@@ -53,7 +53,7 @@ import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
 import { XMM, emitSimd, translatesSimd } from './simd.js';
 import { regionX87, x87Stores } from './x87.js';
 import { wrapIntoRam } from '../emit/memory.js';
-import { deadFlagPass, liveFlagsOut } from '../emit/region.js';
+import { deadFlagPass, liveFlagsOut, structureOf } from '../emit/region.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
 
@@ -380,8 +380,17 @@ class BlockEmitter {
         this.spills = [];
         /** The block being emitted, by its index in the region. */
         this.blockIndex = -1;
-        /** Labels between the block's code and the exit block, ifs aside. */
-        this.outer = 1;
+        /**
+         * The labels around the block's code, ifs aside, outermost first: the
+         * exit, the dispatch loop, and inside it the items of the region's
+         * structure still open -- `b<p>` for the item whose code starts at
+         * place p of the order, `L<p>` for the wasm loop of the loop whose
+         * head is at p (`emitRegion`).
+         * @type {string[]}
+         */
+        this.frames = ['exit'];
+        /** By block index, its place in the order the region is emitted in. @type {number[]} */
+        this.placeOf = [];
         /**
          * The flag record pending where the code being emitted runs: none
          * (null, FL is whole), one of a known kind, or not known (undefined,
@@ -416,7 +425,17 @@ class BlockEmitter {
 
     /** The depth of a branch to the exit block from here. */
     get exitDepth(){
-        return this.outer + this.nest;
+        return this.nest + this.frames.length - 1;
+    }
+
+    /** The depth of a branch to the label `name` of `frames` from here. @param {string} name */
+    depthOf(name){
+        const at = this.frames.lastIndexOf(name);
+        if (at < 0)
+        {
+            throw new Error(`long emit: no label ${name} around the block`);
+        }
+        return this.nest + this.frames.length - 1 - at;
     }
 
     // --- structure ---
@@ -1938,14 +1957,19 @@ class BlockEmitter {
 
     /**
      * Goes to `to` from the end of block `here`: on to its block when the
-     * region holds it -- forward by a branch to the block's label, or by
-     * falling into it when it is the next one; backward through the dispatch
-     * loop while the budget lasts -- else out with RIP there.
+     * region holds it -- forward in the order by a branch to its item's label,
+     * or by falling into it when it is the next one; back to the head of a
+     * loop around the block by a branch to that loop, with the head's own
+     * index in IDX (`emitRange`); any other way back through the dispatch
+     * loop, with the target's index in IDX; each way back while the budget
+     * lasts -- else out with RIP there.
      *
      * @param {number} to @param {Map<number, number>} indexOf  block starts to indices
-     * @param {number} here @param {number} count  the region's blocks
+     * @param {number} here  the block's index
+     * @param {number} [inside]  wasm blocks opened around here and not in `frames`
+     *     (a switch's stubs)
      */
-    go(to, indexOf, here, count){
+    go(to, indexOf, here, inside = 0){
         const { b } = this;
         if (to === this.selfEntry)
         {
@@ -1953,32 +1977,35 @@ class BlockEmitter {
             b.localGet(K);
             this.budget().op(Op.i32ges);
             this.guard();
-            b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
+            b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth + inside);
             this.close();
-            b.br(this.nest - this.selfAt);
+            b.br(this.nest - this.selfAt + inside);
             return;
         }
         const index = indexOf.get(to);
-        if (index !== undefined && index > here)
+        if (index === undefined)
         {
-            if (index !== here + 1 || this.nest !== 0)
+            b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth + inside);
+            return;
+        }
+        const at = this.placeOf[index];
+        if (at > this.placeOf[here])
+        {
+            if (inside !== 0 || this.nest !== 0 || this.frames[this.frames.length - 1] !== `b${at}`)
             {
-                b.br(index - here - 1 + this.nest);
+                b.br(this.depthOf(`b${at}`) + inside);
             }
             return;
         }
-        if (index !== undefined)
-        {
-            // A jump back is what can loop: the budget bounds it.
-            b.localGet(K);
-            this.budget().op(Op.i32ges);
-            this.guard();
-            b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
-            this.close();
-            b.i32const(index).localSet(IDX).br(count - 1 - here + this.nest);
-            return;
-        }
-        b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
+        // A jump back is what can loop: the budget bounds it.
+        b.localGet(K);
+        this.budget().op(Op.i32ges);
+        this.guard();
+        b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth + inside);
+        this.close();
+        b.i32const(index).localSet(IDX);
+        b.br((this.frames.includes(`L${at}`) ? this.depthOf(`L${at}`) : this.depthOf('top'))
+            + inside);
     }
 
     /**
@@ -1991,9 +2018,9 @@ class BlockEmitter {
      * the transfer.
      *
      * @param {import('./switch.js').Switch} which @param {Map<number, number>} indexOf
-     * @param {number} here @param {number} count  the region's blocks
+     * @param {number} here  the block's index
      */
-    dispatch(which, indexOf, here, count){
+    dispatch(which, indexOf, here){
         const { b } = this;
         const targets = [...new Set(which.cases)].filter(target=>indexOf.has(target));
         if (targets.length === 0)
@@ -2014,18 +2041,10 @@ class BlockEmitter {
             which.cases.map(target=>stubOf.get(target) ?? targets.length), targets.length);
         targets.forEach((target, stub)=>{
             b.end();
-            // Inside the stubs after this one and the miss block.
+            // Inside the stubs after this one; the miss block is in `nest`.
             const inside = targets.length - 1 - stub;
-            const to = /** @type {number} */ (indexOf.get(target));
             b.localGet(RIP).i64const(BigInt(target)).op(Op.i64ne).unlikely().brIf(inside);
-            if (to > here)
-            {
-                b.br(to - here - 1 + this.nest + inside);
-                return;
-            }
-            b.localGet(K);
-            this.budget().op(Op.i32ges).unlikely().brIf(inside);
-            b.i32const(to).localSet(IDX).br(count - 1 - here + this.nest + inside);
+            this.go(target, indexOf, here, inside);
         });
         b.end();
         this.nest--;
@@ -2072,9 +2091,9 @@ class BlockEmitter {
      *
      * @param {number | null} to @param {number} next @param {number} slot
      * @param {number} regionType @param {Map<number, number>} indexOf
-     * @param {number} here @param {number} count
+     * @param {number} here  the block's index
      */
-    callOut(to, next, slot, regionType, indexOf, here, count){
+    callOut(to, next, slot, regionType, indexOf, here){
         const { b, layout } = this;
         const transfer = this.helpers.transfer;
         if (to === null && transfer === null)
@@ -2125,7 +2144,7 @@ class BlockEmitter {
         this.guard();
         b.localGet(U).localSet(CODE).br(this.exitDepth);
         this.close();
-        this.go(next, indexOf, here, count);
+        this.go(next, indexOf, here);
     }
 
     /**
@@ -3016,8 +3035,9 @@ function emitRegion(layout, helpers, region,
     const e = new BlockEmitter(layout, helpers, checkReads, looseStacks);
     e.defaultNaNNegative = defaultNaNNegative;
     const { b } = e;
-    // In address order: a jump forward, most of them, is a branch out to the
-    // target's label, or no branch at all.
+    // In address order, by which a block's label is its index plus one; the
+    // code in the order of the control flow (`structureOf`), the 32-bit
+    // emitter's, so that every jump but one closing a loop goes forward.
     const blocks = [...region.blocks].sort((x, y)=>x.entry - y.entry);
     const count = blocks.length;
     /** @type {Map<number, number>} */
@@ -3026,37 +3046,36 @@ function emitRegion(layout, helpers, region,
     const liveAfter = flagLiveness(blocks, indexOf);
     // The rets of callees formed in, by block, and where each may go on in the region.
     const returns = formCalls ? formedReturns(blocks, indexOf) : new Map();
+    const successors = regionSuccessors(blocks, indexOf, returns, formCalls);
+    const { order, loops } = structureOf(successors, [first], at=>{
+        const last = blocks[at].instructions[blocks[at].instructions.length - 1];
+        const falls = !endsBlock(last.op) || (last.op !== 'jmp' && last.op !== 'call'
+            && last.op !== 'ret');
+        return falls ? indexOf.get(last.eip + last.length) : undefined;
+    });
+    order.forEach((index, at)=>{
+        e.placeOf[index] = at;
+    });
+    // A loop of one block onto itself is the block's own wasm loop (`selfEntry`).
+    const loopEnds = new Map([...loops].filter(([head, end])=>end > head));
     e.left = !blocks.some(block=>{
         const last = block.instructions[block.instructions.length - 1];
         const [operand] = last.operands;
         return last.op === 'call' && !(formCalls && operand?.kind === 'rel'
             && indexOf.has(/** @type {number} */ (operand.target)));
-    }) && regionSuccessors(blocks, indexOf, returns, formCalls)
-        .some((to, index)=>to.some(next=>next <= index));
-    // Label 0 is the region's entry, label i + 1 its block i.
-    b.globalGet(LABEL).i32const(1).op(Op.i32sub).i32const(first).globalGet(LABEL)
-        .op(Op.select).localSet(IDX);
-    b.block();
-    b.loop();
-    for (let i = 0; i < count; i++)
-    {
-        b.block();
-    }
-    b.localGet(IDX).brTable(blocks.map((_, index)=>index), count - 1);
+    }) && successors.some((to, index)=>to.some(next=>e.placeOf[next] <= e.placeOf[index]));
     /** By block, the locals its code touches, and those it writes. @type {Set<number>[]} */
     const seen = [];
     /** @type {Set<number>[]} */
     const wrote = [];
-    blocks.forEach((block, index)=>{
-        b.end();
+    /** @param {number} index  the block, by its index */
+    const emitBlock = index=>{
+        const block = blocks[index];
         b.seen = new Set();
         b.written = new Set();
-        seen.push(b.seen);
-        wrote.push(b.written);
+        seen[index] = b.seen;
+        wrote[index] = b.written;
         e.blockIndex = index;
-        // Inside block `index`'s code: the labels of the blocks after it, the
-        // loop, the exit.
-        e.outer = count - index;
         e.pending = undefined;
         // A block whose jump comes back to its own start -- the shape of most
         // inner loops -- is a wasm loop with a direct branch on its back edge,
@@ -3104,12 +3123,12 @@ function emitRegion(layout, helpers, region,
         if (ending === true)
         {
             const last = block.instructions[block.instructions.length - 1];
-            e.go(last.eip + last.length, indexOf, index, count);
+            e.go(last.eip + last.length, indexOf, index);
         }
         else if (ending.call && formCalls && ending.to !== null && indexOf.has(ending.to))
         {
             // A callee formed in: its return address pushed, on into it.
-            e.go(ending.to, indexOf, index, count);
+            e.go(ending.to, indexOf, index);
         }
         else if (ending.call)
         {
@@ -3122,7 +3141,7 @@ function emitRegion(layout, helpers, region,
                     {
                         b.localGet(RIP).i64const(BigInt(target)).op(Op.i64eq);
                         e.open();
-                        e.go(target, indexOf, index, count);
+                        e.go(target, indexOf, index);
                         e.close();
                     }
                 }
@@ -3133,46 +3152,37 @@ function emitRegion(layout, helpers, region,
                 }
             }
             e.callOut(ending.to, /** @type {number} */ (ending.next),
-                ending.to === null ? -1 : slotOf(ending.to), regionType, indexOf, index, count);
+                ending.to === null ? -1 : slotOf(ending.to), regionType, indexOf, index);
         }
         else if (ending.to === null)
         {
             if (block.switch !== undefined)
             {
-                e.dispatch(block.switch, indexOf, index, count);
+                e.dispatch(block.switch, indexOf, index);
             }
             // A formed-in callee's ret: on to the call it returns past, where it does.
             for (const to of returns.get(index) ?? [])
             {
                 b.localGet(RIP).i64const(BigInt(to)).op(Op.i64eq);
                 e.open();
-                e.go(to, indexOf, index, count);
+                e.go(to, indexOf, index);
                 e.close();
             }
             b.br(e.exitDepth);
         }
         else if (ending.cc === undefined)
         {
-            e.go(ending.to, indexOf, index, count);
-        }
-        else if (indexOf.get(/** @type {number} */ (ending.next)) === index + 1)
-        {
-            // Not taken falls into the next block.
-            e.condition(ending.cc);
-            e.open();
-            e.go(ending.to, indexOf, index, count);
-            e.close();
+            e.go(ending.to, indexOf, index);
         }
         else
         {
+            // Not taken goes on after the branch, falling into the block
+            // emitted next where it is that one.
             e.condition(ending.cc);
             e.open();
-            e.go(ending.to, indexOf, index, count);
-            e.otherwise();
-            e.go(/** @type {number} */ (ending.next), indexOf, index, count);
+            e.go(ending.to, indexOf, index);
             e.close();
-            // Both ways branched: nothing falls into the next block.
-            b.unreachable();
+            e.go(/** @type {number} */ (ending.next), indexOf, index);
         }
         if (self)
         {
@@ -3180,7 +3190,77 @@ function emitRegion(layout, helpers, region,
             e.nest--;
             e.selfEntry = -1;
         }
-    });
+    };
+    /**
+     * The blocks at places `lo` to `hi` of the order: each an item, a wasm
+     * block the code after its end follows, a loop among them one item whose
+     * blocks are a range of their own inside a wasm loop, as the 32-bit
+     * emitter's `emitRange` lays them out. The range of the whole region
+     * opens with the dispatch over IDX, which sends a block inside a loop to
+     * that loop; a loop's head tests IDX for a block inside it -- a way in
+     * from the dispatch, the region's entry or a jump back that is not the
+     * loop's -- where a turn of the loop comes back with the head's own.
+     *
+     * @param {number} lo @param {number} hi
+     * @param {boolean} loop  the range is a loop's, `lo` its head
+     */
+    const emitRange = (lo, hi, loop)=>{
+        /** @type {{ start: number, end: number, loop: boolean }[]} */
+        const items = [];
+        for (let at = loop ? lo + 1 : lo; at <= hi;)
+        {
+            const end = loopEnds.get(at);
+            items.push({ start: at, end: end ?? at, loop: end !== undefined });
+            at = (end ?? at) + 1;
+        }
+        for (let k = items.length - 1; k >= 0; k--)
+        {
+            b.block();
+            e.frames.push(`b${items[k].start}`);
+        }
+        /** The depth of the item holding block `index` from here, else -1. @param {number} index */
+        const itemOf = index=>{
+            const item = items.find(one=>one.start <= e.placeOf[index]
+                && e.placeOf[index] <= one.end);
+            return item === undefined ? -1 : e.depthOf(`b${item.start}`);
+        };
+        if (loop)
+        {
+            e.pending = undefined;
+            b.localGet(IDX).i32const(order[lo]).op(Op.i32ne);
+            e.guard();
+            b.localGet(IDX).brTable(blocks.map((_, index)=>Math.max(itemOf(index), 0)), 0);
+            e.close();
+            emitBlock(order[lo]);
+        }
+        else
+        {
+            b.localGet(IDX).brTable(blocks.map((_, index)=>itemOf(index)), itemOf(first));
+        }
+        for (const item of items)
+        {
+            b.end();
+            e.frames.pop();
+            if (item.loop)
+            {
+                b.loop();
+                e.frames.push(`L${item.start}`);
+                emitRange(item.start, item.end, true);
+                b.end();
+                e.frames.pop();
+                continue;
+            }
+            emitBlock(order[item.start]);
+        }
+    };
+    // Label 0 is the region's entry, label i + 1 its block i.
+    b.globalGet(LABEL).i32const(1).op(Op.i32sub).i32const(first).globalGet(LABEL)
+        .op(Op.select).localSet(IDX);
+    e.frames = ['exit'];
+    b.block();
+    b.loop();
+    e.frames.push('top');
+    emitRange(0, count - 1, false);
     b.end();
     b.end();
     b.seen = null;

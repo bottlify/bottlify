@@ -3505,7 +3505,6 @@ export function liveFlagsOut(blocks, labels, precise = true){
  */
 export function planStructure(region, returns, callReturn = false){
     const { blocks } = region;
-    const count = blocks.length;
     const index = new Map(blocks.map((block, i)=>[block.start, i]));
     /** @type {number[]} the blocks entered from outside the region besides its entry */
     const roots = [index.get(region.entry) ?? 0];
@@ -3540,13 +3539,34 @@ export function planStructure(region, returns, callReturn = false){
         }
         return out;
     });
+    /** @param {number} at */
+    const fallOf = at=>(['fallthrough', 'jcc', 'loop'].includes(blocks[at].exit.kind)
+        ? index.get(blocks[at].exit.next) : undefined);
+    return { ...structureOf(successors, roots, fallOf), reentered };
+}
+
+/**
+ * The order and the loops of `planStructure` from the region's graph alone,
+ * the 32-bit emitter's and the long-mode one's (`long/emit.js`): the loops
+ * are the natural loops of the jumps from the roots, and the blocks are in a
+ * topological order of the jumps that close no loop, a loop's blocks
+ * together after its head, ties going to the block the last one falls
+ * through to, then to the lowest index.
+ *
+ * @param {number[][]} successors  by block, the blocks it jumps to inside the region, once each
+ * @param {number[]} roots  the blocks entered from outside, the region's entry first
+ * @param {(at: number) => number | undefined} fallOf  the block `at` falls through into, if any
+ * @returns {{ order: number[], loops: Map<number, number> }}  as `planStructure`'s
+ */
+export function structureOf(successors, roots, fallOf){
+    const count = successors.length;
     // With no jump back in address order but a block's onto itself there is
     // no loop of more than one block, and the address order is one the jumps
     // all go forward in: most regions, whose search below cost more than their
     // emitting.
     if (successors.every((to, from)=>to.every(at=>at >= from)))
     {
-        return { order: blocks.map((_, at)=>at), loops: new Map(), reentered };
+        return { order: successors.map((_, at)=>at), loops: new Map() };
     }
     const entry = roots[0];
     let graph = successors;
@@ -3616,9 +3636,7 @@ export function planStructure(region, returns, callReturn = false){
         const inner = open.length > 0 ? open[open.length - 1].head : -1;
         /** @param {number} at */
         const allowed = at=>inner < 0 || loopsOf[at].includes(inner);
-        const falls = last >= 0 && last !== virtual
-            && ['fallthrough', 'jcc', 'loop'].includes(blocks[last].exit.kind);
-        const fall = falls ? index.get(blocks[last].exit.next) : undefined;
+        const fall = last >= 0 && last !== virtual ? fallOf(last) : undefined;
         let pick = -1;
         if (fall !== undefined && ready.has(fall) && allowed(fall))
         {
@@ -3711,7 +3729,7 @@ export function planStructure(region, returns, callReturn = false){
             loops.set(at, at);
         }
     }
-    return { order: blockOrder, loops, reentered };
+    return { order: blockOrder, loops };
 }
 
 /**
