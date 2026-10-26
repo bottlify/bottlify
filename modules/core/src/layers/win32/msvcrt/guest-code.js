@@ -19,7 +19,41 @@
  * the two: the x86 as its code, the JavaScript as its handler -- the
  * reference the x86 is tested against, and the answer wherever a handler is
  * asked for directly.
+ *
+ * A 64-bit process runs no i386. Where the build also compiled the source to
+ * x86-64 (`inguest.x64.js`, under the x64 convention), the export carries
+ * that as `long`, bound as `code` is, and a 64-bit process places it; where
+ * it did not -- doubles, the x87's words, a pointer the source writes as four
+ * bytes -- the export is its handler's trap there.
  */
+
+import { COMPILED as RUNTIME } from './inguest.x86.js';
+import { COMPILED as RUNTIME_LONG } from './inguest.x64.js';
+
+/**
+ * Each function's x86-64 code by its i386, the two compiled from one source:
+ * an export is bound with the record the build made, and finds the other by it.
+ *
+ * @type {Map<CompiledGuestCode, CompiledGuestCode>}
+ */
+const LONG_CODE = new Map();
+for (const [i386, long] of /** @type {[Record<string, CompiledGuestCode>,
+    Record<string, CompiledGuestCode>][]} */ ([[RUNTIME, RUNTIME_LONG]]))
+{
+    for (const [name, compiled] of Object.entries(long))
+    {
+        LONG_CODE.set(i386[name], compiled);
+    }
+}
+
+/**
+ * The x86-64 the build compiled from the same source as an i386 record, or
+ * undefined where it made none.
+ *
+ * @param {CompiledGuestCode} compiled
+ * @returns {CompiledGuestCode | undefined}
+ */
+export const longCodeOf = compiled=>LONG_CODE.get(compiled);
 
 /** @typedef {number} i32  A signed 32-bit stack slot, or EAX. */
 /** @typedef {number} u32  An unsigned 32-bit stack slot, or EAX. */
@@ -263,22 +297,35 @@ export function guestMemory(host){
  * A function that hands some calls to the host (`return host()`) is given
  * the handler it hands them to: its code, bound, jumps to a trap into it.
  *
+ * Where the build made x86-64 code from the same source (`longCodeOf`), the
+ * export has it as `long`, bound the same way, for a 64-bit process to place
+ * instead of `code`: its hand-over jumps to the trap with the arguments where
+ * the x64 convention passes them, which the bridge's 64-bit trap reads.
+ *
  * @param {CompiledGuestCode} compiled
  * @param {HostFallback} [fallback]
+ * @returns {{ convention: string, argBytes: number,
+ *     code: (builder?: CodeBuilder) => Uint8Array,
+ *     long?: (builder?: CodeBuilder) => Uint8Array }}
  */
 export function guestExport(compiled, fallback){
-    const { convention, host } = compiled;
+    const { convention } = compiled;
     const argBytes = compiled.params.reduce((sum, type)=>
         sum + (type === 'f64' ? 8 : type === 'x87' ? 0 : 4), 0);
-    if (host !== undefined && !fallback)
+    if (compiled.host !== undefined && !fallback)
     {
         throw new Error('guest code: a function that hands calls to the host wants its handler');
     }
-    /** @param {CodeBuilder} [builder] */
-    const code = builder=>{
+    /**
+     * The code with its jump to the trap filled in, where it has one.
+     *
+     * @param {CompiledGuestCode} record @param {CodeBuilder} [builder]
+     */
+    const bound = (record, builder)=>{
+        const { host } = record;
         if (host === undefined || !fallback)
         {
-            return compiled.code;
+            return record.code;
         }
         if (!builder)
         {
@@ -286,21 +333,28 @@ export function guestExport(compiled, fallback){
                 + 'a builder to register its trap');
         }
         // A thiscall function has put `this` on the stack by the time it
-        // hands over: the trap finds a stdcall frame.
+        // hands over: the trap finds a stdcall frame. (At 64 bits the
+        // convention is one, and `this` is in RCX either way.)
         const trap = builder.register({
             convention: convention === 'thiscall' ? 'stdcall' : convention,
             argBytes, handler: fallback.handler });
-        if (compiled.code[host - 1] !== MOV_EAX)
+        if (record.code[host - 1] !== MOV_EAX)
         {
             builder.jump(host, trap);
-            return compiled.code;
+            return record.code;
         }
         // The address itself, which no placement moves: the trap's stub is the bridge's.
-        const bytes = compiled.code.slice();
+        const bytes = record.code.slice();
         new DataView(bytes.buffer).setUint32(host, trap >>> 0, true);
         return bytes;
     };
-    return { convention, argBytes, code };
+    const long = LONG_CODE.get(compiled);
+    return {
+        convention, argBytes,
+        code: (/** @type {CodeBuilder | undefined} */ builder)=>bound(compiled, builder),
+        ...long ? { long: (/** @type {CodeBuilder | undefined} */ builder)=>bound(long, builder) }
+            : {},
+    };
 }
 
 /**
@@ -314,7 +368,8 @@ export function guestExport(compiled, fallback){
  * @param {HostFallback} [fallback]  What `return host()` answers with, in the
  *     handler and through the trap the code jumps to.
  * @returns {{ convention: string, argBytes: number,
- *     code: (builder?: CodeBuilder) => Uint8Array, handler: (args: number[]) => number }}
+ *     code: (builder?: CodeBuilder) => Uint8Array,
+ *     long?: (builder?: CodeBuilder) => Uint8Array, handler: (args: number[]) => number }}
  */
 export function guestEntry(source, compiled, host, fallback){
     const { params, returns, uses } = compiled;

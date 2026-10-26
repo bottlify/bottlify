@@ -7,7 +7,9 @@
 /**
  * The compiler, on sources of its own: every form of the subset compiled and
  * run against the same JavaScript on cork's test machine, input by input, and
- * every form outside it refused with its place in the source.
+ * every form outside it refused with its place in the source. Each function
+ * the x86-64 back end takes runs as x86-64 too, on cork's long-mode machine,
+ * against the same JavaScript (`equivalence`'s 64-bit run).
  */
 
 import { test } from 'node:test';
@@ -29,8 +31,20 @@ async function load(text){
     {
         compiled[fn.name] = fn;
     }
+    /** @type {Record<string, any>} */
+    const long = {};
+    /** @type {Record<string, string>} */
+    const refusedAt64 = {};
+    for (const fn of compileModule(text, { file: 'sample.js', values, bits: 64,
+        onRefused: (name, reason)=>{
+            refusedAt64[name] = reason;
+        } }))
+    {
+        long[fn.name] = fn;
+    }
     const model = await loadModel(text, { file: 'sample.js', url: X87_MODULE, values });
-    return { values, compiled, model, ...equivalence(compiled, values, model) };
+    return { values, compiled, long, refusedAt64, model,
+        ...equivalence(compiled, values, model, long) };
 }
 
 /** The control words a double is computed under: double, extended, single, and two roundings. */
@@ -662,6 +676,36 @@ const CALLBACK_X86 = [
 /** The same callback, stdcall: it pops its two arguments. */
 const CALLBACK_STD_X86 = [...CALLBACK_X86.slice(0, -1), 0xc2, 0x08, 0x00];
 
+/**
+ * The same callback in x86-64, p in RCX and k in RDX, doing what the x64
+ * convention lets a callee do: it writes its home space, changes every
+ * register the caller may not count on and leaves a pattern above EAX in
+ * RAX, and faults (`ud2`) where RSP was not a multiple of 16 at the call.
+ */
+const CALLBACK_X64 = [
+    0x49, 0x89, 0xe2,                                   // mov r10, rsp
+    0x41, 0x83, 0xe2, 0x0f,                             // and r10d, 15
+    0x41, 0x83, 0xfa, 0x08,                             // cmp r10d, 8
+    0x74, 0x02,                                         // je past the ud2
+    0x0f, 0x0b,                                         // ud2
+    0x48, 0x89, 0x4c, 0x24, 0x08,                       // mov [rsp+8], rcx
+    0x48, 0x89, 0x54, 0x24, 0x10,                       // mov [rsp+16], rdx
+    0x4c, 0x89, 0x44, 0x24, 0x18,                       // mov [rsp+24], r8
+    0x4c, 0x89, 0x4c, 0x24, 0x20,                       // mov [rsp+32], r9
+    0x88, 0x91, 0x00, 0x08, 0x00, 0x00,                 // mov [rcx+0x800], dl
+    0x0f, 0xb6, 0x01,                                   // movzx eax, byte [rcx]
+    0x8d, 0x04, 0x40,                                   // lea eax, [rax+rax*2]
+    0x01, 0xd0,                                         // add eax, edx
+    0x49, 0xbb, 0, 0, 0, 0, 0xad, 0xde, 0, 0,           // mov r11, 0xdead00000000
+    0x4c, 0x09, 0xd8,                                   // or rax, r11
+    0x48, 0xc7, 0xc1, 0xff, 0xff, 0xff, 0xff,           // mov rcx, -1
+    0x48, 0xc7, 0xc2, 0xff, 0xff, 0xff, 0xff,           // mov rdx, -1
+    0x49, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff,           // mov r8, -1
+    0x49, 0xc7, 0xc1, 0xff, 0xff, 0xff, 0xff,           // mov r9, -1
+    0x49, 0xc7, 0xc2, 0xff, 0xff, 0xff, 0xff,           // mov r10, -1
+    0xc3,
+];
+
 /** @type {(memory: Uint8Array, fn: number, args: number[]) => number} */
 const callbackJs = (memory, fn, [p, k])=>{
     assert.equal(fn, CALLBACK);
@@ -773,7 +817,7 @@ test('copies up and down, over themselves, a fill, and calls through a pointer',
         // where a dword read differs from a byte read.
         const d = i % 2 === 0 ? s + next() % 9 - 4 : DATA + next() % 64;
         same('bulk', { stack: [d, s, next() % 40, CALLBACK], memory: [[DATA, bytes]] },
-            { callback: CALLBACK_X86, call: callbackJs });
+            { callback: CALLBACK_X86, callback64: CALLBACK_X64, call: callbackJs });
     }
 });
 
@@ -784,7 +828,8 @@ test('calls of a stdcall function leave the frame where the callee popped it', a
     {
         const bytes = Array.from({ length: 96 }, ()=>next() & 0xff);
         same('stdcalls', { stack: [DATA + next() % 32, next() % 9, CALLBACK],
-            memory: [[DATA, bytes]] }, { callback: CALLBACK_STD_X86, call: callbackJs });
+            memory: [[DATA, bytes]] },
+        { callback: CALLBACK_STD_X86, callback64: CALLBACK_X64, call: callbackJs });
     }
 });
 
@@ -819,7 +864,7 @@ test('more variables across calls than the callee keeps registers for', async()=
     {
         same('acrossMany', { stack: [DATA + next() % 16, next() % 20, CALLBACK],
             memory: [[DATA, Array.from({ length: 64 }, ()=>next() & 0xff)]] },
-        { callback: CALLBACK_X86, call: callbackJs });
+        { callback: CALLBACK_X86, callback64: CALLBACK_X64, call: callbackJs });
     }
 });
 
@@ -842,7 +887,8 @@ test('variables kept across calls through a pointer, which may change EAX, ECX a
         {
             const bytes = Array.from({ length: 128 }, ()=>next() & 0xff);
             same('across', { stack: [DATA + next() % 16, next() % 30, CALLBACK],
-                memory: [[DATA, bytes]] }, { callback: CALLBACK_X86, call: callbackJs });
+                memory: [[DATA, bytes]] },
+            { callback: CALLBACK_X86, callback64: CALLBACK_X64, call: callbackJs });
         }
     });
 

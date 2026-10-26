@@ -12,7 +12,14 @@
  *
  * Nothing here knows where the code will sit in guest memory: every transfer
  * is relative, and a table is reached through the address a `call` to the next
- * instruction pushes (`picBase`), plus the distance the assembler fills in.
+ * instruction pushes (`picBase`) -- in x86-64 code, the address a RIP-relative
+ * `lea` takes there -- plus the distance the assembler fills in.
+ *
+ * The x86-64 back end emits the same instructions over the low halves of
+ * the registers, R8 to R11 among them: a 32-bit operation zero-extends into
+ * the whole register, so a register the code computed holds an address as it
+ * is. A register past the eighth is named by its low three bits in the
+ * instruction and its fourth in a REX prefix (`Rex`) before the opcode.
  */
 
 export const EAX = 0;
@@ -23,10 +30,26 @@ export const ESP = 4;
 export const EBP = 5;
 export const ESI = 6;
 export const EDI = 7;
+export const R8 = 8;
+export const R9 = 9;
+export const R10 = 10;
+export const R11 = 11;
+
+/** A REX prefix's bits: a register past the eighth in the reg field, the index, the base or rm. */
+export const Rex = Object.freeze({ PREFIX: 0x40, W: 0x08, R: 0x04, X: 0x02, B: 0x01 });
+
+/** The prefixes that come before a REX prefix, which must be the last before the opcode. */
+export const LEGACY_PREFIXES = new Set([0x66, 0xf2, 0xf3]);
+
+/** The registers the x64 convention passes the first four integer arguments in. */
+export const ARGUMENTS_64 = Object.freeze([ECX, EDX, R8, R9]);
+
+/** REX.W, with REX.R where the reg field names R8 or above. @param {number} reg */
+const rexW = reg=>0x48 | (reg >= 8 ? 0x04 : 0);
 
 /** Condition codes, as the low nibble of `jcc`. */
 export const CC = Object.freeze({
-    b: 0x2, ae: 0x3, e: 0x4, ne: 0x5, be: 0x6, a: 0x7,
+    o: 0x0, b: 0x2, ae: 0x3, e: 0x4, ne: 0x5, be: 0x6, a: 0x7,
     p: 0xa, np: 0xb, l: 0xc, ge: 0xd, le: 0xe, g: 0xf,
 });
 
@@ -83,14 +106,51 @@ export function memory(reg, { base, index, scale = 1, disp = 0 }){
     return [mod << 6 | reg << 3 | 4, ss << 6 | index << 3 | base, ...tail];
 }
 
+/** `mov [rsp + disp], reg64`. @param {number} reg @param {number} disp @returns {number[]} */
+export const storeQuad = (reg, disp)=>[rexW(reg), 0x89, ...memory(reg & 7, { base: ESP, disp })];
+
+/** `mov reg64, [rsp + disp]`. @param {number} reg @param {number} disp @returns {number[]} */
+export const loadQuad = (reg, disp)=>[rexW(reg), 0x8b, ...memory(reg & 7, { base: ESP, disp })];
+
+/**
+ * `mov to, from` of two registers of x86-64 code: the whole of each with
+ * `quad`, else their low halves, the destination zero-extended.
+ *
+ * @param {number} to @param {number} from @param {boolean} quad
+ * @returns {number[]}
+ */
+export function moveRegister(to, from, quad){
+    const rex = (quad ? Rex.W : 0) | (from >= 8 ? Rex.R : 0) | (to >= 8 ? Rex.B : 0);
+    return [...rex === 0 ? [] : [Rex.PREFIX | rex], 0x89, 0xc0 | (from & 7) << 3 | to & 7];
+}
+
+/** `mov reg32, [rsp + disp]`, R8 to R15 among the registers. @param {number} reg @param {number} disp */
+export const loadDword = (reg, disp)=>[...reg >= 8 ? [Rex.PREFIX | Rex.R] : [], 0x8b,
+    ...memory(reg & 7, { base: ESP, disp })];
+
+/**
+ * `add rsp, bytes` (or `sub`, for a negative count): the whole register, which
+ * a 32-bit form would cut to its low half.
+ *
+ * @param {number} bytes @returns {number[]}
+ */
+export function moveStack64(bytes){
+    const digit = bytes < 0 ? 5 : 0;
+    const size = Math.abs(bytes);
+    return fitsByte(size) ? [0x48, 0x83, 0xc4 | digit << 3, size]
+        : [0x48, 0x81, 0xc4 | digit << 3, ...le32(size)];
+}
+
 /**
  * @typedef {{ kind: 'bytes', bytes: number[] }
  *     | { kind: 'label', name: string }
  *     | { kind: 'jump', cc: number, to: string, long: boolean }
  *     | { kind: 'call', to: string }
- *     | { kind: 'ref', table: string, addend: number }} Item
+ *     | { kind: 'ref', table: string, addend: number }
+ *     | { kind: 'rip', table: string, addend: number }} Item
  *   jump: cc -1 is `jmp`; call: `call rel32` to a label; ref: four bytes, the table's offset
- *   less `picBase`'s, plus the addend
+ *   less `picBase`'s, plus the addend; rip: four bytes ending an instruction, the table's
+ *   offset plus the addend less the instruction's end, which a RIP-relative operand adds
  */
 
 /**
@@ -154,6 +214,17 @@ export class Assembler {
      */
     ref(table, addend = 0){
         this.items.push({ kind: 'ref', table, addend });
+        return this;
+    }
+
+    /**
+     * The four bytes that end an instruction with a RIP-relative operand:
+     * where a table starts, plus a constant, from the instruction's end.
+     *
+     * @param {string} table @param {number} [addend]
+     */
+    rip(table, addend = 0){
+        this.items.push({ kind: 'rip', table, addend });
         return this;
     }
 
@@ -255,6 +326,15 @@ export class Assembler {
                 }
                 out.set(le32(table - base + item.addend), offset);
             }
+            else if (item.kind === 'rip')
+            {
+                const table = placed.get(item.table);
+                if (table === undefined)
+                {
+                    throw new Error(`x86: table ${item.table} referred to without a place`);
+                }
+                out.set(le32(table + item.addend - (offset + 4)), offset);
+            }
             offset += sizeOf(item);
         }
         for (const table of tables)
@@ -275,6 +355,7 @@ function sizeOf(item){
         case 'label':
             return 0;
         case 'ref':
+        case 'rip':
             return 4;
         case 'call':
             return 5;

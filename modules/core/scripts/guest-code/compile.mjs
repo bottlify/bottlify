@@ -149,11 +149,62 @@
  * are placed after the code and read by index, the index the source's to
  * keep in range. A module-level function of one `return` is inlined, its
  * arguments evaluated once each, in order.
+ *
+ * Compiled for a 64-bit process (`bits: 64`), a function is x86-64 code
+ * under the x64 convention, whatever its tag names: the first four arguments
+ * in RCX, RDX, R8 and R9, the rest on the stack past the 32 bytes of home
+ * space the caller leaves, the caller taking them down; the result in RAX,
+ * an i32 or u32 extended by its sign, as the bridge's trap answers one. The
+ * code keeps to the same 32-bit integers, over R8 to R11 as well: an
+ * operation on a low half zero-extends into the whole register, so a
+ * register the code computed holds an address as it is, and an address of
+ * two registers is made into one by a 32-bit `lea` first, which wraps at
+ * 2^32 as the helpers' addresses do (a register and a displacement are
+ * added in 64 bits, the same sum wherever it lands in the guest's 4 GiB).
+ * An argument is read as its low half, whatever the caller left above it.
+ *
+ * Such code is a leaf where it can be -- no stack moved, nothing its caller
+ * keeps changed, which is what an unwinder takes code with no unwind data
+ * for. A variable takes EDX or R8 to R11 first, which the convention leaves
+ * to the callee (`planLeaf`); then a slot of the home space whose argument
+ * went to a register or that no argument has; and only a variable a loop
+ * uses past those takes RBX, RSI, RDI or RBP, kept meanwhile in a free home
+ * slot or one of R8 to R11 rather than pushed (`placement`). An argument in
+ * the frame is read from its home slot, where the entry wrote it whole; and
+ * a value an expression holds a while waits in a free register before it is
+ * pushed (`hold`). A function that hands calls to the host keeps every
+ * argument in its slot, which the hand-over takes them back from before it
+ * jumps to the trap. One that calls -- through a pointer or another
+ * `@guestCode` function -- is no leaf: it pushes what it keeps, a call
+ * being free to change R8 to R11, and passes the arguments in the
+ * convention's registers and slots, home space below them and RSP a
+ * multiple of 16 at the call, reading the answer's low half.
+ *
+ * Doubles are SSE2's there, scalar, which is IEEE double's arithmetic to
+ * the last bit as JavaScript's is: a double or float argument comes in the
+ * XMM register of its place (or its slot past the fourth) and is read from
+ * its home slot, the result goes in XMM0 (a float's rounded by `cvtsd2ss`),
+ * and the expression's doubles are XMM0 to XMM3 as the x87's stack would be,
+ * XMM4 and XMM5 scratch: `+ - * /`, unary `-`, `Math.sqrt` (`sqrtsd`),
+ * `Math.abs`, `Math.fround`, `Math.floor`, `Math.ceil` and `Math.trunc`
+ * (through a quadword under 2^52, the sign put back), the comparisons
+ * (`ucomisd`), `| 0` and `>>> 0` (`cvttsd2si` into RAX, the significand
+ * shifted from the bits past 2^63), and the loads and stores. A constant is
+ * read RIP-relative from a table after the code. A function with a double
+ * argument or result hands nothing to the host: the 64-bit trap carries no
+ * XMM register.
+ *
+ * What only the x87 does -- `%`, `Math.sin` and the other transcendentals,
+ * `X87`, x87 arguments, the control and status words, an i64 in EDX:EAX --
+ * is refused at 64 bits with its reason (`onRefused`), and the function
+ * stays a trap into its handler there.
  */
 
 import * as espree from 'espree';
 import {
-    ALU, Assembler, CC, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, fitsByte, invert, le32, memory,
+    ALU, ARGUMENTS_64, Assembler, CC, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, LEGACY_PREFIXES,
+    R10, R11, R8, R9, Rex, fitsByte, invert, le32, loadDword, loadQuad, memory, moveRegister,
+    moveStack64, storeQuad,
 } from './x86.mjs';
 
 /**
@@ -180,6 +231,8 @@ import {
  *                                  a `jmp rel32`'s displacement, or the address
  *                                  `mov eax` loads for a `jmp eax`, as the byte
  *                                  before says (0xe9 or 0xb8).
+ * @property {boolean} [leaf]       x86-64 code only: it moves no stack and changes
+ *                                  no register its caller keeps.
  */
 
 /**
@@ -202,9 +255,18 @@ import {
  * @property {Set<any>} assigned           The parameters the body assigns.
  * @property {boolean} pool                Double constants are read from a table after
  *                                         the code (EBX its base), not pushed.
- * @property {{ locals: number, saved: number }} [frame]
+ * @property {boolean} calls               The function calls: x86-64 code keeps nothing
+ *                                         a call may change in R8 to R11 then.
+ * @property {boolean} tables              It reads a table after the code.
+ * @property {boolean} bulk                It copies or fills.
+ * @property {number} tableBase            The register a table is read through.
+ * @property {Set<any>} homes              x86-64 code's variables kept in the home space.
+ * @property {number[]} homeSaves          The home slots left, by argument place, where
+ *                                         x86-64 code keeps a register its caller keeps.
+ * @property {{ locals: number, saved: number, pushed: boolean }} [frame]
  *     The bytes of variables in the frame and the registers saved above it,
- *     once a compilation with the registers has found them.
+ *     once a compilation with the registers has found them -- pushed there,
+ *     or, in x86-64 code that calls nothing, held in R8 to R11 instead.
  */
 
 /**
@@ -307,8 +369,39 @@ const POOL = '$f64';
 /** How many x87 registers an expression may hold at once. */
 const X87_DEPTH = 7;
 
+/** How many XMM registers an expression may hold at once in x86-64 code: two more are scratch. */
+const SSE_DEPTH = 4;
+
+/** The name of the table of quadwords x86-64 code reads RIP-relative: doubles' bits, masks. */
+const QUADS = '$q64';
+
+/** A double's bits without the sign, and the sign alone. */
+const ABS_MASK = 0x7fff_ffff_ffff_ffffn;
+const SIGN_MASK = 0x8000_0000_0000_0000n;
+
+/** A double's bits. @param {number} value */
+function doubleBits(value){
+    const view = new DataView(new ArrayBuffer(8));
+    view.setFloat64(0, value, true);
+    return view.getBigUint64(0, true);
+}
+
 /** The registers a callee keeps for its caller, and so saves to use. */
 const CALLEE_SAVED = new Set([EBX, ESI, EDI, EBP]);
+
+/**
+ * The registers x86-64 code gives a variable for nothing: the x64 convention
+ * leaves them to the callee, so a function that keeps to them moves no stack
+ * and changes nothing its caller keeps -- what an unwinder takes code with no
+ * unwind data for. A call may change them.
+ */
+const FREE_64 = Object.freeze([EDX, R8, R9, R10, R11]);
+
+/** The registers a callee may change under the x64 convention, besides EAX and ECX. */
+const VOLATILE_64 = new Set(FREE_64);
+
+/** The registers that hold what x86-64 code keeps or pushes for a while: R8 to R11. */
+const SPARE_64 = Object.freeze([R11, R10, R9, R8]);
 
 /** How much more a use inside a loop weighs than one outside it, per level. */
 const LOOP_WEIGHT = 8;
@@ -344,9 +437,13 @@ const isFloat = type=>type === 'f64' || type === 'f32';
 const tableOp = table=>(table.size === 4 ? [0x8b]
     : table.size === 2 ? [0x0f, table.signed ? 0xbf : 0xb7] : [0x0f, table.signed ? 0xbe : 0xb6]);
 
-/** `[ebx + index * size]`'s SIB. @param {TableInfo} table @param {number} index */
-const tableSib = (table, index)=>(table.size === 1 ? 0 : table.size === 2 ? 1 : 2) << 6
-    | index << 3 | EBX;
+/**
+ * `[base + index * size]`'s SIB, of the registers' low three bits.
+ *
+ * @param {TableInfo} table @param {number} index @param {number} base
+ */
+const tableSib = (table, index, base)=>(table.size === 1 ? 0 : table.size === 2 ? 1 : 2) << 6
+    | (index & 7) << 3 | base & 7;
 
 /** What an entry is. @param {TableInfo} table @returns {Type} */
 const tableType = table=>(table.signed ? 'i32' : table.size === 4 ? 'u32' : 'nat');
@@ -370,6 +467,7 @@ const tableType = table=>(table.signed ? 'i32' : table.size === 4 ? 'u32' : 'nat
  * @property {Map<string, { node: any, doc: string }>} guests  The `@guestCode` functions.
  * @property {(name: string, node: any) => CompiledFunction} compiledOf
  *     A `@guestCode` function compiled, once, for a call to it.
+ * @property {32 | 64} bits  i386 code, or x86-64 code under the x64 convention.
  */
 
 /**
@@ -377,13 +475,22 @@ const tableType = table=>(table.signed ? 'i32' : table.size === 4 ? 'u32' : 'nat
  *
  * @param {string} text  The module's source.
  * @param {{ file: string, values?: Record<string, unknown>,
- *     arithmetic?: Map<any, Set<string>> }} options
+ *     arithmetic?: Map<any, Set<string>>, bits?: 32 | 64,
+ *     onRefused?: (name: string, reason: string) => void,
+ *     refuse?: Readonly<Record<string, string>> }} options
  *     file: named in errors; values: the module's exports as importing it
  *     gives them, where a table's contents come from; arithmetic: where each
- *     arithmetic node is noted (`ModuleScope`), for the tests' model
+ *     arithmetic node is noted (`ModuleScope`), for the tests' model; bits:
+ *     the code's, 32 unless 64; onRefused: given, a function the compiler
+ *     refuses is left out and named here with the reason, where without it
+ *     the refusal is thrown; refuse: functions refused for the reason given,
+ *     what the source's contract says and its subset cannot (a pointer laid
+ *     out for 32 bits), and every function that calls one
  * @returns {CompiledFunction[]}
  */
-export function compileModule(text, { file, values = {}, arithmetic }){
+export function compileModule(text, { file, values = {}, arithmetic, bits = 32, onRefused,
+    refuse = {} })
+{
     /** @type {any} */
     let ast;
     try
@@ -400,7 +507,7 @@ export function compileModule(text, { file, values = {}, arithmetic }){
     const scope = {
         file, text, constants: new Map(), tables: new Map(), inline: new Map(),
         declared: new Map(), comments: ast.comments, x87: null, arithmetic: arithmetic ?? null,
-        guests: new Map(), compiledOf: ()=>fail(scope, null, 'no function compiled yet'),
+        guests: new Map(), compiledOf: ()=>fail(scope, null, 'no function compiled yet'), bits,
     };
     /** @type {{ node: any, doc: string }[]} */
     const marked = [];
@@ -490,22 +597,54 @@ export function compileModule(text, { file, values = {}, arithmetic }){
         {
             fail(scope, at, `${name} calls itself, through the functions it calls`);
         }
-        compiling.add(name);
         const { node, doc } = /** @type {{ node: any, doc: string }} */ (scope.guests.get(name));
-        // Once to count the uses, once with the registers they earn to find
-        // the frame that leaves, and once to address it.
-        const first = new FunctionCompiler(scope, node, doc, null);
-        first.compile();
-        const plan = first.plan();
-        const second = new FunctionCompiler(scope, node, doc, plan);
-        second.compile();
-        const made = new FunctionCompiler(scope, node, doc, { ...plan, frame: second.frame() })
-            .compile();
-        compiling.delete(name);
-        compiled.set(name, made);
-        return made;
+        if (Object.hasOwn(refuse, name))
+        {
+            fail(scope, node, `${name}: ${refuse[name]}`);
+        }
+        compiling.add(name);
+        try
+        {
+            // Once to count the uses, once with the registers they earn to
+            // find the frame that leaves, and once to address it.
+            const first = new FunctionCompiler(scope, node, doc, null);
+            first.compile();
+            const plan = first.plan();
+            const second = new FunctionCompiler(scope, node, doc, plan);
+            second.compile();
+            const made = new FunctionCompiler(scope, node, doc,
+                { ...plan, frame: second.frame() }).compile();
+            compiled.set(name, made);
+            return made;
+        }
+        finally
+        {
+            // Refused or made, it is no longer being compiled: a caller met
+            // after a refusal is refused for the callee, not for a cycle.
+            compiling.delete(name);
+        }
     };
-    return marked.map(({ node })=>scope.compiledOf(node.id.name, node));
+    if (!onRefused)
+    {
+        return marked.map(({ node })=>scope.compiledOf(node.id.name, node));
+    }
+    /** @type {CompiledFunction[]} */
+    const made = [];
+    for (const { node } of marked)
+    {
+        try
+        {
+            made.push(scope.compiledOf(node.id.name, node));
+        }
+        catch (e){
+            if (!(e instanceof GuestCodeError))
+            {
+                throw e;
+            }
+            onRefused(node.id.name, e.message);
+        }
+    }
+    return made;
 }
 
 /** A function whose body is a single `return` of an expression, or an expression arrow. @param {any} node */
@@ -555,6 +694,37 @@ class FunctionCompiler {
         this.scope = scope;
         this.node = node;
         this.doc = doc;
+        /** x86-64 code under the x64 convention. */
+        this.long = scope.bits === 64;
+        /** The bytes a push moves the stack by, and a stack slot holds. */
+        this.word = this.long ? 8 : 4;
+        /**
+         * The register a table is read through: EBX, which the callee saves;
+         * at 64 bits R11, which it need not -- unless the function calls,
+         * which may change R11.
+         */
+        this.tableBase = this.long ? planned?.tableBase ?? R11 : EBX;
+        /** The REX bits the instruction being made needs, gathered from its operands (`op`). */
+        this.rexBits = 0;
+        /**
+         * Registers x86-64 code holds a value in for a while instead of
+         * pushing it (`hold`): what R8 to R11 the plan left free. None in a
+         * function that calls, where a call would change them.
+         *
+         * @type {number[]}
+         */
+        this.temps = [];
+        /** What `hold` holds, a register or the stack for each, innermost last. @type {number[]} */
+        this.held = [];
+        /** Whether the code moved RSP for an expression: x86-64 code that does is no leaf. */
+        this.pushedAny = false;
+        /**
+         * The slots of the home space x86-64 code may keep a variable in, by
+         * the argument's place: none until the parameters are placed.
+         *
+         * @type {number[]}
+         */
+        this.homeFree = [];
         this.a = new Assembler();
         /** @type {Map<string, Variable | { constant: number }>[]} */
         this.scopes = [new Map()];
@@ -621,6 +791,8 @@ class FunctionCompiler {
         this.paramKeys = new Set();
         /** @type {number[]} The double constants of the table after the code. */
         this.pool = [];
+        /** @type {bigint[]} The quadwords x86-64 code reads after itself, RIP-relative. */
+        this.quads = [];
         /** How many double constants the code loads, a load in a loop weighing more. */
         this.constantLoads = 0;
         /** @type {Map<any, Type>} Each node's type, once asked, outside an inlined body. */
@@ -632,6 +804,138 @@ class FunctionCompiler {
                 this.saves.add(reg);
             }
         }
+        if (this.long && planned !== null)
+        {
+            this.temps = this.placement(planned).temps;
+        }
+    }
+
+    /**
+     * Where x86-64 code keeps what it must give back, by the plan: each
+     * register the caller keeps that the code uses, in a slot of the home
+     * space the variables left (`{ home }`, by the argument's place) or in
+     * one of R8 to R11 they left (`{ reg }`) -- or, in a function that calls,
+     * which may change R8 to R11, or where too few places are free, pushed
+     * (`keptIn` null) -- and the registers left after that, EDX among them
+     * where no variable has it and nothing copies, for the values an
+     * expression holds a while (`temps`).
+     *
+     * @param {Plan} planned
+     * @returns {{ kept: number[], keptIn: Map<number, { home?: number, reg?: number }> | null,
+     *     temps: number[] }}
+     */
+    placement(planned){
+        const used = new Set(planned.registers.values());
+        const kept = [EBX, ESI, EDI, EBP].filter(reg=>used.has(reg)
+            || planned.bulk && (reg === ESI || reg === EDI)
+            || planned.tables && reg === planned.tableBase);
+        const spare = SPARE_64.filter(reg=>!used.has(reg)
+            && !(planned.tables && reg === planned.tableBase));
+        if (planned.calls)
+        {
+            return { kept, keptIn: null, temps: [] };
+        }
+        const edx = used.has(EDX) || planned.bulk ? [] : [EDX];
+        /** @type {{ home?: number, reg?: number }[]} */
+        const places = [...planned.homeSaves.map(home=>({ home })),
+            ...spare.map(reg=>({ reg }))];
+        if (kept.length > places.length)
+        {
+            return { kept, keptIn: null, temps: [...edx, ...spare] };
+        }
+        const taken = places.slice(0, kept.length);
+        return {
+            kept,
+            keptIn: new Map(kept.map((reg, i)=>[reg, taken[i]])),
+            temps: [...edx, ...spare.filter(reg=>!taken.some(place=>place.reg === reg))],
+        };
+    }
+
+    // --- x86-64 encoding ---------------------------------------------------
+
+    /**
+     * A register's low three bits for a field of an instruction, its fourth
+     * noted as `bit` of the REX prefix `op` puts before the opcode.
+     *
+     * @param {number} reg @param {number} bit
+     */
+    low(reg, bit){
+        if (reg >= 8)
+        {
+            this.rexBits |= bit;
+        }
+        return reg & 7;
+    }
+
+    /** The ModRM of two registers, `field` in its reg field. @param {number} field @param {number} reg */
+    regs(field, reg){
+        return 0xc0 | this.low(field, Rex.R) << 3 | this.low(reg, Rex.B);
+    }
+
+    /**
+     * `memory`'s ModRM, SIB and displacement, of registers that may be past
+     * the eighth.
+     *
+     * @param {number} field @param {import('./x86.mjs').Memory} operand
+     * @returns {number[]}
+     */
+    mem(field, operand){
+        const { base, index } = operand;
+        return memory(this.low(field, Rex.R), { ...operand, base: this.low(base, Rex.B),
+            ...index === undefined ? {} : { index: this.low(index, Rex.X) } });
+    }
+
+    /**
+     * Emits one instruction whose operands were made by `low`, `regs`, `mem`
+     * or `rm`: its REX prefix, where they named a register past the eighth,
+     * after its legacy prefixes. The same bytes as `emit` at 32 bits.
+     *
+     * @param {...number} bytes
+     */
+    op(...bytes){
+        const rex = this.rexBits;
+        this.rexBits = 0;
+        if (rex === 0)
+        {
+            return this.a.emit(...bytes);
+        }
+        let at = 0;
+        while (LEGACY_PREFIXES.has(bytes[at]))
+        {
+            at++;
+        }
+        return this.a.emit(...bytes.slice(0, at), Rex.PREFIX | rex, ...bytes.slice(at));
+    }
+
+    /**
+     * Keeps EAX while an expression is made: pushed, or in x86-64 code that
+     * calls nothing, in a register no variable has, where one is free -- RSP
+     * left where it is.
+     */
+    hold(){
+        const reg = this.temps.find(temp=>!this.held.includes(temp));
+        if (reg === undefined)
+        {
+            this.a.emit(0x50);                                             // push eax
+            this.grew(this.word);
+            this.pushedAny = true;
+            this.held.push(-1);
+            return;
+        }
+        this.op(0x89, this.regs(EAX, reg));                                // mov reg, eax
+        this.held.push(reg);
+    }
+
+    /** What `hold` kept last, into EAX, ECX, ESI or EDI. @param {number} reg */
+    unhold(reg){
+        const from = /** @type {number} */ (this.held.pop());
+        if (from < 0)
+        {
+            this.a.emit(0x58 | reg);                                       // pop reg
+            this.grew(-this.word);
+            return;
+        }
+        this.op(0x89, this.regs(from, reg));                               // mov reg, from
     }
 
     /** @param {any} node @param {string} message @returns {never} */
@@ -682,8 +986,26 @@ class FunctionCompiler {
                 }
                 uses.push(property.key.name);
                 this.helpers.add(property.key.name);
+                if (this.long && X87_WORDS.has(property.key.name))
+                {
+                    this.fail(property, `${property.key.name}: the x87's control and status `
+                        + 'words are the 32-bit runtime\'s, refused at 64 bits');
+                }
             }
             params.shift();
+        }
+        if (this.long && this.returns === 'i64')
+        {
+            this.fail(node, `${name}: an i64 is EDX:EAX at 32 bits, refused at 64 bits`);
+        }
+        const doubleParam = params.some(param=>isFloat(declared.get(param.name) ?? ''));
+        if (this.long && this.helpers.has('host') && (isFloat(this.returns) || doubleParam))
+        {
+            // The trap of a 64-bit process reads RCX, RDX, R8, R9 and the
+            // stack, and answers RAX: a double's XMM register it neither reads
+            // nor writes.
+            this.fail(node, `${name}: a double in an XMM register is no argument or answer the `
+                + '64-bit trap carries, so the function has no host to hand over to at 64 bits');
         }
         /** @type {ParamType[]} */
         const types = [];
@@ -701,7 +1023,9 @@ class FunctionCompiler {
         const x87Popped = [];
         /** @type {{ from: Variable, to: Variable }[]} */
         const x87Copies = [];
-        let stack = 8;
+        // Each parameter's place as EBP (RBP) would name it: past the saved
+        // frame pointer and the return address.
+        let stack = this.word * 2;
         for (const param of params)
         {
             if (param.type !== 'Identifier')
@@ -712,6 +1036,11 @@ class FunctionCompiler {
             if (type === undefined || !PARAM_TYPES.has(type))
             {
                 this.fail(param, `@param {i32 | u32 | f64 | f32 | x87} ${param.name} is wanted`);
+            }
+            if (this.long && type === 'x87')
+            {
+                this.fail(param, `${param.name}: an x87 argument is the 32-bit convention's, `
+                    + 'refused at 64 bits');
             }
             types.push(/** @type {ParamType} */ (type));
             this.paramKeys.add(param);
@@ -757,17 +1086,28 @@ class FunctionCompiler {
                 const own = this.newVariable(param.name, v.type, true, param);
                 copies.push({ from: stack, to: own, size: type === 'f64' ? 8 : 4 });
                 this.bind(param, own);
-                stack += type === 'f64' ? 8 : 4;
+                stack += this.long || type === 'f64' ? 8 : 4;
                 continue;
             }
             this.params.add(param);
             this.live.add(param);
             this.bind(param, v);
-            stack += type === 'f64' ? 8 : 4;
+            // A quadword a slot at 64 bits, whatever the value in its low half.
+            stack += this.long || type === 'f64' ? 8 : 4;
         }
         if (x87.some(v=>v.onStack))
         {
             this.fpu = 1;
+        }
+        if (this.long)
+        {
+            // The home space the caller left for the register arguments is
+            // the callee's: a slot whose argument went to a register, or that
+            // no argument has, holds a variable above RSP, which stays put.
+            // A hand-over takes the arguments back from their slots.
+            const inRegister = new Set(inRegisters.map(v=>v.disp));
+            this.homeFree = [0, 1, 2, 3].filter(i=>i >= params.length
+                || !this.helpers.has('host') && inRegister.has(16 + 8 * i));
         }
 
         this.statements(node.body.body);
@@ -785,9 +1125,15 @@ class FunctionCompiler {
         const out = new Assembler();
         const saved = [EBX, ESI, EDI, EBP].filter(reg=>this.saves.has(reg));
         const planned = this.planned?.frame;
-        if (planned && (planned.locals !== this.locals || planned.saved !== saved.length))
+        if (planned && (planned.locals !== this.locals || planned.saved !== saved.length
+            || planned.pushed !== this.frame().pushed))
         {
             throw new Error(`guest code: ${name}'s frame is not the one it was addressed as`);
+        }
+        if (this.long)
+        {
+            return this.finishLong({ name, convention, types, uses, inRegisters, copies,
+                count: (stack - 16) / 8, saved });
         }
         if (convention === 'thiscall')
         {
@@ -915,6 +1261,188 @@ class FunctionCompiler {
         };
     }
 
+    /**
+     * The x86-64 function around the body this compilation made: the register
+     * arguments written into their home space, the registers a callee keeps
+     * saved, the frame below them, and the two ways out -- the return, and
+     * the jump to the host's trap with everything back where the call left it.
+     *
+     * @param {{ name: string, convention: CompiledFunction['convention'],
+     *     types: ParamType[], uses: string[], inRegisters: Variable[],
+     *     copies: { from: number, to: Variable, size: number }[], count: number,
+     *     saved: number[] }} parts
+     *     count: the parameters; saved: the registers kept for the caller, in order
+     * @returns {CompiledFunction}
+     */
+    finishLong({ name, convention, types, uses, inRegisters, copies, count, saved }){
+        const out = new Assembler();
+        const { pushed } = this.frame();
+        // The first compilation, which only counts, has no plan to place by.
+        const { kept, keptIn } = this.planned === null ? { kept: saved, keptIn: null }
+            : this.placement(this.planned);
+        if (kept.join() !== saved.join())
+        {
+            throw new Error(`guest code: ${name} keeps registers its plan did not place`);
+        }
+        const inRegisterArguments = Math.min(count, ARGUMENTS_64.length);
+        /** The parameters given registers, by their place in the list. */
+        const byIndex = new Map(inRegisters.map(v=>[(v.disp - 16) / 8, v]));
+        // Whole into the home space, each register argument the frame reads
+        // where it is, or a hand-over takes back as it came.
+        // A double comes in the XMM register of its place, and is read from
+        // its slot: movsd, or movss, a float's.
+        for (let i = 0; i < inRegisterArguments; i++)
+        {
+            if (isFloat(types[i]))
+            {
+                out.emit(types[i] === 'f64' ? 0xf2 : 0xf3, 0x0f, 0x11,
+                    ...memory(i, { base: ESP, disp: 8 + 8 * i }));
+            }
+            else if (this.hostUsed || !byIndex.has(i))
+            {
+                out.emit(...storeQuad(ARGUMENTS_64[i], 8 + 8 * i));       // mov [rsp+8+8i], arg
+            }
+        }
+        if (pushed)
+        {
+            for (const reg of saved)
+            {
+                out.emit(0x50 | reg);                                      // push reg
+            }
+        }
+        for (const [reg, { home }] of keptIn ?? [])
+        {
+            if (home !== undefined)
+            {
+                out.emit(...storeQuad(reg, 8 + 8 * home));                // mov [rsp+8+8i], reg
+            }
+        }
+        // The register arguments into their variables' registers, and the
+        // registers the caller keeps into the free ones that hold them, as one
+        // move: R8 and R9 are arguments until they are read.
+        /** @type {{ from: number, to: number, quad: boolean }[]} */
+        const moves = [];
+        for (const [i, v] of byIndex)
+        {
+            if (i < ARGUMENTS_64.length)
+            {
+                moves.push({ from: ARGUMENTS_64[i], to: /** @type {number} */ (v.reg), quad: false });
+            }
+        }
+        for (const [reg, { reg: into }] of keptIn ?? [])
+        {
+            if (into !== undefined)
+            {
+                moves.push({ from: reg, to: into, quad: true });
+            }
+        }
+        out.emit(...parallelMove(moves));
+        if (this.locals > 0)
+        {
+            out.emit(...moveStack64(-this.locals));
+        }
+        if (this.tables.size > 0)
+        {
+            // lea r11, [rip]: the address every table is reached from.
+            out.emit(0x48 | (this.tableBase >= 8 ? Rex.R : 0), 0x8d,
+                0x05 | (this.tableBase & 7) << 3, 0, 0, 0, 0).label('picBase');
+        }
+        for (const [i, v] of byIndex)
+        {
+            if (i >= ARGUMENTS_64.length)
+            {
+                out.emit(...loadDword(/** @type {number} */ (v.reg), this.paramAt(v.disp)));
+            }
+        }
+        for (const { from, to, size } of copies)
+        {
+            for (let at = 0; at < size; at += 4)
+            {
+                // mov eax, the argument; mov the variable, eax
+                out.emit(0x8b, ...memory(EAX, { base: ESP, disp: this.paramAt(from) + at }));
+                out.emit(0x89, ...memory(EAX, { base: ESP, disp: this.locals + to.disp + at }));
+            }
+        }
+        out.append(this.a);
+        /** RSP and the kept registers as the caller left them. */
+        const takeDown = ()=>{
+            if (this.locals > 0)
+            {
+                out.emit(...moveStack64(this.locals));
+            }
+            if (pushed)
+            {
+                for (const reg of [...saved].reverse())
+                {
+                    out.emit(0x58 | reg);                                  // pop reg
+                }
+            }
+            for (const [reg, { home, reg: into }] of keptIn ?? [])
+            {
+                out.emit(...into !== undefined ? moveRegister(reg, into, true)
+                    : loadQuad(reg, 8 + 8 * /** @type {number} */ (home)));
+            }
+        };
+        out.label(this.epilogue);
+        takeDown();
+        if (this.returns === 'i32' || this.returns === 'u32')
+        {
+            // cdqe: the answer the trap gives, a dword extended by its sign.
+            out.emit(0x48, 0x98);
+        }
+        out.emit(0xc3);
+        if (this.hostUsed)
+        {
+            out.label(this.toHost);
+            takeDown();
+            for (let i = 0; i < inRegisterArguments; i++)
+            {
+                out.emit(...loadQuad(ARGUMENTS_64[i], 8 + 8 * i));        // mov arg, [rsp+8+8i]
+            }
+            out.emit(0xe9).label('hostJump').emit(0, 0, 0, 0);       // jmp the handler's trap
+        }
+        for (const callee of this.callees)
+        {
+            out.label(`fn:${callee}`).emit(...this.scope.compiledOf(callee, this.node).code);
+        }
+        const quads = new DataView(new ArrayBuffer(this.quads.length * 8));
+        this.quads.forEach((bits, i)=>quads.setBigUint64(i * 8, bits, true));
+        const code = out.finish([...this.tables.values()].map(table=>({
+            name: table.name, bytes: table.bytes, align: table.size,
+        })).concat(this.quads.length === 0 ? []
+            : [{ name: QUADS, bytes: new Uint8Array(quads.buffer), align: 8 }]));
+        if (this.rexBits !== 0)
+        {
+            throw new Error(`guest code: ${name} left a REX prefix unplaced`);
+        }
+        if (this.x87Used)
+        {
+            // Every use of a double at 64 bits is SSE2's or refused: an x87
+            // instruction here would round under a control word no x64
+            // caller sets for it.
+            throw new Error(`guest code: ${name}'s x86-64 holds an x87 instruction`);
+        }
+        return {
+            name, convention, params: types, returns: this.returns, uses, code,
+            ...this.hostUsed ? { host: /** @type {number} */ (out.offsets.get('hostJump')) } : {},
+            // No stack moved and nothing the caller keeps changed: what an
+            // unwinder with no unwind data for the code takes it to be.
+            leaf: saved.length === 0 && this.locals === 0 && !this.pushedAny && !this.calls,
+        };
+    }
+
+    /**
+     * A parameter's offset from ESP (RSP) once the frame is made, nothing
+     * pushed below it: past the variables, the registers saved on the stack
+     * and the return address.
+     *
+     * @param {number} disp  As EBP (RBP) names it.
+     */
+    paramAt(disp){
+        const { locals, saved, pushed } = this.planned?.frame ?? this.frame();
+        return locals + (pushed ? saved * this.word : 0) + disp - this.word;
+    }
+
     // --- names -----------------------------------------------------------
 
     /** @param {any} node @param {Variable | { constant: number }} what */
@@ -957,6 +1485,12 @@ class FunctionCompiler {
         {
             return { name, type, disp: 0, reg, mutable, key };
         }
+        const home = this.planned?.homes.has(key) ? this.homeFree.shift() : undefined;
+        if (home !== undefined)
+        {
+            // Named as the argument in that slot would be.
+            return { name, type, disp: 16 + 8 * home, mutable, key };
+        }
         const size = type === 'f64' ? 8 : 4;
         this.locals = Math.ceil((this.locals + size) / size) * size;
         return { name, type, disp: -this.locals, mutable, key };
@@ -986,28 +1520,36 @@ class FunctionCompiler {
      */
     rm(field, v){
         this.use(v);
-        return v.reg !== undefined ? [0xc0 | field << 3 | v.reg] : this.frameAt(field, v.disp);
+        return v.reg !== undefined ? [this.regs(field, v.reg)] : this.frameAt(field, v.disp);
     }
 
     /**
      * A variable or parameter in the frame, from ESP: `disp` below the frame's
-     * top for a variable, above the return address (less four) for a
+     * top for a variable, above the return address (less a word) for a
      * parameter, as EBP would have named them.
      *
      * @param {number} field @param {number} disp
      */
     frameAt(field, disp){
         this.frameUsed = true;
-        const { locals, saved } = this.planned?.frame ?? { locals: 0, saved: 0 };
-        const offset = disp < 0 ? locals + disp : locals + saved * 4 + disp - 4;
-        return memory(field, { base: ESP, disp: this.pushed + offset });
+        const { locals, saved, pushed } = this.planned?.frame
+            ?? { locals: 0, saved: 0, pushed: true };
+        const offset = disp < 0 ? locals + disp
+            : locals + (pushed ? saved * this.word : 0) + disp - this.word;
+        return this.mem(field, { base: ESP, disp: this.pushed + offset });
     }
 
-    /** What this compilation left in the frame, and saved above it. */
+    /**
+     * What this compilation left in the frame, and saved above it: on the
+     * stack, but in x86-64 code that calls nothing, whose registers to keep
+     * wait in R8 to R11.
+     */
     frame(){
         return {
             locals: this.locals,
             saved: [EBX, ESI, EDI, EBP].filter(reg=>this.saves.has(reg)).length,
+            pushed: !this.long || this.planned === null
+                || this.placement(this.planned).keptIn === null,
         };
     }
 
@@ -1032,28 +1574,57 @@ class FunctionCompiler {
     plan(){
         /** @type {{ reg: number, cost: number }[]} */
         const free = [];
-        if (!this.bulkUsed)
-        {
-            free.push({ reg: EDX, cost: 0 });
-        }
         const pool = this.constantLoads > 2;
-        if (this.tables.size === 0 && !pool)
+        // A table is read through R11 at 64 bits, or EBX where a call may change R11.
+        const tableBase = this.long && !this.calls ? R11 : EBX;
+        const tables = this.tables.size > 0;
+        if (this.long)
         {
-            free.push({ reg: EBX, cost: 2 });
+            // The convention's volatile registers first, which cost nothing
+            // to take; the kept ones after them, which cost their saving.
+            for (const reg of FREE_64)
+            {
+                if (!(reg === EDX && this.bulkUsed) && !(reg === tableBase && tables))
+                {
+                    free.push({ reg, cost: 0 });
+                }
+            }
+            if (!this.bulkUsed)
+            {
+                free.push({ reg: ESI, cost: 2 }, { reg: EDI, cost: 2 });
+            }
+            if (!(tableBase === EBX && tables))
+            {
+                free.push({ reg: EBX, cost: 2 });
+            }
+            free.push({ reg: EBP, cost: 2 });
         }
-        if (!this.bulkUsed)
+        else
         {
-            free.push({ reg: ESI, cost: 2 }, { reg: EDI, cost: 2 });
+            if (!this.bulkUsed)
+            {
+                free.push({ reg: EDX, cost: 0 });
+            }
+            if (this.tables.size === 0 && !pool)
+            {
+                free.push({ reg: EBX, cost: 2 });
+            }
+            if (!this.bulkUsed)
+            {
+                free.push({ reg: ESI, cost: 2 }, { reg: EDI, cost: 2 });
+            }
+            free.push({ reg: EBP, cost: 2 });
         }
-        free.push({ reg: EBP, cost: 2 });
         /** @type {Map<any, number>} */
         const registers = new Map();
         const heaviest = [...this.weights].sort((left, right)=>right[1] - left[1]);
-        for (const [key, weight] of heaviest)
+        const homes = this.long && !this.calls ? this.planLeaf(heaviest, free, registers)
+            : new Set();
+        for (const [key, weight] of this.long && !this.calls ? [] : heaviest)
         {
             const load = this.params.has(key) ? 1 : 0;
             const at = free.findIndex(({ reg, cost })=>weight > cost + load
-                && (reg !== EDX || !this.acrossCalls.has(key)));
+                && (!this.volatile(reg) || !this.acrossCalls.has(key)));
             if (at >= 0)
             {
                 registers.set(key, free[at].reg);
@@ -1066,14 +1637,102 @@ class FunctionCompiler {
                 && !this.x87Stored && !this.hostUsed,
             assigned: this.assigned,
             pool,
+            calls: this.calls,
+            tables,
+            bulk: this.bulkUsed,
+            tableBase,
+            homes,
+            // The home slots the variables leave, where the kept registers wait.
+            homeSaves: this.homeSlots(registers).slice(homes.size),
         };
     }
 
     /**
+     * The registers of x86-64 code that calls nothing, dealt so that it
+     * stays a leaf where it can: the variables that pay for one by weight
+     * take the volatile registers; the rest are kept in the slots of the home
+     * space no argument holds (`homeFree`), a parameter in its own; and only
+     * the heaviest of those past that take a register the caller keeps.
+     *
+     * @param {[any, number][]} heaviest  Each variable's weight, heaviest first.
+     * @param {{ reg: number, cost: number }[]} free  Volatile first, as `plan` lists them.
+     * @param {Map<any, number>} registers  Filled.
+     */
+    planLeaf(heaviest, free, registers){
+        const volatile = free.filter(({ reg })=>this.volatile(reg));
+        const kept = free.filter(({ reg })=>!this.volatile(reg));
+        for (const [key, weight] of heaviest)
+        {
+            if (volatile.length > 0 && weight > (this.params.has(key) ? 1 : 0))
+            {
+                registers.set(key, /** @type {{ reg: number }} */ (volatile.shift()).reg);
+            }
+        }
+        // A variable a loop uses is worth a register the caller keeps, saved
+        // once a call; one it does not, a slot of memory.
+        for (const [key, weight] of heaviest)
+        {
+            const load = this.params.has(key) ? 1 : 0;
+            if (!registers.has(key) && weight >= LOOP_WEIGHT && kept.length > 0
+                && weight > kept[0].cost + load)
+            {
+                registers.set(key, /** @type {{ reg: number }} */ (kept.shift()).reg);
+            }
+        }
+        const homes = new Set();
+        const slots = this.homeSlots(registers);
+        for (const [key, weight] of heaviest)
+        {
+            if (registers.has(key) || this.params.has(key))
+            {
+                continue;
+            }
+            if (homes.size < slots.length)
+            {
+                homes.add(key);
+            }
+            else if (kept.length > 0 && weight > kept[0].cost)
+            {
+                registers.set(key, /** @type {{ reg: number }} */ (kept.shift()).reg);
+            }
+        }
+        return homes;
+    }
+
+    /**
+     * The slots of the home space that x86-64 code may use, by the
+     * argument's place: those that no argument has, and those whose argument
+     * is in a register by the plan -- unless a hand-over takes the arguments
+     * back from there.
+     *
+     * @param {Map<any, number>} registers
+     */
+    homeSlots(registers){
+        if (!this.long)
+        {
+            return [];
+        }
+        const params = [...this.paramKeys];
+        return [0, 1, 2, 3].filter(i=>i >= params.length
+            || !this.helpers.has('host') && registers.has(params[i]));
+    }
+
+    /**
+     * Whether a call may change a register: EDX among those a variable is
+     * given, and at 64 bits R8 to R11 too.
+     *
+     * @param {number} reg
+     */
+    volatile(reg){
+        return this.long ? VOLATILE_64.has(reg) : reg === EDX;
+    }
+
+    /**
      * The same registers dealt again so that a variable a byte is stored from
-     * has one with a low byte (EDX or EBX; ESI, EDI and EBP have none), the
-     * others taking ESI, EDI and EBP first -- and EDX never to a variable in scope
-     * across a call. As they were, when that cannot be done.
+     * has one with a low byte (EDX or EBX; ESI, EDI and EBP have none -- at 64
+     * bits R8 to R11 have theirs too), the others taking ESI, EDI and EBP
+     * first -- R8 to R11 at 64 bits -- and no register a call may change to a
+     * variable in scope across a call. As they were, when that cannot be done.
      *
      * @param {Map<any, number>} registers
      */
@@ -1085,10 +1744,13 @@ class FunctionCompiler {
         const dealt = new Map();
         for (const key of order)
         {
-            const preference = this.byteStored.has(key) ? [EDX, EBX, ESI, EDI, EBP]
-                : [ESI, EDI, EBP, EBX, EDX];
+            const preference = this.long
+                ? this.byteStored.has(key) ? [EDX, R8, R9, R10, R11, EBX, ESI, EDI, EBP]
+                    : [R8, R9, R10, R11, EDX, ESI, EDI, EBP, EBX]
+                : this.byteStored.has(key) ? [EDX, EBX, ESI, EDI, EBP]
+                    : [ESI, EDI, EBP, EBX, EDX];
             const reg = preference.find(candidate=>pool.has(candidate)
-                && (candidate !== EDX || !this.acrossCalls.has(key)));
+                && (!this.volatile(candidate) || !this.acrossCalls.has(key)));
             if (reg === undefined)
             {
                 return registers;
@@ -1104,8 +1766,8 @@ class FunctionCompiler {
         const registers = this.planned?.registers ?? new Map();
         const used = new Set(registers.values());
         const clash = this.bulkUsed && used.has(EDX)
-            || [...registers].some(([key, reg])=>reg === EDX && this.acrossCalls.has(key))
-            || this.tables.size > 0 && used.has(EBX)
+            || [...registers].some(([key, reg])=>this.volatile(reg) && this.acrossCalls.has(key))
+            || this.tables.size > 0 && used.has(this.tableBase)
             || this.bulkUsed && (used.has(ESI) || used.has(EDI));
         if (clash)
         {
@@ -1480,7 +2142,6 @@ class FunctionCompiler {
      * @param {Variable} v @param {Value} value @param {any} node
      */
     store(v, value, node){
-        const a = this.a;
         if (isFloat(v.type))
         {
             this.assignable(v, value.type, node);
@@ -1488,32 +2149,29 @@ class FunctionCompiler {
             {
                 this.x87Stored = true;
             }
-            this.toSt0(value, node);
-            // fstp qword [v], or dword, a float's
-            a.emit(v.type === 'f64' ? 0xdd : 0xd9, ...this.frameAt(3, v.disp));
-            this.fpu--;
+            this.spill(v, value, node);
             return;
         }
         this.assignable(v, value.type, node);
         if (value.where === 'imm' && v.reg !== undefined)
         {
-            a.emit(...value.value === 0 ? [0x31, 0xc0 | v.reg << 3 | v.reg]   // xor reg, reg
-                : [0xb8 | v.reg, ...le32(value.value)]);                     // mov reg, imm
+            this.op(...value.value === 0 ? [0x31, this.regs(v.reg, v.reg)]   // xor reg, reg
+                : [0xb8 | this.low(v.reg, Rex.B), ...le32(value.value)]);     // mov reg, imm
             return;
         }
         if (value.where === 'imm')
         {
-            a.emit(0xc7, ...this.rm(0, v), ...le32(value.value));
+            this.op(0xc7, ...this.rm(0, v), ...le32(value.value));
             return;
         }
         if (value.where === 'var' && v.reg !== undefined)
         {
-            a.emit(0x8b, ...this.rm(v.reg, value.v));                     // mov reg, [value]
+            this.op(0x8b, ...this.rm(v.reg, value.v));                    // mov reg, [value]
             return;
         }
         if (value.where === 'var' && value.v.reg !== undefined)
         {
-            a.emit(0x89, ...this.rm(value.v.reg, v));                     // mov [v], reg
+            this.op(0x89, ...this.rm(value.v.reg, v));                    // mov [v], reg
             return;
         }
         if (value.where === 'eax' && v.reg !== undefined && this.retarget(v.reg))
@@ -1521,7 +2179,7 @@ class FunctionCompiler {
             return;
         }
         this.toEax(value, node);
-        a.emit(0x89, ...this.rm(EAX, v));
+        this.op(0x89, ...this.rm(EAX, v));
     }
 
     /**
@@ -1552,9 +2210,11 @@ class FunctionCompiler {
         // The load noted must be the last thing emitted, in the assembler in
         // hand: a count and a length that only match a stale note -- of another
         // pass, of another expression -- would retarget an instruction long gone.
+        // A register past the eighth wants a REX bit the load was made
+        // without: the value is moved there instead.
         if (!loaded || this.a.items.length !== loaded.count
             || this.a.items[loaded.at] !== loaded.item
-            || loaded.item.bytes.length !== loaded.length)
+            || loaded.item.bytes.length !== loaded.length || reg >= 8)
         {
             return false;
         }
@@ -1621,19 +2281,19 @@ class FunctionCompiler {
                 {
                     if (value.where === 'imm')
                     {
-                        a.emit(0xc1, ...this.rm(shift, v), value.value & 31);
+                        this.op(0xc1, ...this.rm(shift, v), value.value & 31);
                         return;
                     }
                     if (value.where === 'var')
                     {
-                        a.emit(0x8b, ...this.rm(ECX, value.v));   // mov ecx, [count]
+                        this.op(0x8b, ...this.rm(ECX, value.v));  // mov ecx, [count]
                     }
                     else
                     {
                         this.toEax(value, node.right);
                         a.emit(0x89, 0xc1);                       // mov ecx, eax
                     }
-                    a.emit(0xd3, ...this.rm(shift, v));           // shl/sar/shr [v], cl
+                    this.op(0xd3, ...this.rm(shift, v));          // shl/sar/shr [v], cl
                     return;
                 }
                 const alu = { '+': ALU.add, '-': ALU.sub, '|': ALU.or, '&': ALU.and,
@@ -1641,22 +2301,22 @@ class FunctionCompiler {
                 if (value.where === 'imm')
                 {
                     const imm = value.value | 0;
-                    a.emit(...fitsByte(imm) ? [0x83, ...this.rm(alu, v), imm & 0xff]
+                    this.op(...fitsByte(imm) ? [0x83, ...this.rm(alu, v), imm & 0xff]
                         : [0x81, ...this.rm(alu, v), ...le32(imm)]);
                     return;
                 }
                 if (value.where === 'var' && value.v.reg !== undefined)
                 {
-                    a.emit(alu << 3 | 1, ...this.rm(value.v.reg, v));   // op [v], reg
+                    this.op(alu << 3 | 1, ...this.rm(value.v.reg, v));  // op [v], reg
                     return;
                 }
                 if (value.where === 'var' && v.reg !== undefined)
                 {
-                    a.emit(alu << 3 | 3, ...this.rm(v.reg, value.v));   // op reg, [value]
+                    this.op(alu << 3 | 3, ...this.rm(v.reg, value.v));  // op reg, [value]
                     return;
                 }
                 this.toEax(value, node.right);
-                a.emit(alu << 3 | 1, ...this.rm(EAX, v));          // op [v], eax
+                this.op(alu << 3 | 1, ...this.rm(EAX, v));         // op [v], eax
                 return;
             }
             case 'UpdateExpression':
@@ -1667,7 +2327,7 @@ class FunctionCompiler {
                     this.fail(node, `${node.operator} on a double is written ${v.name} = `
                         + `${v.name} ${node.operator[0]} 1`);
                 }
-                a.emit(0xff, ...this.rm(node.operator === '++' ? 0 : 1, v));
+                this.op(0xff, ...this.rm(node.operator === '++' ? 0 : 1, v));
                 return;
             }
             case 'CallExpression':
@@ -1806,7 +2466,11 @@ class FunctionCompiler {
             }
             if (isFloat(returns))
             {
-                this.toSt0(value, node.argument);
+                this.toFloat(value, node.argument);
+                if (this.long && returns === 'f32')
+                {
+                    this.sse(0xf2, 0x5a, 0, 0);                            // cvtsd2ss xmm0, xmm0
+                }
                 this.fpu--;
             }
             else if (returns === 'i64' && isFloat(value.type))
@@ -1900,8 +2564,15 @@ class FunctionCompiler {
         {
             // A double compared with itself is unordered, PF set, only as a NaN.
             this.arity(node, 1);
-            this.toSt0(this.expr(node.arguments[0]), node.arguments[0]);
-            a.emit(0xdf, 0xe8);                                    // fucomip st0: popped
+            this.toFloat(this.expr(node.arguments[0]), node.arguments[0]);
+            if (this.long)
+            {
+                this.sse(0x66, 0x2e, this.fpu - 1, this.fpu - 1);      // ucomisd x, x
+            }
+            else
+            {
+                a.emit(0xdf, 0xe8);                                // fucomip st0: popped
+            }
             this.fpu--;
             a.jump(when ? CC.p : CC.np, target);
             return;
@@ -1915,7 +2586,7 @@ class FunctionCompiler {
         }
         if (value.where === 'var' && value.v.reg !== undefined)
         {
-            a.emit(0x85, 0xc0 | value.v.reg * 9);                  // test reg, reg
+            this.op(0x85, this.regs(value.v.reg, value.v.reg));    // test reg, reg
         }
         else
         {
@@ -1933,16 +2604,26 @@ class FunctionCompiler {
         const rightType = this.peekType(node.right);
         if (isFloat(leftType) || isFloat(rightType))
         {
-            this.toSt0(this.expr(node.left), node.left);
-            this.toSt0(this.expr(node.right), node.right);
+            this.toFloat(this.expr(node.left), node.left);
+            this.toFloat(this.expr(node.right), node.right);
             // ST0 the right, ST1 the left; fucomip compares ST0 with ST1, so
             // `>` and `>=` exchange them first and every test is `a`/`ae`,
-            // which an unordered comparison (CF set) fails.
-            if (op === '>' || op === '>=')
+            // which an unordered comparison (CF set) fails. `ucomisd` sets
+            // the flags as `fucomip` does, its first operand compared.
+            const greater = op === '>' || op === '>=';
+            if (this.long)
             {
-                a.emit(0xd9, 0xc9);                                // fxch st1
+                const [left, right] = [this.fpu - 2, this.fpu - 1];
+                this.sse(0x66, 0x2e, greater ? left : right, greater ? right : left);  // ucomisd
             }
-            a.emit(0xdf, 0xe9, 0xdd, 0xd8);                        // fucomip st1; fstp st0
+            else
+            {
+                if (greater)
+                {
+                    a.emit(0xd9, 0xc9);                            // fxch st1
+                }
+                a.emit(0xdf, 0xe9, 0xdd, 0xd8);                    // fucomip st1; fstp st0
+            }
             this.fpu -= 2;
             if (op === '===' || op === '!==')
             {
@@ -1975,22 +2656,22 @@ class FunctionCompiler {
             this.integer(right, node.right, 'intish');
             if (right.where === 'imm' && right.value === 0)
             {
-                a.emit(0x85, 0xc0 | reg * 9);                              // test reg, reg
+                this.op(0x85, this.regs(reg, reg));                        // test reg, reg
             }
             else if (right.where === 'imm')
             {
                 const imm = right.value | 0;
-                a.emit(...fitsByte(imm) ? [0x83, 0xf8 | reg, imm & 0xff]
-                    : [0x81, 0xf8 | reg, ...le32(imm)]);                   // cmp reg, imm
+                this.op(...fitsByte(imm) ? [0x83, this.regs(ALU.cmp, reg), imm & 0xff]
+                    : [0x81, this.regs(ALU.cmp, reg), ...le32(imm)]);      // cmp reg, imm
             }
             else
             {
-                a.emit(0x3b, ...this.rm(reg, /** @type {{ v: Variable }} */ (right).v)); // cmp
+                this.op(0x3b, ...this.rm(reg, /** @type {{ v: Variable }} */ (right).v)); // cmp
             }
         }
         else if (left?.where === 'var' && right?.where === 'var' && right.v.reg !== undefined)
         {
-            a.emit(0x39, ...this.rm(right.v.reg, left.v));                   // cmp [left], reg
+            this.op(0x39, ...this.rm(right.v.reg, left.v));                  // cmp [left], reg
         }
         else
         {
@@ -2046,8 +2727,11 @@ class FunctionCompiler {
         const tables = new Map(this.tables);
         const saves = new Set(this.saves);
         const scopes = this.scopes.map(scope=>new Map(scope));
-        const { x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed, constantLoads } = this;
+        const { x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed, constantLoads,
+            pushedAny } = this;
+        const homeFree = [...this.homeFree];
         const pooled = this.pool.length;
+        const quads = this.quads.length;
         this.peeking++;
         /** @type {Value} */
         let value;
@@ -2060,9 +2744,11 @@ class FunctionCompiler {
             this.peeking--;
         }
         Object.assign(this, {
-            x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed, constantLoads,
+            x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed, constantLoads, pushedAny,
+            homeFree,
         });
         this.pool.length = pooled;
+        this.quads.length = quads;
         this.a.items.length = mark;
         if (last?.kind === 'bytes')
         {
@@ -2150,8 +2836,7 @@ class FunctionCompiler {
             load.emit(ECX);
             return { right: { where: 'ecx', type: load.type }, leftType: lv.type };
         }
-        a.emit(0x50);                                                  // push eax
-        this.grew(4);
+        this.hold();                                                   // push eax
         const rv = this.expr(right);
         this.integer(rv, right, 'intish');
         if (rv.where !== 'eax' || !this.retarget(ECX))
@@ -2159,8 +2844,7 @@ class FunctionCompiler {
             this.toEax(rv, right);
             a.emit(0x89, 0xc1);                                        // mov ecx, eax
         }
-        a.emit(0x58);                                                  // pop eax
-        this.grew(-4);
+        this.unhold(EAX);                                              // pop eax
         return { right: { where: 'ecx', type: rv.type }, leftType: lv.type };
     }
 
@@ -2183,7 +2867,7 @@ class FunctionCompiler {
         }
         else if (right.where === 'var')
         {
-            a.emit(op << 3 | 3, ...this.rm(EAX, right.v));
+            this.op(op << 3 | 3, ...this.rm(EAX, right.v));
         }
         else
         {
@@ -2232,7 +2916,7 @@ class FunctionCompiler {
                 }
                 return;
             case 'var':
-                a.emit(0x8b, ...this.rm(EAX, value.v));
+                this.op(0x8b, ...this.rm(EAX, value.v));
                 return;
             default:
                 return;
@@ -2247,6 +2931,7 @@ class FunctionCompiler {
      */
     toSt0(value, node){
         const a = this.a;
+        this.x87Only(node, 'this use of a double');
         if (value.where === 'st0')
         {
             return;
@@ -2307,6 +2992,301 @@ class FunctionCompiler {
     }
 
     /**
+     * Brings a value onto the stack of doubles: the x87's, or at 64 bits the
+     * XMM registers'. For a use whose next instructions are the same for both.
+     *
+     * @param {Value} value @param {any} node
+     */
+    toFloat(value, node){
+        if (this.long)
+        {
+            this.toXmm(value, node);
+            return;
+        }
+        this.toSt0(value, node);
+    }
+
+    /**
+     * Writes a double into a variable in the frame: `fstp`, or at 64 bits
+     * `movsd`, a float's rounded to nearest by either.
+     *
+     * @param {Variable} v @param {Value} value @param {any} node
+     */
+    spill(v, value, node){
+        if (this.long)
+        {
+            this.toXmm(value, node);
+            this.storeXmm(v.type === 'f64', field=>this.frameAt(field, v.disp));
+            return;
+        }
+        this.toSt0(value, node);
+        // fstp qword [v], or dword, a float's
+        this.a.emit(v.type === 'f64' ? 0xdd : 0xd9, ...this.frameAt(3, v.disp));
+        this.fpu--;
+    }
+
+    /**
+     * Refuses at 64 bits what only the x87 does: its doubles are SSE2's
+     * there, which has no instruction for it.
+     *
+     * @param {any} node @param {string} what
+     */
+    x87Only(node, what){
+        if (this.long)
+        {
+            this.fail(node, `${what} is the x87's, with no SSE2 instruction: refused at 64 bits`);
+        }
+    }
+
+    // --- doubles at 64 bits: SSE2 --------------------------------------------
+    //
+    // The x87's stack of doubles, as XMM registers: the value `fpu` deep in
+    // XMM(fpu - 1), the next pushed into the register past it. Scalar SSE2
+    // arithmetic is IEEE double's to the last bit, as JavaScript's is, under
+    // the convention's MXCSR (round to nearest, no exception unmasked). XMM0
+    // to XMM5 are the callee's to change: four deep at most, two past them
+    // for an operation's own use.
+
+    /** The next XMM register an expression takes. @param {any} node */
+    pushXmm(node){
+        if (++this.fpu > SSE_DEPTH)
+        {
+            this.fail(node, 'the expression holds more doubles at once than x86-64 code keeps '
+                + 'in registers');
+        }
+        return this.fpu - 1;
+    }
+
+    /**
+     * A scalar SSE2 instruction of two XMM registers.
+     *
+     * @param {number} prefix  0xf2 (double), 0xf3 (float) or 0x66.
+     * @param {number} opcode  The byte after 0x0f. @param {number} reg @param {number} rm
+     */
+    sse(prefix, opcode, reg, rm){
+        this.a.emit(prefix, 0x0f, opcode, 0xc0 | reg << 3 | rm);
+    }
+
+    /**
+     * A scalar SSE2 instruction reading the table of quadwords after the
+     * code, RIP-relative: a constant's bits.
+     *
+     * @param {number} prefix @param {number} opcode @param {number} reg @param {bigint} bits
+     */
+    sseConstant(prefix, opcode, reg, bits){
+        let at = this.quads.indexOf(bits);
+        if (at < 0)
+        {
+            at = this.quads.push(bits) - 1;
+        }
+        this.a.emit(prefix, 0x0f, opcode, 0x05 | reg << 3).rip(QUADS, at * 8);
+    }
+
+    /**
+     * The double on top of the XMM stack and a mask of its bits, by a packed
+     * logical instruction of two registers: the mask is read into the
+     * scratch register with `movsd`, which, unlike `andpd` of memory, asks
+     * for no 16-byte alignment.
+     *
+     * @param {number} opcode  0x54 `andpd`, 0x57 `xorpd`. @param {bigint} bits
+     */
+    masked(opcode, bits){
+        const x = this.fpu - 1;
+        this.sseConstant(0xf2, 0x10, x + 1, bits);                         // movsd scratch, [mask]
+        this.sse(0x66, opcode, x, x + 1);
+    }
+
+    /**
+     * A double onto the XMM stack: an integer converted exactly, a float
+     * widened, a constant from the table after the code (zero made).
+     *
+     * @param {Value} value @param {any} node
+     */
+    toXmm(value, node){
+        if (value.where === 'st0')
+        {
+            return;
+        }
+        if (value.where === 'var' && isFloat(value.type))
+        {
+            const x = this.pushXmm(node);
+            if (value.type === 'f64')
+            {
+                this.op(0xf2, 0x0f, 0x10, ...this.frameAt(x, value.v.disp));  // movsd xmm, [v]
+                return;
+            }
+            this.op(0xf3, 0x0f, 0x10, ...this.frameAt(x, value.v.disp));      // movss xmm, [v]
+            this.sse(0xf3, 0x5a, x, x);                                        // cvtss2sd
+            return;
+        }
+        if (value.where === 'imm')
+        {
+            const x = this.pushXmm(node);
+            if (Object.is(value.value, 0))
+            {
+                this.sse(0x66, 0x57, x, x);                                    // xorpd xmm, xmm
+                return;
+            }
+            this.sseConstant(0xf2, 0x10, x, doubleBits(value.value));          // movsd xmm, [c]
+            return;
+        }
+        if (value.type === 'intish')
+        {
+            this.fail(node, 'a sum becomes a double once it is brought back to 32 bits');
+        }
+        if (value.type === 'u32')
+        {
+            // Zero-extended in RAX: the 64-bit conversion takes it exactly.
+            this.toEax(value, node);
+            const x = this.pushXmm(node);
+            this.a.emit(0xf2, 0x48, 0x0f, 0x2a, 0xc0 | x << 3);                // cvtsi2sd xmm, rax
+            return;
+        }
+        if (value.where === 'var')
+        {
+            const x = this.pushXmm(node);
+            this.op(0xf2, 0x0f, 0x2a, ...this.rm(x, value.v));                 // cvtsi2sd xmm, r/m32
+            return;
+        }
+        this.a.emit(0xf2, 0x0f, 0x2a, 0xc0 | this.pushXmm(node) << 3);         // cvtsi2sd xmm, eax
+    }
+
+    /**
+     * The double on top of the XMM stack stored, a float's rounded to
+     * nearest as `cvtsd2ss` rounds it, and popped.
+     *
+     * @param {boolean} double @param {(field: number) => number[]} operand
+     *     The memory operand's ModRM and the rest, with `field` in the reg field.
+     */
+    storeXmm(double, operand){
+        const x = this.fpu - 1;
+        if (double)
+        {
+            this.op(0xf2, 0x0f, 0x11, ...operand(x));                         // movsd [m], xmm
+        }
+        else
+        {
+            this.sse(0xf2, 0x5a, x, x);                                        // cvtsd2ss
+            this.op(0xf3, 0x0f, 0x11, ...operand(x));                         // movss [m], xmm
+        }
+        this.fpu--;
+    }
+
+    /**
+     * `+ - * /` of two doubles: each onto the stack, JavaScript's order, and
+     * the operation's scalar instruction.
+     *
+     * @param {any} node @returns {Value}
+     */
+    floatBinaryXmm(node){
+        if (node.operator === '%')
+        {
+            this.x87Only(node, '% of a double, the exact remainder of `fprem`,');
+        }
+        this.note(node, 'rounds');
+        this.toXmm(this.expr(node.left), node.left);
+        this.toXmm(this.expr(node.right), node.right);
+        const opcode = /** @type {Record<string, number>} */ ({ '+': 0x58, '*': 0x59, '-': 0x5c,
+            '/': 0x5e })[node.operator];
+        this.sse(0xf2, opcode, this.fpu - 2, this.fpu - 1);
+        this.fpu--;
+        return { where: 'st0', type: 'f64' };
+    }
+
+    /**
+     * `Math.trunc`, `Math.floor` and `Math.ceil` of the double on top of the
+     * stack, with no SSE4.1: a value 2^52 or more in magnitude -- and an
+     * infinity, and NaN -- is whole already; any other is truncated through a
+     * quadword (`cvttsd2si`), given the argument's sign back -- the sign of a
+     * zero it rounds to -- and moved by one where it went the wrong way.
+     *
+     * @param {string} name
+     */
+    roundXmm(name){
+        const a = this.a;
+        const x = this.fpu - 1;
+        const s = x + 1;
+        const t = x + 2;
+        const done = a.fresh('whole');
+        this.sseConstant(0xf2, 0x10, s, ABS_MASK);                             // movsd s, [abs]
+        this.sse(0x66, 0x54, s, x);                                            // andpd s, x
+        this.sseConstant(0xf2, 0x10, t, doubleBits(2 ** 52));                  // movsd t, [2^52]
+        this.sse(0x66, 0x2e, t, s);                                            // ucomisd t, s
+        a.jump(CC.be, done);
+        a.emit(0xf2, 0x48, 0x0f, 0x2c, 0xc0 | x);                              // cvttsd2si rax, x
+        a.emit(0xf2, 0x48, 0x0f, 0x2a, 0xc0 | s << 3);                         // cvtsi2sd s, rax
+        this.sseConstant(0xf2, 0x10, t, SIGN_MASK);                            // movsd t, [sign]
+        this.sse(0x66, 0x54, t, x);                                            // andpd t, x
+        this.sse(0x66, 0x56, s, t);                                            // orpd s, t
+        if (name !== 'trunc')
+        {
+            // Floor: one less where truncation went up; ceil: one more where it went down.
+            const kept = a.fresh('kept');
+            if (name === 'floor')
+            {
+                this.sse(0x66, 0x2e, s, x);                                    // ucomisd s, x
+            }
+            else
+            {
+                this.sse(0x66, 0x2e, x, s);                                    // ucomisd x, s
+            }
+            a.jump(CC.be, kept);
+            this.sseConstant(0xf2, 0x10, t, doubleBits(1));                    // movsd t, [1]
+            this.sse(0xf2, name === 'floor' ? 0x5c : 0x58, s, t);              // subsd/addsd s, t
+            a.label(kept);
+        }
+        this.sse(0xf2, 0x10, x, s);                                            // movsd x, s
+        a.label(done);
+    }
+
+    /**
+     * A double brought to an integer as `| 0` and `>>> 0` bring one, modulo
+     * 2^32 after truncation: `cvttsd2si` of the whole into RAX, its low half
+     * -- and where that answers the integer indefinite, a magnitude of 2^63
+     * or more, an infinity or NaN, the double's bits moved left by its
+     * exponent less 1075: the low 32 bits of the whole number it is, negated
+     * for a negative value. Such a shift is 11 or more, which puts the
+     * implicit bit, the exponent and the sign past bit 31; one of 32 or more,
+     * an infinity's and NaN's among them, leaves none of the significand there.
+     *
+     * @param {any} node @param {string} op @returns {Value}
+     */
+    toIntegerXmm(node, op){
+        const a = this.a;
+        this.toXmm(this.expr(node), node);
+        const x = this.fpu - 1;
+        const done = a.fresh('converted');
+        const slow = a.fresh('indefinite');
+        const zero = a.fresh('none');
+        const positive = a.fresh('positive');
+        a.emit(0xf2, 0x48, 0x0f, 0x2c, 0xc0 | x);                      // cvttsd2si rax, x
+        a.emit(0x48, 0x89, 0xc1, 0x48, 0xf7, 0xd9);                    // mov rcx, rax; neg rcx
+        a.jump(CC.o, slow);                                            // only -2^63 overflows
+        a.emit(0x89, 0xc0);                                            // mov eax, eax
+        a.jump(-1, done);
+        a.label(slow);
+        a.emit(0x66, 0x48, 0x0f, 0x7e, 0xc0 | x << 3);                 // movq rax, x
+        a.emit(0x48, 0xd1, 0xe0, 0x48, 0xc1, 0xe8, 0x35);              // shl rax, 1; shr rax, 53
+        a.emit(0x8d, 0x88, ...le32(-1075 >>> 0));                      // lea ecx, [rax - 1075]
+        a.emit(0x83, 0xf9, 0x20);                                      // cmp ecx, 32
+        a.jump(CC.ae, zero);
+        a.emit(0x66, 0x48, 0x0f, 0x7e, 0xc0 | x << 3);                 // movq rax, x
+        a.emit(0x48, 0xd3, 0xe0);                                      // shl rax, cl
+        a.emit(0x66, 0x48, 0x0f, 0x7e, 0xc1 | x << 3);                 // movq rcx, x
+        a.emit(0x48, 0x85, 0xc9);                                      // test rcx, rcx
+        a.jump(CC.ge, positive);
+        a.emit(0xf7, 0xd8);                                            // neg eax
+        a.label(positive);
+        a.emit(0x89, 0xc0);                                            // mov eax, eax
+        a.jump(-1, done);
+        a.label(zero);
+        a.emit(0x31, 0xc0);                                            // xor eax, eax
+        a.label(done);
+        this.fpu--;
+        return { where: 'eax', type: op === '|' ? 'i32' : 'u32' };
+    }
+
+    /**
      * Evaluates an expression: a constant or a variable is answered as an
      * operand, anything else emitted into EAX or onto the x87 stack.
      *
@@ -2351,10 +3331,10 @@ class FunctionCompiler {
                 const no = this.peekType(node.alternate);
                 if (isFloat(yes.type) || isFloat(no))
                 {
-                    this.toSt0(yes, node.consequent);
+                    this.toFloat(yes, node.consequent);
                     this.fpu--;
                     a.jump(-1, end).label(otherwise);
-                    this.toSt0(this.expr(node.alternate), node.alternate);
+                    this.toFloat(this.expr(node.alternate), node.alternate);
                     a.label(end);
                     return { where: 'st0',
                         type: yes.type === 'f32' && no === 'f32' ? 'f32' : 'f64' };
@@ -2379,6 +3359,7 @@ class FunctionCompiler {
                         this.fail(node, `X87.${node.property.name} is not a constant the x87 `
                             + `loads: ${Object.keys(X87_CONSTANTS).join(', ')}`);
                     }
+                    this.x87Only(node, `X87.${node.property.name}`);
                     this.x87Used = true;
                     if (++this.fpu > X87_DEPTH)
                     {
@@ -2424,6 +3405,13 @@ class FunctionCompiler {
             case '-':
             {
                 const value = this.expr(node.argument);
+                if (isFloat(value.type) && this.long)
+                {
+                    // The sign flipped, as `fchs` flips it: NaN's and zero's too.
+                    this.toXmm(value, node.argument);
+                    this.masked(0x57, SIGN_MASK);                          // xorpd: the sign
+                    return { where: 'st0', type: 'f64' };
+                }
                 if (isFloat(value.type))
                 {
                     this.toSt0(value, node.argument);
@@ -2445,7 +3433,7 @@ class FunctionCompiler {
             case '+':
             {
                 const value = this.expr(node.argument);
-                this.toSt0(value, node.argument);
+                this.toFloat(value, node.argument);
                 return { where: 'st0', type: 'f64' };
             }
             case '!':
@@ -2468,12 +3456,12 @@ class FunctionCompiler {
         const zero = this.fold(node.right) === 0;
         if (zero && (op === '|' || op === '>>>') && isFloat(this.peekType(node.left)))
         {
-            return this.toInteger(node.left, op);
+            return this.long ? this.toIntegerXmm(node.left, op) : this.toInteger(node.left, op);
         }
         if (['+', '-', '*', '/', '%'].includes(op) && (op === '/' || isFloat(this.peekType(node.left))
             || isFloat(this.peekType(node.right))))
         {
-            return this.floatBinary(node);
+            return this.long ? this.floatBinaryXmm(node) : this.floatBinary(node);
         }
         if (op === '+' || op === '-' || op === '*')
         {
@@ -2530,7 +3518,7 @@ class FunctionCompiler {
                     const { right } = this.pair(node.left, node.right);
                     if (right.where === 'var')
                     {
-                        a.emit(0x8b, ...this.rm(ECX, right.v));          // mov ecx, [count]
+                        this.op(0x8b, ...this.rm(ECX, right.v));         // mov ecx, [count]
                     }
                     a.emit(0xd3, 0xc0 | digit << 3);                     // shl/sar/shr eax, cl
                 }
@@ -2836,6 +3824,7 @@ class FunctionCompiler {
      */
     x87Intrinsic(node, name){
         const a = this.a;
+        this.x87Only(node, `X87.${name}`);
         /** @param {number} count */
         const pushed = count=>node.arguments.slice(0, count).forEach((/** @type {any} */ arg)=>
             this.toSt0(this.expr(arg), arg));
@@ -2930,13 +3919,45 @@ class FunctionCompiler {
                 }
                 else if (right.where === 'var')
                 {
-                    a.emit(0x0f, 0xaf, ...this.rm(EAX, right.v));
+                    this.op(0x0f, 0xaf, ...this.rm(EAX, right.v));
                 }
                 else
                 {
                     a.emit(0x0f, 0xaf, 0xc1);                          // imul eax, ecx
                 }
                 return { where: 'eax', type: 'i32' };
+            }
+            if (this.long && (Object.hasOwn(ROUNDING, name) || name === 'abs' || name === 'sqrt'
+                || name === 'fround'))
+            {
+                this.arity(node, 1);
+                this.toXmm(this.expr(node.arguments[0]), node.arguments[0]);
+                const x = this.fpu - 1;
+                if (name === 'abs')
+                {
+                    this.masked(0x54, ABS_MASK);                           // andpd: no sign
+                }
+                else if (name === 'sqrt')
+                {
+                    this.note(node, 'rounds');
+                    this.sse(0xf2, 0x51, x, x);                            // sqrtsd
+                }
+                else if (name === 'fround')
+                {
+                    this.sse(0xf2, 0x5a, x, x);                            // cvtsd2ss
+                    this.sse(0xf3, 0x5a, x, x);                            // cvtss2sd
+                    return { where: 'st0', type: 'f32' };
+                }
+                else
+                {
+                    this.roundXmm(name);
+                }
+                return { where: 'st0', type: 'f64' };
+            }
+            if (this.long && (Object.hasOwn(MATH_UNARY, name) || name === 'atan2'
+                || name === 'log2'))
+            {
+                this.x87Only(node, `Math.${name}`);
             }
             if (Object.hasOwn(ROUNDING, name) || name === 'abs')
             {
@@ -3019,6 +4040,18 @@ class FunctionCompiler {
                 this.arity(node, 1);
                 const load = LOADS[name];
                 const operand = this.address(node.arguments[0]);
+                if (isFloat(load.type) && this.long)
+                {
+                    // movsd, or movss and widened: a float's every value a double holds.
+                    const one = this.wrapped(operand, EAX);
+                    const x = this.pushXmm(node);
+                    this.op(load.type === 'f64' ? 0xf2 : 0xf3, 0x0f, 0x10, ...this.mem(x, one));
+                    if (load.type === 'f32')
+                    {
+                        this.sse(0xf3, 0x5a, x, x);                        // cvtss2sd
+                    }
+                    return { where: 'st0', type: /** @type {'f64' | 'f32'} */ (load.type) };
+                }
                 if (isFloat(load.type))
                 {
                     this.x87Clean = false;
@@ -3031,8 +4064,9 @@ class FunctionCompiler {
                     a.emit(...load.op, ...memory(0, operand));
                     return { where: 'st0', type: /** @type {'f64' | 'f32'} */ (load.type) };
                 }
-                const modrm = memory(EAX, operand);
-                a.emit(...load.op, ...modrm);
+                const one = this.wrapped(operand, EAX);
+                const modrm = this.mem(EAX, one);
+                this.op(...load.op, ...modrm);
                 this.noteLoad(modrm.length - 1);
                 return { where: 'eax', type: load.type };
             }
@@ -3132,6 +4166,12 @@ class FunctionCompiler {
         {
             this.acrossCalls.add(key);
         }
+        if (this.long)
+        {
+            this.longCall(given, null, ()=>void a.call(`fn:${name}`));
+            this.callees.add(name);
+            return { where: 'eax', type: callee.returns === 'u32' ? 'u32' : 'i32' };
+        }
         const bytes = given.length * 4;
         if (bytes > 0)
         {
@@ -3220,9 +4260,7 @@ class FunctionCompiler {
                 /** @type {Variable['type']} */ (value.type), false, argument);
             if (isFloat(v.type))
             {
-                this.toSt0(value, argument);
-                this.a.emit(v.type === 'f64' ? 0xdd : 0xd9, ...this.frameAt(3, v.disp));
-                this.fpu--;
+                this.spill(v, value, argument);
             }
             else
             {
@@ -3291,7 +4329,6 @@ class FunctionCompiler {
      * @returns {{ emit: (reg: number) => void, type: Type } | null}
      */
     registerLoad(node){
-        const a = this.a;
         if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
             && this.helpers.has(node.callee.name) && Object.hasOwn(LOADS, node.callee.name)
             && !isFloat(LOADS[node.callee.name].type) && node.arguments.length === 1)
@@ -3299,7 +4336,11 @@ class FunctionCompiler {
             const operand = this.registerAddress(node.arguments[0]);
             const load = LOADS[node.callee.name];
             return operand === null ? null : {
-                emit: reg=>void a.emit(...load.op, ...memory(reg, operand)), type: load.type,
+                emit: reg=>{
+                    const one = this.wrapped(operand, reg);
+                    this.op(...load.op, ...this.mem(reg, one));
+                },
+                type: load.type,
             };
         }
         const table = node.type === 'MemberExpression' && node.computed
@@ -3316,12 +4357,24 @@ class FunctionCompiler {
             return null;
         }
         this.tables.set(table.name, table);
-        this.saves.add(EBX);
+        this.saves.add(this.tableBase);
         return {
-            emit: reg=>void a.emit(...tableOp(table), 0x84 | reg << 3, tableSib(table, at))
-                .ref(table.name, addend),
+            emit: reg=>void this.tableOperand(tableOp(table), reg, table, at).ref(table.name,
+                addend),
             type: tableType(table),
         };
+    }
+
+    /**
+     * `op reg, [base + index * size + disp32]` of a table, the displacement
+     * left for the reference that follows.
+     *
+     * @param {number[]} opcode @param {number} reg @param {TableInfo} table
+     * @param {number} index
+     */
+    tableOperand(opcode, reg, table, index){
+        return this.op(...opcode, 0x84 | this.low(reg, Rex.R) << 3,
+            tableSib(table, this.low(index, Rex.X), this.low(this.tableBase, Rex.B)));
     }
 
     /**
@@ -3332,7 +4385,6 @@ class FunctionCompiler {
      * @param {any} node @returns {import('./x86.mjs').Memory}
      */
     address(node){
-        const a = this.a;
         let disp = 0;
         let inner = node;
         while (inner.type === 'BinaryExpression' && (inner.operator === '+'
@@ -3372,7 +4424,7 @@ class FunctionCompiler {
             }
             if (operand.where === 'var')
             {
-                a.emit(0x8b, ...this.rm(ECX, operand.v));                  // mov ecx, [right]
+                this.op(0x8b, ...this.rm(ECX, operand.v));                 // mov ecx, [right]
             }
             return { base: EAX, index: ECX, disp };
         }
@@ -3387,10 +4439,28 @@ class FunctionCompiler {
         return { base: EAX, disp };
     }
 
+    /**
+     * An address of two registers as long mode reaches it: made into one by a
+     * 32-bit `lea` into `scratch`, which wraps at 2^32 as the i386's address
+     * and the helpers' do, where the 64-bit sum of a pointer and an index
+     * holding a negative i32 would land 4 GiB past it. As it is at 32 bits,
+     * and for one register.
+     *
+     * @param {import('./x86.mjs').Memory} operand @param {number} scratch
+     * @returns {import('./x86.mjs').Memory}
+     */
+    wrapped(operand, scratch){
+        if (!this.long || operand.index === undefined)
+        {
+            return operand;
+        }
+        this.op(0x8d, ...this.mem(scratch, operand));                      // lea scratch, [..]
+        return { base: scratch };
+    }
+
     /** @param {any} node @returns {Value} */
     tableLoad(node){
-        const a = this.a;
-        this.saves.add(EBX);
+        this.saves.add(this.tableBase);
         if (!node.computed || node.object.type !== 'Identifier')
         {
             this.fail(node, 'a member is read only from a table, by index');
@@ -3411,7 +4481,7 @@ class FunctionCompiler {
             this.toEax(value, index);
         }
         // op eax, [ebx + index*scale + disp32]
-        a.emit(...tableOp(table), 0x84, tableSib(table, at)).ref(table.name, addend);
+        this.tableOperand(tableOp(table), EAX, table, at).ref(table.name, addend);
         this.noteLoad(1);
         return { where: 'eax', type: tableType(table) };
     }
@@ -3455,24 +4525,30 @@ class FunctionCompiler {
         }
         if (operand.index !== undefined)
         {
-            a.emit(0x8d, ...memory(EAX, { base: operand.base, index: operand.index })); // lea
+            // A 32-bit lea, whose sum wraps as the address does in long mode too.
+            this.op(0x8d, ...this.mem(EAX, { base: operand.base, index: operand.index })); // lea
         }
-        a.emit(0x50);                                                      // push eax
-        this.grew(4);
+        this.hold();                                                       // push eax
         const value = this.expr(node.arguments[1]);
+        if (FLOAT_STORES.has(name) && this.long)
+        {
+            this.toXmm(value, node.arguments[1]);
+            this.unhold(ECX);
+            this.storeXmm(name === 'setF64',
+                field=>this.mem(field, { base: ECX, disp: operand.disp ?? 0 }));
+            return;
+        }
         if (FLOAT_STORES.has(name))
         {
             this.toSt0(value, node.arguments[1]);
-            a.emit(0x59);                                                  // pop ecx
-            this.grew(-4);
+            this.unhold(ECX);                                              // pop ecx
             a.emit(...STORES[name], ...memory(3, { base: ECX, disp: operand.disp ?? 0 }));
             this.fpu--;
             return;
         }
         this.integer(value, node.arguments[1], 'intish');
         this.toEax(value, node.arguments[1]);
-        a.emit(0x59);                                                      // pop ecx
-        this.grew(-4);
+        this.unhold(ECX);                                                  // pop ecx
         a.emit(...STORES[name], ...memory(EAX, { base: ECX, disp: operand.disp ?? 0 }));
     }
 
@@ -3480,37 +4556,48 @@ class FunctionCompiler {
      * A store to an operand no expression changes: a constant as it is, any
      * other value from EAX or ST0.
      *
-     * @param {import('./x86.mjs').Memory} operand @param {any} node @param {string} name
+     * @param {import('./x86.mjs').Memory} given @param {any} node @param {string} name
      */
-    storeTo(operand, node, name){
+    storeTo(given, node, name){
         const a = this.a;
         const value = this.expr(node);
+        if (FLOAT_STORES.has(name) && this.long)
+        {
+            this.toXmm(value, node);
+            const operand = this.wrapped(given, ECX);
+            this.storeXmm(name === 'setF64', field=>this.mem(field, operand));
+            return;
+        }
         if (FLOAT_STORES.has(name))
         {
             this.toSt0(value, node);
-            a.emit(...STORES[name], ...memory(3, operand));                // fstp dword/qword
+            a.emit(...STORES[name], ...memory(3, given));                  // fstp dword/qword
             this.fpu--;
             return;
         }
         this.integer(value, node, 'intish');
+        // ECX holds nothing now: the value is a constant, a variable, or in EAX.
+        const operand = this.wrapped(given, ECX);
         if (value.where === 'var' && value.v.reg !== undefined
-            && (name !== 'setU8' || value.v.reg === EDX || value.v.reg === EBX))
+            && (name !== 'setU8' || value.v.reg === EDX || value.v.reg === EBX
+                || value.v.reg >= 8))
         {
-            // ESI, EDI and EBP have no low byte of their own.
-            a.emit(...STORES[name], ...memory(value.v.reg, operand));
+            // ESI, EDI and EBP have no low byte of their own without a REX
+            // prefix (R8 to R11 have theirs with the one they need anyway).
+            this.op(...STORES[name], ...this.mem(value.v.reg, operand));
             return;
         }
         if (value.where === 'imm')
         {
             const imm = value.value;
-            a.emit(...name === 'setU8' ? [0xc6, ...memory(0, operand), imm & 0xff]
-                : name === 'setU16' ? [0x66, 0xc7, ...memory(0, operand), imm & 0xff,
+            this.op(...name === 'setU8' ? [0xc6, ...this.mem(0, operand), imm & 0xff]
+                : name === 'setU16' ? [0x66, 0xc7, ...this.mem(0, operand), imm & 0xff,
                     imm >>> 8 & 0xff]
-                    : [0xc7, ...memory(0, operand), ...le32(imm)]);
+                    : [0xc7, ...this.mem(0, operand), ...le32(imm)]);
             return;
         }
         this.toEax(value, node);
-        a.emit(...STORES[name], ...memory(EAX, operand));
+        this.op(...STORES[name], ...this.mem(EAX, operand));
     }
 
     /**
@@ -3531,30 +4618,59 @@ class FunctionCompiler {
         this.bulkUsed = true;
         this.saves.add(ESI);
         this.saves.add(EDI);
-        for (const argument of node.arguments)
+        // Where each argument goes: the destination, the source or the byte, the count.
+        const into = name === 'fill' ? [EDI, EAX, ECX] : [EDI, ESI, ECX];
+        if (this.long)
         {
-            const value = this.expr(argument);
-            this.integer(value, argument, 'intish');
-            this.toEax(value, argument);
-            a.emit(0x50);                                                  // push eax
-            this.grew(4);
+            // Each straight into its register, in order: no expression
+            // writes ESI or EDI, which no variable here has either. A fill's
+            // byte waits in ESI while the count is made in EAX.
+            node.arguments.forEach((/** @type {any} */ argument, /** @type {number} */ i)=>{
+                const value = this.expr(argument);
+                this.integer(value, argument, 'intish');
+                const reg = i === 1 ? ESI : into[i];
+                if (value.where === 'eax')
+                {
+                    this.op(0x89, this.regs(EAX, reg));                    // mov reg, eax
+                }
+                else
+                {
+                    this.into(value, reg);
+                }
+            });
+            if (name === 'fill')
+            {
+                a.emit(0x89, 0xf0);                                        // mov eax, esi
+            }
         }
-        a.emit(0x59);                                                      // pop ecx: the count
-        this.grew(-12);
+        else
+        {
+            for (const argument of node.arguments)
+            {
+                const value = this.expr(argument);
+                this.integer(value, argument, 'intish');
+                this.toEax(value, argument);
+                this.hold();                                               // push eax
+            }
+            for (const reg of [...into].reverse())
+            {
+                this.unhold(reg);                                          // pop ecx; pop esi; ...
+            }
+        }
+        // In long mode 0x48 is a REX prefix, not `dec eax`.
+        const decEax = this.long ? [0xff, 0xc8] : [0x48];
         if (name === 'fill')
         {
-            a.emit(0x58, 0x5f);                                            // pop eax; pop edi
             a.emit(0x0f, 0xb6, 0xc0, 0x69, 0xc0, ...le32(0x01010101));    // the byte, four times
             a.emit(0x89, 0xca, 0xc1, 0xe9, 0x02, 0xf3, 0xab);          // edx = n; rep stosd
             a.emit(0x89, 0xd1, 0x83, 0xe1, 0x03, 0xf3, 0xaa);          // n & 3; rep stosb
             return;
         }
-        a.emit(0x5e, 0x5f);                                                // pop esi; pop edi
         const bytes = a.fresh('bytes');
         if (name === 'copyUp')
         {
             // One to three bytes ahead of the source: bytes throughout.
-            a.emit(0x89, 0xf8, 0x29, 0xf0, 0x48, 0x83, 0xf8, 0x03);    // eax = edi - esi - 1
+            a.emit(0x89, 0xf8, 0x29, 0xf0, ...decEax, 0x83, 0xf8, 0x03); // eax = edi - esi - 1
             a.jump(CC.b, bytes);
             a.emit(0x89, 0xca, 0xc1, 0xe9, 0x02, 0xf3, 0xa5);          // edx = n; rep movsd
             a.emit(0x89, 0xd1, 0x83, 0xe1, 0x03);                      // ecx = n & 3
@@ -3565,7 +4681,7 @@ class FunctionCompiler {
         // From the last byte of each, with the direction flag set and cleared
         // again: the top n & 3 bytes, then the dwords below them.
         const done = a.fresh('done');
-        a.emit(0x89, 0xf0, 0x29, 0xf8, 0x48, 0x83, 0xf8, 0x03);        // eax = esi - edi - 1
+        a.emit(0x89, 0xf0, 0x29, 0xf8, ...decEax, 0x83, 0xf8, 0x03);   // eax = esi - edi - 1
         a.emit(0x8d, 0x74, 0x0e, 0xff, 0x8d, 0x7c, 0x0f, 0xff, 0xfd);  // lea esi/edi, ...; std
         a.jump(CC.b, bytes);
         a.emit(0x89, 0xca, 0x83, 0xe1, 0x03, 0xf3, 0xa4);              // edx = n; rep movsb
@@ -3576,6 +4692,17 @@ class FunctionCompiler {
         a.emit(0xf3, 0xa4);                                                // rep movsb
         a.label(done);
         a.emit(0xfc);                                                      // cld
+    }
+
+    /** A constant or a variable into a register. @param {Value} value @param {number} reg */
+    into(value, reg){
+        if (value.where === 'imm')
+        {
+            this.op(...value.value === 0 ? [0x31, this.regs(reg, reg)]          // xor reg, reg
+                : [0xb8 | this.low(reg, Rex.B), ...le32(value.value)]);         // mov reg, imm
+            return;
+        }
+        this.op(0x8b, ...this.rm(reg, /** @type {{ v: Variable }} */ (value).v)); // mov reg, [v]
     }
 
     /** `push` a constant or a variable. @param {Value} value */
@@ -3622,6 +4749,13 @@ class FunctionCompiler {
         for (const key of this.live)
         {
             this.acrossCalls.add(key);
+        }
+        if (this.long)
+        {
+            // call qword [rsp + the target's slot]: one convention at 64 bits.
+            this.longCall(args, target, at=>void a.emit(0xff,
+                ...memory(2, { base: ESP, disp: at })));
+            return;
         }
         const bytes = args.length * 4;
         const simple = [target, ...args].map(arg=>this.simple(arg));
@@ -3676,6 +4810,87 @@ class FunctionCompiler {
         a.emit(0x83, 0xc4, stdcall ? 4 : bytes + 4);                       // add esp, (4n+)4
         this.grew(-(bytes + 4));
     }
+
+    /**
+     * A call under the x64 convention: the target, when it is a pointer, and
+     * the arguments evaluated in order into an area made below RSP -- each
+     * argument in its slot, the first four the home space the callee may
+     * write, the target past them -- the first four then loaded into RCX,
+     * RDX, R8 and R9, and RSP a multiple of 16 at the call. Each slot is
+     * written whole, the integer zero-extended, so a callee reading a pointer
+     * from it reads the address. The answer is the low half of RAX, made
+     * whole again: an address the code reaches through RAX next is the
+     * callee's 32 bits, not what it left above them.
+     *
+     * @param {any[]} args  The argument nodes.
+     * @param {any} target  The pointer's node, or null.
+     * @param {(at: number) => void} emitCall  Emits the call, the target's
+     *     slot `at` bytes above RSP.
+     */
+    longCall(args, target, emitCall){
+        const a = this.a;
+        const slots = Math.max(args.length, ARGUMENTS_64.length);
+        const area = slots * 8 + (target === null ? 0 : 8);
+        // Below RSP as the call found it: the return address, the registers
+        // saved on the stack, the variables and what expressions pushed; the
+        // area makes it a multiple of 16, as RSP was before the caller's call.
+        const { locals, saved, pushed } = this.planned?.frame ?? this.frame();
+        const below = 8 + (pushed ? saved * 8 : 0) + locals + this.pushed;
+        const size = area + (16 - (below + area) % 16) % 16;
+        a.emit(...moveStack64(-size));
+        this.grew(size);
+        const operands = [...target === null ? [] : [{ node: target, at: slots * 8 }],
+            ...args.map((/** @type {any} */ node, /** @type {number} */ i)=>({ node, at: i * 8 }))];
+        for (const { node, at } of operands)
+        {
+            const value = this.expr(node);
+            this.integer(value, node, 'typed');
+            this.toEax(value, node);
+            a.emit(...storeQuad(EAX, at));                                 // mov [rsp+at], rax
+        }
+        for (let i = 0; i < Math.min(args.length, ARGUMENTS_64.length); i++)
+        {
+            a.emit(...loadQuad(ARGUMENTS_64[i], i * 8));                   // mov arg, [rsp+8i]
+        }
+        emitCall(slots * 8);
+        a.emit(...moveStack64(size));
+        this.grew(-size);
+        a.emit(0x89, 0xc0);                                                // mov eax, eax
+    }
+}
+
+/**
+ * Register-to-register moves made as if all at once: each destination
+ * written once every move that reads it has, a cycle broken through RAX,
+ * which none of them names.
+ *
+ * @param {{ from: number, to: number, quad: boolean }[]} moves  Each `to` once.
+ * @returns {number[]}
+ */
+function parallelMove(moves){
+    const pending = moves.filter(({ from, to })=>from !== to).map(move=>({ ...move }));
+    /** @type {number[]} */
+    const bytes = [];
+    while (pending.length > 0)
+    {
+        const ready = pending.findIndex(({ to })=>!pending.some(({ from })=>from === to));
+        if (ready >= 0)
+        {
+            const [{ from, to, quad }] = pending.splice(ready, 1);
+            bytes.push(...moveRegister(to, from, quad));
+            continue;
+        }
+        const aside = pending[0].from;
+        bytes.push(...moveRegister(EAX, aside, true));
+        for (const move of pending)
+        {
+            if (move.from === aside)
+            {
+                move.from = EAX;
+            }
+        }
+    }
+    return bytes;
 }
 
 /**

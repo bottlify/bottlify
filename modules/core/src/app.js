@@ -5475,8 +5475,11 @@ async function buildApp(options){
             // displacement is the loader's, which places the code.
             // A variable may hold other exports' addresses: a vtable's slots.
             // A long-mode process runs no i386: an export that is guest code
-            // with a host handler is a trap into that handler there.
-            ...fn.code && !(long && fn.handler) ? codeExport(fn, `${name}!${exported}`)
+            // runs its x86-64 there (`long`), where the build made any, and
+            // is a trap into its host handler where it did not.
+            ...long && fn.long || fn.code && !(long && fn.handler)
+                ? codeExport(long && fn.long ? { ...fn, code: fn.long } : fn,
+                    `${name}!${exported}`)
                 : fn.data ? {
                     data: fn.data(), pointers: fn.pointers, entry: fn.entry,
                 } : {

@@ -32,12 +32,25 @@
  * function that loads a control word, whose model rounds as the word it
  * loads says.
  *
+ * Where the function has x86-64 code too -- the build's for a 64-bit process
+ * (`longCodeOf`), or the table a test gives -- each input runs that as well,
+ * on cork's long-mode machine (`long.mjs`), called as the x64 convention calls
+ * with the same arguments and memory, and is held to the same JavaScript: the
+ * result in RAX (an i32 or u32 extended by its sign, as the bridge's trap
+ * answers one), the memory, RSP past the return address, the direction flag
+ * clear, and RBX, RBP, RSI, RDI and R12 to R15 as they were; a hand-over
+ * finds RSP at the return address, RCX, RDX, R8, R9 and the stack's
+ * arguments whole as the call left them, the kept registers and every byte
+ * of memory. A case that calls through a pointer runs there only with an
+ * x86-64 callback of its own (`callback64`).
+ *
  * For the tests: the machine is cork's own test machine, not the engine.
  */
 
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../../../cork/src/testing/machine.js';
-import { guestEntry } from '../../src/layers/win32/msvcrt/guest-code.js';
+import { guestEntry, longCodeOf } from '../../src/layers/win32/msvcrt/guest-code.js';
+import { CODE_64, KEPT_64, STACK_64, argumentOf, callLong, longMachine } from './long.mjs';
 
 export const CODE = 0x1000;
 export const HALT = 0x0f00;
@@ -61,6 +74,7 @@ const SAVED = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x444444
 /**
  * @typedef {Object} Double
  * @property {number[]} [callback]    x86 at CALLBACK, which a call through a pointer reaches.
+ * @property {number[]} [callback64]  The same callback in x86-64, for the x86-64 code's run.
  * @property {(memory: Uint8Array, fn: number, args: number[]) => number} [call]
  *     Its JavaScript stand-in.
  * @property {(memory: Uint8Array, args: number[], x87: number[])
@@ -196,11 +210,16 @@ const spanOf = fn=>(fn.uses.some(use=>use !== 'host') ? DATA_END - DATA : 0);
  * @param {import('./model.mjs').Model} [model]  The x87's model of the same
  *     module, the reference under a single-precision control word; without
  *     one, the source is held to it there too.
+ * @param {Record<string, import('../../src/layers/win32/msvcrt/guest-code.js').CompiledGuestCode>}
+ *     [long]  The same functions' x86-64 code; without it, the build's
+ *     (`longCodeOf`), where it made any.
  */
-export function equivalence(compiled, sources, model){
+export function equivalence(compiled, sources, model, long){
     /** One machine per function: its translations kept from one input to the next. */
     /** @type {Map<string, ReturnType<typeof createTestMachine>>} */
     const machines = new Map();
+    /** @type {Map<string, import('./long.mjs').LongMachine>} */
+    const longMachines = new Map();
 
     /** @param {string} name */
     const compiledOf = name=>{
@@ -210,6 +229,147 @@ export function equivalence(compiled, sources, model){
             throw new Error(`no compiled ${name}`);
         }
         return found;
+    };
+
+    /** The function's x86-64 code, where there is any. @param {string} name */
+    const longOf = name=>(long !== undefined ? long[name] : longCodeOf(compiledOf(name)));
+
+    /**
+     * Runs the x86-64 code on the long-mode machine, and answers what it left
+     * -- or, at a hand-over, checks the call is as it came and answers what
+     * the stand-in does from there.
+     *
+     * @param {string} name
+     * @param {import('../../src/layers/win32/msvcrt/guest-code.js').CompiledGuestCode} fn
+     * @param {Case} input @param {Double} double
+     */
+    const runLong = (name, fn, input, double)=>{
+        let m = longMachines.get(name);
+        if (!m)
+        {
+            m = longMachine();
+            const code = fn.code.slice();
+            if (fn.host !== undefined)
+            {
+                new DataView(code.buffer).setUint32(fn.host, (HOST - (CODE_64 + fn.host + 4)) >>> 0,
+                    true);
+            }
+            m.write(CODE_64, code);
+            m.write(HALT, [0xf4]);
+            m.write(HOST, [0xf4]);
+            if (double.callback64)
+            {
+                m.write(CALLBACK, double.callback64);
+            }
+            longMachines.set(name, m);
+        }
+        const span = spanOf(fn);
+        m.write(DATA, new Uint8Array(span));
+        for (const [address, bytes] of input.memory ?? [])
+        {
+            m.write(address, Array.from(bytes));
+        }
+        const words = input.stack ?? [];
+        // The words as the 32-bit stack has them: a double's two, low first.
+        let next = 0;
+        const args = fn.params.map((type, i)=>(type === 'f64'
+            ? BigInt(words[next++] >>> 0) | BigInt(words[next++] >>> 0) << 32n
+            : argumentOf(words[next++] ?? 0, i)));
+        const floats = fn.params.map(type=>type === 'f64' || type === 'f32');
+        const before = m.read(DATA, span);
+        const { entry, xmm, slots, halted } = callLong(m, CODE_64, { args, floats,
+            returnTo: HALT });
+        const what = `${name}(${JSON.stringify(words)}) at 64 bits`;
+        assert.ok(halted, `${what} halts`);
+        // XMM6 to XMM15 are the caller's, as RBX and the rest are.
+        const kept = Object.fromEntries([...KEPT_64.map(reg=>[reg, m.reg(reg)]),
+            ...xmm.slice(6).map((_, i)=>[`xmm${i + 6}`, Array.from(m.xmm(i + 6))])]);
+        const given = Object.fromEntries([...KEPT_64.map(reg=>[reg, entry[reg]]),
+            ...xmm.slice(6).map((bytes, i)=>[`xmm${i + 6}`, Array.from(bytes)])]);
+        const df = (m.flags() & 0x400) !== 0;
+        if (fn.host !== undefined && m.rip() === HOST + 1)
+        {
+            const handed = `${what} handed to the host`;
+            assert.equal(m.reg('rsp'), BigInt(STACK_64), `${handed}: RSP at the return address`);
+            assert.equal(m.quad(STACK_64), BigInt(HALT), `${handed}: the return address kept`);
+            // The registers that carry arguments, and those a callee keeps.
+            const owed = [...['rcx', 'rdx', 'r8', 'r9'].slice(0, fn.params.length), ...KEPT_64];
+            assert.deepEqual(Object.fromEntries(owed.map(reg=>[reg, m.reg(reg)])),
+                Object.fromEntries(owed.map(reg=>[reg, entry[reg]])),
+                `${handed}: the argument registers and the kept ones as the call left them`);
+            assert.deepEqual(slots.map((_, i)=>m.quad(STACK_64 + 40 + i * 8)), slots,
+                `${handed}: the stack's arguments kept`);
+            assert.equal(df, false, `${handed}: the direction flag clear`);
+            const data = m.read(DATA, span);
+            if (!Buffer.from(data).equals(Buffer.from(before)))
+            {
+                const at = data.findIndex((byte, i)=>byte !== before[i]);
+                assert.fail(`${handed}: memory written before, first at 0x${(DATA + at)
+                    .toString(16)}`);
+            }
+            if (!double.host)
+            {
+                throw new Error(`${name} hands a call to the host, and the case gives no stand-in`);
+            }
+            const memory = new Uint8Array(1 << 20);
+            memory.set(data, DATA);
+            // What the trap reads: the low half of each argument.
+            const answer = double.host(memory, args.map(arg=>Number(BigInt.asUintN(32, arg))), []);
+            // The trap answers as the bridge does: the dword extended by its sign.
+            return {
+                rax: BigInt.asUintN(64, BigInt(typeof answer === 'number' ? answer | 0 : 0)),
+                rsp: BigInt(STACK_64 + 8), kept, given, df,
+                data: memory.slice(DATA, DATA + data.length), handedOver: true,
+            };
+        }
+        assert.equal(m.rip(), HALT + 1, `${what} returns to its caller's address`);
+        const answer = new DataView(m.xmm(0).buffer);
+        return { rax: m.reg('rax'), rsp: m.reg('rsp'), kept, given, df, data: m.read(DATA, span),
+            handedOver: false,
+            xmm0: fn.returns === 'f32' ? answer.getFloat32(0, true) : answer.getFloat64(0, true) };
+    };
+
+    /**
+     * Holds the x86-64 code to what the JavaScript answered for an input.
+     *
+     * @param {string} name @param {Case} input @param {Double} double
+     * @param {{ eax: number, st: number[], data: Uint8Array, handedOver: boolean }} js
+     *     The JavaScript's answer in doubles: the source's, whatever the control
+     *     word, which SSE2's arithmetic has nothing of.
+     * @param {string} what
+     */
+    const sameLong = (name, input, double, js, what)=>{
+        const fn = longOf(name);
+        // An x87 argument has no x86-64 code to take it; a call through a
+        // pointer reaches x86-64 only where the case gives some.
+        if (fn === undefined || (input.x87 ?? []).length > 0
+            || double.callback && !double.callback64)
+        {
+            return;
+        }
+        const x64 = runLong(name, fn, input, double);
+        const at64 = `${what} at 64 bits`;
+        assert.equal(x64.handedOver, js.handedOver, `${at64}: handed to the host by both or by `
+            + 'neither');
+        assert.deepEqual(x64.kept, x64.given, `${at64}: the registers a callee keeps kept`);
+        assert.equal(x64.rsp, BigInt(STACK_64 + 8), `${at64}: RSP past the return address`);
+        assert.equal(x64.df, false, `${at64}: the direction flag clear`);
+        if (fn.returns === 'f64' || fn.returns === 'f32')
+        {
+            assert.ok(sameDouble(/** @type {number} */ (x64.xmm0), js.st[0]),
+                `${at64}: XMM0 ${x64.xmm0} against ${js.st[0]}`);
+        }
+        else if (fn.returns !== 'void')
+        {
+            assert.equal(x64.rax, BigInt.asUintN(64, BigInt(js.eax | 0)),
+                `${at64}: RAX, EAX extended by its sign`);
+        }
+        const at = firstDifference(x64.data, js.data);
+        if (at >= 0)
+        {
+            assert.fail(`${at64}: memory differs first at 0x${(DATA + at).toString(16)}: `
+                + `${x64.data[at]} against ${js.data[at]}`);
+        }
     };
 
     /** @param {string} name @param {Case} input @param {Double} double */
@@ -366,8 +526,10 @@ export function equivalence(compiled, sources, model){
     /**
      * @param {string} name @param {Case} input @param {Double} double
      * @param {Record<string, unknown>} module  The source, or the model's copy of it.
+     * @param {[number, number]} [bounds]  The addresses the JavaScript may reach,
+     *     [from, to): past them a RangeError, as past the test's memory.
      */
-    const runJs = (name, input, double, module)=>{
+    const runJs = (name, input, double, module, bounds = [0, Infinity])=>{
         // The x87's words as the call finds them; a control word the source
         // loads is the one the model's arithmetic rounds to from there on.
         let control = input.control ?? 0x37f;
@@ -389,16 +551,33 @@ export function equivalence(compiled, sources, model){
         const { call } = double;
         let handedOver = false;
         const { host } = double;
+        /**
+         * An access past the test's memory, or the bounds given, refused.
+         *
+         * @param {number} address @param {number} length @param {string} what
+         */
+        const reach = (address, length, what)=>{
+            if (address + length > memory.length || address < bounds[0]
+                || address + length > bounds[1])
+            {
+                throw new RangeError(`${what} past the test's memory at 0x${address.toString(16)}`);
+            }
+        };
         const entry = guestEntry(source, compiledOf(name), {
             readMemory: (address, length)=>{
-                if (address + length > memory.length)
-                {
-                    throw new RangeError('read past the test\'s memory at '
-                        + `0x${address.toString(16)}`);
-                }
+                reach(address, length, 'read');
                 return memory.subarray(address, address + length);
             },
-            writeMemory: (address, bytes)=>memory.set(bytes, address),
+            writeMemory: (address, bytes)=>{
+                reach(address, bytes.length, 'write');
+                memory.set(bytes, address);
+            },
+            // Bounded first: a count past the test's memory is refused before
+            // a buffer of its length is made.
+            fillMemory: (address, value, length)=>{
+                reach(address, length, 'fill');
+                memory.fill(value, address, address + length);
+            },
             fpu: {
                 setResult: value=>void st.unshift(value),
                 get: index=>st[index],
@@ -504,6 +683,30 @@ export function equivalence(compiled, sources, model){
                 assert.fail(`${what}: memory differs first at 0x${(DATA + at).toString(16)}: `
                     + `${x86.data[at]} against ${js.data[at]}`);
             }
+            // The model's rounding is the x87's; x86-64 code's doubles are
+            // SSE2's, the source's own.
+            sameLong(name, input, double, rounds && model ? runJs(name, input, double, sources)
+                : js, what);
+            return js;
+        },
+
+        /**
+         * Runs one input through the JavaScript and the x86-64 code alone:
+         * what a function the build made x86-64 code for is held to where
+         * its i386 is no part of the question.
+         *
+         * @param {string} name @param {Case} input @param {Double} [double]
+         * @param {[number, number]} [bounds]  The addresses the input may reach,
+         *     [from, to): one that reaches past them is refused with a
+         *     RangeError before the x86-64 runs, as one past the test's memory is.
+         */
+        sameAt64(name, input, double = {}, bounds = undefined){
+            if (longOf(name) === undefined)
+            {
+                throw new Error(`no x86-64 code for ${name}`);
+            }
+            const js = runJs(name, input, double, sources, bounds);
+            sameLong(name, input, double, js, `${name}(${JSON.stringify(input.stack ?? [])})`);
             return js;
         },
     };
