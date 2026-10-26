@@ -16,9 +16,10 @@
  * flags are lazy: an arithmetic instruction leaves a record (kind, width,
  * operands, result, carry in, the flags it writes) that a helper turns into
  * the word only where something reads it, and at the exit; a record crosses
- * from block to block. A jump to a block of the region goes on inside the
- * function, through a dispatch loop, until the instructions it retired reach
- * the module's `budget` global; any other leaves with RIP at the target.
+ * from block to block, and a condition is read from it directly where its
+ * kind gives one (a compare and branch). A jump to a block of the region goes
+ * on inside the function, a jump back only until the instructions it retired
+ * reach the module's `budget` global; any other leaves with RIP at the target.
  *
  * What the block cannot do itself it leaves before the instruction, with the
  * state exactly as the interpreter (`interp64.js`) wants it: an instruction it
@@ -46,7 +47,8 @@ export const LongExit = Object.freeze({
 });
 
 /** Lazy flag kinds, the helper's (`flagsHelper`). */
-const Kind = Object.freeze({ ADD: 1, ADC: 2, SUB: 3, SBB: 4, LOGIC: 5, INC: 6, DEC: 7, IMUL: 8 });
+const Kind = Object.freeze({ ADD: 1, ADC: 2, SUB: 3, SBB: 4, LOGIC: 5, INC: 6, DEC: 7, IMUL: 8,
+    SHL: 9, SHR: 10, SAR: 11 });
 /** Shift kinds, the shift helper's. */
 const Shift = Object.freeze({ shl: 0, sal: 0, shr: 1, sar: 2, rol: 3, ror: 4 });
 
@@ -82,7 +84,8 @@ const BUDGET = 0;
 const Op = Object.freeze({
     i32eqz: 0x45, i32eq: 0x46, i32ne: 0x47, i32ltu: 0x49, i32gtu: 0x4b, i32leu: 0x4d,
     i32geu: 0x4f, i64eqz: 0x50, i64eq: 0x51, i64ne: 0x52, i64lts: 0x53, i64ltu: 0x54,
-    i64gtu: 0x56, i32add: 0x6a, i32sub: 0x6b, i32and: 0x71, i32or: 0x72, i32xor: 0x73,
+    i64gtu: 0x56, i64les: 0x57, i64leu: 0x58, i32add: 0x6a, i32sub: 0x6b, i32and: 0x71,
+    i32or: 0x72, i32xor: 0x73,
     i32shl: 0x74, i32shru: 0x76, i32remu: 0x70, i32popcnt: 0x69, i64popcnt: 0x7b,
     i64add: 0x7c, i64sub: 0x7d, i64mul: 0x7e, i64divs: 0x7f, i64and: 0x83, i64or: 0x84,
     i64xor: 0x85, i64shl: 0x86, i64shrs: 0x87, i64shru: 0x88, i64rotl: 0x89, i64rotr: 0x8a,
@@ -160,6 +163,13 @@ class BlockEmitter {
         this.nest = 0;
         /** Labels between the block's code and the exit block, ifs aside. */
         this.outer = 1;
+        /**
+         * The flag record pending where the code being emitted runs: none
+         * (null, FL is whole), one of a known kind, or not known (undefined,
+         * a block's start, which the dispatch loop enters from anywhere).
+         * @type {{ kind: number, size: number } | null | undefined}
+         */
+        this.pending = undefined;
         this.flagTable = pageFlagsAt(layout);
     }
 
@@ -387,15 +397,55 @@ class BlockEmitter {
 
     // --- flags ---
 
-    /** The pending record, if any, folded into FL. */
+    /**
+     * The pending record, if any, folded into FL. Nothing to emit where the
+     * emitter knows none is pending.
+     */
     settle(){
         const { b } = this;
+        if (this.pending === null)
+        {
+            return;
+        }
         b.localGet(PK);
         this.open();
         b.localGet(PK).localGet(PS).localGet(PA).localGet(PB).localGet(PR).localGet(PC)
             .localGet(PW).localGet(FL).call(this.helpers.flags).localSet(FL)
             .i32const(0).localSet(PK);
         this.close();
+        this.pending = null;
+    }
+
+    /** The pending record dropped unfolded: whatever was pending, the next write replaces. */
+    drop(){
+        if (this.pending !== null)
+        {
+            this.b.i32const(0).localSet(PK);
+            this.pending = null;
+        }
+    }
+
+    /**
+     * FL made whole for an instruction that writes every status flag but CF:
+     * only CF is folded, straight from a pending record whose kind gives it,
+     * and the record dropped; any other record folded whole.
+     */
+    keepCarry(){
+        const { b } = this;
+        if (!this.pending)
+        {
+            this.settle();
+            return;
+        }
+        b.localGet(FL).i32const(~CF).op(Op.i32and);
+        if (!this.direct(this.pending, 1))
+        {
+            b.drop();
+            this.settle();
+            return;
+        }
+        b.op(Op.i32or).localSet(FL);
+        this.drop();
     }
 
     /**
@@ -421,11 +471,21 @@ class BlockEmitter {
         {
             b.i32const(0).localSet(PC);
         }
+        this.pending = { kind, size };
     }
 
-    /** Whether condition `cc` holds under FL, an i32 0 or 1. @param {number} cc */
+    /** Whether condition `cc` holds, an i32 0 or 1. @param {number} cc */
     condition(cc){
         const { b } = this;
+        if (this.pending && this.direct(this.pending, cc >> 1))
+        {
+            if ((cc & 1) !== 0)
+            {
+                b.op(Op.i32eqz);
+            }
+            return;
+        }
+        this.settle();
         /** @param {number} bit */
         const flag = bit=>b.localGet(FL).i32const(Math.log2(bit)).op(Op.i32shru)
             .i32const(1).op(Op.i32and);
@@ -444,6 +504,88 @@ class BlockEmitter {
         {
             b.op(Op.i32eqz);
         }
+    }
+
+    /**
+     * A condition's even half (`B`, `E`, `BE`, `L`, ...) straight from the
+     * pending record's operands, as a compare-and-branch does, where the
+     * record's kind decides it: answers false, emitting nothing, where it
+     * does not.
+     *
+     * @param {{ kind: number, size: number }} pending @param {number} half  cc >> 1
+     */
+    direct({ kind, size }, half){
+        const { b } = this;
+        const bits = BigInt(size * 8);
+        const zero = ()=>b.localGet(PR).op(Op.i64eqz);
+        const sign = ()=>b.localGet(PR).i64const(bits - 1n).op(Op.i64shru).i64const(1n)
+            .op(Op.i64and).op(Op.i32wrap);
+        /** The local sign-extended from the operand size. @param {number} local */
+        const signed = local=>{
+            b.localGet(local);
+            if (size < 8)
+            {
+                b.i64const(64n - bits).op(Op.i64shl).i64const(64n - bits).op(Op.i64shrs);
+            }
+        };
+        if (kind === Kind.SUB)
+        {
+            switch (half)
+            {
+                case 1: b.localGet(PA).localGet(PB).op(Op.i64ltu); return true;
+                case 2: zero(); return true;
+                case 3: b.localGet(PA).localGet(PB).op(Op.i64leu); return true;
+                case 4: sign(); return true;
+                case 6: signed(PA); signed(PB); b.op(Op.i64lts); return true;
+                case 7: signed(PA); signed(PB); b.op(Op.i64les); return true;
+                default: return false;
+            }
+        }
+        if (kind === Kind.LOGIC)
+        {
+            switch (half)
+            {
+                case 0: case 1: b.i32const(0); return true;
+                case 2: case 3: zero(); return true;
+                case 4: case 6: sign(); return true;
+                case 7: zero(); sign(); b.op(Op.i32or); return true;
+                default: return false;
+            }
+        }
+        if (kind === Kind.SHL || kind === Kind.SHR || kind === Kind.SAR)
+        {
+            switch (half)
+            {
+                case 1:
+                    if (kind !== Kind.SHR)
+                    {
+                        return false;
+                    }
+                    b.localGet(PA).localGet(PB).i64const(1n).op(Op.i64sub).op(Op.i64shru)
+                        .op(Op.i32wrap).i32const(1).op(Op.i32and);
+                    return true;
+                case 2: zero(); return true;
+                case 4: sign(); return true;
+                default: return false;
+            }
+        }
+        if (kind === Kind.ADD || kind === Kind.INC || kind === Kind.DEC)
+        {
+            switch (half)
+            {
+                case 1:
+                    if (kind !== Kind.ADD)
+                    {
+                        return false;
+                    }
+                    b.localGet(PR).localGet(PA).op(Op.i64ltu);
+                    return true;
+                case 2: zero(); return true;
+                case 4: sign(); return true;
+                default: return false;
+            }
+        }
+        return false;
     }
 
     // --- the stack ---
@@ -561,7 +703,7 @@ class BlockEmitter {
                 if (op !== 'neg')
                 {
                     // CF stays as it was: the record before is folded first.
-                    this.settle();
+                    this.keepCarry();
                 }
                 if (op === 'neg')
                 {
@@ -612,6 +754,28 @@ class BlockEmitter {
             case 'shl': case 'sal': case 'shr': case 'sar': case 'rol': case 'ror':
             {
                 placeMemory(dst.kind === 'mem');
+                const count = src.kind === 'imm'
+                    ? /** @type {number} */ (src.value) & (size === 8 ? 63 : 31) : 0;
+                if (count !== 0 && (op === 'shl' || op === 'sal' || op === 'shr' || op === 'sar'))
+                {
+                    // By a count known not to be zero: the result here, and a
+                    // record for the six flags it writes.
+                    this.read(dst);
+                    b.localTee(T0);
+                    if (op === 'sar' && size < 8)
+                    {
+                        const spare = BigInt(64 - size * 8);
+                        b.i64const(spare).op(Op.i64shl).i64const(spare).op(Op.i64shrs);
+                    }
+                    b.i64const(BigInt(count))
+                        .op(op === 'shr' ? Op.i64shru : op === 'sar' ? Op.i64shrs : Op.i64shl)
+                        .i64const(maskOf(size)).op(Op.i64and).localTee(T2);
+                    this.write(dst);
+                    b.i64const(BigInt(count)).localSet(T1);
+                    this.record(op === 'shr' ? Kind.SHR : op === 'sar' ? Kind.SAR : Kind.SHL, size,
+                        ARITH);
+                    return true;
+                }
                 this.settle();
                 b.i32const(Shift[op]).i32const(size);
                 this.read(dst);
@@ -719,7 +883,6 @@ class BlockEmitter {
         if (op.startsWith('set'))
         {
             placeMemory(true);
-            this.settle();
             this.condition(cc);
             b.op(Op.i64extendu);
             this.write(dst);
@@ -728,7 +891,6 @@ class BlockEmitter {
         if (op.startsWith('cmov'))
         {
             placeMemory(false);
-            this.settle();
             // The source is read and a dword destination zero-extended whether or not it moves.
             this.read(src);
             this.read(dst);
@@ -738,25 +900,35 @@ class BlockEmitter {
             return true;
         }
         // jcc: the region emitter branches on the condition.
-        this.settle();
         return { to: /** @type {number} */ (dst.target), cc, next };
     }
 
     /**
-     * Goes to `to`: on to its block when the region holds it and the budget
-     * is not spent, else out with RIP there.
+     * Goes to `to` from the end of block `here`: on to its block when the
+     * region holds it -- forward by a branch to the block's label, or by
+     * falling into it when it is the next one; backward through the dispatch
+     * loop while the budget lasts -- else out with RIP there.
      *
      * @param {number} to @param {Map<number, number>} indexOf  block starts to indices
-     * @param {number} topDepth  the dispatch loop's depth from the block, ifs aside
+     * @param {number} here @param {number} count  the region's blocks
      */
-    go(to, indexOf, topDepth){
+    go(to, indexOf, here, count){
         const { b } = this;
         const index = indexOf.get(to);
+        if (index !== undefined && index > here)
+        {
+            if (index !== here + 1 || this.nest !== 0)
+            {
+                b.br(index - here - 1 + this.nest);
+            }
+            return;
+        }
         if (index !== undefined)
         {
+            // A jump back is what can loop: the budget bounds it.
             b.localGet(K).globalGet(BUDGET).op(Op.i32ltu);
             this.open();
-            b.i32const(index).localSet(IDX).br(topDepth + this.nest);
+            b.i32const(index).localSet(IDX).br(count - 1 - here + this.nest);
             this.close();
         }
         b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
@@ -839,8 +1011,9 @@ function flagsHelper(){
         .localGet(RR).i64const(0xffn).op(Op.i64and).op(Op.i64popcnt).op(Op.i32wrap)
         .i32const(1).op(Op.i32and).op(Op.i32eqz).i32const(2).op(Op.i32shl).op(Op.i32or)
         .localSet(OUT);
-    // AF for every kind but LOGIC
-    b.localGet(KIND).i32const(Kind.LOGIC).op(Op.i32ne);
+    // AF for every kind but LOGIC and the shifts, which clear it.
+    b.localGet(KIND).i32const(Kind.LOGIC).op(Op.i32ne).localGet(KIND).i32const(Kind.SHL)
+        .op(Op.i32ltu).op(Op.i32and);
     b.if();
     b.localGet(OUT).localGet(AA).localGet(BB).op(Op.i64xor).localGet(RR).op(Op.i64xor)
         .i64const(0x10n).op(Op.i64and).op(Op.i32wrap).op(Op.i32or).localSet(OUT);
@@ -861,7 +1034,8 @@ function flagsHelper(){
         .op(Op.i64and).localGet(SIGN).op(Op.i64and).op(Op.i64eqz).op(Op.i32eqz)
         .i32const(11).op(Op.i32shl).localGet(OUT).op(Op.i32or).localSet(OUT);
     b.else();
-    b.localGet(KIND).i32const(Kind.LOGIC).op(Op.i32ne);
+    b.localGet(KIND).i32const(Kind.LOGIC).op(Op.i32ne).localGet(KIND).i32const(Kind.SHL)
+        .op(Op.i32ltu).op(Op.i32and);
     b.if();
     // CF = a < b || (cin && a == b); OF = (a ^ b) & (a ^ r) & sign
     b.localGet(AA).localGet(BB).op(Op.i64ltu)
@@ -872,12 +1046,45 @@ function flagsHelper(){
         .i32const(11).op(Op.i32shl).localGet(OUT).op(Op.i32or).localSet(OUT);
     b.end();
     b.end();
+    // A shift by `b` (not zero, masked), `shift64` in ir64.js: CF the last bit
+    // out, OF by kind.
+    const CARRY = 12;
+    b.localGet(KIND).i32const(Kind.SHL).op(Op.i32geu);
+    b.if();
+    b.localGet(KIND).i32const(Kind.SHL).op(Op.i32eq);
+    b.if(ValType.i32);
+    // count <= bits ? a >> (bits - count) & 1 : 0
+    b.localGet(AA).localGet(SIZE).i32const(3).op(Op.i32shl).op(Op.i64extendu).localGet(BB)
+        .op(Op.i64sub).op(Op.i64shru).op(Op.i32wrap).i32const(1).op(Op.i32and).i32const(0)
+        .localGet(BB).localGet(SIZE).i32const(3).op(Op.i32shl).op(Op.i64extendu).op(Op.i64leu)
+        .op(Op.select);
+    b.else();
+    b.localGet(KIND).i32const(Kind.SHR).op(Op.i32eq);
+    b.if(ValType.i64);
+    b.localGet(AA);
+    b.else();
+    // a sign-extended from the width
+    b.localGet(AA).i64const(64n).localGet(SIZE).i32const(3).op(Op.i32shl).op(Op.i64extendu)
+        .op(Op.i64sub).localTee(OV).op(Op.i64shl).localGet(OV).op(Op.i64shrs);
+    b.end();
+    b.localGet(BB).i64const(1n).op(Op.i64sub).op(Op.i64shrs).op(Op.i32wrap).i32const(1)
+        .op(Op.i32and);
+    b.end();
+    b.localTee(CARRY).localGet(OUT).op(Op.i32or).localSet(OUT);
+    // OF: shl the result's top bit against CF, shr the operand's top bit, sar none.
+    b.localGet(RR).localGet(SIGN).op(Op.i64and).op(Op.i64eqz).op(Op.i32eqz).localGet(CARRY)
+        .op(Op.i32xor)
+        .localGet(AA).localGet(SIGN).op(Op.i64and).op(Op.i64eqz).op(Op.i32eqz).i32const(0)
+        .localGet(KIND).i32const(Kind.SHR).op(Op.i32eq).op(Op.select)
+        .localGet(KIND).i32const(Kind.SHL).op(Op.i32eq).op(Op.select)
+        .i32const(11).op(Op.i32shl).localGet(OUT).op(Op.i32or).localSet(OUT);
+    b.end();
     b.localGet(FLW).localGet(WR).i32const(-1).op(Op.i32xor).op(Op.i32and)
         .localGet(OUT).localGet(WR).op(Op.i32and).op(Op.i32or);
     b.end();
     return { params: [ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64,
         ValType.i32, ValType.i32, ValType.i32], results: [ValType.i32],
-    locals: [ValType.i64, ValType.i64, ValType.i32, ValType.i64], body: b };
+    locals: [ValType.i64, ValType.i64, ValType.i32, ValType.i64, ValType.i32], body: b };
 }
 
 /**
@@ -1049,8 +1256,10 @@ export function emitRegions(layout, memoryLimits, regions){
  *       end
  *     end
  *
- * each block ending in a branch to the loop with IDX set or to the exit with
- * RIP set; then the epilogue storing what it wrote.
+ * the blocks in address order, so a jump forward is a branch out to the
+ * target's label (or no branch, into the next block) and only a jump back
+ * goes round the loop, with IDX set, while the budget lasts; anything else
+ * leaves for the exit with RIP set. Then the epilogue storing what it wrote.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ flags: number, shift: number }} helpers @param {LongRegion} region
@@ -1058,10 +1267,17 @@ export function emitRegions(layout, memoryLimits, regions){
 function emitRegion(layout, helpers, region){
     const e = new BlockEmitter(layout, helpers);
     const { b } = e;
-    const { blocks } = region;
+    // In address order: a jump forward, most of them, is a branch out to the
+    // target's label, or no branch at all.
+    const blocks = [...region.blocks].sort((x, y)=>x.entry - y.entry);
     const count = blocks.length;
     /** @type {Map<number, number>} */
     const indexOf = new Map(blocks.map((block, index)=>[block.entry, index]));
+    const first = /** @type {number} */ (indexOf.get(region.blocks[0].entry));
+    if (first !== 0)
+    {
+        b.i32const(first).localSet(IDX);
+    }
     b.block();
     b.loop();
     for (let i = 0; i < count; i++)
@@ -1074,7 +1290,7 @@ function emitRegion(layout, helpers, region){
         // Inside block `index`'s code: the labels of the blocks after it, the
         // loop, the exit.
         e.outer = count - index;
-        const topDepth = count - 1 - index;
+        e.pending = undefined;
         /** @type {Ending} */
         let ending = true;
         let retired = 0;
@@ -1091,7 +1307,7 @@ function emitRegion(layout, helpers, region){
         if (ending === true)
         {
             const last = block.instructions[block.instructions.length - 1];
-            e.go(last.eip + last.length, indexOf, topDepth);
+            e.go(last.eip + last.length, indexOf, index, count);
         }
         else if (ending.to === null)
         {
@@ -1099,16 +1315,26 @@ function emitRegion(layout, helpers, region){
         }
         else if (ending.cc === undefined)
         {
-            e.go(ending.to, indexOf, topDepth);
+            e.go(ending.to, indexOf, index, count);
+        }
+        else if (indexOf.get(/** @type {number} */ (ending.next)) === index + 1)
+        {
+            // Not taken falls into the next block.
+            e.condition(ending.cc);
+            e.open();
+            e.go(ending.to, indexOf, index, count);
+            e.close();
         }
         else
         {
             e.condition(ending.cc);
             e.open();
-            e.go(ending.to, indexOf, topDepth);
+            e.go(ending.to, indexOf, index, count);
             b.else();
-            e.go(/** @type {number} */ (ending.next), indexOf, topDepth);
+            e.go(/** @type {number} */ (ending.next), indexOf, index, count);
             e.close();
+            // Both ways branched: nothing falls into the next block.
+            b.unreachable();
         }
     });
     b.end();

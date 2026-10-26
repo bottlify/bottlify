@@ -131,6 +131,15 @@ function program(instructions, seed, count){
         back >>> 16 & 0xff, back >>> 24 & 0xff]);
     const one = CORPUS.cases[next() % CORPUS.cases.length];
     const regs = [...one.regs];
+    if ((seed & 1) !== 0)
+    {
+        // Small values in the registers no address uses: equal operands, zero
+        // results and borrows of one, which random quadwords almost never give.
+        for (const index of [0, 1, 2, 8, 9, 10, 11, 14])
+        {
+            regs[index] = (next() & 3).toString(16);
+        }
+    }
     regs[15] = '3';
     const code = Buffer.concat([body, loop]).toString('hex');
     return { ...one, text: `program ${seed}`, code, regs };
@@ -267,7 +276,7 @@ test('translated long-mode blocks do what the interpreter does on every corpus c
 test('seeded long programs run translated as they run interpreted', ()=>{
     const instructions = pool();
     assert.ok(instructions.length > 1000, `${instructions.length} instructions in the pool`);
-    const cases = Array.from({ length: 300 },
+    const cases = Array.from({ length: 600 },
         (_, i)=>program(instructions, 0x5eed + i, 20 + i % 60));
     const { failures, stats, exits } = compare(cases);
     assert.ok(exits > cases.length * 0.9, `${exits} programs ran to their exit`);
