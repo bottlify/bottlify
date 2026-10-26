@@ -3485,7 +3485,7 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
             return 0;
         },
     });
-    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
 
@@ -3788,6 +3788,37 @@ test('a CBT hook is told of a window before its procedure is, and can refuse it'
     assert.equal(dispatched[2].thread, THREAD);
 });
 
+test('SetWindowsHookEx refuses what Windows refuses whatever the type, each with its reason', ()=>{
+    // user32:msg's test_set_hook. Every type is accepted for what it is,
+    // journal hooks too (decided in SetWindowsHookExA's own comment).
+    const { fns, errors } = setup({ threadExists: ()=>true });
+    const set = (/** @type {number[]} */ ...args)=>fns.SetWindowsHookExA.handler(args);
+    const WH_JOURNALRECORD = 0;
+    const WH_SYSMSGFILTER = 6;
+    const WH_KEYBOARD_LL = 13;
+    const WH_MOUSE_LL = 14;
+    assert.equal(set(WH_CBT, HOOK_PROC, 0, 0), 0, 'a hook for every thread names its module');
+    assert.equal(set(WH_CBT, 0, HINSTANCE, 1), 0);
+    assert.equal(set(15, HOOK_PROC, HINSTANCE, 0), 0);
+    assert.equal(set(-2, HOOK_PROC, HINSTANCE, 0), 0);
+    for (const type of [WH_JOURNALRECORD, WH_SYSMSGFILTER, WH_KEYBOARD_LL, WH_MOUSE_LL])
+    {
+        assert.equal(set(type, HOOK_PROC, HINSTANCE, 1), 0, `type ${type} hears every thread`);
+    }
+    assert.equal(fns.UnhookWindowsHookEx.handler([0xdeadbeef]), 0);
+    assert.deepEqual(errors, [1428, 1427, 1426, 1426, 1429, 1429, 1429, 1429, 1404]);
+
+    errors.length = 0;
+    for (const hook of [set(WH_CBT, HOOK_PROC, HINSTANCE, 1), set(WH_CBT, HOOK_PROC, 0, 1),
+        set(WH_MOUSE_LL, HOOK_PROC, 0, 0), set(WH_KEYBOARD_LL, HOOK_PROC, HINSTANCE, 0),
+        set(-1, HOOK_PROC, HINSTANCE, 0)])
+    {
+        assert.notEqual(hook, 0);
+        assert.equal(fns.UnhookWindowsHookEx.handler([hook]), 1);
+    }
+    assert.deepEqual(errors, [], 'a thread\'s own hook needs no module, nor a low-level one');
+});
+
 test('SetWindowsHookA hooks the calling thread; UnhookWindowsHook takes it off by its procedure',
     ()=>{
         // The form from before SetWindowsHookEx: comctl32's toolbar test
@@ -4036,7 +4067,7 @@ test('a window its CBT hook hears of is not yet among its siblings', ()=>{
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     const first = createWindow(fns, memory);
-    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
     const second = createWindow(fns, memory);
     const child = createWindow(fns, memory, { style: WS_CHILD, parent: first });
     createWindow(fns, memory, { style: WS_CHILD, parent: first });
@@ -4055,7 +4086,7 @@ test('a CBT hook hears a window activated, focused, commanded and destroyed, and
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = createWindow(fns, memory);
-    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
 
     fns.SetFocus.handler([hwnd]);
     assert.deepEqual(called.map(call=>call.args[0]), [HCBT_SETFOCUS, HCBT_ACTIVATE]);
@@ -5154,7 +5185,7 @@ test('a window CreateWindowEx makes visible is hidden while it is made -- to its
         },
     });
     calls = context.fns;
-    calls.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    calls.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
     putClass(context.memory);
     calls.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = await createWindow(calls, context.memory, { style: WS_VISIBLE | 0x80000000 });
@@ -5457,7 +5488,7 @@ test('the CBT hook sees the styles asked for, the window edge following the fram
         },
     });
     table = fns;
-    const hook = fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    const hook = fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     memory.putString(TITLE, 'Main');

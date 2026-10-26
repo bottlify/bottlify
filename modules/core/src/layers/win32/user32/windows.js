@@ -215,6 +215,21 @@ const WH_CBT = 5;
 const WH_KEYBOARD = 2;
 const WH_MOUSE = 7;
 const WH_GETMESSAGE = 3;
+/** The types a hook may be, and those that hear every thread or none. */
+const WH_MIN = -1;
+const WH_MAX = 14;
+const WH_JOURNALRECORD = 0;
+const WH_JOURNALPLAYBACK = 1;
+const WH_SYSMSGFILTER = 6;
+const WH_KEYBOARD_LL = 13;
+const WH_MOUSE_LL = 14;
+const GLOBAL_ONLY_HOOKS = [WH_JOURNALRECORD, WH_JOURNALPLAYBACK, WH_SYSMSGFILTER, WH_KEYBOARD_LL,
+    WH_MOUSE_LL];
+const ERROR_INVALID_HOOK_HANDLE = 1404;
+const ERROR_INVALID_HOOK_FILTER = 1426;
+const ERROR_INVALID_FILTER_PROC = 1427;
+const ERROR_HOOK_NEEDS_HMOD = 1428;
+const ERROR_GLOBAL_ONLY_HOOK = 1429;
 /** MOUSEHOOKSTRUCT: pt.x, pt.y, hwnd, wHitTestCode, dwExtraInfo. */
 const MOUSEHOOKSTRUCT_SIZE = 20;
 /** A keyboard hook's codes: the message is being taken, or only looked at. */
@@ -7559,13 +7574,38 @@ export function createWindowFunctions(host){
          * start-up and treats a refusal as fatal; a CBT, a keyboard, a mouse
          * and a GetMessage hook are called, and the others say so once
          * rather than failing silently.
+         *
+         * What Windows refuses whatever the type is refused here too: a type
+         * that is none (ERROR_INVALID_HOOK_FILTER), no procedure
+         * (ERROR_INVALID_FILTER_PROC), a hook for every thread whose procedure
+         * is in no module (ERROR_HOOK_NEEDS_HMOD; a low-level hook is called
+         * in the installer's own process, and needs none), and a thread named
+         * for a type that hears every thread or none (ERROR_GLOBAL_ONLY_HOOK).
          */
         SetWindowsHookExA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([type, proc, , thread])=>{
+            handler: ([type, proc, module, thread])=>{
+                const kind = type | 0;
+                if (kind < WH_MIN || kind > WH_MAX)
+                {
+                    host.setLastError?.(ERROR_INVALID_HOOK_FILTER);
+                    return 0;
+                }
                 if ((proc >>> 0) === 0)
                 {
+                    host.setLastError?.(ERROR_INVALID_FILTER_PROC);
+                    return 0;
+                }
+                if ((thread >>> 0) === 0 && (module >>> 0) === 0 && kind !== WH_KEYBOARD_LL
+                    && kind !== WH_MOUSE_LL)
+                {
+                    host.setLastError?.(ERROR_HOOK_NEEDS_HMOD);
+                    return 0;
+                }
+                if ((thread >>> 0) !== 0 && GLOBAL_ONLY_HOOKS.includes(kind))
+                {
+                    host.setLastError?.(ERROR_GLOBAL_ONLY_HOOK);
                     return 0;
                 }
                 const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0 };
@@ -7617,7 +7657,7 @@ export function createWindowFunctions(host){
             },
         },
 
-        /** BOOL UnhookWindowsHookEx(HHOOK hhk) */
+        /** BOOL UnhookWindowsHookEx(HHOOK hhk): ERROR_INVALID_HOOK_HANDLE for one not installed. */
         UnhookWindowsHookEx: {
             argBytes: 4,
             /** @param {number[]} args */
@@ -7625,6 +7665,7 @@ export function createWindowFunctions(host){
                 const at = hooks.findIndex(hook=>hook.handle === (handle >>> 0));
                 if (at < 0)
                 {
+                    host.setLastError?.(ERROR_INVALID_HOOK_HANDLE);
                     return 0;
                 }
                 hooks.splice(at, 1);

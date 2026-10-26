@@ -324,7 +324,7 @@ test('a CBT hook hears of the dialog window and may subclass it before its first
     });
     table = fns;
     putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
-    fns.SetWindowsHookExA.handler([5, HOOK, 0, 0]);
+    fns.SetWindowsHookExA.handler([5, HOOK, 0x400000, 0]);
 
     const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     assert.notEqual(dialog, 0);
