@@ -34,8 +34,13 @@ import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, translate
 
 /** Instructions a block holds at most. */
 const BLOCK_LIMIT = 64;
-/** Blocks a region holds at most. */
-const REGION_LIMIT = 32;
+/**
+ * Blocks and bytes of code a region holds at most: the 32-bit translator's
+ * own (`formRegion`'s `maxBlocks` and `maxBytes`), so that a loop of many
+ * blocks is one region rather than several going round through the transfer.
+ */
+const REGION_LIMIT = 128;
+const REGION_BYTES = 8192;
 
 /**
  * A start: the region translated from it, or none (`run` null) where its
@@ -230,10 +235,13 @@ export function createLongRunner(settings){
             /** @type {Set<number>} */
             const seen = new Set([entry]);
             const queue = [{ entry, instructions: first }];
-            while (queue.length > 0 && blocks.length < REGION_LIMIT)
+            let size = 0;
+            while (queue.length > 0 && blocks.length < REGION_LIMIT && size < REGION_BYTES)
             {
                 const block = /** @type {import('./emit.js').LongBlock} */ (queue.shift());
                 blocks.push(block);
+                const last = block.instructions[block.instructions.length - 1];
+                size += last.eip + last.length - block.entry;
                 for (const to of successors(block.instructions))
                 {
                     if (!seen.has(to))
