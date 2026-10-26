@@ -20,15 +20,17 @@
  * on its own stack and reported with its signal and the instruction's address.
  *
  * Input on stdin, little-endian, per case: u32 code length, the code, 17 u64
- * (rax..r15, rflags), u32 seed. Output on stdout per case: 17 u64 (the same,
- * after), u32 signal (0 for none), u64 faulting address, u32 changed bytes,
- * then (u32 offset, u8 value) for each byte of the buffer that changed.
+ * (rax..r15, rflags), u32 seed; xmm0-15 start from the seed too. Output on
+ * stdout per case: 17 u64 (the same, after), xmm0-15 (256 bytes), u32 signal
+ * (0 for none), u64 faulting address, u32 changed bytes, then (u32 offset, u8
+ * value) for each byte of the buffer that changed.
  *
  * Linux on x86-64 only; built by tools/x64-corpus.mjs with clang.
  */
 
 #define _GNU_SOURCE
 #include <setjmp.h>
+#include <stddef.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -41,8 +43,10 @@
 #define CODE_SIZE 0x10000UL
 #define DATA_AT 0x10000000UL
 #define DATA_SIZE 0x2000UL
+/* The xmm registers start from the case's seed with these bits flipped. */
+#define XMM_SEED 0x9e3779b9u
 
-typedef struct { uint64_t r[16]; uint64_t flags; } Regs;
+typedef struct { uint64_t r[16]; uint64_t flags; uint8_t x[16][16]; } Regs;
 
 Regs g_in, g_out;
 uint64_t g_host_rsp;
@@ -67,6 +71,12 @@ __asm__(
     "    mov rdi, [rax + 56]\n mov r8, [rax + 64]\n mov r9, [rax + 72]\n"
     "    mov r10, [rax + 80]\n mov r11, [rax + 88]\n mov r12, [rax + 96]\n"
     "    mov r13, [rax + 104]\n mov r14, [rax + 112]\n mov r15, [rax + 120]\n"
+    "    movdqu xmm0, [rax + 136]\n movdqu xmm1, [rax + 152]\n movdqu xmm2, [rax + 168]\n"
+    "    movdqu xmm3, [rax + 184]\n movdqu xmm4, [rax + 200]\n movdqu xmm5, [rax + 216]\n"
+    "    movdqu xmm6, [rax + 232]\n movdqu xmm7, [rax + 248]\n movdqu xmm8, [rax + 264]\n"
+    "    movdqu xmm9, [rax + 280]\n movdqu xmm10, [rax + 296]\n movdqu xmm11, [rax + 312]\n"
+    "    movdqu xmm12, [rax + 328]\n movdqu xmm13, [rax + 344]\n movdqu xmm14, [rax + 360]\n"
+    "    movdqu xmm15, [rax + 376]\n"
     "    mov rax, [rax]\n"
     "    jmp qword ptr [rip + g_code]\n"
     ".globl exit_case\n"
@@ -78,6 +88,12 @@ __asm__(
     "    mov [rax + 56], rdi\n mov [rax + 64], r8\n mov [rax + 72], r9\n"
     "    mov [rax + 80], r10\n mov [rax + 88], r11\n mov [rax + 96], r12\n"
     "    mov [rax + 104], r13\n mov [rax + 112], r14\n mov [rax + 120], r15\n"
+    "    movdqu [rax + 136], xmm0\n movdqu [rax + 152], xmm1\n movdqu [rax + 168], xmm2\n"
+    "    movdqu [rax + 184], xmm3\n movdqu [rax + 200], xmm4\n movdqu [rax + 216], xmm5\n"
+    "    movdqu [rax + 232], xmm6\n movdqu [rax + 248], xmm7\n movdqu [rax + 264], xmm8\n"
+    "    movdqu [rax + 280], xmm9\n movdqu [rax + 296], xmm10\n movdqu [rax + 312], xmm11\n"
+    "    movdqu [rax + 328], xmm12\n movdqu [rax + 344], xmm13\n movdqu [rax + 360], xmm14\n"
+    "    movdqu [rax + 376], xmm15\n"
     "    lea rsp, [rip + g_exit_stack + 128]\n"
     "    pushfq\n"
     "    pop qword ptr [rax + 128]\n"
@@ -109,14 +125,15 @@ static void on_fault(int signal, siginfo_t *info, void *context)
         g_out.r[i] = (uint64_t)uc->uc_mcontext.gregs[CONTEXT_ORDER[i]];
     }
     g_out.flags = (uint64_t)uc->uc_mcontext.gregs[REG_EFL];
+    memcpy(g_out.x, uc->uc_mcontext.fpregs->_xmm, sizeof g_out.x);
     siglongjmp(g_jump, 1);
 }
 
-/* The data's bytes from a seed: xorshift32, the low byte each step. */
-static void fill(uint8_t *data, uint32_t seed)
+/* Bytes from a seed: xorshift32, the low byte each step. */
+static void fill(uint8_t *data, size_t size, uint32_t seed)
 {
     uint32_t x = seed ? seed : 1;
-    for (size_t i = 0; i < DATA_SIZE; i++)
+    for (size_t i = 0; i < size; i++)
     {
         x ^= x << 13;
         x ^= x >> 17;
@@ -163,10 +180,11 @@ int main(void)
             return 2;
         }
         uint32_t seed;
-        if (!readAll(code, length) || !readAll(&g_in, sizeof g_in) || !readAll(&seed, 4))
+        if (!readAll(code, length) || !readAll(&g_in, offsetof(Regs, x)) || !readAll(&seed, 4))
         {
             return 3;
         }
+        fill(&g_in.x[0][0], sizeof g_in.x, seed ^ XMM_SEED);
         /* jmp qword ptr [rip + d] to the slot at the area's end; zeros up to it. */
         uint64_t target = (uint64_t)exit_case;
         int32_t disp = (int32_t)(CODE_SIZE - 8 - (length + 6));
@@ -176,7 +194,7 @@ int main(void)
         memcpy(code + length + 2, &disp, 4);
         memcpy(code + CODE_SIZE - 8, &target, 8);
         __builtin___clear_cache((char *)code, (char *)code + CODE_SIZE);
-        fill(data, seed);
+        fill(data, DATA_SIZE, seed);
         memcpy(before, data, DATA_SIZE);
         g_signal = 0;
         g_fault_rip = 0;

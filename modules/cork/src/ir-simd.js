@@ -852,14 +852,12 @@ export function evaluateSimd(instruction, state, address){
             {
                 const x = double ? f64At(left, i * size) : f32At(left, i * size);
                 const y = double ? f64At(right, i * size) : f32At(right, i * size);
-                const value = minimum ? (x < y ? x : y) : (x > y ? x : y);
-                if (double)
+                // The destination's lane stays where it wins; otherwise the
+                // source's bytes as they are, so a signalling NaN the processor
+                // hands through is not quietened by a trip through a number.
+                if (!(minimum ? x < y : x > y))
                 {
-                    putF64(out, i * size, value);
-                }
-                else
-                {
-                    putF32(out, i * size, value);
+                    out.set(right.subarray(i * size, i * size + size), i * size);
                 }
             }
             writeVector(state, dst, 16, address, out);

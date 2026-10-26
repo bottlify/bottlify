@@ -2019,10 +2019,9 @@ static u32 sse(const u8 *p)
             }
             else if (minmax)
             {
-                /* The operand chosen, as the model puts it back through a single. */
+                /* The operand chosen, bit for bit: a signalling NaN goes through as it is. */
                 double x = widen(a.w[i]), y = widen(b.w[i]);
-                u32 pick = (op2 == 0x5d ? x < y : x > y) ? a.w[i] : b.w[i];
-                a.w[i] = isNaN32(pick) ? pick | 0x400000u : pick;
+                a.w[i] = (op2 == 0x5d ? x < y : x > y) ? a.w[i] : b.w[i];
             }
             else a.w[i] = lane32(floatOp(op2, widen(a.w[i]), widen(b.w[i])), a.w[i], b.w[i], 2);
         }

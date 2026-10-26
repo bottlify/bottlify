@@ -21,18 +21,26 @@
  * leaves the state as it was before the instruction: every memory access an
  * instruction makes is done before any register it changes is written.
  *
- * The integer set in this step; SSE and x87 follow.
+ * SSE goes to the 32-bit model's own (`ir-simd.js`) through a view of this
+ * state, where the vector registers and memory are the same and a dword
+ * general register is written zero-extended; the forms with a 64-bit general
+ * operand, which 32-bit code has no encoding for, are modelled here. x87 and
+ * MMX are not modelled yet.
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF } from './decode/table.js';
 import { Fault, Unsupported, condition } from './ir.js';
 import { cpuidLeaf, topologyOf } from './cpuid.js';
+import { evaluateSimd, isSimdOp } from './ir-simd.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
 /** IF, set for a user-mode program and not its to change. */
 const IF = 1 << 9;
 /** What `popf` can change in user mode: the status flags, DF, NT, AC and ID. */
 const WRITABLE = ARITH | DF | (1 << 14) | (1 << 18) | (1 << 21);
+
+/** The SSE instructions whose 16-byte memory operand need not be aligned. */
+const UNALIGNED = new Set(['movups', 'movupd', 'movdqu', 'lddqu', 'maskmovdqu']);
 
 /** @param {number} size */
 const maskOf = size=>(1n << BigInt(size * 8)) - 1n;
@@ -53,6 +61,8 @@ const signOf = size=>1n << BigInt(size * 8 - 1);
  * @property {number} rflags
  * @property {bigint} fsBase
  * @property {bigint} gsBase
+ * @property {Uint32Array} xmm     the sixteen XMM registers, four words each
+ * @property {number} mxcsr
  * @property {Memory64} memory
  * @property {boolean} halted
  * @property {number} retired
@@ -72,7 +82,8 @@ const signOf = size=>1n << BigInt(size * 8 - 1);
 export function createState64(memory, { rip = 0n, rsp = 0n, fsBase = 0n, gsBase = 0n } = {}){
     const r = new BigUint64Array(16);
     r[4] = rsp;
-    return { r, rip, rflags: IF | 2, fsBase, gsBase, memory, halted: false, retired: 0 };
+    return { r, rip, rflags: IF | 2, fsBase, gsBase, xmm: new Uint32Array(64), mxcsr: 0x1f80,
+        memory, halted: false, retired: 0 };
 }
 
 /** @param {bigint} value */
@@ -251,6 +262,12 @@ export function evaluate64(instruction, state){
     const cf = (state.rflags & CF) !== 0 ? 1 : 0;
 
     state.retired++;
+    if (isSimdOp(instruction))
+    {
+        simd(instruction, state);
+        state.rip = next;
+        return;
+    }
     switch (op)
     {
         case 'nop': case 'pause': case 'lfence': case 'mfence': case 'sfence': case 'prefetch':
@@ -928,4 +945,188 @@ function strings(instruction, state, read, write, setFlags){
             return;
         }
     }
+}
+
+/**
+ * An SSE instruction. One with a 64-bit general or memory operand where 32-bit
+ * code has a dword (REX.W `movd`, the conversions to and from a quadword
+ * integer) is done here; every other runs on the 32-bit model over a view of
+ * this state.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @param {State64} state
+ */
+function simd(instruction, state){
+    const { op, operands } = instruction;
+    if (operands.some(operand=>operand.kind === 'mm'))
+    {
+        throw new Unsupported(`${op} on an MMX register`, instruction.eip);
+    }
+    const [dst, src] = operands;
+    // A 16-byte memory operand of a legacy SSE instruction must be aligned,
+    // but for the unaligned moves.
+    const wide = operands.find(operand=>operand.kind === 'mem' && operand.size === 16);
+    if (wide !== undefined && !UNALIGNED.has(op) && (operandAddress64(state, wide) & 15n) !== 0n)
+    {
+        throw new Fault(13, instruction.eip);
+    }
+    /** @param {import('./decode/decoder.js').Operand} operand */
+    const quadword = operand=>operand.kind !== 'xmm' && operand.size === 8;
+    /** @param {import('./decode/decoder.js').Operand} operand */
+    const readGeneral = operand=>(operand.kind === 'reg'
+        ? state.r[/** @type {number} */ (operand.reg)]
+        : state.memory.read(operandAddress64(state, operand), 8));
+    /** The register's low quadword. @param {number} reg */
+    const low = reg=>BigInt(state.xmm[reg * 4 + 1]) << 32n | BigInt(state.xmm[reg * 4]);
+    /** @param {number} reg @param {bigint} value */
+    const setLow = (reg, value)=>{
+        state.xmm[reg * 4] = Number(value & 0xffffffffn);
+        state.xmm[reg * 4 + 1] = Number(value >> 32n & 0xffffffffn);
+    };
+    if (op === 'movd' && (quadword(dst) || quadword(src)))
+    {
+        if (dst.kind === 'xmm')
+        {
+            const reg = /** @type {number} */ (dst.reg);
+            setLow(reg, readGeneral(src));
+            state.xmm[reg * 4 + 2] = 0;
+            state.xmm[reg * 4 + 3] = 0;
+        }
+        else if (dst.kind === 'reg')
+        {
+            state.r[/** @type {number} */ (dst.reg)] = low(/** @type {number} */ (src.reg));
+        }
+        else
+        {
+            state.memory.write(operandAddress64(state, dst), 8,
+                low(/** @type {number} */ (src.reg)));
+        }
+        return;
+    }
+    if ((op === 'cvtsi2sd' || op === 'cvtsi2ss') && quadword(src))
+    {
+        const value = BigInt.asIntN(64, readGeneral(src));
+        const reg = /** @type {number} */ (dst.reg);
+        if (op === 'cvtsi2sd')
+        {
+            setLow(reg, doubleBits(roundToBits(value, 53, state.mxcsr)));
+        }
+        else
+        {
+            const view = new DataView(new ArrayBuffer(4));
+            view.setFloat32(0, roundToBits(value, 24, state.mxcsr), true);
+            state.xmm[reg * 4] = view.getUint32(0, true);
+        }
+        return;
+    }
+    if (/^cvtt?s[sd]2si$/.test(op) && dst.size === 8)
+    {
+        const double = op.endsWith('sd2si');
+        const view = new DataView(new ArrayBuffer(8));
+        if (src.kind === 'xmm')
+        {
+            view.setUint32(0, state.xmm[/** @type {number} */ (src.reg) * 4], true);
+            view.setUint32(4, state.xmm[/** @type {number} */ (src.reg) * 4 + 1], true);
+        }
+        else
+        {
+            const at = operandAddress64(state, src);
+            view.setBigUint64(0, state.memory.read(at, double ? 8 : 4), true);
+        }
+        const value = double ? view.getFloat64(0, true) : view.getFloat32(0, true);
+        const mode = op.startsWith('cvtt') ? 3 : state.mxcsr >>> 13 & 3;
+        state.r[/** @type {number} */ (dst.reg)] = BigInt.asUintN(64, floatToQuadword(value, mode));
+        return;
+    }
+    // The 32-bit model over a view: the same vector registers, MXCSR, flags
+    // and memory, the general registers' low halves.
+    const view = /** @type {import('./ir.js').EvalState} */ (/** @type {unknown} */ ({
+        reg: Uint32Array.from(state.r, value=>Number(value & 0xffffffffn)),
+        xmm: state.xmm,
+        mxcsr: state.mxcsr,
+        eflags: state.rflags,
+        memory: {
+            read: (/** @type {number} */ at, /** @type {number} */ size)=>
+                Number(state.memory.read(BigInt(at), size)),
+            write: (/** @type {number} */ at, /** @type {number} */ size, /** @type {number} */ value)=>
+                state.memory.write(BigInt(at), size, BigInt(value >>> 0)),
+        },
+    }));
+    if (!evaluateSimd(instruction, view, operand=>Number(operandAddress64(state, operand))))
+    {
+        throw new Unsupported(op, instruction.eip);
+    }
+    state.mxcsr = view.mxcsr;
+    state.rflags = view.eflags;
+    if (dst?.kind === 'reg')
+    {
+        const reg = /** @type {number} */ (dst.reg);
+        setRegister(state, reg, Math.max(dst.size, 4), BigInt(view.reg[reg]));
+    }
+}
+
+/** A double's bits. @param {number} value */
+function doubleBits(value){
+    const view = new DataView(new ArrayBuffer(8));
+    view.setFloat64(0, value, true);
+    return view.getBigUint64(0, true);
+}
+
+/**
+ * A quadword integer rounded to `bits` significant bits by MXCSR's rounding
+ * mode, as a number: exact for a double (53) and, being exact at 24, for a
+ * float without the double rounding a conversion through a double would add.
+ *
+ * @param {bigint} value @param {number} bits @param {number} mxcsr
+ */
+function roundToBits(value, bits, mxcsr){
+    const negative = value < 0n;
+    let magnitude = negative ? -value : value;
+    const length = magnitude.toString(2).length;
+    if (length > bits)
+    {
+        const drop = BigInt(length - bits);
+        const kept = magnitude >> drop;
+        const rest = magnitude - (kept << drop);
+        const half = 1n << drop - 1n;
+        const mode = mxcsr >>> 13 & 3;
+        let up;
+        switch (mode)
+        {
+            case 0: up = rest > half || rest === half && (kept & 1n) === 1n; break;
+            case 1: up = negative && rest !== 0n; break; // toward -infinity
+            case 2: up = !negative && rest !== 0n; break; // toward +infinity
+            default: up = false;
+        }
+        magnitude = kept + (up ? 1n : 0n) << drop;
+    }
+    const number = Number(magnitude);
+    return negative ? -number : number;
+}
+
+/**
+ * A float to a signed quadword by a rounding mode (MXCSR's encoding, 3 for
+ * truncation); NaN and out of range give the integer indefinite.
+ *
+ * @param {number} value @param {number} mode
+ */
+function floatToQuadword(value, mode){
+    let whole;
+    switch (mode)
+    {
+        case 1: whole = Math.floor(value); break;
+        case 2: whole = Math.ceil(value); break;
+        case 3: whole = Math.trunc(value); break;
+        default:
+        {
+            const floor = Math.floor(value);
+            const diff = value - floor;
+            whole = diff > 0.5 || diff === 0.5 && floor % 2 !== 0 ? floor + 1 : floor;
+        }
+    }
+    if (Number.isNaN(whole) || whole >= 2 ** 63 || whole < -(2 ** 63))
+    {
+        return -(1n << 63n);
+    }
+    return BigInt(whole);
 }

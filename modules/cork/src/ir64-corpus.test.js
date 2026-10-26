@@ -9,8 +9,9 @@
  * (`x64-corpus.json.gz`, made by `tools/x64-corpus.mjs`) decoded in long mode
  * and run on `evaluate64` from the same registers, flags and memory, then
  * compared with what the processor did -- the sixteen registers, the status
- * flags and DF, every byte of memory that changed, and a fault's kind and
- * instruction with the registers as they stood before it.
+ * flags and DF, the sixteen XMM registers, every byte of memory that changed,
+ * and a fault's kind and instruction with the registers as they stood before
+ * it. MXCSR's exception flags are not modelled and not compared.
  *
  * A flag the architecture leaves undefined is not compared, and a case whose
  * later instruction reads one (a jump on OF after a multi-bit shift) is
@@ -40,9 +41,9 @@ const STEPS = 10000;
  *
  * @param {number} seed
  */
-function fill(seed){
-    const data = new Uint8Array(CORPUS.dataSize);
-    let x = seed || 1;
+function fill(seed, size = CORPUS.dataSize){
+    const data = new Uint8Array(size);
+    let x = seed >>> 0 || 1;
     for (let i = 0; i < data.length; i++)
     {
         x ^= x << 13;
@@ -161,8 +162,8 @@ function repeatsNone(instruction, state){
  * Runs one case on the model.
  *
  * @param {any} one
- * @returns {{ regs: string[], flags: number, signal: number, at?: number, writes: number[][],
- *     undefinedFlags: number } | { skipped: string }}
+ * @returns {{ regs: string[], flags: number, xmm: Record<number, string>, signal: number,
+ *     at?: number, writes: number[][], undefinedFlags: number } | { skipped: string }}
  */
 function runCase(one){
     const code = Uint8Array.from(Buffer.from(one.code, 'hex'));
@@ -174,6 +175,7 @@ function runCase(one){
         state.r[i] = BigInt(`0x${value}`);
     });
     state.rflags = one.flags | 0x200;
+    state.xmm.set(new Uint32Array(fill(one.seed ^ CORPUS.xmmSeed, 256).buffer));
     const end = BigInt(CORPUS.codeAt + code.length);
     let undefinedFlags = 0;
     let signal = 0;
@@ -232,7 +234,19 @@ function runCase(one){
             writes.push([i, value]);
         }
     });
-    return { regs: [...state.r].map(value=>value.toString(16)), flags: state.rflags, signal,
+    /** @type {Record<number, string>} */
+    const xmm = {};
+    const start = fill(one.seed ^ CORPUS.xmmSeed, 256);
+    const after = new Uint8Array(state.xmm.buffer);
+    for (let i = 0; i < 16; i++)
+    {
+        const bytes = after.subarray(i * 16, i * 16 + 16);
+        if (bytes.some((value, j)=>value !== start[i * 16 + j]))
+        {
+            xmm[i] = Buffer.from(bytes).toString('hex');
+        }
+    }
+    return { regs: [...state.r].map(value=>value.toString(16)), flags: state.rflags, xmm, signal,
         ...at === undefined ? {} : { at }, writes, undefinedFlags };
 }
 
@@ -278,6 +292,10 @@ test('the 64-bit model does what the processor did on every corpus case', ()=>{
         {
             differences.push(`flags 0x${(model.flags & mask).toString(16)}`
                 + ` vs 0x${(out.flags & mask).toString(16)}`);
+        }
+        if (JSON.stringify(model.xmm) !== JSON.stringify(out.xmm))
+        {
+            differences.push(`xmm ${JSON.stringify(model.xmm)} vs ${JSON.stringify(out.xmm)}`);
         }
         if (JSON.stringify(model.writes) !== JSON.stringify(out.writes))
         {

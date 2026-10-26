@@ -59,6 +59,28 @@ const below = n=>random() % n;
 const pick = list=>list[below(list.length)];
 
 const DATA_AT = 0x10000000n;
+/** The xmm registers start from the case's seed with these bits flipped, as the runner's do. */
+const XMM_SEED = 0x9e3779b9;
+
+/**
+ * Bytes from a seed, as the runner makes the data and the xmm registers:
+ * xorshift32, the low byte each step.
+ *
+ * @param {number} size @param {number} seed
+ */
+function fill(size, seed){
+    const out = Buffer.alloc(size);
+    let x = seed >>> 0 || 1;
+    for (let i = 0; i < size; i++)
+    {
+        x ^= x << 13;
+        x ^= x >>> 17;
+        x ^= x << 5;
+        x >>>= 0;
+        out[i] = x & 0xff;
+    }
+    return out;
+}
 const CODE_AT = 0x20000000n;
 
 /** The registers by width; the data ones are the ones written. */
@@ -118,6 +140,11 @@ const CONDITIONS = ['o', 'no', 'b', 'ae', 'e', 'ne', 'be', 'a', 's', 'ns', 'p', 
 
 /** One instruction's text (or a few, where one needs a set-up). @returns {string[]} */
 function instruction(){
+    return below(5) < 3 ? integer() : vector();
+}
+
+/** An integer instruction. @returns {string[]} */
+function integer(){
     const size = pick(SIZES);
     const wide = pick([2, 4, 8]);
     switch (below(30))
@@ -252,6 +279,101 @@ function instruction(){
     }
 }
 
+const FLOAT_OPS = ['add', 'sub', 'mul', 'div', 'min', 'max', 'sqrt'];
+const LOGIC = ['and', 'andn', 'or', 'xor'];
+const PACKED = ['paddb', 'paddw', 'paddd', 'paddq', 'paddsb', 'paddsw', 'paddusb', 'paddusw',
+    'psubb', 'psubw', 'psubd', 'psubq', 'psubsb', 'psubsw', 'psubusb', 'psubusw', 'pand', 'pandn',
+    'por', 'pxor', 'pcmpeqb', 'pcmpeqw', 'pcmpeqd', 'pcmpgtb', 'pcmpgtw', 'pcmpgtd', 'pmullw',
+    'pmulhw', 'pmulhuw', 'pmuludq', 'pmaddwd', 'pminub', 'pmaxub', 'pminsw', 'pmaxsw', 'pavgb',
+    'pavgw', 'psadbw', 'packsswb', 'packuswb', 'packssdw', 'punpcklbw', 'punpcklwd', 'punpckldq',
+    'punpcklqdq', 'punpckhbw', 'punpckhwd', 'punpckhdq', 'punpckhqdq', 'unpcklps', 'unpckhps',
+    'unpcklpd', 'unpckhpd', 'addsubps', 'addsubpd', 'haddps', 'haddpd', 'hsubps', 'hsubpd',
+    'cvtdq2ps', 'cvtps2dq', 'cvttps2dq', 'cvtdq2pd', 'cvtpd2dq', 'cvttpd2dq', 'cvtps2pd',
+    'cvtpd2ps', 'movddup', 'movshdup', 'movsldup', 'psllw', 'pslld', 'psllq', 'psrlw', 'psrld',
+    'psrlq', 'psraw', 'psrad'];
+/** The packed operations whose memory source is eight bytes. */
+const HALF_SOURCES = new Set(['movddup', 'cvtdq2pd', 'cvtps2pd']);
+const MOVES = ['movaps', 'movups', 'movapd', 'movupd', 'movdqa', 'movdqu'];
+
+/** An xmm register. */
+const xmm = ()=>`xmm${below(16)}`;
+/** A 16-byte memory operand, 16-byte aligned. */
+const aligned = ()=>`xmmword ptr [${NAMES[8][pick(POINTERS)]} + ${below(8) * 16}]`;
+
+/** An SSE, SSE2 or SSE3 instruction, of the kinds a compiler emits. @returns {string[]} */
+function vector(){
+    const kind = pick(['ps', 'pd', 'ss', 'sd']);
+    const scalarMemory = kind === 'ss' ? mem(4) : kind === 'sd' ? mem(8) : aligned();
+    switch (below(16))
+    {
+        case 0: case 1:
+            return [`${pick(FLOAT_OPS)}${kind} ${xmm()}, ${below(3) ? xmm() : scalarMemory}`];
+        case 2:
+        {
+            const source = below(3) ? xmm() : aligned();
+            return [`${pick(LOGIC)}${pick(['ps', 'pd'])} ${xmm()}, ${source}`];
+        }
+        case 3: return [`cmp${kind} ${xmm()}, ${below(3) ? xmm() : scalarMemory}, ${below(8)}`];
+        case 4: return [`${pick(['comi', 'ucomi'])}${pick(['ss', 'sd'])} ${xmm()}, ${xmm()}`];
+        case 5:
+        {
+            // Small integers in, so the arithmetic after them has ordinary numbers.
+            const width = pick([4, 8]);
+            return [`cvtsi2${pick(['ss', 'sd'])} ${xmm()}, ${below(3) ? reg(width) : mem(width)}`];
+        }
+        case 6:
+            return [`${pick(['cvt', 'cvtt'])}${pick(['ss', 'sd'])}2si ${reg(pick([4, 8]))},`
+                + ` ${xmm()}`];
+        case 7: return [`${pick(['cvtss2sd', 'cvtsd2ss'])} ${xmm()}, ${xmm()}`];
+        case 8: case 9:
+        {
+            const op = pick(PACKED);
+            const at = HALF_SOURCES.has(op) ? aligned().replace('xmmword', 'qword') : aligned();
+            return [`${op} ${xmm()}, ${below(4) ? xmm() : at}`];
+        }
+        case 10:
+            return [`${pick(['psllw', 'pslld', 'psllq', 'psrlw', 'psrld', 'psrlq', 'psraw', 'psrad',
+                'pslldq', 'psrldq'])} ${xmm()}, ${below(20)}`];
+        case 11:
+            return [`${pick(['pshufd', 'pshuflw', 'pshufhw', 'shufps', 'shufpd'])} ${xmm()},`
+                + ` ${xmm()}, ${below(256)}`];
+        case 12:
+            switch (below(4))
+            {
+                case 0: return [`${pick(MOVES)} ${xmm()}, ${below(2) ? xmm() : aligned()}`];
+                case 1: return [`${pick(MOVES)} ${aligned()}, ${xmm()}`];
+                case 2: return [`${pick(['movss', 'movsd'])} ${xmm()}, ${xmm()}`];
+                default:
+                {
+                    const op = pick(['movss', 'movsd']);
+                    const at = op === 'movss' ? mem(4) : mem(8);
+                    return [below(2) ? `${op} ${xmm()}, ${at}` : `${op} ${at}, ${xmm()}`];
+                }
+            }
+        case 13:
+            switch (below(5))
+            {
+                case 0: return [`movd ${xmm()}, ${below(2) ? reg(4) : mem(4)}`];
+                case 1: return [`movd ${below(2) ? reg(4) : mem(4)}, ${xmm()}`];
+                case 2: return [`movq ${xmm()}, ${pick([reg(8), mem(8), xmm()])}`];
+                case 3: return [`movq ${below(2) ? reg(8) : mem(8)}, ${xmm()}`];
+                default: return [`${pick(['movhps', 'movlps', 'movhpd', 'movlpd'])} ${below(2)
+                    ? `${xmm()}, ${mem(8)}` : `${mem(8)}, ${xmm()}`}`];
+            }
+        case 14:
+            switch (below(4))
+            {
+                case 0:
+                    return [`${pick(['pmovmskb', 'movmskps', 'movmskpd'])} ${reg(4)}, ${xmm()}`];
+                case 1: return [`pextrw ${reg(4)}, ${xmm()}, ${below(8)}`];
+                case 2: return [`pinsrw ${xmm()}, ${below(2) ? reg(4) : mem(2)}, ${below(8)}`];
+                default: return [`${pick(['movhlps', 'movlhps'])} ${xmm()}, ${xmm()}`];
+            }
+        default:
+            return [`lddqu ${xmm()}, xmmword ptr [${NAMES[8][pick(POINTERS)]} + ${below(64)}]`];
+    }
+}
+
 /** A random 64-bit value as a BigInt. */
 function wide64(){
     return BigInt(random()) << 32n | BigInt(random());
@@ -346,6 +468,19 @@ const results = cases.map((one, n)=>{
     }
     const flags = Number(output.readBigUInt64LE(at + 128));
     at += 136;
+    // Of the xmm registers, only those that changed from what the seed gave.
+    const start = fill(256, one.seed ^ XMM_SEED);
+    /** @type {Record<number, string>} */
+    const xmms = {};
+    for (let i = 0; i < 16; i++)
+    {
+        const after = output.subarray(at + i * 16, at + i * 16 + 16);
+        if (!after.equals(start.subarray(i * 16, i * 16 + 16)))
+        {
+            xmms[i] = after.toString('hex');
+        }
+    }
+    at += 256;
     const signal = output.readUInt32LE(at);
     const faultAt = output.readBigUInt64LE(at + 4);
     at += 12;
@@ -364,11 +499,13 @@ const results = cases.map((one, n)=>{
         regs: one.regs.map(value=>value.toString(16)),
         flags: one.flags,
         seed: one.seed,
-        out: { regs, flags, signal, ...signal ? { at: Number(faultAt - CODE_AT) } : {}, writes },
+        out: { regs, flags, xmm: xmms, signal, ...signal ? { at: Number(faultAt - CODE_AT) } : {},
+            writes },
     };
 });
 writeFileSync(OUT, gzipSync(JSON.stringify({ dataAt: Number(DATA_AT), dataSize: 0x2000,
-    codeAt: Number(CODE_AT), codeSize: 0x10000, cases: results }), { level: 9 }));
+    codeAt: Number(CODE_AT), codeSize: 0x10000, xmmSeed: XMM_SEED, cases: results }),
+{ level: 9 }));
 const faults = results.filter(one=>one.out.signal !== 0).length;
 console.log(`${results.length} cases (${faults} fault) -> ${OUT}`
     + ` (${readFileSync(OUT).length} bytes)`);
