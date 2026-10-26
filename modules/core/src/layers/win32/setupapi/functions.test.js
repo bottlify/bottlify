@@ -1160,3 +1160,60 @@ test('pSetupGetField hands out the field itself, wide, for as long as the INF is
         assert.equal(m.fns.pSetupGetField.handler([context, 4]), 0);
         assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
     });
+
+test('a file\'s source disk, the disk\'s details and a list\'s target are read from the INF',
+    async()=>{
+        // Wine's setupapi query tests.
+        const m = await machine();
+        m.file('C:\\src\\q.inf', [
+            '[Version]', 'Signature="$Chicago$"', '[copy_section]', 'one.txt,,2', 'two.txt',
+            'four.txt,five.txt', '[SourceDisksNames]',
+            '2 = %SrcDiskName%, LANCOM\\LANtools\\lanconf.cab', '4=,,,here',
+            '[SourceDisksFiles]', 'one.txt=2', 'two.txt=4,there', '[DestinationDirs]',
+            'DefaultDestDir = 24, %DefaultDest%', 'copy_section = 10', '[Strings]',
+            'DefaultDest = LANCOM', 'SrcDiskName = "LANCOM Software CD"',
+        ].join('\r\n'));
+        const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\q.inf'), 0,
+            INF_STYLE_WIN4, 0]);
+        const id = m.buffer(4);
+        const out = m.buffer(260);
+        const needed = m.buffer(4);
+        const ask = (/** @type {number} */ context, /** @type {string} */ name)=>
+            (m.fns.SetupGetSourceFileLocationA.handler([inf, context, m.str(name), id, out, 260,
+                needed]) ? [m.u32(id), m.readCString(out, 260)] : m.lastError());
+        assert.deepEqual(ask(0, 'one.txt'), [2, '']);
+        assert.equal(m.u32(needed), 1);
+        assert.deepEqual(ask(0, 'two.txt'), [4, 'there']);
+        assert.equal(ask(0, 'four.txt'), ERROR_LINE_NOT_FOUND);
+        const context = m.buffer(16);
+        m.fns.SetupFindFirstLineA.handler([inf, m.str('copy_section'), 0, context]);
+        assert.deepEqual(ask(context, 'two.txt'), [2, ''],
+            'with a context, the file its line copies, whatever the name');
+
+        /** @param {number} what */
+        const info = what=>(m.fns.SetupGetSourceInfoA.handler([inf, 2, what, out, 260, needed])
+            ? [m.readCString(out, 260), m.u32(needed)] : m.lastError());
+        assert.deepEqual(info(1), ['', 1], 'SRCINFO_PATH');
+        assert.deepEqual(info(2), ['LANCOM\\LANtools\\lanconf.cab', 28], 'SRCINFO_TAGFILE');
+        assert.deepEqual(info(3), ['LANCOM Software CD', 19], 'SRCINFO_DESCRIPTION');
+        assert.equal(info(9), ERROR_INVALID_PARAMETER);
+
+        /** @param {number} at @param {string | null} section */
+        const target = (at, section)=>(m.fns.SetupGetTargetPathA.handler([inf, at,
+            section === null ? 0 : m.str(section), out, 260, needed])
+            ? m.readCString(out, 260) : m.lastError());
+        assert.equal(target(0, 'copy_section'), 'C:\\WINDOWS', 'its own DestinationDirs entry');
+        assert.equal(target(0, 'other'), 'C:\\LANCOM', 'the DefaultDestDir');
+        m.view.setUint32(context + 8, 7, true);
+        assert.equal(target(context, null), 'C:\\LANCOM', 'a context in no section: the default');
+
+        const information = m.buffer(1024);
+        assert.equal(m.fns.SetupGetInfInformationA.handler([m.str('C:\\src\\q.inf'), 2,
+            information, 1024, needed]), 1);
+        assert.equal(m.fns.SetupQueryInfFileInformationA.handler([information, 0, out, 260,
+            needed]), 1);
+        assert.equal(m.readCString(out, 260), 'C:\\src\\q.inf');
+        assert.equal(m.fns.SetupQueryInfFileInformationA.handler([information, 1, out, 260,
+            needed]), 0, 'one INF in it');
+        assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
+    });

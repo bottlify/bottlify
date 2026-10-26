@@ -6,7 +6,9 @@
 
 import { INF_STYLE_OLDNT, INF_STYLE_WIN4, infText, parseInf } from './inf.js';
 import { decodeFolder, folderOf, readCabinet } from '../cabinet/cabinet.js';
-import { commitQueue, queueInstallSection } from './queue.js';
+import {
+    commitQueue, lookup, queueInstallSection, targetDirectory as listTarget,
+} from './queue.js';
 import { standardDirids } from './dirids.js';
 import { installRegistry } from './registry.js';
 import { CATALOG_STORE } from '../sfc/functions.js';
@@ -1236,6 +1238,138 @@ export function createSetupapiFunctions(host){
                 return fail(ERROR_SUCCESS, address);
             },
         },
+
+        /**
+         * BOOL SetupQueryInfFileInformationA(PSP_INF_INFORMATION InfInformation,
+         *     UINT InfIndex, PSTR ReturnBuffer, DWORD ReturnBufferSize,
+         *     PDWORD RequiredSize), and the W form
+         *
+         * The path of the INF of that index in what SetupGetInfInformation
+         * wrote, which leads its version data; an index past the count is
+         * ERROR_INVALID_PARAMETER.
+         */
+        ...bothWidths('SetupQueryInfFileInformation', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [information, index, buffer, size, required])=>{
+                if ((information >>> 0) === 0 || (index >>> 0) >= readU32(information + 4))
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const path = textOf(information + 8, wide) ?? '';
+                return answerText(path, buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * BOOL SetupGetSourceFileLocationA(HINF InfHandle, PINFCONTEXT InfContext,
+         *     PCSTR FileName, PUINT SourceId, PSTR ReturnBuffer,
+         *     DWORD ReturnBufferSize, PDWORD RequiredSize), and the W form
+         *
+         * The disk a file comes from and its path on it, from its
+         * [SourceDisksFiles] line. With a context, the file is the one the
+         * context's copy line names where it goes -- whatever name is passed,
+         * as Windows looks it up. ERROR_LINE_NOT_FOUND for a file no line names.
+         */
+        ...bothWidths('SetupGetSourceFileLocation', wide=>({
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, context, namePointer, sourceId, buffer,
+                size, required])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                let name = textOf(namePointer, wide) ?? '';
+                if ((context >>> 0) !== 0)
+                {
+                    const at = readContext(context);
+                    const line = openInf(at.handle)?.list[at.section]?.lines[at.line];
+                    name = line?.fields[0] ?? line?.key ?? '';
+                }
+                const disk = name === '' ? null : lookup(open.inf, 'SourceDisksFiles', name);
+                if (!disk)
+                {
+                    return fail(ERROR_LINE_NOT_FOUND);
+                }
+                if ((sourceId >>> 0) !== 0)
+                {
+                    writeU32(sourceId, Number.parseInt(disk.fields[0] ?? '', 10) || 0);
+                }
+                return answerText(expand(open, disk.fields[1] ?? ''), buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * BOOL SetupGetSourceInfoA(HINF InfHandle, UINT SourceId, UINT InfoDesired,
+         *     PSTR ReturnBuffer, DWORD ReturnBufferSize, LPDWORD RequiredSize),
+         *     and the W form
+         *
+         * A [SourceDisksNames] line's fields by what is asked: SRCINFO_PATH
+         * (1) its fourth, SRCINFO_TAGFILE (2) its second, SRCINFO_DESCRIPTION
+         * (3) its first, SRCINFO_TAGFILE2 (5) its sixth -- empty when the line
+         * has not got it. ERROR_LINE_NOT_FOUND for a disk no line names.
+         */
+        ...bothWidths('SetupGetSourceInfo', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, sourceId, desired, buffer, size,
+                required])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const field = ({ 1: 3, 2: 1, 3: 0, 5: 5 })[desired >>> 0];
+                if (field === undefined)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const disk = lookup(open.inf, 'SourceDisksNames', String(sourceId >>> 0));
+                if (!disk)
+                {
+                    return fail(ERROR_LINE_NOT_FOUND);
+                }
+                return answerText(expand(open, disk.fields[field] ?? ''), buffer, size, required,
+                    wide) ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * BOOL SetupGetTargetPathA(HINF InfHandle, PINFCONTEXT InfContext,
+         *     PCSTR Section, PSTR ReturnBuffer, DWORD ReturnBufferSize,
+         *     PDWORD RequiredSize), and the W form
+         *
+         * Where a file list's files go, by the context's section or the
+         * section named: its DestinationDirs entry, the INF's DefaultDestDir,
+         * or the system directory. A context whose section is none of the
+         * INF's has the default.
+         */
+        ...bothWidths('SetupGetTargetPath', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, context, sectionPointer, buffer, size,
+                required])=>{
+                let open = openInf(handle);
+                let list = textOf(sectionPointer, wide) ?? '';
+                if ((context >>> 0) !== 0)
+                {
+                    const at = readContext(context);
+                    open = openInf(at.handle) ?? open;
+                    list = open?.list[at.section]?.name ?? '';
+                }
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const path = listTarget(open.inf, list, diridOf(open));
+                return answerText(path, buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
 
         /**
          * BOOL SetupSetDirectoryIdA(HINF InfHandle, DWORD Id, PCSTR Directory)

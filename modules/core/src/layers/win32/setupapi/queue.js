@@ -83,7 +83,7 @@ const join = (...parts)=>parts.filter(part=>part !== '').reduce((path, part)=>(
  *
  * @param {import('./inf.js').Inf} inf @param {string} section @param {string} key
  */
-const lookup = (inf, section, key)=>{
+export const lookup = (inf, section, key)=>{
     const lower = key.toLowerCase();
     for (const name of [section + PLATFORM, section])
     {
@@ -97,6 +97,26 @@ const lookup = (inf, section, key)=>{
 };
 
 /**
+ * Where a file list's files go: its DestinationDirs entry, else the INF's
+ * DefaultDestDir, else the system directory -- a DIRID and a subdirectory
+ * under it, or with DIRID -1 the subdirectory as an absolute path.
+ *
+ * @param {import('./inf.js').Inf} inf @param {string} list
+ * @param {(id: number) => string | null} dirid
+ */
+export function targetDirectory(inf, list, dirid){
+    const line = lookup(inf, 'DestinationDirs', list)
+        ?? lookup(inf, 'DestinationDirs', 'DefaultDestDir');
+    const id = line ? Number.parseInt(line.fields[0], 10) : DIRID_DEFAULT;
+    const subdirectory = line?.fields[1] ?? '';
+    if (id === -1)
+    {
+        return subdirectory;
+    }
+    return join(dirid(id) ?? '', subdirectory);
+}
+
+/**
  * Queues an install section's CopyFiles, DelFiles and RenFiles.
  *
  * @param {FileQueue} queue @param {import('./inf.js').Inf} inf
@@ -105,17 +125,7 @@ const lookup = (inf, section, key)=>{
  */
 export function queueInstallSection(queue, inf, section, how){
     /** @param {string} list  The file list's section, which DestinationDirs is keyed by. */
-    const destination = list=>{
-        const line = lookup(inf, 'DestinationDirs', list)
-            ?? lookup(inf, 'DestinationDirs', 'DefaultDestDir');
-        const id = line ? Number.parseInt(line.fields[0], 10) : DIRID_DEFAULT;
-        const subdirectory = line?.fields[1] ?? '';
-        if (id === -1)
-        {
-            return subdirectory;
-        }
-        return join(how.dirid(id) ?? '', subdirectory);
-    };
+    const destination = list=>targetDirectory(inf, list, how.dirid);
 
     /**
      * @param {string} name  Its name where it goes.
