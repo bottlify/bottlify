@@ -490,6 +490,27 @@ test('IsWow64Process answers FALSE for this process and a child, and fails a str
     assert.equal(fns.IsWow64Process.argBytes, 8);
 });
 
+test('IsWow64Process2: no process is a WOW64 one, on an i386 machine', ()=>{
+    const host = fakeHost();
+    host.handles.set(0x40, { exitCode: STILL_ACTIVE });
+    const fns = createSystemFunctions(host);
+    for (const handle of [CURRENT_PROCESS, 0x40])
+    {
+        host.view.setUint32(0x200, 0xdeaddead, true);
+        assert.equal(fns.IsWow64Process2.handler([handle, 0x200, 0x202]), 1);
+        assert.equal(host.view.getUint16(0x200, true), 0, 'IMAGE_FILE_MACHINE_UNKNOWN');
+        assert.equal(host.view.getUint16(0x202, true), 0x14c, 'IMAGE_FILE_MACHINE_I386');
+    }
+    host.view.setUint32(0x200, 0xdeaddead, true);
+    assert.equal(fns.IsWow64Process2.handler([CURRENT_PROCESS, 0x200, 0]), 1,
+        'the native machine need not be asked for');
+    assert.equal(host.view.getUint16(0x200, true), 0);
+    assert.equal(host.view.getUint16(0x202, true), 0xdead);
+    assert.equal(fns.IsWow64Process2.handler([0x10, 0x200, 0x202]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_HANDLE]);
+    assert.equal(fns.IsWow64Process2.argBytes, 12);
+});
+
 test('a 32-bit system has no WOW64 directory, and says the call is not implemented', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);

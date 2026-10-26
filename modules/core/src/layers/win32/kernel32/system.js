@@ -82,6 +82,8 @@ const STILL_ACTIVE = 259;
 
 /** The pseudo-handle for the running process; -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
+/** The machine every process here runs on, as an image header names it. */
+const IMAGE_FILE_MACHINE_I386 = 0x14c;
 
 /** 100ns units between the FILETIME epoch (1601-01-01) and the Unix one. */
 const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
@@ -974,6 +976,34 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 host.writeMemory(answer >>> 0, new Uint8Array(4));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL IsWow64Process2(HANDLE hProcess, USHORT *pProcessMachine,
+         *                      USHORT *pNativeMachine)
+         *
+         * No process here runs under WOW64, so its machine is
+         * IMAGE_FILE_MACHINE_UNKNOWN, and the machine underneath is the
+         * i386 every process runs on. The native machine may be asked for
+         * or not.
+         */
+        IsWow64Process2: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, machine, native])=>{
+                if ((handle >>> 0) !== CURRENT_PROCESS && !object(handle, 'process'))
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                host.writeMemory(machine >>> 0, new Uint8Array(2));
+                if ((native >>> 0) !== 0)
+                {
+                    host.writeMemory(native >>> 0, new Uint8Array([
+                        IMAGE_FILE_MACHINE_I386 & 0xff, IMAGE_FILE_MACHINE_I386 >>> 8]));
+                }
                 return 1;
             },
         },
