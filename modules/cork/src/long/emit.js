@@ -2286,7 +2286,7 @@ function shiftHelper(){
  * @param {(address: number) => number} slotOf  the table slot of the region at an address,
  *     which holds `missFunction` until there is one
  * @param {{ transfers?: boolean, checkReads?: boolean, looseStacks?: boolean,
- *     defaultNaNNegative?: boolean,
+ *     defaultNaNNegative?: boolean, formCalls?: boolean,
  *     x87Id?: ((instruction: import('../decode/decoder.js').Instruction) => number) | null }}
  *     [options]  `defaultNaNNegative`, the host's
  *     (`features`): false puts an invalid operation's NaN right (`simd.js`); `x87Id`
@@ -2295,12 +2295,14 @@ function shiftHelper(){
  *     `checkReads`: reads test their pages, rather than wrap into RAM; `looseStacks`: a
  *     store through rsp alone tests no page either (the 32-bit translator's
  *     `looseStacks`), its address wrapped into RAM: no translated code lies on a
- *     thread's stack while the runner makes regions so
+ *     thread's stack while the runner makes regions so; `formCalls`, unless false, a
+ *     direct call whose callee the region holds is a push and a jump into it, and that
+ *     callee's rets jump back past the call (`formedReturns`)
  * @returns {Uint8Array<ArrayBuffer>}
  */
 export function emitRegions(layout, memoryLimits, regions, slotOf, options = {}){
     const { transfers = false, checkReads = false, looseStacks = false,
-        defaultNaNNegative = true, x87Id = null } = options;
+        defaultNaNNegative = true, x87Id = null, formCalls = true } = options;
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
@@ -2340,7 +2342,7 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     }
     regions.forEach((region, index)=>{
         const body = emitRegion(layout, helpers, region,
-            { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative });
+            { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative, formCalls });
         const at = m.function(regionType, LOCALS, body.toBytes(),
             { exportAs: `r${index}`, hints: body.hints });
         m.nameFunction(at, `r${region.blocks[0].entry.toString(16).padStart(8, '0')}`);
@@ -2438,6 +2440,72 @@ function flagLiveness(blocks, indexOf){
  */
 
 /**
+ * Where each `ret` of the region may go on to inside it, as the 32-bit
+ * translator's `inlineReturns` finds it: the return addresses of the direct
+ * calls whose callee the region holds, for the rets that callee reaches by
+ * its own branches -- and past calls of its own, which come back after them.
+ * Such a ret compares where it goes with each and jumps there; any other way
+ * leaves the region, as every ret did.
+ *
+ * @param {LongBlock[]} blocks  in address order @param {Map<number, number>} indexOf
+ * @returns {Map<number, number[]>}  ret block index -> return addresses
+ */
+function formedReturns(blocks, indexOf){
+    /** @type {Map<number, number[]>} */
+    const out = new Map();
+    for (const block of blocks)
+    {
+        const last = block.instructions[block.instructions.length - 1];
+        const next = last.eip + last.length;
+        const callee = last.operands[0]?.kind === 'rel' ? last.operands[0].target : undefined;
+        if (last.op !== 'call' || callee === undefined || !indexOf.has(callee)
+            || !indexOf.has(next))
+        {
+            continue;
+        }
+        /** @type {Set<number>} */
+        const seen = new Set();
+        const work = [callee];
+        while (work.length > 0)
+        {
+            const index = indexOf.get(/** @type {number} */ (work.pop()));
+            if (index === undefined || seen.has(index))
+            {
+                continue;
+            }
+            seen.add(index);
+            const reached = blocks[index];
+            const end = reached.instructions[reached.instructions.length - 1];
+            const after = end.eip + end.length;
+            if (end.op === 'ret')
+            {
+                const list = out.get(index) ?? [];
+                if (!list.includes(next))
+                {
+                    list.push(next);
+                }
+                out.set(index, list);
+            }
+            else if (!endsBlock(end.op) || end.op === 'call')
+            {
+                // On into the next block, or back after a call of the callee's own.
+                work.push(after);
+            }
+            else if (end.operands[0]?.kind === 'rel')
+            {
+                work.push(/** @type {number} */ (end.operands[0].target));
+                if (end.op !== 'jmp')
+                {
+                    work.push(after);
+                }
+            }
+            work.push(...reached.switch?.cases ?? []);
+        }
+    }
+    return out;
+}
+
+/**
  * The state block around a region's guest calls. The block holds every
  * register when the region starts and when a call returns; a call stores
  * only what some way to it wrote since then, as the 32-bit translator's
@@ -2460,9 +2528,13 @@ function flagLiveness(blocks, indexOf){
  * @param {Set<number>[]} wrote  by block, the locals it writes
  * @param {{ reload: boolean, block: number }[]} spills  the calls' stores and loads
  * @param {number[]} written  the registers the region writes anywhere
+ * @param {Map<number, number[]>} returns  by a formed-in callee's ret block, the return
+ *     addresses it goes on to in the region (`formedReturns`): edges as a call's into
+ *     its callee is
+ * @param {boolean} formCalls  a direct call into the region is a jump there (`emitRegion`)
  * @returns {{ calls: Map<number, CallSync>, guarded: Set<number> }}
  */
-function callSync(blocks, indexOf, seen, wrote, spills, written){
+function callSync(blocks, indexOf, seen, wrote, spills, written, returns, formCalls){
     /** A local's register number, or -1. @param {number} local */
     const registerOf = local=>(local < 16 ? local : local >= XMM && local < XMM + 16
         ? local - XMM + 16 : -1);
@@ -2480,6 +2552,10 @@ function callSync(blocks, indexOf, seen, wrote, spills, written){
         if (!endsBlock(last.op) || last.op === 'call')
         {
             to.push(next);
+            if (formCalls && last.op === 'call' && operand?.kind === 'rel')
+            {
+                to.push(/** @type {number} */ (operand.target));
+            }
         }
         else
         {
@@ -2493,6 +2569,7 @@ function callSync(blocks, indexOf, seen, wrote, spills, written){
             }
             to.push(...block.switch?.cases ?? []);
         }
+        to.push(...returns.get(/** @type {number} */ (indexOf.get(block.entry))) ?? []);
         return [...new Set(to.map(at=>indexOf.get(at)).filter(index=>index !== undefined))];
     });
     /** The blocks reachable from `from`, itself included. @param {number} from */
@@ -2693,10 +2770,11 @@ export function missFunction(){
  * @param {BlockEmitter['helpers']} helpers
  * @param {LongRegion} region
  * @param {{ slotOf: (address: number) => number, regionType: number, checkReads: boolean,
- *     looseStacks: boolean, defaultNaNNegative: boolean }} link
+ *     looseStacks: boolean, defaultNaNNegative: boolean, formCalls: boolean }} link
+ *     `formCalls`: a direct call whose callee the region holds is a jump into it
  */
 function emitRegion(layout, helpers, region,
-    { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative })
+    { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative, formCalls })
 {
     const e = new BlockEmitter(layout, helpers, checkReads, looseStacks);
     e.defaultNaNNegative = defaultNaNNegative;
@@ -2709,6 +2787,8 @@ function emitRegion(layout, helpers, region,
     const indexOf = new Map(blocks.map((block, index)=>[block.entry, index]));
     const first = /** @type {number} */ (indexOf.get(region.blocks[0].entry));
     const liveAfter = flagLiveness(blocks, indexOf);
+    // The rets of callees formed in, by block, and where each may go on in the region.
+    const returns = formCalls ? formedReturns(blocks, indexOf) : new Map();
     // Label 0 is the region's entry, label i + 1 its block i.
     b.globalGet(LABEL).i32const(1).op(Op.i32sub).i32const(first).globalGet(LABEL)
         .op(Op.select).localSet(IDX);
@@ -2767,6 +2847,11 @@ function emitRegion(layout, helpers, region,
             const last = block.instructions[block.instructions.length - 1];
             e.go(last.eip + last.length, indexOf, index, count);
         }
+        else if (ending.call && formCalls && ending.to !== null && indexOf.has(ending.to))
+        {
+            // A callee formed in: its return address pushed, on into it.
+            e.go(ending.to, indexOf, index, count);
+        }
         else if (ending.call)
         {
             e.callOut(ending.to, /** @type {number} */ (ending.next),
@@ -2777,6 +2862,14 @@ function emitRegion(layout, helpers, region,
             if (block.switch !== undefined)
             {
                 e.dispatch(block.switch, indexOf, index, count);
+            }
+            // A formed-in callee's ret: on to the call it returns past, where it does.
+            for (const to of returns.get(index) ?? [])
+            {
+                b.localGet(RIP).i64const(BigInt(to)).op(Op.i64eq);
+                e.open();
+                e.go(to, indexOf, index, count);
+                e.close();
             }
             b.br(e.exitDepth);
         }
@@ -2818,7 +2911,7 @@ function emitRegion(layout, helpers, region,
     // at its exit and entry; around each call what `callSync` finds.
     const written = [...Array(32).keys()].filter(i=>b.writes(i < 16 ? i : XMM + i - 16));
     const used = [...Array(32).keys()].filter(i=>b.uses(i < 16 ? i : XMM + i - 16));
-    const sync = callSync(blocks, indexOf, seen, wrote, e.spills, written);
+    const sync = callSync(blocks, indexOf, seen, wrote, e.spills, written, returns, formCalls);
     /**
      * @param {Body} body @param {number[]} which
      * @param {Set<number>} [guarded]  those to store only where FRESH does not mark them

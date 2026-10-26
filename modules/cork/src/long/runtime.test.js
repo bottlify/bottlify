@@ -62,9 +62,10 @@ function fill(seed, size){
  * @param {boolean} [looseStacks]  false: stores through rsp test their pages too
  * @param {boolean} [defaultNaNNegative]  false: float code as for a host whose default NaN is
  *     positive, an arm64 one (the host's own unless given)
+ * @param {boolean} [leafCalls]  false: every call a wasm call, no callee formed in
  */
 function machine(transfers = true, checkReads = undefined, looseStacks = undefined,
-    defaultNaNNegative = undefined)
+    defaultNaNNegative = undefined, leafCalls = true)
 {
     const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
@@ -77,7 +78,8 @@ function machine(transfers = true, checkReads = undefined, looseStacks = undefin
     }
     const pages = createPageTable(memory, layout);
     const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads,
-        looseStacks, ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }) });
+        looseStacks, leafCalls,
+        ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }) });
     const state = blockState64({ memory, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
     return { layout, memory, state, runner, view: new DataView(memory.buffer) };
@@ -341,11 +343,13 @@ function run(m, translated, budget = 7){
  *     other without the host: both ways must be the interpreter's
  * @param {boolean} [checkReads]  its reads test their pages, as the interpreter's do
  * @param {boolean} [defaultNaNNegative]  its float code as for that host (`machine`)
+ * @param {boolean} [leafCalls]  its small callees formed into their callers (`machine`)
  */
 function compare(cases, budget = 7, transfers = true, checkReads = undefined,
-    defaultNaNNegative = undefined)
+    defaultNaNNegative = undefined, leafCalls = true)
 {
-    const translatedMachine = machine(transfers, checkReads, undefined, defaultNaNNegative);
+    const translatedMachine = machine(transfers, checkReads, undefined, defaultNaNNegative,
+        leafCalls);
     const interpretedMachine = machine();
     /** @type {string[]} */
     const failures = [];
@@ -737,15 +741,22 @@ test('calls from region to region return where they were made, and leave where t
     {
         for (const transfers of [true, false])
         {
-            const { failures, exits, stats } = compare(cases, budget, transfers);
-            assert.deepEqual(failures, [], `budget ${budget}, transfers ${transfers}`);
-            assert.equal(exits, cases.length);
-            entered[`${budget} ${transfers}`] = stats.entered;
+            // Every call a wasm call, and skip and cold formed into their callers.
+            for (const leafCalls of [false, true])
+            {
+                const { failures, exits, stats } = compare(cases, budget, transfers, undefined,
+                    undefined, leafCalls);
+                assert.deepEqual(failures, [],
+                    `budget ${budget}, transfers ${transfers}, leafCalls ${leafCalls}`);
+                assert.equal(exits, cases.length);
+                entered[`${budget} ${transfers} ${leafCalls}`] = stats.entered;
+            }
         }
     }
     // The returns past a call too deep and the jumps out of a region go on
     // in wasm: the host enters regions less often.
-    assert.ok(entered['100000 true'] * 2 < entered['100000 false'], JSON.stringify(entered));
+    assert.ok(entered['100000 true false'] * 2 < entered['100000 false false'],
+        JSON.stringify(entered));
 });
 
 test('a call loads back only what the code after it touches, and no store undoes a callee', ()=>{
@@ -769,9 +780,35 @@ test('a call loads back only what the code after it touches, and no store undoes
     });
     for (const budget of [7, 100000])
     {
-        const { failures, exits } = compare(cases, budget);
+        // Every call a wasm call, and the small callees formed into their callers.
+        for (const leafCalls of [false, true])
+        {
+            const { failures, exits } = compare(cases, budget, true, undefined, undefined,
+                leafCalls);
+            assert.deepEqual(failures, [], `budget ${budget}, leafCalls ${leafCalls}`);
+            assert.equal(exits, cases.length);
+        }
+    }
+});
+
+test('a callee formed in reads what a wasm call before it left in the state block', ()=>{
+    //         mov ecx, 3
+    // loop:   call g; call leaf               g a wasm call once made, leaf formed in
+    //         dec ecx; jnz loop; jmp done
+    // g:      add eax, 0x1234; call h; ret    no leaf: it calls
+    // h:      ret
+    // leaf:   mov [rbx], rax; add rbx, 8; ret reads what g wrote, nothing after it does
+    // done:
+    const code = 'b903000000e80b000000e812000000ffc975f2eb140534120000e801000000c3c3'
+        + '4889034883c308c3';
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `formed after a call ${i}`, code }));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits, stats } = compare(cases, budget);
         assert.deepEqual(failures, [], `budget ${budget}`);
         assert.equal(exits, cases.length);
+        assert.ok(stats.leaves > 0);
     }
 });
 
@@ -819,9 +856,14 @@ test('a function called indirectly that jumps out past its caller does not retur
         ({ ...one, text: `jumped out ${i}`, code }));
     for (const budget of [7, 100000])
     {
-        const { failures, exits } = compare(cases, budget);
-        assert.deepEqual(failures, [], `budget ${budget}`);
-        assert.equal(exits, cases.length);
+        // Every call a wasm call, and the small callees formed into their callers.
+        for (const leafCalls of [false, true])
+        {
+            const { failures, exits } = compare(cases, budget, true, undefined, undefined,
+                leafCalls);
+            assert.deepEqual(failures, [], `budget ${budget}, leafCalls ${leafCalls}`);
+            assert.equal(exits, cases.length);
+        }
     }
 });
 
@@ -843,9 +885,14 @@ test('a region left by a jump goes on expecting the return its caller waits for'
         ({ ...one, text: `expect ${i}`, code }));
     for (const budget of [7, 100000])
     {
-        const { failures, exits } = compare(cases, budget);
-        assert.deepEqual(failures, [], `budget ${budget}`);
-        assert.equal(exits, cases.length);
+        // Every call a wasm call, and the small callees formed into their callers.
+        for (const leafCalls of [false, true])
+        {
+            const { failures, exits } = compare(cases, budget, true, undefined, undefined,
+                leafCalls);
+            assert.deepEqual(failures, [], `budget ${budget}, leafCalls ${leafCalls}`);
+            assert.equal(exits, cases.length);
+        }
     }
 });
 

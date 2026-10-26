@@ -45,6 +45,12 @@ const BLOCK_LIMIT = 64;
  */
 const REGION_LIMIT = 256;
 const REGION_BYTES = 16384;
+/**
+ * The callee a direct call is formed into its caller with, at most, as the
+ * 32-bit translator's `LEAF_BLOCKS` and `LEAF_BYTES`.
+ */
+const LEAF_BLOCKS = 16;
+const LEAF_BYTES = 512;
 
 /**
  * A start: the region translated from it, or none (`run` null) where its
@@ -64,7 +70,7 @@ const REGION_BYTES = 16384;
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
  *     pages: import('../runtime/pages.js').PageTable,
  *     hot?: number, below?: number, transfers?: boolean, checkReads?: boolean,
- *     looseStacks?: boolean, defaultNaNNegative?: boolean }} settings
+ *     looseStacks?: boolean, defaultNaNNegative?: boolean, leafCalls?: boolean }} settings
  *     `below`: no block starts under it (the host's null range, whose fetch faults on
  *     the interpreter); `transfers`: regions go on into each other through the entry
  *     hash with tail calls, where the host has them (off where a tail call into another
@@ -74,11 +80,13 @@ const REGION_BYTES = 16384;
  *     runtime's do; `looseStacks`, unless false, a store through rsp alone tests no page
  *     until code is translated on a page of a thread's stack (`noteStack`), as the
  *     32-bit runtime's do; `defaultNaNNegative`, the host's own (`features`), false
- *     where float arithmetic puts an invalid operation's NaN right
+ *     where float arithmetic puts an invalid operation's NaN right; `leafCalls`, unless
+ *     false, a direct call's small callee is formed into its caller (`isLeaf`); false,
+ *     every call is a wasm call, one into the region's own blocks too
  */
 export function createLongRunner(settings){
     const { memory, layout, pages, hot = 2, below = 0x10000,
-        transfers = features().tailCalls,
+        transfers = features().tailCalls, leafCalls = true,
         defaultNaNNegative = features().defaultNaNNegative } = settings;
     let readsChecked = settings.checkReads === true;
     /** Whether regions are made loose: until code is translated on a stack. */
@@ -93,7 +101,7 @@ export function createLongRunner(settings){
     const byPage = new Map();
     const limits = memoryLimits(memory);
     const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0,
-        entered: 0, readSwitches: 0, stackSwitches: 0, switches: 0 };
+        entered: 0, readSwitches: 0, stackSwitches: 0, switches: 0, leaves: 0 };
     /**
      * The instructions run on the interpreter one at a time -- the one a block
      * stopped before, or a start no block holds -- by mnemonic, counted each
@@ -237,8 +245,59 @@ export function createLongRunner(settings){
     };
 
     /**
+     * Whether the function at `target` is small enough to form into its
+     * caller, as the 32-bit translator's `isLeaf` asks: at most `LEAF_BLOCKS`
+     * blocks and `LEAF_BYTES` bytes, reached by direct branches alone, every
+     * way out of them a `ret` -- no call, no indirect jump, nothing left to
+     * the interpreter. Only a guess at the shape: the call is still a push
+     * and a jump, and each `ret` still compares where it goes.
+     *
+     * @param {number} target
+     */
+    const isLeaf = target=>{
+        const seen = new Set();
+        const work = [target];
+        let size = 0;
+        while (work.length > 0)
+        {
+            const at = /** @type {number} */ (work.pop());
+            if (seen.has(at))
+            {
+                continue;
+            }
+            if (seen.size >= LEAF_BLOCKS)
+            {
+                return false;
+            }
+            seen.add(at);
+            const instructions = blockAt(at);
+            const last = instructions[instructions.length - 1];
+            if (last === undefined || !endsBlock(last.op) || last.op === 'call')
+            {
+                return false;
+            }
+            size += last.eip + last.length - at;
+            if (size > LEAF_BYTES)
+            {
+                return false;
+            }
+            if (last.op !== 'ret')
+            {
+                if (last.operands[0]?.kind !== 'rel')
+                {
+                    return false;
+                }
+                work.push(...successors(instructions));
+            }
+        }
+        return true;
+    };
+
+    /**
      * The region from `entry`: the blocks its known jumps reach, decoded,
-     * emitted, compiled, their pages marked.
+     * emitted, compiled, their pages marked. A direct call's small callee
+     * (`isLeaf`) is formed in with it, the call a push and a jump and the
+     * callee's returns jumps back, as the 32-bit translator forms one.
      *
      * @param {number} entry
      */
@@ -339,6 +398,13 @@ export function createLongRunner(settings){
                 stats.switches++;
             }
             queue.push(...successors(instructions));
+            const last = instructions[instructions.length - 1];
+            if (leafCalls && last.op === 'call' && last.operands[0]?.kind === 'rel'
+                && isLeaf(/** @type {number} */ (last.operands[0].target)))
+            {
+                queue.push(/** @type {number} */ (last.operands[0].target));
+                stats.leaves++;
+            }
         }
         /** @type {LongEntry} */
         const record = { entry, ranges: [], run: null, hashed: [], wrapped: false, loose };
@@ -347,7 +413,8 @@ export function createLongRunner(settings){
             record.wrapped = !readsChecked;
             const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
                 slotOf, { transfers, checkReads: readsChecked, looseStacks: loose,
-                    defaultNaNNegative, x87Id: instruction=>x87.add(instruction) }));
+                    defaultNaNNegative, x87Id: instruction=>x87.add(instruction),
+                    formCalls: leafCalls }));
             const instance = new WebAssembly.Instance(module,
                 { env: { memory, table, budget: budgetGlobal, depth, label, expect,
                     x87: x87.call } });
