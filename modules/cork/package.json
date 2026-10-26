@@ -37,6 +37,7 @@
     "src",
     "!src/**/*.test.js",
     "!src/**/*.itest.js",
+    "!src/**/*.gz",
     "bin",
     "LICENSE"
   ],
