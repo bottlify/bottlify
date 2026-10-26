@@ -134,7 +134,18 @@ function fakeKernel(){
         createEvent: options=>(
             { kind: 'event', signalled: false, manualReset: false, waiters: [], ...options }),
         /** @param {any} options */
-        createSemaphore: options=>({ kind: 'semaphore', waiters: [], ...options }),
+        createSemaphore: options=>(
+            { kind: 'semaphore', waiters: [], count: options.initial, ...options }),
+        /** @param {any} object @param {number} count */
+        releaseSemaphore(object, count){
+            if (object.count + count > object.maximum)
+            {
+                throw new Error('Semaphore released past its maximum');
+            }
+            const previous = object.count;
+            object.count += count;
+            return previous;
+        },
         /** @param {any} options */
         createTimer: options=>(
             { kind: 'timer', signalled: false, manualReset: false, waiters: [], ...options }),
@@ -688,6 +699,26 @@ test('the Ex creators take their options as flags, and make the same objects', (
     assert.deepEqual([fns.CreateEventExA, fns.CreateEventExW, fns.CreateMutexExA,
         fns.CreateMutexExW, fns.CreateSemaphoreExA, fns.CreateSemaphoreExW]
         .map(fn=>fn.argBytes), [16, 16, 16, 16, 24, 24]);
+});
+
+test('ReleaseSemaphore says why it refuses, and writes the previous count only on success', ()=>{
+    // Wine's kernel32 sync test_signalandwait's semaphore checks.
+    const ERROR_TOO_MANY_POSTS = 298;
+    const { fns, errors, written } = setup();
+    const semaphore = fns.CreateSemaphoreExW.handler([0, 0, 1, 0, 0, 0x1f0003]);
+
+    assert.equal(fns.ReleaseSemaphore.handler([semaphore, -1, 0x3000]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.ReleaseSemaphore.handler([semaphore, 0, 0x3000]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.ReleaseSemaphore.handler([0x999, 1, 0x3000]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+    assert.equal(fns.ReleaseSemaphore.handler([semaphore, 2, 0x3000]), 0);
+    assert.equal(errors.at(-1), ERROR_TOO_MANY_POSTS);
+    assert.equal(written.has(0x3000), false, 'no refusal writes the previous count');
+
+    assert.equal(fns.ReleaseSemaphore.handler([semaphore, 1, 0x3000]), 1);
+    assert.deepEqual([...written.get(0x3000)], [0, 0, 0, 0]);
 });
 
 test('OpenSemaphoreA reports no such thing for a name nothing created', ()=>{

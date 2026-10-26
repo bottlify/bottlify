@@ -72,6 +72,8 @@ const MAX_NAME = 260;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_INVALID_PARAMETER = 87;
+/** ReleaseSemaphore past the semaphore's maximum. */
+const ERROR_TOO_MANY_POSTS = 298;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 
 /** GetOverlappedResult on an operation still in progress, asked not to wait. */
@@ -1031,15 +1033,22 @@ export function createThreadingFunctions(host){
          * Releasing past the maximum fails and releases nothing -- it does not
          * clamp. A caller uses exactly that to detect its own double release,
          * and the previous count is written only on success, which is what makes
-         * the check meaningful.
+         * the check meaningful. Each refusal says why: no semaphore, a count
+         * that is not positive, or ERROR_TOO_MANY_POSTS past the maximum.
          */
         ReleaseSemaphore: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, count, previous])=>{
                 const semaphore = object(handle >>> 0, 'semaphore');
-                if (!semaphore || (count | 0) <= 0)
+                if (!semaphore)
                 {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if ((count | 0) <= 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 try
@@ -1056,6 +1065,7 @@ export function createThreadingFunctions(host){
                 }
                 catch (e){
                     void e;
+                    host.setLastError(ERROR_TOO_MANY_POSTS);
                     return 0;
                 }
             },
