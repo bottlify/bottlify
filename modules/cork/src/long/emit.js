@@ -101,6 +101,16 @@ const PK = 18;
  * code it can reach touches them, which a store must then leave alone.
  */
 const FRESH = 19;
+/**
+ * The budget as a region with a jump back and no wasm call holds it, the
+ * `budget` global read once at the entry: a jump back compares the count with
+ * it, as the 32-bit emitter's budget local is looked at, rather than reading
+ * the imported global each turn. Only a call changes the global while a
+ * region runs, so a region that makes one keeps the global: read back after
+ * every call, the local cost a loop of three calls more than it saved
+ * (`BlockEmitter.left`).
+ */
+const LEFT = 23;
 const PA = 20;
 const PB = 21;
 const PR = 22;
@@ -147,8 +157,8 @@ function unpack(b, { at, mask }){
     b.i32const(mask).op(Op.i32and);
 }
 
-// Locals 23 and 24, the record's parts before they were packed in PK, are
-// unused, kept so the ones after them keep their numbers; 19 is FRESH.
+// Local 24, a part of the record before it was packed in PK, is unused, kept
+// so the ones after it keep their numbers; 19 is FRESH, 23 LEFT.
 const LOCALS = [
     ...new Array(16).fill(ValType.i64), ValType.i64, ValType.i32,
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32,
@@ -349,6 +359,13 @@ class BlockEmitter {
          */
         this.selfEntry = -1;
         this.selfAt = 0;
+        /** Whether the region holds the budget in LEFT: it has a way back and no wasm call. */
+        this.left = false;
+    }
+
+    /** The budget left, from LEFT or the global (`left`). */
+    budget(){
+        return this.left ? this.b.localGet(LEFT) : this.b.globalGet(BUDGET);
     }
 
     /** The depth of a branch to the exit block from here. */
@@ -1793,7 +1810,8 @@ class BlockEmitter {
         if (to === this.selfEntry)
         {
             // The block's own start, round its loop while the budget lasts.
-            b.localGet(K).globalGet(BUDGET).op(Op.i32ges);
+            b.localGet(K);
+            this.budget().op(Op.i32ges);
             this.guard();
             b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
             this.close();
@@ -1812,7 +1830,8 @@ class BlockEmitter {
         if (index !== undefined)
         {
             // A jump back is what can loop: the budget bounds it.
-            b.localGet(K).globalGet(BUDGET).op(Op.i32ges);
+            b.localGet(K);
+            this.budget().op(Op.i32ges);
             this.guard();
             b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
             this.close();
@@ -1863,7 +1882,8 @@ class BlockEmitter {
                 b.br(to - here - 1 + this.nest + inside);
                 return;
             }
-            b.localGet(K).globalGet(BUDGET).op(Op.i32ges).unlikely().brIf(inside);
+            b.localGet(K);
+            this.budget().op(Op.i32ges).unlikely().brIf(inside);
             b.i32const(to).localSet(IDX).br(count - 1 - here + this.nest + inside);
         });
         b.end();
@@ -2440,6 +2460,48 @@ function flagLiveness(blocks, indexOf){
  */
 
 /**
+ * Where each block of a region may go on to inside it, by index: every way
+ * its last instruction could branch, the next block after a call (its
+ * return), a formed-in callee (`formCalls`) and the return addresses a formed
+ * ret jumps to (`returns`). Never less than the truth.
+ *
+ * @param {LongBlock[]} blocks  in address order @param {Map<number, number>} indexOf
+ * @param {Map<number, number[]>} returns @param {boolean} formCalls
+ * @returns {number[][]}
+ */
+function regionSuccessors(blocks, indexOf, returns, formCalls){
+    return blocks.map(block=>{
+        const last = block.instructions[block.instructions.length - 1];
+        const next = last.eip + last.length;
+        const [operand] = last.operands;
+        /** @type {number[]} */
+        const to = [];
+        if (!endsBlock(last.op) || last.op === 'call')
+        {
+            to.push(next);
+            if (formCalls && last.op === 'call' && operand?.kind === 'rel')
+            {
+                to.push(/** @type {number} */ (operand.target));
+            }
+        }
+        else
+        {
+            if (operand?.kind === 'rel')
+            {
+                to.push(/** @type {number} */ (operand.target));
+            }
+            if (last.op !== 'jmp' && last.op !== 'ret')
+            {
+                to.push(next);
+            }
+            to.push(...block.switch?.cases ?? []);
+        }
+        to.push(...returns.get(/** @type {number} */ (indexOf.get(block.entry))) ?? []);
+        return [...new Set(to.map(at=>indexOf.get(at)).filter(index=>index !== undefined))];
+    });
+}
+
+/**
  * Where each `ret` of the region may go on to inside it, as the 32-bit
  * translator's `inlineReturns` finds it: the return addresses of the direct
  * calls whose callee the region holds, for the rets that callee reaches by
@@ -2543,35 +2605,7 @@ function callSync(blocks, indexOf, seen, wrote, spills, written, returns, formCa
     const touches = seen.map(registers);
     const writes = wrote.map(registers);
     const calling = new Set(spills.map(spill=>spill.block));
-    const successors = blocks.map(block=>{
-        const last = block.instructions[block.instructions.length - 1];
-        const next = last.eip + last.length;
-        const [operand] = last.operands;
-        /** @type {number[]} */
-        const to = [];
-        if (!endsBlock(last.op) || last.op === 'call')
-        {
-            to.push(next);
-            if (formCalls && last.op === 'call' && operand?.kind === 'rel')
-            {
-                to.push(/** @type {number} */ (operand.target));
-            }
-        }
-        else
-        {
-            if (operand?.kind === 'rel')
-            {
-                to.push(/** @type {number} */ (operand.target));
-            }
-            if (last.op !== 'jmp' && last.op !== 'ret')
-            {
-                to.push(next);
-            }
-            to.push(...block.switch?.cases ?? []);
-        }
-        to.push(...returns.get(/** @type {number} */ (indexOf.get(block.entry))) ?? []);
-        return [...new Set(to.map(at=>indexOf.get(at)).filter(index=>index !== undefined))];
-    });
+    const successors = regionSuccessors(blocks, indexOf, returns, formCalls);
     /** The blocks reachable from `from`, itself included. @param {number} from */
     const reachable = from=>{
         const found = new Set([from]);
@@ -2789,6 +2823,13 @@ function emitRegion(layout, helpers, region,
     const liveAfter = flagLiveness(blocks, indexOf);
     // The rets of callees formed in, by block, and where each may go on in the region.
     const returns = formCalls ? formedReturns(blocks, indexOf) : new Map();
+    e.left = !blocks.some(block=>{
+        const last = block.instructions[block.instructions.length - 1];
+        const [operand] = last.operands;
+        return last.op === 'call' && !(formCalls && operand?.kind === 'rel'
+            && indexOf.has(/** @type {number} */ (operand.target)));
+    }) && regionSuccessors(blocks, indexOf, returns, formCalls)
+        .some((to, index)=>to.some(next=>next <= index));
     // Label 0 is the region's entry, label i + 1 its block i.
     b.globalGet(LABEL).i32const(1).op(Op.i32sub).i32const(first).globalGet(LABEL)
         .op(Op.select).localSet(IDX);
@@ -2976,7 +3017,12 @@ function emitRegion(layout, helpers, region,
     const tail = store(new Body(256), written, sync.guarded);
     storeRecord(tail, layout);
     tail.i32const(0).localGet(RIP).store('i64', { offset: layout.eip });
-    tail.globalGet(BUDGET).localGet(K).op(Op.i32sub).globalSet(BUDGET);
+    (e.left ? tail.localGet(LEFT) : tail.globalGet(BUDGET)).localGet(K).op(Op.i32sub);
+    if (e.left)
+    {
+        tail.localTee(LEFT);
+    }
+    tail.globalSet(BUDGET);
     tail.localGet(CODE).op(Op.i32eqz);
     tail.if();
     tail.localGet(RIP).globalGet(EXPECT).op(Op.i64eq);
@@ -2985,7 +3031,7 @@ function emitRegion(layout, helpers, region,
     tail.end();
     if (helpers.transfer !== null)
     {
-        tail.globalGet(BUDGET).i32const(0).op(Op.i32gts);
+        (e.left ? tail.localGet(LEFT) : tail.globalGet(BUDGET)).i32const(0).op(Op.i32gts);
         tail.if();
         tail.localGet(RIP).i32const(LongExit.NEXT).returnCall(helpers.transfer);
         tail.end();
@@ -2994,6 +3040,10 @@ function emitRegion(layout, helpers, region,
     tail.localGet(CODE);
     // The prologue: every register the body touches, the flags word and the record.
     const head = load(new Body(256), used);
+    if (e.left)
+    {
+        head.globalGet(BUDGET).localSet(LEFT);
+    }
     if (sync.guarded.size > 0)
     {
         head.i32const(0).localSet(FRESH);
