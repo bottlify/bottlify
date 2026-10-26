@@ -49,7 +49,9 @@ function hostFor({ lookup = {}, load } = {}){
 
     const host = {
         /** @param {number} address */
-        readCString: address=>strings.get(address) ?? '',
+        // Cut at the limit the caller passes, as the layer's reader is.
+        readCString: (/** @type {number} */ address, /** @type {number} */ limit)=>
+            (strings.get(address) ?? '').slice(0, limit),
         /** @param {number} address */
         readWideString: address=>strings.get(address) ?? '',
         writeMemory: ()=>{},
@@ -294,6 +296,20 @@ test('a NULL name loads nothing and reads nothing: ERROR_INVALID_PARAMETER', ()=
     assert.equal(fns.LoadLibraryExA.handler([0x400000, 0, 0]), 0, 'nor does an empty one');
     assert.equal(f.lastError(), 126, 'ERROR_MOD_NOT_FOUND');
     assert.deepEqual(asked, []);
+});
+
+test('a name longer than MAX_PATH reaches the loader whole, never cut to another', ()=>{
+    // Windows reads a library's name to its terminator; one cut at 260
+    // characters names some other file.
+    /** @type {string[]} */
+    const asked = [];
+    const f = hostFor({ load: name=>{ asked.push(name); return 0; } });
+    const fns = createModuleFunctions(f.host);
+    const name = `C:\\${'long\\'.repeat(60)}lib.dll`;
+    f.say(0x400000, name);
+    fns.LoadLibraryA.handler([0x400000]);
+    fns.LoadLibraryExA.handler([0x400000, 0, 0]);
+    assert.deepEqual(asked.map(text=>text.length), [name.length, name.length]);
 });
 
 test('FreeLibrary takes back a data file by the handle LoadLibraryEx gave out', ()=>{

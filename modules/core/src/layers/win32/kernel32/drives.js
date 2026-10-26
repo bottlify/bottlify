@@ -30,6 +30,12 @@
 
 import { encodeAnsi } from './locale.js';
 
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
 /** @param {string} text @returns {Uint8Array} UTF-16, as a wide string is written. */
 const encodeWide = text=>new Uint8Array(Uint16Array.from(text,
     character=>character.charCodeAt(0)).buffer);
@@ -439,7 +445,7 @@ export function createDriveFunctions(host){
 
     return {
         /** DWORD QueryDosDeviceA(LPCSTR lpDeviceName, LPSTR lpTargetPath, DWORD ucchMax) */
-        QueryDosDeviceA: queryDosDevice(address=>host.readCString(address, MAX_PATH), encodeAnsi),
+        QueryDosDeviceA: queryDosDevice(address=>host.readCString(address, WHOLE_NAME), encodeAnsi),
 
         /** DWORD QueryDosDeviceW(LPCWSTR lpDeviceName, LPWSTR lpTargetPath, DWORD ucchMax) */
         QueryDosDeviceW: queryDosDevice(address=>host.readWideString(address, MAX_PATH * 2),
@@ -479,7 +485,7 @@ export function createDriveFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>driveType(
-                path === 0 ? '' : host.readCString(path >>> 0, MAX_PATH)),
+                path === 0 ? '' : host.readCString(path >>> 0, WHOLE_NAME)),
         },
 
         /** UINT GetDriveTypeW(LPCWSTR lpRootPathName) */
@@ -542,7 +548,7 @@ export function createDriveFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([path, name])=>{
-                const root = path === 0 ? '' : host.readCString(path >>> 0, MAX_PATH);
+                const root = path === 0 ? '' : host.readCString(path >>> 0, WHOLE_NAME);
                 const letter = letterOf(root);
                 if (letter === null || !known(root))
                 {
@@ -554,7 +560,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_WRITE_PROTECT);
                     return 0;
                 }
-                labels.set(letter, name === 0 ? '' : host.readCString(name >>> 0, MAX_PATH));
+                labels.set(letter, name === 0 ? '' : host.readCString(name >>> 0, WHOLE_NAME));
                 return 1;
             },
         },

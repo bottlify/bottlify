@@ -22,6 +22,12 @@
 
 import { encodeAnsi } from './locale.js';
 
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
 /** A module name is at most this long; longer is a pointer that is not a string. */
 const MAX_NAME = 260;
 
@@ -341,7 +347,7 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>((name >>> 0) === 0 ? noName()
-                : load(host.readCString(name >>> 0, MAX_NAME))),
+                : load(host.readCString(name >>> 0, WHOLE_NAME))),
         },
 
         /**
@@ -360,7 +366,7 @@ export function createModuleFunctions(host){
                 {
                     return noName();
                 }
-                return load(host.readCString(name >>> 0, MAX_NAME), flags >>> 0);
+                return load(host.readCString(name >>> 0, WHOLE_NAME), flags >>> 0);
             },
         },
         LoadLibraryExW: {
@@ -371,7 +377,7 @@ export function createModuleFunctions(host){
                 {
                     return noName();
                 }
-                return load(host.readWideString(name >>> 0, MAX_NAME * 2), flags >>> 0);
+                return load(host.readWideString(name >>> 0, WHOLE_NAME * 2), flags >>> 0);
             },
         },
 
@@ -389,7 +395,7 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>{
-                dllDirectory = (path >>> 0) === 0 ? null : host.readCString(path >>> 0, MAX_NAME);
+                dllDirectory = (path >>> 0) === 0 ? null : host.readCString(path >>> 0, WHOLE_NAME);
                 return 1;
             },
         },
@@ -498,7 +504,7 @@ export function createModuleFunctions(host){
 
                 const wanted = isOrdinal(name >>> 0)
                     ? `#${name >>> 0}`
-                    : host.readCString(name >>> 0, MAX_NAME);
+                    : host.readCString(name >>> 0, WHOLE_NAME);
                 const address = isOrdinal(name >>> 0)
                     ? module.addressOfOrdinal(name >>> 0)
                     : module.addressOf(wanted);

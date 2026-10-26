@@ -36,6 +36,12 @@ import { createRefusals } from '../common/refusal.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
+/**
  * @typedef {Object} CommonDialogHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, maxLength: number) => string} [readCString]
@@ -335,7 +341,7 @@ export function createCommonDialogFunctions(host){
             /** @param {number[]} args */
             handler: ([file, title, size])=>getFileTitle(
                 !host.readCString || (file >>> 0) === 0 ? null
-                    : host.readCString(file >>> 0, MAX_PATH), title, size, false),
+                    : host.readCString(file >>> 0, WHOLE_NAME), title, size, false),
         },
 
         /** short GetFileTitleW(LPCWSTR lpszFile, LPWSTR lpszTitle, WORD cchSize): the same, wide. */

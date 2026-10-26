@@ -935,7 +935,7 @@ export function createFileFunctions(host){
     /** @type {TextForm} */
     const ANSI = {
         path: pathArgument,
-        raw: pointer=>pointer === 0 ? '' : readName(pointer >>> 0, MAX_PATH),
+        raw: pointer=>pointer === 0 ? '' : readName(pointer >>> 0, MAX_PATH_LIST),
         list: pointer=>readName(pointer >>> 0, MAX_PATH_LIST),
         write: writeStringTo,
         findData: writeFindData,

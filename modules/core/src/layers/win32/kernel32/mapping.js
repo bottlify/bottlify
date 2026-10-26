@@ -8,6 +8,12 @@ import { TAKEN } from './named-objects.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 
 /**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
+/**
  * The two things kernel32 lets a program treat as memory instead of as a
  * stream: a file mapping and a pipe.
  *
@@ -43,9 +49,6 @@ const ALLOCATION_GRANULARITY = 0x10000;
 
 /** INVALID_HANDLE_VALUE, which CreateFileMapping takes to mean "no file". */
 const INVALID_HANDLE_VALUE = 0xffffffff;
-
-/** A name is at most this long; longer is a pointer that is not a string. */
-const MAX_NAME = 260;
 
 /**
  * The PAGE_* half of flProtect, and the protections of it a view can be
@@ -213,8 +216,8 @@ export function createMappingFunctions(host){
         {
             return null;
         }
-        return (wide ? host.readWideString(pointer >>> 0, MAX_NAME * 2)
-            : host.readCString(pointer >>> 0, MAX_NAME)) || null;
+        return (wide ? host.readWideString(pointer >>> 0, WHOLE_NAME * 2)
+            : host.readCString(pointer >>> 0, WHOLE_NAME)) || null;
     };
 
     /**

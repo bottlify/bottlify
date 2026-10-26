@@ -24,6 +24,12 @@ import { CabinetError, COMPRESSION } from './cabinet.js';
 import { extractCabinet, readCabinetHead } from './stream.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
 /** FDICopy's notifications. */
 const fdintCABINET_INFO = 0;
 const fdintPARTIAL_FILE = 1;
@@ -255,8 +261,8 @@ export function createCabinetFunctions(host){
                     return 0;
                 }
                 const thread = host.callerThread();
-                const name = host.readCString(cabinetName >>> 0, 260);
-                const directory = host.readCString(cabinetPath >>> 0, 260);
+                const name = host.readCString(cabinetName >>> 0, WHOLE_NAME);
+                const directory = host.readCString(cabinetPath >>> 0, WHOLE_NAME);
                 const path = guestString(directory + name);
                 /** @param {number} kind @param {(block: Uint8Array) => void} fill */
                 const tell = async(kind, fill)=>{

@@ -45,6 +45,12 @@ import { urlOfShortcut } from './internet-shortcut.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
+/**
  * The exports a program imports from shell32 by number alone, by their XP
  * ordinals.
  */
@@ -376,7 +382,7 @@ export function createShellFunctions(host){
         }
         try
         {
-            return host.readCString(address >>> 0, MAX_PATH);
+            return host.readCString(address >>> 0, WHOLE_NAME);
         }
         catch (e){
             void e;

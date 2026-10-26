@@ -11,6 +11,12 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { verLanguageName } from '../kernel32/languages.js';
 
 /**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
+/**
  * version — what a file says about itself.
  *
  * The three calls are one operation split in three: ask how big the block is,
@@ -219,9 +225,6 @@ const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
-
-/** A path is at most this long; longer is a pointer that is not a string. */
-const MAX_PATH = 260;
 
 /** @param {Uint8Array} block @param {number} at */
 const u16 = (block, at)=>block[at] | block[at + 1] << 8;
@@ -491,10 +494,10 @@ export function createVersionFunctions(host){
     // of a version block.
     /** @param {number} address */
     const narrow = address=>((address >>> 0) === 0 ? ''
-        : host.readCString(address >>> 0, MAX_PATH));
+        : host.readCString(address >>> 0, WHOLE_NAME));
     /** @param {number} address */
     const wide = address=>((address >>> 0) === 0 ? ''
-        : host.readWideString?.(address >>> 0, MAX_PATH * 2) ?? '');
+        : host.readWideString?.(address >>> 0, WHOLE_NAME * 2) ?? '');
 
     /**
      * GetFileVersionInfoSize, for either spelling: the block and the room its

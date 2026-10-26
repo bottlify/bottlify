@@ -49,6 +49,12 @@ import {
 import { describe } from './describe.js';
 import { createStreaming } from './stream.js';
 
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
 const E_NOTIMPL = 0x80004001;
@@ -100,9 +106,6 @@ const DEFAULT_VIDEO_HEIGHT = 480;
 /** IMediaSeeking's positioning flags: the low two bits say how to read the position. */
 const AM_SEEKING_POSITIONING_MASK = 0x03;
 const AM_SEEKING_ABSOLUTE = 0x01;
-
-/** A file name no longer than Windows would hand a filter graph. */
-const MAX_PATH = 260;
 
 /**
  * How many frames one tick may decode, and how many decoder steps it may take
@@ -266,7 +269,7 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  */
 function openMedia(host, path){
     const name = host.video && (path >>> 0) !== 0
-        ? host.readWideString?.(path >>> 0, MAX_PATH * 2) ?? ''
+        ? host.readWideString?.(path >>> 0, WHOLE_NAME * 2) ?? ''
         : '';
     return name === '' ? null : host.video?.open(name) ?? null;
 }
@@ -902,8 +905,8 @@ export function createQuartz(host){
             return E_POINTER;
         }
         const sources = streaming;
-        const file = (path >>> 0) === 0 ? '' : stream.readWideString(path >>> 0, MAX_PATH * 2);
-        const label = (name >>> 0) === 0 ? file : stream.readWideString(name >>> 0, MAX_PATH * 2);
+        const file = (path >>> 0) === 0 ? '' : stream.readWideString(path >>> 0, WHOLE_NAME * 2);
+        const label = (name >>> 0) === 0 ? file : stream.readWideString(name >>> 0, WHOLE_NAME * 2);
         /** @param {VideoClip | null} clip */
         const took = clip=>{
             if (!clip || !clip.hasVideo)
