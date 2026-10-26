@@ -481,6 +481,28 @@ test('x87 runs in regions as the interpreter runs it, the unit and what it leave
     }
 });
 
+test('an x87 run whose later store finds a closed page faults where the interpreter faults', ()=>{
+    // fld qword [rbx]; fld qword [rbx + 8]; faddp; fstp qword [rcx]; fld1; fstp qword [rbx]
+    const code = 'dd03dd4308dec1dd19d9e8dd1b';
+    const base = CORPUS.cases[0];
+    const end = CORPUS.dataAt + CORPUS.dataSize;
+    const cases = [BigInt(CORPUS.dataAt + 64), BigInt(end - 4), BigInt(CORPUS.dataAt - 8),
+        1n << 32n, (1n << 32n) + BigInt(CORPUS.dataAt)].map(rcx=>{
+        const regs = [...base.regs];
+        regs[1] = rcx.toString(16);
+        regs[3] = (CORPUS.dataAt + 16).toString(16);
+        return { ...base, text: `x87 run rcx=${rcx.toString(16)}`, code, regs };
+    });
+    for (const budget of [3, 100000])
+    {
+        const { failures, exits, stats } = compare(cases, budget, true, true);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        // The one open place ran to its exit; the others faulted at the store.
+        assert.equal(exits, 1);
+        assert.ok(stats.translated > 0);
+    }
+});
+
 test('nested loops, jumps over them, out of them and into them run as interpreted', ()=>{
     const instructions = pool();
     const cases = Array.from({ length: 400 }, (_, i)=>nested(instructions, 0x1005 + i));

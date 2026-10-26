@@ -450,7 +450,7 @@ export function createLongRunner(settings){
             record.wrapped = !readsChecked;
             const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
                 slotOf, { transfers, checkReads: readsChecked, looseStacks: loose,
-                    defaultNaNNegative, x87Id: instruction=>x87.add(instruction),
+                    defaultNaNNegative, x87Id: run=>x87.add(run),
                     formCalls: leafCalls, profileCalls: profileAt >= 0 }));
             const instance = new WebAssembly.Instance(module,
                 { env: { memory, table, budget: budgetGlobal, depth, label, expect,

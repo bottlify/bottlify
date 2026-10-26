@@ -17,8 +17,15 @@
  * where the region already found it may; it folds the flags into FL before
  * an instruction that reads or writes them.
  *
- * The call answers what the instruction leaves outside the unit: the flags
- * word `fcomi` and its kin write, or the status word `fnstsw ax` puts in AX.
+ * A run of x87 instructions in a row is one call (`x87Run` in `emit.js`):
+ * the unit loaded from the state block and stored back once for all of them,
+ * their memory operands' addresses its parameters in order. In a C library's
+ * `long double` routine forty instructions stood between two integer ones,
+ * each a call and a load and store of the whole unit.
+ *
+ * The call answers what the run's last instruction leaves outside the unit:
+ * the flags word `fcomi` and its kin write, or the status word `fnstsw ax`
+ * puts in AX -- the one instruction that does, a run ends at it.
  */
 
 import { evaluateX87, isX87Op } from '../ir-x87.js';
@@ -46,16 +53,18 @@ export function regionX87(instruction){
 export const x87Stores = op=>STORES.has(op);
 
 /**
- * The model behind the regions' `x87` import: instructions registered as the
- * regions are emitted, by number, and the call that runs one.
+ * The model behind the regions' `x87` import: runs of instructions registered
+ * as the regions are emitted, by number, and the call that runs one.
  *
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout }} machine
  */
 export function createX87Calls({ memory, layout }){
-    /** @type {import('../decode/decoder.js').Instruction[]} */
-    const instructions = [];
+    /** @type {import('../decode/decoder.js').Instruction[][]} */
+    const runs = [];
     const words = new Uint32Array(16);
+    /** By register, its shadow at the last instruction of a run it was exact after. */
+    const lastShadow = new BigInt64Array(8);
     let view = new DataView(memory.buffer);
     const ram = layout.ramBase;
     const unit = layout.x87;
@@ -105,24 +114,24 @@ export function createX87Calls({ memory, layout }){
         fresh,
 
         /**
-         * A number for the instruction, which the region passes back.
+         * A number for the run, which the region passes back.
          *
-         * @param {import('../decode/decoder.js').Instruction} instruction
+         * @param {import('../decode/decoder.js').Instruction[]} run
          */
-        add(instruction){
-            instructions.push(instruction);
-            return instructions.length - 1;
+        add(run){
+            runs.push(run);
+            return runs.length - 1;
         },
 
         /**
-         * Runs instruction `id` over the unit in the state block.
+         * Runs run `id` over the unit in the state block.
          *
-         * @param {number} id @param {number} address  its memory operand's, placed
-         * @param {number} flags  the flags word, whole
+         * @param {number} id @param {number} flags  the flags word, whole
+         * @param {...number} addresses  its memory operands', placed, in order
          * @returns {number}  the flags word after it, or with `fnstsw ax` the status word
          */
-        call(id, address, flags){
-            const instruction = instructions[id];
+        call(id, flags, ...addresses){
+            const run = runs[id];
             for (let i = 0; i < 8; i++)
             {
                 words[i * 2] = view.getUint32(unit + i * 16, true);
@@ -142,9 +151,28 @@ export function createX87Calls({ memory, layout }){
                 }
             }
             state.eflags = flags;
-            if (!evaluateX87(instruction, state, ()=>address))
+            let placed = 0;
+            // The registers exact after any instruction of the run, and each
+            // one's shadow then: what goes back, as a call an instruction would
+            // have left it -- not a shadow an exchange put beside a double since.
+            let shadowed = 0;
+            for (const instruction of run)
             {
-                throw new Error(`long x87: no case for ${instruction.op}`);
+                const address = instruction.operands.some(operand=>operand.kind === 'mem')
+                    ? addresses[placed++] : 0;
+                if (!evaluateX87(instruction, state, ()=>address))
+                {
+                    throw new Error(`long x87: no case for ${instruction.op}`);
+                }
+                const exact = state.x87Exact & 0xff;
+                shadowed |= exact;
+                for (let i = 0; exact >>> i !== 0; i++)
+                {
+                    if ((exact >>> i & 1) !== 0)
+                    {
+                        lastShadow[i] = state.x87Shadow[i];
+                    }
+                }
             }
             for (let i = 0; i < 8; i++)
             {
@@ -155,16 +183,15 @@ export function createX87Calls({ memory, layout }){
             view.setUint8(layout.x87Empty, state.empty & 0xff);
             view.setUint16(layout.x87Control, state.control & 0xffff, true);
             view.setUint16(layout.x87Status, state.status & 0xffff, true);
-            const exactOut = state.x87Exact & 0xff;
-            view.setUint8(exactAt, exactOut);
-            for (let i = 0; exactOut >>> i !== 0; i++)
+            view.setUint8(exactAt, state.x87Exact & 0xff);
+            for (let i = 0; shadowed >>> i !== 0; i++)
             {
-                if ((exactOut >>> i & 1) !== 0)
+                if ((shadowed >>> i & 1) !== 0)
                 {
-                    view.setBigInt64(unit + i * 16 + 8, state.x87Shadow[i], true);
+                    view.setBigInt64(unit + i * 16 + 8, lastShadow[i], true);
                 }
             }
-            return instruction.operands[0]?.kind === 'reg' ? state.reg[0] & 0xffff
+            return run[run.length - 1].operands[0]?.kind === 'reg' ? state.reg[0] & 0xffff
                 : state.eflags | 0;
         },
     };

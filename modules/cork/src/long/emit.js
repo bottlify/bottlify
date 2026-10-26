@@ -169,6 +169,8 @@ const LOCALS = [
     ...new Array(19).fill(ValType.v128), ValType.f32, ValType.f32, ValType.f64, ValType.f64,
     // The address the wasm call waiting for this one expects it to return to.
     ValType.i64,
+    // The memory operands' addresses of an x87 run (`x87`).
+    ValType.i32, ValType.i32, ValType.i32, ValType.i32,
 ];
 /** The float scratch locals, past the vectors. */
 const F32 = XMM + 19;
@@ -178,6 +180,44 @@ const F32 = XMM + 19;
  * value the whole function keeps live, only one a call puts back.
  */
 const EXPECTED = XMM + 23;
+/** The first of the four locals an x87 run's memory operands are placed in. */
+const X87_ADDRESSES = XMM + 24;
+/** The most memory operands an x87 run passes the model, one parameter each. */
+const X87_OPERANDS = 4;
+/** The most instructions in one x87 run. */
+const X87_RUN = 32;
+
+/**
+ * The end, past it, of the x87 run that starts at instruction `i`: the
+ * instructions the model runs in one call, as many in a row as the region
+ * calls it for, up to `X87_OPERANDS` memory operands -- and ended by one that
+ * leaves something outside the unit (the flags `fcomi` writes, AX `fnstsw ax`
+ * does), which the call answers. No x87 instruction changes a register an
+ * address is made of but `fnstsw ax`, so every address is placed before the
+ * call.
+ *
+ * @param {import('../decode/decoder.js').Instruction[]} list @param {number} i
+ */
+function x87Run(list, i){
+    let end = i;
+    let memories = 0;
+    while (end < list.length && end - i < X87_RUN && regionX87(list[end]))
+    {
+        const instruction = list[end];
+        const memory = instruction.operands.some(operand=>operand.kind === 'mem') ? 1 : 0;
+        if (memories + memory > X87_OPERANDS)
+        {
+            break;
+        }
+        memories += memory;
+        end++;
+        if (instruction.flagsWritten !== 0 || instruction.operands[0]?.kind === 'reg')
+        {
+            break;
+        }
+    }
+    return end;
+}
 /** The direction flag, which no record holds. */
 const DF = 1 << 10;
 /**
@@ -301,9 +341,9 @@ class BlockEmitter {
     /**
      * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
      * @param {{ flags: number, shift: number, transfer: number | null, x87: number | null,
-     *     x87Id: ((instruction: import('../decode/decoder.js').Instruction) => number) | null }}
+     *     x87Id: ((run: import('../decode/decoder.js').Instruction[]) => number) | null }}
      *     helpers  function indices, `transfer` none without transfers, `x87` none where the
-     *     regions leave x87 to the interpreter; `x87Id` numbers an instruction for it
+     *     regions leave x87 to the interpreter; `x87Id` numbers a run of instructions for it
      * @param {boolean} checkReads  reads test their pages, rather than wrap into RAM
      * @param {boolean} looseStacks  a store through rsp alone tests no page
      */
@@ -1191,7 +1231,7 @@ class BlockEmitter {
         }
         if (regionX87(instruction))
         {
-            this.x87(instruction, index, at);
+            this.x87([instruction], index, at);
             return true;
         }
         /** Places a memory operand, if the instruction has one. @param {boolean} store */
@@ -1988,47 +2028,56 @@ class BlockEmitter {
     }
 
     /**
-     * An x87 instruction, the model's (`x87.js`): its memory operand placed,
-     * the flags whole where it reads or writes them, and what it leaves
-     * outside the unit taken back -- FL from `fcomi` and its kin, AX from
-     * `fnstsw ax`.
+     * An x87 run (`x87Run`), the model's (`x87.js`) in one call: each memory
+     * operand placed, a page that is not open leaving before the run's first
+     * instruction, none of which has run then; the flags whole where one reads
+     * or writes them; and what the last leaves outside the unit taken back --
+     * FL from `fcomi` and its kin, AX from `fnstsw ax`.
      *
-     * @param {import('../decode/decoder.js').Instruction} instruction
-     * @param {number} index @param {number} at
+     * @param {import('../decode/decoder.js').Instruction[]} run
+     * @param {number} index @param {number} at  the first instruction's
      */
-    x87(instruction, index, at){
+    x87(run, index, at){
         const { b, helpers } = this;
         if (helpers.x87 === null || helpers.x87Id === null)
         {
             throw new Error('long emit: x87 in a region, and no model to call');
         }
-        const memory = instruction.operands.find(operand=>operand.kind === 'mem');
-        if (memory !== undefined)
+        let placed = 0;
+        for (const instruction of run)
         {
-            this.place(memory, x87Stores(instruction.op), index, at);
+            const memory = instruction.operands.find(operand=>operand.kind === 'mem');
+            if (memory !== undefined)
+            {
+                this.place(memory, x87Stores(instruction.op), index, at);
+                b.localGet(A).localSet(X87_ADDRESSES + placed++);
+            }
         }
-        const flags = (instruction.flagsRead | instruction.flagsWritten) !== 0;
-        if (flags)
+        if (run.some(instruction=>(instruction.flagsRead | instruction.flagsWritten) !== 0))
         {
             this.settle();
         }
-        b.i32const(helpers.x87Id(instruction));
-        if (memory !== undefined)
+        b.i32const(helpers.x87Id(run)).localGet(FL);
+        for (let k = 0; k < X87_OPERANDS; k++)
         {
-            b.localGet(A);
+            if (k < placed)
+            {
+                b.localGet(X87_ADDRESSES + k);
+            }
+            else
+            {
+                b.i32const(0);
+            }
         }
-        else
-        {
-            b.i32const(0);
-        }
-        b.localGet(FL).call(helpers.x87);
-        if (instruction.operands[0]?.kind === 'reg')
+        b.call(helpers.x87);
+        const last = run[run.length - 1];
+        if (last.operands[0]?.kind === 'reg')
         {
             // fnstsw ax: AX, the rest of RAX as it was.
             b.op(Op.i64extendu).localGet(0).i64const(~0xffffn).op(Op.i64and).op(Op.i64or)
                 .localSet(0);
         }
-        else if (instruction.flagsWritten !== 0)
+        else if (last.flagsWritten !== 0)
         {
             b.localSet(FL);
         }
@@ -2339,10 +2388,10 @@ function shiftHelper(){
  *     which holds `missFunction` until there is one
  * @param {{ transfers?: boolean, checkReads?: boolean, looseStacks?: boolean,
  *     defaultNaNNegative?: boolean, formCalls?: boolean, profileCalls?: boolean,
- *     x87Id?: ((instruction: import('../decode/decoder.js').Instruction) => number) | null }}
+ *     x87Id?: ((run: import('../decode/decoder.js').Instruction[]) => number) | null }}
  *     [options]  `defaultNaNNegative`, the host's
  *     (`features`): false puts an invalid operation's NaN right (`simd.js`); `x87Id`
- *     numbers an x87 instruction for the model the regions import as `env.x87`
+ *     numbers a run of x87 instructions for the model the regions import as `env.x87`
  *     (`x87.js`), without which x87 is the interpreter's
  *     `checkReads`: reads test their pages, rather than wrap into RAM; `looseStacks`: a
  *     store through rsp alone tests no page either (the 32-bit translator's
@@ -2368,9 +2417,10 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     m.importGlobal('env', 'depth', ValType.i32, true);
     m.importGlobal('env', 'label', ValType.i32, true);
     m.importGlobal('env', 'expect', ValType.i64, true);
-    // The x87 model, where the runner gives it: (instruction, address, flags) -> i32.
+    // The x87 model, where the runner gives it: (run, flags, four addresses) -> i32.
     const x87 = x87Id === null ? null : m.importFunction('env', 'x87', m.type({
-        params: [ValType.i32, ValType.i32, ValType.i32], results: [ValType.i32] }));
+        params: [ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32],
+        results: [ValType.i32] }));
     const flags = flagsHelper();
     const shift = shiftHelper();
     const flagsType = m.type({ params: flags.params, results: flags.results });
@@ -2912,10 +2962,21 @@ function emitRegion(layout, helpers, region,
         /** @type {Ending} */
         let ending = true;
         let retired = 0;
-        for (const instruction of block.instructions)
+        const list = block.instructions;
+        for (let i = 0; i < list.length; i++)
         {
+            const run = helpers.x87 === null ? i : x87Run(list, i);
+            if (run > i + 1)
+            {
+                // A run of x87 instructions, one call of the model.
+                e.live = liveAfter[index][run - 1] & ARITH;
+                e.x87(list.slice(i, run), retired, list[i].eip);
+                retired += run - i;
+                i = run - 1;
+                continue;
+            }
             e.live = liveAfter[index][retired] & ARITH;
-            ending = e.instruction(instruction, retired);
+            ending = e.instruction(list[i], retired);
             retired++;
             if (ending !== true)
             {
