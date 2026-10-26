@@ -1769,6 +1769,33 @@ class BlockEmitter {
     }
 
     /**
+     * An indirect jump to RIP among the region's own blocks: the entry hash's
+     * first slot for RIP looked at as the transfer looks at it, and where it
+     * names this region (its table slot) the dispatch loop goes round to the
+     * block at its label, while the budget lasts, as a jump back does. Else,
+     * on to the exit after it, which leaves through the transfer.
+     *
+     * @param {number} here @param {number} count  the region's blocks
+     * @param {number} slot  the region's table slot
+     */
+    dispatch(here, count, slot){
+        const { b, layout } = this;
+        b.block();
+        this.nest++;
+        b.localGet(RIP).i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz).brIf(0);
+        b.localGet(RIP).op(Op.i32wrap).localTee(A).i32const(0x9e3779b1 | 0).op(Op.i32mul)
+            .i32const(layout.hashShift ?? 16).op(Op.i32shru).i32const(Tables.HASH_SLOT)
+            .op(Op.i32mul).i32const(layout.tables + Tables.HASH).op(Op.i32add).localTee(U)
+            .load('i32').localGet(A).op(Op.i32ne).brIf(0);
+        b.localGet(U).load('i32', { offset: 4 }).i32const(slot).op(Op.i32ne).brIf(0);
+        b.localGet(K).globalGet(BUDGET).op(Op.i32lts).op(Op.i32eqz).brIf(0);
+        b.localGet(U).load('i32_16u', { offset: 8 }).i32const(1).op(Op.i32sub).localSet(IDX)
+            .br(count - 1 - here + this.nest);
+        b.end();
+        this.nest--;
+    }
+
+    /**
      * A call as a wasm call: what the block retired charged, the registers
      * and flags to the block, the callee called expecting `next` -- a direct
      * call's region at `to` through its table slot at its entry, an indirect
@@ -2107,6 +2134,8 @@ function shiftHelper(){
  * @property {number} entry
  * @property {import('../decode/decoder.js').Instruction[]} instructions  what it runs; the
  *     last a branch, or not when the block was cut short, and then it goes on past it
+ * @property {number[]} [cases]  where its indirect jump goes through a switch's table
+ *     (`switch.js`): the jump looks its target up among the region's blocks (`dispatch`)
  */
 
 /**
@@ -2452,6 +2481,10 @@ function emitRegion(layout, helpers, region,
         }
         else if (ending.to === null)
         {
+            if (block.cases !== undefined)
+            {
+                e.dispatch(index, count, slotOf(region.blocks[0].entry));
+            }
             b.br(e.exitDepth);
         }
         else if (ending.cc === undefined)

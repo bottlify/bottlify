@@ -29,6 +29,7 @@ import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { features } from '../wasm/features.js';
 import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
+import { switchCases } from './switch.js';
 import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, translates }
     from './emit.js';
 
@@ -91,7 +92,7 @@ export function createLongRunner(settings){
     const byPage = new Map();
     const limits = memoryLimits(memory);
     const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0,
-        entered: 0, readSwitches: 0, stackSwitches: 0 };
+        entered: 0, readSwitches: 0, stackSwitches: 0, switches: 0 };
     /**
      * The instructions run on the interpreter one at a time -- the one a block
      * stopped before, or a start no block holds -- by mnemonic, counted each
@@ -298,8 +299,11 @@ export function createLongRunner(settings){
                 {
                     // A jump into a block made already: it is split there, both
                     // halves the region's, rather than its tail translated twice.
-                    const tail = { entry: at, instructions: inside.instructions.slice(index) };
+                    /** @type {import('./emit.js').LongBlock} */
+                    const tail = { entry: at, instructions: inside.instructions.slice(index),
+                        ...inside.cases === undefined ? {} : { cases: inside.cases } };
                     inside.instructions = inside.instructions.slice(0, index);
+                    delete inside.cases;
                     blocks.push(tail);
                     byStart.set(at, tail);
                     ordered.splice(place(at), 0, at);
@@ -317,11 +321,20 @@ export function createLongRunner(settings){
             {
                 continue;
             }
+            /** @type {import('./emit.js').LongBlock} */
             const block = { entry: at, instructions };
             blocks.push(block);
             byStart.set(at, block);
             ordered.splice(place(at), 0, at);
             size += endOf(block) - at;
+            // A switch's cases join the region, its jump a branch among them.
+            const cases = switchCases(block, blocks, fetch);
+            if (cases !== null)
+            {
+                block.cases = cases;
+                queue.push(...cases);
+                stats.switches++;
+            }
             queue.push(...successors(instructions));
         }
         /** @type {LongEntry} */

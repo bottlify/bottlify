@@ -413,6 +413,41 @@ test('nested loops, jumps over them, out of them and into them run as interprete
     }
 });
 
+test('the cases of a switch join its region, its jump going among them as interpreted', ()=>{
+    // Eight rounds through four switches, then eight more after a table is rewritten
+    // (tools: GNU as, `ld -Ttext=0x20000000 --oformat binary`):
+    //   jmp [tableA + rax*8]                 GCC's absolute quadwords, bound by cmp esi, 5; ja
+    //   lea rdx, [rip + base]; mov ecx, [rdx + rax*4 + tableB - base]; add rcx, rdx; jmp rcx
+    //                                        MSVC's RVAs from a base below the code (the
+    //                                        image's), the index widened by movsxd
+    //   lea rdx, [rip + tableC]; movsxd rax, [rdx + rax*4]; add rax, rdx; jmp rax
+    //                                        MinGW's offsets, the bound tested in memory
+    //   jmp [0x10000040 + rax*8]             a table in the data area, filled by the program
+    //                                        (read at forming before or after the fill), and
+    //                                        an entry rewritten once its region has run
+    // Each case changes a word of [rbx] differently, a default the indices past the bound.
+    const code = '488d05d40000004889042540000010488d05cc0000004889042548000010488d05c4000000488904'
+        + '25500000104531c931f683fe05772889f0ff24c52001002048830301eb204883030aeb1a48830364'
+        + '48830303eb10486b0b0348890beb07488103e803000083fe0477294863c6488d158bffffff8b8c82'
+        + '500100004801d1ffe14883430807eb1148836b0805eb0a48837308554883430802897318837b1803'
+        + '77268b4318488d15b8000000486304824801d0ffe0488343100beb1148d16310eb0b48f75310eb05'
+        + '488343100d83fe02771d89f0ff24c5400000104883432011eb1248c1432003eb0b48f75b20eb0548'
+        + '83432013ffc683fe080f8233ffffff4585c9757041ffc1488d05dbffffff488904254800001031f6'
+        + 'e915ffffff0f1f00400000200000000046000020000000004c000020000000005000002000000000'
+        + '56000020000000005f0000200000000081000000880000008f0000008f0000008100000051ffffff'
+        + '58ffffff5effffff51ffffff';
+    const cases = CORPUS.cases.slice(0, 6).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `switch ${i}`, code }));
+    for (const [budget, transfers] of /** @type {const} */ ([[7, true], [100000, true], [50, false]]))
+    {
+        const { failures, exits, stats } = compare(cases, budget, transfers);
+        assert.deepEqual(failures, [], `budget ${budget}, transfers ${transfers}`);
+        assert.equal(exits, cases.length);
+        // GCC's, MSVC's and MinGW's tables in the code are read wherever they are formed.
+        assert.ok(stats.switches >= 3, JSON.stringify(stats));
+    }
+});
+
 test('an access across into a closed page or past 4 GiB faults where the interpreter faults', ()=>{
     const base = CORPUS.cases[0];
     const end = CORPUS.dataAt + CORPUS.dataSize;
