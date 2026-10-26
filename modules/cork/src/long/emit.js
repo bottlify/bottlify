@@ -51,6 +51,7 @@ import { Tables, hashSlotsOf, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
 import { XMM, emitSimd, translatesSimd } from './simd.js';
+import { regionX87, x87Stores } from './x87.js';
 import { wrapIntoRam } from '../emit/memory.js';
 import { deadFlagPass, liveFlagsOut } from '../emit/region.js';
 
@@ -219,6 +220,11 @@ export function translates(instruction){
     {
         return !prefixes.lock;
     }
+    if (regionX87(instruction))
+    {
+        // The model's (`x87.js`), for a runner that gives the regions it.
+        return !prefixes.lock;
+    }
     // A repeat prefix on a branch is a hint (`rep ret`, `bnd jmp`); on anything
     // translated here but a string instruction it means nothing either.
     if ((prefixes.lock && !LOCKABLE.has(op))
@@ -283,8 +289,10 @@ export const endsBlock = op=>op === 'jmp' || op === 'call' || op === 'ret' || op
 class BlockEmitter {
     /**
      * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
-     * @param {{ flags: number, shift: number, transfer: number | null }} helpers  function
-     *     indices; `transfer` none without transfers
+     * @param {{ flags: number, shift: number, transfer: number | null, x87: number | null,
+     *     x87Id: ((instruction: import('../decode/decoder.js').Instruction) => number) | null }}
+     *     helpers  function indices, `transfer` none without transfers, `x87` none where the
+     *     regions leave x87 to the interpreter; `x87Id` numbers an instruction for it
      * @param {boolean} checkReads  reads test their pages, rather than wrap into RAM
      * @param {boolean} looseStacks  a store through rsp alone tests no page
      */
@@ -1144,6 +1152,11 @@ class BlockEmitter {
             emitSimd(this, instruction, index, at);
             return true;
         }
+        if (regionX87(instruction))
+        {
+            this.x87(instruction, index, at);
+            return true;
+        }
         /** Places a memory operand, if the instruction has one. @param {boolean} store */
         const placeMemory = store=>{
             const memory = operands.find(operand=>operand.kind === 'mem');
@@ -1894,6 +1907,57 @@ class BlockEmitter {
         this.go(next, indexOf, here, count);
     }
 
+    /**
+     * An x87 instruction, the model's (`x87.js`): its memory operand placed,
+     * the flags whole where it reads or writes them, and what it leaves
+     * outside the unit taken back -- FL from `fcomi` and its kin, AX from
+     * `fnstsw ax`.
+     *
+     * @param {import('../decode/decoder.js').Instruction} instruction
+     * @param {number} index @param {number} at
+     */
+    x87(instruction, index, at){
+        const { b, helpers } = this;
+        if (helpers.x87 === null || helpers.x87Id === null)
+        {
+            throw new Error('long emit: x87 in a region, and no model to call');
+        }
+        const memory = instruction.operands.find(operand=>operand.kind === 'mem');
+        if (memory !== undefined)
+        {
+            this.place(memory, x87Stores(instruction.op), index, at);
+        }
+        const flags = (instruction.flagsRead | instruction.flagsWritten) !== 0;
+        if (flags)
+        {
+            this.settle();
+        }
+        b.i32const(helpers.x87Id(instruction));
+        if (memory !== undefined)
+        {
+            b.localGet(A);
+        }
+        else
+        {
+            b.i32const(0);
+        }
+        b.localGet(FL).call(helpers.x87);
+        if (instruction.operands[0]?.kind === 'reg')
+        {
+            // fnstsw ax: AX, the rest of RAX as it was.
+            b.op(Op.i64extendu).localGet(0).i64const(~0xffffn).op(Op.i64and).op(Op.i64or)
+                .localSet(0);
+        }
+        else if (instruction.flagsWritten !== 0)
+        {
+            b.localSet(FL);
+        }
+        else
+        {
+            b.drop();
+        }
+    }
+
     /** Reverses the bytes of the i64 on the stack. */
     bswap64(){
         const { b } = this;
@@ -2190,8 +2254,12 @@ function shiftHelper(){
  * @param {(address: number) => number} slotOf  the table slot of the region at an address,
  *     which holds `missFunction` until there is one
  * @param {{ transfers?: boolean, checkReads?: boolean, looseStacks?: boolean,
- *     defaultNaNNegative?: boolean }} [options]  `defaultNaNNegative`, the host's
- *     (`features`): false puts an invalid operation's NaN right (`simd.js`)
+ *     defaultNaNNegative?: boolean,
+ *     x87Id?: ((instruction: import('../decode/decoder.js').Instruction) => number) | null }}
+ *     [options]  `defaultNaNNegative`, the host's
+ *     (`features`): false puts an invalid operation's NaN right (`simd.js`); `x87Id`
+ *     numbers an x87 instruction for the model the regions import as `env.x87`
+ *     (`x87.js`), without which x87 is the interpreter's
  *     `checkReads`: reads test their pages, rather than wrap into RAM; `looseStacks`: a
  *     store through rsp alone tests no page either (the 32-bit translator's
  *     `looseStacks`), its address wrapped into RAM: no translated code lies on a
@@ -2200,7 +2268,7 @@ function shiftHelper(){
  */
 export function emitRegions(layout, memoryLimits, regions, slotOf, options = {}){
     const { transfers = false, checkReads = false, looseStacks = false,
-        defaultNaNNegative = true } = options;
+        defaultNaNNegative = true, x87Id = null } = options;
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
@@ -2212,6 +2280,9 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     m.importGlobal('env', 'depth', ValType.i32, true);
     m.importGlobal('env', 'label', ValType.i32, true);
     m.importGlobal('env', 'expect', ValType.i64, true);
+    // The x87 model, where the runner gives it: (instruction, address, flags) -> i32.
+    const x87 = x87Id === null ? null : m.importFunction('env', 'x87', m.type({
+        params: [ValType.i32, ValType.i32, ValType.i32], results: [ValType.i32] }));
     const flags = flagsHelper();
     const shift = shiftHelper();
     const flagsType = m.type({ params: flags.params, results: flags.results });
@@ -2222,6 +2293,8 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
         shift: m.function(shiftType, shift.locals, shift.body.toBytes()),
         /** @type {number | null} */
         transfer: null,
+        x87,
+        x87Id,
     };
     // Named as the 32-bit translator names its functions, so a CPU profile
     // says which region, or which helper, the time went to.
@@ -2584,7 +2657,7 @@ export function missFunction(){
  * waiting at RIP, into the region the entry hash names there, or out.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ flags: number, shift: number, transfer: number | null }} helpers
+ * @param {BlockEmitter['helpers']} helpers
  * @param {LongRegion} region
  * @param {{ slotOf: (address: number) => number, regionType: number, checkReads: boolean,
  *     looseStacks: boolean, defaultNaNNegative: boolean }} link

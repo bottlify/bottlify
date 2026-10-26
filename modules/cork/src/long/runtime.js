@@ -30,6 +30,7 @@ import { features } from '../wasm/features.js';
 import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
 import { switchCases } from './switch.js';
+import { createX87Calls } from './x87.js';
 import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, translates }
     from './emit.js';
 
@@ -137,6 +138,8 @@ export function createLongRunner(settings){
     const depth = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
     const label = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
     const expect = new WebAssembly.Global({ value: 'i64', mutable: true }, -1n);
+    // The x87 model the regions call (`x87.js`).
+    const x87 = createX87Calls({ memory, layout });
     // Every block of every region, by address: what a region's transfer probes
     // (in memory) and the host's loop looks up (in its map).
     const hashed = createEntries({ memory, hashBase: layout.tables + Tables.HASH,
@@ -344,9 +347,10 @@ export function createLongRunner(settings){
             record.wrapped = !readsChecked;
             const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
                 slotOf, { transfers, checkReads: readsChecked, looseStacks: loose,
-                    defaultNaNNegative }));
+                    defaultNaNNegative, x87Id: instruction=>x87.add(instruction) }));
             const instance = new WebAssembly.Instance(module,
-                { env: { memory, table, budget: budgetGlobal, depth, label, expect } });
+                { env: { memory, table, budget: budgetGlobal, depth, label, expect,
+                    x87: x87.call } });
             const run = /** @type {() => number} */ (instance.exports.r0);
             record.run = run;
             const slot = slotOf(entry);

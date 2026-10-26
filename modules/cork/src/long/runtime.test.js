@@ -445,6 +445,37 @@ test('MMX runs translated as interpreted, the x87 unit it leaves in its state in
     }
 });
 
+/**
+ * x87 forms at 64 bits, as bytes: loads, stores and arithmetic of every
+ * memory width through rbx and rsi (the corpus's data pointers), the stack
+ * forms, compares into the flags and the status word, the transcendentals,
+ * the control word from memory, the environment's image (which a region
+ * leaves to the interpreter), and the integer instructions that read what
+ * `fcomi`, `fnstsw ax` and `cmp` leave.
+ */
+const X87_POOL = [
+    'dd4310', 'd94318', 'db6b20', 'db4328', 'df6b30', 'df4338', 'dd5e08', 'd95610', 'db7e18',
+    'df7e28', 'db5630', 'db4e34', 'df5e38', 'dc4310', 'd84b18', 'dc6340', 'd87b44', 'da4328',
+    'dc5310', 'd85b18', 'd97e40', 'd96b48', 'dd7e44', 'd9e8', 'd9ee', 'd9eb', 'd9ea', 'd9c1',
+    'ddd9', 'd9c9', 'd9cb', 'dec1', 'dee1', 'dec9', 'def9', 'd8c2', 'dccb', 'd9e0', 'd9e1',
+    'd9fa', 'd9fc', 'd9fd', 'd9f0', 'd9f1', 'd9f8', 'd9e5', 'd9e4', 'dbf1', 'dfe9', 'd8d9',
+    'ded9', 'dae9', 'dfe0', 'dac1', 'daca', 'dbd1', 'ddc2', 'd9f7', 'd9f6', 'dbe3', 'dbe2', '9b',
+    'd9fe', 'd9ff', 'd9f3', 'd9f2', 'd9f4', 'd9fb', 'd97650', 'd96650', '0f97c0', '0f42ca', '9e',
+    '39c8',
+].map(hex=>Buffer.from(hex, 'hex'));
+
+test('x87 runs in regions as the interpreter runs it, the unit and what it leaves outside', ()=>{
+    const cases = Array.from({ length: 400 }, (_, i)=>program(X87_POOL, 0x8700 + i, 3 + i % 14));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits, stats } = compare(cases, budget);
+        assert.equal(exits, cases.length);
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.ok(stats.translated > stats.interpreted * 4,
+            `translated ${stats.translated}, interpreted ${stats.interpreted}`);
+    }
+});
+
 test('nested loops, jumps over them, out of them and into them run as interpreted', ()=>{
     const instructions = pool();
     const cases = Array.from({ length: 400 }, (_, i)=>nested(instructions, 0x1005 + i));
