@@ -80,6 +80,10 @@ const A_ARCH = 0x20;
 
 /** The fixed part of a tmpnam name, as the runtime spells it from its process. */
 const TMPNAM_STEM = '1c';
+/** What `_mktemp`'s template ends in, and the number its digits come from. */
+const MKTEMP_X = 'XXXXXX';
+const MKTEMP_PROCESS = 0x1c;
+
 const TMPNAM_BUFFER = 260;
 
 /**
@@ -575,6 +579,32 @@ export function createPathFunctions(host){
     const removal = (path, refused)=>
         (host.files.remove(path) === true ? 0 : (exists(path) ? refused : ENOENT));
 
+    /**
+     * `_mktemp`'s name of a template: null for one without six closing X's,
+     * or with every letter taken.
+     *
+     * @param {string} template
+     * @returns {string | null}
+     */
+    const uniqueName = template=>{
+        if (!template.endsWith(MKTEMP_X))
+        {
+            fail(EINVAL);
+            return null;
+        }
+        const stem = template.slice(0, -MKTEMP_X.length);
+        const digits = String(MKTEMP_PROCESS % 100000).padStart(5, '0');
+        for (let letter = 0x61; letter <= 0x7a; letter++)
+        {
+            const name = `${stem}${String.fromCharCode(letter)}${digits}`;
+            if (!exists(name))
+            {
+                return name;
+            }
+        }
+        return null;
+    };
+
     return {
         /**
          * void _splitpath(const char *path, char *drive, char *dir,
@@ -825,6 +855,35 @@ export function createPathFunctions(host){
                 const address = host.allocate(encodeAnsi(text).length + 1);
                 writeString(address, text);
                 return address;
+            },
+        },
+
+        /**
+         * char *_mktemp(char *template)
+         *
+         * The template's six closing X's made a name no file has, in place:
+         * a letter, 'a' first, then five digits of the process -- the next
+         * letter while the name is taken. Null for a template that does not
+         * end in six X's, or when all 26 letters are taken; the template is
+         * then left as it was.
+         */
+        _mktemp: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([template])=>{
+                if ((template >>> 0) === 0)
+                {
+                    fail(EINVAL);
+                    return 0;
+                }
+                const name = uniqueName(readString(template));
+                if (name === null)
+                {
+                    return 0;
+                }
+                writeString(template, name);
+                return template;
             },
         },
 
