@@ -7568,6 +7568,42 @@ export function createWindowFunctions(host){
             },
         },
 
+        /**
+         * HHOOK SetWindowsHookA(int nFilterType, HOOKPROC pfnFilterProc)
+         *
+         * The form from before SetWindowsHookEx: a hook for the calling
+         * thread alone.
+         */
+        SetWindowsHookA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([type, proc])=>table.SetWindowsHookExA.handler(
+                [type, proc, 0, threadIdOf(host.callerThread?.()) ?? 0]),
+        },
+        /** HHOOK SetWindowsHookW(...), as the ANSI form. */
+        SetWindowsHookW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>table.SetWindowsHookA.handler(args),
+        },
+
+        /**
+         * BOOL UnhookWindowsHook(int nCode, HOOKPROC pfnFilterProc)
+         *
+         * Removes the calling thread's newest hook of that type and procedure;
+         * FALSE when it has none.
+         */
+        UnhookWindowsHook: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([type, proc])=>{
+                const id = threadIdOf(host.callerThread?.());
+                const hook = [...hooks].reverse().find(each=>each.type === (type | 0)
+                    && each.proc === (proc >>> 0) && (id === null || each.thread === id));
+                return hook ? table.UnhookWindowsHookEx.handler([hook.handle]) : 0;
+            },
+        },
+
         /** BOOL UnhookWindowsHookEx(HHOOK hhk) */
         UnhookWindowsHookEx: {
             argBytes: 4,

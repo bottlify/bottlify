@@ -3788,6 +3788,42 @@ test('a CBT hook is told of a window before its procedure is, and can refuse it'
     assert.equal(dispatched[2].thread, THREAD);
 });
 
+test('SetWindowsHookA hooks the calling thread; UnhookWindowsHook takes it off by its procedure',
+    ()=>{
+        // The form from before SetWindowsHookEx: comctl32's toolbar test
+        // subclasses the toolbar from a CBT hook installed so.
+        const caller = { current: /** @type {any} */ ({ id: 7 }) };
+        const { memory, fns, called } = setup({ heap: true, caller, threadExists: ()=>true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        assert.equal(fns.SetWindowsHookA.argBytes, 8);
+        assert.equal(fns.UnhookWindowsHook.argBytes, 8);
+        const hook = fns.SetWindowsHookA.handler([WH_CBT, HOOK_PROC]);
+        assert.notEqual(hook, 0);
+
+        const hwnd = createWindow(fns, memory);
+        assert.deepEqual(called.map(c=>[c.entry, c.args[0], c.args[1]]),
+            [[HOOK_PROC, HCBT_CREATEWND, hwnd]]);
+        assert.equal(fns.UnhookWindowsHook.handler([WH_CBT, HOOK_PROC + 1]), 0,
+            'another procedure is not this hook');
+        assert.equal(fns.UnhookWindowsHook.handler([WH_CBT, HOOK_PROC]), 1);
+        assert.equal(fns.UnhookWindowsHook.handler([WH_CBT, HOOK_PROC]), 0, 'gone already');
+        assert.equal(fns.UnhookWindowsHookEx.handler([hook]), 0);
+        createWindow(fns, memory);
+        assert.equal(called.length, 1, 'nobody hooks the second window');
+    });
+
+test('a hook SetWindowsHookA installs is not heard by another thread', ()=>{
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    const { memory, fns, called } = setup({ heap: true, caller, threadExists: ()=>true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    fns.SetWindowsHookW.handler([WH_CBT, HOOK_PROC]);
+    caller.current = { id: 8 };
+    createWindow(fns, memory);
+    assert.equal(called.length, 0);
+});
+
 test('a keyboard hook is shown every key message taken, and can discard it', ()=>{
     // A game that keeps its key state in a WH_KEYBOARD hook heard no key at
     // all while only CBT hooks were called: Enter on its title did nothing.
