@@ -7,13 +7,15 @@
 /**
  * comctl32 — image lists (imagelist.js), the mouse-tracking request,
  * property sheets (propsheet.js), flat scroll bars (flatsb.js), and the
- * toolbar, mapped-bitmap and drag-list helpers (helpers.js).
+ * toolbar, mapped-bitmap and drag-list helpers (helpers.js), window
+ * subclassing (subclass.js).
  */
 
 import { createFlatScrollBarFunctions } from './flatsb.js';
 import { createHelperFunctions } from './helpers.js';
 import { createImageListFunctions } from './imagelist-stream.js';
 import { createPropertySheetFunctions } from './propsheet.js';
+import { createSubclassFunctions } from './subclass.js';
 
 /**
  * @typedef {Object} ComctlHost
@@ -81,6 +83,11 @@ export const COMCTL32_ORDINALS = Object.freeze({
     13: 'MakeDragList',
     14: 'LBItemFromPt',
     17: 'InitCommonControls',
+    // Exported by number alone before Windows XP, and found so still.
+    410: 'SetWindowSubclass',
+    411: 'GetWindowSubclass',
+    412: 'RemoveWindowSubclass',
+    413: 'DefSubclassProc',
 });
 
 /**
@@ -187,6 +194,7 @@ export function createComctlFunctions(host){
         ...sheets,
         ...createFlatScrollBarFunctions(host),
         ...createHelperFunctions(host),
+        ...createSubclassFunctions(host),
 
         // The undecorated names the library exports for the ANSI forms, which
         // a program that looks a call up by hand may ask for.
