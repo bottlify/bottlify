@@ -5,7 +5,7 @@
  */
 
 
-import { TEB, blockLayouts } from './teb.js';
+import { TEB, TEB64, blockLayouts } from './teb.js';
 import { createProcessors } from './processor.js';
 import { pointerWidth } from '../common/pointers.js';
 import { setCondition, verifyVersion, windowsVersion } from './versions.js';
@@ -367,6 +367,66 @@ export function tlsSetValueCode(at, trap){
         // slow:
         0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
     ]);
+}
+
+/**
+ * The same five at 64 bits, where a 64-bit process runs no i386: the fields of
+ * the 64-bit block through GS, the argument in ECX (and the value in RDX), the
+ * array's slots a quadword each. A routine that hands an index past the
+ * block's array to the host jumps to its trap, whose rel32 is at `jump`.
+ */
+const gs = (/** @type {number} */ offset)=>[0x04, 0x25, ...dword(offset)];
+
+/** GetLastError at 64 bits: mov eax, gs:[0x68]; ret */
+export const getLastErrorLongCode = ()=>Uint8Array.of(
+    0x65, 0x8b, ...gs(TEB64.LAST_ERROR), 0xc3);
+
+/** SetLastError at 64 bits: mov gs:[0x68], ecx; ret */
+export const setLastErrorLongCode = ()=>Uint8Array.of(
+    0x65, 0x89, 0x0c, 0x25, ...dword(TEB64.LAST_ERROR), 0xc3);
+
+/** GetCurrentThreadId at 64 bits: mov eax, gs:[0x48]; ret */
+export const getCurrentThreadIdLongCode = ()=>Uint8Array.of(
+    0x65, 0x8b, ...gs(TEB64.THREAD_ID), 0xc3);
+
+/**
+ * TlsGetValue at 64 bits: the slot's quadword, the error cleared; past the
+ * block's array, the host's.
+ *
+ *     mov ecx, ecx; cmp ecx, 64; jae slow
+ *     mov dword gs:[0x68], 0; mov rax, gs:[0x58]; mov rax, [rax+rcx*8]; ret
+ *     slow: jmp trap
+ */
+export function tlsGetValueLongCode(){
+    const slow = 33;
+    const code = Uint8Array.of(
+        0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,
+        0x65, 0xc7, ...gs(TEB64.LAST_ERROR), ...dword(0),
+        0x65, 0x48, 0x8b, ...gs(TEB64.TLS_POINTER),
+        0x48, 0x8b, 0x04, 0xc8,
+        0xc3,
+        0xe9, ...dword(0));
+    return { code, jump: slow + 1 };
+}
+
+/**
+ * TlsSetValue at 64 bits: the value into the slot, the error left alone; past
+ * the block's array, the host's.
+ *
+ *     mov ecx, ecx; cmp ecx, 64; jae slow
+ *     mov rax, gs:[0x58]; mov [rax+rcx*8], rdx; mov eax, 1; ret
+ *     slow: jmp trap
+ */
+export function tlsSetValueLongCode(){
+    const slow = 26;
+    const code = Uint8Array.of(
+        0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,
+        0x65, 0x48, 0x8b, ...gs(TEB64.TLS_POINTER),
+        0x48, 0x89, 0x14, 0xc8,
+        0xb8, ...dword(1),
+        0xc3,
+        0xe9, ...dword(0));
+    return { code, jump: slow + 1 };
 }
 
 /**
@@ -1709,5 +1769,23 @@ export function createProcessFunctions(host){
             handler: ([pointer])=>pointer >>> 0,
         },
     };
+    // At 64 bits the same routines in x86-64 (`long`), a routine that hands
+    // a call to the host jumping to the export's own trap.
+    /**
+     * @param {string} name
+     * @param {() => { code: Uint8Array, jump: number }} make
+     */
+    const longWithTrap = (name, make)=>(
+        /** @type {{ register: (trap: any) => number, jump: (at: number, target: number) => void }} */
+        builder)=>{
+        const { code, jump } = make();
+        builder.jump(jump, builder.register(table[name]));
+        return code;
+    };
+    Object.assign(table.GetLastError, { long: getLastErrorLongCode });
+    Object.assign(table.SetLastError, { long: setLastErrorLongCode });
+    Object.assign(table.GetCurrentThreadId, { long: getCurrentThreadIdLongCode });
+    Object.assign(table.TlsGetValue, { long: longWithTrap('TlsGetValue', tlsGetValueLongCode) });
+    Object.assign(table.TlsSetValue, { long: longWithTrap('TlsSetValue', tlsSetValueLongCode) });
     return table;
 }

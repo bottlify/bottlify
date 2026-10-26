@@ -89,6 +89,12 @@ __declspec(dllimport) QWORD __stdcall GetTickCount64(void);
 __declspec(dllimport) WCHAR *__stdcall GetCommandLineW(void);
 __declspec(dllimport) WCHAR **__stdcall CommandLineToArgvW(const WCHAR *line, int *count);
 __declspec(dllimport) long __stdcall RtlGetVersion(OSVERSIONINFOW *info);
+__declspec(dllimport) void __stdcall SetLastError(DWORD code);
+__declspec(dllimport) DWORD __stdcall GetLastError(void);
+__declspec(dllimport) DWORD __stdcall TlsAlloc(void);
+__declspec(dllimport) int __stdcall TlsFree(DWORD index);
+__declspec(dllimport) void *__stdcall TlsGetValue(DWORD index);
+__declspec(dllimport) int __stdcall TlsSetValue(DWORD index, void *value);
 __declspec(dllimport) long __stdcall InterlockedIncrement(volatile long *addend);
 __declspec(dllimport) long __stdcall InterlockedDecrement(volatile long *addend);
 __declspec(dllimport) long __stdcall InterlockedExchange(volatile long *target, long value);
@@ -274,6 +280,43 @@ void mainCRTStartup(void)
         seen == -8 && shared == 7);
     seen = InterlockedCompareExchange(&shared, 9, 1);
     check("and leaves the value where it does not", seen == 7 && shared == 7);
+
+    SetLastError(1234);
+    check("the last error set is the last error read", GetLastError() == 1234);
+    /* Past the block's 64 slots an index is the host's: some of these are. A
+       slot in the block keeps a quadword; the host is handed a pointer's low
+       half, which is the whole of a pointer below 4 GiB. */
+    DWORD indices[70];
+    int kept = 1;
+    for (int i = 0; i < 70; i++)
+    {
+        indices[i] = TlsAlloc();
+    }
+    for (int i = 0; i < 70; i++)
+    {
+        QWORD value = indices[i] < 64 ? 0x100000000ull + 0x10 * i : 0x10000ull + 0x10 * i;
+        kept &= TlsSetValue(indices[i], (void *)value) != 0;
+    }
+    int read = 1, past = 1;
+    for (int i = 0; i < 70; i++)
+    {
+        QWORD value = indices[i] < 64 ? 0x100000000ull + 0x10 * i : 0x10000ull + 0x10 * i;
+        int same = TlsGetValue(indices[i]) == (void *)value;
+        if (indices[i] < 64) read &= same; else past &= same;
+    }
+    check("a thread-local slot keeps its quadword", kept && read);
+    check("past the block's array too, a pointer's", past && indices[69] >= 64);
+    SetLastError(5);
+    TlsGetValue(indices[0]);
+    DWORD inBlock = GetLastError();
+    SetLastError(5);
+    TlsGetValue(indices[69]);
+    check("and reading one clears the last error, in the block or past it",
+        indices[0] < 64 && inBlock == 0 && GetLastError() == 0);
+    for (int i = 0; i < 70; i++)
+    {
+        TlsFree(indices[i]);
+    }
 
     int count = 0;
     WCHAR **args = CommandLineToArgvW(GetCommandLineW(), &count);
