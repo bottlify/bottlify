@@ -509,6 +509,29 @@ clipped against its siblings at the top level. Everything else follows Windows a
 it does not: the messages and their order, the WinEvents, activation and focus order, the CBT
 hook's sequences. A difference in those is not this decision. *2026-10-26.*
 
+**A54. The mount manager gives each volume an MBR disk's unique ID, one disk per drive letter.**
+`IOCTL_MOUNTMGR_QUERY_POINTS` lists each drive by its letter and by its volume name, and both links
+carry the volume's unique ID. There is no disk under the volumes to read one from, so the ID is
+what an MBR partition's is, twelve bytes: the disk signature (the volume serial `drives.js`
+reports) and the partition's offset, 1 MiB times the letter's place among the drives
+(`mountPointsOf`). It is the same for a volume's two links and differs between volumes, which is
+all a program comparing IDs asks; a GPT ID (`DMIO:ID:` and a GUID) would serve as well. *2026-10-26,
+`08e7ceb`.*
+
+**A55. Every time an open file reports is its last write.** The volume keeps one time per file,
+when it was last written, and `NtQueryInformationFile` (Basic, NetworkOpen, All) and
+`FileIdBothDirectoryInfo` give it as the creation, access, write and change times alike, as
+`GetFileTime` and `GetFileInformationByHandle` already did. A creation time later than the write
+time would be a contradiction a program can see; one earlier would be invented. *2026-10-26,
+`08e7ceb`.*
+
+**A56. A file's number on its volume is the FNV-1a hash of its full path, case folded.**
+`GetFileInformationByHandle`'s file index, `FileInternalInformation` and a directory listing's
+`FileId` are that one number (`filetime.js` `fileIndex`): the same for the same file however it
+was opened, which is what a program comparing two handles asks, and different for different paths
+but for a hash collision. NTFS numbers files by their place in the MFT, which nothing here has; a
+rename gives a file another number here where NTFS keeps it. *2026-10-26, `08e7ceb`, `33a6087`.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
