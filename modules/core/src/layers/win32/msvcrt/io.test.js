@@ -909,3 +909,25 @@ test('_isatty: the console\'s descriptors are character devices, a file is not',
     assert.deepEqual(errno, [9], 'EBADF');
     assert.equal(fns._isatty.convention, 'cdecl');
 });
+
+test('_creat makes or truncates a file for reading and writing, in _fmode\'s translation', ()=>{
+    // Wine's msvcrt test__creat: four bytes written, read back after a seek;
+    // in text mode the two LFs take a CR each.
+    const data = bytesOf('a\nb\n');
+    for (const [fmode, length] of [[O_TEXT, 6], [O_BINARY, 4]])
+    {
+        const { memory, fns } = build({ 'C:\\game\\old.tst': bytesOf('old contents') },
+            { fmode });
+        const fd = fns._creat.handler([memory.put('C:\\game\\old.tst'), 0]);
+        assert.ok(fd > 2);
+        const buffer = memory.allocate(8);
+        memory.writeMemory(buffer, data);
+        assert.equal(fns._write.handler([fd, buffer, 4]), 4);
+        assert.equal(fns._tell.handler([fd]), length);
+        assert.equal(fns._lseek.handler([fd, 0, SEEK_SET]), 0);
+        assert.equal(fns._read.handler([fd, buffer, 6]), 4, 'the old contents are gone');
+        assert.deepEqual([...memory.bytes.subarray(buffer, buffer + 4)], [...data]);
+    }
+    const { memory, fns } = build();
+    assert.ok(fns._wcreat.handler([memory.putWide('C:\\game\\new.tst'), 0]) > 2);
+});

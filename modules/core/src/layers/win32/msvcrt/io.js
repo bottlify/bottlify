@@ -1184,6 +1184,18 @@ export function createIoFunctions(host, descriptors){
          */
         _open: cdecl(12, ([path, oflag])=>openNamed(path, oflag, false)),
 
+        /**
+         * int _creat(const char *filename, int pmode)
+         *
+         * `_open` creating or truncating the file, for reading and writing, in
+         * `_fmode`'s translation. `pmode` would mark a new file read-only, a
+         * bit the volume does not keep.
+         */
+        _creat: cdecl(8, ([path])=>openNamed(path, O_CREAT | O_TRUNC | O_RDWR, false)),
+
+        /** int _wcreat(const wchar_t *filename, int pmode) -- `_creat`, wide. */
+        _wcreat: cdecl(8, ([path])=>openNamed(path, O_CREAT | O_TRUNC | O_RDWR, true)),
+
         /** int _wopen(const wchar_t *filename, int oflag [, int pmode]) -- `_open`, wide. */
         _wopen: cdecl(12, ([path, oflag])=>openNamed(path, oflag, true)),
 
