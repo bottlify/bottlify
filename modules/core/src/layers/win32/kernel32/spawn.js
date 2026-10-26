@@ -714,6 +714,8 @@ export function createSpawnFunctions(host){
             address=>(wide ? host.readWideString(address, MAX_PATH * 2)
                 : host.readCString(address, MAX_PATH)),
             host.startup?.()?.desktop ?? null);
+        // The process that started it, which its own snapshot names.
+        made.parentId = (host.processId ?? 0) >>> 0;
         // The block asked for, or this process's variables as they are now.
         made.environment = (environment >>> 0) === 0 ? host.environment?.() ?? null
             : environmentBlock(environment >>> 0, (flags & CREATE_UNICODE_ENVIRONMENT) !== 0);

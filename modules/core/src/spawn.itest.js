@@ -812,3 +812,87 @@ test('a child starts with the environment its parent handed CreateProcess, which
             assert.equal((await app.run({ timeoutMs: 60000 })) >>> 0, letter + (1 << 8), name);
         }
     });
+
+test('a child names the process that started it as its parent, whichever way it runs',
+    { timeout: 120000 }, async t=>{
+        // Wine's kernel32 test_Toolhelp reads th32ParentProcessID in the child;
+        // ProcessBasicInformation answers the same. The parent exits 1 when the
+        // child's answer is its own id.
+        /**
+         * @param {string} command @param {boolean} [compares]  else passes the code on
+         * @param {boolean} [waits]  else exits, and the child takes its place
+         */
+        const parent = (command, compares = true, waits = true)=>buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
+                'GetExitCodeProcess', 'GetCurrentProcessId', 'ExitProcess'] },
+            data: {
+                command: ascii(command),
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+                code: u32(0),
+            },
+            codeSize: 0x80,
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                ...waits ? [] : [0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+                ...compares ? [
+                    0xff, 0x15, ...u32(iat('GetCurrentProcessId')),
+                    // ExitProcess(code == eax)
+                    0x3b, 0x05, ...u32(at('code')), 0x0f, 0x94, 0xc0, 0x0f, 0xb6, 0xc0, 0x50,
+                ] : [0xff, 0x35, ...u32(at('code'))],
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const child = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'],
+                'ntdll.dll': ['NtQueryInformationProcess'] },
+            data: { basic: new Array(24).fill(0) },
+            code: ({ iat, at })=>[
+                // NtQueryInformationProcess(-1, ProcessBasicInformation, &basic, 24, 0)
+                0x6a, 0, 0x6a, 24, 0x68, ...u32(at('basic')), 0x6a, 0, 0x6a, 0xff,
+                0xff, 0x15, ...u32(iat('NtQueryInformationProcess')),
+                0xff, 0x35, ...u32(at('basic') + 20), 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const files = [
+            { path: 'C:\\App\\child.exe', bytes: child },
+            { path: 'C:\\App\\middle.exe', bytes: parent('C:\\App\\inner.exe', false) },
+            { path: 'C:\\App\\inner.exe', bytes: parent('C:\\App\\child.exe') },
+        ];
+        for (const [name, concurrency, top] of /** @type {const} */ ([
+            ['its parent waiting on it', 1, 'C:\\App\\child.exe'],
+            ['in a worker of its own', 2, 'C:\\App\\child.exe'],
+            ['beside its parent in its parent\'s worker', 2, 'C:\\App\\middle.exe'],
+        ]))
+        {
+            const app = await createApp({
+                executable: parent(top, top === 'C:\\App\\child.exe'),
+                imagePath: 'C:\\App\\parent.exe',
+                engine: 'cork',
+                concurrency,
+                storage: { load: async()=>({ files }) },
+            });
+            t.after(()=>app.dispose());
+            /** @type {number[]} */
+            const codes = [];
+            app.on('process-resumed', (/** @type {any} */ event)=>codes.push(event.code >>> 0));
+            assert.equal(await app.run({ timeoutMs: 60000 }), 1, `${name}: ${codes}`);
+        }
+        // Gone before its child runs, the parent is still the one it names.
+        const app = await createApp({
+            executable: parent('C:\\App\\child.exe', true, false),
+            imagePath: 'C:\\App\\parent.exe',
+            processId: 0x4000,
+            engine: 'cork',
+            storage: { load: async()=>({ files }) },
+        });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0x4000, 'in its parent\'s place');
+    });

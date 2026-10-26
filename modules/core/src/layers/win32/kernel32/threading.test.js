@@ -843,6 +843,7 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
     assert.ok(entry);
     const view = new DataView(entry.buffer, entry.byteOffset);
     assert.equal(view.getUint32(8, true), 0x2a4, 'th32ProcessID');
+    assert.equal(view.getUint32(24, true), 0, 'th32ParentProcessID: nothing started it');
     assert.equal(new TextDecoder().decode(entry.subarray(36, 45)), 'Setup.exe', 'szExeFile');
     assert.equal(fns.Process32Next.handler([snapshot, 0x100]), 0);
     assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
@@ -855,6 +856,17 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
     assert.equal(fns.CreateToolhelp32Snapshot.argBytes, 8);
     assert.equal(fns.Process32First.argBytes, 8);
     assert.equal(fns.Process32Next.argBytes, 8);
+});
+
+test('a child\'s snapshot names the process that started it as its parent', ()=>{
+    const { fns, host, written } = setup();
+    Object.assign(host, { processId: 0x2a8, parentProcessId: 0x2a4 });
+    const bytes = new Uint8Array(0x1000);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
+    fns.Process32First.handler([fns.CreateToolhelp32Snapshot.handler([0x2, 0]), 0x100]);
+    const entry = /** @type {Uint8Array} */ (written.get(0x100));
+    assert.equal(new DataView(entry.buffer, entry.byteOffset).getUint32(24, true), 0x2a4);
 });
 
 test('K32EnumProcesses lists this process, as many ids as fit, and the bytes written', ()=>{

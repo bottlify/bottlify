@@ -356,6 +356,7 @@ const hashText = (hash, text)=>{
  * @property {import('./layers/win32/kernel32/startup-info.js').StartupRecord | null} [startup]
  *           The STARTUPINFO a child's parent handed CreateProcess, which its
  *           GetStartupInfo answers.
+ * @property {number} [parentProcessId]  The process that started this one, 0 for none.
  * @property {Record<string, string>} [environment]
  *           The variables a process starts with: a child's are the block its
  *           parent handed CreateProcess, or the parent's own as they were then.
@@ -4886,6 +4887,7 @@ async function buildApp(options){
             // A child's variables, as its parent handed them on; absent, the
             // machine's own.
             environment: options.environment,
+            parentProcessId: options.parentProcessId,
             // The run's table of class objects served out of process, and this
             // process's name in it: shared for the same reason.
             com: options.com,
@@ -10154,6 +10156,7 @@ export async function createApp(options){
             standardFiles: request.standardFiles,
             startDirectory: request.startDirectory,
             startup: request.startup ?? null,
+            parentProcessId: request.parentId ?? 0,
             ...request.environment ? { environment: request.environment } : {},
             audio: sound.options,
         });
@@ -10571,6 +10574,7 @@ export async function createApp(options){
                         commandLine: request.commandLine,
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
+                        parentProcessId: request.parentId ?? 0,
                         ...request.environment ? { environment: request.environment } : {},
                         patches: request.patches,
                         processId: request.id,
@@ -10854,6 +10858,7 @@ export async function createApp(options){
                 commandLine: request.commandLine,
                 startDirectory: request.startDirectory,
                 startup: request.startup ?? null,
+                parentId: request.parentId ?? 0,
                 ...request.environment ? { environment: request.environment } : {},
                 patches: request.patches,
                 id: request.id,
@@ -10912,6 +10917,7 @@ export async function createApp(options){
                         standardFiles: request.standardFiles,
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
+                        parentProcessId: request.parentId ?? 0,
                         ...request.environment ? { environment: request.environment } : {},
                         audio: sound.options,
                     });
@@ -11088,6 +11094,7 @@ export async function createApp(options){
                 commandLine: request.commandLine,
                 startDirectory: request.startDirectory,
                 startup: request.startup ?? null,
+                parentProcessId: request.parentId ?? 0,
                 ...request.environment ? { environment: request.environment } : {},
                 patches: request.patches,
                 processId: request.id,

@@ -238,6 +238,13 @@ test('the process reports the block a program would have found itself', ()=>{
     assert.equal(host.view.getUint32(BUFFER + 0x00, true), STATUS.PENDING,
         'a running process has no exit status yet');
     assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x18);
+    assert.equal(host.view.getUint32(BUFFER + 0x14, true), 0, 'nothing started it');
+
+    const child = { ...fakeHost(), processes: ()=>[
+        { id: 0x1234, parent: 0x2a4, path: 'C:\\child.exe', threads: [0x1238] }] };
+    createQueryFunctions(child).NtQueryInformationProcess.handler([-1, 0, BUFFER, 0x18, 0]);
+    assert.equal(child.view.getUint32(BUFFER + 0x14, true), 0x2a4,
+        'InheritedFromUniqueProcessId: the process that started it');
 });
 
 test('there is no debugger, and the answer says so rather than declining', ()=>{

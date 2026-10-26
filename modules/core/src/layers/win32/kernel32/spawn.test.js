@@ -302,6 +302,8 @@ test('the child is handed the STARTUPINFO its parent gave, a NULL desktop the pa
     assert.equal(startup.x, 0x34343434);
     assert.equal(startup.flags, 1);
     assert.equal(startup.showWindow, 1);
+    assert.equal(host.kernel.processes.all()[0].parentId, host.processId ?? 0,
+        'and the process that started it');
 
     view.setUint32(0x400 + 12, putWide(host, 0x600, 'wide'), true);
     assert.equal(fns.CreateProcessW.handler(

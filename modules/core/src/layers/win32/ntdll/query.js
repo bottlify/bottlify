@@ -568,8 +568,10 @@ export function createQueryFunctions(host){
                     view.setUint32(PROCESS_BASIC.BASE_PRIORITY, NORMAL_BASE_PRIORITY, true);
                     view.setUint32(PROCESS_BASIC.PROCESS_ID,
                         teb === 0 ? 0 : readU32(teb + TEB.PROCESS_ID), true);
-                    // Nothing started this process, so there is no parent to name.
-                    view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID, 0, true);
+                    // The process list names this process first, with the
+                    // process that started it; 0 where none did.
+                    view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID,
+                        (host.processes?.()[0]?.parent ?? 0) >>> 0, true);
                     host.writeMemory(buffer >>> 0, struct);
                     return STATUS.SUCCESS;
                 }

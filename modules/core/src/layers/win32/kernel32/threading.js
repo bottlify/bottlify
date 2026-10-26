@@ -135,6 +135,7 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           and if nothing notices it stays runnable for ever, is picked every
  *           turn, retires nothing, and keeps whatever it was holding.
  * @property {number} [processId]      What the running process is numbered.
+ * @property {number} [parentProcessId]  The process that started it, 0 for none.
  * @property {() => string} [imagePath]  Where its image is, for a snapshot's entry.
  * @property {() => { name: string, base: number, size?: number, path?: string }[]} [modules]
  *           The modules the process has loaded, the image first, for a snapshot's
@@ -1424,7 +1425,8 @@ export function createThreadingFunctions(host){
                 return kernel.handles.open('snapshot', {
                     flags: flags >>> 0,
                     processes: [
-                        { id: self, parent: 0, threads: Math.max(own.length, 1),
+                        { id: self, parent: (host.parentProcessId ?? 0) >>> 0,
+                            threads: Math.max(own.length, 1),
                             path: host.imagePath?.() ?? '' },
                         ...children.map((/** @type {any} */ child)=>({
                             id: child.id >>> 0, parent: self, threads: 1,

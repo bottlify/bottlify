@@ -1624,6 +1624,7 @@ export function createWin32Module(){
                         threadStart: ()=>threadCalls.start(),
                         endThread,
                         processId,
+                        parentProcessId: config?.parentProcessId,
                         imagePath: ()=>modules.imagePath(),
                         modules: ()=>modules.list?.() ?? [],
                         divergence: config?.divergence,
@@ -3470,7 +3471,8 @@ export function createWin32Module(){
                 // children it started that are still running.
                 processes: ()=>[
                     {
-                        id: processId, parent: 0, path: modules.imagePath(),
+                        id: processId, parent: (config?.parentProcessId ?? 0) >>> 0,
+                        path: modules.imagePath(),
                         threads: (kernel.threads?.() ?? [])
                             .filter((/** @type {any} */ thread)=>thread.state !== 'terminated')
                             .map((/** @type {any} */ thread)=>thread.id >>> 0),
