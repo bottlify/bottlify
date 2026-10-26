@@ -20,6 +20,8 @@ const STATUS_BUFFER_TOO_SMALL = 0xc0000023;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOACCESS = 998;
 const CURRENT_THREAD = 0xfffffffe;
+/** HRESULT_FROM_NT(STATUS_SUCCESS): the facility bit, on success too. */
+const DONE = 0x10000000;
 const THREAD_HANDLE = 0x40;
 
 /** Guest memory from 0x1000 to 0x4000; anything else is unmapped. */
@@ -202,7 +204,7 @@ test('a thread description is set and read through either spelling', ()=>{
     const query = natives.NtQueryInformationThread.handler;
     const set = natives.NtSetInformationThread.handler;
     const description = ()=>{
-        assert.equal(fns.GetThreadDescription.handler([CURRENT_THREAD, 0x1f00]), 0);
+        assert.equal(fns.GetThreadDescription.handler([CURRENT_THREAD, 0x1f00]), DONE);
         return wide(view.getUint32(0x1f00, true));
     };
 
@@ -214,7 +216,7 @@ test('a thread description is set and read through either spelling', ()=>{
     assert.equal(view.getUint32(0x1204, true), 0x1208, 'the buffer is just past the structure');
 
     const named = putWide(0x1300, 'thread_desc');
-    assert.equal(fns.SetThreadDescription.handler([CURRENT_THREAD, named]), 0);
+    assert.equal(fns.SetThreadDescription.handler([CURRENT_THREAD, named]), DONE);
     assert.equal(description(), 'thread_desc');
     assert.equal(query([CURRENT_THREAD, THREAD_INFO.NAME, 0x1200, 128, 0x1100]), STATUS_SUCCESS);
     assert.equal(view.getUint32(0x1100, true), 8 + 22);
@@ -235,7 +237,7 @@ test('a thread description is set and read through either spelling', ()=>{
     view.setUint32(0x1404, 0, true);
     assert.equal(set([CURRENT_THREAD, THREAD_INFO.NAME, 0x1400, 8]), STATUS_ACCESS_VIOLATION);
 
-    assert.equal(fns.SetThreadDescription.handler([CURRENT_THREAD, 0]), 0, 'NULL empties it');
+    assert.equal(fns.SetThreadDescription.handler([CURRENT_THREAD, 0]), DONE, 'NULL empties it');
     assert.equal(description(), '');
     view.setUint32(0x1400, 0, true);
     view.setUint32(0x1404, 0, true);
@@ -245,7 +247,7 @@ test('a thread description is set and read through either spelling', ()=>{
     assert.equal(fns.SetThreadDescription.handler([0x99, 0]),
         (STATUS_INVALID_HANDLE | 0x10000000) >>> 0,
         'HRESULT_FROM_NT');
-    assert.equal(fns.SetThreadDescription.handler([THREAD_HANDLE, putWide(0x1300, 'other')]), 0);
-    assert.equal(fns.GetThreadDescription.handler([THREAD_HANDLE, 0x1f00]), 0);
+    assert.equal(fns.SetThreadDescription.handler([THREAD_HANDLE, putWide(0x1300, 'other')]), DONE);
+    assert.equal(fns.GetThreadDescription.handler([THREAD_HANDLE, 0x1f00]), DONE);
     assert.equal(wide(view.getUint32(0x1f00, true)), 'other', 'each thread has its own');
 });

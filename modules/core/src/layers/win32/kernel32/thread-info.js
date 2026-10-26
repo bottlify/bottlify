@@ -59,8 +59,13 @@ const NORMAL_BASE_PRIORITY = 8;
 /** GetCurrentThread hands out this, and it is -2 on every Windows. */
 const CURRENT_THREAD = 0xfffffffe;
 
-/** @param {number} status */
-const hresultFromNt = status=>(status === STATUS_SUCCESS ? 0 : (status | 0x10000000) >>> 0);
+/**
+ * HRESULT_FROM_NT: the facility bit set on any status, success included, so
+ * a description call that succeeds answers 0x10000000 rather than S_OK.
+ *
+ * @param {number} status
+ */
+const hresultFromNt = status=>(status | 0x10000000) >>> 0;
 
 /**
  * The Win32 error each status here becomes, as RtlNtStatusToDosError maps it.
@@ -490,7 +495,7 @@ export function createThreadInfoFunctions(host){
                 {
                     return hresultFromNt(STATUS_ACCESS_VIOLATION);
                 }
-                return 0;
+                return hresultFromNt(STATUS_SUCCESS);
             },
         },
 
@@ -524,7 +529,7 @@ export function createThreadInfoFunctions(host){
                     name += String.fromCharCode(code);
                 }
                 thread.description = name;
-                return 0;
+                return hresultFromNt(STATUS_SUCCESS);
             },
             natives: {
                 NtQueryInformationThread: { argBytes: 20, handler: query },
