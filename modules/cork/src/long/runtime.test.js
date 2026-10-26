@@ -436,6 +436,22 @@ test('an instruction whose two operands are one register runs translated as inte
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
 });
 
+test('a run comes back once it has interpreted its limit, the budget left over', ()=>{
+    const m = machine();
+    // Twenty cpuids, which no block holds: each one the interpreter's.
+    const code = Buffer.alloc(0x100, 0x90);
+    for (let i = 0; i < 20; i++)
+    {
+        code.set([0x0f, 0xa2], i * 2);
+    }
+    load(m, { ...CORPUS.cases[0], code: code.toString('hex') });
+    const interpreted = m.runner.stats.interpreted;
+    m.runner.run(m.state, 1000000, { interpretLimit: 4 });
+    const spent = m.runner.stats.interpreted - interpreted;
+    assert.ok(spent >= 4 && spent < 8, `${spent} interpreted`);
+    assert.ok(m.state.retired < 1000000);
+});
+
 test('calls from region to region return where they were made, and leave where they cannot', ()=>{
     // start:  mov ecx, 12; call fib; mov [rbx], rax          fib(12), nested wasm calls
     //         mov ecx, 80; call depth; mov [rbx + 8], rax     deeper than CALL_DEPTH

@@ -1286,7 +1286,7 @@ export function createCorkHost(config){
             };
             if (longRunner !== null)
             {
-                longRunner.run(state, budget, { onStep });
+                longRunner.run(state, budget, { onStep, interpretLimit: interpretChunk });
             }
             else
             {
@@ -1553,8 +1553,12 @@ export function createCorkHost(config){
                 continue;
             }
             const interpretAt = clock();
-            const stepped = interpretRange(at, Math.min(remaining, interpretChunk), false,
-                jumpedIn);
+            // Long mode's regions run inside the long runner, called from
+            // here: handed the slice as the 32-bit regions are, the runner
+            // itself coming back once it has interpreted a chunk.
+            const chunk = longRunner === null ? interpretChunk
+                : yieldCheck === null ? remaining : Math.min(remaining, yieldChunk);
+            const stepped = interpretRange(at, Math.min(remaining, chunk), false, jumpedIn);
             interpretMs += clock() - interpretAt;
             interpreted += stepped;
             jumpedIn = false;

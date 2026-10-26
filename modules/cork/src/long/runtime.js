@@ -335,13 +335,16 @@ export function createLongRunner(settings){
          * @param {ReturnType<typeof import('../interp64.js').blockState64>} state  over the
          *     same block
          * @param {number} budget
-         * @param {{ onStep?: (at: number, jumped: boolean) => void }} [options]  heard at each
-         *     interpreted run's start
+         * @param {{ onStep?: (at: number, jumped: boolean) => void, interpretLimit?: number }}
+         *     [options]  `onStep` heard at each interpreted run's start; `interpretLimit`, the
+         *     instructions it interprets before it comes back, the rest of the budget aside
          * @returns {number}  retired
          */
         run(state, budget, options = {}){
             fresh();
             const before = state.retired;
+            const interpretedBefore = stats.interpreted;
+            const limit = options.interpretLimit ?? Infinity;
             /** Up to `count` instructions interpreted, to the next jump. @param {number} count */
             const step = count=>{
                 if (count === 1)
@@ -368,7 +371,8 @@ export function createLongRunner(settings){
                 state.syncOut();
             };
             state.syncOut();
-            while (state.retired - before < budget && !state.halted && state.trapped.length === 0)
+            while (state.retired - before < budget && !state.halted && state.trapped.length === 0
+                && stats.interpreted - interpretedBefore < limit)
             {
                 const rip = view.getBigUint64(layout.eip, true);
                 const at = Number(rip);
