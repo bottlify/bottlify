@@ -13,8 +13,9 @@
  * told of a thread's end), quadword answers in RAX, and the pointers in
  * localeconv's structure and CommandLineToArgvW's array, the interlocked
  * arithmetic kernel32 exports, its last error, thread-local slots and fibre
- * slots, pointer encoding, and critical sections taken by three threads at
- * once. Each check prints a line; the exit code counts the checks that failed.
+ * slots, pointer encoding, critical sections taken by three threads at once,
+ * and the heaps three threads allocate from, fill, check and free at once.
+ * Each check prints a line; the exit code counts the checks that failed.
  */
 
 typedef void *HANDLE;
@@ -120,6 +121,19 @@ __declspec(dllimport) void __stdcall EnterCriticalSection(CRITICAL_SECTION *sect
 __declspec(dllimport) void __stdcall LeaveCriticalSection(CRITICAL_SECTION *section);
 __declspec(dllimport) int __stdcall TryEnterCriticalSection(CRITICAL_SECTION *section);
 __declspec(dllimport) void __stdcall DeleteCriticalSection(CRITICAL_SECTION *section);
+__declspec(dllimport) HANDLE __stdcall GetProcessHeap(void);
+__declspec(dllimport) void *__stdcall HeapAlloc(HANDLE heap, DWORD flags, QWORD bytes);
+__declspec(dllimport) int __stdcall HeapFree(HANDLE heap, DWORD flags, void *block);
+__declspec(dllimport) QWORD __stdcall HeapSize(HANDLE heap, DWORD flags, const void *block);
+__declspec(dllimport) void *__stdcall HeapReAlloc(HANDLE heap, DWORD flags, void *block,
+    QWORD bytes);
+__declspec(dllimport) HANDLE __stdcall GlobalAlloc(unsigned flags, QWORD bytes);
+__declspec(dllimport) HANDLE __stdcall GlobalFree(HANDLE block);
+__declspec(dllimport) void *__cdecl malloc(QWORD bytes);
+__declspec(dllimport) void *__cdecl calloc(QWORD count, QWORD bytes);
+__declspec(dllimport) void *__cdecl realloc(void *block, QWORD bytes);
+__declspec(dllimport) void __cdecl free(void *block);
+__declspec(dllimport) QWORD __cdecl _msize(void *block);
 __declspec(dllimport) long __stdcall InterlockedIncrement(volatile long *addend);
 __declspec(dllimport) long __stdcall InterlockedDecrement(volatile long *addend);
 __declspec(dllimport) long __stdcall InterlockedExchange(volatile long *target, long value);
@@ -301,6 +315,176 @@ static void sections(void)
     DeleteCriticalSection(&section);
 }
 
+#define HEAP_ZERO_MEMORY 0x8
+#define GMEM_ZEROINIT 0x40
+#define SLOTS 64
+
+/* What one thread found wrong, a bit for each kind of check. */
+static volatile int heapWrong[3];
+
+/* A thread's blocks, each filled with a byte of its own: a block that
+   another one overlaps, or that a free or a resize lost, shows as a byte
+   that is not its fill. Each turn frees or resizes or allocates, by one of
+   the families at random. */
+static DWORD __stdcall churn(void *parameter)
+{
+    int me = (int)(QWORD)parameter;
+    HANDLE heap = GetProcessHeap();
+    unsigned char *blocks[SLOTS] = { 0 };
+    QWORD sizes[SLOTS] = { 0 };
+    char kinds[SLOTS] = { 0 };
+    unsigned state = 0x9e3779b9u * (unsigned)(me + 1);
+    int wrong = 0;
+    for (int turn = 0; turn < 3000; turn++)
+    {
+        state = state * 1103515245u + 12345u;
+        int slot = (state >> 8) % SLOTS;
+        unsigned char fill = (unsigned char)(me * 64 + slot + 1);
+        unsigned char *block = blocks[slot];
+        if (block)
+        {
+            for (QWORD i = 0; i < sizes[slot]; i++)
+            {
+                if (block[i] != fill)
+                {
+                    wrong |= 1;
+                    break;
+                }
+            }
+            QWORD size = kinds[slot] == 'h' ? HeapSize(heap, 0, block)
+                : kinds[slot] == 'm' ? _msize(block) : sizes[slot];
+            if (size != sizes[slot])
+            {
+                wrong |= 2;
+            }
+            if ((state >> 20) % 4 == 0 && kinds[slot] != 'g')
+            {
+                QWORD grown = (state >> 4) % 300;
+                unsigned char *moved = kinds[slot] == 'h'
+                    ? HeapReAlloc(heap, HEAP_ZERO_MEMORY, block, grown) : realloc(block, grown);
+                if (grown != 0 && moved == 0)
+                {
+                    wrong |= 4;
+                    continue;
+                }
+                if (kinds[slot] == 'h')
+                {
+                    for (QWORD i = sizes[slot]; i < grown; i++)
+                    {
+                        if (moved[i] != 0)
+                        {
+                            wrong |= 8;
+                            break;
+                        }
+                    }
+                }
+                for (QWORD i = 0; i < grown; i++)
+                {
+                    moved[i] = fill;
+                }
+                blocks[slot] = grown == 0 && kinds[slot] != 'h' ? 0 : moved;
+                sizes[slot] = grown;
+                continue;
+            }
+            if (kinds[slot] == 'h')
+            {
+                wrong |= HeapFree(heap, 0, block) ? 0 : 16;
+            }
+            else if (kinds[slot] == 'g')
+            {
+                wrong |= GlobalFree(block) == 0 ? 0 : 16;
+            }
+            else
+            {
+                free(block);
+            }
+            blocks[slot] = 0;
+            continue;
+        }
+        QWORD size = (state >> 12) % ((state >> 28) % 8 == 0 ? 3000 : 200);
+        int kind = (state >> 24) % 4;
+        int zero = (state >> 26) % 2;
+        block = kind == 0 ? HeapAlloc(heap, zero ? HEAP_ZERO_MEMORY : 0, size)
+            : kind == 1 ? (zero ? calloc(1, size) : malloc(size))
+            : kind == 2 ? GlobalAlloc(zero ? GMEM_ZEROINIT : 0, size)
+            : malloc(size);
+        if (block == 0)
+        {
+            wrong |= 32;
+            continue;
+        }
+        if (zero && kind != 3)
+        {
+            for (QWORD i = 0; i < size; i++)
+            {
+                if (block[i] != 0)
+                {
+                    wrong |= 64;
+                    break;
+                }
+            }
+        }
+        for (QWORD i = 0; i < size; i++)
+        {
+            block[i] = fill;
+        }
+        blocks[slot] = block;
+        sizes[slot] = size;
+        kinds[slot] = kind == 0 ? 'h' : kind == 2 ? 'g' : 'm';
+    }
+    for (int slot = 0; slot < SLOTS; slot++)
+    {
+        if (blocks[slot] && kinds[slot] == 'h')
+        {
+            HeapFree(heap, 0, blocks[slot]);
+        }
+        else if (blocks[slot])
+        {
+            free(blocks[slot]);
+        }
+    }
+    heapWrong[me] = wrong;
+    return 0;
+}
+
+static void heaps(void)
+{
+    HANDLE heap = GetProcessHeap();
+    check("GetProcessHeap answers the process block's heap at 0x30",
+        heap != 0 && heap == *(HANDLE *)(gs(0x60) + 0x30));
+    void *block = HeapAlloc(heap, 0, 20);
+    check("a block of the process heap is sized as asked", block != 0
+        && ((QWORD)block & 7) == 0 && HeapSize(heap, 0, block) == 20);
+    check("grown in place within its cell", HeapReAlloc(heap, 0, block, 24) == block
+        && HeapSize(heap, 0, block) == 24);
+    check("freed", HeapFree(heap, 0, block) && HeapFree(heap, 0, 0));
+    unsigned char *zeroed = calloc(5, 20);
+    int clear = zeroed != 0 && _msize(zeroed) == 100;
+    for (int i = 0; clear && i < 100; i++)
+    {
+        clear = zeroed[i] == 0;
+    }
+    check("calloc's block is zero and its size the product", clear);
+    free(zeroed);
+    free(0);
+
+    HANDLE threads[2];
+    threads[0] = CreateThread(0, 0, churn, (void *)1, 0, 0);
+    threads[1] = CreateThread(0, 0, churn, (void *)2, 0, 0);
+    churn(0);
+    WaitForMultipleObjects(2, threads, 1, 0xffffffff);
+    CloseHandle(threads[0]);
+    CloseHandle(threads[1]);
+    check("three threads allocating at once keep every block whole, sized and apart",
+        heapWrong[0] == 0 && heapWrong[1] == 0 && heapWrong[2] == 0);
+    if (heapWrong[0] | heapWrong[1] | heapWrong[2])
+    {
+        say("  wrong ");
+        number((unsigned long long)(heapWrong[0] | heapWrong[1] << 8 | heapWrong[2] << 16));
+        fputc('\n', &_iob[1]);
+    }
+}
+
 void mainCRTStartup(void)
 {
     check("the TLS callback heard the process start, with the module", told[1] == 1
@@ -422,6 +606,7 @@ void mainCRTStartup(void)
         (void *)0x123456789abcull)) == (void *)0x123456789abcull);
 
     sections();
+    heaps();
 
     int count = 0;
     WCHAR **args = CommandLineToArgvW(GetCommandLineW(), &count);

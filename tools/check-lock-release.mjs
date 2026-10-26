@@ -24,7 +24,7 @@
  *     node tools/check-lock-release.mjs
  */
 
-import { decode } from '../modules/cork/src/decode/decoder.js';
+import { MODE_64, decode } from '../modules/cork/src/decode/decoder.js';
 import {
     commandCode, getRenderStateCode, getSamplerStateCode, getShaderCode, getSurfaceDescCode,
     getSurfaceLevelCode, getTargetCode, getTextureStageStateCode, getTransformCode,
@@ -40,11 +40,20 @@ import {
     callocCode, freeCode, globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode,
     heapReAllocCode, heapSizeCode, mallocCode, msizeCode, reallocCode,
 } from '../modules/core/src/layers/win32/kernel32/guest-heap.js';
-import { enterCode, leaveCode, tryEnterCode } from '../modules/core/src/layers/win32/kernel32/critical.js';
+import {
+    callocLongCode, freeLongCode, globalAllocLongCode, globalFreeLongCode, heapAllocLongCode,
+    heapFreeLongCode, heapReAllocLongCode, heapSizeLongCode, mallocLongCode, msizeLongCode,
+    reallocLongCode,
+} from '../modules/core/src/layers/win32/kernel32/guest-heap-long.js';
+import {
+    enterCode, enterLongCode, leaveCode, leaveLongCode, tryEnterCode, tryEnterLongCode,
+} from '../modules/core/src/layers/win32/kernel32/critical.js';
 import { eventStateCode, releaseMutexCode, waitOneCode }
     from '../modules/core/src/layers/win32/kernel32/wait-one.js';
 import {
     COMPARE_EXCHANGE_CODE, DECREMENT_CODE, EXCHANGE_ADD_CODE, EXCHANGE_CODE, INCREMENT_CODE,
+    LONG_COMPARE_EXCHANGE_CODE, LONG_DECREMENT_CODE, LONG_EXCHANGE_ADD_CODE, LONG_EXCHANGE_CODE,
+    LONG_INCREMENT_CODE,
 } from '../modules/core/src/layers/win32/kernel32/interlocked.js';
 import { queryPerformanceCounterCode, sleepCode }
     from '../modules/core/src/layers/win32/kernel32/process.js';
@@ -59,16 +68,17 @@ const PLACED = { dirBase: 0x400000, dirSpan: 0x1000000, directory: 0x30000, clas
 /**
  * The instructions of `code`, each with its memory operand, if any.
  *
- * @param {Uint8Array} code
+ * @param {Uint8Array} code @param {typeof MODE_64} [mode]  MODE_64 for x86-64.
  * @returns {{ op: string, locked: boolean, writes: boolean, mem: any }[]}
  */
-function instructionsOf(code){
+function instructionsOf(code, mode){
     /** The operations that only read their memory operand. */
     const reads = new Set(['cmp', 'test', 'bt', 'push', 'lea', 'jmp', 'call']);
     const found = [];
     for (let at = 0; at < code.length;)
     {
-        const decoded = /** @type {any} */ (decode(address=>code[address - AT] ?? 0, AT + at));
+        const decoded = /** @type {any} */ (decode(address=>code[address - AT] ?? 0, AT + at,
+            mode));
         if ('reason' in decoded)
         {
             // Data after a routine's last jump (a table, padding): the rest is not code.
@@ -148,6 +158,28 @@ const routines = [
         enter: TRAP + 16 })],
     ['InitOnceExecuteOnce', executeOnceCode(AT, { begin: TRAP, end: TRAP + 8 })],
 ];
+/** The x86-64 a 64-bit process runs instead, decoded at 64 bits. @type {[string, Uint8Array][]} */
+const longRoutines = [
+    ['HeapAlloc', heapAllocLongCode(PLACED).code],
+    ['malloc', mallocLongCode(PLACED, 0x500000).code],
+    ['calloc', callocLongCode(PLACED, 0x500000).code],
+    ['HeapFree', heapFreeLongCode(PLACED).code],
+    ['free', freeLongCode(PLACED).code],
+    ['HeapSize', heapSizeLongCode(PLACED).code],
+    ['_msize', msizeLongCode(PLACED).code],
+    ['HeapReAlloc', heapReAllocLongCode(PLACED).code],
+    ['realloc', reallocLongCode(PLACED).code],
+    ['GlobalAlloc', globalAllocLongCode(PLACED, 0x500000).code],
+    ['GlobalFree', globalFreeLongCode(PLACED, 0x500000).code],
+    ['EnterCriticalSection', enterLongCode(0x40000).code],
+    ['LeaveCriticalSection', leaveLongCode(0x40000).code],
+    ['TryEnterCriticalSection', tryEnterLongCode(0x40000)],
+    ['InterlockedCompareExchange', LONG_COMPARE_EXCHANGE_CODE],
+    ['InterlockedDecrement', LONG_DECREMENT_CODE],
+    ['InterlockedExchangeAdd', LONG_EXCHANGE_ADD_CODE],
+    ['InterlockedExchange', LONG_EXCHANGE_CODE],
+    ['InterlockedIncrement', LONG_INCREMENT_CODE],
+];
 /**
  * @param {string} family @param {Record<string, any>} table
  * @param {(name: string) => number} slotOf @param {Record<string, any>} [more]
@@ -167,9 +199,12 @@ commands('OpenGL', GL_COMMANDS.COMMANDS, GL_COMMANDS.commandSlot, { thread: true
 /** @type {string[]} */
 const problems = [];
 let locking = 0;
-for (const [name, code] of routines)
+/** @type {[string, Uint8Array, typeof MODE_64 | undefined][]} */
+const all = [...routines.map(([title, bytes])=>[title, bytes, undefined]),
+    ...longRoutines.map(([title, bytes])=>[`${title} (x86-64)`, bytes, MODE_64])];
+for (const [name, code, mode] of /** @type {[string, Uint8Array, any][]} */ (all))
 {
-    const instructions = instructionsOf(code);
+    const instructions = instructionsOf(code, mode);
     const taken = instructions.filter(one=>one.locked).map(one=>one.mem);
     locking += taken.length > 0 ? 1 : 0;
     for (const one of instructions)
@@ -192,5 +227,6 @@ if (problems.length > 0)
     console.error(problems.join('\n'));
     process.exit(1);
 }
-console.log(`lock release: ${routines.length} routines, ${locking} with locked words,`
+console.log(`lock release: ${routines.length + longRoutines.length} routines, ${locking}`
+    + ' with locked words,'
     + ' none let go plainly');

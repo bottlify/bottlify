@@ -62,6 +62,8 @@ const IMPORTS = {
             'InterlockedExchangeAdd@8', 'InterlockedCompareExchange@12', 'TlsAlloc@0',
             'TlsFree@4', 'TlsGetValue@4', 'TlsSetValue@8', 'FlsAlloc@4', 'FlsFree@4',
             'FlsGetValue@4', 'FlsSetValue@8', 'EncodePointer@4', 'DecodePointer@4',
+            'GetProcessHeap@0', 'HeapAlloc@12', 'HeapFree@12', 'HeapSize@12', 'HeapReAlloc@16',
+            'GlobalAlloc@8', 'GlobalFree@4',
         ],
     },
     'SHELL32.dll': {
@@ -126,7 +128,7 @@ const IMPORTS = {
             '_iob DATA', '_osver DATA', '_winver DATA', '_winmajor DATA', '_winminor DATA',
             '_HUGE DATA', '_environ DATA', '__getmainargs', '_initterm', '_onexit',
             '__dllonexit', 'fputs', 'fputc', 'exit', '__initenv DATA', 'strlen', 'memset',
-            'localeconv', 'mbrtowc', '_atoi64',
+            'localeconv', 'mbrtowc', '_atoi64', 'malloc', 'calloc', 'realloc', 'free', '_msize',
         ],
         decorated: ['_seh_longjmp_unwind@4'],
     },

@@ -63,7 +63,7 @@ const CLASS_OF = Uint8Array.from({ length: SMALL_LIMIT / 8 + 1 },
 
 /** A slab's size, and what one directory word covers. */
 export const SLAB = 16384;
-const SLAB_SHIFT = 14;
+export const SLAB_SHIFT = 14;
 
 /**
  * A heap's control block. The lock is 0 while free; each class keeps how

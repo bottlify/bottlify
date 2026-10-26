@@ -11,9 +11,10 @@
  * callback of its own directory, a second thread and its start and end told
  * to the callback, a wait on an array of quadword handles, a runtime routine
  * that calls the program back, quadword answers in RAX, the pointers in
- * localeconv's structure and CommandLineToArgvW's array, and critical sections
+ * localeconv's structure and CommandLineToArgvW's array, critical sections
  * three threads take at once, whose uncontended entries and leaves stay in the
- * guest.
+ * guest, and the heaps three threads allocate from at once, whose small blocks
+ * stay in the guest too.
  */
 
 import { test } from 'node:test';
@@ -52,4 +53,12 @@ test('an x86-64 program finds its blocks, thread-local storage and answers at 64
             'an entry crosses only to wait');
         assert.equal(hot.get('KERNEL32.dll!LeaveCriticalSection'), sections.wakes,
             'a leave only to wake');
+        // Three threads turn 3 000 times each, every turn one to three calls of the
+        // heaps: what crosses is a block past a kilobyte, a move, a cache to fill.
+        const heapCalls = ['KERNEL32.dll!HeapAlloc', 'KERNEL32.dll!HeapFree',
+            'KERNEL32.dll!HeapSize', 'KERNEL32.dll!HeapReAlloc', 'KERNEL32.dll!GlobalAlloc',
+            'KERNEL32.dll!GlobalFree', 'msvcrt.dll!malloc', 'msvcrt.dll!calloc',
+            'msvcrt.dll!realloc', 'msvcrt.dll!free', 'msvcrt.dll!_msize']
+            .reduce((sum, name)=>sum + (hot.get(name) ?? 0), 0);
+        assert.ok(heapCalls < 4500, `${heapCalls} heap calls crossed into the host`);
     });

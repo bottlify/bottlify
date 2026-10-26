@@ -22,6 +22,10 @@
 import {
     globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode,
 } from './guest-heap.js';
+import {
+    bindLong, globalAllocLongCode, globalFreeLongCode, heapAllocLongCode, heapFreeLongCode,
+    heapReAllocLongCode, heapSizeLongCode,
+} from './guest-heap-long.js';
 
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
 const HEAP_ZERO_MEMORY = 0x00000008;
@@ -1291,7 +1295,26 @@ export function createHeapFunctions(host){
         return routines;
     };
     /**
-     * An export's guest routine where the small blocks are the guest's.
+     * The same routines in x86-64 (`guest-heap-long.js`) for a 64-bit
+     * process, each placed with its module by the loader: the export each
+     * hands over to, and the routine over the tables' placement.
+     *
+     * @type {Record<'alloc' | 'free' | 'size' | 'reAlloc' | 'globalAlloc' | 'globalFree',
+     *     ['HeapAlloc' | 'HeapFree' | 'HeapSize' | 'HeapReAlloc' | 'GlobalAlloc' | 'GlobalFree',
+     *     (p: import('./guest-heap.js').Placement)
+     *         => import('./guest-heap-long.js').LongRoutine]>}
+     */
+    const longRoutines = {
+        alloc: ['HeapAlloc', heapAllocLongCode],
+        free: ['HeapFree', heapFreeLongCode],
+        size: ['HeapSize', heapSizeLongCode],
+        reAlloc: ['HeapReAlloc', heapReAllocLongCode],
+        globalAlloc: ['GlobalAlloc', p=>globalAllocLongCode(p, processHeap)],
+        globalFree: ['GlobalFree', p=>globalFreeLongCode(p, processHeap)],
+    };
+    /**
+     * An export's guest routine where the small blocks are the guest's, and
+     * its x86-64 for a 64-bit process.
      *
      * @param {'alloc' | 'free' | 'size' | 'reAlloc' | 'globalAlloc' | 'globalFree'} which
      */
@@ -1299,6 +1322,16 @@ export function createHeapFunctions(host){
         ? {
             /** @param {import('./sync.js').GuestBuilder} builder */
             guest: builder=>placedRoutines(builder)[which],
+            /** @param {import('./guest-heap-long.js').LongBuilder} builder */
+            long: builder=>{
+                const [name, make] = longRoutines[which];
+                const placement = guestHeap.placement();
+                return bindLong(builder, placement === null ? null : make(placement), {
+                    argBytes: table[name].argBytes,
+                    /** @param {number[]} args */
+                    handler: args=>table[name].handler(args),
+                });
+            },
         }
         : {});
 
@@ -1310,6 +1343,9 @@ export function createHeapFunctions(host){
             // mov eax, fs:[0x30]; mov eax, [eax + 0x18]; ret -- PEB->ProcessHeap,
             // which the process block is written with from this handler
             code: ()=>Uint8Array.from([0x64, 0xa1, 0x30, 0, 0, 0, 0x8b, 0x40, 0x18, 0xc3]),
+            // mov rax, gs:[0x60]; mov rax, [rax + 0x30]; ret -- the same at 64 bits
+            long: ()=>Uint8Array.from([0x65, 0x48, 0x8b, 0x04, 0x25, 0x60, 0, 0, 0,
+                0x48, 0x8b, 0x40, 0x30, 0xc3]),
         },
 
         /** HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize) */

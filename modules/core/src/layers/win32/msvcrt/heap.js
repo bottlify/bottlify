@@ -24,6 +24,9 @@ import { EINVAL, ENOMEM } from './globals.js';
 import {
     callocCode, freeCode, mallocCode, msizeCode, reallocCode,
 } from '../kernel32/guest-heap.js';
+import {
+    bindLong, callocLongCode, freeLongCode, mallocLongCode, msizeLongCode, reallocLongCode,
+} from '../kernel32/guest-heap-long.js';
 
 /**
  * @typedef {Object} HeapHost
@@ -166,10 +169,41 @@ export function createHeapFunctions(host){
         return routines;
     };
     /** @param {'malloc' | 'new' | 'free' | 'calloc' | 'realloc' | 'msize'} which */
+    /**
+     * The same routines in x86-64 for a 64-bit process, each placed with its
+     * module by the loader: the export each hands over to, and the routine
+     * over the tables' placement and the heap.
+     *
+     * @type {Record<'malloc' | 'new' | 'free' | 'calloc' | 'realloc' | 'msize',
+     *     [() => { argBytes: number, handler: Function },
+     *     (p: import('../kernel32/guest-heap.js').Placement, heap: number)
+     *         => import('../kernel32/guest-heap-long.js').LongRoutine]>}
+     */
+    const longRoutines = {
+        malloc: [()=>allocator, mallocLongCode],
+        new: [()=>newAllocator, mallocLongCode],
+        free: [()=>deallocator, freeLongCode],
+        calloc: [()=>table.calloc, callocLongCode],
+        realloc: [()=>table.realloc, reallocLongCode],
+        msize: [()=>table._msize, msizeLongCode],
+    };
+    /** @param {'malloc' | 'new' | 'free' | 'calloc' | 'realloc' | 'msize'} which */
     const routine = which=>(host.guestHeap && host.heapHandle && host.allocateCode
         ? {
             /** @param {{ register: (label: string, trap: any) => number }} builder */
             guest: builder=>placedRoutines(builder)[which],
+            /** @param {import('../kernel32/guest-heap-long.js').LongBuilder} builder */
+            long: builder=>{
+                const [entryOf, make] = longRoutines[which];
+                const guest = /** @type {NonNullable<HeapHost['guestHeap']>} */ (host.guestHeap);
+                const placement = guest.placement();
+                const heap = /** @type {() => number} */ (host.heapHandle)();
+                const entry = entryOf();
+                return bindLong(builder, placement === null || !guest.isHeap(heap) ? null
+                    : make(placement, heap), {
+                    convention: 'cdecl', argBytes: entry.argBytes, handler: entry.handler,
+                });
+            },
         }
         : {});
 

@@ -8,7 +8,10 @@
  * The heap's small blocks: the guest's routines run on cork's test machine
  * over the same memory the host's half reads and writes, each call either
  * answered in the guest or handed to its trap -- a stub here that marks the
- * hand-over, after which the test answers it as the host would.
+ * hand-over, after which the test answers it as the host would. Each test
+ * runs twice: the i386 routines, and their x86-64 (`guest-heap-long.js`) on
+ * cork's long-mode machine, called as the x64 convention calls, whose trap
+ * stub keeps the four argument registers to be held to the call's.
  */
 
 import { test } from 'node:test';
@@ -20,6 +23,13 @@ import {
     heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode, mallocCode, msizeCode,
     reallocCode,
 } from './guest-heap.js';
+import {
+    callocLongCode, freeLongCode, heapAllocLongCode, heapFreeLongCode, heapReAllocLongCode,
+    heapSizeLongCode, mallocLongCode, msizeLongCode, reallocLongCode,
+} from './guest-heap-long.js';
+import {
+    ENTRY_64, KEPT_64, argumentOf, longMachine,
+} from '../../../../scripts/guest-code/long.mjs';
 
 const ARENA = { base: 0x100000, size: 0x300000 };
 const CODE = 0x10000;
@@ -33,15 +43,35 @@ const HEAP_REALLOC_IN_PLACE_ONLY = 0x10;
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
+/** Where the 64-bit trap stub keeps RCX, RDX, R8 and R9 as it found them. */
+const ARGS = 0xe100;
+
 /**
- * A machine with the guest heap over its memory, every routine placed, and a
- * call that says which side answered.
+ * What each routine's arguments are at 64 bits: a DWORD's upper half is
+ * undefined, and the call gives it a pattern; a pointer's and a size's are
+ * the value's own.
+ *
+ * @type {Record<string, ('word' | 'dword')[]>}
  */
-function world(){
-    const m = createTestMachine({ ramSize: 4 << 20 });
-    const ram = ()=>new Uint8Array(m.memory.buffer, m.layout.ramBase, 4 << 20);
-    const view = ()=>new DataView(m.memory.buffer, m.layout.ramBase, 4 << 20);
-    const memory = {
+const KINDS = {
+    HeapAlloc: ['word', 'dword', 'word'],
+    HeapFree: ['word', 'dword', 'word'],
+    HeapSize: ['word', 'dword', 'word'],
+    HeapReAlloc: ['word', 'dword', 'word', 'word'],
+    malloc: ['word'],
+    calloc: ['word', 'word'],
+    free: ['word'],
+    realloc: ['word', 'word'],
+    _msize: ['word'],
+};
+
+/**
+ * The guest memory the host's half is handed, over a machine's RAM.
+ *
+ * @param {() => Uint8Array} ram @param {() => DataView} view
+ */
+function heapMemory(ram, view){
+    return {
         readU16: (/** @type {number} */ at)=>view().getUint16(at, true),
         readU32: (/** @type {number} */ at)=>view().getUint32(at, true),
         writeU16: (/** @type {number} */ at, /** @type {number} */ value)=>{
@@ -60,12 +90,32 @@ function world(){
             ram().fill(value, at, at + length);
         },
     };
+}
+
+/**
+ * The guest heap over a machine's memory, with the heaps the tests use.
+ *
+ * @param {ReturnType<typeof heapMemory>} memory
+ */
+function heapsOver(memory){
     const backend = createHeapAllocator(ARENA);
     const guest = createGuestHeap({ allocator: backend, arena: ARENA, memory });
     const heap = guest.createHeap();
     const other = guest.createHeap();
     const placement = /** @type {import('./guest-heap.js').Placement} */ (guest.placement());
-    const allocator = guest.wrap();
+    return { backend, guest, heap, other, placement, allocator: guest.wrap() };
+}
+
+/**
+ * A machine with the guest heap over its memory, every routine placed, and a
+ * call that says which side answered.
+ */
+function world(){
+    const m = createTestMachine({ ramSize: 4 << 20 });
+    const ram = ()=>new Uint8Array(m.memory.buffer, m.layout.ramBase, 4 << 20);
+    const view = ()=>new DataView(m.memory.buffer, m.layout.ramBase, 4 << 20);
+    const memory = heapMemory(ram, view);
+    const { backend, guest, heap, other, placement, allocator } = heapsOver(memory);
     m.write(HALT, [0xf4]);
     /** @type {Record<string, number>} */
     const at = {};
@@ -119,9 +169,110 @@ function world(){
     return { m, memory, ram, guest, heap, other, allocator, backend, call };
 }
 
-test('a block allocated in the guest is sized, resized in place and freed in the guest,'
-    + ' once the host has filled the cache', ()=>{
-    const w = world();
+/**
+ * The same over cork's long-mode machine: the x86-64 routines, each placed
+ * after a trap stub that marks the hand-over and keeps RCX, RDX, R8 and R9,
+ * and a call made as the x64 convention makes one, every register a pattern.
+ * A hand-over is held to the arguments the call was made with; a routine's
+ * answer to its upper half being zero; and every call to the registers the
+ * convention says a callee keeps.
+ */
+function world64(){
+    const m = longMachine();
+    const ram = ()=>m.bytes().subarray(0, 4 << 20);
+    const view = ()=>new DataView(m.bytes().buffer, 0, 4 << 20);
+    const memory = heapMemory(ram, view);
+    const { backend, guest, heap, other, placement, allocator } = heapsOver(memory);
+    m.write(HALT, [0xf4]);
+    /** @type {Record<string, number>} */
+    const at = {};
+    let next = CODE;
+    /**
+     * @param {string} name
+     * @param {(p: import('./guest-heap.js').Placement)
+     *     => import('./guest-heap-long.js').LongRoutine} make
+     */
+    const place = (name, make)=>{
+        const trap = next;
+        m.write(trap, [
+            0xc7, 0x04, 0x25, ...u32(HANDED), ...u32(1),     // mov dword [HANDED], 1
+            0x48, 0x89, 0x0c, 0x25, ...u32(ARGS),            // mov [ARGS], rcx
+            0x48, 0x89, 0x14, 0x25, ...u32(ARGS + 8),        // mov [ARGS + 8], rdx
+            0x4c, 0x89, 0x04, 0x25, ...u32(ARGS + 16),       // mov [ARGS + 16], r8
+            0x4c, 0x89, 0x0c, 0x25, ...u32(ARGS + 24),       // mov [ARGS + 24], r9
+            0x31, 0xc0, 0xc3,                                // xor eax, eax; ret
+        ]);
+        const { code, jump } = make(placement);
+        const where = trap + 0x40;
+        const bytes = code.slice();
+        new DataView(bytes.buffer).setInt32(jump, trap - (where + jump + 4), true);
+        m.write(where, bytes);
+        at[name] = where;
+        next = (where + bytes.length + 0xff) & ~0xff;
+    };
+    place('HeapAlloc', heapAllocLongCode);
+    place('HeapFree', heapFreeLongCode);
+    place('HeapSize', heapSizeLongCode);
+    place('HeapReAlloc', heapReAllocLongCode);
+    place('malloc', p=>mallocLongCode(p, heap));
+    place('calloc', p=>callocLongCode(p, heap));
+    place('free', freeLongCode);
+    place('realloc', reallocLongCode);
+    place('_msize', msizeLongCode);
+    const ARGUMENTS = ['rcx', 'rdx', 'r8', 'r9'];
+    /**
+     * @param {string} name @param {(number | bigint)[]} args  A bigint is passed whole.
+     * @returns {{ eax: number, handed: boolean }}
+     */
+    const call = (name, args)=>{
+        view().setUint32(HANDED, 0, true);
+        const given = args.map((value, i)=>(typeof value === 'bigint' ? value
+            : KINDS[name][i] === 'dword' ? argumentOf(value, i) : BigInt(value >>> 0)));
+        /** @type {Record<string, bigint>} */
+        const registers = { ...ENTRY_64, rcx: 0xc5c5c5c5c5c5c5c5n, rdx: 0xd5d5d5d5d5d5d5d5n,
+            r8: 0x8888888888888888n, r9: 0x9999999999999999n, rsp: BigInt(STACK) };
+        given.forEach((value, i)=>{
+            registers[ARGUMENTS[i]] = value;
+        });
+        view().setBigUint64(STACK, BigInt(HALT), true);
+        ram().fill(0xcd, STACK + 8, STACK + 40);
+        const { halted } = m.call(at[name], registers);
+        assert.ok(halted && m.rip() === HALT + 1, `${name} ran to its return`);
+        assert.equal(m.reg('rsp'), BigInt(STACK + 8), `${name} took its frame down`);
+        for (const register of KEPT_64)
+        {
+            assert.equal(m.reg(register), registers[register], `${name} kept ${register}`);
+        }
+        const handed = view().getUint32(HANDED, true) === 1;
+        const rax = m.reg('rax');
+        if (handed)
+        {
+            given.forEach((value, i)=>assert.equal(view().getBigUint64(ARGS + i * 8, true), value,
+                `${name} handed over ${ARGUMENTS[i]} as it came`));
+        }
+        else if (name !== 'free')
+        {
+            assert.equal(rax >> 32n, 0n, `${name}'s answer is whole in RAX`);
+        }
+        // free answers nothing: its RAX is no answer.
+        return { eax: name === 'free' ? 0 : Number(rax & 0xffffffffn), handed };
+    };
+    return { m, memory, ram, guest, heap, other, allocator, backend, call };
+}
+
+/**
+ * A test on both machines: the i386 routines, then their x86-64.
+ *
+ * @param {string} name
+ * @param {(w: ReturnType<typeof world>) => void} body
+ */
+function both(name, body){
+    test(name, ()=>body(world()));
+    test(`${name} (x86-64)`, ()=>body(/** @type {any} */ (world64())));
+}
+
+both('a block allocated in the guest is sized, resized in place and freed in the guest,'
+    + ' once the host has filled the cache', w=>{
     const first = w.call('HeapAlloc', [w.heap, 0, 24]);
     assert.equal(first.handed, true, 'the cache starts empty: the host fills it');
     const block = w.allocator.allocate(24, { owner: w.heap });
@@ -152,8 +303,7 @@ test('a block allocated in the guest is sized, resized in place and freed in the
         'a null pointer is TRUE');
 });
 
-test('what the guest\'s path does not take goes to the host', ()=>{
-    const w = world();
+both('what the guest\'s path does not take goes to the host', w=>{
     w.allocator.free(w.allocator.allocate(8, { owner: w.heap }));
     assert.equal(w.call('HeapAlloc', [w.heap, 0, SMALL_LIMIT + 1]).handed, true, 'too large');
     assert.equal(w.call('HeapAlloc', [w.heap, 0x20, 8]).handed, true, 'a flag it does not take');
@@ -181,38 +331,36 @@ test('what the guest\'s path does not take goes to the host', ()=>{
     assert.deepEqual(w.call('HeapFree', [w.heap, 0, block.eax]), { eax: 1, handed: false });
 });
 
-test('the host takes and gives back a heap\'s lock in one step each, and leaves a held one alone',
-    ()=>{
-        const w = world();
-        /** What each compare-and-swap found. @type {number[]} */
-        const found = [];
-        Object.assign(w.memory, {
-            /** @param {number} at @param {number} expected @param {number} value */
-            compareExchangeU32(at, expected, value){
-                const was = w.memory.readU32(at);
-                if (was === expected)
-                {
-                    w.memory.writeU32(at, value);
-                }
-                found.push(was);
-                return was;
-            },
-        });
-        const block = w.allocator.allocate(8, { owner: w.heap });
-        assert.ok(block !== 0);
-        assert.deepEqual(found, [0, 1], 'taken free, and given back as one step too');
-        assert.equal(w.memory.readU32(w.heap + CONTROL.LOCK), 0, 'and given back');
-        // Held by a thread running on another executor: the host keeps off the cache.
-        w.memory.writeU32(w.heap + CONTROL.LOCK, 1);
-        const cache = w.guest.diagnostics();
-        assert.ok(w.allocator.free(block));
-        assert.deepEqual(found, [0, 1, 1]);
-        assert.equal(w.memory.readU32(w.heap + CONTROL.LOCK), 1, 'still the other thread\'s');
-        assert.deepEqual(w.guest.diagnostics().cached, cache.cached, 'the cache untouched');
+both('the host takes and gives back a heap\'s lock in one step each, and leaves a held one'
+    + ' alone', w=>{
+    /** What each compare-and-swap found. @type {number[]} */
+    const found = [];
+    Object.assign(w.memory, {
+        /** @param {number} at @param {number} expected @param {number} value */
+        compareExchangeU32(at, expected, value){
+            const was = w.memory.readU32(at);
+            if (was === expected)
+            {
+                w.memory.writeU32(at, value);
+            }
+            found.push(was);
+            return was;
+        },
     });
+    const block = w.allocator.allocate(8, { owner: w.heap });
+    assert.ok(block !== 0);
+    assert.deepEqual(found, [0, 1], 'taken free, and given back as one step too');
+    assert.equal(w.memory.readU32(w.heap + CONTROL.LOCK), 0, 'and given back');
+    // Held by a thread running on another executor: the host keeps off the cache.
+    w.memory.writeU32(w.heap + CONTROL.LOCK, 1);
+    const cache = w.guest.diagnostics();
+    assert.ok(w.allocator.free(block));
+    assert.deepEqual(found, [0, 1, 1]);
+    assert.equal(w.memory.readU32(w.heap + CONTROL.LOCK), 1, 'still the other thread\'s');
+    assert.deepEqual(w.guest.diagnostics().cached, cache.cached, 'the cache untouched');
+});
 
-test('HEAP_ZERO_MEMORY and calloc zero a recycled block, and a grown one past its old end', ()=>{
-    const w = world();
+both('HEAP_ZERO_MEMORY and calloc zero a recycled block, and a grown one past its old end', w=>{
     w.allocator.free(w.allocator.allocate(100, { owner: w.heap }));
     const dirty = w.call('HeapAlloc', [w.heap, 0, 100]).eax;
     w.ram().fill(0xaa, dirty, dirty + 100);
@@ -235,42 +383,39 @@ test('HEAP_ZERO_MEMORY and calloc zero a recycled block, and a grown one past it
     assert.equal(w.call('calloc', [33, 32]).handed, true, 'past a kilobyte');
 });
 
-test('a full cache hands half back, and a slab whose cells all come back leaves the arena',
-    ()=>{
-        const w = world();
-        const cells = SLAB / 64;
-        /** @type {number[]} */
-        const blocks = [];
-        for (let i = 0; i < cells * 3; i++)
+both('a full cache hands half back, and a slab whose cells all come back leaves the arena', w=>{
+    const cells = SLAB / 64;
+    /** @type {number[]} */
+    const blocks = [];
+    for (let i = 0; i < cells * 3; i++)
+    {
+        let { eax, handed } = w.call('malloc', [64]);
+        if (handed)
         {
-            let { eax, handed } = w.call('malloc', [64]);
-            if (handed)
-            {
-                eax = w.allocator.allocate(64, { owner: w.heap });
-            }
-            blocks.push(eax);
+            eax = w.allocator.allocate(64, { owner: w.heap });
         }
-        assert.equal(new Set(blocks).size, blocks.length);
-        assert.equal(w.guest.diagnostics().slabs, 3);
-        let handedOver = 0;
-        for (const block of blocks)
+        blocks.push(eax);
+    }
+    assert.equal(new Set(blocks).size, blocks.length);
+    assert.equal(w.guest.diagnostics().slabs, 3);
+    let handedOver = 0;
+    for (const block of blocks)
+    {
+        if (w.call('free', [block]).handed)
         {
-            if (w.call('free', [block]).handed)
-            {
-                handedOver++;
-                assert.ok(w.allocator.free(block));
-            }
+            handedOver++;
+            assert.ok(w.allocator.free(block));
         }
-        assert.ok(handedOver > 0 && handedOver < blocks.length / 10,
-            `${handedOver} frees found the cache full`);
-        const d = w.guest.diagnostics();
-        assert.ok(d.released >= 1, `slabs given back: ${JSON.stringify(d)}`);
-        assert.ok(d.cached <= CACHE);
-        assert.equal(w.allocator.owned(w.heap).length, 0);
-    });
+    }
+    assert.ok(handedOver > 0 && handedOver < blocks.length / 10,
+        `${handedOver} frees found the cache full`);
+    const d = w.guest.diagnostics();
+    assert.ok(d.released >= 1, `slabs given back: ${JSON.stringify(d)}`);
+    assert.ok(d.cached <= CACHE);
+    assert.equal(w.allocator.owned(w.heap).length, 0);
+});
 
-test('HeapDestroy\'s half takes every slab and the handle with it', ()=>{
-    const w = world();
+both('HeapDestroy\'s half takes every slab and the handle with it', w=>{
     const before = w.backend.diagnostics().used;
     const heap = w.guest.createHeap();
     for (let i = 0; i < 50; i++)
@@ -293,8 +438,7 @@ test('HeapDestroy\'s half takes every slab and the handle with it', ()=>{
     assert.equal(w.guest.isHeap(heap), false);
 });
 
-test('a heap\'s handle is its control block, on a 64 KiB boundary, marked as a heap', ()=>{
-    const w = world();
+both('a heap\'s handle is its control block, on a 64 KiB boundary, marked as a heap', w=>{
     for (const heap of [w.heap, w.other])
     {
         assert.equal(heap % 0x10000, 0);
@@ -303,8 +447,7 @@ test('a heap\'s handle is its control block, on a 64 KiB boundary, marked as a h
     assert.deepEqual(w.guest.list(), [w.heap, w.other]);
 });
 
-test('thousands of random calls from both sides keep every block whole and apart', ()=>{
-    const w = world();
+both('thousands of random calls from both sides keep every block whole and apart', w=>{
     let state = 12345;
     const random = (/** @type {number} */ n)=>{
         state = Math.imul(state ^ state >>> 15, 0x2c1b3c6d) + 0x297a2d39 | 0;
@@ -442,3 +585,41 @@ test('thousands of random calls from both sides keep every block whole and apart
         'the host walks exactly the live blocks');
     assert.ok(guestCalls > hostCalls, `${guestCalls} in the guest, ${hostCalls} in the host`);
 });
+
+test('at 64 bits a pointer or a size with an upper half is the host\'s, its arguments as they came',
+    ()=>{
+        const w = world64();
+        // Each class a size's low half falls in has a cell cached: only the upper half
+        // can send these calls to the host.
+        for (const size of [8, 24])
+        {
+            w.allocator.free(w.allocator.allocate(size, { owner: w.heap }));
+        }
+        const block = w.call('HeapAlloc', [w.heap, 0, 24]);
+        assert.equal(block.handed, false);
+        const high = BigInt(block.eax) | 1n << 32n;
+        const huge = 1n << 32n | 8n;
+        assert.equal(w.call('HeapAlloc', [w.heap, 0, huge]).handed, true, 'a size past 32 bits');
+        assert.equal(w.call('malloc', [huge]).handed, true);
+        assert.equal(w.call('calloc', [1n << 32n, 1]).handed, true);
+        assert.equal(w.call('calloc', [1, 1n << 32n]).handed, true);
+        assert.equal(w.call('calloc', [1n << 63n, 2]).handed, true, 'a product past 64 bits');
+        assert.equal(w.call('calloc', [2, 1n << 63n]).handed, true);
+        for (const name of ['HeapFree', 'HeapSize'])
+        {
+            assert.equal(w.call(name, [w.heap, 0, high]).handed, true, `${name} of a pointer`
+                + ' whose low half is a cell');
+        }
+        assert.equal(w.call('HeapReAlloc', [w.heap, 0, high, 16]).handed, true);
+        assert.equal(w.call('HeapReAlloc', [w.heap, 0, block.eax, huge]).handed, true,
+            'a new size past 32 bits, R9 given back');
+        for (const name of ['free', '_msize'])
+        {
+            assert.equal(w.call(name, [high]).handed, true, name);
+        }
+        assert.equal(w.call('realloc', [high, 16]).handed, true);
+        assert.equal(w.call('realloc', [block.eax, huge]).handed, true);
+        assert.deepEqual(w.call('HeapSize', [w.heap, 0, block.eax]), { eax: 24, handed: false },
+            'and the block as it was');
+        assert.deepEqual(w.call('HeapFree', [w.heap, 0, block.eax]), { eax: 1, handed: false });
+    });
