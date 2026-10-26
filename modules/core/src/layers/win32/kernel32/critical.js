@@ -241,6 +241,165 @@ export function tryEnterCode(counters){
     ]);
 }
 
+/** The 64-bit layout, which the x86-64 below is assembled against. */
+const CS64 = criticalLayout(8);
+
+/** Where a thread's id lives in its 64-bit environment block, read through GS. */
+const TEB64_THREAD_ID = 0x48;
+
+/**
+ * The ModRM and SIB of an absolute `[disp32]` at 64 bits, for the operation
+ * `reg` names, and the address: a counter the engine placed under 2 GiB,
+ * where a disp32 sign-extends to itself.
+ *
+ * @param {number} reg  The ModRM reg field, or an opcode's extension.
+ * @param {number} address
+ * @returns {number[]}
+ */
+const absolute64 = (reg, address)=>{
+    if (address >>> 0 >= 0x80000000)
+    {
+        throw new Error(`critical sections: counters at 0x${(address >>> 0).toString(16)}, `
+            + 'past what a disp32 reaches at 64 bits');
+    }
+    return [reg << 3 | 0x04, 0x25, ...dword(address)];
+};
+
+/**
+ * EnterCriticalSection in a 64-bit process: the routine `enterCode` is, the
+ * section in RCX and the 40-byte layout's fields, the owner written whole
+ * (eight bytes, the id zero-extended, as a HANDLE is). The wait is the same
+ * trap, reached by the `jmp rel32` at `jump`.
+ *
+ *     mov eax, gs:[0x48]
+ *     lock inc dword [counters.entered]
+ *     lock inc dword [rcx+LockCount]
+ *     jnz taken
+ *     mov [rcx+OwningThread], rax
+ *     mov dword [rcx+RecursionCount], 1
+ *     ret
+ *   taken:
+ *     cmp [rcx+OwningThread], rax
+ *     jne wait
+ *     inc dword [rcx+RecursionCount]
+ *     ret
+ *   wait:
+ *     jmp <wait trap>
+ *
+ * @param {number} counters
+ * @returns {{ code: Uint8Array, jump: number }}
+ */
+export function enterLongCode(counters){
+    const body = [
+        0x65, 0x8b, ...absolute64(0, TEB64_THREAD_ID),               // mov eax, gs:[0x48]
+        0xf0, 0xff, ...absolute64(0, counters + COUNTERS.ENTERED),   // lock inc [entered]
+        0xf0, 0xff, 0x41, CS64.LOCK_COUNT,                           // lock inc [rcx+8]
+        0x75, 0x0c,                                                  // jnz taken (+12)
+        0x48, 0x89, 0x41, CS64.OWNING_THREAD,                        // mov [rcx+16], rax
+        0xc7, 0x41, CS64.RECURSION_COUNT, ...dword(1),               // mov [rcx+12], 1
+        0xc3,                                                        // ret
+        // taken:
+        0x48, 0x39, 0x41, CS64.OWNING_THREAD,                        // cmp [rcx+16], rax
+        0x75, 0x04,                                                  // jne wait (+4)
+        0xff, 0x41, CS64.RECURSION_COUNT,                            // inc [rcx+12]
+        0xc3,                                                        // ret
+    ];
+    // wait:
+    return { code: new Uint8Array([...body, 0xe9, ...dword(0)]), jump: body.length + 1 };
+}
+
+/**
+ * LeaveCriticalSection in a 64-bit process, as `leaveCode` is at 32 bits.
+ *
+ *     lock inc dword [counters.left]
+ *     dec dword [rcx+RecursionCount]
+ *     jnz nested
+ *     mov qword [rcx+OwningThread], 0
+ *     lock dec dword [rcx+LockCount]
+ *     jge wake
+ *     ret
+ *   nested:
+ *     lock dec dword [rcx+LockCount]
+ *     ret
+ *   wake:
+ *     jmp <wake trap>
+ *
+ * @param {number} counters
+ * @returns {{ code: Uint8Array, jump: number }}
+ */
+export function leaveLongCode(counters){
+    const body = [
+        0xf0, 0xff, ...absolute64(0, counters + COUNTERS.LEFT),      // lock inc [left]
+        0xff, 0x49, CS64.RECURSION_COUNT,                            // dec [rcx+12]
+        0x75, 0x0f,                                                  // jnz nested (+15)
+        0x48, 0xc7, 0x41, CS64.OWNING_THREAD, ...dword(0),           // mov qword [rcx+16], 0
+        0xf0, 0xff, 0x49, CS64.LOCK_COUNT,                           // lock dec [rcx+8]
+        0x7d, 0x06,                                                  // jge wake (+6)
+        0xc3,                                                        // ret
+        // nested:
+        0xf0, 0xff, 0x49, CS64.LOCK_COUNT,                           // lock dec [rcx+8]
+        0xc3,                                                        // ret
+    ];
+    // wake:
+    return { code: new Uint8Array([...body, 0xe9, ...dword(0)]), jump: body.length + 1 };
+}
+
+/**
+ * TryEnterCriticalSection in a 64-bit process, as `tryEnterCode` is at 32
+ * bits; R8, which the caller does not keep, holds the zero RBX held.
+ *
+ *     mov edx, gs:[0x48]
+ *     xor r8d, r8d
+ *     mov eax, -1
+ *     lock cmpxchg [rcx+LockCount], r8d
+ *     jnz held
+ *     mov [rcx+OwningThread], rdx
+ *     mov dword [rcx+RecursionCount], 1
+ *     lock inc dword [counters.entered]
+ *     mov eax, 1
+ *     ret
+ *   held:
+ *     cmp [rcx+OwningThread], rdx
+ *     jne no
+ *     lock inc dword [rcx+LockCount]
+ *     inc dword [rcx+RecursionCount]
+ *     lock inc dword [counters.entered]
+ *     mov eax, 1
+ *     ret
+ *   no:
+ *     xor eax, eax
+ *     ret
+ *
+ * @param {number} counters
+ * @returns {Uint8Array}
+ */
+export function tryEnterLongCode(counters){
+    const entered = absolute64(0, counters + COUNTERS.ENTERED);
+    return new Uint8Array([
+        0x65, 0x8b, ...absolute64(2, TEB64_THREAD_ID),               // mov edx, gs:[0x48]
+        0x45, 0x31, 0xc0,                                            // xor r8d, r8d
+        0xb8, ...dword(-1),                                          // mov eax, -1
+        0xf0, 0x44, 0x0f, 0xb1, 0x41, CS64.LOCK_COUNT,               // lock cmpxchg [rcx+8], r8d
+        0x75, 0x19,                                                  // jnz held (+25)
+        0x48, 0x89, 0x51, CS64.OWNING_THREAD,                        // mov [rcx+16], rdx
+        0xc7, 0x41, CS64.RECURSION_COUNT, ...dword(1),               // mov [rcx+12], 1
+        0xf0, 0xff, ...entered,                                      // lock inc [entered]
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc3,                                                        // ret
+        // held:
+        0x48, 0x39, 0x51, CS64.OWNING_THREAD,                        // cmp [rcx+16], rdx
+        0x75, 0x15,                                                  // jne no (+21)
+        0xf0, 0xff, 0x41, CS64.LOCK_COUNT,                           // lock inc [rcx+8]
+        0xff, 0x41, CS64.RECURSION_COUNT,                            // inc [rcx+12]
+        0xf0, 0xff, ...entered,                                      // lock inc [entered]
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc3,                                                        // ret
+        // no:
+        0x31, 0xc0,                                                  // xor eax, eax
+        0xc3,                                                        // ret
+    ]);
+}
+
 /**
  * @typedef {Object} CriticalHost
  * @property {(address: number, length: number) => Uint8Array} readMemory

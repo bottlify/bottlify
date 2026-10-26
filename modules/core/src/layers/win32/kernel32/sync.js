@@ -4,7 +4,8 @@
  * See LICENSE for details
  */
 
-import { COUNTERS, criticalLayout, enterCode, leaveCode, tryEnterCode } from './critical.js';
+import { COUNTERS, criticalLayout, enterCode, enterLongCode, leaveCode, leaveLongCode, tryEnterCode,
+    tryEnterLongCode } from './critical.js';
 import { INTERLOCKED } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
 import { createSListFunctions } from './slist.js';
@@ -304,6 +305,25 @@ export function createSyncFunctions(host){
             tryEnter: place(()=>tryEnterCode(counters)),
         };
         return fastPaths;
+    };
+    /**
+     * The same routines in x86-64 for a 64-bit process, each placed with its
+     * module by the loader: a contended entry or an owed wake jumps to a trap
+     * into the same host half.
+     *
+     * @param {(counters: number) => { code: Uint8Array, jump: number }} make
+     * @param {'wait' | 'wake'} trap
+     */
+    const longSection = (make, trap)=>(
+        /** @type {{ register: (trap: any) => number, jump: (at: number, target: number) => void }} */
+        builder)=>{
+        const { code, jump } = make(host.critical.counters());
+        builder.jump(jump, builder.register({
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>host.critical[trap](pointer >>> 0),
+        }));
+        return code;
     };
 
     /**
@@ -753,6 +773,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {GuestBuilder} builder */
             guest: builder=>placed(builder).tryEnter,
+            long: ()=>tryEnterLongCode(host.critical.counters()),
             handler: sectionTraps.tryEnter,
         },
 
@@ -779,6 +800,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {GuestBuilder} builder */
             guest: builder=>placed(builder).enter,
+            long: longSection(enterLongCode, 'wait'),
             handler: sectionTraps.enter,
         },
 
@@ -792,6 +814,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {GuestBuilder} builder */
             guest: builder=>placed(builder).leave,
+            long: longSection(leaveLongCode, 'wake'),
             handler: sectionTraps.leave,
         },
 

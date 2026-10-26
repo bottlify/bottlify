@@ -10,8 +10,10 @@
  * and process blocks GS reaches, the static thread-local storage and TLS
  * callback of its own directory, a second thread and its start and end told
  * to the callback, a wait on an array of quadword handles, a runtime routine
- * that calls the program back, quadword answers in RAX, and the pointers in
- * localeconv's structure and CommandLineToArgvW's array.
+ * that calls the program back, quadword answers in RAX, the pointers in
+ * localeconv's structure and CommandLineToArgvW's array, and critical sections
+ * three threads take at once, whose uncontended entries and leaves stay in the
+ * guest.
  */
 
 import { test } from 'node:test';
@@ -36,4 +38,18 @@ test('an x86-64 program finds its blocks, thread-local storage and answers at 64
         assert.match(text, /^ok the TLS callback heard the thread start and end/m);
         assert.match(text, /failed 0\n$/, text);
         assert.equal(code, 0);
+        const layer = (/** @type {string} */ name)=>app.diagnostics()
+            .find((/** @type {any} */ found)=>found.name === name);
+        const sections = layer('win32')?.metrics?.criticalSections;
+        /** @type {Map<string, number>} */
+        const hot = new Map(layer('bridge')?.metrics?.hot ?? []);
+        // 1 804 the program's own (the loader lock's at each thread's start and end besides).
+        assert.ok(sections.entered >= 1804 && sections.left === sections.entered,
+            JSON.stringify(sections));
+        assert.ok(sections.waits > 0 && sections.wakes === sections.waits,
+            JSON.stringify(sections));
+        assert.equal(hot.get('KERNEL32.dll!EnterCriticalSection'), sections.waits,
+            'an entry crosses only to wait');
+        assert.equal(hot.get('KERNEL32.dll!LeaveCriticalSection'), sections.wakes,
+            'a leave only to wake');
     });

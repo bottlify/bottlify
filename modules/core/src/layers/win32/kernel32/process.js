@@ -78,6 +78,8 @@ const CURRENT_PROCESS = 0xffffffff;
 
 /** EncodePointer and DecodePointer's guest code: `mov eax, [esp+4]; ret 4`. */
 const POINTER_AS_IS = [0x8b, 0x44, 0x24, 0x04, 0xc2, 0x04, 0x00];
+/** The same at 64 bits, the whole quadword: `mov rax, rcx; ret`. */
+const LONG_POINTER_AS_IS = [0x48, 0x89, 0xc8, 0xc3];
 
 /**
  * Ticks per second for the performance counter unless `config.json` says another: a
@@ -1787,5 +1789,13 @@ export function createProcessFunctions(host){
     Object.assign(table.GetCurrentThreadId, { long: getCurrentThreadIdLongCode });
     Object.assign(table.TlsGetValue, { long: longWithTrap('TlsGetValue', tlsGetValueLongCode) });
     Object.assign(table.TlsSetValue, { long: longWithTrap('TlsSetValue', tlsSetValueLongCode) });
+    // A fibre slot is a thread-local slot here (FlsAlloc is TlsAlloc).
+    Object.assign(table.FlsGetValue, { long: longWithTrap('FlsGetValue', tlsGetValueLongCode) });
+    Object.assign(table.FlsSetValue, { long: longWithTrap('FlsSetValue', tlsSetValueLongCode) });
+    for (const name of ['EncodePointer', 'DecodePointer', 'EncodeSystemPointer',
+        'DecodeSystemPointer'])
+    {
+        Object.assign(table[name], { long: ()=>Uint8Array.from(LONG_POINTER_AS_IS) });
+    }
     return table;
 }

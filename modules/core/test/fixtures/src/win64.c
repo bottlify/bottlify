@@ -11,9 +11,10 @@
  * here as a C runtime's tlssup does), a second thread, a wait on an array of
  * handles, a routine the system calls back with an argument (the TLS callback
  * told of a thread's end), quadword answers in RAX, and the pointers in
- * localeconv's structure and CommandLineToArgvW's array, and the interlocked
- * arithmetic kernel32 exports. Each check prints a line; the exit code counts
- * the checks that failed.
+ * localeconv's structure and CommandLineToArgvW's array, the interlocked
+ * arithmetic kernel32 exports, its last error, thread-local slots and fibre
+ * slots, pointer encoding, and critical sections taken by three threads at
+ * once. Each check prints a line; the exit code counts the checks that failed.
  */
 
 typedef void *HANDLE;
@@ -43,6 +44,17 @@ typedef struct
     DWORD dwPlatformId;
     WCHAR szCSDVersion[128];
 } OSVERSIONINFOW;
+
+/* RTL_CRITICAL_SECTION at 64 bits: 40 bytes, the owner a quadword HANDLE. */
+typedef struct
+{
+    void *DebugInfo;
+    long LockCount;
+    long RecursionCount;
+    HANDLE OwningThread;
+    HANDLE LockSemaphore;
+    QWORD SpinCount;
+} CRITICAL_SECTION;
 
 struct lconv
 {
@@ -95,6 +107,19 @@ __declspec(dllimport) DWORD __stdcall TlsAlloc(void);
 __declspec(dllimport) int __stdcall TlsFree(DWORD index);
 __declspec(dllimport) void *__stdcall TlsGetValue(DWORD index);
 __declspec(dllimport) int __stdcall TlsSetValue(DWORD index, void *value);
+__declspec(dllimport) DWORD __stdcall FlsAlloc(void *callback);
+__declspec(dllimport) int __stdcall FlsFree(DWORD index);
+__declspec(dllimport) void *__stdcall FlsGetValue(DWORD index);
+__declspec(dllimport) int __stdcall FlsSetValue(DWORD index, void *value);
+__declspec(dllimport) void *__stdcall EncodePointer(void *pointer);
+__declspec(dllimport) void *__stdcall DecodePointer(void *pointer);
+__declspec(dllimport) void __stdcall Sleep(DWORD milliseconds);
+__declspec(dllimport) DWORD __stdcall WaitForSingleObject(HANDLE handle, DWORD milliseconds);
+__declspec(dllimport) void __stdcall InitializeCriticalSection(CRITICAL_SECTION *section);
+__declspec(dllimport) void __stdcall EnterCriticalSection(CRITICAL_SECTION *section);
+__declspec(dllimport) void __stdcall LeaveCriticalSection(CRITICAL_SECTION *section);
+__declspec(dllimport) int __stdcall TryEnterCriticalSection(CRITICAL_SECTION *section);
+__declspec(dllimport) void __stdcall DeleteCriticalSection(CRITICAL_SECTION *section);
 __declspec(dllimport) long __stdcall InterlockedIncrement(volatile long *addend);
 __declspec(dllimport) long __stdcall InterlockedDecrement(volatile long *addend);
 __declspec(dllimport) long __stdcall InterlockedExchange(volatile long *target, long value);
@@ -202,6 +227,78 @@ static DWORD __stdcall work(void *parameter)
         && *(QWORD *)(worker.block + 0x30) == worker.block;
     worker.slotIsCounter = inSlot();
     return 7;
+}
+
+static CRITICAL_SECTION section;
+static volatile long total;
+static volatile int tried = -1;
+
+/* Each turn reads the total, gives the processor away while it holds the
+   section, and writes the total plus one: a turn another thread got into
+   between the two is a count lost. */
+static DWORD __stdcall contend(void *parameter)
+{
+    for (int i = 0; i < 300; i++)
+    {
+        EnterCriticalSection(&section);
+        EnterCriticalSection(&section);
+        long seen = total;
+        if (i % 3 == 0)
+        {
+            Sleep(0);
+        }
+        total = seen + 1;
+        LeaveCriticalSection(&section);
+        LeaveCriticalSection(&section);
+    }
+    return (DWORD)(QWORD)parameter;
+}
+
+static DWORD __stdcall attempt(void *parameter)
+{
+    tried = TryEnterCriticalSection(&section);
+    if (tried)
+    {
+        LeaveCriticalSection(&section);
+    }
+    return 0;
+}
+
+static void sections(void)
+{
+    InitializeCriticalSection(&section);
+    EnterCriticalSection(&section);
+    EnterCriticalSection(&section);
+    check("an entered section names its owner in a quadword, the recursion counted",
+        section.OwningThread == (HANDLE)(QWORD)GetCurrentThreadId()
+        && section.RecursionCount == 2);
+    HANDLE thread = CreateThread(0, 0, attempt, 0, 0, 0);
+    WaitForSingleObject(thread, 0xffffffff);
+    CloseHandle(thread);
+    check("another thread's try finds it held", tried == 0);
+    check("and the owner's own try takes it again", TryEnterCriticalSection(&section)
+        && section.RecursionCount == 3);
+    LeaveCriticalSection(&section);
+    LeaveCriticalSection(&section);
+    LeaveCriticalSection(&section);
+    check("left as often as entered, it is free", section.OwningThread == 0
+        && section.RecursionCount == 0 && section.LockCount == -1);
+    thread = CreateThread(0, 0, attempt, 0, 0, 0);
+    WaitForSingleObject(thread, 0xffffffff);
+    CloseHandle(thread);
+    check("and another thread's try takes it", tried == 1 && section.LockCount == -1);
+
+    HANDLE threads[2];
+    threads[0] = CreateThread(0, 0, contend, (void *)1, 0, 0);
+    threads[1] = CreateThread(0, 0, contend, (void *)2, 0, 0);
+    contend(0);
+    WaitForMultipleObjects(2, threads, 1, 0xffffffff);
+    CloseHandle(threads[0]);
+    CloseHandle(threads[1]);
+    check("three threads taking one section lose no count", total == 900);
+    check("and leave it free", section.OwningThread == 0 && section.RecursionCount == 0
+        && section.LockCount == -1);
+    DeleteCriticalSection(&section);
 }
 
 void mainCRTStartup(void)
@@ -317,6 +414,14 @@ void mainCRTStartup(void)
     {
         TlsFree(indices[i]);
     }
+
+    DWORD fibre = FlsAlloc(0);
+    check("a fibre slot keeps its quadword", FlsSetValue(fibre, (void *)0x123456789ull)
+        && FlsGetValue(fibre) == (void *)0x123456789ull && FlsFree(fibre));
+    check("an encoded pointer decodes whole", DecodePointer(EncodePointer(
+        (void *)0x123456789abcull)) == (void *)0x123456789abcull);
+
+    sections();
 
     int count = 0;
     WCHAR **args = CommandLineToArgvW(GetCommandLineW(), &count);

@@ -60,7 +60,8 @@ const IMPORTS = {
             'GetTickCount@0', 'GetTickCount64@0', 'GetCommandLineW@0',
             'InterlockedIncrement@4', 'InterlockedDecrement@4', 'InterlockedExchange@8',
             'InterlockedExchangeAdd@8', 'InterlockedCompareExchange@12', 'TlsAlloc@0',
-            'TlsFree@4', 'TlsGetValue@4', 'TlsSetValue@8',
+            'TlsFree@4', 'TlsGetValue@4', 'TlsSetValue@8', 'FlsAlloc@4', 'FlsFree@4',
+            'FlsGetValue@4', 'FlsSetValue@8', 'EncodePointer@4', 'DecodePointer@4',
         ],
     },
     'SHELL32.dll': {
