@@ -45,6 +45,16 @@ const OEM_CODE_PAGE = CP_OEM_437;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_INVALID_FLAGS = 1004;
+/** UTF-7 and the symbol page, which take no default character. */
+const CP_UTF7 = 65000;
+const CP_SYMBOL = 42;
+/** MB_PRECOMPOSED, MB_COMPOSITE, MB_USEGLYPHCHARS, MB_ERR_INVALID_CHARS; no other bit. */
+const MB_FLAGS = 0x0f;
+/**
+ * WC_DISCARDNS, WC_SEPCHARS, WC_DEFAULTCHAR, WC_ERR_INVALID_CHARS,
+ * WC_COMPOSITECHECK, WC_NO_BEST_FIT_CHARS: any other bit is refused.
+ */
+const WC_FLAGS = 0x6f0;
 const ERROR_NO_UNICODE_TRANSLATION = 1113;
 const ERROR_GEN_FAILURE = 31;
 
@@ -2201,9 +2211,15 @@ export function createLocaleFunctions(host){
                 // the source's, it has no "up to the terminator" meaning.
                 const span = (source >>> 0) === 0
                     ? { length: 0 } : sourceSpan(source >>> 0, sourceBytes, 1);
-                if (span.length === 0 || (destinationChars | 0) < 0)
+                if (span.length === 0 || (destinationChars | 0) < 0
+                    || ((destination >>> 0) === 0 && (destinationChars | 0) !== 0))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((flags & ~MB_FLAGS) !== 0)
+                {
+                    host.setLastError(ERROR_INVALID_FLAGS);
                     return 0;
                 }
                 const raw = host.readMemory(source >>> 0, span.length);
@@ -2261,13 +2277,23 @@ export function createLocaleFunctions(host){
             handler(args){
                 const [page, flags, source, sourceChars, destination, destinationBytes] = args;
                 const usedDefaultOut = args[7] >>> 0;
-                void flags;
                 const resolved = resolvePage(page);
                 const span = (source >>> 0) === 0
                     ? { length: 0 } : sourceSpan(source >>> 0, sourceChars, 2);
-                if (span.length === 0 || (destinationBytes | 0) < 0)
+                // A destination of NULL is only the measuring call's, with a
+                // size of zero; UTF-7 and the symbol page have no default
+                // character to report or replace with.
+                if (span.length === 0 || (destinationBytes | 0) < 0
+                    || ((destination >>> 0) === 0 && (destinationBytes | 0) !== 0)
+                    || ((resolved === CP_UTF7 || resolved === CP_SYMBOL)
+                        && ((args[6] >>> 0) !== 0 || usedDefaultOut !== 0)))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((flags & ~WC_FLAGS) !== 0)
+                {
+                    host.setLastError(ERROR_INVALID_FLAGS);
                     return 0;
                 }
                 const text = readWide(source >>> 0, span.length);

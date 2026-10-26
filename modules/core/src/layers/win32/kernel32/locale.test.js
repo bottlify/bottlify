@@ -325,6 +325,32 @@ test('a NULL source is an invalid parameter, not a read of address zero', ()=>{
     assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
 });
 
+test('a NULL destination with a size, an unknown flag, a default for UTF-7: refused', ()=>{
+    // As Windows answers them, before anything is read or written.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x100, 'Hello');
+    host.plantWide(0x300, 'Hello');
+    const ERROR_INVALID_FLAGS = 1004;
+
+    assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0, 0x100, 6, 0, 6]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x300, 6, 0, 6, 0, 0]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([65000, 0, 0x300, 6, 0x400, 16, 0x100, 0]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([42, 0, 0x300, 6, 0x400, 16, 0, 0x500]), 0);
+    assert.deepEqual(host.errors, Array(4).fill(ERROR_INVALID_PARAMETER));
+
+    host.errors.length = 0;
+    assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0x10, 0x100, -1, 0x400, 16]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0x100, 0x300, -1, 0x400, 16, 0, 0]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0x800, 0x300, -1, 0x400, 16, 0, 0]), 0);
+    assert.deepEqual(host.errors, Array(3).fill(ERROR_INVALID_FLAGS));
+    // A NULL source outranks an unknown flag.
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0x100, 0, -1, 0x400, 16, 0, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0x400, 0x300, -1, 0x400, 16, 0, 0]), 6,
+        'WC_NO_BEST_FIT_CHARS is a flag it knows');
+});
+
 test('a destination too small is filled as far as it goes, and the call still fails', ()=>{
     // Windows converts what fits before reporting the buffer too small. A
     // program that sized a BSTR from the measuring call less the terminator
