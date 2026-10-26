@@ -626,13 +626,14 @@ export function createMsiFunctions(host){
             windows: host.machine().windows, registration,
             environment: name=>host.machine().environment(name),
             fileVersion: async path=>{
-                const block = await host.versionInfo?.(host.fullPath(path)) ?? null;
+                const full = resolvePath(path);
+                const block = full === null ? null : await host.versionInfo?.(full) ?? null;
                 const fixed = block ? fixedInfo(block) : null;
                 return fixed ? `${fixed.ms >>> 16}.${fixed.ms & 0xffff}.`
                     + `${fixed.ls >>> 16}.${fixed.ls & 0xffff}` : null;
             },
             fileSize: path=>{
-                const stat = host.files.stat(host.fullPath(path));
+                const stat = statPath(path);
                 return stat && !stat.isDirectory ? stat.size : null;
             },
             format: record=>session.format(record),
@@ -839,9 +840,9 @@ export function createMsiFunctions(host){
         const nodes = [];
         /** @param {string} path */
         const openFile = path=>{
-            const full = host.fullPath(path);
-            const stat = host.files.stat(full);
-            const node = stat && !stat.isDirectory
+            const full = resolvePath(path);
+            const stat = full === null ? null : host.files.stat(full);
+            const node = full !== null && stat && !stat.isDirectory
                 ? host.files.open(full, { read: true, shareWrite: true }) : null;
             if (!node)
             {
@@ -946,7 +947,7 @@ export function createMsiFunctions(host){
      * @param {string} path @param {string} folder @param {string} extension
      */
     const keepCopy = async(path, folder, extension)=>{
-        const bytes = await readFile(host.files, host.fullPath(path));
+        const bytes = await readPath(path);
         if (!bytes)
         {
             return null;
@@ -991,14 +992,59 @@ export function createMsiFunctions(host){
     };
 
     /**
+     * The full path a program's text names, or null when it names none: an
+     * empty string, or one no drive holds. A package path of that kind is a
+     * package that is not there, not a failure of the layer.
+     *
+     * @param {string} path
+     * @returns {string | null}
+     */
+    const resolvePath = path=>{
+        try
+        {
+            return host.fullPath(path);
+        }
+        catch (e){
+            const code = /** @type {{ code?: string }} */ (e)?.code;
+            if (code === 'INVALID_PATH' || code === 'NO_SUCH_DRIVE')
+            {
+                return null;
+            }
+            throw e;
+        }
+    };
+
+    /** The entry a program's path names, or null for none. @param {string} path */
+    const statPath = path=>{
+        const full = resolvePath(path);
+        return full === null ? null : host.files.stat(full);
+    };
+
+    /** The bytes of the file a program's path names, or null. @param {string} path */
+    const readPath = async path=>{
+        const full = resolvePath(path);
+        return full === null ? null : readFile(host.files, full);
+    };
+
+    /**
+     * Writes the file a program's path names; false when it names none.
+     *
+     * @param {string} path @param {Uint8Array} bytes
+     */
+    const writePath = (path, bytes)=>{
+        const full = resolvePath(path);
+        return full !== null && writeFile(host.files, full, bytes);
+    };
+
+    /**
      * A database out of a file on the volume, read where it lies.
      *
      * @param {string} path
      * @returns {Promise<import('./database.js').Database | null>}
      */
     const loadDatabase = async path=>{
-        const full = host.fullPath(path);
-        const stat = host.files.stat(full);
+        const full = resolvePath(path);
+        const stat = full === null ? null : host.files.stat(full);
         if (!stat || stat.isDirectory)
         {
             return null;
@@ -1032,9 +1078,9 @@ export function createMsiFunctions(host){
      * @param {string} path @returns {Promise<import('./patch.js').Patch | number>}
      */
     const loadPatch = async path=>{
-        const full = host.fullPath(path);
-        const stat = host.files.stat(full);
-        const node = stat && !stat.isDirectory
+        const full = resolvePath(path);
+        const stat = full === null ? null : host.files.stat(full);
+        const node = full !== null && stat && !stat.isDirectory
             ? host.files.open(full, { read: true, shareWrite: true }) : null;
         if (!node)
         {
@@ -1081,7 +1127,7 @@ export function createMsiFunctions(host){
             {
                 return patch;
             }
-            found.push({ patch, path: host.fullPath(path), fresh: true });
+            found.push({ patch, path: resolvePath(path) ?? path, fresh: true });
         }
         for (const installed of registration.patches(productCode))
         {
@@ -1127,7 +1173,7 @@ export function createMsiFunctions(host){
         const byHandle = given ? null : /^#(\d+)$/.exec(path);
         const opened = byHandle ? get(Number(byHandle[1]), 'database') : null;
         const packagePath = given?.packagePath ?? (byHandle ? opened?.path ?? ''
-            : host.fullPath(path));
+            : resolvePath(path) ?? '');
         const db = given?.db ?? (byHandle ? opened?.db ?? null : await loadDatabase(packagePath));
         if (!db)
         {
@@ -1462,7 +1508,7 @@ export function createMsiFunctions(host){
     return {
         ...createProductFunctions({
             registration, hive: host.hive, files: host.files, fullPath: host.fullPath, reader,
-            putString, putFixed, readU32, writeU32, get,
+            statPath, readPath, putString, putFixed, readU32, writeU32, get,
             writeMemory: (address, bytes)=>host.writeMemory(address, bytes),
             readFile: path=>readFile(host.files, path),
             openPackage: async path=>{
@@ -1597,7 +1643,7 @@ export function createMsiFunctions(host){
                 }
                 return ERROR_INVALID_PARAMETER;
             }
-            const bytes = await readFile(host.files, host.fullPath(name));
+            const bytes = await readPath(name);
             if (!bytes)
             {
                 return ERROR_FILE_NOT_FOUND;
@@ -1691,13 +1737,14 @@ export function createMsiFunctions(host){
                 db = await loadDatabase(name);
                 if (!db)
                 {
-                    return host.files.stat(host.fullPath(name)) ? ERROR_INSTALL_PACKAGE_INVALID
+                    const full = resolvePath(name);
+                    return full !== null && host.files.stat(full) ? ERROR_INSTALL_PACKAGE_INVALID
                         : ERROR_OPEN_FAILED;
                 }
                 db.readOnly = mode === MSIDBOPEN_READONLY;
             }
-            writeU32(out, open('database', { db, path: host.fullPath(name), mode,
-                outPath: outPath === null ? null : host.fullPath(outPath) }));
+            writeU32(out, open('database', { db, path: resolvePath(name) ?? name, mode,
+                outPath: outPath === null ? null : resolvePath(outPath) ?? outPath }));
             return ERROR_SUCCESS;
         }),
         ...both('MsiDatabaseOpenView', 12, wide=>([database, query, out])=>{
@@ -1959,6 +2006,12 @@ export function createMsiFunctions(host){
             if ((type >>> 0) !== wanted)
             {
                 return ERROR_DATATYPE_MISMATCH;
+            }
+            // A string or a time property set from no value at all.
+            if ((wanted === VT.LPSTR && (text >>> 0) === 0)
+                || (wanted === VT.FILETIME && (filetime >>> 0) === 0))
+            {
+                return ERROR_INVALID_PARAMETER;
             }
             const value = wanted === VT.LPSTR ? reader(wide)(text) ?? ''
                 : wanted === VT.FILETIME ? new DataView(host.readMemory(filetime >>> 0, 8)
@@ -2451,8 +2504,7 @@ export function createMsiFunctions(host){
             {
                 return ERROR_SUCCESS;
             }
-            return writeFile(host.files, host.fullPath(name), bytes) ? ERROR_SUCCESS
-                : ERROR_CREATE_FAILED;
+            return writePath(name, bytes) ? ERROR_SUCCESS : ERROR_CREATE_FAILED;
         }),
         ...both('MsiDatabaseExport', 16, wide=>async([database, table, folder, file])=>{
             const opened = get(database, 'database');
@@ -2468,7 +2520,7 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            if (!host.files.stat(host.fullPath(directory))?.isDirectory)
+            if (!statPath(directory)?.isDirectory)
             {
                 return ERROR_BAD_PATHNAME;
             }
@@ -2506,7 +2558,7 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            if (!host.files.stat(host.fullPath(directory))?.isDirectory)
+            if (!statPath(directory)?.isDirectory)
             {
                 return ERROR_BAD_PATHNAME;
             }
@@ -2543,7 +2595,7 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const bytes = await readFile(host.files, host.fullPath(name));
+            const bytes = await readPath(name);
             if (!bytes)
             {
                 return ERROR_OPEN_FAILED;
@@ -2554,8 +2606,7 @@ export function createMsiFunctions(host){
             {
                 return made.code;
             }
-            return writeFile(host.files, host.fullPath(name), made.bytes) ? ERROR_SUCCESS
-                : ERROR_CREATE_FAILED;
+            return writePath(name, made.bytes) ? ERROR_SUCCESS : ERROR_CREATE_FAILED;
         }),
         ...both('MsiQueryProductState', 4, wide=>([product])=>
             registration.productState(reader(wide)(product) ?? '')),
@@ -2619,8 +2670,8 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const full = host.fullPath(name);
-            if (!host.files.stat(full)?.exists)
+            const full = resolvePath(name);
+            if (full === null || !host.files.stat(full)?.exists)
             {
                 return ERROR_FILE_NOT_FOUND;
             }
