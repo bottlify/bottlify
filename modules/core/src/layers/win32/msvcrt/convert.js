@@ -791,6 +791,15 @@ export function createConversionFunctions(host){
             toDouble(args[0], args[1]) },
 
         /**
+         * int _atodbl_l(_CRT_DOUBLE *value, char *str, _locale_t locale)
+         *
+         * _atodbl in the locale given, which is the C locale's: the only one
+         * carried.
+         */
+        _atodbl_l: { convention: 'cdecl', argBytes: 12, handler: (/** @type {number[]} */ args)=>
+            toDouble(args[0], args[1]) },
+
+        /**
          * errno_t _ecvt_s(char *buffer, size_t size, double value, int count,
          *                 int *dec, int *sign) and _fcvt_s
          *

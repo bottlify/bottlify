@@ -254,6 +254,18 @@ test('_atodbl reads into the caller\'s double and says when it is out of range',
     {
         assert.equal(table._atodbl.handler([value, memory.put(text)]), answer, text);
         assert.equal(read(), number, text);
+        assert.equal(table._atodbl_l.handler([value, memory.put(text), 0]), answer, text);
+        assert.equal(read(), number, `${text}, in the C locale`);
+    }
+    assert.equal(table._atodbl_l.argBytes, 12);
+    // Every simple normal double as Wine's test reads it: the nearest double.
+    for (let j = -307; j <= 308; j++)
+    {
+        for (let i = 1; i <= 9; i++)
+        {
+            table._atodbl.handler([value, memory.put(`${i}e${j}`)]);
+            assert.equal(read(), Number(`${i}e${j}`), `${i}e${j}`);
+        }
     }
 });
 
