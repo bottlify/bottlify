@@ -71,6 +71,26 @@ test('the address a link is counted under can come from the proxy in front', asy
     assert.ok(asked.length >= 2);
 });
 
+test('the pages admitted can be decided per request', async t=>{
+    /** @type {string[]} */
+    const hosts = [];
+    let admit = false;
+    const relay = createRelayServer({
+        port: 0,
+        origins: request=>{
+            hosts.push(String(request.headers.host));
+            return admit;
+        },
+    });
+    const port = await relay.listen();
+    t.after(()=>relay.close());
+
+    assert.equal(await opens(port, t), false, 'refused when the answer is no');
+    admit = true;
+    assert.ok(await opens(port, t));
+    assert.ok(hosts.every(host=>host === `127.0.0.1:${port}`), 'asked with the request it judges');
+});
+
 /** @param {() => any} ready */
 async function waitFor(ready, within = 4000){
     const until = Date.now() + within;

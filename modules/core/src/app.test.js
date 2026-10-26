@@ -1202,6 +1202,37 @@ test("a page's pacing yields on its own clock and looks again on its timer or on
     assert.ok(performance.now() - before < 100, 'the look is short, whatever the deadline');
 });
 
+test("a page's pacing sleeps to a deadline rather than spinning macrotasks to it", async t=>{
+    // Every thread in a timed wait of a millisecond: a lap of macrotasks to the
+    // deadline is a posted message each, tens of thousands a second.
+    let laps = 0;
+    let hidden = false;
+    const pacing = pagePacing({
+        macrotask: async()=>{
+            laps++;
+        },
+        hidden: ()=>hidden,
+        lookMs: 20,
+        napWord: new Int32Array(new SharedArrayBuffer(4)),
+    });
+    // An async wait does not hold node's loop open; the page's does.
+    const held = setInterval(()=>{}, 1000);
+    t.after(()=>clearInterval(held));
+    let before = performance.now();
+    await pacing.wait({ timer: false, sleep: true, deadlineMs: 5, wakes: [] });
+    assert.equal(laps, 0, 'no macrotask on the way to the deadline');
+    assert.ok(performance.now() - before >= 4, 'the deadline is waited out');
+    before = performance.now();
+    await pacing.wait({ timer: false, sleep: true, deadlineMs: 10_000, wakes: [] });
+    assert.ok(performance.now() - before < 1000, 'a look at most, whatever the deadline');
+    assert.equal(pacing.counts?.().napped, 2);
+    await pacing.wait({ timer: false, sleep: false, deadlineMs: 5, wakes: [] });
+    await pacing.wait({ timer: false, sleep: true, deadlineMs: null, wakes: [] });
+    hidden = true;
+    await pacing.wait({ timer: false, sleep: true, deadlineMs: 5, wakes: [] });
+    assert.equal(laps, 3, 'a thread still at work, no deadline, or a hidden page: a macrotask');
+});
+
 test('a run outside a page is never treated as hidden', ()=>{
     // There is no document in a worker or in Node, and answering "hidden" there
     // would put every run that is not in a tab on the spinning path.
@@ -1984,7 +2015,7 @@ test('an iPhone translates without wasm tail calls; phones and Safari run on one
     }
     const off = withoutFaultingTailCalls({ cork: { config: { worker: false } } }, true);
     assert.deepEqual(off.cork.config,
-        { crossTailCalls: false, dispatch: true, callDepth: 64, worker: false });
+        { crossTailCalls: false, dispatch: true, callDepth: 64, gatherAfter: 0, worker: false });
     assert.deepEqual(off.jit, { 6: 0 }, 'the emulator chains no modules');
     assert.equal(withoutFaultingTailCalls({ cork: { config: { crossTailCalls: true } } }, true)
         .cork.config.crossTailCalls, true, 'the caller\'s own setting wins');

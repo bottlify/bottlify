@@ -49,6 +49,7 @@ async function handTurns(rounds, mineMs, theirsMs){
         worker.once('message', resolve);
         worker.once('error', reject);
     });
+    const began = performance.now();
     for (let round = 0; round < rounds; round++)
     {
         channel.say(Turn.RUN, round);
@@ -56,9 +57,33 @@ async function handTurns(rounds, mineMs, theirsMs){
         assert.equal(channel.value(), round + 1, `round ${round}`);
     }
     const counts = /** @type {Record<string, number>} */ (await theirs);
+    const elapsedMs = performance.now() - began;
     await worker.terminate();
     assert.equal(Atomics.load(channel.words, Word.SLEEPING), 0, 'no sleeper left counted');
-    return { mine: channel.counts, theirs: counts };
+    return { mine: channel.counts, theirs: counts, elapsedMs };
+}
+
+/**
+ * What holds of a hand-over whatever the load: no side sleeps before it has
+ * looked `…Ms` (so its sleeps fit in the time the run took), and no side
+ * notifies the other more often than the other slept.
+ *
+ * @param {Awaited<ReturnType<typeof handTurns>>} run
+ * @param {number} mineMs @param {number} theirsMs
+ */
+function assertLooksFirst(run, mineMs, theirsMs){
+    const said = JSON.stringify(run);
+    const unlooked = `a sleep with no look before it: ${said}`;
+    if (mineMs > 0)
+    {
+        assert.ok(run.mine.slept <= run.elapsedMs / mineMs, unlooked);
+    }
+    if (theirsMs > 0)
+    {
+        assert.ok(run.theirs.slept <= run.elapsedMs / theirsMs, unlooked);
+    }
+    assert.ok(run.mine.woke <= run.theirs.slept, `a notify with nobody asleep: ${said}`);
+    assert.ok(run.theirs.woke <= run.mine.slept, `a notify with nobody asleep: ${said}`);
 }
 
 test('a turn ended while the other side looks wakes nothing, and one it sleeps through wakes it',
@@ -70,14 +95,17 @@ test('a turn ended while the other side looks wakes nothing, and one it sleeps t
         assert.equal(asleep.theirs.said, 2000);
         assert.ok(asleep.mine.slept > 0 && asleep.theirs.slept > 0, JSON.stringify(asleep));
         assert.ok(asleep.mine.woke > 0 && asleep.theirs.woke > 0, JSON.stringify(asleep));
-        // Both looking for longer than the other takes: no notify at all.
+        // Both looking for longer than the other takes. A side sleeps only
+        // after a whole look of its own, and is notified only when it sleeps,
+        // so however long a loaded machine keeps the other off its core -- a
+        // look that runs out is a sleep it took fairly -- the sleeps are few
+        // and each notify has a sleeper.
         const awake = await handTurns(2000, 5000, 5000);
-        assert.deepEqual([awake.mine.slept, awake.theirs.slept, awake.mine.woke,
-            awake.theirs.woke], [0, 0, 0, 0], JSON.stringify(awake));
-        // One sleeping, one looking: only the sleeper is woken.
+        assertLooksFirst(awake, 5000, 5000);
+        // One sleeping, one looking: the sleeper is woken, the looker only
+        // when a look of its own ran out.
         const mixed = await handTurns(2000, 5000, 0);
-        assert.equal(mixed.mine.slept, 0);
-        assert.equal(mixed.theirs.woke, 0, 'the looking side was never notified');
+        assertLooksFirst(mixed, 5000, 0);
         assert.ok(mixed.mine.woke > 0, JSON.stringify(mixed));
     });
 

@@ -135,7 +135,8 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {number} initialStack Initial guest ESP.
  * @property {import('../engine.js').EngineConfig} [cork]  The translator's config.
  * @property {number} [translationZone]  The bytes the translator may hold, its tables
- *     past the guest's RAM included: the runtime is given the rest (`cacheBytes`) unless
+ *     past the guest's RAM included: under the iOS hack (`crossTailCalls` false) the
+ *     runtime is given its part of the rest (`cacheBytes`), elsewhere no ceiling, unless
  *     its config names a figure of its own.
  * @property {number} [noExecuteBelow]  Addresses below this run nothing -- an
  *     instruction fetched there is a page fault -- whatever reads and writes
@@ -319,8 +320,14 @@ export function createCorkHost(config){
     // The memory past the guest's RAM: the engine's tables and pages for every
     // executor, which the translator's zone holds before any module of it.
     const engineBytes = memory.buffer.byteLength - own.ramBase - memorySize;
-    const cacheBytes = corkConfig?.cacheBytes ?? (translationZone === undefined ? undefined
-        : cacheShare(translationZone - engineBytes, executors, executor));
+    // A ceiling only where the iOS hack runs (`crossTailCalls` false): a phone's tab is
+    // what it is for. Elsewhere it let a desktop's other executors, a sixteenth of the
+    // zone each, let modules go and bring them back without end: CoD4 on four cores
+    // fell from 58 to 42 frames a second in its menu, under one core's 61.
+    const cacheBytes = corkConfig?.cacheBytes
+        ?? (translationZone === undefined ? undefined
+            : corkConfig?.crossTailCalls !== false ? 0
+                : cacheShare(translationZone - engineBytes, executors, executor));
     if (taken !== undefined)
     {
         // A new memory is zero; this one is made so where it was used: its

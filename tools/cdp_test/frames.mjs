@@ -183,6 +183,14 @@ function describe(before, after, windowMs){
             + (after.layers.cpu.executorsRefused ? `; refused: ${after.layers.cpu.executorsRefused}`
                 : '')
             + `; memory ${after.layers.cpu.sharedMemory ? 'shared' : 'not shared'}`);
+        // Modules each runtime let go past its `cacheBytes` and regions brought back:
+        // an executor that keeps doing both is translating its code over and over.
+        const own = after.layers.cpu.cork;
+        say(`modules let go (brought back): process ${own?.evictions ?? 'not measured'}`
+            + ` (${own?.broughtBack ?? 'not measured'})`
+            + (after.layers.cpu.executors ?? []).map(one=>`, executor ${one.index}`
+                + ` ${one.evictions ?? 'not measured'} (${one.broughtBack ?? 'not measured'})`)
+                .join(''));
         if (options.threads)
         {
             // Where each thread ran last and what held the executors: whose

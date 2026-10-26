@@ -3,8 +3,9 @@
 # See LICENSE for details
 name: publish
 
-# By hand only, from main once its ci run is green: every package packed, the
-# tarballs kept as the run's artifacts, and the packages named staged on npm.
+# By hand only, from main once its ci run is green: the packages named -- each
+# its own release -- built where they need it, packed, kept as the run's
+# artifacts and staged on npm; nothing is done for a package not named.
 # No token: npm trusts this workflow of this repository (trusted publishing,
 # set per package on npmjs.com, which allows it to stage only), and the job
 # proves who it is with its OIDC token. A staged version goes live once a
@@ -40,33 +41,52 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm install -g npm@12.2.0
       - run: npm ci
+      # Only what is named: each package is its own release, and one left out
+      # is neither built, nor packed, nor staged.
+      - id: named
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          names=$(echo "$PACKAGES" | tr ',' ' ' | xargs)
+          for name in $names; do
+            case "$name" in core|cork|installer|networking) ;; *) echo "no package $name" >&2; exit 1 ;; esac
+          done
+          echo "names=$names" >> "$GITHUB_OUTPUT"
+          case " $names " in *" core "*) echo "core=true" >> "$GITHUB_OUTPUT" ;; *) echo "core=false" >> "$GITHUB_OUTPUT" ;; esac
       # The core package carries the video decoder where it can be had; the
       # package check holds it to its size when it is there.
       # A release of this repository, which is private: fetched through the API
       # with the job's token, as in ci.
-      - run: npm run fetch:video-decoder
+      - if: steps.named.outputs.core == 'true'
+        run: npm run fetch:video-decoder
         env:
           GITHUB_TOKEN: ${{ github.token }}
       # Packing runs no prepublishOnly: the core package's dist is built here,
       # and its check run, before anything is packed or published.
-      - run: npm run build -w @bottlify/core
-      - run: npm run check:package -w @bottlify/core
+      - if: steps.named.outputs.core == 'true'
+        run: npm run build -w @bottlify/core
+      - if: steps.named.outputs.core == 'true'
+        run: npm run check:package -w @bottlify/core
       # npmjs.com resolves a README's relative links against the repository's
       # root; each package's README is given links to this commit instead.
-      - run: node tools/readme-links.mjs "$GITHUB_SHA" modules/core modules/cork modules/installer modules/networking
+      - env:
+          NAMES: ${{ steps.named.outputs.names }}
+        run: node tools/readme-links.mjs "$GITHUB_SHA" $(for name in $NAMES; do echo "modules/$name"; done)
       - name: pack
+        env:
+          NAMES: ${{ steps.named.outputs.names }}
         run: |
           mkdir -p packs
-          npm pack -w @bottlify/core -w @bottlify/cork -w @bottlify/installer -w @bottlify/networking --pack-destination packs
+          npm pack $(for name in $NAMES; do echo "-w @bottlify/$name"; done) --pack-destination packs
       - uses: actions/upload-artifact@v4
         with:
           name: packages
           path: packs/*.tgz
       - name: stage
         env:
-          PACKAGES: ${{ inputs.packages }}
+          NAMES: ${{ steps.named.outputs.names }}
         run: |
-          for name in $(echo "$PACKAGES" | tr ',' ' '); do
+          for name in $NAMES; do
             npm stage publish -w "@bottlify/$name" --access public
           done
           # Listing needs a maintainer's login, which the job does not have.

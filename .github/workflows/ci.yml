@@ -9,6 +9,13 @@ name: ci
 # them all; a daily schedule cost a runner every day only to find nothing new.
 # What goes to main is judged by the whole set run locally first (CLAUDE.md,
 # Tests); this is the same set on a clean machine.
+#
+# One job a package, run when the push touched that package or a file of
+# another that it uses (tools/ci-layers.mjs): cork's are core's; core's are the
+# installer's only where the installer imports them; networking stands alone. A
+# change to what every package shares (the root's files, tools/, the lockfile
+# beyond its packages' versions, these workflows) runs them all, as a run by
+# hand does; one to docs/ or roadmap/ alone runs none.
 on:
   push:
     branches: [main]
@@ -20,8 +27,62 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: what the push touched
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cork: ${{ steps.layers.outputs.cork }}
+      core: ${{ steps.layers.outputs.core }}
+      installer: ${{ steps.layers.outputs.installer }}
+      networking: ${{ steps.layers.outputs.networking }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: layers
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          all() { for one in cork core installer networking; do echo "$one=true" >> "$GITHUB_OUTPUT"; done; }
+          # By hand, a new branch, or a push whose start is not here: everything.
+          if [ "$EVENT" != push ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then all; exit 0; fi
+          changed=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
+          # A lockfile that moved only packages' versions moved with their
+          # package.json, which says whose: not a change to what all share.
+          if echo "$changed" | grep -qx package-lock.json && ! git diff -U0 "$BEFORE" "$GITHUB_SHA" -- package-lock.json | grep -E '^[+-][^+-]' | grep -qvE '^[+-][[:space:]]*"version": "'; then
+            changed=$(echo "$changed" | grep -vx package-lock.json)
+          fi
+          echo "$changed"
+          # The packages these files are in and those that use them (tools/ci-layers.mjs).
+          echo "$changed" | node tools/ci-layers.mjs | tee -a "$GITHUB_OUTPUT"
+
+  cork:
+    name: cork (typecheck, lint, tests, corpus)
+    needs: changes
+    if: needs.changes.outputs.cork == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck -w @bottlify/cork
+      - run: npx eslint modules/cork --max-warnings 0
+      - run: npm run test -w @bottlify/cork
+      # The translator's corpus suites judge it against the hardware recording;
+      # with CI set they fail rather than skip without it.
+      - run: npm run fetch:corpus
+      - run: npm run test:integration -w @bottlify/cork
+
   core:
-    name: core (typecheck, tests, boundaries, build)
+    name: core (typecheck, lint, tests, boundaries, build)
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     # About a quarter of an hour when it goes well; a hung run would otherwise
     # be paid for until the platform's six hours end.
@@ -33,9 +94,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm run lint
-      - run: npm run test
+      - run: npm run typecheck -w @bottlify/core
+      - run: npx eslint modules/core tools eslint.config.mjs eslint-rules.mjs --max-warnings 0
+      - run: npm run test -w @bottlify/core
       - run: npm run check:boundaries
       # The release test packs and installs the built package, decoder included.
       # It is a release of this repository, which is private: the plain download
@@ -43,14 +104,48 @@ jobs:
       - run: npm run fetch:video-decoder
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      # The translator's corpus suites judge it against the hardware recording;
-      # with CI set they fail rather than skip without it.
-      - run: npm run fetch:corpus
-      - run: npm run test:integration
+      - run: npm run test:integration -w @bottlify/core
       - run: npm run build
+
+  installer:
+    name: installer (typecheck, lint, tests)
+    needs: changes
+    if: needs.changes.outputs.installer == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck -w @bottlify/installer
+      - run: npx eslint modules/installer --max-warnings 0
+      - run: npm run test -w @bottlify/installer
+      - run: npm run test:integration -w @bottlify/installer
+
+  networking:
+    name: networking (typecheck, lint, tests)
+    needs: changes
+    if: needs.changes.outputs.networking == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck -w @bottlify/networking
+      - run: npx eslint modules/networking --max-warnings 0
+      - run: npm run test -w @bottlify/networking
 
   probe:
     name: probe (browser → worker ping → screenshot)
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

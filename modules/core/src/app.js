@@ -1230,19 +1230,44 @@ export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false,
  * @param {() => number} [deps.now]
  * @param {() => boolean} [deps.signalled]
  * @param {number} [deps.pendingMs]
+ * @param {Int32Array | null} [deps.napWord]  The shared word a wait to a deadline sleeps
+ *     on; null spins macrotasks to it. Left out, one where a browser has it.
  * @returns {RunPacing}
  */
 export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs = PAGE_YIELD_MS,
-    now = ()=>performance.now(), signalled, pendingMs })
+    now = ()=>performance.now(), signalled, pendingMs, napWord })
 {
     /** Turns kept on the thread and trips to the event loop, by why. @type {Record<string, number>} */
     const counts = {};
+    // A word nobody rings, slept on to a deadline: an async wait's timeout is
+    // not a timer, so it is neither clamped to milliseconds as nested timers
+    // are nor a message. Spinning macrotasks to a deadline instead posted one
+    // message per lap -- a program sleeping a millisecond a frame had its
+    // engine post 80 000 a second, whose garbage held 356 MB of a worker's
+    // heap in Chromium and more where JavaScriptCore lets it grow. Not in
+    // node, whose macrotask posts nothing and whose loop an async wait does
+    // not hold open.
+    const nap = napWord !== undefined ? napWord
+        : typeof setImmediate !== 'function' && typeof SharedArrayBuffer === 'function'
+            && typeof (/** @type {any} */ (Atomics).waitAsync) === 'function'
+            ? new Int32Array(new SharedArrayBuffer(4)) : null;
     return {
         counts: ()=>({ ...counts }),
         yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, pendingMs, counts }),
-        wait({ timer, wakes }){
+        wait({ timer, sleep, deadlineMs, wakes }){
             if (!timer)
             {
+                // Nothing can run until the guest's own deadline: sleep to it,
+                // a look at most, so a message from the page that wakes a
+                // thread waits no longer than an idle machine's look. A hidden
+                // page keeps its macrotasks, which nothing throttles.
+                if (nap && sleep && deadlineMs !== null && deadlineMs > 0 && !hidden())
+                {
+                    counts.napped = (counts.napped ?? 0) + 1;
+                    const slept = /** @type {any} */ (Atomics).waitAsync(nap, 0, 0,
+                        Math.min(deadlineMs, lookMs));
+                    return slept.async ? slept.value.then(()=>{}) : Promise.resolve();
+                }
                 return macrotask();
             }
             const look = timedWait({
@@ -1833,8 +1858,13 @@ const IOS_CALL_DEPTH = 64;
  * transfer within a module a direct tail call and one out of it entered by the
  * runtime's loop (`crossTailCalls`); the emulator's chaining, every link of it
  * into another module, off. With them fewer calls wait as wasm calls
- * (`IOS_CALL_DEPTH`). The caller's own settings win. Decided on the page and
- * carried to every worker in the options.
+ * (`IOS_CALL_DEPTH`). The hottest regions are not gathered into a module of
+ * their own (`gatherAfter`): each gathering builds them again, and WebKit keeps
+ * what it compiled -- the Doom 3 demo's load in WebKit 27.2 (Playwright,
+ * Windows, the game test page with the fake GPU, 180-240 s, one run each) held
+ * 3090 MB of the web process at its end gathering and 1110 MB not, past the
+ * 1720 MB an iPhone 13 Pro Max's tab is ended at. The caller's own settings
+ * win. Decided on the page and carried to every worker in the options.
  *
  * @template {Record<string, any>} T
  * @param {T} options
@@ -1845,7 +1875,7 @@ export function withoutFaultingTailCalls(options, fault = tailCallsFault()){
     return fault ? { ...options,
         cork: { ...options.cork,
             config: { crossTailCalls: false, dispatch: true, callDepth: IOS_CALL_DEPTH,
-                ...options.cork?.config } },
+                gatherAfter: 0, ...options.cork?.config } },
         jit: { [JIT_CONFIG_CHAINING]: 0, ...options.jit } } : options;
 }
 
@@ -3751,9 +3781,10 @@ const SEVERITY = /** @type {Record<string, string>} */ ({
  * whose program may call a missing import in a loop and would fill the page's
  * queue with a clone and a wake-up per call. And a position rather than a
  * happening: `cursor-moved` fires at every move of the mouse, and written down
- * it laps everything else out of the ring.
+ * it laps everything else out of the ring. Nor `bundle-fetching`, at each start and end
+ * of the range requests, which the bundle's own read counts account for.
  */
-const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved']);
+const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved', 'bundle-fetching']);
 
 /**
  * Every event the run reports also goes to its journal, so that one ordered
@@ -5215,6 +5246,8 @@ async function buildApp(options){
                     fetched = new Promise(resolve=>{
                         arrived = resolve;
                     });
+                    // A page shows that a stall is the bundle arriving, not the game.
+                    events.emit('bundle-fetching', { fetching: true });
                 }
                 return blocks.fetch(needed).finally(()=>{
                     fetching--;
@@ -5224,6 +5257,7 @@ async function buildApp(options){
                         fetched = null;
                         arrived = ()=>{};
                         open();
+                        events.emit('bundle-fetching', { fetching: false });
                     }
                 });
             },

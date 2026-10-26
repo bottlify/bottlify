@@ -54,6 +54,17 @@ test('a rule of a star alone permits every host, and a star in a name does not',
     assert.equal(permits(['*example.com'], 'notexample.com'), false);
 });
 
+test('a range admits the addresses in it and nothing else', ()=>{
+    assert.equal(permits(['87.228.58.0/24'], '87.228.58.62'), true);
+    assert.equal(permits(['87.228.58.0/24'], '87.228.59.62'), false);
+    assert.equal(permits(['87.228.58.62/32'], '87.228.58.62'), true);
+    assert.equal(permits(['87.228.58.62/32'], '87.228.58.63'), false);
+    assert.equal(permits(['10.0.0.0/8'], '10.255.1.2'), true);
+    assert.equal(permits(['87.228.58.0/24'], 'logon.example.com'), false,
+        'a name is not in a range');
+    assert.equal(permits(['87.228.58.0/33'], '87.228.58.62'), false, 'no such prefix');
+});
+
 test('an exact rule matches only that host', ()=>{
     assert.equal(permits(['example.com'], 'example.com'), true);
     assert.equal(permits(['example.com'], 'EXAMPLE.COM'), true);

@@ -1737,6 +1737,8 @@ export function createCpuModule(){
                             workerBusyMs: figures.workerBusyMs,
                             spent: figures.spent,
                             heldBytes: figures.heldBytes ?? null,
+                            evictions: figures.evictions ?? null,
+                            broughtBack: figures.broughtBack ?? null,
                             said,
                         } : { index: remote.index, instructions, said, answer: 'not answered yet' };
                     }),

@@ -40,14 +40,14 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GCProfiler, deserialize } from 'node:v8';
 
 const args = process.argv.slice(2);
 /** @param {string} name @param {string} fallback */
 const flag = (name, fallback)=>(args.includes(name) ? args[args.indexOf(name) + 1] : fallback);
 const [mode, dir] = args;
-const root = pathToFileURL(resolve(flag('--root', new URL('../..', import.meta.url).pathname)) + '/');
+const root = pathToFileURL(resolve(flag('--root', fileURLToPath(new URL('../..', import.meta.url)))) + '/');
 const only = args.slice(2).filter((one, at, list)=>!one.startsWith('--')
     && !list[at - 1]?.startsWith('--'));
 const images = new URL('images/', import.meta.url);

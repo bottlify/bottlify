@@ -21,6 +21,7 @@
  */
 
 import { createRelayServer } from './index.js';
+import { parseIp } from '../protocol.js';
 
 /** @param {string[]} argv */
 export function parseArguments(argv){
@@ -55,23 +56,36 @@ export function parseArguments(argv){
     return parsed;
 }
 
+const DOTTED = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const RANGE = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/;
+
 /**
  * Whether a host is on the list.
  *
  * Compared whole-label rather than by substring: a suffix rule for
  * `*.example.com` must not admit `example.com.attacker.net`, and a plain
  * `endsWith` admits exactly that. A rule of `*` alone admits every host, for a
- * relay run on one's own machine that is meant to be an open one.
+ * relay run on one's own machine that is meant to be an open one. A range,
+ * `a.b.c.d/n`, admits the addresses in it: a server that hands out addresses
+ * rather than names (a game's list of its worlds) is reached by them.
  *
  * @param {string[]} allow @param {string} host
  */
 export function permits(allow, host){
     const wanted = host.toLowerCase();
+    const address = DOTTED.test(wanted) ? parseIp(wanted) : null;
     return allow.some(rule=>{
         const pattern = rule.toLowerCase();
         if (pattern === '*')
         {
             return true;
+        }
+        const range = RANGE.exec(pattern);
+        if (range)
+        {
+            const bits = Number(range[2]);
+            return address !== null && bits <= 32
+                && (bits === 0 || ((address ^ parseIp(range[1])) >>> (32 - bits)) === 0);
         }
         return pattern.startsWith('*.')
             ? wanted.endsWith(pattern.slice(1)) && wanted.length > pattern.length - 1

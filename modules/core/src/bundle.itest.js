@@ -95,12 +95,17 @@ test('a program reads a file out of a bundle, fetching only what it touches',
         app.on('output', (/** @type {any} */ payload)=>{
             printed += payload.text;
         });
+        /** @type {boolean[]} */
+        const waits = [];
+        app.on('bundle-fetching', (/** @type {any} */ payload)=>waits.push(payload.fetching));
 
         const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 20000 });
 
         assert.equal(exitCode, 0);
         assert.equal(printed, PLANTED,
             'the bytes came out of the bundle, through a read that had to wait for them');
+        assert.ok(waits.length >= 2 && waits.every((on, i)=>on === (i % 2 === 0)),
+            `the wait was told as it began and as it ended, in turn (${waits})`);
 
         // A miss brings the window around it rather than the block alone, so
         // what bounds a read of an eight-byte file is the window and not the
@@ -597,8 +602,13 @@ test('a preloaded bundle is here whole before the program starts, and nothing it
         assert.ok(opened.bytes >= source.summary.bytes - (1 << 20),
             'the bundle came in before the start');
 
+        let waited = 0;
+        app.on('bundle-fetching', ()=>{
+            waited++;
+        });
         assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 40000 }), 0);
         assert.equal(source.fetched.calls, opened.calls, 'the program read it without a request');
+        assert.equal(waited, 0, 'and no wait for the bundle was told');
     });
 
 test('a preload with nowhere to keep the blocks says so and the program reads as it goes',
