@@ -38,6 +38,7 @@ import {
     after, pointOf,
 } from '../user32/controls.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { notifyWindow } from './notify.js';
 
 /** The class name a program creates the control by. */
 export const TREEVIEW_CLASS = 'SysTreeView32';
@@ -374,7 +375,7 @@ export function createTreeViewProcedure(host, tk){
      * @returns {number | Promise<number>}
      */
     const notify = (record, code, bytes, thread)=>{
-        if (!record.parent || !host.allocate)
+        if (!notifyWindow(record) || !host.allocate)
         {
             return 0;
         }
@@ -395,7 +396,8 @@ export function createTreeViewProcedure(host, tk){
             return 0;
         }
         host.writeMemory(address, bytes);
-        return host.send(record.parent, WM_NOTIFY, record.id & 0xffff, address, thread);
+        return host.send(notifyWindow(record), WM_NOTIFY, record.id & 0xffff, address,
+            thread);
     };
 
     /**
@@ -410,7 +412,7 @@ export function createTreeViewProcedure(host, tk){
      */
     const askDispInfo = (record, item, thread)=>{
         const BUFFER = 64;
-        if (!record.parent || !host.allocate)
+        if (!notifyWindow(record) || !host.allocate)
         {
             return Promise.resolve(item.text);
         }
@@ -426,7 +428,7 @@ export function createTreeViewProcedure(host, tk){
             (address + NMTVDISPINFO.SIZE) | 0, true);
         header(bytes, record, TVN_GETDISPINFOA);
         host.writeMemory(address, bytes);
-        return Promise.resolve(host.send(record.parent, WM_NOTIFY, record.id & 0xffff,
+        return Promise.resolve(host.send(notifyWindow(record), WM_NOTIFY, record.id & 0xffff,
             address, thread)).then(()=>{
             const pointer = readI32(address + NMTVDISPINFO.item + TVITEM.pszText) >>> 0;
             const text = pointer === 0 ? '' : host.readCString(pointer, BUFFER);

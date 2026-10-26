@@ -34,6 +34,7 @@ import {
     EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_FOCUS, EVENT_OBJECT_SELECTION,
     raiseEvent,
 } from './winevents.js';
+import { notifyWindow } from './notify.js';
 
 /** The class name a program creates the control by. */
 export const TAB_CLASS = 'SysTabControl32';
@@ -414,7 +415,7 @@ export function createTabProcedure(host, tk, images){
      * @returns {number | Promise<number>}
      */
     const notify = (record, code, thread)=>{
-        const address = record.parent && host.allocate ? host.allocate(NMHDR_SIZE) : 0;
+        const address = notifyWindow(record) && host.allocate ? host.allocate(NMHDR_SIZE) : 0;
         if (address === 0)
         {
             return 0;
@@ -425,7 +426,7 @@ export function createTabProcedure(host, tk, images){
         view.setUint32(4, record.id >>> 0, true);
         view.setInt32(8, code, true);
         host.writeMemory(address, bytes);
-        const sent = host.send(record.parent, WM_NOTIFY, record.id & 0xffff, address,
+        const sent = host.send(notifyWindow(record), WM_NOTIFY, record.id & 0xffff, address,
             thread);
         return after(sent, answer=>{
             host.release?.(address);

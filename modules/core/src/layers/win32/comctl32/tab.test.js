@@ -526,6 +526,24 @@ test('a tab control raises EVENT_OBJECT_CREATE and EVENT_OBJECT_DESTROY per tab,
     'delete_focus_seq; nothing to delete, nothing told');
 });
 
+test('a tab control made as an owned window tells its owner, the window it was made with',
+    async()=>{
+        // comctl32's tab tests make their controls without WS_CHILD, so the
+        // window manager keeps parent_wnd as the owner; setfocus_parent_seq
+        // still sees TCN_FOCUSCHANGE there.
+        const context = setup();
+        const owner = await context.makeParent();
+        context.memory.putString(TEXT, TAB_CLASS);
+        const hwnd = await context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_VISIBLE | TCS_FOCUSNEVER | TCS_BUTTONS, 0, 0, 280, 160, owner, 0, HINSTANCE, 0]);
+        assert.equal(context.fns.GetParent.handler([hwnd]), 0, 'not a popup: no parent to answer');
+        context.insert(hwnd, 0, { text: 'a' });
+        context.insert(hwnd, 1, { text: 'b' });
+        context.codes.length = 0;
+        context.send([hwnd, TCM_SETCURFOCUS, 1, 0]);
+        assert.deepEqual(context.codes, [TCN_FOCUSCHANGE]);
+    });
+
 test('buttons keep the focus apart from the selection and tell TCN_FOCUSCHANGE', async()=>{
     const context = setup();
     await context.makeParent();
