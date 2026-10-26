@@ -718,7 +718,7 @@ test('ReleaseSemaphore says why it refuses, and writes the previous count only o
     assert.equal(written.has(0x3000), false, 'no refusal writes the previous count');
 
     assert.equal(fns.ReleaseSemaphore.handler([semaphore, 1, 0x3000]), 1);
-    assert.deepEqual([...written.get(0x3000)], [0, 0, 0, 0]);
+    assert.deepEqual([...written.get(0x3000) ?? []], [0, 0, 0, 0]);
 });
 
 test('OpenSemaphoreA reports no such thing for a name nothing created', ()=>{
