@@ -1539,11 +1539,17 @@ export function _mbsstr({ u8, host }, haystack, needle){
 /**
  * int _mbscmp(const unsigned char *left, const unsigned char *right)
  *
+ * No string, either side, is the host's: _NLSCMPERROR and EINVAL.
+ *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} left @param {u32} right
  * @returns {i32}
  */
 export function _mbscmp({ u8, host }, left, right){
+    if (left === 0 || right === 0)
+    {
+        return host();
+    }
     for (/** @type {u32} */ let i = 0; ; i++)
     {
         const a = u8(left + i);
@@ -1571,6 +1577,10 @@ export function _mbscmp({ u8, host }, left, right){
  * @returns {i32}
  */
 export function _mbsicmp({ u8, host }, left, right){
+    if (left === 0 || right === 0)
+    {
+        return host();
+    }
     for (/** @type {u32} */ let i = 0; ; i++)
     {
         const a = u8(left + i);

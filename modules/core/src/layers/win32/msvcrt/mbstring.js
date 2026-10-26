@@ -462,13 +462,19 @@ export function createWideFunctions(host){
          * size_t mbstowcs(wchar_t *dest, const char *src, size_t count)
          *
          * A null destination means "how many units would this need", which is
-         * how a caller sizes the buffer before the call that fills it.
+         * how a caller sizes the buffer before the call that fills it; no
+         * source is -1 and EINVAL.
          */
         mbstowcs: {
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
+                if ((source >>> 0) === 0)
+                {
+                    host.errno?.(EINVAL);
+                    return -1;
+                }
                 const text = readNarrowUnits(source);
                 if ((destination >>> 0) === 0)
                 {
@@ -758,6 +764,18 @@ export function createMultiByteFunctions(narrow, host){
         _mbbtype: onHost('_mbbtype', 8),
         _mbsbtype: onHost('_mbsbtype', 8),
         _ismbclegal: onHost('_ismbclegal', 4),
+        _mbsnlen: onHost('_mbsnlen', 8),
+        _mbccpy_s: onHost('_mbccpy_s', 16),
+        _mbscpy_s: onHost('_mbscpy_s', 12),
+        _mbscat_s: onHost('_mbscat_s', 12),
+        _mbsnbcpy_s: onHost('_mbsnbcpy_s', 16),
+        _mbsnbcat_s: onHost('_mbsnbcat_s', 16),
+        _mbsupr_s: onHost('_mbsupr_s', 8),
+        _mbslwr_s: onHost('_mbslwr_s', 8),
+        // The `_l` forms take a locale, and the C locale is the only one a
+        // program can hold here: each is its plain form.
+        _mbsnextc_l: onHost('_mbsnextc', 8),
+        _mbscmp_l: { ...guestCoded('_mbscmp'), argBytes: 12 },
 
         // The Japanese conversions and tests (kana.js): under any page but
         // 932 a conversion is its argument and a test is false.

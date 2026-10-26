@@ -24,7 +24,7 @@
  * handlers here, which read it by the page.
  */
 
-import { EINVAL } from './globals.js';
+import { EILSEQ, EINVAL, ERANGE } from './globals.js';
 
 /** The `_mbctype` bits, at the values msvcrt's `<mbctype.h>` gives them. */
 export const MB_SYMBOL = 0x01;
@@ -33,6 +33,9 @@ export const MB_LEAD = 0x04;
 export const MB_TRAIL = 0x08;
 export const SB_UPPER = 0x10;
 export const SB_LOWER = 0x20;
+
+/** What a comparison answers for no string: _NLSCMPERROR, INT_MAX. */
+const NLS_COMPARE_ERROR = 0x7fffffff;
 
 /** `_mbbtype` and `_mbsbtype`'s answers. */
 export const MBC_SINGLE = 0;
@@ -123,6 +126,71 @@ export function mbctypeOf(layout){
         mark(layout.symbols, MB_SYMBOL);
     }
     return table;
+}
+
+/** The WHATWG decoder each double-byte page is read with; Johab has none. */
+const DECODERS = new Map([[932, 'shift_jis'], [936, 'gbk'], [949, 'euc-kr'], [950, 'big5']]);
+
+/**
+ * Each page's pairs by the character they stand for, made the first time a
+ * pair of that page is cased.
+ *
+ * @type {Map<number, { decode: (pair: number) => string, pairOf: Map<string, number> }>}
+ */
+const PAGE_CHARACTERS = new Map();
+
+/** @param {number} number */
+function charactersOf(number){
+    const known = PAGE_CHARACTERS.get(number);
+    if (known)
+    {
+        return known;
+    }
+    const label = DECODERS.get(number);
+    const layout = DOUBLE_BYTE_PAGES.get(number);
+    const decoder = label ? new TextDecoder(label) : null;
+    /** @param {number} pair */
+    const decode = pair=>(decoder ? decoder.decode(Uint8Array.of(pair >> 8, pair & 0xff)) : '');
+    /** @type {Map<string, number>} */
+    const pairOf = new Map();
+    for (const [firstLead, lastLead] of decoder ? layout?.lead ?? [] : [])
+    {
+        for (let lead = firstLead; lead <= lastLead; lead++)
+        {
+            for (const [firstTrail, lastTrail] of layout?.trail ?? [])
+            {
+                for (let trail = firstTrail; trail <= lastTrail; trail++)
+                {
+                    const character = decode(lead << 8 | trail);
+                    if (character.length === 1 && character !== '\ufffd' && !pairOf.has(character))
+                    {
+                        pairOf.set(character, lead << 8 | trail);
+                    }
+                }
+            }
+        }
+    }
+    const made = { decode, pairOf };
+    PAGE_CHARACTERS.set(number, made);
+    return made;
+}
+
+/**
+ * A double-byte character in the other case, as the page's characters map
+ * it -- a full-width letter, a Roman numeral, a Greek or Cyrillic letter --
+ * where the page has a pair for the other case; itself otherwise.
+ *
+ * @param {number} number  The page. @param {number} pair @param {boolean} upper
+ */
+export function pairCase(number, pair, upper){
+    const { decode, pairOf } = charactersOf(number);
+    const character = decode(pair);
+    if (character.length !== 1)
+    {
+        return pair;
+    }
+    const other = upper ? character.toUpperCase() : character.toLowerCase();
+    return other === character ? pair : pairOf.get(other) ?? pair;
 }
 
 /**
@@ -334,6 +402,107 @@ export function createMultiByteHandlers(host, page){
      */
     let tokenAt = 0;
 
+    /**
+     * _mbscpy_s's and _mbscat_s's body.
+     *
+     * @param {number} destination @param {number} size @param {number} source
+     * @param {boolean} append
+     */
+    const secureAppend = (destination, size, source, append)=>{
+        const room = size >>> 0;
+        if ((destination >>> 0) === 0 || room === 0)
+        {
+            return invalid(EINVAL);
+        }
+        if ((source >>> 0) === 0)
+        {
+            setU8(destination, 0);
+            return invalid(EINVAL);
+        }
+        let end = 0;
+        let ended = false;
+        if (append)
+        {
+            while (end < room && u8(destination + end) !== 0)
+            {
+                end++;
+            }
+            if (end === room)
+            {
+                setU8(destination, 0);
+                return invalid(EINVAL);
+            }
+            // A lead byte that ends the destination is no character.
+            for (let at = 0; at < end; at += width(destination + at))
+            {
+                if (page.isLead(u8(destination + at)) && at + 1 === end)
+                {
+                    end--;
+                    ended = true;
+                }
+            }
+        }
+        /** @type {number[]} */
+        const bytes = [];
+        for (let at = source; u8(at) !== 0; at++)
+        {
+            if (page.isLead(u8(at)))
+            {
+                if (u8(at + 1) === 0)
+                {
+                    ended = true;
+                    break;
+                }
+                bytes.push(u8(at));
+                at++;
+            }
+            bytes.push(u8(at));
+        }
+        if (end + bytes.length + 1 > room)
+        {
+            host.writeMemory(destination + end, Uint8Array.from(bytes.slice(0, room - end)));
+            setU8(destination, 0);
+            host.errno?.(ERANGE);
+            return ERANGE;
+        }
+        host.writeMemory(destination + end, Uint8Array.from([...bytes, 0]));
+        if (ended)
+        {
+            host.errno?.(EILSEQ);
+            return EILSEQ;
+        }
+        return 0;
+    };
+
+    /**
+     * _mbsupr_s's and _mbslwr_s's body.
+     *
+     * @param {number} string @param {number} size @param {number} fold
+     */
+    const secureCase = (string, size, fold)=>{
+        const room = size >>> 0;
+        if ((string >>> 0) === 0 && room === 0)
+        {
+            return 0;
+        }
+        if ((string >>> 0) === 0 || room === 0)
+        {
+            return invalid(EINVAL);
+        }
+        let length = 0;
+        while (length < room && u8(string + length) !== 0)
+        {
+            length++;
+        }
+        if (length === room)
+        {
+            setU8(string, 0);
+            return invalid(EINVAL);
+        }
+        caseMap(fold)([string]);
+        return 0;
+    };
+
     /** @param {number} fold @returns {(args: number[]) => number} */
     const caseMap = fold=>([string])=>{
         for (let at = string; u8(at) !== 0;)
@@ -346,6 +515,16 @@ export function createMultiByteHandlers(host, page){
                 if (mapped !== c)
                 {
                     setU8(at, mapped);
+                }
+            }
+            else
+            {
+                const pair = u8(at) << 8 | u8(at + 1);
+                const mapped = pairCase(page.page(), pair, fold !== 0);
+                if (mapped !== pair)
+                {
+                    setU8(at, mapped >> 8);
+                    setU8(at + 1, mapped & 0xff);
                 }
             }
             at += w;
@@ -677,9 +856,11 @@ export function createMultiByteHandlers(host, page){
         },
 
         /** @param {number[]} args */
-        _mbscmp: ([left, right])=>compare(left, right, 0xffffffff, {}),
+        _mbscmp: ([left, right])=>((left >>> 0) === 0 || (right >>> 0) === 0
+            ? invalid(NLS_COMPARE_ERROR) : compare(left, right, 0xffffffff, {})),
         /** @param {number[]} args */
-        _mbsicmp: ([left, right])=>compare(left, right, 0xffffffff, { fold: true }),
+        _mbsicmp: ([left, right])=>((left >>> 0) === 0 || (right >>> 0) === 0
+            ? invalid(NLS_COMPARE_ERROR) : compare(left, right, 0xffffffff, { fold: true })),
         /** @param {number[]} args */
         _mbsncmp: ([left, right, count])=>compare(left, right, count, {}),
         /** @param {number[]} args */
@@ -820,5 +1001,197 @@ export function createMultiByteHandlers(host, page){
         /** @param {number[]} args */
         _ismbclegal: ([c])=>((c >>> 0) < 0x10000 && page.isLead(c >>> 8 & 0xff)
             && page.isTrail(c & 0xff) ? 1 : 0),
+
+        /**
+         * size_t _mbsnlen(const unsigned char *string, size_t max): `max`
+         * when no terminator comes within `max` bytes, else the characters
+         * before it, as _mbslen counts them.
+         *
+         * @param {number[]} args
+         */
+        _mbsnlen: ([string, max])=>{
+            const limit = max >>> 0;
+            let bytes = 0;
+            while (bytes < limit && u8(string + bytes) !== 0)
+            {
+                bytes++;
+            }
+            if (bytes === limit)
+            {
+                return limit;
+            }
+            let count = 0;
+            for (let at = string; u8(at) !== 0; count++)
+            {
+                if (page.isLead(u8(at)) && u8(at + 1) === 0)
+                {
+                    break;
+                }
+                at += width(at);
+            }
+            return count;
+        },
+
+        /**
+         * errno_t _mbccpy_s(unsigned char *dest, size_t size, int *copied,
+         *                   const unsigned char *src)
+         *
+         * One character: EINVAL for no room, ERANGE with an empty buffer for
+         * a pair that does not fit, EILSEQ for a lead byte the terminator
+         * follows (one byte copied, written as a terminator).
+         *
+         * @param {number[]} args
+         */
+        _mbccpy_s: ([destination, size, copied, source])=>{
+            const writeCopied = (/** @type {number} */ count)=>{
+                if ((copied >>> 0) !== 0)
+                {
+                    host.writeMemory(copied, Uint8Array.of(count, 0, 0, 0));
+                }
+            };
+            writeCopied(0);
+            if ((destination >>> 0) === 0 || (source >>> 0) === 0 || (size >>> 0) === 0)
+            {
+                return invalid(EINVAL);
+            }
+            const c = u8(source);
+            if (!page.isLead(c))
+            {
+                setU8(destination, c);
+                writeCopied(1);
+                return 0;
+            }
+            if (u8(source + 1) === 0)
+            {
+                setU8(destination, 0);
+                writeCopied(1);
+                host.errno?.(EILSEQ);
+                return EILSEQ;
+            }
+            if ((size >>> 0) < 2)
+            {
+                setU8(destination, 0);
+                host.errno?.(ERANGE);
+                return ERANGE;
+            }
+            setU8(destination, c);
+            setU8(destination + 1, u8(source + 1));
+            writeCopied(2);
+            return 0;
+        },
+
+        /**
+         * errno_t _mbscpy_s(unsigned char *dest, size_t size, const unsigned char *src)
+         * and _mbscat_s: strcpy_s and strcat_s by characters. A lead byte the
+         * terminator follows -- at the end of the destination or of the
+         * source -- is dropped, the rest copied, and the answer EILSEQ. No
+         * terminator within the destination's size is EINVAL; a text that
+         * does not fit is ERANGE, the destination's first byte zeroed.
+         *
+         * @param {number[]} args
+         */
+        _mbscpy_s: ([destination, size, source])=>secureAppend(destination, size, source, false),
+        /** @param {number[]} args */
+        _mbscat_s: ([destination, size, source])=>secureAppend(destination, size, source, true),
+
+        /**
+         * errno_t _mbsnbcpy_s(unsigned char *dest, size_t size, const unsigned char *src,
+         *                     size_t count)
+         *
+         * At most `count` bytes of the source and a terminator: ERANGE when
+         * they do not fit, what fit left after a zeroed first byte.
+         *
+         * @param {number[]} args
+         */
+        _mbsnbcpy_s: ([destination, size, source, count])=>{
+            const room = size >>> 0;
+            if ((destination >>> 0) === 0 || room === 0)
+            {
+                return invalid(EINVAL);
+            }
+            if ((source >>> 0) === 0)
+            {
+                setU8(destination, 0);
+                return invalid(EINVAL);
+            }
+            let length = 0;
+            while (length < (count >>> 0) && u8(source + length) !== 0)
+            {
+                length++;
+            }
+            const kept = Math.min(length, room);
+            host.writeMemory(destination, host.readMemory(source, kept).slice());
+            if (length + 1 > room)
+            {
+                setU8(destination, 0);
+                host.errno?.(ERANGE);
+                return ERANGE;
+            }
+            setU8(destination + length, 0);
+            return 0;
+        },
+
+        /**
+         * errno_t _mbsnbcat_s(unsigned char *dest, size_t size, const unsigned char *src,
+         *                     size_t count)
+         *
+         * strncat_s by bytes: nothing at all to do is 0; no source, or no
+         * terminator within `size`, is EINVAL; what does not fit is ERANGE,
+         * what fit appended after a zeroed first byte.
+         *
+         * @param {number[]} args
+         */
+        _mbsnbcat_s: ([destination, size, source, count])=>{
+            const room = size >>> 0;
+            if ((destination >>> 0) === 0 && room === 0 && (count >>> 0) === 0)
+            {
+                return 0;
+            }
+            if ((destination >>> 0) === 0 || room === 0)
+            {
+                return invalid(EINVAL);
+            }
+            if ((source >>> 0) === 0)
+            {
+                setU8(destination, 0);
+                return invalid(EINVAL);
+            }
+            let end = 0;
+            while (end < room && u8(destination + end) !== 0)
+            {
+                end++;
+            }
+            if (end === room)
+            {
+                setU8(destination, 0);
+                return invalid(EINVAL);
+            }
+            let length = 0;
+            while (length < (count >>> 0) && u8(source + length) !== 0)
+            {
+                length++;
+            }
+            const kept = Math.min(length, room - end);
+            host.writeMemory(destination + end, host.readMemory(source, kept).slice());
+            if (end + length + 1 > room)
+            {
+                setU8(destination, 0);
+                host.errno?.(ERANGE);
+                return ERANGE;
+            }
+            setU8(destination + end + length, 0);
+            return 0;
+        },
+
+        /**
+         * errno_t _mbsupr_s(unsigned char *string, size_t size) and _mbslwr_s:
+         * _mbsupr and _mbslwr within `size`; nothing at all is 0, no string or
+         * no terminator within the size EINVAL.
+         *
+         * @param {number[]} args
+         */
+        _mbsupr_s: ([string, size])=>secureCase(string, size, 1),
+        /** @param {number[]} args */
+        _mbslwr_s: ([string, size])=>secureCase(string, size, 0),
     };
 }
