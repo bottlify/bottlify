@@ -382,6 +382,10 @@ export function _nextafter({ controlWord, setControlWord, host }, x, y){
  * @returns {f64}
  */
 export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, end){
+    if (text === 0)
+    {
+        return host();
+    }
     let at = text;
     let c = u8(at);
     while (c === 0x20 || c >= 0x09 && c <= 0x0d)
@@ -514,13 +518,17 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
 
 /**
  * double atof(const char *text) -- strtod's reading, and its value, with
- * no end to report.
+ * no end to report. No text is the handler's: zero and EINVAL.
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text
  * @returns {f64}
  */
 export function atof({ u8, controlWord, setControlWord, host }, text){
+    if (text === 0)
+    {
+        return host();
+    }
     let at = text;
     let c = u8(at);
     while (c === 0x20 || c >= 0x09 && c <= 0x0d)

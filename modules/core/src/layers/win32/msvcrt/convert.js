@@ -39,6 +39,11 @@ const INT64_MAX = 0x7fffffffffffffffn;
 const INT64_MIN = -0x8000000000000000n;
 const UINT64_MAX = 0xffffffffffffffffn;
 
+/** `_atodbl`'s answers for a value out of range, and the least normal double. */
+const OVERFLOW = 3;
+const UNDERFLOW = 4;
+const MIN_NORMAL = 2.2250738585072014e-308;
+
 /** What `isspace` accepts, which is what every conversion skips first. */
 const WHITESPACE = ' \t\n\v\f\r';
 
@@ -523,6 +528,63 @@ export function createConversionFunctions(host){
         },
     });
 
+    /**
+     * _atodbl's body.
+     *
+     * @param {number} value @param {number} text
+     */
+    const toDouble = (value, text)=>{
+        const scanned = (text >>> 0) === 0 ? null : scanDecimal(readString(text));
+        const number = scanned ? scanned.value : 0;
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setFloat64(0, number, true);
+        host.writeMemory(value >>> 0, bytes);
+        if (!scanned)
+        {
+            return 0;
+        }
+        if (!Number.isFinite(number))
+        {
+            return OVERFLOW;
+        }
+        return number !== 0 && Math.abs(number) < MIN_NORMAL || scanned.range ? UNDERFLOW : 0;
+    };
+
+    /**
+     * _gcvt's text of the double in the first two slots: `digits` significant
+     * digits, the trailing zeros of the fraction dropped and the point kept
+     * -- "-314150." -- or, for an exponent below -4 or not below `digits`,
+     * one digit, the fraction, and an exponent of three digits ("1.2e+005").
+     *
+     * @param {number[]} slots @param {number} digits
+     */
+    const gcvtText = (slots, digits)=>{
+        const value = readDouble(slots, 0);
+        if (!Number.isFinite(value))
+        {
+            return String(value);
+        }
+        const count = Math.max(1, Math.min(digits, MAX_DIGITS));
+        const { digits: text, point, negative } = cvtDigits({ value, low: slots[0] >>> 0,
+            high: slots[1] >>> 0 }, count, false);
+        const sign = negative && value !== 0 ? '-' : '';
+        if (value === 0)
+        {
+            return `${sign}0.`;
+        }
+        const exponent = point - 1;
+        if (exponent < -4 || exponent >= count)
+        {
+            return `${sign}${text[0]}.${text.slice(1).replace(/0+$/, '')}e${
+                exponent < 0 ? '-' : '+'}${String(Math.abs(exponent)).padStart(3, '0')}`;
+        }
+        if (point > 0)
+        {
+            return `${sign}${text.slice(0, point)}.${text.slice(point).replace(/0+$/, '')}`;
+        }
+        return `${sign}0.${'0'.repeat(-point)}${text.replace(/0+$/, '')}`;
+    };
+
     /** @param {boolean} fixed */
     const secureCvt = fixed=>({
         convention: 'cdecl',
@@ -704,6 +766,16 @@ export function createConversionFunctions(host){
         _fcvt: cvt(true),
 
         /**
+         * int _atodbl(_CRT_DOUBLE *value, char *str)
+         *
+         * strtod's reading into the caller's double: 0, or _UNDERFLOW (4) or
+         * _OVERFLOW (3) for a value out of range -- the value written as
+         * strtod has it, a denormal kept -- and errno untouched.
+         */
+        _atodbl: { convention: 'cdecl', argBytes: 8, handler: (/** @type {number[]} */ args)=>
+            toDouble(args[0], args[1]) },
+
+        /**
          * errno_t _ecvt_s(char *buffer, size_t size, double value, int count,
          *                 int *dec, int *sign) and _fcvt_s
          *
@@ -718,21 +790,55 @@ export function createConversionFunctions(host){
          * char *_gcvt(double value, int digits, char *buffer)
          *
          * This one writes into the caller's buffer and prints a complete
-         * number, point and sign included -- the shortest of the fixed and
-         * exponential forms, which is what %g does.
+         * number, point and sign included (`gcvtText`). No buffer is null
+         * and EINVAL, a negative count null and ERANGE.
          */
         _gcvt: {
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
             handler: args=>{
-                const value = readDouble(args, 0);
-                const digits = Math.max(1, Math.min(args[2] | 0, MAX_DIGITS));
                 const buffer = args[3];
-                writeString(buffer, Number.isFinite(value)
-                    ? value.toPrecision(digits).replace(/e([+-])(\d)$/, 'e$10$2')
-                    : String(value));
+                if ((args[2] | 0) < 0)
+                {
+                    host.errno?.(ERANGE);
+                    return 0;
+                }
+                if ((buffer >>> 0) === 0)
+                {
+                    host.errno?.(EINVAL);
+                    return 0;
+                }
+                writeString(buffer, gcvtText(args, args[2] | 0));
                 return buffer;
+            },
+        },
+
+        /**
+         * errno_t _gcvt_s(char *buffer, size_t size, double value, int digits)
+         *
+         * _gcvt into a buffer of `size`: EINVAL for none, ERANGE and an empty
+         * buffer when it cannot hold `digits` or the text.
+         */
+        _gcvt_s: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([buffer, size, low, high, digits])=>{
+                if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (digits | 0) < 0)
+                {
+                    host.errno?.(EINVAL);
+                    return EINVAL;
+                }
+                const text = gcvtText([low, high], digits | 0);
+                if ((digits | 0) >= (size >>> 0) || text.length + 1 > (size >>> 0))
+                {
+                    writeString(buffer, '');
+                    host.errno?.(ERANGE);
+                    return ERANGE;
+                }
+                writeString(buffer, text);
+                return 0;
             },
         },
     };
@@ -794,8 +900,18 @@ export function createConversionFunctions(host){
         return readString(pointer);
     };
 
-    /** @param {number[]} args */
+    /**
+     * strtod's handler: no text is zero and EINVAL, the end null.
+     *
+     * @param {number[]} args
+     */
     const strtod = args=>{
+        if ((args[0] >>> 0) === 0)
+        {
+            host.errno?.(EINVAL);
+            writeInt(args[1], 0);
+            return 0;
+        }
         const scanned = scanDecimal(decimalText(args[0]));
         writeInt(args[1], scanned ? args[0] + scanned.end : args[0]);
         return decimal(scanned);
@@ -808,6 +924,12 @@ export function createConversionFunctions(host){
      * @param {number[]} args
      */
     const wcstod = args=>{
+        if ((args[0] >>> 0) === 0)
+        {
+            host.errno?.(EINVAL);
+            writeInt(args[1], 0);
+            return 0;
+        }
         const text = wideStringAt(/** @type {(address: number, length: number)
             => Uint8Array} */ (readMemory), args[0]);
         const scanned = scanDecimal(text);
@@ -817,7 +939,7 @@ export function createConversionFunctions(host){
 
     const handlers = {
         /** double atof(const char *str) */
-        atof: returningDouble(host.fpu, 4, args=>decimal(scanDecimal(decimalText(args[0])))),
+        atof: returningDouble(host.fpu, 4, args=>strtod([args[0], 0])),
 
         /** double strtod(const char *str, char **end) */
         strtod: returningDouble(host.fpu, 8, strtod),
@@ -836,5 +958,11 @@ export function createConversionFunctions(host){
         strtod: readMemory
             ? guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, guest, handlers.strtod)
             : handlers.strtod,
+
+        // The `_l` forms' locale is the C one, the only one carried.
+        /** double _atof_l(const char *str, _locale_t locale) */
+        _atof_l: returningDouble(host.fpu, 8, args=>strtod([args[0], 0])),
+        /** double _strtod_l(const char *str, char **end, _locale_t locale) */
+        _strtod_l: returningDouble(host.fpu, 12, strtod),
     };
 }

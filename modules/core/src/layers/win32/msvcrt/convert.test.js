@@ -11,10 +11,13 @@ import { fakeMemory, doubleSlots, fakeFpu } from './harness.test.js';
 
 const build = (/** @type {any} */ fpu = undefined)=>{
     const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
     return {
         memory,
+        errno,
         table: /** @type {Record<string, any>} */ (
-            createConversionFunctions({ ...memory, fpu })),
+            createConversionFunctions({ ...memory, fpu, errno: code=>errno.push(code) })),
     };
 };
 
@@ -216,11 +219,42 @@ test('_ecvt and _fcvt hand back the same buffer every time', ()=>{
     assert.equal(first, second, 'documented to be overwritten by the next call');
 });
 
-test('_gcvt writes a whole number into the caller\'s buffer', ()=>{
-    const { memory, table } = build();
+test('_gcvt writes a whole number into the caller\'s buffer, its fraction\'s zeros dropped', ()=>{
+    // Wine's msvcrt test_gcvt: 1.2 to five digits is "1.2"; the
+    // documentation's -3.1415e5 to seven is "-314150.".
+    const { memory, table, errno } = build();
     const buffer = memory.allocate(64);
-    table._gcvt.handler([...doubleSlots(-3.25), 6, buffer]);
-    assert.equal(memory.text(buffer), '-3.25000');
+    for (const [value, digits, text] of /** @type {[number, number, string][]} */ ([
+        [-3.25, 6, '-3.25'], [1.2, 5, '1.2'], [-314150, 7, '-314150.'],
+        [123456, 2, '1.2e+005'], [0.0001234, 3, '0.000123'], [1.5e-7, 4, '1.5e-007'],
+    ]))
+    {
+        assert.equal(table._gcvt.handler([...doubleSlots(value), digits, buffer]), buffer);
+        assert.equal(memory.text(buffer), text, `${value} ${digits}`);
+    }
+    assert.equal(table._gcvt.handler([...doubleSlots(1.2), -1, buffer]), 0);
+    assert.equal(table._gcvt.handler([...doubleSlots(1.2), 5, 0]), 0);
+    assert.deepEqual(errno, [34, 22]);
+    assert.equal(table._gcvt_s.handler([buffer, 5, ...doubleSlots(1.2), 10]), 34);
+    assert.equal(memory.text(buffer), '');
+    assert.equal(table._gcvt_s.handler([buffer, 4, ...doubleSlots(123456), 2]), 34);
+    assert.equal(table._gcvt_s.handler([buffer, 16, ...doubleSlots(1.2), 5]), 0);
+    assert.equal(memory.text(buffer), '1.2');
+});
+
+test('_atodbl reads into the caller\'s double and says when it is out of range', ()=>{
+    // Wine's msvcrt test__atodbl: _UNDERFLOW 4 for a denormal, _OVERFLOW 3.
+    const { memory, table } = build();
+    const value = memory.allocate(8);
+    const read = ()=>new DataView(memory.bytes.buffer).getFloat64(value, true);
+    for (const [text, answer, number] of /** @type {[string, number, number][]} */ ([
+        ['', 0, 0], ['t', 0, 0], ['0', 0, 0], ['123', 0, 123], ['1e-309', 4, 1e-309],
+        ['1e309', 3, Infinity],
+    ]))
+    {
+        assert.equal(table._atodbl.handler([value, memory.put(text)]), answer, text);
+        assert.equal(read(), number, text);
+    }
 });
 
 test('the double-returning conversions appear only with an FPU seam', ()=>{
@@ -457,4 +491,23 @@ test('_strtoi64 and _strtoui64 read 64 bits, the high half in EDX, out of range 
     assert.equal(table._wcstoi64.handler([wide, 0, 10]) >>> 0,
         Number(BigInt.asUintN(32, -1234567890123n)));
     assert.equal(edx >>> 0, Number(BigInt.asUintN(64, -1234567890123n) >> 32n));
+});
+
+test('atof, strtod and their _l forms of no text are zero and EINVAL, the end null', ()=>{
+    // Wine's msvcrt test__strtod and test_atof.
+    const fpu = fakeFpu();
+    const { memory, table, errno } = build(fpu);
+    const end = memory.allocate(4);
+    memory.setU32(end, 0xdeadbeef);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([['atof', [0]],
+        ['strtod', [0, end]], ['_atof_l', [0, 0]], ['_strtod_l', [0, 0, 0]],
+        ['wcstod', [0, 0]]]))
+    {
+        table[name].handler(args);
+        assert.equal(fpu.result, 0, name);
+    }
+    assert.equal(memory.u32(end), 0);
+    assert.deepEqual(errno, [22, 22, 22, 22, 22]);
+    table._strtod_l.handler([memory.put('12.5'), end, 0]);
+    assert.equal(fpu.result, 12.5);
 });
