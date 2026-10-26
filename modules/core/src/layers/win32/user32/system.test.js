@@ -1437,6 +1437,18 @@ test('LR_LOADFROMFILE makes a bitmap of a .bmp file, its pixels where bfOffBits 
         ['C:\\SETUP\\AUTORUN\\AUTORUN.BMP', bmp(14 + 40 + 2, 2)],
         ['C:\\SETUP\\PACKED.BMP', bmp(0, 0)],
         ['C:\\SETUP\\NOTES.TXT', new TextEncoder().encode('not a bitmap at all, only words')],
+        ...[0, 11, 13, 39, 41, 107, 109, 123, 125, 26, 116, 0xdeadbeef, 0xffffffff]
+            .map(size=>{
+                const bytes = bmp(0, 0);
+                new DataView(bytes.buffer).setUint32(14, size, true);
+                return /** @type {[string, Uint8Array]} */ ([`C:\\SETUP\\SIZE${size}.BMP`, bytes]);
+            }),
+        ...[[65536, 2], [2, 65536]].map(([width, height])=>{
+            const bytes = bmp(0, 0);
+            new DataView(bytes.buffer).setInt32(18, width, true);
+            new DataView(bytes.buffer).setInt32(22, height, true);
+            return /** @type {[string, Uint8Array]} */ ([`C:\\SETUP\\W${width}H${height}.BMP`, bytes]);
+        }),
     ]);
     /** @param {string} path */
     const find = path=>disk.get(path.toUpperCase());
@@ -1481,6 +1493,18 @@ test('LR_LOADFROMFILE makes a bitmap of a .bmp file, its pixels where bfOffBits 
     memory.putString(TEXT_BUFFER, 'C:\\Setup\\Missing.bmp');
     assert.equal(fns.LoadImageA.handler([0, TEXT_BUFFER, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE]),
         0, 'no file');
+    assert.equal(made.length, 2);
+
+    // Wine's cursoricon test: a header of no size a header has, or a side
+    // past 65535, is a broken file, refused before its colours are looked for.
+    for (const name of [0, 11, 13, 39, 41, 107, 109, 123, 125, 26, 116, 0xdeadbeef, 0xffffffff]
+        .map(size=>`C:\\Setup\\Size${size}.bmp`).concat(
+            ['C:\\Setup\\W65536H2.bmp', 'C:\\Setup\\W2H65536.bmp']))
+    {
+        memory.putString(TEXT_BUFFER, name);
+        assert.equal(await fns.LoadImageA.handler([0, TEXT_BUFFER, IMAGE_BITMAP, 0, 0,
+            LR_LOADFROMFILE]), 0, name);
+    }
     assert.equal(made.length, 2);
 });
 

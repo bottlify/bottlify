@@ -1437,7 +1437,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const FILE_HEADER = 14;
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         if (bytes.length <= FILE_HEADER + 12 || view.getUint16(0, true) !== 0x4d42
-            || !host.allocate || !host.bitmapFromDib)
+            || !host.allocate || !host.bitmapFromDib || !loadableDib(view, FILE_HEADER))
         {
             return 0;
         }
@@ -1459,6 +1459,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             host.release?.(at);
         }
     });
+
+    /**
+     * Whether the DIB a .bmp file holds is one LoadImage takes: its header
+     * one of the four sizes a header has -- BITMAPCOREHEADER, BITMAPINFOHEADER
+     * and its V4 and V5 forms -- inside the file, and no side longer than
+     * 65535 pixels. Any other size is a broken file rather than a header
+     * newer than this one, and the colour table it would place lies wherever
+     * that size says (Wine's cursoricon test, broken biSize).
+     *
+     * @param {DataView} view @param {number} at  Where the DIB starts in the file.
+     */
+    const loadableDib = (view, at)=>{
+        const size = view.getUint32(at, true);
+        if (![12, 40, 108, 124].includes(size) || at + size > view.byteLength)
+        {
+            return false;
+        }
+        const width = size === 12 ? view.getUint16(at + 4, true) : view.getInt32(at + 4, true);
+        const height = size === 12 ? view.getUint16(at + 6, true) : view.getInt32(at + 8, true);
+        return width > 0 && width <= 0xffff && height !== 0 && Math.abs(height) <= 0xffff;
+    };
 
     /**
      * A file's bytes, handed to `make`; 0 for a name that is no file. The
