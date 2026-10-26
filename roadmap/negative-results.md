@@ -1676,3 +1676,24 @@ None yet.
 - **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
 - **Decision.** Not kept; the patch (a `narrow` set in the block emitter and a directed test of a
   block entered with a wide register after a doubleword write) is not in the tree.
+
+### 2026-10-26: long-mode regions laid out with wasm loops instead of the dispatch loop
+
+- **Idea.** A long-mode region runs its blocks inside one dispatch loop: every jump back goes
+  round it through a `br_table`, 668 M of them in a 7-Zip benchmark run, one per 51 guest
+  instructions. Laid out as the 32-bit translator lays its regions (`planStructure`'s order and
+  natural loops), each loop a wasm `loop` whose jumps back are its own branch, forward jumps
+  `block`s opened before any loop they would cross, and only blocks outside every loop (or a
+  loop's head) filed as ways in, the dispatch would be left to entries and the rare jump back
+  to a block that heads no loop around it.
+- **Workload.** 7-Zip 23.01 x64 (`7za.exe b -md18 -mmt1`) under the engine in node, the whole
+  benchmark, its total rating; both arms snapshots of the tree at 2d8f1e52, one with the layout.
+  The long gate (with a new generator of nested loops, jumps out of and into them) passed on
+  both, and the layout's mutations (loop depth, entries, hoisting) were caught.
+- **Values.** Before 1520, 1474, 1489, 1572, 1558 (mean 1523); after 1493, 1601, 1552, 1534,
+  1384 (mean 1513). Five runs an arm, alternated.
+- **Why.** Not measured further; V8's code for the dispatch's `br_table` is predicted well enough
+  that a branch of its own buys nothing here.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
+- **Decision.** Not kept. The generator of nested programs stays in the long gate; the layout
+  (`structureOf`, a control stack in the block emitter, entries filed by it) is not in the tree.

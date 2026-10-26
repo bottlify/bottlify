@@ -157,6 +157,82 @@ function program(instructions, seed, count){
 }
 
 /**
+ * A seeded program of nested control flow over the pool's instructions:
+ * runs of them, a run jumped over when a condition holds, and loops on r12
+ * and r13 (which the pool leaves alone) of one to three turns, a loop now
+ * and then left from its middle past its jump back, and entered past its
+ * head from before it -- a way into its middle, which makes it no natural
+ * loop. Every jump is a rel32.
+ *
+ * @param {Buffer[]} instructions @param {number} seed
+ */
+function nested(instructions, seed){
+    let x = seed >>> 0 || 1;
+    const next = ()=>{
+        x ^= x << 13;
+        x ^= x >>> 17;
+        x ^= x << 5;
+        x >>>= 0;
+        return x;
+    };
+    /** @param {number} value */
+    const rel = value=>{
+        const bytes = Buffer.alloc(4);
+        bytes.writeInt32LE(value);
+        return bytes;
+    };
+    /** A conditional jump over `length` bytes. @param {number} length */
+    const jcc = length=>Buffer.concat([Buffer.from([0x0f, 0x80 + next() % 16]), rel(length)]);
+    /** @param {number} depth @returns {Buffer} */
+    const body = depth=>{
+        /** @type {Buffer[]} */
+        const parts = [];
+        for (let item = 1 + next() % 4; item > 0; item--)
+        {
+            const kind = next() % 4;
+            if (kind === 1)
+            {
+                const over = body(depth + 1);
+                parts.push(jcc(over.length), over);
+            }
+            else if (kind === 2 && depth < 2)
+            {
+                // mov r12d/r13d, turns; [jcc into the middle]; head: first; middle: second;
+                // dec r12d/r13d; jnz head
+                const counter = depth === 0 ? 0xc : 0xd;
+                const first = body(depth + 1);
+                let second = body(depth + 1);
+                if (next() % 3 === 0)
+                {
+                    // A way out of the loop past its jump back.
+                    second = Buffer.concat([jcc(second.length + 3 + 6), second]);
+                }
+                const turns = 1 + next() % 3;
+                parts.push(Buffer.from([0x41, 0xb8 + counter - 8]), rel(turns));
+                if (next() % 3 === 0)
+                {
+                    parts.push(jcc(first.length));
+                }
+                parts.push(first, second, Buffer.from([0x41, 0xff, 0xc0 + counter]));
+                parts.push(Buffer.from([0x0f, 0x85]),
+                    rel(-(first.length + second.length + 3 + 6)));
+            }
+            else
+            {
+                for (let n = 1 + next() % 3; n > 0; n--)
+                {
+                    parts.push(instructions[next() % instructions.length]);
+                }
+            }
+        }
+        return Buffer.concat(parts);
+    };
+    const code = body(0).subarray(0, CORPUS.codeSize - 64);
+    const one = CORPUS.cases[next() % CORPUS.cases.length];
+    return { ...one, text: `nested ${seed}`, code: code.toString('hex'), regs: [...one.regs] };
+}
+
+/**
  * Sets a case up on a machine: its code area (with the exit jump and EXIT in
  * the area's last eight bytes), data, registers, flags and XMM registers.
  *
@@ -315,6 +391,18 @@ test('seeded long programs run translated as they run interpreted', ()=>{
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(stats.translated > stats.interpreted * 2,
             `translated ${stats.translated}, interpreted ${stats.interpreted}`);
+    }
+});
+
+test('nested loops, jumps over them, out of them and into them run as interpreted', ()=>{
+    const instructions = pool();
+    const cases = Array.from({ length: 400 }, (_, i)=>nested(instructions, 0x1005 + i));
+    for (const [budget, transfers] of /** @type {const} */ ([[7, true], [1000, true], [5, false]]))
+    {
+        const { failures, exits } = compare(cases, budget, transfers);
+        assert.ok(exits > cases.length * 0.6, `${exits} programs ran to their exit`);
+        assert.deepEqual(failures.slice(0, 20), [],
+            `${failures.length} differences, budget ${budget}`);
     }
 });
 

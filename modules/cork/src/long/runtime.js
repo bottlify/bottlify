@@ -269,9 +269,14 @@ export function createLongRunner(settings){
             record.run = run;
             const slot = slotOf(entry);
             table.set(slot, run);
-            // Block i, in the address order the emitter lays them out in, is label i + 1.
+            // Block i, in the address order the emitter lays them out in, is label i + 1;
+            // a block another region's entry already names stays that region's, which
+            // alone may take the entry away when it goes.
             [...blocks].sort((x, y)=>x.entry - y.entry).forEach((block, index)=>{
-                record.hashed.push(hashed.add(block.entry, run, index + 1, ANY_TOP, slot));
+                if (hashed.entryOf(block.entry) < 0)
+                {
+                    record.hashed.push(hashed.add(block.entry, run, index + 1, ANY_TOP, slot));
+                }
             });
             for (const block of blocks)
             {
