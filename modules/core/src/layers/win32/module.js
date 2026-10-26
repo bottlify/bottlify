@@ -319,6 +319,7 @@ export function createWin32Module(){
             // what the program says it knows; everything else keeps the truth.
             const reported = reportedVersion(windows, config?.compatibility);
             const folders = shellFolders(windows);
+            const pointerSize = config?.bits === 64 ? 8 : 4;
 
             const memory = host.requireApi('memory');
             const kernel = host.requireApi('kernel');
@@ -946,6 +947,7 @@ export function createWin32Module(){
             // The host's half of a critical section: the queue behind a contended
             // one and the hand-off that wakes it. The rest is guest code.
             const critical = createCriticalSections({
+                pointerSize,
                 readMemory,
                 writeMemory,
                 currentThread: ()=>kernel.currentThread(),
@@ -1670,6 +1672,7 @@ export function createWin32Module(){
                     }),
                     ...createProcessFunctions({
                         processors,
+                        pointerSize,
                         performanceFrequency: config?.performanceFrequency,
                         readMemory,
                         processId,
@@ -1759,6 +1762,7 @@ export function createWin32Module(){
                         allocateCode: bytes=>heap.allocateCode(bytes),
                     }),
                     ...createSyncFunctions({
+                        pointerSize,
                         kernel,
                         processors,
                         // A change notification watches a directory on the
@@ -1903,6 +1907,7 @@ export function createWin32Module(){
                     }),
                     ...createSystemFunctions({
                         processors,
+                        pointerSize,
                         // TerminateProcess wakes whoever waits on the child it ends.
                         wake: (/** @type {any} */ thread, /** @type {number} */ result)=>
                             kernel.wake(thread, result),
@@ -2045,6 +2050,7 @@ export function createWin32Module(){
                         divergence: config?.divergence,
                     }).table,
                     ...createMsvcrtFunctions({
+                        pointerSize,
                         readMemory,
                         writeMemory,
                         fillMemory,
@@ -3391,6 +3397,7 @@ export function createWin32Module(){
             // The universal runtime of Visual C++ 2015 on, over 2005's: the same
             // functions, reached through the entries its headers call instead.
             libraries['ucrtbase.dll'] = createUcrtbaseFunctions(libraries['MSVCR80.dll'], {
+                pointerSize,
                 readMemory,
                 writeMemory,
                 callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),

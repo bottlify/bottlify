@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { enterCode, leaveCode, tryEnterCode } from './critical.js';
+import { COUNTERS, criticalLayout, enterCode, leaveCode, tryEnterCode } from './critical.js';
 import { INTERLOCKED } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
 import { createSListFunctions } from './slist.js';
@@ -43,20 +43,13 @@ import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
  * moment at which both the new owner and the structure are known.
  */
 
-/**
- * Offsets into RTL_CRITICAL_SECTION, 32-bit.
- *
- * DebugInfo at 0x00 is a pointer into a structure only a debugger walks, and
- * Windows 8 and later make none: they write -1 there, which DeleteCriticalSection
- * clears. LockSemaphore at 0x10 is left at zero: Windows creates it lazily
- * itself, so a guest that finds it null is looking at something Windows also
- * produces.
+/*
+ * RTL_CRITICAL_SECTION (`criticalLayout`): DebugInfo, its first field, is a
+ * pointer into a structure only a debugger walks, and Windows 8 and later make
+ * none: they write -1 there, which DeleteCriticalSection clears. LockSemaphore
+ * is left at zero: Windows creates it lazily itself, so a guest that finds it
+ * null is looking at something Windows also produces.
  */
-const CS_DEBUG_INFO = 0x00;
-const CS_NO_DEBUG_INFO = -1;
-const CS_LOCK_COUNT = 0x04;
-const CS_SPIN_COUNT = 0x14;
-const CS_SIZE = 0x18;
 
 /** LockCount while nobody holds the section. Held, it is zero or above. */
 const CS_UNLOCKED = -1;
@@ -141,11 +134,14 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {import('./processor.js').Processors} [processors]  The process's
  *           processors and its affinity, which every other interface that
  *           counts or sets them shares. Absent, the kernel's alone.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose critical
+ *           sections are 40 bytes and taken by traps; absent, 4.
  */
 
 /**
  * Builds the function table: name -> { argBytes, handler } for a trap, or
- * { argBytes, guest } for guest code.
+ * { argBytes, guest } for guest code, with a `handler` beside it where a
+ * 64-bit process takes the call as a trap.
  *
  * `argBytes` is the size of the argument list the guest compiled against; all of
  * these are stdcall, the bridge's default, so none of them says so.
@@ -155,12 +151,113 @@ const FILETIME_EPOCH_MS = 11644473600000;
 export function createSyncFunctions(host){
     const { kernel } = host;
     const processors = host.processors ?? createProcessors(kernel);
+    const cs = criticalLayout(host.pointerSize);
 
     /** @param {number} address @param {number} value */
     const writeI32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setInt32(0, value | 0, true);
         host.writeMemory(address, bytes);
+    };
+
+    /** @param {number} address */
+    const readI32 = address=>new DataView(host.readMemory(address, 4).slice().buffer)
+        .getInt32(0, true);
+
+    /**
+     * Adds to a section's LockCount as the fast paths' `lock inc` and `lock
+     * dec` do, so a thread entering on another executor is not lost between
+     * the read and the write; answers the count after.
+     *
+     * @param {number} section @param {number} delta
+     */
+    const addLockCount = (section, delta)=>{
+        const at = section + cs.LOCK_COUNT;
+        for (;;)
+        {
+            const was = readI32(at);
+            const now = (was + delta) | 0;
+            if (host.compareExchangeU32 === undefined)
+            {
+                writeI32(at, now);
+                return now;
+            }
+            if ((host.compareExchangeU32(at, was >>> 0, now >>> 0) | 0) === was)
+            {
+                return now;
+            }
+        }
+    };
+
+    /** One more in the fast paths' counter at `offset`, for a section the host took or left. @param {number} offset */
+    const tally = offset=>{
+        const at = host.critical.counters() + offset;
+        writeI32(at, readI32(at) + 1);
+    };
+
+    /**
+     * Entering, leaving and trying a section as traps over the same fields
+     * and queues the guest code below uses, for a 64-bit process, whose
+     * processor runs none of that 32-bit code.
+     */
+    const sectionTraps = {
+        /** @param {number[]} args */
+        enter: ([pointer])=>{
+            const section = pointer >>> 0;
+            const me = host.currentThread().id;
+            tally(COUNTERS.ENTERED);
+            if (addLockCount(section, 1) === 0)
+            {
+                writeI32(section + cs.OWNING_THREAD, me);
+                writeI32(section + cs.RECURSION_COUNT, 1);
+                return 0;
+            }
+            if (readI32(section + cs.OWNING_THREAD) === me)
+            {
+                writeI32(section + cs.RECURSION_COUNT, readI32(section + cs.RECURSION_COUNT) + 1);
+                return 0;
+            }
+            return host.critical.wait(section);
+        },
+        /** @param {number[]} args */
+        leave: ([pointer])=>{
+            const section = pointer >>> 0;
+            tally(COUNTERS.LEFT);
+            const recursion = readI32(section + cs.RECURSION_COUNT) - 1;
+            writeI32(section + cs.RECURSION_COUNT, recursion);
+            if (recursion !== 0)
+            {
+                addLockCount(section, -1);
+                return 0;
+            }
+            writeI32(section + cs.OWNING_THREAD, 0);
+            return addLockCount(section, -1) >= 0 ? host.critical.wake(section) : 0;
+        },
+        /** @param {number[]} args */
+        tryEnter: ([pointer])=>{
+            const section = pointer >>> 0;
+            const me = host.currentThread().id;
+            const at = section + cs.LOCK_COUNT;
+            const free = host.compareExchangeU32 === undefined
+                ? readI32(at) === CS_UNLOCKED && (writeI32(at, 0), true)
+                : (host.compareExchangeU32(at, CS_UNLOCKED >>> 0, 0) | 0) === CS_UNLOCKED;
+            if (free)
+            {
+                writeI32(section + cs.OWNING_THREAD, me);
+                writeI32(section + cs.RECURSION_COUNT, 1);
+            }
+            else if (readI32(section + cs.OWNING_THREAD) === me)
+            {
+                addLockCount(section, 1);
+                writeI32(section + cs.RECURSION_COUNT, readI32(section + cs.RECURSION_COUNT) + 1);
+            }
+            else
+            {
+                return 0;
+            }
+            tally(COUNTERS.ENTERED);
+            return 1;
+        },
     };
 
     /**
@@ -405,10 +502,10 @@ export function createSyncFunctions(host){
         host.critical.forget(address);
         // Written whole rather than field by field: the guest allocated this and
         // its contents are whatever was there before.
-        host.writeMemory(address, new Uint8Array(CS_SIZE));
-        writeI32(address + CS_DEBUG_INFO, CS_NO_DEBUG_INFO);
-        writeI32(address + CS_LOCK_COUNT, CS_UNLOCKED);
-        writeI32(address + CS_SPIN_COUNT, spinCount);
+        host.writeMemory(address, new Uint8Array(cs.SIZE));
+        host.writeMemory(address, new Uint8Array(host.pointerSize ?? 4).fill(0xff));
+        writeI32(address + cs.LOCK_COUNT, CS_UNLOCKED);
+        writeI32(address + cs.SPIN_COUNT, spinCount);
     };
 
     /**
@@ -634,7 +731,7 @@ export function createSyncFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pointer, spinCount])=>{
-                const at = (pointer >>> 0) + CS_SPIN_COUNT;
+                const at = (pointer >>> 0) + cs.SPIN_COUNT;
                 const bytes = host.readMemory(at, 4);
                 const previous = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
                 writeI32(at, spinCount | 0);
@@ -651,6 +748,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {GuestBuilder} builder */
             guest: builder=>placed(builder).tryEnter,
+            handler: sectionTraps.tryEnter,
         },
 
         /** VOID DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
@@ -660,7 +758,7 @@ export function createSyncFunctions(host){
             handler: ([pointer])=>{
                 const address = pointer >>> 0;
                 host.critical.forget(address);
-                host.writeMemory(address, new Uint8Array(CS_SIZE));
+                host.writeMemory(address, new Uint8Array(cs.SIZE));
                 return 0;
             },
         },
@@ -676,6 +774,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {GuestBuilder} builder */
             guest: builder=>placed(builder).enter,
+            handler: sectionTraps.enter,
         },
 
         /**
@@ -688,6 +787,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {GuestBuilder} builder */
             guest: builder=>placed(builder).leave,
+            handler: sectionTraps.leave,
         },
 
         // The value after for an increment or a decrement, the value before

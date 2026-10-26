@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { CS } from './critical.js';
+import { criticalLayout } from './critical.js';
 
 /**
  * Slim reader/writer locks, condition variables and one-time initialisation:
@@ -187,6 +187,7 @@ export function executeOnceCode(at, { begin, end }){
  * @property {(bytes: number) => number} [allocateCode]
  * @property {(code: number) => void} [setLastError]
  * @property {{ wake: (address: number) => number }} critical
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -196,6 +197,7 @@ export function executeOnceCode(at, { begin, end }){
  */
 export function createSlimSync(host, enterCritical){
     const { kernel } = host;
+    const CS = criticalLayout(host.pointerSize);
 
     /**
      * @typedef {Object} SrwState

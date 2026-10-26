@@ -45,12 +45,24 @@
  * happens in between; the wake must not be lost.
  */
 
-/** Field offsets of RTL_CRITICAL_SECTION. */
-export const CS = {
-    LOCK_COUNT: 4,
-    RECURSION_COUNT: 8,
-    OWNING_THREAD: 12,
-};
+/**
+ * Field offsets of RTL_CRITICAL_SECTION for a pointer of `size` bytes:
+ * DebugInfo, LockCount, RecursionCount, OwningThread, LockSemaphore and
+ * SpinCount -- 24 bytes in a 32-bit process, 40 in a 64-bit one, where
+ * DebugInfo and the three handle-sized fields after the counts widen.
+ *
+ * @param {number} [size]  4 or 8
+ */
+export const criticalLayout = (size = 4)=>Object.freeze({
+    LOCK_COUNT: size,
+    RECURSION_COUNT: size + 4,
+    OWNING_THREAD: size + 8,
+    SPIN_COUNT: 3 * size + 8,
+    SIZE: 4 * size + 8,
+});
+
+/** The 32-bit layout, which the guest code below is assembled against. */
+export const CS = criticalLayout(4);
 
 /** Where a thread's id lives in its environment block. */
 const TEB_THREAD_ID = 0x24;
@@ -239,6 +251,7 @@ export function tryEnterCode(counters){
  * @property {(thread?: any) => any} park
  * @property {(bytes: number) => number} allocate
  *           Guest memory for the two counters the fast paths keep.
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -248,6 +261,7 @@ export function tryEnterCode(counters){
  * @param {CriticalHost} host
  */
 export function createCriticalSections(host){
+    const cs = criticalLayout(host.pointerSize);
     /**
      * @typedef {Object} Queue
      * @property {any[]} waiters
@@ -302,8 +316,8 @@ export function createCriticalSections(host){
      * @param {number} address @param {any} thread
      */
     const handOver = (address, thread)=>{
-        host.writeMemory(address + CS.OWNING_THREAD, dwordBytes(thread.id));
-        host.writeMemory(address + CS.RECURSION_COUNT, dwordBytes(1));
+        host.writeMemory(address + cs.OWNING_THREAD, dwordBytes(thread.id));
+        host.writeMemory(address + cs.RECURSION_COUNT, dwordBytes(1));
         handoffs++;
     };
 
@@ -333,9 +347,9 @@ export function createCriticalSections(host){
             // The structure as the waiter saw it, for the report's blocked-thread
             // line: a wait with no owner names a lost release, not contention.
             host.block(thread, `critical section 0x${address.toString(16)}`
-                + ` (lock ${readU32(address + CS.LOCK_COUNT) | 0},`
-                + ` owner ${readU32(address + CS.OWNING_THREAD)},`
-                + ` recursion ${readU32(address + CS.RECURSION_COUNT) | 0}, me ${thread.id})`);
+                + ` (lock ${readU32(address + cs.LOCK_COUNT) | 0},`
+                + ` owner ${readU32(address + cs.OWNING_THREAD)},`
+                + ` recursion ${readU32(address + cs.RECURSION_COUNT) | 0}, me ${thread.id})`);
             return host.park(thread);
         },
 

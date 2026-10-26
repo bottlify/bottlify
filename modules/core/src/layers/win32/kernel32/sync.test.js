@@ -326,7 +326,8 @@ test('entering, leaving and trying a section are guest code, placed once', ()=>{
 
     assert.equal(fns.EnterCriticalSection.guest(builder), enter, 'the same place again');
     assert.equal(builder.registered.length, 2, 'and no more traps');
-    assert.equal('handler' in fns.EnterCriticalSection, false, 'nothing to trap into');
+    // The trap beside it is a 64-bit process's (critical-paths.itest.js).
+    assert.equal(typeof fns.EnterCriticalSection.handler, 'function');
 });
 
 test('the fast paths are placed where the host keeps code, not in the heap beside data',

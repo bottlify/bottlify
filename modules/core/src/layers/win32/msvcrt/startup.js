@@ -33,6 +33,7 @@
 import { windowsVersion } from '../kernel32/versions.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createGlobals } from './globals.js';
+import { pointerWidth } from '../common/pointers.js';
 
 /** `_XcptFilter`'s answer: this filter handles nothing and passes it on. */
 const EXCEPTION_CONTINUE_SEARCH = 0;
@@ -138,6 +139,9 @@ export function splitCommandLine(line){
  * @property {{ narrow: () => number, wide: () => number }} [environment]
  *           The runtime's environment arrays (`environ.js`), which the main
  *           arguments hand on as they stand. Absent, an empty one.
+ * @property {number} [pointerSize]
+ *           8 in a 64-bit process, where argv, the initialiser tables and the
+ *           exit tables hold 8-byte pointers. Absent, 4.
  */
 
 /**
@@ -146,6 +150,7 @@ export function splitCommandLine(line){
  */
 export function createStartupFunctions(host){
     const version = host.version ?? windowsVersion();
+    const width = pointerWidth(host.pointerSize);
 
     /**
      * A C string in guest memory that outlives this call, in the ANSI page
@@ -172,14 +177,12 @@ export function createStartupFunctions(host){
      * @returns {number}
      */
     const publishVector = pointers=>{
-        const address = host.allocate((pointers.length + 1) * 4);
+        const bytes = width.array(pointers);
+        const address = host.allocate(bytes.length);
         if (address === 0)
         {
             return 0;
         }
-        const bytes = new Uint8Array((pointers.length + 1) * 4);
-        const view = new DataView(bytes.buffer);
-        pointers.forEach((pointer, index)=>view.setUint32(index * 4, pointer >>> 0, true));
         host.writeMemory(address, bytes);
         return address;
     };
@@ -195,10 +198,36 @@ export function createStartupFunctions(host){
         host.writeMemory(address >>> 0, bytes);
     };
 
+    /** @param {number} address @param {number} value */
+    const writePointer = (address, value)=>{
+        if ((address >>> 0) !== 0)
+        {
+            host.writeMemory(address >>> 0, width.bytes(value));
+        }
+    };
+
     /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
-        return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+    const readPointer = address=>{
+        const bytes = host.readMemory(address >>> 0, width.size);
+        return width.get(new DataView(bytes.buffer, bytes.byteOffset, width.size), 0);
+    };
+
+    /**
+     * The non-null pointers of a table from `first` up to `last`.
+     *
+     * @param {number} first @param {number} last
+     */
+    const tableEntries = (first, last)=>{
+        const entries = [];
+        for (let at = first; at + width.size <= last; at += width.size)
+        {
+            const entry = readPointer(at);
+            if (entry !== 0)
+            {
+                entries.push(entry);
+            }
+        }
+        return entries;
     };
 
     /**
@@ -319,8 +348,8 @@ export function createStartupFunctions(host){
             handler: ([argc, argv, env])=>{
                 const built = buildMainArgs();
                 writeU32(argc, built.argc);
-                writeU32(argv, built.argv);
-                writeU32(env, host.environment?.narrow() ?? built.env);
+                writePointer(argv, built.argv);
+                writePointer(env, host.environment?.narrow() ?? built.env);
                 return 0;
             },
         },
@@ -339,8 +368,8 @@ export function createStartupFunctions(host){
             handler: ([argc, argv, env])=>{
                 const built = buildWideMainArgs();
                 writeU32(argc, built.argc);
-                writeU32(argv, built.argv);
-                writeU32(env, host.environment?.wide() ?? buildMainArgs().env);
+                writePointer(argv, built.argv);
+                writePointer(env, host.environment?.wide() ?? buildMainArgs().env);
                 return 0;
             },
         },
@@ -367,15 +396,7 @@ export function createStartupFunctions(host){
                 {
                     return 0;
                 }
-                const entries = [];
-                for (let at = first; at < last; at += 4)
-                {
-                    const entry = readU32(at);
-                    if (entry !== 0)
-                    {
-                        entries.push(entry);
-                    }
-                }
+                const entries = tableEntries(first, last);
                 // Whose call this is, read before the walk starts. Only the
                 // first initialiser runs while this handler holds the
                 // processor; the loop turns between them, and the rest would
@@ -405,15 +426,7 @@ export function createStartupFunctions(host){
                 {
                     return 0;
                 }
-                const entries = [];
-                for (let at = first; at < last; at += 4)
-                {
-                    const entry = readU32(at);
-                    if (entry !== 0)
-                    {
-                        entries.push(entry);
-                    }
-                }
+                const entries = tableEntries(first, last);
                 const asked = host.currentThread?.();
                 return entries.reduce(
                     (waiting, entry)=>waiting.then(
@@ -588,7 +601,7 @@ export function createStartupFunctions(host){
          * The environment `__getmainargs` hands `main` as its third argument,
          * the same vector: a program walks whichever it has.
          */
-        _environ: { data: ()=>dword(buildMainArgs().env) },
+        _environ: { data: ()=>width.bytes(buildMainArgs().env) },
 
         /**
          * int __mb_cur_max
@@ -639,23 +652,24 @@ export function createStartupFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([fn, pbegin, pend])=>{
-                const begin = readU32(pbegin);
+                const size = width.size;
+                const begin = readPointer(pbegin);
                 const empty = begin === 0 || begin === 0xffffffff;
-                const count = empty ? 0 : (readU32(pend) - begin) >>> 2;
+                const count = empty ? 0 : Math.trunc(((readPointer(pend) - begin) >>> 0) / size);
                 // ponytail: a fresh array per entry, the old one left to the
                 // library's own free at detach; resize when a table gets long.
-                const grown = host.allocate((count + 1) * 4);
+                const grown = host.allocate((count + 1) * size);
                 if (grown === 0)
                 {
                     return 0;
                 }
                 if (count > 0)
                 {
-                    host.writeMemory(grown, host.readMemory(begin, count * 4));
+                    host.writeMemory(grown, host.readMemory(begin, count * size));
                 }
-                writeU32(grown + count * 4, fn >>> 0);
-                writeU32(pbegin, grown);
-                writeU32(pend, grown + (count + 1) * 4);
+                writePointer(grown + count * size, fn >>> 0);
+                writePointer(pbegin, grown);
+                writePointer(pend, grown + (count + 1) * size);
                 return fn >>> 0;
             },
         },

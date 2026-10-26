@@ -4823,6 +4823,8 @@ async function buildApp(options){
             },
         },
         win32: {
+            // A 64-bit process's structures hold 8-byte pointers.
+            bits: long ? 64 : 32,
             // The Windows the machine is, and what the program says it knows,
             // which is all Windows 10 needs to decide what to tell it.
             windows: options.windows,
@@ -5472,16 +5474,19 @@ async function buildApp(options){
             // a trap answering as the export, and named as it; the jump's
             // displacement is the loader's, which places the code.
             // A variable may hold other exports' addresses: a vtable's slots.
-            ...fn.code ? codeExport(fn, `${name}!${exported}`) : fn.data ? {
-                data: fn.data(), pointers: fn.pointers, entry: fn.entry,
-            } : {
-                target: fn.guest
-                    ? fn.guest({
-                        /** @param {string} label @param {any} trap */
-                        register: (label, trap)=>bridge.register(label, trap),
-                    })
-                    : bridge.register(`${name}!${exported}`, fn),
-            },
+            // A long-mode process runs no i386: an export that is guest code
+            // with a host handler is a trap into that handler there.
+            ...fn.code && !(long && fn.handler) ? codeExport(fn, `${name}!${exported}`)
+                : fn.data ? {
+                    data: fn.data(), pointers: fn.pointers, entry: fn.entry,
+                } : {
+                    target: fn.guest && !long
+                        ? fn.guest({
+                            /** @param {string} label @param {any} trap */
+                            register: (label, trap)=>bridge.register(label, trap),
+                        })
+                        : bridge.register(`${name}!${exported}`, fn),
+                },
         }));
 
         const base = systemModulesEnd;

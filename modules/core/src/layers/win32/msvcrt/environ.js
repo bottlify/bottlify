@@ -26,6 +26,7 @@
 import { EINVAL, ERANGE } from './globals.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wideStringAt } from './widetext.js';
+import { pointerWidth } from '../common/pointers.js';
 
 /** A string is read no further than this. */
 const MAX_STRING = 1 << 20;
@@ -50,8 +51,9 @@ const MAX_STRING = 1 << 20;
  *     rewritten there as they change. Absent, each keeps the value it was
  *     placed with.
  * @property {(name: string, initial?: number) => number} cell
- *     An int of the runtime's own, for a `__p__` accessor when the export's
- *     own address is not to be had.
+ *     A cell of the runtime's own, for a `__p__` accessor when the export's
+ *     own address is not to be had: room for a pointer of either width.
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -72,6 +74,7 @@ export function createEnvironment(host){
     let initenv = 0;
     let wenviron = 0;
     let winitenv = 0;
+    const width = pointerWidth(host.pointerSize);
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
@@ -79,6 +82,9 @@ export function createEnvironment(host){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address, bytes);
     };
+
+    /** @param {number} address @param {number} value */
+    const writePointer = (address, value)=>host.writeMemory(address, width.bytes(value));
 
     /** @param {Uint8Array} bytes */
     const place = bytes=>{
@@ -105,12 +111,7 @@ export function createEnvironment(host){
     };
 
     /** A null-terminated array of the strings. @param {number[]} pointers */
-    const array = pointers=>{
-        const bytes = new Uint8Array((pointers.length + 1) * 4);
-        const view = new DataView(bytes.buffer);
-        pointers.forEach((pointer, index)=>view.setUint32(index * 4, pointer >>> 0, true));
-        return place(bytes);
-    };
+    const array = pointers=>place(width.array(pointers));
 
     /**
      * Each variable as the arrays and accessors report it, wherever it is
@@ -124,9 +125,9 @@ export function createEnvironment(host){
             const at = host.addressOf?.(name) ?? 0;
             if (at !== 0)
             {
-                writeU32(at, value);
+                writePointer(at, value);
             }
-            writeU32(host.cell(name), value);
+            writePointer(host.cell(name), value);
         }
     };
 
@@ -311,13 +312,6 @@ export function createEnvironment(host){
         },
     });
 
-    /** @param {number} value */
-    const dword = value=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        return bytes;
-    };
-
     const functions = {
         /**
          * char *getenv(const char *name)
@@ -453,7 +447,7 @@ export function createEnvironment(host){
                 const index = find(readNarrow(name));
                 const bytes = index < 0 ? null : encodeAnsi(`${start()[index].value}\0`);
                 const copy = bytes ? place(bytes) : 0;
-                writeU32(buffer, copy);
+                writePointer(buffer, copy);
                 if ((length >>> 0) !== 0)
                 {
                     writeU32(length, copy === 0 ? 0 : /** @type {Uint8Array} */ (bytes).length);
@@ -480,7 +474,7 @@ export function createEnvironment(host){
                 start();
                 if ((out >>> 0) !== 0)
                 {
-                    writeU32(out, environ);
+                    writePointer(out, environ);
                 }
                 return 0;
             },
@@ -494,7 +488,7 @@ export function createEnvironment(host){
             handler: ([out])=>{
                 if ((out >>> 0) !== 0)
                 {
-                    writeU32(out, wenviron);
+                    writePointer(out, wenviron);
                 }
                 return 0;
             },
@@ -506,10 +500,10 @@ export function createEnvironment(host){
          *
          * Variables: the arrays, as placed at start -- the wide ones null.
          */
-        _environ: { data: ()=>dword((start(), environ)) },
-        _wenviron: { data: ()=>dword(wenviron) },
-        __initenv: { data: ()=>dword((start(), initenv)) },
-        __winitenv: { data: ()=>dword(winitenv) },
+        _environ: { data: ()=>width.bytes((start(), environ)) },
+        _wenviron: { data: ()=>width.bytes(wenviron) },
+        __initenv: { data: ()=>width.bytes((start(), initenv)) },
+        __winitenv: { data: ()=>width.bytes(winitenv) },
     };
 
     return {

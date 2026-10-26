@@ -32,17 +32,23 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
  * nothing here is ever left to flush.
  */
 
-/** msvcrt's `_iobuf`: eight dwords. */
-const FILE_SIZE = 32;
-const FILE_CNT = 4;
-const FILE_FLAG = 12;
-const FILE_FILE = 16;
 /**
- * `_bufsiz`: the buffer a stream would have, msvcrt's 4096 unless setvbuf
- * named another. Nothing is held in it here, but a program sizes its own
- * writes by it.
+ * msvcrt's `_iobuf` for a pointer of `size` bytes: `_ptr`, `_cnt`, `_base`,
+ * `_flag`, `_file`, `_charbuf`, `_bufsiz`, `_tmpfname` -- eight dwords in a
+ * 32-bit process, 48 bytes in a 64-bit one, where the three pointers widen
+ * and `_cnt` is padded to the next. `_bufsiz` is the buffer a stream would
+ * have, msvcrt's 4096 unless setvbuf named another: nothing is held in it
+ * here, but a program sizes its own writes by it.
+ *
+ * @param {number} [size]  4 or 8
  */
-const FILE_BUFSIZ = 24;
+export const fileLayout = (size = 4)=>({
+    size: 3 * size + 16 + size,
+    cnt: size,
+    flag: 3 * size,
+    file: 3 * size + 4,
+    bufsiz: 3 * size + 12,
+});
 const DEFAULT_BUFFER = 4096;
 
 /**
@@ -79,10 +85,11 @@ const IONBF = 0x0004;
  * The records of stdin, stdout and stderr, where `_iob` keeps them: nothing
  * before the runtime's image has placed `_iob`.
  *
- * @param {number} iob
+ * @param {number} iob @param {number} [pointerSize]
  */
-export const standardRecords = iob=>(iob === 0 ? []
-    : Array.from({ length: STANDARD_STREAMS }, (_, index)=>iob + index * FILE_SIZE));
+export const standardRecords = (iob, pointerSize = 4)=>(iob === 0 ? []
+    : Array.from({ length: STANDARD_STREAMS },
+        (_, index)=>iob + index * fileLayout(pointerSize).size));
 
 /**
  * @typedef {Object} StdioHost
@@ -102,7 +109,8 @@ export const standardRecords = iob=>(iob === 0 ? []
  * @property {() => number} [fmode]  The runtime's `_fmode`, for that table.
  * @property {(list: number) => number[]} [varargs]
  *           The argument slots a `va_list` points at, for vprintf.
- * @property {(values: Record<string, number>) => void} [setRegisters]
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose FILE is 48 bytes; absent, 4.
+* @property {(values: Record<string, number>) => void} [setRegisters]
  *           EDX, for an __int64 answer; without it `_ftelli64` is not exported.
  */
 
@@ -165,6 +173,7 @@ function parseMode(mode){
  * @param {StdioHost} host
  */
 export function createStdioFunctions(host){
+    const layout = fileLayout(host.pointerSize);
     /** @type {Map<number, Stream>} */
     const streams = new Map();
 
@@ -199,8 +208,8 @@ export function createStdioFunctions(host){
     const standardIndex = pointer=>{
         const base = host.iob?.() ?? 0;
         const offset = (pointer >>> 0) - base;
-        return base === 0 || offset < 0 || offset % FILE_SIZE !== 0
-            || offset / FILE_SIZE >= STANDARD_STREAMS ? -1 : offset / FILE_SIZE;
+        return base === 0 || offset < 0 || offset % layout.size !== 0
+            || offset / layout.size >= STANDARD_STREAMS ? -1 : offset / layout.size;
     };
 
     /**
@@ -238,7 +247,7 @@ export function createStdioFunctions(host){
      */
     const standardStream = index=>{
         const base = host.iob?.() ?? 0;
-        return base === 0 ? null : streamOf(base + index * FILE_SIZE);
+        return base === 0 ? null : streamOf(base + index * layout.size);
     };
 
     /**
@@ -259,7 +268,7 @@ export function createStdioFunctions(host){
     /** @param {Stream} stream @param {number} flags */
     const setFlags = (stream, flags)=>{
         stream.flags = flags;
-        writeU32(stream.record + FILE_FLAG, flags);
+        writeU32(stream.record + layout.flag, flags);
     };
 
     /** @param {Stream} stream @param {number} bit */
@@ -283,8 +292,8 @@ export function createStdioFunctions(host){
     const standOn = (stream, fd, flags)=>{
         stream.fd = fd;
         stream.pushback.length = 0;
-        writeU32(stream.record + FILE_FILE, fd);
-        writeU32(stream.record + FILE_CNT, 0);
+        writeU32(stream.record + layout.file, fd);
+        writeU32(stream.record + layout.cnt, 0);
         setFlags(stream, flags);
     };
 
@@ -295,15 +304,15 @@ export function createStdioFunctions(host){
      * @param {number} fd @param {number} flags
      */
     const attach = (fd, flags)=>{
-        const record = host.allocate(FILE_SIZE);
+        const record = host.allocate(layout.size);
         if (record === 0)
         {
             return 0;
         }
-        host.writeMemory(record, new Uint8Array(FILE_SIZE));
+        host.writeMemory(record, new Uint8Array(layout.size));
         const stream = { record, fd, flags: 0, pushback: [] };
         standOn(stream, fd, flags);
-        writeU32(record + FILE_BUFSIZ, DEFAULT_BUFFER);
+        writeU32(record + layout.bufsiz, DEFAULT_BUFFER);
         streams.set(record, stream);
         return record;
     };
@@ -769,13 +778,13 @@ export function createStdioFunctions(host){
          */
         _iob: {
             data: ()=>{
-                const bytes = new Uint8Array(IOB_ENTRIES * FILE_SIZE);
+                const bytes = new Uint8Array(IOB_ENTRIES * layout.size);
                 const view = new DataView(bytes.buffer);
                 for (let index = 0; index < STANDARD_STREAMS; index++)
                 {
-                    view.setUint32(index * FILE_SIZE + FILE_FLAG,
+                    view.setUint32(index * layout.size + layout.flag,
                         index === 0 ? IOREAD : IOWRT, true);
-                    view.setUint32(index * FILE_SIZE + FILE_FILE, index, true);
+                    view.setUint32(index * layout.size + layout.file, index, true);
                 }
                 return bytes;
             },
@@ -1155,7 +1164,7 @@ export function createStdioFunctions(host){
             {
                 return EOF;
             }
-            writeU32(stream.record + FILE_CNT, 0);
+            writeU32(stream.record + layout.cnt, 0);
             return nextByte(stream);
         }),
 
@@ -1231,7 +1240,7 @@ export function createStdioFunctions(host){
             {
                 return EOF;
             }
-            writeU32(stream.record + FILE_CNT, 0);
+            writeU32(stream.record + layout.cnt, 0);
             return putByte(stream, c);
         }),
 
@@ -1501,7 +1510,7 @@ export function createStdioFunctions(host){
             }
             if (mode !== IONBF)
             {
-                writeU32(stream.record + FILE_BUFSIZ, size >>> 0);
+                writeU32(stream.record + layout.bufsiz, size >>> 0);
             }
             return 0;
         }),

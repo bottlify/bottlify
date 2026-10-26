@@ -73,9 +73,12 @@ export function createGlobals(host){
             {
                 return held;
             }
-            const address = host.allocate(4);
+            // Room for a pointer of either width, the high half zero: the
+            // environment's cells (`environ.js`) hold a `char **` here.
+            const address = host.allocate(8);
             if (address !== 0)
             {
+                host.writeMemory(address + 4, new Uint8Array(4));
                 store(address, values.get(name) ?? initial);
             }
             addresses.set(name, address);

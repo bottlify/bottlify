@@ -169,6 +169,8 @@ const seededCode = (made, argBytes, handler)=>({
  *           unexported.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {() => number} [iob]           Where the runtime's `_iob` was placed, once it has been.
+ * @property {number} [pointerSize]     8 in a 64-bit process, whose argv, FILE and
+ *           pointer-sized variables are laid out for it; absent, 4.
  * @property {() => Record<string, string>} [environment]
  *           The process's variables as it starts, as GetEnvironmentStrings
  *           holds them: the runtime's own copy begins as these. Absent, the
@@ -824,6 +826,7 @@ export function createMsvcrtFunctions(host){
     // starts: what getenv reads, _putenv changes and main is handed.
     const environment = host.allocate
         ? createEnvironment({
+            pointerSize: host.pointerSize,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             readCString: host.readCString,
@@ -856,6 +859,7 @@ export function createMsvcrtFunctions(host){
 
     const stdio = host.files && host.allocate && host.free
         ? createStdioFunctions({
+            pointerSize: host.pointerSize,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             readCString: host.readCString,
@@ -879,7 +883,8 @@ export function createMsvcrtFunctions(host){
         if (stdio)
         {
             stdio._fcloseall.handler([]);
-            standardRecords(host.iob?.() ?? 0).forEach(record=>stdio.fclose.handler([record]));
+            standardRecords(host.iob?.() ?? 0, host.pointerSize)
+                .forEach(record=>stdio.fclose.handler([record]));
         }
     };
 
@@ -997,6 +1002,7 @@ export function createMsvcrtFunctions(host){
         // than a start-up that half runs.
         ...(host.allocate && host.commandLine && host.exitProcess
             ? createStartupFunctions({
+                pointerSize: host.pointerSize,
                 readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 allocate: host.allocate,

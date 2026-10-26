@@ -36,9 +36,26 @@ const ERROR_INVALID_HANDLE = 6;
 /** TerminateProcess on a process that has already ended. */
 const ERROR_ACCESS_DENIED = 5;
 
-/** sizeof(SYSTEM_INFO) and sizeof(SYSTEMTIME). */
-const SYSTEM_INFO_SIZE = 36;
+/** sizeof(SYSTEMTIME). */
 const SYSTEMTIME_SIZE = 16;
+
+/**
+ * SYSTEM_INFO for a pointer of `size` bytes: 36 bytes in a 32-bit process, 48
+ * in a 64-bit one, where the two addresses and the processor mask widen.
+ *
+ * @param {number} size
+ */
+const systemInfoLayout = size=>({
+    MINIMUM_ADDRESS: 8,
+    MAXIMUM_ADDRESS: 8 + size,
+    ACTIVE_MASK: 8 + 2 * size,
+    PROCESSORS: 8 + 3 * size,
+    PROCESSOR_TYPE: 12 + 3 * size,
+    GRANULARITY: 16 + 3 * size,
+    LEVEL: 20 + 3 * size,
+    REVISION: 22 + 3 * size,
+    SIZE: 24 + 3 * size,
+});
 
 /**
  * SYSTEM_LOGICAL_PROCESSOR_INFORMATION on x86: the processor mask, the
@@ -66,6 +83,9 @@ const CACHE_TYPES = Object.freeze({ unified: 0, instruction: 1, data: 2 });
 /** The machine claimed. See the note above. */
 const PROCESSOR_ARCHITECTURE_INTEL = 0;
 const PROCESSOR_INTEL_PENTIUM = 586;
+/** What a 64-bit process is told: the same processor, as x64 Windows names it. */
+const PROCESSOR_ARCHITECTURE_AMD64 = 9;
+const PROCESSOR_AMD_X8664 = 8664;
 const PAGE_SIZE = 0x1000;
 const ALLOCATION_GRANULARITY = 0x10000;
 const MINIMUM_APPLICATION_ADDRESS = 0x00010000;
@@ -268,6 +288,8 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  * @property {import('./processor.js').Processors} [processors]  The process's
  *           processors, which every other interface that counts them shares.
  *           Absent, one.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose SYSTEM_INFO
+ *           is laid out for it and names the x64 processor; absent, 4.
  */
 
 /**
@@ -808,21 +830,27 @@ export function createSystemFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([info])=>{
-            const bytes = new Uint8Array(SYSTEM_INFO_SIZE);
+            const wide = host.pointerSize === 8;
+            const layout = systemInfoLayout(wide ? 8 : 4);
+            const bytes = new Uint8Array(layout.SIZE);
             const view = new DataView(bytes.buffer);
-            view.setUint16(0, PROCESSOR_ARCHITECTURE_INTEL, true);
+            view.setUint16(0, wide ? PROCESSOR_ARCHITECTURE_AMD64 : PROCESSOR_ARCHITECTURE_INTEL,
+                true);
             view.setUint32(4, PAGE_SIZE, true);
-            view.setUint32(8, MINIMUM_APPLICATION_ADDRESS, true);
-            view.setUint32(12, MAXIMUM_APPLICATION_ADDRESS, true);
+            // The same span in a 64-bit process: its memory is the window
+            // below 4 GiB (`roadmap/x64.md`), and the high halves stay zero.
+            view.setUint32(layout.MINIMUM_ADDRESS, MINIMUM_APPLICATION_ADDRESS, true);
+            view.setUint32(layout.MAXIMUM_ADDRESS, MAXIMUM_APPLICATION_ADDRESS, true);
             // The processors the machine has, whatever the process is
             // narrowed to: dwActiveProcessorMask, then dwNumberOfProcessors.
-            view.setUint32(16, processors.systemMask(), true);
-            view.setUint32(20, processors.count(), true);
-            view.setUint32(24, PROCESSOR_INTEL_PENTIUM, true);
-            view.setUint32(28, ALLOCATION_GRANULARITY, true);
+            view.setUint32(layout.ACTIVE_MASK, processors.systemMask(), true);
+            view.setUint32(layout.PROCESSORS, processors.count(), true);
+            view.setUint32(layout.PROCESSOR_TYPE, wide ? PROCESSOR_AMD_X8664
+                : PROCESSOR_INTEL_PENTIUM, true);
+            view.setUint32(layout.GRANULARITY, ALLOCATION_GRANULARITY, true);
             // The family and the model and stepping, as CPUID gives them.
-            view.setUint16(32, PROCESSOR_LEVEL, true);
-            view.setUint16(34, PROCESSOR_REVISION, true);
+            view.setUint16(layout.LEVEL, PROCESSOR_LEVEL, true);
+            view.setUint16(layout.REVISION, PROCESSOR_REVISION, true);
             host.writeMemory(info >>> 0, bytes);
             return 0;
         },

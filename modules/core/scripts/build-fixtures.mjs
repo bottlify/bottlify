@@ -54,7 +54,9 @@ const IMPORTS = {
             'VirtualAlloc@16', 'VirtualFree@12', 'GetLastError@0', 'SetLastError@4',
             'CreateProcessA@40', 'GetExitCodeProcess@8', 'CloseHandle@4', 'CreateFileA@28',
             'ReadFile@20', 'GetCommandLineA@0', 'WaitForMultipleObjects@16',
-            'GetModuleHandleA@4', 'GetCurrentProcessId@0',
+            'GetModuleHandleA@4', 'GetCurrentProcessId@0', 'InitializeCriticalSection@4',
+            'EnterCriticalSection@4', 'LeaveCriticalSection@4', 'TryEnterCriticalSection@4',
+            'DeleteCriticalSection@4', 'GetCurrentProcess@0', 'GetProcessAffinityMask@12',
         ],
     },
     'ADVAPI32.dll': {
@@ -111,7 +113,8 @@ const IMPORTS = {
             '__CxxFrameHandler3', '_CxxThrowException@8', '_except_handler3', 'qsort',
             '??3@YAXPAX@Z', '_setjmp3', 'longjmp', 'fprintf', 'fwrite', 'fread', '__iob_func',
             '_iob DATA', '_osver DATA', '_winver DATA', '_winmajor DATA', '_winminor DATA',
-            '_HUGE DATA', '_environ DATA',
+            '_HUGE DATA', '_environ DATA', '__getmainargs', '_initterm', '_onexit',
+            '__dllonexit', 'fputs', 'fputc', 'exit', '__initenv DATA', 'strlen', 'memset',
         ],
         decorated: ['_seh_longjmp_unwind@4'],
     },
@@ -139,6 +142,7 @@ const PROGRAMS = [
     { name: 'overlap', source: 'overlap.c', cxx: false },
     { name: 'effect', source: 'effect.c', cxx: false },
     { name: 'hello64', source: 'hello64.c', cxx: false, x64: true },
+    { name: 'crt64', source: 'crt64.c', cxx: false, x64: true },
 ];
 
 /** The fixtures named on the command line, or every one. */

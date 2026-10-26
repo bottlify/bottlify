@@ -7,6 +7,7 @@
 
 import { TEB } from './teb.js';
 import { createProcessors } from './processor.js';
+import { pointerWidth } from '../common/pointers.js';
 import { setCondition, verifyVersion, windowsVersion } from './versions.js';
 
 /**
@@ -207,6 +208,7 @@ const ERROR_NOACCESS = 998;
  * @property {import('./processor.js').Processors} [processors]  The process's
  *           processors and its affinity, which every other interface that
  *           counts or sets them shares. Absent, one processor.
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -562,6 +564,7 @@ export function tickCountCode(block){
  * @param {ProcessHost} host
  */
 export function createProcessFunctions(host){
+    const width = pointerWidth(host.pointerSize);
     const performanceFrequency = host.performanceFrequency ?? Number(PERFORMANCE_FREQUENCY);
     if (!Number.isInteger(performanceFrequency) || performanceFrequency < 1
         || performanceFrequency > 0xffffffff)
@@ -1356,13 +1359,14 @@ export function createProcessFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, processMask, systemMask])=>{
+                // DWORD_PTRs: a quadword each in a 64-bit process.
                 if ((processMask >>> 0) !== 0)
                 {
-                    memory.writeU32(processMask >>> 0, processors.processMask());
+                    host.writeMemory(processMask >>> 0, width.bytes(processors.processMask()));
                 }
                 if ((systemMask >>> 0) !== 0)
                 {
-                    memory.writeU32(systemMask >>> 0, processors.systemMask());
+                    host.writeMemory(systemMask >>> 0, width.bytes(processors.systemMask()));
                 }
                 return 1;
             },

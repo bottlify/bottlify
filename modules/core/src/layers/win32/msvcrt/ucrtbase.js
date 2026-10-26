@@ -26,12 +26,11 @@
  */
 
 import { VARIADIC_SLOTS } from './scan.js';
+import { fileLayout } from './stdio.js';
 
 const EINVAL = 22;
 /** `_TRUNCATE`: a count that asks for as much as fits. */
 const TRUNCATE = 0xffffffff;
-/** A FILE record in msvcrt's `_iob`, which `__acrt_iob_func` indexes. */
-const FILE_SIZE = 32;
 /**
  * The options bit of `__stdio_common_vsprintf` and its wide twin that asks for
  * C99's snprintf: the text cut to fit and always terminated, the answer the
@@ -50,6 +49,7 @@ const SECURE_SCANF = 0x1;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(entry: number, args: number[], thread?: any) => any} callGuest
  * @property {() => any} [currentThread]
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -180,8 +180,8 @@ export function createUcrtbaseFunctions(crt, host){
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([index])=>((crt.__iob_func.handler([]) >>> 0) + (index >>> 0) * FILE_SIZE)
-                >>> 0,
+            handler: ([index])=>((crt.__iob_func.handler([]) >>> 0)
+                + (index >>> 0) * fileLayout(host.pointerSize).size) >>> 0,
         },
 
         /**
