@@ -358,6 +358,108 @@ test('setting an item changes only what the mask names', ()=>{
     assert.equal(memory.readCString(OUT, 16), 'Save', 'the text the mask did not name survived');
 });
 
+test('a bitmap item gives its handle back in dwTypeData and writes no text there', ()=>{
+    // Wine's menu test: under MIIM_TYPE a bitmap item's dwTypeData is its
+    // HBITMAP, both ways; writing the text through it wrote to the handle.
+    const { memory, fns } = setup();
+    const MIIM_TYPE = 0x0010;
+    const MFT_BITMAP = 0x0004;
+    const HBITMAP = 0x4c;
+    const menu = fns.CreateMenu.handler([]);
+    putItemInfo(memory, { mask: MIIM_TYPE, type: MFT_BITMAP });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [HBITMAP]);
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 1);
+
+    putItemInfo(memory, { mask: MIIM_TYPE, cch: 80 });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [HBITMAP]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fType), MFT_BITMAP);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.dwTypeData), HBITMAP);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.cch), 0);
+});
+
+test('MENUITEMINFO carries only what its mask names, and MIIM_TYPE not beside its halves', ()=>{
+    // Wine's menu test, test_menu_iteminfo.
+    const { memory, fns } = setup();
+    const MIIM_TYPE = 0x0010;
+    const MIIM_BITMAP = 0x0080;
+    const MIIM_FTYPE = 0x0100;
+    const MFT_BITMAP = 0x0004;
+    const MFT_SEPARATOR = 0x0800;
+    const menu = fns.CreateMenu.handler([]);
+    for (const mask of [MIIM_TYPE | MIIM_STRING, MIIM_TYPE | MIIM_FTYPE, MIIM_TYPE | MIIM_BITMAP])
+    {
+        putItemInfo(memory, { mask, text: 'text' });
+        assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 0, `insert ${mask}`);
+    }
+    putItemInfo(memory, { mask: MIIM_FTYPE, type: MFT_BITMAP });
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 0, 'no MFT_BITMAP in FTYPE');
+
+    // A type of -1 the mask does not name was never given.
+    putItemInfo(memory, { mask: MIIM_STRING, type: 0xffffffff, id: 0xffffffff, text: 'text' });
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0xffffffff, 1, INFO]), 1);
+    putItemInfo(memory, { mask: MIIM_TYPE | MIIM_ID, cch: 80 });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [OUT, 80]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.deepEqual([memory.u32(INFO + MENUITEMINFO.fType), memory.u32(INFO + MENUITEMINFO.wID)],
+        [0, 0]);
+    assert.equal(memory.readCString(OUT, 80), 'text');
+    putItemInfo(memory, { mask: MIIM_TYPE | MIIM_STRING });
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 0, 'nor when asking');
+
+    // A string item given no text reads back as a separator.
+    putItemInfo(memory, { mask: MIIM_STRING | MIIM_FTYPE });
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 1);
+    putItemInfo(memory, { mask: MIIM_STRING | MIIM_FTYPE, cch: 80 });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [OUT, 80]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fType), MFT_SEPARATOR);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.cch), 0);
+
+    // An item's own bitmap is a bitmap item to MIIM_TYPE, its handle in dwTypeData.
+    putItemInfo(memory, { mask: MIIM_BITMAP });
+    memory.putU32s(INFO + MENUITEMINFO.hbmpItem, [0x4c]);
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 1);
+    putItemInfo(memory, { mask: MIIM_TYPE, cch: 80 });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [0x4c]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fType) & MFT_BITMAP, MFT_BITMAP);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.dwTypeData), 0x4c);
+});
+
+test('an appended bitmap item is MF_BITMAP with its handle, and magic ones stay last', ()=>{
+    // Wine's menu test, test_InsertMenu: a menu bar's MDI buttons -- magic
+    // bitmaps 1 to 6 -- keep the end whatever is appended after them.
+    const { memory, fns } = setup();
+    const MF_BITMAP = 0x0004;
+    const MF_HELP = 0x4000;
+    const MIIM_BITMAP = 0x0080;
+    const MIIM_FTYPE = 0x0100;
+    const menu = fns.CreateMenu.handler([]);
+    memory.putString(TITLE, 'File');
+    assert.equal(fns.AppendMenuA.handler([menu, 0, 1, TITLE]), 1);
+    assert.equal(fns.AppendMenuA.handler([menu, MF_BITMAP | MF_HELP, 0xf060, 1]), 1);
+    memory.putString(TITLE, 'Help');
+    assert.equal(fns.AppendMenuA.handler([menu, MF_HELP, 2, TITLE]), 1);
+    assert.deepEqual([0, 1, 2].map(at=>fns.GetMenuItemID.handler([menu, at])), [1, 2, 0xf060]);
+
+    putItemInfo(memory, { mask: MIIM_FTYPE | MIIM_ID | MIIM_BITMAP });
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 2, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fType), MF_BITMAP | MF_HELP);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.hbmpItem), 1);
+});
+
+test('a NULL MENUITEMINFO is ERROR_INVALID_PARAMETER', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const { fns } = setup({ setLastError: (/** @type {number} */ code)=>errors.push(code) });
+    const menu = fns.CreateMenu.handler([]);
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, 0]), 0);
+    assert.equal(fns.SetMenuItemInfoA.handler([menu, 0, 1, 0]), 0);
+    assert.equal(fns.SetMenuItemInfoW.handler([menu, 0, 0, 0]), 0);
+    assert.deepEqual(errors, [87, 87, 87]);
+});
+
 /**
  * Lays out a MENUITEMINFOW: the same structure, its text in UTF-16.
  *
