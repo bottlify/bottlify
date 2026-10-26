@@ -218,6 +218,11 @@ test('attributes, names and a combined list say what a browser needs of an item'
     assert.deepEqual(m.texts(m.u32(0x148)), ['C:\\Program Files\\Common']);
     assert.equal(m.u32(0x150), SFGAO_FOLDER | SFGAO_FILESYSTEM, 'Common has no subfolder');
     assert.equal(m.u32(0x14c), 'C:\\Program Files\\Common'.length);
+    // Wine's shlfolder test: no name is E_INVALIDARG, read from nowhere.
+    m.put(0x148, 0xdeadbeef);
+    assert.equal(m.call(root, FOLDER.ParseDisplayName, [0, 0, 0, 0, 0x148, 0]) >>> 0,
+        0x80070057);
+    assert.equal(m.u32(0x148), 0, 'and the item is NULL');
 });
 
 test('binding a file, or asking for an interface the folder lacks, is refused with a null', ()=>{

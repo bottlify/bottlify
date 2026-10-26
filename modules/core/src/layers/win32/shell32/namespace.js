@@ -404,6 +404,16 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                  */
         { name: 'ParseDisplayName', argBytes: 28,
             invoke: (object, [, , name, eaten, out, attributes])=>{
+                // No name, or nowhere to put the item, is refused before
+                // either is touched.
+                if ((name >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    if ((out >>> 0) !== 0)
+                    {
+                        memory.writeMemory(out >>> 0, dword(0));
+                    }
+                    return E_INVALIDARG;
+                }
                 const item = itemFor(parsingName(readWide(name >>> 0)));
                 memory.writeMemory(out >>> 0, dword(0));
                 if (!item)
