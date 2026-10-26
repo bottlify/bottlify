@@ -12,7 +12,7 @@ import {
 } from './table.js';
 
 /** The operand forms the decoder's resolver knows, by their first letter or whole name. */
-const KNOWN_FORMS = /^(E[bwvdqy]?|G[bwvdy]|M(b|w|d|q|dq|a|v)?|S[w]|Z[bvd]|I(b|bs|w|z|v)|J[bz]|O[bv]|X[bv]|Y[bv]|P[q]|Q[q]|N[q]|V(ps|pd|ss|sd|dq|q|d)|W(ps|pd|ss|sd|dq|q|d)|U(ps|pd|dq|q)|AL|CL|AX|DX|eAX|1|ES|CS|SS|DS|FS|GS|Xlat|ST0?|STi|m(16int|32int|64int|32fp|64fp|80fp|80bcd)|Menv|Msave)$/;
+const KNOWN_FORMS = /^(E[bwvdqy]?|G[bwvdy]|M(b|w|d|q|dq|a|v)?|S[w]|Z[bvdy]|I(b|bs|w|z|v)|J[bz]|O[bv]|X[bv]|Y[bv]|P[q]|Q[q]|N[q]|V(ps|pd|ss|sd|dq|q|d)|W(ps|pd|ss|sd|dq|q|d)|U(ps|pd|dq|q)|AL|CL|AX|DX|eAX|1|ES|CS|SS|DS|FS|GS|Xlat|ST0?|STi|m(16int|32int|64int|32fp|64fp|80fp|80bcd)|Menv|Msave)$/;
 
 test('every operand form the tables use is one the resolver knows', ()=>{
     const unknown = [...formsInUse()].filter(form=>!KNOWN_FORMS.test(form));

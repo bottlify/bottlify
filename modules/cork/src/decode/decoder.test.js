@@ -361,8 +361,6 @@ test('the refusals name the opcode and the reason', ()=>{
     assert.equal(refused([0x8d, 0xc0]).invalid, true, 'lea of a register');
     assert.equal(refused([0x0f, 0x38, 0x00, 0xc1]).invalid, false);
     assert.equal(refused([0xea, 0, 0, 0, 0, 0, 0]).invalid, false);
-    const sixtyFour = decode(()=>0x90, 0, { bits: 64 });
-    assert.ok('refused' in sixtyFour);
 });
 
 test('segment registers, the string forms, prefixes that stack, and hlt', ()=>{

@@ -613,7 +613,7 @@ TWO_BYTE[0xc7] = G([
 ]);
 for (let reg = 0; reg < 8; reg++)
 {
-    TWO_BYTE[0xc8 + reg] = I('bswap', 'Zd');
+    TWO_BYTE[0xc8 + reg] = I('bswap', 'Zy');
 }
 TWO_BYTE[0xd0] = S({ 66: I('addsubpd', 'Vpd,Wpd'), f2: I('addsubps', 'Vps,Wps') });
 TWO_BYTE[0xd6] = S({

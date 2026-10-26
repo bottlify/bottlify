@@ -17,12 +17,18 @@
  * for it, or a run past fifteen bytes is a `Refusal`, counted by opcode so
  * the table grows from what programs actually execute.
  *
- * The mode is a parameter from the first line: 32-bit today, and the seam a
- * 64-bit engine will put a REX-aware table behind without renaming anything.
+ * The mode is a parameter: 32-bit, or 64-bit long mode (`MODE_64`), where a REX
+ * prefix widens the operand to 64 bits and names the eight further registers,
+ * the near branches and the stack operations default to 64 bits, an address is
+ * 64 bits wide (32 with the address-size prefix) and may be RIP-relative, and
+ * the encodings the mode dropped are #UD. Records of either mode have the same
+ * shape: a 64-bit operand is size 8 and its register 0-15; an 8-byte immediate
+ * carries its high half in `upper`; a RIP-relative operand has `rip` set and its
+ * absolute address in `disp`.
  */
 
 import {
-    CONDITIONS, DF, Group, ONE_BYTE, Prefixed, SYS, TWO_BYTE, X87, conditionReads,
+    CONDITIONS, DF, Group, I, ONE_BYTE, Prefixed, SYS, TWO_BYTE, X87, conditionReads,
 } from './table.js';
 
 /** The longest an instruction may be; the processor faults past it. */
@@ -30,6 +36,9 @@ const MAX_LENGTH = 15;
 
 /** The eight general registers by index; byte registers 4..7 are AH CH DH BH. */
 export const REGISTERS = Object.freeze(['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi']);
+/** The sixteen general registers of long mode by index. */
+export const REGISTERS64 = Object.freeze(['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
+    'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15']);
 export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
 
 /**
@@ -37,15 +46,21 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  * @property {'reg' | 'mem' | 'imm' | 'rel' | 'seg' | 'x87' | 'mm' | 'xmm'} kind
  * @property {number} size          in bytes (0 for a register with no data width, as
  *                                  `lea`'s source)
- * @property {number} [reg]         register index, for reg/seg/x87/mm/xmm
- * @property {boolean} [high]       a byte register that is the high byte (AH..BH)
+ * @property {number} [reg]         register index, for reg/seg/x87/mm/xmm (0-15 in long mode)
+ * @property {boolean} [high]       a byte register that is the high byte (AH..BH): never
+ *                                  with a REX prefix, where 4..7 are SPL, BPL, SIL, DIL
  * @property {number} [base]        mem: base register index, or -1
  * @property {number} [index]       mem: index register index, or -1
  * @property {number} [scale]       mem: 1, 2, 4 or 8
  * @property {number} [disp]        mem: signed displacement
  * @property {number} [segment]     mem: segment register index the access is relative to
- * @property {16 | 32} [addressSize]
- * @property {number} [value]       imm: the value, sign-extended where the form says so
+ * @property {16 | 32 | 64} [addressSize]
+ * @property {true} [rip]           mem: RIP-relative, `disp` already the absolute address
+ * @property {number} [value]       imm: the value, sign-extended where the form says so;
+ *                                  of an 8-byte immediate the low 32 bits, unsigned
+ * @property {number} [upper]       imm: of an 8-byte immediate the high 32 bits, unsigned;
+ *                                  mem: of a 64-bit offset (`mov al, [moffs64]`) the high
+ *                                  32 bits, `disp` its low 32 unsigned
  * @property {number} [target]      rel: the absolute target
  */
 
@@ -62,7 +77,8 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  * @property {'none' | 'divide' | 'invalid' | 'trap' | 'halt'} faults
  * @property {boolean} memory       whether any operand is a memory operand
  * @property {{ lock: boolean, rep: boolean, repne: boolean, segment: number, operand: boolean,
- *              address: boolean }} prefixes
+ *              address: boolean, rex?: number }} prefixes  `rex` in long mode: the REX
+ *              byte, or 0
  * @property {number} [cc]          for jcc/setcc/cmovcc/fcmovcc
  * @property {string} opcode        the opcode bytes as text, "0f 2e", for a report
  * @property {{ name: string, address: number, length: number }} [helper]
@@ -91,7 +107,38 @@ const INVALID_SLOTS = new Set([
 
 /** Refusals whose encoding a processor rejects with #UD whatever it supports. */
 const INVALID_REASONS = new Set(['no such segment register', 'register form only',
-    'memory form only', 'lock on a register form']);
+    'memory form only', 'lock on a register form', 'not in 64-bit mode']);
+
+/**
+ * The one-byte opcodes long mode dropped: the pushes and pops of ES, CS, SS and
+ * DS, the decimal adjusts, pusha/popa, bound, the 82 alias of group 1, the far
+ * call and jump, les/lds (the VEX prefixes there, and this processor has no
+ * AVX), into, aam/aad and salc. 40..4F are REX prefixes and 63 is movsxd.
+ */
+const LONG_INVALID = new Set([0x06, 0x07, 0x0e, 0x16, 0x17, 0x1e, 0x1f, 0x27, 0x2f, 0x37, 0x3f,
+    0x60, 0x61, 0x62, 0x82, 0x9a, 0xc4, 0xc5, 0xce, 0xd4, 0xd5, 0xd6, 0xea]);
+
+/**
+ * In long mode, the near branches: their operand size is 64 bits whatever
+ * the prefixes say (as Intel's processors decode them), and their offset
+ * stays 8 or 32 bits, sign-extended.
+ */
+const LONG_BRANCHES = new Set(['e8', 'e9', 'eb', 'c2', 'c3', 'e0', 'e1', 'e2', 'e3', 'ff /2',
+    'ff /4', ...Array.from({ length: 16 }, (_, cc)=>(0x70 + cc).toString(16)),
+    ...Array.from({ length: 16 }, (_, cc)=>`0f ${(0x80 + cc).toString(16)}`)]);
+/**
+ * In long mode, the stack operations: 64 bits by default, 16 with the
+ * operand-size prefix, never 32.
+ */
+const LONG_STACK = new Set(['68', '6a', '8f /0', 'ff /6', '9c', '9d', 'c8', 'c9', '0f a0', '0f a1',
+    '0f a8', '0f a9', ...Array.from({ length: 16 }, (_, reg)=>(0x50 + reg).toString(16))]);
+
+/** movsxd, which long mode puts where arpl was. */
+const MOVSXD = I('movsxd', 'Gv,Ed');
+/** 90 with REX.B: xchg r8, rax, no longer a nop. */
+const XCHG_R8 = I('xchg', 'eAX,Zv');
+/** 0F C7 /1 with REX.W: the sixteen-byte compare and exchange. */
+const CMPXCHG16B = I('cmpxchg16b', 'Mdq', 'cmpxchg8b');
 
 /**
  * What a table entry's forms need, worked out once an entry: whether they take
@@ -126,6 +173,8 @@ function planOf(entry){
 }
 
 const MODE_32 = Object.freeze({ bits: /** @type {32 | 64} */ (32) });
+/** Long mode, for a 64-bit program. */
+export const MODE_64 = Object.freeze({ bits: /** @type {32 | 64} */ (64) });
 
 // The instruction being decoded: whose bytes, where it starts, how far it has
 // been read, its modrm byte once fetched (-1 before) and its memory operand
@@ -138,6 +187,9 @@ let cursor = 0;
 let modrmByte = -1;
 /** @type {Operand | null} */
 let rmOperand = null;
+/** Whether the instruction is decoded in long mode, and its REX byte there (0 for none). */
+let long = false;
+let rex = 0;
 
 /** The instruction's next byte. @returns {number} */
 function next(){
@@ -164,10 +216,6 @@ function fetchModrm(){
  * @returns {Instruction | Refusal}
  */
 export function decode(read, eip, mode = MODE_32){
-    if (mode.bits !== 32)
-    {
-        return refusal(eip, '', 'a 64-bit decoder is a later package');
-    }
     // Put back afterwards, so a reader that decodes does not lose its own
     // instruction, and nothing holds on to this one's reader.
     const outerSource = source;
@@ -175,11 +223,15 @@ export function decode(read, eip, mode = MODE_32){
     const outerCursor = cursor;
     const outerModrm = modrmByte;
     const outerRm = rmOperand;
+    const outerLong = long;
+    const outerRex = rex;
     source = read;
     origin = eip;
     cursor = eip;
     modrmByte = -1;
     rmOperand = null;
+    long = mode.bits === 64;
+    rex = 0;
     try
     {
         return decodeAt(eip);
@@ -198,6 +250,8 @@ export function decode(read, eip, mode = MODE_32){
         cursor = outerCursor;
         modrmByte = outerModrm;
         rmOperand = outerRm;
+        long = outerLong;
+        rex = outerRex;
     }
 }
 
@@ -215,7 +269,7 @@ function refusal(eip, opcode, reason){
  * first time; a register form's register, or null where only memory will do.
  *
  * @param {number} size @param {'reg' | 'mm' | 'xmm'} regKind @param {boolean} memoryOnly
- * @param {number} segment @param {16 | 32} addressSize
+ * @param {number} segment @param {16 | 32 | 64} addressSize
  * @returns {Operand | null}
  */
 function resolveRm(size, regKind, memoryOnly, segment, addressSize){
@@ -226,11 +280,13 @@ function resolveRm(size, regKind, memoryOnly, segment, addressSize){
         {
             return null;
         }
-        return register(regKind, m & 7, size);
+        // REX.B reaches the eight further general and xmm registers, never an mm one.
+        return register(regKind, m & 7 | (regKind === 'mm' ? 0 : (rex & 1) << 3), size);
     }
     if (rmOperand === null)
     {
-        rmOperand = addressSize === 32 ? memory32(m, next, segment) : memory16(m, next, segment);
+        rmOperand = long ? memory64(m, next, segment, /** @type {32 | 64} */ (addressSize))
+            : addressSize === 32 ? memory32(m, next, segment) : memory16(m, next, segment);
     }
     return { ...rmOperand, size };
 }
@@ -251,37 +307,55 @@ function decodeAt(eip){
         lock: false, rep: false, repne: false, segment: -1, operand: false, address: false,
     };
     let opcode = next();
+    // In long mode a REX byte counts only right before the opcode: a legacy
+    // prefix after it voids it.
+    let rexByte = 0;
     for (;;)
     {
-        if (opcode === 0x66)
+        if (long && opcode >= 0x40 && opcode <= 0x4f)
+        {
+            rexByte = opcode;
+        }
+        else if (opcode === 0x66)
         {
             prefixes.operand = true;
+            rexByte = 0;
         }
         else if (opcode === 0x67)
         {
             prefixes.address = true;
+            rexByte = 0;
         }
         else if (opcode === 0xf0)
         {
             prefixes.lock = true;
+            rexByte = 0;
         }
         else if (opcode === 0xf2)
         {
             prefixes.repne = true;
             prefixes.rep = false;
+            rexByte = 0;
         }
         else if (opcode === 0xf3)
         {
             prefixes.rep = true;
             prefixes.repne = false;
+            rexByte = 0;
         }
         else if (opcode === 0x26 || opcode === 0x2e || opcode === 0x36 || opcode === 0x3e)
         {
-            prefixes.segment = [0x26, 0x2e, 0x36, 0x3e].indexOf(opcode);
+            // Long mode ignores the ES, CS, SS and DS overrides: every one is flat.
+            if (!long)
+            {
+                prefixes.segment = [0x26, 0x2e, 0x36, 0x3e].indexOf(opcode);
+            }
+            rexByte = 0;
         }
         else if (opcode === 0x64 || opcode === 0x65)
         {
             prefixes.segment = opcode - 0x64 + 4;
+            rexByte = 0;
         }
         else
         {
@@ -290,15 +364,24 @@ function decodeAt(eip){
         opcode = next();
     }
 
-    const operandSize = prefixes.operand ? 2 : 4;
-    const addressSize = prefixes.address ? 16 : 32;
+    rex = rexByte;
+    if (long)
+    {
+        /** @type {any} */ (prefixes).rex = rexByte;
+    }
+    let operandSize = long && (rexByte & 8) !== 0 ? 8 : prefixes.operand ? 2 : 4;
+    const addressSize = long ? (prefixes.address ? 32 : 64) : prefixes.address ? 16 : 32;
+    if (long && LONG_INVALID.has(opcode))
+    {
+        return refusal(eip, hex(opcode), 'not in 64-bit mode');
+    }
 
     /** @type {import('./table.js').Entry | Group | Prefixed | typeof SYS | null} */
     let entry;
     let opcodeText;
     // The register an opcode's low three bits name (`inc eax` is 0x40+0),
     // taken from the last opcode byte -- the second one in the 0F map.
-    let zReg = opcode & 7;
+    let zReg = opcode & 7 | (rexByte & 1) << 3;
     if (opcode >= 0xd8 && opcode <= 0xdf)
     {
         const map = X87[opcode - 0xd8];
@@ -309,7 +392,7 @@ function decodeAt(eip){
     else if (opcode === 0x0f)
     {
         const second = next();
-        zReg = second & 7;
+        zReg = second & 7 | (rexByte & 1) << 3;
         opcodeText = TWO_TEXT[second] ??= `0f ${hex(second)}`;
         entry = TWO_BYTE[second];
         if (entry instanceof Prefixed)
@@ -333,7 +416,9 @@ function decodeAt(eip){
     }
     else
     {
-        entry = ONE_BYTE[opcode];
+        entry = long && opcode === 0x63 ? MOVSXD
+            : long && opcode === 0x90 && (rexByte & 1) !== 0 && !prefixes.rep ? XCHG_R8
+                : ONE_BYTE[opcode];
         opcodeText = hex(opcode);
     }
 
@@ -356,6 +441,21 @@ function decodeAt(eip){
     if (entry === SYS)
     {
         return refusal(eip, opcodeText, 'not user mode');
+    }
+    if (long)
+    {
+        if (LONG_BRANCHES.has(opcodeText))
+        {
+            operandSize = 8;
+        }
+        else if (LONG_STACK.has(opcodeText))
+        {
+            operandSize = prefixes.operand ? 2 : 8;
+        }
+        else if (opcodeText === '0f c7 /1' && (rexByte & 8) !== 0)
+        {
+            entry = CMPXCHG16B;
+        }
     }
 
     // Operands, in the table's order; the modrm and its addressing bytes
@@ -411,7 +511,8 @@ function decodeAt(eip){
                     addressSize);
                 break;
             case 'G':
-                operand = register('reg', fetchModrm() >> 3 & 7, gpSize(sizeLetter, operandSize));
+                operand = register('reg', fetchModrm() >> 3 & 7 | (rexByte & 4) << 1,
+                    gpSize(sizeLetter, operandSize));
                 break;
             case 'S':
                 operand = { kind: 'seg', size: 2, reg: fetchModrm() >> 3 & 7 };
@@ -428,20 +529,28 @@ function decodeAt(eip){
                 break;
             case 'J':
             {
-                const displacement = immediate(sizeLetter === 'b' ? 'bs' : 'zs', operandSize, next);
-                operand = { kind: 'rel', size: 4, target: 0 };
+                const displacement = immediate(sizeLetter === 'b' ? 'bs' : 'zs',
+                    long ? 4 : operandSize, next);
+                operand = { kind: 'rel', size: long ? 8 : 4, target: 0 };
                 // The target is relative to the end of the instruction, which
                 // is known only once every byte is consumed: patched below.
-                relative = /** @type {number} */ (displacement.value);
+                // Signed in long mode, where the target is not taken mod 2^32.
+                relative = long ? /** @type {number} */ (displacement.value) | 0
+                    : /** @type {number} */ (displacement.value);
                 break;
             }
             case 'O':
                 operand = {
                     kind: 'mem', size: gpSize(sizeLetter, operandSize),
                     base: -1, index: -1, scale: 1,
-                    disp: addressSize === 32 ? readU32(next) : readU16(next),
+                    disp: addressSize === 32 || addressSize === 64 ? readU32(next) : readU16(next),
                     segment: prefixes.segment >= 0 ? prefixes.segment : 3, addressSize,
                 };
+                // A 64-bit offset's high half apart (`upper`), as an 8-byte immediate's is.
+                if (addressSize === 64)
+                {
+                    operand.upper = readU32(next);
+                }
                 break;
             case 'X':
                 operand = stringOperand(
@@ -464,7 +573,8 @@ function decodeAt(eip){
                 }
                 break;
             case 'V':
-                operand = register('xmm', fetchModrm() >> 3 & 7, simdSize(sizeLetter));
+                operand = register('xmm', fetchModrm() >> 3 & 7 | (rexByte & 4) << 1,
+                    simdSize(sizeLetter));
                 break;
             case 'W':
                 operand = resolveRm(simdSize(sizeLetter), 'xmm', false, segment, addressSize);
@@ -506,7 +616,12 @@ function decodeAt(eip){
     {
         if (operand.kind === 'rel')
         {
-            operand.target = (eip + length + relative) >>> 0;
+            operand.target = long ? eip + length + relative : (eip + length + relative) >>> 0;
+        }
+        else if (operand.rip)
+        {
+            const target = eip + length + /** @type {number} */ (operand.disp);
+            operand.disp = addressSize === 32 ? target >>> 0 : target;
         }
     }
     if (prefixes.lock && !memory)
@@ -570,7 +685,9 @@ const hex = value=>HEX[value];
 function register(kind, index, size){
     if (kind === 'reg' && size === 1)
     {
-        return { kind, size, reg: index & 3, high: index >= 4 };
+        // With any REX prefix, 4..7 are the low bytes of SP, BP, SI and DI.
+        return rex !== 0 ? { kind, size, reg: index, high: false }
+            : { kind, size, reg: index & 3, high: index >= 4 };
     }
     return { kind, size, reg: index };
 }
@@ -581,7 +698,9 @@ function gpSize(letter, operandSize){
     {
         case 'b': return 1;
         case 'w': return 2;
-        case 'd': case 'y': return 4;
+        case 'd': return 4;
+        // A dword, or a qword with REX.W.
+        case 'y': return operandSize === 8 ? 8 : 4;
         case 'q': return 8;
         case 'dq': return 16;
         case 'v': case 'z': return operandSize;
@@ -640,6 +759,12 @@ function immediate(letter, operandSize, byte){
         case 'bs':
         {
             const value = byte() << 24 >> 24;
+            if (operandSize === 8)
+            {
+                return {
+                    kind: 'imm', size: 8, value: value >>> 0, upper: value < 0 ? 0xffffffff : 0,
+                };
+            }
             return {
                 kind: 'imm', size: operandSize,
                 value: operandSize === 2 ? value & 0xffff : value >>> 0,
@@ -648,6 +773,20 @@ function immediate(letter, operandSize, byte){
         case 'w': return { kind: 'imm', size: 2, value: readU16(byte) };
         case 'z':
         case 'v':
+            if (operandSize === 8)
+            {
+                // `Iv` is the one 8-byte immediate (mov r64, imm64); `Iz`
+                // stays four bytes, sign-extended.
+                if (letter === 'v')
+                {
+                    const low = readU32(byte);
+                    return { kind: 'imm', size: 8, value: low, upper: readU32(byte) };
+                }
+                const value = readU32(byte) | 0;
+                return {
+                    kind: 'imm', size: 8, value: value >>> 0, upper: value < 0 ? 0xffffffff : 0,
+                };
+            }
             return {
                 kind: 'imm', size: operandSize,
                 value: operandSize === 2 ? readU16(byte) : readU32(byte),
@@ -713,6 +852,69 @@ function memory32(modrm, byte, segmentOverride){
 }
 
 /**
+ * Long mode's modrm/SIB forms: REX.B and REX.X reach the further registers,
+ * `mod 00 rm 101` is RIP-relative (its `disp` made absolute once the
+ * instruction's length is known), and a SIB base of 101 under `mod 00` is a
+ * bare disp32 whatever REX.B says, as is an index of 100 no index, whatever
+ * REX.X says not. The address is 64 bits, or 32 with the address-size prefix.
+ *
+ * @param {number} modrm @param {() => number} byte @param {number} segmentOverride
+ * @param {32 | 64} addressSize
+ * @returns {Operand}
+ */
+function memory64(modrm, byte, segmentOverride, addressSize){
+    const mod = modrm >> 6;
+    const rm = modrm & 7;
+    const extendBase = (rex & 1) << 3;
+    let base = -1;
+    let index = -1;
+    let scale = 1;
+    let disp = 0;
+    let rip = false;
+    if (rm === 4)
+    {
+        const sib = byte();
+        scale = 1 << (sib >> 6);
+        index = sib >> 3 & 7 | (rex & 2) << 2;
+        if (index === 4)
+        {
+            index = -1;
+        }
+        base = sib & 7 | extendBase;
+        if ((sib & 7) === 5 && mod === 0)
+        {
+            base = -1;
+            disp = readU32(byte) | 0;
+        }
+    }
+    else if (rm === 5 && mod === 0)
+    {
+        rip = true;
+        disp = readU32(byte) | 0;
+    }
+    else
+    {
+        base = rm | extendBase;
+    }
+    if (mod === 1)
+    {
+        disp = byte() << 24 >> 24;
+    }
+    else if (mod === 2)
+    {
+        disp = readU32(byte) | 0;
+    }
+    const segment = segmentOverride >= 0 ? segmentOverride : (base === 4 || base === 5 ? 2 : 3);
+    /** @type {Operand} */
+    const operand = { kind: 'mem', size: 0, base, index, scale, disp, segment, addressSize };
+    if (rip)
+    {
+        operand.rip = true;
+    }
+    return operand;
+}
+
+/**
  * The 16-bit addressing forms an address-size prefix selects.
  *
  * @param {number} modrm @param {() => number} byte @param {number} segmentOverride
@@ -749,7 +951,7 @@ function memory16(modrm, byte, segmentOverride){
  * destination (always ES, no override).
  *
  * @param {number} reg @param {number} size @param {number} override @param {number} fallback
- * @param {16 | 32} addressSize
+ * @param {16 | 32 | 64} addressSize
  * @returns {Operand}
  */
 function stringOperand(reg, size, override, fallback, addressSize){
@@ -763,7 +965,7 @@ function stringOperand(reg, size, override, fallback, addressSize){
  * The forms that name a fixed register.
  *
  * @param {string} form @param {number} operandSize
- * @param {number} segmentOverride @param {16 | 32} addressSize
+ * @param {number} segmentOverride @param {16 | 32 | 64} addressSize
  * @returns {Operand | null}
  */
 function fixedOperand(form, operandSize, segmentOverride, addressSize){
