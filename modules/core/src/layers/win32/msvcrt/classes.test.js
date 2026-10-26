@@ -209,7 +209,13 @@ test('__unDName undecorates a type into the buffer given, or memory from the all
     assert.equal(memory.text(buffer), 'class', 'cut to the room given');
     const made = await run([0, mangled, 0, 0x1234, 0, 0]);
     assert.equal(memory.text(made), 'class std::bad_alloc');
-    assert.equal(await run([0, memory.put('??0bad_alloc@std@@QAE@ABV01@@Z'), 0, 0x1234, 0, 0]), 0,
-        'a function\'s name is not one it reads');
+    const constructor = await run([0, memory.put('??0bad_alloc@std@@QAE@ABV01@@Z'), 0, 0x1234,
+        0, 0]);
+    assert.equal(memory.text(constructor),
+        'public: __thiscall std::bad_alloc::bad_alloc(class std::bad_alloc const &)');
+    const unread = await run([0, memory.put('?nothing'), 0, 0x1234, 0, 0]);
+    assert.equal(memory.text(unread), '?nothing', 'what cannot be read comes back as it is');
+    const typeOnly = await run([0, memory.put('P8test@@BACXZ'), 0, 0x1234, 0, 0x2800]);
+    assert.equal(memory.text(typeOnly), 'signed char (__cdecl test::*)(void)const ');
     assert.equal(table.__unDName.argBytes, 24);
 });

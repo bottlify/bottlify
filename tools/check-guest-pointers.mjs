@@ -75,7 +75,6 @@ export const KNOWN = new Map([
     ['d3dx9_24.dll!D3DXFresnelTerm', 'guest code: answers on the x87 stack'],
     // Gaps of their libraries' own, outside the host-crash package that
     // made this list.
-    ['msvcrt.dll!__unDName', 'msvcrt: a long name recurses until the host stack is gone'],
     ['ole32.dll!FreePropVariantArray', 'ole32: a count read as a VARIANT recurses for ever'],
     ['OLEAUT32.dll!SafeArrayRedim', 'oleaut32: a SAFEARRAY that is not one read as a record'],
     ['SETUPAPI.dll!SetupCopyOEMInfA', 'setupapi: a path the filesystem refuses (INVALID_PATH)'],
