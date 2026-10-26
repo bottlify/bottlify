@@ -83,6 +83,11 @@ const WM_GETMINMAXINFO = 0x0024;
 const WM_WINDOWPOSCHANGED = 0x0047;
 /** In WM_WINDOWPOSCHANGED's flags: the client area kept its size, its place. */
 const SWP_NOCLIENTSIZE = 0x0800;
+/** WM_PARENTNOTIFY, and the style that keeps a child from sending it. */
+const WM_PARENTNOTIFY = 0x0210;
+const WM_RBUTTONUP = 0x0205;
+const WM_CONTEXTMENU = 0x007b;
+const WS_EX_NOPARENTNOTIFY = 0x00000004;
 const SWP_NOCLIENTMOVE = 0x1000;
 const WM_NCCREATE = 0x0081;
 const WM_CREATE = 0x0001;
@@ -1760,6 +1765,22 @@ export function createWindowFunctions(host){
     /** @param {any} record  Whether it is placed inside another window. */
     const isChild = record=>(record.style & WS_CHILD) !== 0;
 
+    /**
+     * Whether a window is somewhere under another, by parents.
+     *
+     * @param {any} record @param {any} ancestor
+     */
+    const isDescendant = (record, ancestor)=>{
+        for (let at = record; at && isChild(at); at = live(at.parent))
+        {
+            if (at.parent === ancestor.hwnd)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
     /** @param {any} record @returns {any} the top-level window it is inside */
     const topLevelOf = record=>{
         let at = record;
@@ -2535,12 +2556,27 @@ export function createWindowFunctions(host){
         // with it. A run whose foreground and focus went with the window sent
         // the keyboard to nobody -- a game's loader brought a popup forward
         // and destroyed it at once, and no key reached the game after.
-        const handing = record.hwnd === active ? activateOther(record, on) : 0;
-        // EVENT_OBJECT_DESTROY just before WM_DESTROY, for a window that was
-        // ever made to its procedure.
-        const gone = ()=>(told === 'all'
-            ? winEvent(EVENT_OBJECT_DESTROY, record.hwnd, OBJID_WINDOW, on) : 0);
-        return andThen(handing, ()=>andThen(gone(), ()=>andThen(tell(WM_DESTROY), ()=>{
+        // Before it hears WM_DESTROY, as DestroyWindow takes it down
+        // (msg.c WmDestroyChildSeq, WmDestroyOverlappedSeq): a child's
+        // parents are told, a child is told it is hidden, a visible window is
+        // hidden -- which hands the activation on, and a child's focus to its
+        // parent -- and EVENT_OBJECT_DESTROY. A window that was never made to
+        // its procedure is spared all of it.
+        const SWP_HIDING = 0x0080 | 0x0010 | 0x0004 | 0x0002 | 0x0001;
+        const aChild = (record.style & WS_CHILD) !== 0;
+        const hide = ()=>andThen(aChild ? send(record.hwnd, WM_SHOWWINDOW, 0, 0, on) : 0,
+            ()=>((record.style & WS_VISIBLE) !== 0
+                ? placeWindow([record.hwnd, 0, 0, 0, 0, 0, SWP_HIDING], on) : 0));
+        const focus = focusWindow();
+        const holdsFocus = aChild && focus !== 0 && (focus === record.hwnd
+            || isDescendant(live(focus), record));
+        const before = told !== 'all' ? (record.hwnd === active ? activateOther(record, on) : 0)
+            : andThen(aChild ? parentNotify(record, WM_DESTROY, on) : 0, ()=>andThen(hide(),
+                ()=>andThen(record.hwnd === active ? activateOther(record, on) : 0,
+                    ()=>andThen(holdsFocus && live(record.parent)
+                        ? setFocus(record.parent, on) : 0,
+                    ()=>winEvent(EVENT_OBJECT_DESTROY, record.hwnd, OBJID_WINDOW, on)))));
+        return andThen(before, ()=>andThen(tell(WM_DESTROY), ()=>{
             // Its children and the windows it owns go with it.
             const children = [...windows.values()].filter(child=>child !== record
                 && !child.destroyed
@@ -2563,7 +2599,7 @@ export function createWindowFunctions(host){
                     afterChange(watched);
                     return andThen(eraseShown(on), ()=>1);
                 }));
-        })));
+        }));
     };
 
     /**
@@ -2838,6 +2874,37 @@ export function createWindowFunctions(host){
      */
     const winEvent = (event, hwnd, object, thread)=>winEvents.notify(event, hwnd >>> 0, object,
         CHILDID_SELF, thread);
+
+    /**
+     * WM_PARENTNOTIFY up a child's line of parents: each is told, the low
+     * word the event, the high word the id of the window under it and lParam
+     * that window, as long as the window under it is a child without
+     * WS_EX_NOPARENTNOTIFY (msg.c WmCreateChildSeq, WmDestroyChildSeq).
+     *
+     * @param {any} record @param {number} message  WM_CREATE or WM_DESTROY.
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const parentNotify = (record, message, thread)=>{
+        /** @type {[number, number, number][]} */
+        const told = [];
+        for (let below = record; below && (below.style & WS_CHILD) !== 0
+            && (below.exStyle & WS_EX_NOPARENTNOTIFY) === 0;)
+        {
+            const above = live(below.parent);
+            if (!above || above === desktop)
+            {
+                break;
+            }
+            told.push([above.hwnd, ((below.id & 0xffff) << 16 | message) >>> 0, below.hwnd]);
+            below = above;
+        }
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>(at >= told.length ? 0
+            : andThen(send(told[at][0], WM_PARENTNOTIFY, told[at][1], told[at][2], thread),
+                ()=>next(at + 1)));
+        return next(0);
+    };
 
     /**
      * Whether a hook hears what a thread does. A caller the bridge names
@@ -3400,7 +3467,9 @@ export function createWindowFunctions(host){
         };
         // A procedure on this side reads no CREATESTRUCT: what it needs of one
         // is on the record.
-        const onThisSide = ()=>(record.wndProc === 0 ? andThen(made(), activated)
+        /** EVENT_OBJECT_CREATE, then the parents told of the child. */
+        const told = ()=>andThen(made(), ()=>parentNotify(record, WM_CREATE, thread));
+        const onThisSide = ()=>(record.wndProc === 0 ? andThen(told(), activated)
             : andThen(callProcedure(record.wndProc, {
                 hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
             }, thread), created=>{
@@ -3408,7 +3477,7 @@ export function createWindowFunctions(host){
                 {
                     return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
-                return andThen(made(), activated);
+                return andThen(told(), activated);
             }));
         /** Whether the window's procedure is still one this side runs. */
         const systemProcedure = ()=>record.wndProc === 0 || procedures.has(record.wndProc);
@@ -3532,10 +3601,12 @@ export function createWindowFunctions(host){
                             | ((client.right - client.left) & 0xffff)) >>> 0, thread),
                         ()=>andThen(send(record.hwnd, WM_MOVE, 0,
                             (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
-                        ()=>(!visible ? done(record.hwnd)
+                        ()=>andThen(parentNotify(record, WM_CREATE, thread), ()=>(!visible
+                            ? done(record.hwnd)
                             : andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
                                 ()=>andThen(reveal(), ()=>andThen(activateCreated(record, thread),
-                                    ()=>andThen(eraseShown(thread), ()=>done(record.hwnd))))))));
+                                    ()=>andThen(eraseShown(thread),
+                                        ()=>done(record.hwnd)))))))));
                     })))));
         });
     };
@@ -4140,10 +4211,11 @@ export function createWindowFunctions(host){
             }
             if (each === record && how.sized)
             {
-                // Its frame is drawn where its edges now are.
+                // Its frame is drawn where its edges now are, at its next
+                // paint: SetWindowPos sends no WM_NCPAINT for a window it
+                // only resizes (comctl32's updown test, add_updown_with_edit_seq).
                 record.ncDirty = true;
                 host.queue.dirtied?.(creatorOf(record));
-                unerased.add(record);
             }
             exposeIn(each, subtractAreas(sightOf(each), offsetArea(before.sight, dx, dy)));
         }
@@ -5314,6 +5386,20 @@ export function createWindowFunctions(host){
                     answer=>((answer >>> 0) !== 0 ? answer : MA_ACTIVATE));
                 }
                 return MA_ACTIVATE;
+            case WM_RBUTTONUP: {
+                // The right button let go over the client area asks for the
+                // context menu, at the point on the screen.
+                const origin = geometry.clientOrigin(record);
+                const x = ((message.lParam & 0xffff) << 16 >> 16) + origin.x;
+                const y = (message.lParam >> 16) + origin.y;
+                return andThen(send(record.hwnd, WM_CONTEXTMENU, record.hwnd,
+                    ((y & 0xffff) << 16 | x & 0xffff) >>> 0, thread), ()=>0);
+            }
+            case WM_CONTEXTMENU:
+                // A child that has no menu of its own asks its parent.
+                return isChild(record) && live(record.parent)
+                    ? send(record.parent, WM_CONTEXTMENU, message.wParam, message.lParam, thread)
+                    : 0;
             case WM_SETTEXT: {
                 const address = message.lParam >>> 0;
                 record.title = address === 0 ? '' : host.readCString(address, MAX_WINDOW_TEXT);

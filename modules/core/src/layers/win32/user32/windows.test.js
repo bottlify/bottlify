@@ -4108,6 +4108,118 @@ test('the window manager raises its WinEvents among the messages where Windows d
         order.join(' '));
 });
 
+test('a child tells its parents WM_PARENTNOTIFY when it is made and before it is destroyed, '
+    + 'is hidden first, and hands its focus to its parent', ()=>{
+    // msg.c WmCreateChildSeq and WmDestroyChildSeq.
+    const WM_PARENTNOTIFY = 0x0210;
+    const WM_SETFOCUS = 0x0007;
+    const WM_KILLFOCUS = 0x0008;
+    /** @type {[number, number, number, number][]} */
+    const log = [];
+    const context = setup({ heap: true, reply: message=>{
+        log.push([message.hwnd, message.message, message.wParam, message.lParam]);
+        return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+            message.wParam, message.lParam]);
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    log.length = 0;
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent, menu: 7 });
+    const notes = log.filter(([, message])=>message === WM_PARENTNOTIFY);
+    assert.deepEqual(notes, [[parent, WM_PARENTNOTIFY, 7 << 16 | WM_CREATE, child]]);
+    const created = log.findIndex(([, message])=>message === WM_PARENTNOTIFY);
+    assert.ok(created > log.findIndex(([, message])=>message === WM_MOVE), 'after WM_MOVE');
+
+    fns.SetFocus.handler([child]);
+    log.length = 0;
+    fns.DestroyWindow.handler([child]);
+    const order = log.map(([hwnd, message])=>`${hwnd === parent ? 'p' : 'c'}${message}`);
+    const at = (/** @type {string} */ what)=>order.indexOf(what);
+    assert.ok(at(`p${WM_PARENTNOTIFY}`) === 0, order.join(' '));
+    assert.equal(log[0][2], 7 << 16 | WM_DESTROY);
+    assert.ok(at(`c${WM_SHOWWINDOW}`) < at(`c${WM_WINDOWPOSCHANGING}`), order.join(' '));
+    assert.ok(at(`c${WM_WINDOWPOSCHANGED}`) < at(`c${WM_KILLFOCUS}`), order.join(' '));
+    assert.ok(at(`c${WM_KILLFOCUS}`) < at(`p${WM_SETFOCUS}`), order.join(' '));
+    assert.ok(at(`p${WM_SETFOCUS}`) < at(`c${WM_DESTROY}`), order.join(' '));
+    assert.equal(fns.GetFocus.handler(), parent);
+});
+
+test('a child made with WS_EX_NOPARENTNOTIFY tells its parent nothing', ()=>{
+    const WM_PARENTNOTIFY = 0x0210;
+    const WS_EX_NOPARENTNOTIFY = 0x00000004;
+    /** @type {number[]} */
+    const seen = [];
+    const context = setup({ heap: true, reply: message=>{
+        seen.push(message.message);
+        return 0;
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory);
+    memory.putString(TITLE, 'child');
+    const child = fns.CreateWindowExA.handler([WS_EX_NOPARENTNOTIFY, CLASS_NAME, TITLE, WS_CHILD,
+        0, 0, 10, 10, parent, 1, HINSTANCE, 0]);
+    fns.DestroyWindow.handler([child]);
+    assert.equal(seen.includes(WM_PARENTNOTIFY), false);
+});
+
+test('DefWindowProc answers WM_RBUTTONUP with WM_CONTEXTMENU at the point on the screen, and a '
+    + 'child passes WM_CONTEXTMENU to its parent', ()=>{
+    const WM_RBUTTONUP = 0x0205;
+    const WM_CONTEXTMENU = 0x007b;
+    /** @type {[number, number, number, number][]} */
+    const log = [];
+    const context = setup({ heap: true, reply: message=>{
+        log.push([message.hwnd, message.message, message.wParam, message.lParam]);
+        return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+            message.wParam, message.lParam]);
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent, x: 5, y: 6 });
+    fns.ClientToScreen.handler([child, MSG_BUFFER]);
+    const origin = { x: memory.u32(MSG_BUFFER) | 0, y: memory.u32(MSG_BUFFER + 4) | 0 };
+    log.length = 0;
+    fns.SendMessageA.handler([child, WM_RBUTTONUP, 0, 3 << 16 | 2]);
+    const point = ((origin.y + 3) << 16 | (origin.x + 2)) >>> 0;
+    assert.deepEqual(log.filter(([, message])=>message === WM_CONTEXTMENU),
+        [[child, WM_CONTEXTMENU, child, point], [parent, WM_CONTEXTMENU, child, point]]);
+});
+
+test('a window SetWindowPos only resizes hears no WM_NCPAINT before WM_WINDOWPOSCHANGED', ()=>{
+    // comctl32's updown test, add_updown_with_edit_seq: its frame waits for
+    // its next paint.
+    /** What the child heard. @type {number[]} */
+    const seen = [];
+    let child = 0;
+    const context = setup({ heap: true, reply: message=>{
+        if (message.hwnd === child)
+        {
+            seen.push(message.message);
+        }
+        return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+            message.wParam, message.lParam]);
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    // No CS_HREDRAW or CS_VREDRAW, which repaint the whole window as it is sized.
+    memory.putU32s(CLASS_STRUCT, [0]);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE | 0x00800000,
+        parent, width: 80, height: 30 });
+    seen.length = 0;
+    fns.MoveWindow.handler([child, 10, 20, 60, 30, 1]);
+    const changed = seen.indexOf(WM_WINDOWPOSCHANGED);
+    assert.ok(changed > 0);
+    assert.equal(seen.slice(0, changed).includes(WM_NCPAINT), false, seen.join(' '));
+});
+
 test('a keyboard hook is shown every key message taken, and can discard it', ()=>{
     // A game that keeps its key state in a WH_KEYBOARD hook heard no key at
     // all while only CBT hooks were called: Enter on its title did nothing.
