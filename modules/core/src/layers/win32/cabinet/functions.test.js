@@ -80,6 +80,11 @@ function setup(cabinet, onNotify){
                 case ENTRIES.seek:
                 {
                     const [handle, distance, how] = args;
+                    // SetFilePointer on a handle that is no file.
+                    if (handle === 0xffffffff)
+                    {
+                        return 0xffffffff;
+                    }
                     const at = how === 2 ? cabinet.length + (distance | 0)
                         : how === 1 ? (positions.get(handle) ?? 0) + (distance | 0) : distance;
                     positions.set(handle, at);
@@ -220,6 +225,8 @@ test('FDIIsCabinet answers for a cabinet and says what is not one', async()=>{
     const bad = setup(new Uint8Array(100));
     assert.equal(await bad.fns.FDIIsCabinet.handler([bad.ctx, 1, 0x400]), 0);
     assert.equal(bad.view.getUint32(bad.erf + 8, true), 0, 'the ERF is left alone');
+    // Wine's fdi test: a handle of -1, whose seek fails, is no cabinet either.
+    assert.equal(await fns.FDIIsCabinet.handler([ctx, 0xffffffff, 0x400]), 0);
     void erf;
 });
 

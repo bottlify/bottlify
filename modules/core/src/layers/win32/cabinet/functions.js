@@ -118,7 +118,9 @@ export function createCabinetFunctions(host){
         const end = Number(await host.call(context.seek, [file, 0, 2], thread) | 0);
         const buffer = host.allocate(READ_CHUNK);
         return {
-            size: end,
+            // A seek that failed -- a handle that is no file -- leaves
+            // nothing to read, and so no cabinet; the error is the callback's.
+            size: Math.max(end, 0),
             read: async(offset, length)=>{
                 const out = new Uint8Array(length);
                 let done = 0;
