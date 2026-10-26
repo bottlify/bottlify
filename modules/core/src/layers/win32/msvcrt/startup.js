@@ -50,20 +50,33 @@ const EXCEPTION_CONTINUE_SEARCH = 0;
  * @returns {string[]}
  */
 export function splitCommandLine(line){
-    /** @type {string[]} */
+    return splitCommandLineWords(line).map(word=>word.text);
+}
+
+/**
+ * splitCommandLine's words, each with whether a quote was part of it: the
+ * runtime's wildcard expansion leaves a quoted word as it is.
+ *
+ * @param {string} line
+ * @returns {{ text: string, quoted: boolean }[]}
+ */
+export function splitCommandLineWords(line){
+    /** @type {{ text: string, quoted: boolean }[]} */
     const argv = [];
     let current = '';
     let quoted = false;
     let started = false;
+    let hadQuote = false;
     let slashes = 0;
 
     const flush = ()=>{
         if (started)
         {
-            argv.push(current);
+            argv.push({ text: current, quoted: hadQuote });
         }
         current = '';
         started = false;
+        hadQuote = false;
     };
 
     for (const character of line)
@@ -83,6 +96,7 @@ export function splitCommandLine(line){
             else
             {
                 quoted = !quoted;
+                hadQuote = true;
             }
             slashes = 0;
             started = true;
@@ -109,6 +123,9 @@ export function splitCommandLine(line){
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(bytes: number) => number} allocate
  * @property {() => string} commandLine
+ * @property {(pattern: string) => string[] | null} [expand]
+ *           The names in a directory a wildcard pattern matches, null for a
+ *           directory that is not there. Absent, no word is expanded.
  *           What the process was started with, exactly as GetCommandLineA
  *           reports it -- the two must agree, because a program is free to read
  *           either and compare.
@@ -212,12 +229,42 @@ export function createStartupFunctions(host){
      */
     let mainArgs = null;
 
-    const buildMainArgs = ()=>{
-        if (mainArgs)
+    /**
+     * The words of the command line, each wildcard word unquoted made the
+     * names it matches when the program asks for that (`doWildCard`), as
+     * the runtime's own `_setargv` does: a word whose last component has a
+     * `*` or `?` and matches something, the directory it names kept as it
+     * was typed before each name; a word that matches nothing stays.
+     *
+     * @param {boolean} wildcards
+     */
+    const wordsOf = wildcards=>splitCommandLineWords(host.commandLine()).flatMap(word=>{
+        if (!wildcards || word.quoted || !host.expand)
+        {
+            return [word.text];
+        }
+        const cut = Math.max(word.text.lastIndexOf('\\'), word.text.lastIndexOf('/'));
+        if (!/[*?]/.test(word.text.slice(cut + 1)) || /[*?]/.test(word.text.slice(0, cut + 1)))
+        {
+            return [word.text];
+        }
+        const names = host.expand(word.text);
+        return names && names.length > 0
+            ? names.map(name=>`${word.text.slice(0, cut + 1)}${name}`) : [word.text];
+    });
+
+    /**
+     * The argument vector: built once, and again each time a program asks
+     * for the wildcards expanded, which may find what the last one did not.
+     *
+     * @param {boolean} [wildcards]
+     */
+    const buildMainArgs = (wildcards = false)=>{
+        if (mainArgs && !wildcards)
         {
             return mainArgs;
         }
-        const argv = splitCommandLine(host.commandLine());
+        const argv = wordsOf(wildcards);
         const pointers = argv.map(argument=>publish(argument));
         mainArgs = {
             argc: argv.length,
@@ -225,8 +272,10 @@ export function createStartupFunctions(host){
             // An empty environment block, not a null one: a program that walks
             // it expects to reach a terminator, and a null pointer is what it
             // checks for to decide the runtime failed.
-            env: publishVector([]),
+            env: mainArgs?.env ?? publishVector([]),
         };
+        globals.set('argc', mainArgs.argc);
+        globals.set('argv', mainArgs.argv);
         return mainArgs;
     };
 
@@ -253,12 +302,14 @@ export function createStartupFunctions(host){
         return address;
     };
 
-    const buildWideMainArgs = ()=>{
-        if (!wideMainArgs)
+    /** @param {boolean} [wildcards] */
+    const buildWideMainArgs = (wildcards = false)=>{
+        if (!wideMainArgs || wildcards)
         {
-            const words = splitCommandLine(host.commandLine());
+            const words = wordsOf(wildcards);
             wideMainArgs = { argc: words.length,
                 argv: publishVector(words.map(word=>publishWide(word))) };
+            globals.set('wargv', wideMainArgs.argv);
         }
         return wideMainArgs;
     };
@@ -307,17 +358,17 @@ export function createStartupFunctions(host){
          * int __getmainargs(int *argc, char ***argv, char ***env,
          *                   int doWildCard, _startupinfo *startInfo)
          *
-         * Zero for success. The wildcard expansion is deliberately not done:
-         * Windows does not expand wildcards for a program, the runtime does, and
-         * only when the program asked -- a program that did not ask and gets an
-         * expanded vector sees files it never named.
+         * Zero for success. Windows does not expand wildcards for a program,
+         * the runtime does, and only when the program asked -- `doWildCard`
+         * -- since a program that did not ask and gets an expanded vector
+         * sees files it never named.
          */
         __getmainargs: {
             convention: 'cdecl',
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([argc, argv, env])=>{
-                const built = buildMainArgs();
+            handler: ([argc, argv, env, wildcards])=>{
+                const built = buildMainArgs(wildcards !== 0);
                 writeU32(argc, built.argc);
                 writeU32(argv, built.argv);
                 writeU32(env, host.environment?.narrow() ?? built.env);
@@ -336,8 +387,8 @@ export function createStartupFunctions(host){
             convention: 'cdecl',
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([argc, argv, env])=>{
-                const built = buildWideMainArgs();
+            handler: ([argc, argv, env, wildcards])=>{
+                const built = buildWideMainArgs(wildcards !== 0);
                 writeU32(argc, built.argc);
                 writeU32(argv, built.argv);
                 writeU32(env, host.environment?.wide() ?? buildMainArgs().env);
@@ -555,14 +606,16 @@ export function createStartupFunctions(host){
         _adjust_fdiv: { data: ()=>new Uint8Array(4) },
 
         /**
-         * unsigned _osver, _winver, _winmajor, _winminor
+         * unsigned _osver, _winver, _winmajor, _winminor, _osplatform
          *
          * The runtime's copy of the system version, which a start-up and a
          * program's own version check read without calling GetVersion: the
-         * build, major and minor in one word, and each part alone. The same
-         * figures GetVersion answers for the Windows the process is told it
-         * runs on, since a program may compare the two.
+         * build, major and minor in one word, and each part alone, and the
+         * platform GetVersionEx names. The same figures GetVersion answers
+         * for the Windows the process is told it runs on, since a program may
+         * compare the two.
          */
+        _osplatform: { data: ()=>dword(version.platformId) },
         _osver: { data: ()=>dword(version.build) },
         _winver: { data: ()=>dword(version.major << 8 | version.minor) },
         _winmajor: { data: ()=>dword(version.major) },

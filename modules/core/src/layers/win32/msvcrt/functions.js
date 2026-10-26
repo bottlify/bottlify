@@ -26,7 +26,7 @@ import { createConversionFunctions } from './convert.js';
 import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
 import { createTimeFunctions } from './time.js';
-import { createPathFunctions } from './paths.js';
+import { createPathFunctions, splitSearch } from './paths.js';
 import {
     createWideFunctions, createWideClassificationFunctions, createMultiByteFunctions,
 } from './mbstring.js';
@@ -1071,6 +1071,13 @@ export function createMsvcrtFunctions(host){
                 writeMemory: host.writeMemory,
                 allocate: host.allocate,
                 commandLine: host.commandLine,
+                ...host.files ? {
+                    expand: (/** @type {string} */ pattern)=>{
+                        const { directory, pattern: last } = splitSearch(pattern);
+                        return host.files.list(directory, last)
+                            ?.map((/** @type {{ name: string }} */ entry)=>entry.name) ?? null;
+                    },
+                } : {},
                 callGuest: host.callGuest,
                 currentThread: host.currentThread,
                 exitProcess: host.exitProcess,

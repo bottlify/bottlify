@@ -22,9 +22,10 @@ const HEAP_BASE = 0x00500000;
 /** Guest memory as a flat array, plus a bump allocator over the top of it. */
 /**
  * @param {string} [commandLine]
- * @param {{ version?: import('../kernel32/versions.js').WindowsVersion }} [options]
+ * @param {{ version?: import('../kernel32/versions.js').WindowsVersion,
+ *     expand?: (pattern: string) => string[] | null }} [options]
  */
-function fakeMachine(commandLine = '"C:\\App\\Game.exe"', { version } = {}){
+function fakeMachine(commandLine = '"C:\\App\\Game.exe"', { version, expand } = {}){
     const bytes = new Uint8Array(0x600000);
     let next = HEAP_BASE;
     /** @type {number[]} */
@@ -97,6 +98,7 @@ function fakeMachine(commandLine = '"C:\\App\\Game.exe"', { version } = {}){
             exited.push(code);
         },
         version,
+        ...expand ? { expand } : {},
     });
     return { machine, fns };
 }
@@ -184,6 +186,37 @@ test('asking twice gets the same vector, not a second one', ()=>{
     fns.__getmainargs.handler([ARGC, ARGV, ENV, 0, 0]);
 
     assert.equal(machine.u32(ARGV), first);
+});
+
+test('__getmainargs expands an unquoted wildcard word when the program asks, each time', ()=>{
+    // Wine's msvcrt test___getmainargs: "dir/*" is the files in dir, the
+    // directory kept as typed; a word with a wildcard before its last
+    // component, or a quoted one, stays as it is.
+    const listing = ['a', 'test'];
+    /** @type {string[]} */
+    const asked = [];
+    const { machine, fns } = fakeMachine(
+        'test.exe data C:\\TEMP\\*\\* C:\\TEMP\\wine_test/* "C:\\q\\*" none\\*.x',
+        { expand: pattern=>{
+            asked.push(pattern);
+            return pattern.startsWith('C:\\TEMP\\wine_test') ? listing.slice() : [];
+        } });
+    fns.__getmainargs.handler([0x1000, 0x1010, 0x1020, 0, 0]);
+    assert.equal(machine.u32(0x1000), 6, 'no expansion unasked');
+    assert.deepEqual(asked, []);
+    fns.__getmainargs.handler([0x1000, 0x1010, 0x1020, 1, 0]);
+    assert.deepEqual(machine.vector(machine.u32(0x1010)), ['test.exe', 'data',
+        'C:\\TEMP\\*\\*', 'C:\\TEMP\\wine_test/a', 'C:\\TEMP\\wine_test/test', 'C:\\q\\*',
+        'none\\*.x']);
+    assert.equal(machine.u32(0x1000), 7);
+    assert.equal(machine.u32(fns.__p___argc.handler([])), 7);
+    assert.equal(machine.u32(fns.__p___argv.handler([])), machine.u32(0x1010));
+    listing.push('b');
+    fns.__getmainargs.handler([0x1000, 0x1010, 0x1020, 1, 0]);
+    assert.equal(machine.u32(0x1000), 8, 'a file made since is found');
+    assert.equal(machine.u32(fns.__p___argc.handler([])), 8);
+    fns.__wgetmainargs.handler([0x1100, 0x1110, 0x1120, 1, 0]);
+    assert.equal(machine.u32(0x1100), 8);
 });
 
 test('__getmainargs writes nothing through a null pointer', ()=>{
@@ -415,8 +448,8 @@ test('the version variables are the Windows the process is told it runs on', ()=
     const { fns } = fakeMachine('"C:\\App\\Game.exe"', { version: windowsVersion('win7') });
     /** @param {string} name */
     const dword = name=>new DataView(fns[name].data().buffer).getUint32(0, true);
-    assert.deepEqual(['_winmajor', '_winminor', '_winver', '_osver'].map(dword),
-        [6, 1, 0x0601, 7601]);
+    assert.deepEqual(['_winmajor', '_winminor', '_winver', '_osver', '_osplatform'].map(dword),
+        [6, 1, 0x0601, 7601, 2], 'VER_PLATFORM_WIN32_NT');
 });
 
 test('the version variables are GetVersion\'s figures, _HUGE is infinity, _environ a vector', ()=>{

@@ -168,6 +168,29 @@ export function fullPath(path, current){
 }
 
 /**
+ * A search specification as the directory to look in and the pattern its
+ * last component is. A root keeps its separator, so "C:\*.*" looks in
+ * "C:\" and not in wherever "C:" alone would mean.
+ *
+ * @param {string} spec
+ */
+export const splitSearch = spec=>{
+    const cut = Math.max(spec.lastIndexOf('\\'), spec.lastIndexOf('/'));
+    if (cut < 0)
+    {
+        const drive = /^[A-Za-z]:/.test(spec) ? spec.slice(0, 2) : '.';
+        return { directory: drive, pattern: drive === '.' ? spec : spec.slice(2) };
+    }
+    const parent = spec.slice(0, cut);
+    const rooted = parent === '' || parent.endsWith(':');
+    return {
+        directory: rooted ? spec.slice(0, cut + 1) : parent,
+        pattern: spec.slice(cut + 1),
+    };
+};
+
+
+/**
  * @typedef {Object} PathHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -547,28 +570,6 @@ export function createPathFunctions(host){
             return 0;
         },
     });
-
-    /**
-     * A search specification as the directory to look in and the pattern its
-     * last component is. A root keeps its separator, so "C:\*.*" looks in
-     * "C:\" and not in wherever "C:" alone would mean.
-     *
-     * @param {string} spec
-     */
-    const splitSearch = spec=>{
-        const cut = Math.max(spec.lastIndexOf('\\'), spec.lastIndexOf('/'));
-        if (cut < 0)
-        {
-            const drive = /^[A-Za-z]:/.test(spec) ? spec.slice(0, 2) : '.';
-            return { directory: drive, pattern: drive === '.' ? spec : spec.slice(2) };
-        }
-        const parent = spec.slice(0, cut);
-        const rooted = parent === '' || parent.endsWith(':');
-        return {
-            directory: rooted ? spec.slice(0, cut + 1) : parent,
-            pattern: spec.slice(cut + 1),
-        };
-    };
 
     /**
      * Why a removal the volume refused failed: the name is not there, or it
