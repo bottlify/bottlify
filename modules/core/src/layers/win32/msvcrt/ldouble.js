@@ -151,3 +151,68 @@ export function decimalToExtended(text){
     return { bytes: extendedBytes(negative, nearest.exponent, nearest.significand), end,
         status: STRINGTOLD.OK };
 }
+
+/** The most significant digits `$I10_OUTPUT` writes. */
+const MOST_DIGITS = 21;
+
+/**
+ * `$I10_OUTPUT`'s reading of an extended: its decimal digits rounded to
+ * `precision` significant ones -- or with `fixed`, to `precision` after the
+ * point -- as many as 21; the point's place (`pos`, the value 0.digits x
+ * 10^pos), the sign, and the digits written with the trailing zeros dropped
+ * (`len` of them, at least one). The buffer holds the dropped zeros past the
+ * terminator, and after them the first digit past the rounding when there
+ * was room for it. An infinity or a NaN is "1#INF", "1#SNAN" or "1#QNAN" at
+ * pos 1, and the answer 0; a number answers 1.
+ *
+ * @param {Uint8Array} bytes  The ten bytes.
+ * @param {number} precision @param {boolean} fixed
+ * @returns {{ pos: number, negative: boolean, len: number, buffer: string, ok: number }}
+ */
+export function extendedDigits(bytes, precision, fixed){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, LDOUBLE_SIZE);
+    const significand = view.getBigUint64(0, true);
+    const field = view.getUint16(8, true);
+    const negative = (field & 0x8000) !== 0;
+    const exponent = field & 0x7fff;
+    if (exponent === MAX_EXPONENT)
+    {
+        const fraction = significand & (INTEGER_BIT - 1n);
+        const text = (significand & 1n << 62n) !== 0n ? '1#QNAN'
+            : fraction !== 0n ? '1#SNAN' : '1#INF';
+        return { pos: 1, negative, len: text.length, buffer: text, ok: 0 };
+    }
+    const zero = { pos: 0, negative, len: 1, buffer: '0', ok: 1 };
+    if (significand === 0n)
+    {
+        return zero;
+    }
+    // value = significand * 2^power, written exactly as an integer over 10^k.
+    const power = Math.max(exponent, 1) - BIAS - 63;
+    const exact = power >= 0 ? `${significand << BigInt(power)}`
+        : `${significand * 5n ** BigInt(-power)}`;
+    const scale = power >= 0 ? 0 : -power;
+    const digits = exact.replace(/^0+/, '');
+    const pos = digits.length - scale;
+    const wanted = Math.min(fixed ? pos + precision : precision, MOST_DIGITS);
+    if (wanted <= 0)
+    {
+        return zero;
+    }
+    const padded = digits.padEnd(wanted + 1, '0');
+    let kept = BigInt(padded.slice(0, wanted));
+    if (padded[wanted] >= '5')
+    {
+        kept++;
+    }
+    let text = `${kept}`;
+    let place = pos;
+    if (text.length > wanted)
+    {
+        text = text.slice(0, wanted);
+        place++;
+    }
+    const len = Math.max(1, text.replace(/0+$/, '').length);
+    const guard = wanted < MOST_DIGITS ? padded[wanted] : '';
+    return { pos: place, negative, len, buffer: `${text}${guard}`, ok: 1 };
+}

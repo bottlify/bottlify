@@ -26,7 +26,7 @@ import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
 import { cvtDigits } from './format.js';
-import { decimalToExtended } from './ldouble.js';
+import { decimalToExtended, extendedDigits } from './ldouble.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 
@@ -488,6 +488,41 @@ export function createConversionFunctions(host){
 
     const { readMemory, writeMemory } = host;
     const table = {
+        /**
+         * int $I10_OUTPUT(_LDOUBLE value, int precision, int flags, I10_OUTPUT_data *out)
+         *
+         * The digits of an extended (ldouble.js `extendedDigits`), passed by
+         * value in three stack slots, into `{ short pos; char sign; BYTE len;
+         * char str[100]; }`: the sign ' ' or '-', the digits terminated after
+         * `len`. Bit 0 of `flags` counts the precision after the point.
+         */
+        '$I10_OUTPUT': {
+            convention: 'cdecl',
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([low, high, top, precision, flags, out])=>{
+                const value = new Uint8Array(10);
+                const view = new DataView(value.buffer);
+                view.setUint32(0, low >>> 0, true);
+                view.setUint32(4, high >>> 0, true);
+                view.setUint16(8, top & 0xffff, true);
+                const answer = extendedDigits(value, precision | 0, (flags & 1) !== 0);
+                const bytes = new Uint8Array(4 + answer.buffer.length + 1);
+                const record = new DataView(bytes.buffer);
+                record.setInt16(0, answer.pos, true);
+                bytes[2] = answer.negative ? 0x2d : 0x20;
+                bytes[3] = answer.len;
+                for (let at = 0; at < answer.buffer.length; at++)
+                {
+                    bytes[4 + at] = answer.buffer.charCodeAt(at);
+                }
+                bytes[4 + answer.len] = 0;
+                host.writeMemory(out >>> 0, bytes.subarray(0, Math.max(4 + answer.len + 1,
+                    4 + answer.buffer.length)));
+                return answer.ok;
+            },
+        },
+
         /**
          * int __STRINGTOLD(_LDOUBLE *value, char **end, const char *text, int flags)
          *

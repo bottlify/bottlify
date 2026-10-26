@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decimalToExtended, extendedBytes, STRINGTOLD } from './ldouble.js';
+import { decimalToExtended, extendedBytes, extendedDigits, STRINGTOLD } from './ldouble.js';
 import { createConversionFunctions } from './convert.js';
 import { fakeMemory } from './harness.test.js';
 
@@ -89,4 +89,49 @@ test('__STRINGTOLD writes the value and where the reading stopped, and leaves er
     assert.equal(table.__STRINGTOLD.handler([value, 0, memory.put('1e99999'), 0]),
         STRINGTOLD.OVERFLOW, 'no end is asked for');
     assert.equal(errno, 0);
+});
+
+test('$I10_OUTPUT\'s digits: rounded, the point placed, trailing zeros dropped', ()=>{
+    // Wine's msvcrt test_I10_OUTPUT: low and high dwords, the exponent word,
+    // precision, flags; then pos, sign, len and the digits.
+    /** @type {[number, number, number, number, number, number, string, string, number][]} */
+    const cases = [
+        [0, 0, 0, 10, 0, 0, ' ', '0', 1],
+        [0, 0x80000000, 0x3fff, 10, 0, 1, ' ', '1', 1],
+        [0, 0x80000000, 0xbfff, 10, 0, 1, '-', '1', 1],
+        [0x0a3d7000, 0x9d70a3d7, 0x3fff, 10, 0, 1, ' ', '123', 1],
+        [0, 0x9184e72a, 0x402a, 10, 0, 14, ' ', '1', 1],
+        [0x04675000, 0xc9f2c9cd, 0x4062, 30, 0, 31, ' ', '100000000000000001988', 1],
+        [0x4bb41000, 0xe12e1342, 0x3fd3, 10, 0, -12, ' ', '1', 1],
+        [0, 0x80000000, 0x3ffd, 10, 0, 0, ' ', '25', 1],
+        [0xbf94d800, 0x800000d6, 0x3fff, 10, 0, 1, ' ', '10000001', 1],
+        [0, 0x80000000, 0x7fff, 10, 0, 1, ' ', '1#INF', 0],
+        [0, 0x80000000, 0xffff, 10, 0, 1, '-', '1#INF', 0],
+        [1, 0x80000000, 0x7fff, 10, 0, 1, ' ', '1#SNAN', 0],
+        [0, 0xc0000000, 0x7fff, 10, 0, 1, ' ', '1#QNAN', 0],
+        [0, 0x40000000, 0xffff, 10, 0, 1, '-', '1#QNAN', 0],
+        [0x4bb41000, 0xe12e1342, 0x3fd3, 10, 1, 0, ' ', '0', 1],
+        [0xe57a4000, 0xd6bf94d5, 0x3fe7, 10, 1, -6, ' ', '1', 1],
+        [0, 0xf6000000, 0x4005, 2, 0, 3, ' ', '12', 1],
+        [0, 0xf6000000, 0x4005, 0, 0, 0, ' ', '0', 1],
+        [0, 0xf6000000, 0x4005, 2, 1, 3, ' ', '123', 1],
+        [0x0a3d7000, 0xfd70a3d7, 0x3ffe, 1, 0, 1, ' ', '1', 1],
+        [0, 0x9a5db800, 0x4013, 2, 0, 7, ' ', '13', 1],
+        [0, 0x9a5db800, 0x4013, 2, 1, 7, ' ', '1264567', 1],
+        [0, 0x932c05a6, 0x401d, 2, 1, 10, ' ', '1234567891', 1],
+    ];
+    for (const [low, high, top, precision, flags, pos, sign, digits, ok] of cases)
+    {
+        const bytes = new Uint8Array(10);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, low, true);
+        view.setUint32(4, high, true);
+        view.setUint16(8, top, true);
+        const answer = extendedDigits(bytes, precision, flags === 1);
+        const name = `${digits} ${precision} ${flags}`;
+        assert.equal(answer.pos, pos, name);
+        assert.equal(answer.negative ? '-' : ' ', sign, name);
+        assert.equal(answer.buffer.slice(0, answer.len), digits, name);
+        assert.equal(answer.ok, ok, name);
+    }
 });
