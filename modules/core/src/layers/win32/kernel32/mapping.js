@@ -349,6 +349,11 @@ export function createMappingFunctions(host){
             {
                 return fail(ERROR_INVALID_HANDLE);
             }
+            // A directory has no bytes to map.
+            if (opened?.directory)
+            {
+                return fail(ERROR_ACCESS_DENIED);
+            }
             // What a file handle resolves to is the open-file record -- path,
             // position, access -- and the volume's node is a field of it. The
             // mapping keeps the node, because the record's position is the

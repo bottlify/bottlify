@@ -34,10 +34,13 @@ import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
 import { createResourceUpdates } from './resource-update.js';
 import { readToTerminator } from '../common/scan-windows.js';
+import { mountPointsOf, onVolume } from './drives.js';
+import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_FUNCTION = 1;
+const ERROR_MORE_DATA = 234;
 const ERROR_FILE_NOT_FOUND = 2;
 /** What CreateSymbolicLink answers a user who may not make links. */
 const ERROR_PRIVILEGE_NOT_HELD = 1314;
@@ -99,6 +102,8 @@ const GENERIC_READ = 0x80000000;
 
 /** dwFlagsAndAttributes' flag that ends the file with its handle. */
 const FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
+/** What lets CreateFile open a directory, as a handle for its times and its changes. */
+const FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
 const FILE_FLAG_OVERLAPPED = 0x40000000;
 
 /** LockFileEx's flag for an exclusive lock; without it the lock is shared. */
@@ -128,13 +133,33 @@ const STATUS_INVALID_INFO_CLASS = 0xc0000003;
 const STATUS_INVALID_DEVICE_REQUEST = 0xc0000010;
 const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
 /** The FILE_INFORMATION_CLASS values NtQueryInformationFile answers. */
+const FILE_BASIC_INFORMATION = 4;
 const FILE_STANDARD_INFORMATION = 5;
+const FILE_INTERNAL_INFORMATION = 6;
+const FILE_EA_INFORMATION = 7;
+const FILE_ACCESS_INFORMATION = 8;
 const FILE_NAME_INFORMATION = 9;
 const FILE_POSITION_INFORMATION = 14;
+const FILE_MODE_INFORMATION = 16;
+const FILE_ALIGNMENT_INFORMATION = 17;
+const FILE_ALL_INFORMATION = 18;
+const FILE_NETWORK_OPEN_INFORMATION = 34;
+const FILE_ATTRIBUTE_TAG_INFORMATION = 35;
+/** FILE_MODE_INFORMATION's flags, as NtCreateFile's options name them. */
+const FILE_SEQUENTIAL_ONLY = 0x4;
+const FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+/** What CreateFile's flag asks of the cache, kept for FileModeInformation. */
+const FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000;
+/** FILE_ALL_INFORMATION's fixed part, ahead of the name's characters. */
+const ALL_INFORMATION_FIXED = 100;
+/** FILE_GENERIC_READ and FILE_GENERIC_WRITE, what an open for each is granted. */
+const FILE_GENERIC_READ = 0x120089;
+const FILE_GENERIC_WRITE = 0x120116;
 const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_HANDLE = 0xc0000008;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_OBJECT_TYPE_MISMATCH = 0xc0000024;
 const STATUS_ACCESS_DENIED = 0xc0000022;
 const STATUS_OBJECT_NAME_INVALID = 0xc0000033;
 const STATUS_OBJECT_NAME_NOT_FOUND = 0xc0000034;
@@ -337,6 +362,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *     CreateFile or NtCreateFile refused, with the error and what was asked
  * @property {(handle: number, text: string) => void} writeConsole
  *           Where a write to a standard handle goes instead of the filesystem.
+ * @property {() => string[]} [drives]  the drive letters, for the mount manager
+ * @property {(letter: string) => any} [volume]  a drive's volume, its `kind` read
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any,
@@ -589,13 +616,16 @@ export function createFileFunctions(host){
      * dropped -- the filesystem sees one spelling of a directory, and the one
      * caller that cares about the separator (GetFullPathNameA) puts it back.
      *
-     * @param {string} name
+     * @param {string} given
      */
-    function fullPath(name){
-        if (name === '')
+    function fullPath(given){
+        if (given === '')
         {
             return '';
         }
+        // A volume's own name is its drive's root, `\\?\` and all.
+        const volume = onVolume(given);
+        const name = volume ? `${volume.letter}:\\${volume.rest}` : given;
         // The Win32 file namespace turns the parsing off: no slash is a
         // separator and no dot a step. The filesystem reads it so itself.
         if (name.startsWith('\\\\?\\'))
@@ -1518,14 +1548,16 @@ export function createFileFunctions(host){
      * What is wrong with a name a file is opened by, before anything is
      * looked up, or 0. Resolution forgives what the open must not: a wildcard
      * names no one file, and a trailing separator says the name is a
-     * directory -- an existing directory spelled so is not a file to open,
-     * and a new file cannot be made under a name that ends in one.
+     * directory -- an existing directory spelled so is not a file to open
+     * unless it is opened as a directory, and a new file cannot be made
+     * under a name that ends in one.
      *
      * @param {string} raw  What the caller wrote.
      * @param {string} path  The same, resolved.
      * @param {boolean} creating  Whether the disposition may make the file.
+     * @param {number} [flags]  CreateFile's, FILE_FLAG_BACKUP_SEMANTICS read.
      */
-    const nameRefusal = (raw, path, creating)=>{
+    const nameRefusal = (raw, path, creating, flags = 0)=>{
         const last = path.slice(path.lastIndexOf(SEPARATOR) + 1);
         if (/[*?]/.test(last))
         {
@@ -1538,7 +1570,9 @@ export function createFileFunctions(host){
         const entry = files.stat(path);
         if (entry?.exists)
         {
-            return entry.isDirectory ? ERROR_PATH_NOT_FOUND : ERROR_INVALID_NAME;
+            const asDirectory = ((flags >>> 0) & FILE_FLAG_BACKUP_SEMANTICS) !== 0;
+            return !entry.isDirectory ? ERROR_INVALID_NAME
+                : asDirectory ? 0 : ERROR_PATH_NOT_FOUND;
         }
         return creating ? ERROR_INVALID_NAME : missing(path);
     };
@@ -1592,9 +1626,20 @@ export function createFileFunctions(host){
         const exists = Boolean(existing && existing.exists);
         if (exists && existing?.isDirectory)
         {
-            // Opening a directory needs FILE_FLAG_BACKUP_SEMANTICS,
-            // which nothing here honours.
-            return { error: ERROR_ACCESS_DENIED };
+            // A directory opens only with FILE_FLAG_BACKUP_SEMANTICS, and
+            // only as itself: no bytes to read or write, nothing to make.
+            if (((flags >>> 0) & FILE_FLAG_BACKUP_SEMANTICS) === 0
+                || disposition === CREATE_ALWAYS || disposition === TRUNCATE_EXISTING)
+            {
+                return { error: ERROR_ACCESS_DENIED };
+            }
+            if (disposition === CREATE_NEW)
+            {
+                return { error: ERROR_FILE_EXISTS };
+            }
+            const handle = host.handles.open('file',
+                { path, node: null, directory: true, read: false, write: false, position: 0 });
+            return { handle, existed: true };
         }
         if (exists && disposition === CREATE_NEW)
         {
@@ -1634,9 +1679,10 @@ export function createFileFunctions(host){
         // A handle opened for overlapped I/O keeps no file pointer of its
         // own that a read or write moves: each says where in its OVERLAPPED.
         const overlapped = ((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0;
+        const sequential = ((flags >>> 0) & FILE_FLAG_SEQUENTIAL_SCAN) !== 0;
         const handle = host.handles.open('file', {
             path, node, read, write, position: 0, ...deleteOnClose ? { deleteOnClose } : {},
-            ...overlapped ? { overlapped } : {},
+            ...overlapped ? { overlapped } : {}, ...sequential ? { sequential } : {},
         });
         return { handle, existed: exists };
     };
@@ -1650,8 +1696,14 @@ export function createFileFunctions(host){
      * Windows would refuse for want of FILE_SHARE_READ still succeeds here.
      */
     const createFile = bothForms(28, ([name, access, share, , disposition, flags], text)=>{
+        // The one device opened by name: the mount manager, whatever was asked of it.
+        if (name !== 0 && text.raw(name).toLowerCase() === MOUNT_MANAGER.toLowerCase())
+        {
+            host.setLastError(ERROR_SUCCESS);
+            return host.handles.open('device', { device: 'mountmgr' });
+        }
         const refusal = nameRefusal(text.raw(name), text.path(name),
-            disposition !== OPEN_EXISTING && disposition !== TRUNCATE_EXISTING);
+            disposition !== OPEN_EXISTING && disposition !== TRUNCATE_EXISTING, flags);
         if (refusal !== 0)
         {
             return fail(refusal, INVALID_HANDLE_VALUE);
@@ -2012,6 +2064,144 @@ export function createFileFunctions(host){
     };
 
     /**
+     * One FILE_INFORMATION_CLASS record of an open file, as NtQueryInformationFile
+     * lays it out; null for a class this keeps nothing for. The volume keeps
+     * one time per file, the last write, and every time answers with it, as
+     * GetFileTime's do.
+     *
+     * @param {any} file @param {number} kind
+     * @returns {Uint8Array | null}
+     */
+    const informationOf = (file, kind)=>{
+        const entry = files.stat(file.path);
+        const size = file.directory ? 0n : BigInt(entry?.size ?? 0);
+        const attributes = fileAttributes(entry ?? { isDirectory: file.directory === true });
+        const time = msToFileTime(entry?.modified ?? 0);
+        /** @param {number} length @param {(view: DataView) => void} fill */
+        const record = (length, fill)=>{
+            const bytes = new Uint8Array(length);
+            fill(new DataView(bytes.buffer));
+            return bytes;
+        };
+        /** @param {DataView} view @param {number} at */
+        const times = (view, at)=>{
+            for (let field = 0; field < 4; field++)
+            {
+                view.setBigUint64(at + field * 8, time, true);
+            }
+        };
+        const name = String(file.path).replace(/^[A-Za-z]:/, '');
+        const mode = (file.overlapped ? 0 : FILE_SYNCHRONOUS_IO_NONALERT)
+            | (file.sequential ? FILE_SEQUENTIAL_ONLY : 0)
+            | (file.deleteOnClose ? FILE_DELETE_ON_CLOSE : 0);
+        const access = (file.read ? FILE_GENERIC_READ : 0) | (file.write ? FILE_GENERIC_WRITE : 0);
+        // A file's number on its volume: the same for the same path, which
+        // is what a program comparing two handles asks of it.
+        let index = 0x811c9dc5;
+        for (const unit of name.toLowerCase())
+        {
+            index = Math.imul(index ^ unit.charCodeAt(0), 0x01000193) >>> 0;
+        }
+        switch (kind)
+        {
+            case FILE_BASIC_INFORMATION:
+                // Four times, the attributes, and the padding to eight.
+                return record(40, view=>{
+                    times(view, 0);
+                    view.setUint32(32, attributes, true);
+                });
+            case FILE_STANDARD_INFORMATION:
+                // AllocationSize, EndOfFile, NumberOfLinks, DeletePending, Directory.
+                return record(24, view=>{
+                    view.setBigUint64(0, size, true);
+                    view.setBigUint64(8, size, true);
+                    view.setUint32(16, 1, true);
+                    view.setUint8(20, file.deleteOnClose ? 1 : 0);
+                    view.setUint8(21, file.directory ? 1 : 0);
+                });
+            case FILE_INTERNAL_INFORMATION:
+                return record(8, view=>view.setBigUint64(0, BigInt(index), true));
+            case FILE_EA_INFORMATION:
+                return new Uint8Array(4);
+            case FILE_ACCESS_INFORMATION:
+                return record(4, view=>view.setUint32(0, access, true));
+            case FILE_NAME_INFORMATION:
+                // The path from the volume's root, without its drive.
+                return record(4 + name.length * 2, view=>{
+                    view.setUint32(0, name.length * 2, true);
+                    [...name].forEach((unit, at)=>view.setUint16(4 + at * 2,
+                        unit.charCodeAt(0), true));
+                });
+            case FILE_POSITION_INFORMATION:
+                return record(8, view=>view.setBigUint64(0, BigInt(file.position), true));
+            case FILE_MODE_INFORMATION:
+                return record(4, view=>view.setUint32(0, mode, true));
+            case FILE_ALIGNMENT_INFORMATION:
+                return new Uint8Array(4);
+            case FILE_ALL_INFORMATION: {
+                // Basic, Standard, Internal, Ea, Access, Position, Mode,
+                // Alignment, then the name.
+                const parts = [FILE_BASIC_INFORMATION, FILE_STANDARD_INFORMATION,
+                    FILE_INTERNAL_INFORMATION, FILE_EA_INFORMATION, FILE_ACCESS_INFORMATION,
+                    FILE_POSITION_INFORMATION, FILE_MODE_INFORMATION, FILE_ALIGNMENT_INFORMATION,
+                    FILE_NAME_INFORMATION].map(part=>/** @type {Uint8Array} */ (
+                    informationOf(file, part)));
+                const all = new Uint8Array(parts.reduce((sum, part)=>sum + part.length, 0));
+                parts.reduce((at, part)=>{
+                    all.set(part, at);
+                    return at + part.length;
+                }, 0);
+                return all;
+            }
+            case FILE_NETWORK_OPEN_INFORMATION:
+                // Four times, AllocationSize, EndOfFile, the attributes, padding.
+                return record(56, view=>{
+                    times(view, 0);
+                    view.setBigUint64(32, size, true);
+                    view.setBigUint64(40, size, true);
+                    view.setUint32(48, attributes, true);
+                });
+            case FILE_ATTRIBUTE_TAG_INFORMATION:
+                // The attributes, and no reparse tag: there are no reparse points.
+                return record(8, view=>view.setUint32(0, attributes, true));
+            default:
+                return null;
+        }
+    };
+
+    /**
+     * A control code sent to an open handle: the mount manager answers its
+     * own; a file or directory on the volume is no driver's, and answers
+     * none; anything else is no file object.
+     *
+     * @param {number} handle @param {number} code
+     * @param {number} input @param {number} inLength @param {number} output
+     * @param {number} outLength
+     * @returns {{ status: number, information: number }}
+     */
+    const deviceControl = (handle, code, input, inLength, output, outLength)=>{
+        if (object(handle, 'device')?.device === 'mountmgr')
+        {
+            const answer = mountManagerControl(mountPointsOf(host), code,
+                input >>> 0 === 0 ? null : host.readMemory(input >>> 0, inLength >>> 0),
+                output >>> 0 === 0 ? 0 : outLength >>> 0);
+            if (answer.output)
+            {
+                host.writeMemory(output >>> 0, answer.output);
+            }
+            return answer;
+        }
+        if (object(handle, 'file') || object(handle, 'directory'))
+        {
+            host.divergence?.('NtDeviceIoControlFile',
+                `control code 0x${(code >>> 0).toString(16)} sent to a file`);
+            return { status: STATUS_INVALID_DEVICE_REQUEST, information: 0 };
+        }
+        return { status: host.handles.typeOf?.(handle >>> 0) === undefined
+            ? STATUS_INVALID_HANDLE : STATUS_OBJECT_TYPE_MISMATCH, information: 0 };
+    };
+
+    /**
      * The native calls over this table's opens, which ntdll publishes.
      */
     const natives = {
@@ -2089,6 +2279,26 @@ export function createFileFunctions(host){
         },
 
         /**
+         * NTSTATUS NtDeviceIoControlFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE,
+         *   PVOID, PIO_STATUS_BLOCK, ULONG IoControlCode, PVOID InputBuffer,
+         *   ULONG InputBufferLength, PVOID OutputBuffer, ULONG OutputBufferLength)
+         *
+         * Every request finishes before the call answers. The block is
+         * written for an answer the device gave, success or a warning, and
+         * left alone for a request refused before it reached one.
+         */
+        NtDeviceIoControlFile: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: ([handle, , , , block, code, input, inLength, output, outLength])=>{
+                const { status, information } = deviceControl(handle, code, input, inLength,
+                    output, outLength);
+                return (status >>> 0) < 0xc0000000 ? report(block >>> 0, status, information)
+                    : status;
+            },
+        },
+
+        /**
          * NTSTATUS NtQueryInformationFile(HANDLE, PIO_STATUS_BLOCK, PVOID,
          *                                 ULONG Length, FILE_INFORMATION_CLASS)
          *
@@ -2104,45 +2314,20 @@ export function createFileFunctions(host){
                 {
                     return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
                 }
-                /** @type {Uint8Array} */
-                let data;
-                switch (kind >>> 0)
+                const data = informationOf(file, kind >>> 0);
+                if (data === null)
                 {
-                    case FILE_STANDARD_INFORMATION: {
-                        const size = BigInt(files.stat(file.path)?.size ?? 0);
-                        data = new Uint8Array(24);
-                        const view = new DataView(data.buffer);
-                        // AllocationSize, EndOfFile, NumberOfLinks, DeletePending, Directory.
-                        view.setBigUint64(0, size, true);
-                        view.setBigUint64(8, size, true);
-                        view.setUint32(16, 1, true);
-                        data[20] = file.deleteOnClose ? 1 : 0;
-                        break;
-                    }
-                    case FILE_NAME_INFORMATION: {
-                        // The path from the volume's root, without its drive.
-                        const name = String(file.path).replace(/^[A-Za-z]:/, '');
-                        data = new Uint8Array(4 + name.length * 2);
-                        new DataView(data.buffer).setUint32(0, name.length * 2, true);
-                        for (let at = 0; at < name.length; at++)
-                        {
-                            data[4 + at * 2] = name.charCodeAt(at) & 0xff;
-                            data[5 + at * 2] = name.charCodeAt(at) >>> 8;
-                        }
-                        break;
-                    }
-                    case FILE_POSITION_INFORMATION:
-                        data = new Uint8Array(8);
-                        new DataView(data.buffer).setBigUint64(0, BigInt(file.position), true);
-                        break;
-                    default:
-                        host.divergence?.('NtQueryInformationFile',
-                            `information class ${kind >>> 0} is not kept`);
-                        return report(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
+                    host.divergence?.('NtQueryInformationFile',
+                        `information class ${kind >>> 0} is not kept`);
+                    return report(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
                 }
                 if ((length >>> 0) < data.length)
                 {
-                    const fits = kind >>> 0 === FILE_NAME_INFORMATION && (length >>> 0) >= 4;
+                    // A name, alone or at the end of the whole record, is
+                    // cut to the room with its length saying all of it.
+                    const fixed = kind >>> 0 === FILE_NAME_INFORMATION ? 4
+                        : kind >>> 0 === FILE_ALL_INFORMATION ? ALL_INFORMATION_FIXED : -1;
+                    const fits = fixed >= 0 && (length >>> 0) >= fixed;
                     if (fits)
                     {
                         host.writeMemory(out >>> 0, data.subarray(0, length >>> 0));
@@ -3256,14 +3441,34 @@ export function createFileFunctions(host){
          *     DWORD nInBufferSize, LPVOID lpOutBuffer, DWORD nOutBufferSize,
          *     LPDWORD lpBytesReturned, LPOVERLAPPED lpOverlapped)
          *
-         * No device here answers a control code: the volume is a file store,
-         * not a driver. ERROR_INVALID_FUNCTION is what a driver says of a code
-         * it does not handle, and a program asking a disk or a VxD for
-         * something takes the documented no.
+         * The mount manager answers its own codes, as NtDeviceIoControlFile
+         * does. Nothing else here is a driver: the volume is a file store,
+         * and ERROR_INVALID_FUNCTION is what a driver says of a code it does
+         * not handle, so a program asking a disk or a VxD for something
+         * takes the documented no.
          */
         DeviceIoControl: {
             argBytes: 32,
-            handler: ()=>fail(ERROR_INVALID_FUNCTION),
+            /** @param {number[]} args */
+            handler: ([handle, code, input, inLength, output, outLength, returned])=>{
+                if (object(handle, 'device') === null)
+                {
+                    return fail(ERROR_INVALID_FUNCTION);
+                }
+                const { status, information } = deviceControl(handle, code, input, inLength,
+                    output, outLength);
+                if (returned >>> 0 !== 0 && (status >>> 0) < 0xc0000000)
+                {
+                    writeDword(returned >>> 0, information);
+                }
+                const error = {
+                    [STATUS_SUCCESS]: ERROR_SUCCESS,
+                    [STATUS_BUFFER_OVERFLOW]: ERROR_MORE_DATA,
+                    [STATUS_INVALID_PARAMETER]: ERROR_INVALID_PARAMETER,
+                    [STATUS_OBJECT_NAME_NOT_FOUND]: ERROR_FILE_NOT_FOUND,
+                }[status >>> 0] ?? ERROR_INVALID_FUNCTION;
+                return error === ERROR_SUCCESS ? 1 : fail(error);
+            },
         },
 
         /**

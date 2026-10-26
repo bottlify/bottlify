@@ -1868,6 +1868,10 @@ export function createWin32Module(){
                         setLastError: setError,
                         drives: ()=>filesystem.drives(),
                         volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
+                        currentDirectory: ()=>filesystem.currentDirectory(),
+                        stat: (/** @type {string} */ path)=>volume.stat(path),
+                        handles,
+                        divergence: config?.divergence,
                     }),
                     ...createMappingFunctions({
                         readMemory,
@@ -2043,6 +2047,8 @@ export function createWin32Module(){
                         readCString,
                         readWideString,
                         files: volume,
+                        drives: ()=>filesystem.drives(),
+                        volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
                         // The libraries this build implements, standing in the
                         // system folder for a setup that looks before it loads.
                         // Every layer's, not only this one's: DDRAW.dll stands

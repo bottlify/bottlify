@@ -116,7 +116,7 @@ function setup(names = {}){
     // Shaped as kernel32 keeps an open file: the volume's node is a field of
     // the record a handle resolves to, not the record itself.
     table.set(fileHandle, { type: 'file', object: { node: file, position: 0 } });
-    return { fns, bytes, errors, errorsFor, file, fileHandle, said };
+    return { fns, bytes, errors, errorsFor, file, fileHandle, said, table };
 }
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -135,6 +135,14 @@ test('a view starts on an allocation granule, as every view on Windows does', ()
     assert.deepEqual([first % 0x10000, second % 0x10000], [0, 0]);
     assert.notEqual(first, second);
     assert.equal(fns.UnmapViewOfFile.handler([second]), 1);
+});
+
+test('a directory opened for its handle has no bytes to map', ()=>{
+    const { fns, errors, table } = setup();
+    table.set(0x7000, { type: 'file',
+        object: { path: 'C:\\GAME', node: null, directory: true, position: 0 } });
+    assert.equal(fns.CreateFileMappingA.handler([0x7000, 0, PAGE_READWRITE, 0, 0x100, 0]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
 });
 
 test('a view of a file starts as that file, and is written back when unmapped', ()=>{
