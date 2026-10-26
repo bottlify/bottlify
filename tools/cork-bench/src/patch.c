@@ -5,6 +5,22 @@
  * crossing's own cost, where every other workload runs within one tier. */
 typedef unsigned int u32;
 u32 scale(u32 value, u32 factor);
+#ifdef __x86_64__
+/* The same routine at 64 bits: its arguments in edi and esi, its immediate reached RIP-relative. */
+__asm__(
+    ".section .text.patched, \"ax\", @progbits\n"
+    ".balign 4096\n"
+    "scale:\n"
+    "    cmpl %esi, scale_step - 4(%rip)\n"
+    "    je 1f\n"
+    "    movl %esi, scale_step - 4(%rip)\n"
+    "1:  imull $0x12345678, %edi, %eax\n"
+    "scale_step:\n"
+    "    addl $7, %eax\n"
+    "    ret\n"
+    ".balign 4096\n"
+    ".text\n");
+#else
 __asm__(
     ".section .text.patched, \"ax\", @progbits\n"
     ".balign 4096\n"
@@ -20,6 +36,7 @@ __asm__(
     "    ret\n"
     ".balign 4096\n"
     ".text\n");
+#endif
 int main(void){
     u32 sum = 0;
     for (u32 i = 0; i < 10000; i++)

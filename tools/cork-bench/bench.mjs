@@ -20,7 +20,7 @@
  * launch runs a program.
  *
  *   node tools/cork-bench/bench.mjs [name...] [--warm N] [--iters N] [--reps N]
- *       [--cork JSON] [--cores N] [--root DIR] [--json]
+ *       [--cork JSON] [--cores N] [--root DIR] [--json] [--bits 64]
  *       [--store fresh | --seed DIR | --capture DIR]
  *
  * Each rep makes a fresh host, times its first iteration (`coldMs`: the
@@ -38,7 +38,9 @@
  * lays the memory out for that many executors and runs the program on the
  * first, as a process of one thread on a machine of several runs, `--root`
  * a checkout whose engine to run, so one tree compares against another
- * (`compare.mjs`). A steady-state figure moves by five to ten per cent between
+ * (`compare.mjs`). `--bits 64` runs the x86-64 twins of the workloads (`build64.sh`,
+ * `images64/`) on the long-mode translator, for the 32-bit and the 64-bit translators on the
+ * same programs. A steady-state figure moves by five to ten per cent between
  * processes; `node --no-liftoff` takes the baseline tier out of it.
  *
  * With a translation store every rep's host gets a fresh one in memory, open
@@ -64,6 +66,7 @@ const iters = Number(flag('--iters', '40'));
 const reps = Number(flag('--reps', '5'));
 const cork = JSON.parse(flag('--cork', '{}'));
 const cores = Number(flag('--cores', '1'));
+const bits = Number(flag('--bits', '32'));
 const root = pathToFileURL(resolve(flag('--root', new URL('../..', import.meta.url).pathname)) + '/');
 const only = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.startsWith('--'));
 
@@ -80,7 +83,7 @@ const { seedRecords } = await import(new URL('modules/cork/src/runtime/cache.js'
 
 const IMAGE_BASE = 0x401000;
 const ENTRY_VECTOR = 0x7000;
-const images = new URL('images/', import.meta.url);
+const images = new URL(bits === 64 ? 'images64/' : 'images/', import.meta.url);
 const names = readdirSync(images).filter(file=>file.endsWith('.bin'))
     .map(file=>file.slice(0, -4)).filter(name=>only.length === 0
         || only.some(prefix=>name.startsWith(prefix))).sort();
@@ -90,7 +93,7 @@ function makeHost(image, store){
     const host = createCorkHost({
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, cork: store === null ? cork : { ...cork, store },
-        ...(cores > 1 ? { executors: cores } : {}),
+        ...(cores > 1 ? { executors: cores } : {}), ...(bits === 64 ? { bits } : {}),
     });
     host.writePhysical(IMAGE_BASE, image);
     const vector = new Uint8Array(4);
@@ -175,6 +178,7 @@ for (const name of names)
         {
             await run(host);
         }
+        const longBefore = bits === 64 ? host.corkDiagnostics().long : null;
         const before = host.cork().counters();
         const exits = /** @type {Record<string, number>} */ ({ ...before.exits });
         const startedAt = performance.now();
@@ -192,10 +196,13 @@ for (const name of names)
                 { select: (/** @type {any} */ records)=>seedRecords(records, stores.fileNameOf) }));
         }
         const after = host.cork().counters();
+        // A long-mode run's regions and translated instructions are the long runner's.
+        const long = bits === 64 ? host.corkDiagnostics().long : null;
         summary = {
             instructions: retired / iters,
-            share: (after.retired - before.retired) / retired,
-            regions: after.regions,
+            share: long === null ? (after.retired - before.retired) / retired
+                : (long.translated - longBefore.translated) / retired,
+            regions: long === null ? after.regions : long.regions,
             exits: Object.fromEntries(Object.entries(after.exits)
                 .map(([kind, count])=>[kind, (count - exits[kind]) / iters])
                 .filter(([, count])=>count > 0)),

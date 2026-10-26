@@ -242,10 +242,31 @@ static double round_with(double x, int mode){
     __asm__ volatile("fldcw %1\n\tfrndint\n\tfldcw %2" : "=t"(r) : "m"(nw), "m"(cw), "0"(x));
     return r;
 }
+#ifdef __x86_64__
+/* At 64 bits the runtime's rounding and roots are SSE2, as an x64 compiler's are; the rarer
+ * functions below stay x87. */
+double floor(double x){
+    if (!(fabs(x) < 4503599627370496.0)) return x;
+    double t = (double)(long long)x;
+    return t > x ? t - 1 : t;
+}
+double ceil(double x){
+    if (!(fabs(x) < 4503599627370496.0)) return x;
+    double t = (double)(long long)x;
+    return t < x ? t + 1 : t;
+}
+double fabs(double x){
+    union { double d; unsigned long long u; } v = { x };
+    v.u &= ~(1ULL << 63);
+    return v.d;
+}
+double sqrt(double x){ double r; __asm__("sqrtsd %1, %0" : "=x"(r) : "x"(x)); return r; }
+#else
 double floor(double x){ return round_with(x, 0x0400); }
 double ceil(double x){ return round_with(x, 0x0800); }
 double fabs(double x){ double r; __asm__("fabs" : "=t"(r) : "0"(x)); return r; }
 double sqrt(double x){ double r; __asm__("fsqrt" : "=t"(r) : "0"(x)); return r; }
+#endif
 double fmod(double x, double y){ double r; __asm__("1: fprem\n\tfnstsw %%ax\n\tsahf\n\tjp 1b" : "=t"(r) : "0"(x), "u"(y) : "ax", "cc"); return r; }
 double sin(double x){ double r; __asm__("fsin" : "=t"(r) : "0"(x)); return r; }
 double cos(double x){ double r; __asm__("fcos" : "=t"(r) : "0"(x)); return r; }
