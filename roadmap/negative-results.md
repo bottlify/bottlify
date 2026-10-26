@@ -1714,3 +1714,19 @@ None yet.
   about what the branches they replace did.
 - **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
 - **Decision.** Not kept; the new gate case is.
+
+### 2026-10-26: no flag record for a long-mode write whose flags no one reads
+
+- **Idea.** As the 32-bit translator's `deadFlagPass` finds, a flag-writing instruction whose
+  flags are all written again before any read needs no record: the long-mode emitter's
+  `record()` returning at once when nothing it writes is live.
+- **Workload.** 7-Zip 23.01 x64 compressing the same 8.4 MB file (`a -mx5 -md18 -mmt1`) under the
+  engine in node, wall time of the whole job; callgrind on the same job over 1 MB. Both arms
+  snapshots of the tree at 3aa6df06, one with the change. The long gate passed with it and its
+  mutations were caught.
+- **Values.** Wall time, before 10753, 8718, 9495 ms; after 9269, 9224, 9027 ms (alternated).
+  Host instructions (callgrind), before 24.32 G, after 24.36 G.
+- **Why.** V8 already drops a local written and never read: the record the change leaves out
+  was not in the machine code.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
+- **Decision.** Not kept.

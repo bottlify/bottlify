@@ -35,12 +35,14 @@ import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, translate
 /** Instructions a block holds at most. */
 const BLOCK_LIMIT = 64;
 /**
- * Blocks and bytes of code a region holds at most: the 32-bit translator's
- * own (`formRegion`'s `maxBlocks` and `maxBytes`), so that a loop of many
- * blocks is one region rather than several going round through the transfer.
+ * Blocks and bytes of code a region holds at most: what the 32-bit translator
+ * lets the entry's own function take (`formRegion`'s caps, 128 blocks and
+ * 8 KiB, and its `ownRoom` past them, the caps again), so that a loop of many
+ * blocks is one region rather than several going round through the transfer,
+ * each with a copy of the blocks the others hold.
  */
-const REGION_LIMIT = 128;
-const REGION_BYTES = 8192;
+const REGION_LIMIT = 256;
+const REGION_BYTES = 16384;
 
 /**
  * A start: the region translated from it, or none (`run` null) where its
@@ -156,11 +158,13 @@ export function createLongRunner(settings){
 
     /**
      * The instructions of the block at `entry`: up to a branch, an instruction
-     * the emitter has no case for, or the limit.
+     * the emitter has no case for, the limit, or an address `decoded` says
+     * a block of the region already holds, which this one falls through to.
      *
      * @param {number} entry
+     * @param {(at: number) => boolean} [decoded]
      */
-    const blockAt = entry=>{
+    const blockAt = (entry, decoded = ()=>false)=>{
         /** @type {import('../decode/decoder.js').Instruction[]} */
         const instructions = [];
         let at = entry;
@@ -168,7 +172,7 @@ export function createLongRunner(settings){
         {
             return instructions;
         }
-        while (instructions.length < BLOCK_LIMIT)
+        while (instructions.length < BLOCK_LIMIT && (at === entry || !decoded(at)))
         {
             let instruction;
             try
@@ -190,6 +194,12 @@ export function createLongRunner(settings){
             }
         }
         return instructions;
+    };
+
+    /** The address past a block's last instruction. @param {import('./emit.js').LongBlock} block */
+    const endOf = block=>{
+        const last = block.instructions[block.instructions.length - 1];
+        return last.eip + last.length;
     };
 
     /**
@@ -229,32 +239,88 @@ export function createLongRunner(settings){
     const form = entry=>{
         /** @type {import('./emit.js').LongBlock[]} */
         const blocks = [];
-        const first = blockAt(entry);
-        if (first.length > 0)
-        {
-            /** @type {Set<number>} */
-            const seen = new Set([entry]);
-            const queue = [{ entry, instructions: first }];
-            let size = 0;
-            while (queue.length > 0 && blocks.length < REGION_LIMIT && size < REGION_BYTES)
+        /** By start. @type {Map<number, import('./emit.js').LongBlock>} */
+        const byStart = new Map();
+        /** The starts in address order. @type {number[]} */
+        const ordered = [];
+        /** The first start not below `at`. @param {number} at */
+        const place = at=>{
+            let lo = 0;
+            let hi = ordered.length;
+            while (lo < hi)
             {
-                const block = /** @type {import('./emit.js').LongBlock} */ (queue.shift());
-                blocks.push(block);
-                const last = block.instructions[block.instructions.length - 1];
-                size += last.eip + last.length - block.entry;
-                for (const to of successors(block.instructions))
+                const mid = (lo + hi) >> 1;
+                if (ordered[mid] < at)
                 {
-                    if (!seen.has(to))
-                    {
-                        seen.add(to);
-                        const instructions = blockAt(to);
-                        if (instructions.length > 0)
-                        {
-                            queue.push({ entry: to, instructions });
-                        }
-                    }
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid;
                 }
             }
+            return lo;
+        };
+        // As the 32-bit translator's `formRegion`: until two blocks share a
+        // byte (code decoded at two offsets), the block holding an address is
+        // the last to start at or below it; after, the first made that does.
+        let overlapping = false;
+        /** @param {number} at */
+        const containing = at=>{
+            if (overlapping)
+            {
+                return blocks.find(block=>at >= block.entry && at < endOf(block)) ?? null;
+            }
+            const block = byStart.get(ordered[place(at + 1) - 1]);
+            return block !== undefined && at < endOf(block) ? block : null;
+        };
+        /** @param {number} at */
+        const decoded = at=>byStart.has(at) || containing(at) !== null;
+        let size = 0;
+        /** @type {Set<number>} */
+        const seen = new Set();
+        const queue = [entry];
+        while (queue.length > 0)
+        {
+            const at = /** @type {number} */ (queue.shift());
+            if (seen.has(at))
+            {
+                continue;
+            }
+            seen.add(at);
+            const inside = containing(at);
+            if (inside !== null)
+            {
+                const index = inside.instructions.findIndex(instruction=>instruction.eip === at);
+                if (index > 0)
+                {
+                    // A jump into a block made already: it is split there, both
+                    // halves the region's, rather than its tail translated twice.
+                    const tail = { entry: at, instructions: inside.instructions.slice(index) };
+                    inside.instructions = inside.instructions.slice(0, index);
+                    blocks.push(tail);
+                    byStart.set(at, tail);
+                    ordered.splice(place(at), 0, at);
+                    continue;
+                }
+                overlapping = true;
+            }
+            if (blocks.length >= REGION_LIMIT || size >= REGION_BYTES)
+            {
+                // Not followed: whoever jumps here leaves the region.
+                continue;
+            }
+            const instructions = blockAt(at, decoded);
+            if (instructions.length === 0)
+            {
+                continue;
+            }
+            const block = { entry: at, instructions };
+            blocks.push(block);
+            byStart.set(at, block);
+            ordered.splice(place(at), 0, at);
+            size += endOf(block) - at;
+            queue.push(...successors(instructions));
         }
         /** @type {LongEntry} */
         const record = { entry, ranges: [], run: null, hashed: [], wrapped: false, loose };
