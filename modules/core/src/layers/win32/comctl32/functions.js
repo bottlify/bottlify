@@ -16,6 +16,7 @@ import { createHelperFunctions } from './helpers.js';
 import { createImageListFunctions } from './imagelist-stream.js';
 import { createPropertySheetFunctions } from './propsheet.js';
 import { createSubclassFunctions } from './subclass.js';
+import { UDM_SETBUDDY, UDM_SETPOS, UDM_SETRANGE, UPDOWN_CLASS } from './updown.js';
 
 /**
  * @typedef {Object} ComctlHost
@@ -187,6 +188,47 @@ export function createComctlFunctions(host){
                 }
                 host.writeMemory((info >>> 0) + 4, new Uint8Array(fields.buffer));
                 return S_OK;
+            },
+        },
+
+        /**
+         * HWND CreateUpDownControl(DWORD dwStyle, int x, int y, int cx, int cy,
+         *     HWND hParent, int nID, HINSTANCE hInst, HWND hBuddy, int nUpper,
+         *     int nLower, int nPos)
+         *
+         * An up-down control made and set up in one call: its buddy, its range
+         * and its position, each as its message sets it.
+         */
+        CreateUpDownControl: {
+            argBytes: 48,
+            /** @param {number[]} args */
+            handler: ([style, x, y, cx, cy, parent, id, instance, buddy, upper, lower, pos])=>{
+                const create = host.user32?.('CreateWindowExA');
+                const send = host.user32?.('SendMessageA');
+                const name = host.allocate?.(UPDOWN_CLASS.length + 1) ?? 0;
+                if (!create || !send || name === 0)
+                {
+                    return 0;
+                }
+                host.writeMemory(name, new Uint8Array([...UPDOWN_CLASS].map(c=>c.charCodeAt(0))
+                    .concat(0)));
+                /** @param {unknown} value @param {(answer: any) => any} then */
+                const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then
+                    === 'function' ? /** @type {Promise<unknown>} */ (value).then(then)
+                    : then(value));
+                return andThen(create.handler([0, name, 0, style, x, y, cx, cy, parent, id,
+                    instance, 0]), hwnd=>{
+                    host.release?.(name);
+                    if ((hwnd >>> 0) === 0)
+                    {
+                        return 0;
+                    }
+                    return andThen(send.handler([hwnd, UDM_SETBUDDY, buddy, 0]),
+                        ()=>andThen(send.handler([hwnd, UDM_SETRANGE, 0,
+                            ((lower & 0xffff) << 16 | upper & 0xffff) >>> 0]),
+                        ()=>andThen(send.handler([hwnd, UDM_SETPOS, 0, pos & 0xffff]),
+                            ()=>hwnd >>> 0)));
+                });
             },
         },
 

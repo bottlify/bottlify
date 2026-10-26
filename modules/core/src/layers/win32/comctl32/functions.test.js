@@ -170,3 +170,39 @@ test('DllGetVersion answers the 5.82 common controls of Windows XP SP3', ()=>{
     assert.equal(view.getUint32(0x84, true), 0xaaaaaaaa, 'and nothing written');
     assert.equal(m.comctl.DllGetVersion.handler([0]), E_INVALIDARG, 'no structure');
 });
+
+test('CreateUpDownControl makes the control by its class and sets its buddy, range and '
+    + 'position in that order', async()=>{
+    const memory = new Uint8Array(0x400);
+    /** @type {any[]} */
+    const calls = [];
+    const comctl = /** @type {any} */ (createComctlFunctions({
+        readMemory: (a, n)=>memory.slice(a, a + n),
+        writeMemory: (a, b)=>memory.set(b, a),
+        allocate: ()=>0x100,
+        release: ()=>{},
+        user32: name=>({
+            handler: (/** @type {number[]} */ args)=>{
+                if (name === 'CreateWindowExA')
+                {
+                    const at = args[1];
+                    calls.push([name, String.fromCharCode(...memory.subarray(at,
+                        memory.indexOf(0, at))), args[3], args[8], args[9]]);
+                    return Promise.resolve(0x10040);
+                }
+                calls.push([name, ...args]);
+                return 0;
+            },
+        }),
+    }));
+    assert.equal(comctl.CreateUpDownControl.argBytes, 48);
+    const hwnd = await comctl.CreateUpDownControl.handler([0x50800000, 0, 0, 10, 10, 0x10010,
+        1, 0x400000, 0x10020, 100, 10, 50]);
+    assert.equal(hwnd, 0x10040);
+    assert.deepEqual(calls, [
+        ['CreateWindowExA', 'msctls_updown32', 0x50800000, 0x10010, 1],
+        ['SendMessageA', 0x10040, 0x0469, 0x10020, 0],
+        ['SendMessageA', 0x10040, 0x0465, 0, (10 << 16 | 100) >>> 0],
+        ['SendMessageA', 0x10040, 0x0467, 0, 50],
+    ]);
+});

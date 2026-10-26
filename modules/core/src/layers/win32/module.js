@@ -2992,6 +2992,16 @@ export function createWin32Module(){
                             ...createCommonControls(controlHost, toolkit, imageLists, {
                                 loadBitmap: (instance, id)=>libraries['USER32.dll']
                                     ?.LoadBitmapA?.handler([instance, id]) ?? 0,
+                                // A control that subclasses another window -- an
+                                // up-down control its buddy -- does it with
+                                // comctl32's own SetWindowSubclass.
+                                subclassing: {
+                                    procedure: (name, handler)=>bridge.register(`<${name}>`,
+                                        { argBytes: 24, handler }),
+                                    call: (name, args)=>libraries['COMCTL32.dll']?.[name]
+                                        ?.handler(args) ?? 0,
+                                    callerThread: ()=>bridge.callerThread(),
+                                },
                             }),
                             ...createRichEditControls(controlHost, toolkit)])
                         {
