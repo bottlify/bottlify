@@ -3666,8 +3666,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         GrayStringA: { argBytes: 36, handler: ()=>0 },
         TabbedTextOutA: { argBytes: 32, handler: ()=>0 },
         WinHelpA: { argBytes: 16, handler: ()=>0 },
-        /** void NotifyWinEvent(DWORD event, HWND hwnd, LONG idObject, LONG idChild): nobody listens */
-        NotifyWinEvent: { argBytes: 16, handler: ()=>0 },
         GrayStringW: { argBytes: 36, handler: ()=>0 },
         TabbedTextOutW: { argBytes: 32, handler: ()=>0 },
         WinHelpW: { argBytes: 16, handler: ()=>0 },

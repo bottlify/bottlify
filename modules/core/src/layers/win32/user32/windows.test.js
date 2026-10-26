@@ -3824,6 +3824,22 @@ test('a hook SetWindowsHookA installs is not heard by another thread', ()=>{
     assert.equal(called.length, 0);
 });
 
+test('an out-of-context WinEvent hook is called at its thread\'s next look at its messages', ()=>{
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    const { fns, called } = setup({ caller, threadExists: ()=>true });
+    const WINEVENT_OUTOFCONTEXT = 0;
+    const EVENT_OBJECT_SHOW = 0x8002;
+    const hook = fns.SetWinEventHook.handler([1, 0x7fffffff, 0, HOOK_PROC, 0, 0,
+        WINEVENT_OUTOFCONTEXT]);
+    assert.notEqual(hook, 0);
+    assert.equal(fns.NotifyWinEvent.handler([EVENT_OBJECT_SHOW, 0, -8, 0]), 0);
+    assert.equal(called.length, 0, 'not yet: it waits for the queue to be looked at');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_NOREMOVE]), 0,
+        'and is no message');
+    assert.deepEqual(called.map(c=>[c.entry, c.args.slice(0, 6), c.thread]),
+        [[HOOK_PROC, [hook, EVENT_OBJECT_SHOW, 0, -8 >>> 0, 0, 7], caller.current]]);
+});
+
 test('a keyboard hook is shown every key message taken, and can discard it', ()=>{
     // A game that keeps its key state in a WH_KEYBOARD hook heard no key at
     // all while only CBT hooks were called: Enter on its title did nothing.

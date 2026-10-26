@@ -1524,8 +1524,6 @@ test('CharNext walks a string a byte at a time and stops at its end', ()=>{
     assert.equal(fns.CharNextA.handler([TEXT_BUFFER + 2]), TEXT_BUFFER + 2,
         'the terminator is where it stays');
     assert.equal(fns.CharNextA.handler([0]), 0);
-    assert.equal(fns.NotifyWinEvent.handler([0, 0, 0, 0]), 0, 'an event nobody hears');
-    assert.equal(fns.NotifyWinEvent.argBytes, 16);
     memory.bytes.set([0x61, 0, 0, 0], TEXT_BUFFER + 0x40);
     assert.equal(fns.CharNextW.handler([TEXT_BUFFER + 0x40]), TEXT_BUFFER + 0x42, 'two bytes on');
     assert.equal(fns.CharNextW.handler([TEXT_BUFFER + 0x42]), TEXT_BUFFER + 0x42);

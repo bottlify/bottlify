@@ -31,6 +31,7 @@ import { createRawInput } from './rawinput.js';
 import { createCaret } from './caret.js';
 import { createDirectoryListFunctions } from './dlgdir.js';
 import { createMdi } from './mdi.js';
+import { createWinEventHooks } from './hooks.js';
 import {
     WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, contains, createGeometry,
     createdStyles, edgeFor, frameOf, frameRings, intersect, isEmpty,
@@ -6706,9 +6707,21 @@ export function createWindowFunctions(host){
 
     // Named, because a message for a window with no procedure of its own is
     // handed to the default procedure in this table by `deliver` above.
+    const winEvents = createWinEventHooks(host, {
+        windowThread: hwnd=>{
+            const record = live(hwnd);
+            return record ? threadIdOf(record.thread) : null;
+        },
+        later: (owner, run)=>{
+            listOf(inbox, owner).push(/** @type {any} */ ({ run }));
+            host.queue.sent?.(owner);
+        },
+    });
+
     const table = {
         ...paint.table,
         ...caret.table,
+        ...winEvents.table,
         // The focus, the capture and the geometry live with the windows, so
         // the system half answers from them through a view of the host that
         // carries them.
