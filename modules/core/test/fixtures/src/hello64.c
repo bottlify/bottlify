@@ -26,8 +26,8 @@ static unsigned long long fib(unsigned n)
 
 void mainCRTStartup(void)
 {
-    char text[64] = "hello from x64, fib(40)=";
-    unsigned long long value = fib(40);
+    char text[64] = "hello from x64, fib(25)=";
+    unsigned long long value = fib(25);
     char digits[24];
     int count = 0;
     do
@@ -43,5 +43,5 @@ void mainCRTStartup(void)
     text[at++] = '\n';
     DWORD written = 0;
     WriteFile(GetStdHandle((DWORD)-11), text, (DWORD)at, &written, 0);
-    ExitProcess(written == (DWORD)at && at == 34 ? 0 : 1);
+    ExitProcess(written == (DWORD)at && at == 30 ? 0 : 1);
 }

@@ -57,9 +57,12 @@ export function createSwitcher({ cpu, memory = null }){
         const esp = context.reg32[4] >>> 0;
         const op = memory.readU8(at);
         const pops = op === 0xc3 ? 0 : op === 0xc2 ? memory.readU16(at + 1) : -1;
+        // A return address is a quadword in long mode, where every address
+        // lies below 4 GiB: its low dword is the address.
+        const slot = cpu.bits?.() === 64 ? 8 : 4;
         if (pops < 0 || memory.readU32(esp) !== cpu.parkAddress?.()
             || (resume.esp !== null && resume.esp !== undefined
-                && esp + 4 + pops !== resume.esp >>> 0))
+                && esp + slot + pops !== resume.esp >>> 0))
         {
             return resume;
         }

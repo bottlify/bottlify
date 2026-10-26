@@ -93,7 +93,8 @@ export async function planDependencies({ entry, entryName, readLibrary, isSystem
      * @returns {{ dll: string, entries: import('./pe.js').ImportEntry[] }[]}
      */
     const importsOf = file=>{
-        const image = parsePe(file);
+        // Read alone, so an x86-64 program's imports are walked as well.
+        const image = parsePe(file, { wide: true });
         return [...readImports(file, image), ...readDelayImports(file, image)];
     };
 

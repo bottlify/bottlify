@@ -2396,7 +2396,7 @@ export function versionResourceOf(filesystem, path, blocks = null, tries = 4){
                 head = readAt(0, end);
             }
         }
-        const image = parsePe(head);
+        const image = parsePe(head, { wide: true });
         const directory = image.directories[DIR_RESOURCE];
         if (!directory || directory.size === 0)
         {
@@ -2446,7 +2446,7 @@ export function versionResourceOf(filesystem, path, blocks = null, tries = 4){
  */
 export function compatibilityOf(executable){
     const RT_MANIFEST = 24;
-    const image = parsePe(executable);
+    const image = parsePe(executable, { wide: true });
     const view = new DataView(executable.buffer, executable.byteOffset, executable.byteLength);
     // MajorOperatingSystemVersion and its minor, forty bytes into the optional
     // header that follows the signature and the file header.
@@ -3827,7 +3827,10 @@ async function buildApp(options){
     // library a game ships can itself be twelve megabytes, and a library
     // placed inside the heap would be overwritten by the first large
     // allocation.
-    const mainImage = parsePe(options.executable);
+    const mainImage = programImage(options.executable);
+    // An x86-64 program (`roadmap/x64.md`): long mode on cork, one executor,
+    // its image in the window below 4 GiB.
+    const long = mainImage.bits === 64;
     const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_START, heapBase: HEAP_BASE }
         = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage, mainImage.imageBase);
     /** The program's image lies in the heap's span, which gives that part up (`spaceAbove`). */
@@ -4354,7 +4357,8 @@ async function buildApp(options){
             // faults, as on Windows, rather than sliding through the zeroes.
             noExecuteBelow: 0x10000,
             engine: options.engine ?? DEFAULT_ENGINE,
-            executors: options.executors ?? 1,
+            executors: long ? 1 : options.executors ?? 1,
+            bits: long ? 64 : 32,
             eagerExecutors: options.cpu?.eager === true,
             // The threads holding the guest's memory bring JavaScriptCore's
             // collections forward (`gc-nudge.js`): by default there only.
@@ -5361,7 +5365,7 @@ async function buildApp(options){
     const stackRoom = initialStack - (mainStack.initialStack === undefined
         ? thunkBase + cpu.layout.thunkCapacity : STACK_POOL_START);
     const stackSize = options.stackSize
-        ?? Math.min(stackReserveOf(parsePe(options.executable).stackReserve), stackRoom);
+        ?? Math.min(stackReserveOf(mainImage.stackReserve), stackRoom);
 
     memory.register({
         name: 'entry-vector', base: entryVector, size: 4,
@@ -6503,7 +6507,8 @@ async function buildApp(options){
     nextLibraryBase = shipped.reduce(
         (highest, library)=>Math.max(highest, library.base + library.size), systemModulesEnd);
 
-    const image = loader.load(options.executable, { resolveImport, missing: missingImport });
+    const image = loader.load(options.executable, { resolveImport, missing: missingImport,
+        ...long ? { wide: true, base: mainImage.imageBase } : {} });
 
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
@@ -6514,7 +6519,7 @@ async function buildApp(options){
     // out in place before it asks for its own exports. Read again whenever the
     // directory's head has changed since; one the image could not hold is no
     // exports at all, said once.
-    const ownImage = parsePe(options.executable);
+    const ownImage = parsePe(options.executable, { wide: true });
     const ownDirectory = ownImage.directories[DIR_EXPORT];
     /** @type {{ head: string, byName: Map<string, number>, byOrdinal: Map<number, number> } | null} */
     let ownTable = null;
@@ -9426,6 +9431,36 @@ export function liveDumpOf(worker, control){
             }
         },
     };
+}
+
+/**
+ * Where an x86-64 program's image goes when the linker placed it above the
+ * window: the 32-bit programs' own default base, which the address map below
+ * it is laid out around (`roadmap/x64.md`: every guest page below 4 GiB).
+ */
+const LONG_IMAGE_BASE = 0x00400000;
+
+/**
+ * The program's image headers, a 64-bit (PE32+) one included: one whose base
+ * lies above 2 GiB is placed at `LONG_IMAGE_BASE`, which its relocations (or
+ * its RIP-relative code, which needs none) allow, and every address its
+ * process gives out stays below 2 GiB, where a dword sign-extended to a
+ * quadword is the same address.
+ *
+ * @param {Uint8Array} executable
+ */
+function programImage(executable){
+    const image = parsePe(executable, { wide: true });
+    if (image.bits !== 64 || image.imageBase + image.sizeOfImage <= 0x80000000)
+    {
+        return image;
+    }
+    if (!image.relocatable)
+    {
+        throw new Error(`image: an x86-64 program at 0x${image.imageBase.toString(16)} that`
+            + ' carries no relocations cannot be placed below 2 GiB');
+    }
+    return { ...image, imageBase: LONG_IMAGE_BASE };
 }
 
 /**

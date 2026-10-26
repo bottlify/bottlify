@@ -185,10 +185,11 @@ export function createLoaderModule(){
                  * @param {ImportResolver}
                  *     [options.missing]  Where a call to an import nothing claims should land.
                  * @param {string} [options.name]  Region name, for diagnostics.
+                 * @param {boolean} [options.wide]  A 64-bit (PE32+) image is taken.
                  * @returns {{ base: number, entryPoint: number, unresolved: string[] }}
                  */
-                load(file, { resolveImport, base, missing, name = 'image' }){
-                    const image = buildImage(file, { resolveImport, base, missing });
+                load(file, { resolveImport, base, missing, name = 'image', wide = false }){
+                    const image = buildImage(file, { resolveImport, base, missing, wide });
                     // Both tables. A delay-load slot left as the linker wrote it is
                     // resolved by the program's own helper, which walks an export
                     // directory by hand and refuses an address it does not believe;

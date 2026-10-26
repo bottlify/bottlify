@@ -37,6 +37,9 @@ import { createPorts } from './ports.js';
 
 /** Register names in the state block's reg32 view, in index order. */
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
+/** Long mode's sixteen, as the 64-bit block holds them. */
+const REGISTERS64 = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi', 'r8', 'r9', 'r10',
+    'r11', 'r12', 'r13', 'r14', 'r15'];
 
 /**
  * How far the counter runs ahead of the guest's clock inside a slice: the
@@ -160,6 +163,8 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {{ everyMs: number, bytes: number } | false} [gcNudge]  How the threads holding
  *     the guest's memory bring JavaScriptCore's collections forward (`gc-nudge.js`), as the
  *     process settled it; an executor's worker nudges by it.
+ * @property {32 | 64} [bits]  64 for a long-mode (x86-64) process: the engine's 64-bit state
+ *     block, run on its long-mode interpreter, on one executor. Default 32.
  */
 
 /**
@@ -216,7 +221,15 @@ export function cacheShare(bytes, executors, executor){
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
         closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0, memory: given,
-        reused, tsc, features, translationZone } = config;
+        reused, tsc, features, translationZone, bits = 32 } = config;
+    // Long mode: the 64-bit block and the long-mode interpreter, which is all
+    // the engine runs 64-bit code on so far.
+    const long = bits === 64;
+    if (long && (executors !== 1 || typeof engine?.interpret64 !== 'function'))
+    {
+        throw new Error('cpu: a 64-bit process runs on one executor of an engine with'
+            + ' a long-mode interpreter');
+    }
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
     for (const name of ENGINE_EXPORTS)
@@ -248,7 +261,9 @@ export function createCorkHost(config){
     // addressed from 0 is shorter code on arm64. An engine whose layout has no
     // such choice keeps its own.
     const own = ownLayout({ ramSize: memorySize, processors: executors, ramBase: 0,
+        ...(long ? { bits } : {}),
         ...(corkConfig?.hashSlots ? { hashSlots: corkConfig.hashSlots } : {}) });
+    const blockSize = long ? engine.STATE_BLOCK_SIZE_64 : STATE_BLOCK_SIZE;
     // The guest's addresses the state page and the wasm interpreter's statics
     // past it hold: closed to the program for good. Its first page stays open,
     // where a read through a null pointer finds zeroes as on a page nobody
@@ -268,7 +283,7 @@ export function createCorkHost(config){
     const profileSize = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
         ? Tables.BLOCK_PROFILE_SIZE : 0;
     const wasmWanted = typeof engine.createWasmInterpreter === 'function'
-        && corkConfig?.wasmInterpreter !== false;
+        && corkConfig?.wasmInterpreter !== false && !long;
     const past = tables + profileSize + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0);
     const firstPages = pagesFor(own, past);
     // Every other executor's: its state page, its tables and what lies past them.
@@ -320,10 +335,14 @@ export function createCorkHost(config){
 
     // The memory is fixed (initial === maximum), so the buffer never detaches
     // and the views are taken once.
-    const block = new Uint8Array(memory.buffer, stateBase, STATE_BLOCK_SIZE);
-    const blockView = new DataView(memory.buffer, stateBase, STATE_BLOCK_SIZE);
+    const block = new Uint8Array(memory.buffer, stateBase, blockSize);
+    const blockView = new DataView(memory.buffer, stateBase, blockSize);
     const reg32 = new Int32Array(memory.buffer, layout.regs, 8);
-    const xmm = new Uint32Array(memory.buffer, layout.xmm, 32);
+    const reg64 = long ? new BigUint64Array(memory.buffer, layout.regs, 16) : null;
+    /** A general register's low dword, either mode's. @param {number} index */
+    const regLow = index=>(reg64 === null ? reg32[index] >>> 0
+        : Number(reg64[index] & 0xffffffffn));
+    const xmm = new Uint32Array(memory.buffer, layout.xmm, long ? 64 : 32);
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const whole = new DataView(memory.buffer);
     const wholeWords = new Int32Array(memory.buffer);
@@ -414,7 +433,14 @@ export function createCorkHost(config){
 
     // The boot state: the registers the ROM would have left, and nothing run.
     block.fill(0);
-    reg32[4] = initialStack | 0; // ESP
+    if (reg64 === null)
+    {
+        reg32[4] = initialStack | 0; // ESP
+    }
+    else
+    {
+        reg64[4] = BigInt(initialStack >>> 0);
+    }
     blockView.setUint32(inBlock.eflags, DEFAULT_EFLAGS, true);
     blockView.setUint16(inBlock.x87Control, DEFAULT_CONTROL_WORD, true);
     block[inBlock.x87Empty] = 0xff; // every register empty
@@ -529,10 +555,19 @@ export function createCorkHost(config){
     let counted = 0;
     let lastWord = 0;
 
-    const eip = ()=>blockView.getUint32(inBlock.eip, true) >>> 0;
+    // RIP in long mode, whose code lies in the window below 4 GiB.
+    const eip = long ? ()=>Number(blockView.getBigUint64(inBlock.eip, true))
+        : ()=>blockView.getUint32(inBlock.eip, true) >>> 0;
     /** @param {number} value */
     const setEip = value=>{
-        blockView.setUint32(inBlock.eip, value >>> 0, true);
+        if (long)
+        {
+            blockView.setBigUint64(inBlock.eip, BigInt(value >>> 0), true);
+        }
+        else
+        {
+            blockView.setUint32(inBlock.eip, value >>> 0, true);
+        }
         entered = true;
     };
     const x87Top = ()=>block[inBlock.x87Top] & 7;
@@ -862,9 +897,9 @@ export function createCorkHost(config){
     const takeFault = (vector, page = null)=>{
         const fault = {
             ...buildFault(vector),
-            stack: reg32[4] >>> 0,
-            eax: reg32[0] >>> 0,
-            edx: reg32[2] >>> 0,
+            stack: regLow(4),
+            eax: regLow(0),
+            edx: regLow(2),
             // A page fault's error code and the address it could not reach (CR2):
             // not present, and whether the access wrote.
             ...page === null ? {} : { errorCode: page.write ? 2 : 0, address: page.address >>> 0 },
@@ -1135,6 +1170,10 @@ export function createCorkHost(config){
      * @returns {number}
      */
     const interpretJs = (address, budget, force, jumpedIn, once)=>{
+        if (long)
+        {
+            return interpretLong(address, budget, force);
+        }
         interpreter ??= blockState({
             memory,
             layout,
@@ -1182,7 +1221,75 @@ export function createCorkHost(config){
             }
             thrown = e;
         }
-        const retired = state.retired - before;
+        return settle(state, state.retired - before, thrown);
+    };
+
+    /**
+     * The long-mode interpreter over a range, as `interpretJs` runs the 32-bit
+     * one: no translator to stop for and no hotness to count, nothing below
+     * `runsFrom` fetched, a trap answered once the run ends.
+     *
+     * @param {number} address @param {number} budget @param {boolean} force
+     * @returns {number}
+     */
+    const interpretLong = (address, budget, force)=>{
+        interpreter ??= engine.blockState64({
+            memory,
+            layout,
+            rdtsc: readTsc,
+            ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
+            onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{
+                invalidate(at, size, true);
+            },
+        });
+        const state = interpreter;
+        state.syncIn();
+        state.rip = BigInt(address >>> 0);
+        state.processor = played;
+        state.halted = false;
+        const before = state.retired;
+        lastStart = address;
+        /** @type {unknown} */
+        let thrown = null;
+        try
+        {
+            engine.interpret64(state, budget, {
+                force,
+                shouldStop: ()=>state.trapped.length > 0,
+                onStep: (/** @type {number} */ at)=>{
+                    lastStart = at;
+                    if (at < runsFrom)
+                    {
+                        throw Object.assign(new Error('a fetch from the null range'),
+                            { vector: PAGE_FAULT, eip: at });
+                    }
+                    if (((at - parkBase) >>> 0) > 2)
+                    {
+                        noteStart(at);
+                    }
+                },
+            });
+        }
+        catch (e){
+            const fault = /** @type {{ vector?: number, eip?: number, op?: string }} */ (e);
+            if (typeof fault.vector === 'number' || typeof fault.op === 'string')
+            {
+                state.rip = BigInt(fault.eip ?? lastStart);
+            }
+            thrown = e;
+        }
+        return settle(state, state.retired - before, thrown);
+    };
+
+    /**
+     * What either JavaScript interpreter's range leaves: the state written
+     * back, its count in the block's word, a fault or a no-tier instruction
+     * taken, the traps it recorded raised.
+     *
+     * @param {any} state @param {number} retired @param {unknown} thrown
+     * @returns {number}
+     */
+    const settle = (state, retired, thrown)=>{
         state.syncOut();
         // The interpreter's instructions count in the block's own word, so the
         // layer's instruction count and the translated share are over the whole
@@ -1697,7 +1804,7 @@ export function createCorkHost(config){
             {
                 throw new Error(`Unknown register "${name}"`);
             }
-            return reg32[index] >>> 0;
+            return regLow(index);
         },
         /** @param {string} name @param {number} value */
         writeReg32(name, value){
@@ -1716,11 +1823,55 @@ export function createCorkHost(config){
             {
                 throw new Error(`Unknown register "${name}"`);
             }
+            if (reg64 !== null)
+            {
+                // A dword write, which in long mode clears the upper half.
+                reg64[index] = BigInt(value >>> 0);
+                return;
+            }
             reg32[index] = value | 0;
         },
+        /** The register width: 64 for a long-mode process. */
+        bits: ()=>bits,
+        /**
+         * A long-mode register whole, by its name (rax..r15, rip).
+         *
+         * @param {string} name @returns {bigint}
+         */
+        readReg64(name){
+            if (name === 'rip')
+            {
+                return BigInt(eip());
+            }
+            const index = REGISTERS64.indexOf(name);
+            if (reg64 === null || index === -1)
+            {
+                throw new Error(`Unknown register "${name}"${reg64 === null ? ' (32-bit)' : ''}`);
+            }
+            return reg64[index];
+        },
+        /** @param {string} name @param {bigint} value */
+        writeReg64(name, value){
+            if (name === 'rip')
+            {
+                setEip(Number(BigInt.asUintN(32, value)));
+                return;
+            }
+            const index = REGISTERS64.indexOf(name);
+            if (reg64 === null || index === -1)
+            {
+                throw new Error(`Unknown register "${name}"${reg64 === null ? ' (32-bit)' : ''}`);
+            }
+            reg64[index] = BigInt.asUintN(64, value);
+        },
 
-        /** The general registers in place, for the bridge's crossing. @returns {Int32Array} */
-        registerFile: ()=>reg32,
+        /**
+         * The general registers in place, for the bridge's crossing; none in long
+         * mode, whose registers are quadwords (`readReg64`).
+         *
+         * @returns {Int32Array | null}
+         */
+        registerFile: ()=>(long ? null : reg32),
         /** @param {number} base @param {number} size */
         noteStack: (base, size)=>runtime.noteStack(base, size),
         /**

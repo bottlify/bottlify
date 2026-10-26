@@ -18,7 +18,8 @@ import {
 } from './internal/boot-rom.js';
 import { readFault, describeFault, hostFault } from './internal/faults.js';
 import {
-    captureContext, freshThreadFpu, restoreContext, setContextEflags, setThreadBase,
+    captureContext, clearGeneralRegisters, freshThreadFpu, restoreContext, setContextEflags,
+    setThreadBase,
 } from './internal/context.js';
 import { createSampleTable, creditSample, takeDue, topSamples } from './internal/samples.js';
 import { fileNameOf } from './internal/translation-store.js';
@@ -490,7 +491,14 @@ export function createCpuModule(){
                 // threads (`executors`). The program is told it has a processor
                 // for each (`processorsFor`).
                 executors: Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)),
+                // 64 for an x86-64 process (`roadmap/x64.md`): cork's long-mode
+                // state block and interpreter, on one executor.
+                bits: config?.bits === 64 ? /** @type {64} */ (64) : /** @type {32} */ (32),
             };
+            if (settings.bits === 64)
+            {
+                settings.executors = 1;
+            }
             state.store = settings.cork?.store ?? null;
             // Executors past one share the program's memory with workers, which
             // only a SharedArrayBuffer allows, and a page that is not
@@ -724,6 +732,7 @@ export function createCpuModule(){
                             // each thread that holds the guest's memory is nudged.
                             gcNudge: nudging ?? /** @type {false} */ (false),
                             translationZone: TRANSLATION_ZONE_BYTES,
+                            bits: settings.bits,
                         };
                         state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                             reused: settings.reused });
@@ -819,6 +828,7 @@ export function createCpuModule(){
                     state.thunks = createThunkTable({
                         base: settings.thunkBase,
                         port: settings.trapPort,
+                        long: settings.bits === 64,
                         // The same span the region is registered with, so the table
                         // refuses a slot rather than laying one outside it.
                         capacity: settings.thunkCapacity,
@@ -1090,6 +1100,16 @@ export function createCpuModule(){
                 wasmMemory: ()=>state.host?.wasmMemory?.() ?? null,
                 /** @param {string} name @param {number} value */
                 writeReg32: (name, value)=>started().writeReg32(name, value),
+                /** The register width: 64 for an x86-64 process. @returns {32 | 64} */
+                bits: ()=>settings.bits,
+                /**
+                 * A long-mode register whole (rax..r15, rip).
+                 *
+                 * @param {string} name @returns {bigint}
+                 */
+                readReg64: name=>started().readReg64(name),
+                /** @param {string} name @param {bigint} value */
+                writeReg64: (name, value)=>started().writeReg64(name, value),
 
                 /**
                  * Takes a stub slot and returns the trap id it raises together with
@@ -1475,6 +1495,10 @@ export function createCpuModule(){
                 newContext({ entry, stackTop }){
                     const context = captureCurrentContext();
                     freshThreadFpu(context);
+                    // A long-mode thread starts from clear registers: the
+                    // template's upper halves are its creator's, which the
+                    // dword view below would leave in place.
+                    clearGeneralRegisters(context);
                     context.eip = entry;
                     context.reg32[4] = stackTop; // ESP
                     context.reg32[5] = stackTop; // EBP

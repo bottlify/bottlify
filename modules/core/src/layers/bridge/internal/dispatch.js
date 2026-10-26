@@ -917,6 +917,31 @@ class Dispatcher {
     }
 
     /**
+     * An x86-64 call's arguments, as the x64 convention passes them: the first
+     * four in RCX, RDX, R8 and R9 -- RDX as the stub kept it, in R11, before
+     * the trap spent DX -- and the rest on the stack past the return address
+     * and the 32 bytes of home space the caller leaves for the four. Each
+     * argument is its slot's low dword: a handler takes dwords, and every
+     * address lies in the window below 4 GiB. A quadword argument the 32-bit
+     * signature counts as two is not split yet.
+     *
+     * @param {Entry} entry @param {number} rsp
+     * @returns {number} the return address at RSP
+     */
+    readLongCall(entry, rsp){
+        const args = entry.args;
+        const count = entry.registerArgs + entry.stackWords;
+        const registers = ['rcx', 'r11', 'r8', 'r9'];
+        for (let i = 0; i < count; i++)
+        {
+            args[i] = i < 4
+                ? Number(BigInt.asIntN(32, this.cpu.readReg64(registers[i])))
+                : this.memory.readU32(rsp + 8 + 0x20 + (i - 4) * 8) | 0;
+        }
+        return this.memory.readU32(rsp);
+    }
+
+    /**
      * Whether a hook's crossing is traced, and its entry line when it is:
      * written before the handler runs, so a handler that never comes back
      * still leaves the frame it was handed on the record.
@@ -1126,13 +1151,22 @@ class Dispatcher {
             throw new Error(`bridge: trap ${id} has no implementation`);
         }
 
-        const regs = this.registers();
+        // An x86-64 process: its registers are quadwords (no register file
+        // here) and its calls follow the x64 convention (`readLongCall`).
+        const long = this.cpu.bits?.() === 64;
+        const regs = long ? null : this.registers();
         const pushed = regs === null ? this.cpu.readReg32('esp') : regs[ESP] >>> 0;
         const esp = pushed + entry.saved;
         const args = entry.args;
-        const hostReturn = entry.site
-            ? this.readSite(entry, pushed, esp)
-            : this.readCall(entry, regs, pushed, esp);
+        if (long && (entry.site || entry.saved !== 0 || entry.hook))
+        {
+            throw new Error(`bridge: ${entry.name} is a hook, which an x86-64 process`
+                + ' has none of yet');
+        }
+        const hostReturn = long ? this.readLongCall(entry, esp)
+            : entry.site
+                ? this.readSite(entry, pushed, esp)
+                : this.readCall(entry, regs, pushed, esp);
 
         this.callCount++;
         const at = this.ringSkip.has(id) ? CALL_RING : this.ringCount++ & CALL_RING - 1;
@@ -1159,7 +1193,9 @@ class Dispatcher {
         frame.name = entry.name;
         frame.freeStack = pushed;
         frame.callerStack = esp;
-        frame.restingStack = esp + 4 + entry.cleanup;
+        // Past the return address: a quadword in long mode, where the caller
+        // cleans up whatever the convention.
+        frame.restingStack = long ? esp + 8 : esp + 4 + entry.cleanup;
         frame.hostReturn = hostReturn;
 
         // Which instruction made this call. Read from the frame that was
@@ -1423,6 +1459,15 @@ class Dispatcher {
             this.cpu.writeReg32('eax', this.memory.readU32(pushed + 28));
             this.cpu.writeReg32('edx', this.memory.readU32(pushed + 20));
             this.cpu.writeReg32('esp', esp);
+            return;
+        }
+        if (long)
+        {
+            // Sign-extended, as a dword the host computes is meant: a handle
+            // of -1 is INVALID_HANDLE_VALUE whole, and every address below
+            // 2 GiB reads the same either way.
+            this.cpu.writeReg64('rax', typeof result === 'bigint' ? BigInt.asUintN(64, result)
+                : BigInt.asUintN(64, BigInt(/** @type {number} */ (result) | 0)));
             return;
         }
         // Asked again rather than reusing `regs`: the handler may have

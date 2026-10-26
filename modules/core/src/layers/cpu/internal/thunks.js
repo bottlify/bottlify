@@ -74,16 +74,25 @@ export const DEFAULT_THUNK_CAPACITY = 16384 * STUB_SIZE;
  *     writing EIP itself while the trap is being handled, a decision a fixed
  *     byte pattern cannot make. For a slot hook, whose fallback target is not
  *     known until the handler has run.
+ * @param {boolean} [options.long]  An x86-64 process's stub (`longStub`).
  * @returns {Uint8Array}
  */
 export function buildStub(
     {
         trapId, port, popBytes, preserveResult = false, forwardTo = 0, address = 0,
-        saveRegisters = false, pushEdx = false, holdEip = false,
+        saveRegisters = false, pushEdx = false, holdEip = false, long = false,
     })
 {
     const u16 = (/** @type {number} */ v)=>[v & 0xff, v >>> 8 & 0xff];
     const u32 = (/** @type {number} */ v)=>[...u16(v), v >>> 16 & 0xff, v >>> 24 & 0xff];
+    if (long)
+    {
+        if (forwardTo !== 0 || saveRegisters || pushEdx)
+        {
+            throw new Error('a long-mode stub neither forwards nor saves registers yet');
+        }
+        return longStub(trapId, port, preserveResult, holdEip, u32);
+    }
 
     const saves = forwardTo !== 0 || saveRegisters;
 
@@ -123,14 +132,44 @@ export function buildStub(
 }
 
 /**
+ * An x86-64 process's stub. Under the x64 convention the first four arguments
+ * are in RCX, RDX, R8 and R9 and the caller cleans the stack, so the stub pops
+ * nothing; the trap sequence needs DX for the port, so RDX goes to R11 first,
+ * a register the convention leaves to the callee, where the host reads the
+ * second argument. A stub reached by a `ret` has no arguments and keeps the
+ * value handed to it in RCX instead, as the 32-bit one keeps it in ECX.
+ *
+ * @param {number} trapId @param {number} port @param {boolean} preserveResult
+ * @param {boolean} holdEip @param {(value: number) => number[]} u32
+ * @returns {Uint8Array}
+ */
+function longStub(trapId, port, preserveResult, holdEip, u32){
+    const bytes = [
+        // A stub reached by a `ret` is handed a value, not arguments.
+        ...preserveResult ? [0x48, 0x89, 0xc1] //       mov rcx, rax
+            : [0x49, 0x89, 0xd3], //                    mov r11, rdx
+        0xba, ...u32(port), //                          mov edx, port
+        0xb8, ...u32(trapId), //                        mov eax, trapId
+        0xef, //                                        out dx, eax
+        ...holdEip ? [] : [0xc3], //                    ret
+    ];
+    if (bytes.length > STUB_SIZE)
+    {
+        throw new Error('stub does not fit its slot');
+    }
+    return new Uint8Array([...bytes, ...new Array(STUB_SIZE - bytes.length).fill(0xcc)]);
+}
+
+/**
  * A table of stubs laid out in guest memory.
  *
  * @param {Object} options
  * @param {number} options.base  Guest address of the first stub.
  * @param {number} options.port
  * @param {number} [options.capacity]  Bytes reserved for the table in the guest.
+ * @param {boolean} [options.long]  Stubs for an x86-64 process (`longStub`).
  */
-export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY }){
+export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY, long = false }){
     const slots = Math.floor(capacity / STUB_SIZE);
     /**
      * @type {{
@@ -226,6 +265,7 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
                 saveRegisters: entry.saveRegisters,
                 pushEdx: entry.pushEdx,
                 holdEip: entry.holdEip,
+                long,
             });
         },
 
@@ -264,6 +304,7 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
                         saveRegisters: entry.saveRegisters,
                         pushEdx: entry.pushEdx,
                         holdEip: entry.holdEip,
+                        long,
                     }),
                     entry.id * STUB_SIZE);
             }

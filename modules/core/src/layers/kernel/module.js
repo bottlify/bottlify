@@ -365,12 +365,26 @@ export function createKernelModule(){
                     // the top of the region is outside it. The headroom keeps every
                     // pointer the thread can reach inside the memory it was given.
                     top -= 16;
-                    if (start !== undefined)
+                    const long = cpu.bits?.() === 64;
+                    if (long)
                     {
-                        memory.writeU32(top + 8, start);
+                        // The x64 frame: the return address alone, with the 32
+                        // bytes of home space a caller leaves above it, and RSP
+                        // eight past a multiple of sixteen, as after a call. The
+                        // parameter goes in RCX (below), the start in RDX.
+                        top = (top & ~15) - 0x28;
+                        memory.writeBytes(top, new Uint8Array(0x28));
+                        memory.writeU32(top, returnTo ?? cpu.parkAddress());
                     }
-                    memory.writeU32(top + 4, parameter);
-                    memory.writeU32(top, returnTo ?? cpu.parkAddress());
+                    else
+                    {
+                        if (start !== undefined)
+                        {
+                            memory.writeU32(top + 8, start);
+                        }
+                        memory.writeU32(top + 4, parameter);
+                        memory.writeU32(top, returnTo ?? cpu.parkAddress());
+                    }
 
                     const thread = state.scheduler.create({
                         entry,
@@ -380,6 +394,11 @@ export function createKernelModule(){
                         name,
                         id,
                     });
+                    if (long)
+                    {
+                        thread.context.reg32[1] = parameter | 0;
+                        thread.context.reg32[2] = (start ?? 0) | 0;
+                    }
                     thread.handle = state.handles.open('thread', thread);
                     if (start !== undefined)
                     {

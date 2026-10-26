@@ -143,7 +143,14 @@ export function restoreContext(cpu, context){
  * @property {number} previousIp
  * @property {number} inHlt
  * @property {number} fsBase
+ * @property {number} [gsBase]  A long-mode thread's: its TEB, which GS addresses.
  * @property {import('../engine.js').StateLayout} layout
+ *
+ * In long mode `reg32` holds each of the first eight registers' low dwords and
+ * `eip` RIP's: a restore writes them into the low halves and leaves the upper
+ * ones as the block has them, so a resume that moves the stack pointer or the
+ * accumulator keeps every quadword the thread holds. Every address is below
+ * 4 GiB, so the upper half of RSP and RIP is zero.
  */
 
 /**
@@ -191,14 +198,20 @@ export function captureBlockContext(host, into){
         && into.block?.length === source.length && Array.isArray(into.reg32)
         ? into
         : { block: new Uint8Array(source.length), reg32: new Array(8).fill(0), eip: 0,
-            previousIp: 0, inHlt: 0, fsBase: 0, layout };
+            previousIp: 0, inHlt: 0, fsBase: 0, gsBase: 0, layout };
     context.block.set(source);
     const registers = layout.regs >> 2;
+    // A long-mode register is two words, the low one first.
+    const stride = layout.bits === 64 ? 2 : 1;
     for (let index = 0; index < 8; index++)
     {
-        context.reg32[index] = words[registers + index];
+        context.reg32[index] = words[registers + index * stride];
     }
     context.eip = view.getUint32(layout.eip, true) >>> 0;
+    if (layout.bits === 64)
+    {
+        context.gsBase = Number(view.getBigUint64(layout.gsBase, true));
+    }
     context.previousIp = layout.previousIp >= 0 ? view.getUint32(layout.previousIp, true) >>> 0 : 0;
     context.inHlt = host.haltedFlag();
     context.fsBase = layout.fsBase >= 0 ? view.getUint32(layout.fsBase, true) >>> 0 : 0;
@@ -218,9 +231,14 @@ export function restoreBlockContext(host, context){
     const counter = layout.counter >= 0 ? view.getUint32(layout.counter, true) >>> 0 : 0;
     block.set(context.block);
     const registers = layout.regs >> 2;
+    const stride = layout.bits === 64 ? 2 : 1;
     for (let index = 0; index < 8; index++)
     {
-        words[registers + index] = context.reg32[index] | 0;
+        words[registers + index * stride] = context.reg32[index] | 0;
+    }
+    if (layout.bits === 64)
+    {
+        view.setBigUint64(layout.gsBase, BigInt((context.gsBase ?? 0) >>> 0), true);
     }
     view.setUint32(layout.eip, context.eip >>> 0, true);
     if (layout.previousIp >= 0)
@@ -271,7 +289,7 @@ export function freshThreadFpu(context){
         {
             block[layout.x87Exact] = 0;
         }
-        block.fill(0, layout.xmm, layout.xmm + 8 * 16);
+        block.fill(0, layout.xmm, layout.xmm + (layout.bits === 64 ? 16 : 8) * 16);
         view.setUint32(layout.mxcsr, THREAD_MXCSR, true);
         return;
     }
@@ -299,10 +317,33 @@ export function freshThreadFpu(context){
 export function setThreadBase(context, tebAddress){
     if (context.block !== undefined)
     {
+        // Long mode reaches the TEB through GS; FS has no base there.
+        if (context.layout?.bits === 64)
+        {
+            context.gsBase = tebAddress >>> 0;
+            return;
+        }
         context.fsBase = tebAddress >>> 0;
         return;
     }
     context.segmentOffsets[SEGMENT_FS] = tebAddress;
+}
+
+/**
+ * Clears a long-mode context's general registers, whole: a new thread's
+ * template is its creator's state, and the dword view a context is moved with
+ * leaves the upper halves as they were. Nothing for a 32-bit context, whose
+ * registers the caller sets one by one.
+ *
+ * @param {any} context
+ */
+export function clearGeneralRegisters(context){
+    if (context.block instanceof Uint8Array && context.layout?.bits === 64)
+    {
+        const { block, layout } = /** @type {BlockContext} */ (context);
+        block.fill(0, layout.regs, layout.regs + 16 * 8);
+        context.reg32.fill(0);
+    }
 }
 
 /**
