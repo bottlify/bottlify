@@ -63,9 +63,11 @@ function fill(seed, size){
  * @param {boolean} [defaultNaNNegative]  false: float code as for a host whose default NaN is
  *     positive, an arm64 one (the host's own unless given)
  * @param {boolean} [leafCalls]  false: every call a wasm call, no callee formed in
+ * @param {number} [volatileWindowMs]  the runner's: none by default, so that the cases'
+ *     code, written over for each, is never left to the interpreter
  */
 function machine(transfers = true, checkReads = undefined, looseStacks = undefined,
-    defaultNaNNegative = undefined, leafCalls = true)
+    defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0)
 {
     const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
@@ -78,7 +80,7 @@ function machine(transfers = true, checkReads = undefined, looseStacks = undefin
     }
     const pages = createPageTable(memory, layout);
     const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads,
-        looseStacks, leafCalls,
+        looseStacks, leafCalls, volatileWindowMs,
         ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }) });
     const state = blockState64({ memory, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
@@ -344,12 +346,13 @@ function run(m, translated, budget = 7){
  * @param {boolean} [checkReads]  its reads test their pages, as the interpreter's do
  * @param {boolean} [defaultNaNNegative]  its float code as for that host (`machine`)
  * @param {boolean} [leafCalls]  its small callees formed into their callers (`machine`)
+ * @param {number} [volatileWindowMs]  its runner's (`machine`)
  */
 function compare(cases, budget = 7, transfers = true, checkReads = undefined,
-    defaultNaNNegative = undefined, leafCalls = true)
+    defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0)
 {
     const translatedMachine = machine(transfers, checkReads, undefined, defaultNaNNegative,
-        leafCalls);
+        leafCalls, volatileWindowMs);
     const interpretedMachine = machine();
     /** @type {string[]} */
     const failures = [];
@@ -892,6 +895,31 @@ test('a store beside code on its page stays in the region; one into the code sti
         (/** @type {{ eip?: number }} */ error)=>error.eip === EXIT);
     assert.equal(flags[page], PageFlag.WRITTEN);
     assert.equal(m.runner.stats.exits, 0);
+});
+
+test('a page whose code is written again and again is left to the interpreter', ()=>{
+    //         mov r8d, 0x20001000; scale's 24 bytes written there, a page on
+    //         mov ecx, 3000
+    // l:      mov esi, ecx; shr esi, 4; mov edi, ecx       a new factor every 16 calls
+    //         call r8; add r13, rax; dec ecx; jnz l
+    // scale:  cmp [rip + step - 4], esi; je 1f
+    //         mov [rip + step - 4], esi                    into imul's immediate
+    // 1:      imul eax, edi, 0x12345678
+    // step:   add eax, 7; ret
+    const code = '41b80010002048b839350a000000740649890048b889350200000069c74989400848b878563412'
+        + '83c007c349894010b9b80b000089cec1ee0489cf41ffd04901c5ffc975ef';
+    const cases = CORPUS.cases.slice(0, 2).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `patched ${i}`, code }));
+    for (const budget of [7, 1000])
+    {
+        // A window no run of the test outlasts, however loaded the machine.
+        const { failures, exits, stats } = compare(cases, budget, true, undefined, undefined,
+            true, 60000);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+        // Translated again at each of the 188 writes a case, it was a region a write.
+        assert.ok(stats.volatilePages >= 1 && stats.regions < 60, JSON.stringify(stats));
+    }
 });
 
 test('a callee predicted on code since rewritten is not formed in from what replaced it', ()=>{

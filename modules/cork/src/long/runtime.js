@@ -63,6 +63,19 @@ const PREDICT_CALLEES = 4;
 const REFORMS = 3;
 
 /**
+ * A page whose code is written again and again -- a span drawer storing its
+ * steps into its own immediates, a mixer patching a voice in -- is left to
+ * the interpreter, as the 32-bit runtime's `volatileAfter`,
+ * `volatileWindowMs` and `volatileHoldMs`: the writes that dropped its
+ * regions, this many within the window of each other, and it is left for the
+ * hold, twice as long each time it is left again. Translated again at every
+ * write, such code costs a module a write.
+ */
+const VOLATILE_AFTER = 8;
+const VOLATILE_WINDOW_MS = 100;
+const VOLATILE_HOLD_MS = 2000;
+
+/**
  * A start: the region translated from it, or none (`run` null) where its
  * first instruction is the interpreter's.
  *
@@ -81,7 +94,7 @@ const REFORMS = 3;
  *     pages: import('../runtime/pages.js').PageTable,
  *     hot?: number, below?: number, transfers?: boolean, checkReads?: boolean,
  *     looseStacks?: boolean, defaultNaNNegative?: boolean, leafCalls?: boolean,
- *     callTargets?: boolean }} settings
+ *     callTargets?: boolean, volatileWindowMs?: number }} settings
  *     `below`: no block starts under it (the host's null range, whose fetch faults on
  *     the interpreter); `transfers`: regions go on into each other through the entry
  *     hash with tail calls, where the host has them (off where a tail call into another
@@ -95,12 +108,14 @@ const REFORMS = 3;
  *     false, a direct call's small callee is formed into its caller (`isLeaf`); false,
  *     every call is a wasm call, one into the region's own blocks too; `callTargets`,
  *     unless false, indirect calls are sampled and the small callees a call goes to
- *     formed into its region (`sampleCalls`)
+ *     formed into its region (`sampleCalls`); `volatileWindowMs`, the window a page's
+ *     code is written `VOLATILE_AFTER` times in before it is left to the interpreter
  */
 export function createLongRunner(settings){
     const { memory, layout, pages, hot = 2, below = 0x10000,
         transfers = features().tailCalls, leafCalls = true, callTargets = true,
-        defaultNaNNegative = features().defaultNaNNegative } = settings;
+        defaultNaNNegative = features().defaultNaNNegative,
+        volatileWindowMs = VOLATILE_WINDOW_MS } = settings;
     let readsChecked = settings.checkReads === true;
     /** Whether regions are made loose: until code is translated on a stack. */
     let loose = settings.looseStacks !== false;
@@ -115,7 +130,61 @@ export function createLongRunner(settings){
     const limits = memoryLimits(memory);
     const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0,
         entered: 0, readSwitches: 0, stackSwitches: 0, switches: 0, leaves: 0, predicted: 0,
-        quiet: 0 };
+        quiet: 0, volatilePages: 0 };
+    /**
+     * By page, the writes that dropped its regions: how many since `since`, the
+     * window's start, and how many times it was left to the interpreter.
+     * @type {Map<number, { times: number, since: number, left: number }>}
+     */
+    const rewritten = new Map();
+    /** By page left to the interpreter, when it is translated again. @type {Map<number, number>} */
+    const volatileUntil = new Map();
+    /**
+     * Whether the page is left to the interpreter, its hold lifted when it is over.
+     * @param {number} page
+     */
+    const volatile = page=>{
+        const until = volatileUntil.get(page);
+        if (until === undefined)
+        {
+            return false;
+        }
+        const now = performance.now();
+        if (now < until)
+        {
+            return true;
+        }
+        volatileUntil.delete(page);
+        const record = /** @type {{ times: number, since: number }} */ (rewritten.get(page));
+        record.times = 0;
+        record.since = now;
+        return false;
+    };
+    /**
+     * A write dropped the page's regions: counted, and the page left to the
+     * interpreter at the `VOLATILE_AFTER`th in the window.
+     * @param {number} page
+     */
+    const noteRewritten = page=>{
+        const now = performance.now();
+        let record = rewritten.get(page);
+        if (record === undefined)
+        {
+            record = { times: 0, since: now, left: 0 };
+            rewritten.set(page, record);
+        }
+        if (now - record.since > volatileWindowMs)
+        {
+            record.times = 0;
+            record.since = now;
+        }
+        if (++record.times === VOLATILE_AFTER && !volatileUntil.has(page))
+        {
+            volatileUntil.set(page, now + VOLATILE_HOLD_MS * 2 ** Math.min(record.left, 5));
+            record.left++;
+            stats.volatilePages++;
+        }
+    };
     // Indirect-call prediction: the layout's call profile (`callProfile`) the
     // regions note their indirect calls in while its flag is up.
     const profileAt = callTargets && leafCalls ? layout.callProfile ?? -1 : -1;
@@ -411,6 +480,13 @@ export function createLongRunner(settings){
             const instructions = blockAt(at, decoded);
             if (instructions.length === 0)
             {
+                continue;
+            }
+            const end = instructions[instructions.length - 1];
+            if (volatileUntil.size > 0 && (volatile(at >>> 12)
+                || volatile((end.eip + end.length - 1) >>> 12)))
+            {
+                // On a page left to the interpreter: whoever goes there leaves.
                 continue;
             }
             /** @type {import('./emit.js').LongBlock} */
@@ -718,6 +794,12 @@ export function createLongRunner(settings){
                     else
                     {
                         let block = entries.get(at);
+                        if (block === undefined && volatileUntil.size > 0 && volatile(at >>> 12))
+                        {
+                            // Left to the interpreter: to the next jump, nothing formed.
+                            step(budget - (state.retired - before));
+                            continue;
+                        }
                         if (block === undefined)
                         {
                             const seen = (visits.get(at) ?? 0) + 1;
@@ -795,6 +877,12 @@ export function createLongRunner(settings){
                 if (starts === undefined)
                 {
                     continue;
+                }
+                // Only a write that cost a region counts towards leaving the
+                // page: a loader writes a page many times before anything on it runs.
+                if (starts.size > 0)
+                {
+                    noteRewritten(page);
                 }
                 for (const entry of [...starts])
                 {
