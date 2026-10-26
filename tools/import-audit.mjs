@@ -224,7 +224,7 @@ const isMz = bytes=>bytes[0] === 0x4d && bytes[1] === 0x5a;
 const images = (await Promise.all(paths.map(gather))).flat().map(found=>{
     try
     {
-        const image = parsePe(found.bytes);
+        const image = parsePe(found.bytes, { wide: true });
         return { ...found, imports: readImports(found.bytes, image),
             exports: readExports(found.bytes, image).exports };
     }
