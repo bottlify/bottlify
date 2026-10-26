@@ -222,6 +222,57 @@ test('CreateProcess refuses a malformed name before it looks for a file', ()=>{
     assert.equal(pending(host).imagePath, 'C:\\App\\child.exe');
 });
 
+test('QueryFullProcessImageName answers this process\'s image and a child\'s', ()=>{
+    // Wine's kernel32 test_QueryFullProcessImageNameA/W.
+    const ERROR_INVALID_PARAMETER = 87;
+    const ERROR_INSUFFICIENT_BUFFER = 122;
+    const host = fakeHost({ files: ['C:\\App\\child.exe'] });
+    const fns = /** @type {Record<string, any>} */ (createSpawnFunctions(host));
+    const view = new DataView(host.bytes.buffer);
+    const own = 'C:\\App\\launcher.exe';
+    /** @param {string} name @param {number[]} args @param {number} room */
+    const ask = (name, args, room)=>{
+        view.setUint32(0x300, room, true);
+        return fns[name].handler([...args.slice(0, 2), args[2], 0x300]);
+    };
+    const ansi = ()=>new TextDecoder().decode(host.bytes.subarray(0x400,
+        host.bytes.indexOf(0, 0x400)));
+
+    assert.equal(ask('QueryFullProcessImageNameA', [CURRENT_PROCESS, 0, 0x400], 260), 1);
+    assert.equal(ansi(), own);
+    assert.equal(view.getUint32(0x300, true), own.length, 'the length without the terminator');
+
+    assert.equal(ask('QueryFullProcessImageNameW', [CURRENT_PROCESS, 0, 0x600], 260), 1);
+    let wide = '';
+    for (let at = 0x600; view.getUint16(at, true) !== 0; at += 2)
+    {
+        wide += String.fromCharCode(view.getUint16(at, true));
+    }
+    assert.equal(wide, own);
+
+    host.bytes.fill(0x41, 0x400, 0x410);
+    host.bytes[0x410] = 0;
+    assert.equal(ask('QueryFullProcessImageNameA', [CURRENT_PROCESS, 0, 0x400], own.length), 0,
+        'no room for the terminator');
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(view.getUint32(0x300, true), own.length, 'the size left as it was');
+    assert.equal(ansi(), 'A'.repeat(16), 'and the buffer');
+    assert.equal(ask('QueryFullProcessImageNameW', [CURRENT_PROCESS, 0, 0], 0), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(ask('QueryFullProcessImageNameA', [CURRENT_PROCESS, 0, 0], 1024), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER, 'room, and nowhere to put it');
+    assert.equal(ask('QueryFullProcessImageNameW', [CURRENT_PROCESS, 2, 0x600], 260), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER, 'a flag that is not one');
+    assert.equal(ask('QueryFullProcessImageNameA', [0x999, 0, 0x400], 260), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+
+    fns.CreateProcessA.handler([putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0x200]);
+    const child = view.getUint32(0x200, true);
+    assert.equal(ask('QueryFullProcessImageNameA', [child, 0, 0x400], 260), 1);
+    assert.equal(ansi(), 'C:\\App\\child.exe');
+    assert.equal(fns.QueryFullProcessImageNameW.argBytes, 16);
+});
+
 test('a name with no extension gets .exe, as CreateProcess gives it', ()=>{
     const host = fakeHost({ files: ['C:\\App\\setup.exe'] });
     const fns = createSpawnFunctions(host);

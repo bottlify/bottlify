@@ -34,6 +34,7 @@
  */
 
 import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
+import { encodeAnsi } from './locale.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -49,6 +50,8 @@ const ERROR_NOT_SUPPORTED = 50;
 const ERROR_GEN_FAILURE = 31;
 const ERROR_OBJECT_NAME_EXISTS = 5010;
 const ERROR_NOACCESS = 998;
+/** QueryFullProcessImageName's one flag: the path in the object manager's terms. */
+const PROCESS_NAME_NATIVE = 1;
 
 /**
  * Writes into this process's memory as WriteProcessMemory writes into its
@@ -486,6 +489,7 @@ export function createSpawner(host){
  *           The one every library in this process launches through, when the
  *           caller assembled it. Built here otherwise, from the same fields.
  * @property {number} [processId]  The running program's own identifier.
+ * @property {(api: string, detail: string) => void} [divergence]
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]
  *           Writes into this process through the pages' protection
  *           (`writeThroughProtection`); false when not all of it is mapped.
@@ -522,6 +526,76 @@ export function createSpawnFunctions(host){
         const b = host.readMemory(address, 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
+
+    /**
+     * The image a process handle names: this process's, or a child's.
+     *
+     * @param {number} handle @returns {string | null}
+     */
+    const imagePathOf = handle=>((handle >>> 0) === CURRENT_PROCESS ? host.imagePath()
+        : processOf(handle)?.imagePath ?? null);
+
+    /**
+     * QueryFullProcessImageName in either width. The size is the room in
+     * characters going in and the length without its terminator coming out;
+     * a buffer too small for the path and its terminator leaves both the
+     * buffer and the size as they were (Wine's test_QueryFullProcessImageName).
+     * The native form names the volume as the object manager does, which is
+     * the drives' to say and not reachable from here: refused, and said so.
+     *
+     * @param {boolean} wide
+     */
+    const queryImageName = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([handle, flags, buffer, size])=>{
+            const path = imagePathOf(handle);
+            if (path === null)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            if ((flags >>> 0) & ~PROCESS_NAME_NATIVE)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            if ((flags >>> 0) === PROCESS_NAME_NATIVE)
+            {
+                host.divergence?.('QueryFullProcessImageName', 'the native path is not answered');
+                host.setLastError(ERROR_NOT_SUPPORTED);
+                return 0;
+            }
+            const room = readDword(size >>> 0);
+            if (room < path.length + 1)
+            {
+                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                return 0;
+            }
+            if ((buffer >>> 0) === 0)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const text = `${path}\0`;
+            if (wide)
+            {
+                const bytes = new Uint8Array(text.length * 2);
+                for (let i = 0; i < text.length; i++)
+                {
+                    bytes[i * 2] = text.charCodeAt(i) & 0xff;
+                    bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
+                }
+                host.writeMemory(buffer >>> 0, bytes);
+            }
+            else
+            {
+                host.writeMemory(buffer >>> 0, encodeAnsi(text));
+            }
+            writeDword(size >>> 0, path.length);
+            return 1;
+        },
+    });
 
     /**
      * The files a STARTUPINFO hands the child as its output and error, when
@@ -932,5 +1006,12 @@ export function createSpawnFunctions(host){
                 return 1;
             },
         },
+
+        /**
+         * BOOL QueryFullProcessImageNameA/W(HANDLE hProcess, DWORD dwFlags,
+         *                                   LPSTR/LPWSTR lpExeName, PDWORD lpdwSize)
+         */
+        QueryFullProcessImageNameA: queryImageName(false),
+        QueryFullProcessImageNameW: queryImageName(true),
     };
 }
