@@ -189,6 +189,39 @@ test('a child is recorded with a full path, however the caller spelled it', ()=>
         'and the line composed for it names the same full path');
 });
 
+test('CreateProcess refuses a malformed name before it looks for a file', ()=>{
+    // Wine's kernel32 test_CommandLine: what Windows answers to each spelling.
+    const ERROR_PATH_NOT_FOUND = 3;
+    const ERROR_INVALID_PARAMETER = 87;
+    const host = fakeHost({ files: ['C:\\App\\child.exe'] });
+    const fns = createSpawnFunctions(host);
+    /** @param {number} application @param {string} line */
+    const refusal = (application, line)=>{
+        assert.equal(fns.CreateProcessA.handler(
+            [application, putAnsi(host, 0x200, line), 0, 0, 0, 0, 0, 0, 0, 0]), 0, line);
+        return host.errors.at(-1);
+    };
+
+    assert.equal(refusal(putAnsi(host, 0x100, ''), 'child.exe'), ERROR_PATH_NOT_FOUND,
+        'an empty application name, as against none');
+    assert.equal(refusal(putAnsi(host, 0x100, ''), ''), ERROR_PATH_NOT_FOUND);
+    for (const line of ['', ' ', ' child.exe', '\tchild.exe', '""', '" "'])
+    {
+        assert.equal(refusal(0, line), ERROR_INVALID_PARAMETER, JSON.stringify(line));
+    }
+    // Blanks inside the quotes but before the name are part of it.
+    for (const line of ['"\t"', '" child.exe"', '"\tchild.exe"', '"child\t"'])
+    {
+        assert.equal(refusal(0, line), ERROR_FILE_NOT_FOUND, JSON.stringify(line));
+    }
+    assert.equal(host.kernel.processes.all().length, 0, 'and none of them started anything');
+
+    // Trailing spaces inside the quotes are not, and .exe is still added.
+    assert.equal(fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x200, '"child " /s'), 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+    assert.equal(pending(host).imagePath, 'C:\\App\\child.exe');
+});
+
 test('a name with no extension gets .exe, as CreateProcess gives it', ()=>{
     const host = fakeHost({ files: ['C:\\App\\setup.exe'] });
     const fns = createSpawnFunctions(host);

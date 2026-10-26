@@ -38,6 +38,7 @@ import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 /** ReadProcessMemory of a range nothing is at. */
@@ -225,6 +226,35 @@ const directoryOf = path=>path.slice(0, Math.max(
  */
 
 /**
+ * The error CreateProcess answers before it looks for any file, or 0 when the
+ * names are well formed. An application name given as an empty string names
+ * no path; with none given, the image is the command line's first token, and
+ * a line that is empty or starts with a blank, or whose quoted name is empty
+ * once its trailing spaces go, names none (Wine's kernel32 test_CommandLine
+ * records what Windows answers to each).
+ *
+ * @param {string | null} named  lpApplicationName, null for NULL.
+ * @param {string} line
+ */
+export function createRefusal(named, line){
+    if (named !== null)
+    {
+        return named === '' ? ERROR_PATH_NOT_FOUND : 0;
+    }
+    if (line === '' || line[0] === ' ' || line[0] === '\t')
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (line[0] === '"')
+    {
+        const end = line.indexOf('"', 1);
+        const name = line.slice(1, end < 0 ? line.length : end);
+        return name.replace(/ +$/, '') === '' ? ERROR_INVALID_PARAMETER : 0;
+    }
+    return 0;
+}
+
+/**
  * Finding an image and recording a child for it, apart from the calls that
  * spell the request.
  *
@@ -308,7 +338,9 @@ export function createSpawner(host){
      * @returns {string | null}
      */
     const resolveImage = name=>{
-        const wanted = name.trim();
+        // Trailing spaces only: a name that begins with blanks names no file,
+        // and CreateProcess looks for it as spelled (`createRefusal`).
+        const wanted = name.replace(/ +$/, '');
         if (wanted === '')
         {
             return null;
@@ -525,12 +557,19 @@ export function createSpawnFunctions(host){
     };
 
     /**
-     * @param {string} named @param {string} line
+     * @param {string | null} named  null where no application name was given.
+     * @param {string} line
      * @param {number} flags @param {number} information @param {number} [startup]
      * @param {string} [directory]
      */
     const create = (named, line, flags, information, startup = 0, directory = '')=>{
-        const made = record(named, line, flags, directory);
+        const refused = createRefusal(named, line);
+        if (refused !== 0)
+        {
+            host.setLastError(refused);
+            return 0;
+        }
+        const made = record(named ?? '', line, flags, directory);
         if (!made)
         {
             host.setLastError(ERROR_FILE_NOT_FOUND);
@@ -570,7 +609,7 @@ export function createSpawnFunctions(host){
             /** @param {number[]} args */
             handler: ([application, commandLine, , , , flags, , directory, startup,
                 information])=>create(
-                (application >>> 0) === 0 ? '' : host.readCString(application >>> 0, MAX_PATH),
+                (application >>> 0) === 0 ? null : host.readCString(application >>> 0, MAX_PATH),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readCString(commandLine >>> 0, MAX_COMMAND_LINE),
@@ -584,7 +623,7 @@ export function createSpawnFunctions(host){
             /** @param {number[]} args */
             handler: ([application, commandLine, , , , flags, , directory, startup,
                 information])=>create(
-                (application >>> 0) === 0 ? ''
+                (application >>> 0) === 0 ? null
                     : host.readWideString(application >>> 0, MAX_PATH * 2),
                 (commandLine >>> 0) === 0
                     ? ''
