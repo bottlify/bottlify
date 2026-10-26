@@ -14,16 +14,17 @@
  * with no terminator within the caller's limit is no fault at all -- the
  * memory is there -- and is what an API with a length limit (an atom name, a
  * path) answers with its own error. A layer above tells them apart by
- * `code` alone: it cannot import this module.
+ * `code` alone: it cannot import this module. Not `GUEST_FAULT`, which is the
+ * processor's own exception the run stopped on: this one is a host call's.
  */
 
 /** A read or write the processor would have refused. */
-export const GUEST_FAULT = 'GUEST_FAULT';
+export const GUEST_ACCESS = 'GUEST_ACCESS';
 /** A string whose terminator is not within the limit asked for. */
 export const UNTERMINATED = 'UNTERMINATED';
 
 /**
- * @typedef {Error & { code: typeof GUEST_FAULT, address: number, length: number,
+ * @typedef {Error & { code: typeof GUEST_ACCESS, address: number, length: number,
  *     mode: 'read' | 'write' | 'execute' }} GuestFault
  * @typedef {Error & { code: typeof UNTERMINATED, address: number, limit: number }} Unterminated
  */
@@ -37,7 +38,7 @@ export const UNTERMINATED = 'UNTERMINATED';
  */
 export function guestFault(message, address, length, mode){
     const error = /** @type {GuestFault} */ (new Error(message));
-    error.code = GUEST_FAULT;
+    error.code = GUEST_ACCESS;
     error.address = address >>> 0;
     error.length = length;
     error.mode = mode;

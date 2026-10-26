@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Access, RegionKind, createRegionMap } from './regions.js';
 import { createAccessors } from './accessors.js';
-import { GUEST_FAULT, UNTERMINATED } from './faults.js';
+import { GUEST_ACCESS, UNTERMINATED } from './faults.js';
 
 function setup(){
     const bytes = new Uint8Array(0x4000);
@@ -42,13 +42,13 @@ test('a refused access is a fault that names the address, length and mode', ()=>
     const { regions, accessors } = setup();
     const unmapped = caught(()=>accessors.readU32(0));
     assert.deepEqual([unmapped.code, unmapped.address, unmapped.length, unmapped.mode],
-        [GUEST_FAULT, 0, 4, 'read']);
+        [GUEST_ACCESS, 0, 4, 'read']);
     const readOnly = caught(()=>regions.assert(0x1000, 1, 'write'));
     assert.deepEqual([readOnly.code, readOnly.address, readOnly.mode],
-        [GUEST_FAULT, 0x1000, 'write']);
+        [GUEST_ACCESS, 0x1000, 'write']);
     // Past the end, the first byte refused is the region's end, not the start.
     const past = caught(()=>regions.assert(0x2ffe, 4, 'read'));
-    assert.deepEqual([past.code, past.address], [GUEST_FAULT, 0x3000]);
+    assert.deepEqual([past.code, past.address], [GUEST_ACCESS, 0x3000]);
 });
 
 test('a string longer than the limit is unterminated; one cut by its region is a fault', ()=>{
@@ -64,10 +64,10 @@ test('a string longer than the limit is unterminated; one cut by its region is a
     // No terminator before the region ends: the byte after it is what a
     // processor would refuse.
     const cut = caught(()=>accessors.readCString(0x2f00, 0x1000));
-    assert.deepEqual([cut.code, cut.address], [GUEST_FAULT, 0x3000]);
+    assert.deepEqual([cut.code, cut.address], [GUEST_ACCESS, 0x3000]);
     const wideCut = caught(()=>accessors.readWideString(0x2f00, 0x1000));
-    assert.deepEqual([wideCut.code, wideCut.address], [GUEST_FAULT, 0x3000]);
+    assert.deepEqual([wideCut.code, wideCut.address], [GUEST_ACCESS, 0x3000]);
     const wideLong = caught(()=>accessors.readWideString(0x2000, 0x10));
     assert.equal(wideLong.code, UNTERMINATED);
-    assert.equal(caught(()=>accessors.readCString(0, 16)).code, GUEST_FAULT);
+    assert.equal(caught(()=>accessors.readCString(0, 16)).code, GUEST_ACCESS);
 });
