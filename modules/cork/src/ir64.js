@@ -24,14 +24,17 @@
  * SSE goes to the 32-bit model's own (`ir-simd.js`) through a view of this
  * state, where the vector registers and memory are the same and a dword
  * general register is written zero-extended; the forms with a 64-bit general
- * operand, which 32-bit code has no encoding for, are modelled here. x87 and
- * MMX are not modelled yet.
+ * operand, which 32-bit code has no encoding for, are modelled here. x87 goes
+ * to the 32-bit model's own (`ir-x87.js`) the same way: the registers, control
+ * and status words are the same at either width, and only `fnstsw ax` writes a
+ * general register. MMX is not modelled yet.
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF } from './decode/table.js';
 import { Fault, Unsupported, condition } from './ir.js';
 import { cpuidLeaf, topologyOf } from './cpuid.js';
 import { evaluateSimd, isSimdOp } from './ir-simd.js';
+import { evaluateX87, isX87Op } from './ir-x87.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
 /** IF, set for a user-mode program and not its to change. */
@@ -70,10 +73,30 @@ const signOf = size=>1n << BigInt(size * 8 - 1);
  * @property {{ trapPort: number, read: (port: number, size: number) => number,
  *     write: (port: number, size: number, value: number) => void }} [ports]
  *     the machine's I/O ports; absent, every `out` is a trap-port write
+ * @property {X87State} [x87]  the x87 unit, where the state holds it itself
+ * @property {() => X87State} [loadX87]  else the unit as the state's block holds it
+ * @property {(unit: X87State) => void} [storeX87]  written back after an x87 instruction
  * @property {() => bigint} [rdtsc]
  * @property {{ processors?: number, processor?: number }} [layout]
  * @property {number} [processor]
  */
+
+/**
+ * The x87 unit as `ir-x87.js` models it (`EvalState`'s x87 fields): the stack's
+ * top, the empty-register mask, the status and control words, the eight
+ * registers as doubles (and their bytes), and the quadwords a `fild` left exact.
+ *
+ * @typedef {{ top: number, empty: number, status: number, control: number,
+ *     f80: Float64Array, f80bits: BigInt64Array, x87Exact: number,
+ *     x87Shadow: BigInt64Array }} X87State
+ */
+
+/** The unit as `fninit` leaves it. @returns {X87State} */
+export function freshX87(){
+    const bytes = new ArrayBuffer(64);
+    return { top: 0, empty: 0xff, status: 0, control: 0x37f, f80: new Float64Array(bytes),
+        f80bits: new BigInt64Array(bytes), x87Exact: 0, x87Shadow: new BigInt64Array(8) };
+}
 
 /**
  * A fresh state: registers clear, the flags as a user-mode program first
@@ -87,7 +110,7 @@ export function createState64(memory, { rip = 0n, rsp = 0n, fsBase = 0n, gsBase 
     const r = new BigUint64Array(16);
     r[4] = rsp;
     return { r, rip, rflags: IF | 2, fsBase, gsBase, xmm: new Uint32Array(64), mxcsr: 0x1f80,
-        memory, halted: false, retired: 0, trapped: [] };
+        x87: freshX87(), memory, halted: false, retired: 0, trapped: [] };
 }
 
 /** @param {bigint} value */
@@ -269,6 +292,12 @@ export function evaluate64(instruction, state){
     if (isSimdOp(instruction))
     {
         simd(instruction, state);
+        state.rip = next;
+        return;
+    }
+    if (isX87Op(instruction))
+    {
+        x87(instruction, state);
         state.rip = next;
         return;
     }
@@ -1087,6 +1116,44 @@ function simd(instruction, state){
     {
         const reg = /** @type {number} */ (dst.reg);
         setRegister(state, reg, Math.max(dst.size, 4), BigInt(view.reg[reg]));
+    }
+}
+
+/**
+ * An x87 instruction, on the 32-bit model over a view of this state: its
+ * memory, the flags `fcomi` writes and `fcmov` reads, and the unit itself.
+ * Only `fnstsw ax` writes a general register, a word of rax.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @param {State64} state
+ */
+function x87(instruction, state){
+    const unit = state.loadX87?.() ?? /** @type {X87State} */ (state.x87);
+    const view = /** @type {import('./ir.js').EvalState} */ (/** @type {unknown} */ ({
+        ...unit,
+        reg: Uint32Array.from(state.r, value=>Number(value & 0xffffffffn)),
+        eflags: state.rflags,
+        memory: {
+            read: (/** @type {number} */ at, /** @type {number} */ size)=>
+                Number(state.memory.read(BigInt(at), size)),
+            write: (/** @type {number} */ at, /** @type {number} */ size, /** @type {number} */ value)=>
+                state.memory.write(BigInt(at), size, BigInt(value >>> 0)),
+        },
+    }));
+    if (!evaluateX87(instruction, view, operand=>Number(operandAddress64(state, operand))))
+    {
+        throw new Unsupported(instruction.op, instruction.eip);
+    }
+    unit.top = view.top;
+    unit.empty = view.empty;
+    unit.status = view.status;
+    unit.control = view.control;
+    unit.x87Exact = view.x87Exact;
+    state.storeX87?.(unit);
+    state.rflags = view.eflags;
+    if (instruction.operands[0]?.kind === 'reg')
+    {
+        setRegister(state, 0, 2, BigInt(view.reg[0] & 0xffff));
     }
 }
 

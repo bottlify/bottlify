@@ -23,7 +23,7 @@
 import { MODE_64, decode } from './decode/decoder.js';
 import { BlockMemory } from './interp.js';
 import { Fault, Unsupported } from './ir.js';
-import { evaluate64 } from './ir64.js';
+import { evaluate64, freshX87 } from './ir64.js';
 
 const WINDOW = 1n << 32n;
 
@@ -130,6 +130,54 @@ class BlockState64 {
 
     get fsBase(){
         return this.view.getBigUint64(this.layout.fsBase, true);
+    }
+
+    /**
+     * The x87 unit as the block holds it, as the 32-bit block does: a double
+     * every sixteen bytes, the quadword a `fild` left exact beside it, and the
+     * words past the registers.
+     *
+     * @returns {import('./ir64.js').X87State}
+     */
+    loadX87(){
+        const { view, layout } = this;
+        const unit = freshX87();
+        for (let i = 0; i < 8; i++)
+        {
+            unit.f80[i] = view.getFloat64(layout.x87 + i * 16, true);
+        }
+        unit.top = view.getUint8(layout.x87Top) & 7;
+        unit.empty = view.getUint8(layout.x87Empty);
+        unit.control = view.getUint16(layout.x87Control, true);
+        unit.status = view.getUint16(layout.x87Status, true);
+        // The 64-bit layout always has the place (`longLayout`).
+        unit.x87Exact = view.getUint8(/** @type {number} */ (layout.x87Exact));
+        for (let i = 0; i < 8; i++)
+        {
+            if ((unit.x87Exact >>> i & 1) !== 0)
+            {
+                unit.x87Shadow[i] = view.getBigInt64(layout.x87 + i * 16 + 8, true);
+            }
+        }
+        return unit;
+    }
+
+    /** @param {import('./ir64.js').X87State} unit */
+    storeX87(unit){
+        const { view, layout } = this;
+        for (let i = 0; i < 8; i++)
+        {
+            view.setFloat64(layout.x87 + i * 16, unit.f80[i], true);
+            if ((unit.x87Exact >>> i & 1) !== 0)
+            {
+                view.setBigInt64(layout.x87 + i * 16 + 8, unit.x87Shadow[i], true);
+            }
+        }
+        view.setUint8(layout.x87Top, unit.top & 7);
+        view.setUint8(layout.x87Empty, unit.empty & 0xff);
+        view.setUint16(layout.x87Control, unit.control & 0xffff, true);
+        view.setUint16(layout.x87Status, unit.status & 0xffff, true);
+        view.setUint8(/** @type {number} */ (layout.x87Exact), unit.x87Exact & 0xff);
     }
 
     get gsBase(){
