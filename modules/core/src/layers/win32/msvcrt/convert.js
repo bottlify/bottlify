@@ -20,7 +20,7 @@
  */
 
 import { readDouble, returningDouble } from './float.js';
-import { ERANGE } from './globals.js';
+import { EINVAL, ERANGE } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
@@ -486,6 +486,33 @@ export function createConversionFunctions(host){
         },
     });
 
+    /** @param {boolean} fixed */
+    const secureCvt = fixed=>({
+        convention: 'cdecl',
+        argBytes: 28,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [buffer, size, low, high, count, point, sign])=>{
+            if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (point >>> 0) === 0
+                || (sign >>> 0) === 0)
+            {
+                host.errno?.(EINVAL);
+                return EINVAL;
+            }
+            const answer = cvtDigits({ value: readDouble([low, high], 0), low: low >>> 0,
+                high: high >>> 0 }, count | 0, fixed);
+            writeInt(point, answer.point);
+            writeInt(sign, answer.negative ? 1 : 0);
+            if (answer.digits.length + 1 > (size >>> 0))
+            {
+                writeString(buffer, '');
+                host.errno?.(ERANGE);
+                return ERANGE;
+            }
+            writeString(buffer, answer.digits);
+            return 0;
+        },
+    });
+
     const { readMemory, writeMemory } = host;
     const table = {
         /**
@@ -622,6 +649,17 @@ export function createConversionFunctions(host){
          * a value below one loses its leading zeros to a negative *dec.
          */
         _fcvt: cvt(true),
+
+        /**
+         * errno_t _ecvt_s(char *buffer, size_t size, double value, int count,
+         *                 int *dec, int *sign) and _fcvt_s
+         *
+         * _ecvt's and _fcvt's digits into the caller's buffer: EINVAL for no
+         * buffer, no room or no pointer for the point or the sign, ERANGE
+         * and an empty buffer when the digits do not fit with a terminator.
+         */
+        _ecvt_s: secureCvt(false),
+        _fcvt_s: secureCvt(true),
 
         /**
          * char *_gcvt(double value, int digits, char *buffer)

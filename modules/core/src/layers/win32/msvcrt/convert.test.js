@@ -379,3 +379,38 @@ test('wcstod reads strtod\'s number from a wide string, its end two bytes a char
     assert.equal(memory.u32(end), none, 'nothing read leaves the end at the start');
     assert.equal(build().table.wcstod, undefined, 'no FPU, no export');
 });
+
+test('_ecvt_s and _fcvt_s write _ecvt\'s and _fcvt\'s digits into the caller\'s buffer', ()=>{
+    // Wine's msvcrt test_xcvt and test_fcvt.
+    const { memory, table } = build(fakeFpu());
+    const buffer = memory.allocate(64);
+    const point = memory.allocate(4);
+    const sign = memory.allocate(4);
+    for (const [name, value, count, digits, at, negative] of
+        /** @type {[string, number, number, string, number, number][]} */ ([
+            ['_ecvt_s', 45, 2, '45', 2, 0], ['_fcvt_s', 45, 2, '4500', 2, 0],
+            ['_ecvt_s', -111.0001, 5, '11100', 3, 1], ['_fcvt_s', 0.0063, 2, '1', -1, 0],
+            ['_fcvt_s', -123.0001, -1, '12', 3, 1], ['_ecvt_s', 0.6, 0, '', 1, 0],
+        ]))
+    {
+        assert.equal(table[name].handler([buffer, 64, ...doubleSlots(value), count, point, sign]),
+            0, `${name} ${value}`);
+        assert.equal(memory.text(buffer), digits, `${name} ${value}`);
+        assert.equal(memory.u32(point) | 0, at);
+        assert.equal(memory.u32(sign), negative);
+    }
+    assert.equal(table._fcvt_s.handler([0, 0, ...doubleSlots(0), 0, point, sign]), 22);
+    assert.equal(table._fcvt_s.handler([buffer, 0, ...doubleSlots(0), 0, point, sign]), 22);
+    assert.equal(table._fcvt_s.handler([buffer, 1, ...doubleSlots(0), 0, 0, sign]), 22);
+    assert.equal(table._fcvt_s.handler([buffer, 1, ...doubleSlots(0), 0, point, 0]), 22);
+    assert.equal(table._fcvt_s.handler([buffer, 0xffffffff, ...doubleSlots(0), 0, point, sign]),
+        0);
+    assert.equal(table._ecvt_s.handler([buffer, 3, ...doubleSlots(45), 5, point, sign]), 34,
+        'five digits do not fit in three');
+    assert.equal(memory.text(buffer), '');
+});
+
+test('_ecvt_s and _fcvt_s take the double in two slots: seven of them', ()=>{
+    const { table } = build(fakeFpu());
+    assert.deepEqual([table._ecvt_s.argBytes, table._fcvt_s.argBytes], [28, 28]);
+});
