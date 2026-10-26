@@ -33,18 +33,21 @@ function host(config = {}){
     });
 }
 
-test('the translator is given what its zone leaves after the engine\'s own pages', ()=>{
+test('the translator is given what its zone leaves under the iOS hack, elsewhere no ceiling', ()=>{
     const zone = 64 << 20;
-    const zoned = host({ translationZone: zone });
+    const hack = { crossTailCalls: false, dispatch: true };
+    const zoned = host({ translationZone: zone, cork: hack });
     const engineBytes = zoned.engineBytes();
     assert.equal(engineBytes, zoned.wasmMemory().buffer.byteLength - MEMORY,
         'the memory past the guest\'s RAM');
     assert.ok(engineBytes > 0);
     assert.equal(zoned.cacheBytes(), zone - engineBytes, 'one executor: all of it');
+    assert.equal(host({ translationZone: zone }).cacheBytes(), 0,
+        'without the hack, nothing is let go: a desktop\'s executors held a sixteenth each');
     assert.equal(host({ translationZone: zone, cork: { cacheBytes: 12345 } }).cacheBytes(), 12345,
         'a figure the config names is kept');
     assert.equal(host().cacheBytes(), null, 'no zone, no figure');
-    assert.equal(host({ translationZone: 1 }).cacheBytes(), 8 << 20,
+    assert.equal(host({ translationZone: 1, cork: hack }).cacheBytes(), 8 << 20,
         'never so little that 0, no ceiling at all, is what the runtime is given');
 });
 
