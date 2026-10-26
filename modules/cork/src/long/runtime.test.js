@@ -169,8 +169,8 @@ function load(m, one){
     });
     view.setBigUint64(layout.eip, BigInt(CORPUS.codeAt), true);
     view.setUint32(layout.eflags, one.flags | 0x202, true);
-    view.setUint32(layout.mxcsr, 0x1f80, true);
-    bytes.set(fill(one.seed ^ CORPUS.xmmSeed, 256), layout.xmm);
+    view.setUint32(layout.mxcsr, one.mxcsr ?? 0x1f80, true);
+    bytes.set(one.xmm ?? fill(one.seed ^ CORPUS.xmmSeed, 256), layout.xmm);
     m.state.syncIn();
     m.state.halted = false;
     m.state.trapped.length = 0;
@@ -360,4 +360,117 @@ test('calls from region to region return where they were made, and leave where t
         assert.deepEqual(failures, [], `budget ${budget}`);
         assert.equal(exits, cases.length);
     }
+});
+
+/** SSE forms, one instruction each, as llvm-mc assembles them. */
+const SSE_FORMS = [
+    ['f30f58c1', 'addss xmm0, xmm1'], ['f20f58c1', 'addsd xmm0, xmm1'],
+    ['0f58c1', 'addps xmm0, xmm1'], ['660f58c1', 'addpd xmm0, xmm1'],
+    ['0f5cd3', 'subps xmm2, xmm3'], ['f20f5cd3', 'subsd xmm2, xmm3'],
+    ['0f59c1', 'mulps xmm0, xmm1'], ['f20f59e5', 'mulsd xmm4, xmm5'],
+    ['0f5ec1', 'divps xmm0, xmm1'], ['f20f5ec1', 'divsd xmm0, xmm1'],
+    ['f30f5ef7', 'divss xmm6, xmm7'], ['0f51c1', 'sqrtps xmm0, xmm1'],
+    ['660f51c1', 'sqrtpd xmm0, xmm1'], ['f30f51d3', 'sqrtss xmm2, xmm3'],
+    ['f20f51d3', 'sqrtsd xmm2, xmm3'], ['0f5dc1', 'minps xmm0, xmm1'],
+    ['0f5fc1', 'maxps xmm0, xmm1'], ['660f5dc1', 'minpd xmm0, xmm1'],
+    ['660f5fc1', 'maxpd xmm0, xmm1'], ['f30f5dc1', 'minss xmm0, xmm1'],
+    ['f20f5fc1', 'maxsd xmm0, xmm1'], ['0fc2c100', 'cmpps xmm0, xmm1, 0'],
+    ['0fc2c101', 'cmpps xmm0, xmm1, 1'], ['0fc2c102', 'cmpps xmm0, xmm1, 2'],
+    ['0fc2c103', 'cmpps xmm0, xmm1, 3'], ['0fc2c104', 'cmpps xmm0, xmm1, 4'],
+    ['0fc2c105', 'cmpps xmm0, xmm1, 5'], ['0fc2c106', 'cmpps xmm0, xmm1, 6'],
+    ['0fc2c107', 'cmpps xmm0, xmm1, 7'], ['660fc2c101', 'cmppd xmm0, xmm1, 1'],
+    ['f20fc2c105', 'cmpsd xmm0, xmm1, 5'], ['f30fc2c103', 'cmpss xmm0, xmm1, 3'],
+    ['0f2fc1', 'comiss xmm0, xmm1'], ['0f2ec1', 'ucomiss xmm0, xmm1'],
+    ['660f2fc1', 'comisd xmm0, xmm1'], ['660f2ec1', 'ucomisd xmm0, xmm1'],
+    ['f3480f2ac0', 'cvtsi2ss xmm0, rax'], ['f2480f2ac0', 'cvtsi2sd xmm0, rax'],
+    ['f30f2ac0', 'cvtsi2ss xmm0, eax'], ['f20f2ac0', 'cvtsi2sd xmm0, eax'],
+    ['f30f2cc0', 'cvttss2si eax, xmm0'], ['f3480f2cc0', 'cvttss2si rax, xmm0'],
+    ['f20f2cc0', 'cvttsd2si eax, xmm0'], ['f2480f2cc0', 'cvttsd2si rax, xmm0'],
+    ['f30f2dc0', 'cvtss2si eax, xmm0'], ['f2480f2dc0', 'cvtsd2si rax, xmm0'],
+    ['0f5bc1', 'cvtdq2ps xmm0, xmm1'], ['f30f5bc1', 'cvttps2dq xmm0, xmm1'],
+    ['660f5bc1', 'cvtps2dq xmm0, xmm1'], ['f30fe6c1', 'cvtdq2pd xmm0, xmm1'],
+    ['660fe6c1', 'cvttpd2dq xmm0, xmm1'], ['f20fe6c1', 'cvtpd2dq xmm0, xmm1'],
+    ['f30f5ac1', 'cvtss2sd xmm0, xmm1'], ['f20f5ac1', 'cvtsd2ss xmm0, xmm1'],
+    ['0f5ac1', 'cvtps2pd xmm0, xmm1'], ['660f5ac1', 'cvtpd2ps xmm0, xmm1'],
+    ['660ff1c1', 'psllw xmm0, xmm1'], ['660fd2c1', 'psrld xmm0, xmm1'],
+    ['660fe1c1', 'psraw xmm0, xmm1'], ['660fe2c1', 'psrad xmm0, xmm1'],
+    ['660fd3c1', 'psrlq xmm0, xmm1'], ['660f73f03f', 'psllq xmm0, 63'],
+    ['660f71d010', 'psrlw xmm0, 16'], ['660f71e014', 'psraw xmm0, 20'],
+    ['660f73f805', 'pslldq xmm0, 5'], ['660f73d811', 'psrldq xmm0, 17'],
+    ['660fe5c1', 'pmulhw xmm0, xmm1'], ['660fe4c1', 'pmulhuw xmm0, xmm1'],
+    ['660ff4c1', 'pmuludq xmm0, xmm1'], ['660ff5c1', 'pmaddwd xmm0, xmm1'],
+    ['660ff6c1', 'psadbw xmm0, xmm1'], ['660f63c1', 'packsswb xmm0, xmm1'],
+    ['660f6bc1', 'packssdw xmm0, xmm1'], ['660f67c1', 'packuswb xmm0, xmm1'],
+    ['660fd7c0', 'pmovmskb eax, xmm0'], ['0f50c0', 'movmskps eax, xmm0'],
+    ['660f50c0', 'movmskpd eax, xmm0'], ['660fc5c005', 'pextrw eax, xmm0, 5'],
+    ['660fc4c003', 'pinsrw xmm0, eax, 3'], ['660f70c11b', 'pshufd xmm0, xmm1, 0x1b'],
+    ['f20f70c193', 'pshuflw xmm0, xmm1, 0x93'], ['f30f70c14e', 'pshufhw xmm0, xmm1, 0x4e'],
+    ['0fc6c1b1', 'shufps xmm0, xmm1, 0xb1'], ['660fc6c102', 'shufpd xmm0, xmm1, 2'],
+    ['0f14c1', 'unpcklps xmm0, xmm1'], ['660f15c1', 'unpckhpd xmm0, xmm1'],
+    ['0f12c1', 'movhlps xmm0, xmm1'], ['0f16c1', 'movlhps xmm0, xmm1'],
+    ['660f6ec0', 'movd xmm0, eax'], ['66480f6ec0', 'movq xmm0, rax'],
+    ['66480f7ec0', 'movq rax, xmm0'], ['660f7ec0', 'movd eax, xmm0'],
+    ['f30f7ec1', 'movq xmm0, xmm1'], ['f30f10c1', 'movss xmm0, xmm1'],
+    ['f20f10c1', 'movsd xmm0, xmm1'], ['660fdfc1', 'pandn xmm0, xmm1'],
+    ['0f55c1', 'andnps xmm0, xmm1'], ['660f66c1', 'pcmpgtd xmm0, xmm1'],
+    ['660fe0c1', 'pavgb xmm0, xmm1'],
+];
+
+test('SSE on NaNs, infinities, zeros, denormals and the edges of conversion', ()=>{
+    const singles = [0x00000000, 0x80000000, 0x3f800000, 0xbf800000, 0x3fc00000, 0x40200000,
+        0xc0200000, 0x3f000000, 0x4f000000, 0xcf000000, 0x4effffff, 0xcf000001, 0x7f800000,
+        0xff800000, 0x7fc00001, 0x7f800001, 0xffc00002, 0xff800003, 0x00000001, 0x80000003,
+        0x7f7fffff, 0x5f000000, 0xdf000000, 0x4f800000];
+    const doubles = [0n, 1n << 63n, 0x3ff0000000000000n, 0xbff0000000000000n, 0x3ff8000000000000n,
+        0x4004000000000000n, 0xc004000000000000n, 0x3fe0000000000000n, 0x41e0000000000000n,
+        0xc1e0000000000000n, 0x41dfffffffe00000n, 0xc1e0000000100000n, 0xc1e0000000200000n,
+        0x7ff0000000000000n, 0xfff0000000000000n, 0x7ff8000000000001n, 0x7ff0000000000001n,
+        0xfff8000000000002n, 0xfff0000000000003n, 1n, 0x8000000000000003n, 0x7fefffffffffffffn,
+        0x43e0000000000000n, 0xc3e0000000000000n, 0x4340000000000001n, 0x36a0000000000000n];
+    const integers = [0n, 1n, (1n << 64n) - 1n, 0x7fffffffn, 0x80000000n, (1n << 63n) - 1n,
+        1n << 63n, 0x20000001n, 0x0123456789abcdefn, (1n << 53n) + 1n,
+        (1n << 64n) - (1n << 53n) - 1n, 0xffffffffn];
+    let x = 0x9e3779b9;
+    const next = ()=>{
+        x ^= x << 13;
+        x ^= x >>> 17;
+        x ^= x << 5;
+        x >>>= 0;
+        return x;
+    };
+    const base = CORPUS.cases[0];
+    const cases = [];
+    for (const [code, text] of SSE_FORMS)
+    {
+        for (let k = 0; k < 24; k++)
+        {
+            const xmm = new Uint8Array(256);
+            const view = new DataView(xmm.buffer);
+            for (let reg = 0; reg < 16; reg++)
+            {
+                const kind = next() % 3;
+                for (let lane = 0; lane < (kind === 1 ? 2 : 4); lane++)
+                {
+                    if (kind === 1)
+                    {
+                        view.setBigUint64(reg * 16 + lane * 8, doubles[next() % doubles.length],
+                            true);
+                    }
+                    else
+                    {
+                        view.setUint32(reg * 16 + lane * 4,
+                            kind === 0 ? singles[next() % singles.length] : next(), true);
+                    }
+                }
+            }
+            const regs = [...base.regs];
+            regs[0] = integers[next() % integers.length].toString(16);
+            // Rounding to nearest mostly; down, up and toward zero now and then.
+            const mxcsr = 0x1f80 | (k % 4 === 3 ? (next() % 4) << 13 : 0);
+            cases.push({ ...base, text: `${text} #${k}`, code, regs, xmm, mxcsr });
+        }
+    }
+    const { failures, stats } = compare(cases);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated > cases.length / 2, JSON.stringify(stats));
 });

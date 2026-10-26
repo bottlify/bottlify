@@ -38,6 +38,7 @@ import { Body, EMPTY, ModuleBuilder, ValType } from '../wasm/encoder.js';
 import { pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
+import { XMM, emitSimd, translatesSimd } from './simd.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
 
@@ -94,7 +95,11 @@ const LOCALS = [
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32,
     ValType.i64, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32, ValType.i32,
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i32,
+    // XMM0..15 and three scratch vectors (simd.js), two f32s and two f64s.
+    ...new Array(19).fill(ValType.v128), ValType.f32, ValType.f32, ValType.f64, ValType.f64,
 ];
+/** The float scratch locals, past the vectors. */
+const F32 = XMM + 19;
 /** The direction flag, which no record holds. */
 const DF = 1 << 10;
 /**
@@ -136,6 +141,10 @@ const maskOf = size=>(size === 8 ? -1n : (1n << BigInt(size * 8)) - 1n);
  */
 export function translates(instruction){
     const { op, operands, size, prefixes } = instruction;
+    if (translatesSimd(instruction))
+    {
+        return !prefixes.lock;
+    }
     // A repeat prefix on a branch is a hint (`rep ret`, `bnd jmp`); on anything
     // translated here but a string instruction it means nothing either.
     if ((prefixes.lock && !LOCKABLE.has(op))
@@ -203,6 +212,18 @@ class BlockEmitter {
         this.b = new Body(1024);
         /** Ifs opened inside the block being emitted. */
         this.nest = 0;
+        // The locals simd.js reaches through the emitter.
+        this.A = A;
+        this.F32 = F32;
+        this.G32 = F32 + 1;
+        this.F64 = F32 + 2;
+        this.G64 = F32 + 3;
+        /**
+         * Where calls store the registers before and take them back after,
+         * filled in once the region's whole use of them is known.
+         * @type {{ at: number, reload: boolean }[]}
+         */
+        this.spills = [];
         /** Labels between the block's code and the exit block, ifs aside. */
         this.outer = 1;
         /**
@@ -913,6 +934,11 @@ class BlockEmitter {
         const next = at + instruction.length;
         const defined = instruction.flagsWritten & ~instruction.flagsUndefined;
         const [dst, src] = operands;
+        if (translatesSimd(instruction))
+        {
+            emitSimd(this, instruction, index, at);
+            return true;
+        }
         /** Places a memory operand, if the instruction has one. @param {boolean} store */
         const placeMemory = store=>{
             const memory = operands.find(operand=>operand.kind === 'mem');
@@ -1421,10 +1447,7 @@ class BlockEmitter {
     callOut(to, next, slot, regionType, indexOf, here, count){
         const { b, layout } = this;
         this.settle();
-        for (let reg = 0; reg < 16; reg++)
-        {
-            b.i32const(0).localGet(reg).store('i64', { offset: layout.regs + reg * 8 });
-        }
+        this.spills.push({ at: b.length, reload: false });
         b.i32const(0).localGet(FL).store('i32', { offset: layout.eflags });
         b.globalGet(DEPTH).i32const(CALL_DEPTH).op(Op.i32geu);
         this.open();
@@ -1438,10 +1461,7 @@ class BlockEmitter {
         b.globalGet(DEPTH).i32const(1).op(Op.i32sub).globalSet(DEPTH);
         b.localGet(SAVED).globalSet(BUDGET);
         b.localGet(K).localGet(U).i32const(2).op(Op.i32shru).op(Op.i32add).localSet(K);
-        for (let reg = 0; reg < 16; reg++)
-        {
-            b.i32const(0).load('i64', { offset: layout.regs + reg * 8 }).localSet(reg);
-        }
+        this.spills.push({ at: b.length, reload: true });
         b.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);
         b.i32const(0).load('i64', { offset: layout.eip }).localSet(RIP);
         b.localGet(U).i32const(3).op(Op.i32and).i32const(LongExit.MISS).op(Op.i32eq);
@@ -1886,15 +1906,49 @@ function emitRegion(layout, helpers, region, { slotOf, regionType }){
     });
     b.end();
     b.end();
-    // The epilogue: every register written, the record folded, the flags and RIP.
-    const tail = new Body(256);
-    for (let reg = 0; reg < 16; reg++)
-    {
-        if (b.writes(reg))
+    // Every register the region writes, stored, and every one it uses, loaded:
+    // at its exit and entry, and around each call it makes.
+    const written = [...Array(32).keys()].filter(i=>b.writes(i < 16 ? i : XMM + i - 16));
+    const used = [...Array(32).keys()].filter(i=>b.uses(i < 16 ? i : XMM + i - 16));
+    /** @param {Body} body @param {number[]} which */
+    const store = (body, which)=>{
+        for (const i of which)
         {
-            tail.i32const(0).localGet(reg).store('i64', { offset: layout.regs + reg * 8 });
+            body.i32const(0);
+            if (i < 16)
+            {
+                body.localGet(i).store('i64', { offset: layout.regs + i * 8 });
+            }
+            else
+            {
+                body.localGet(XMM + i - 16).storeV128({ offset: layout.xmm + (i - 16) * 16 });
+            }
         }
+        return body;
+    };
+    /** @param {Body} body @param {number[]} which */
+    const load = (body, which)=>{
+        for (const i of which)
+        {
+            body.i32const(0);
+            if (i < 16)
+            {
+                body.load('i64', { offset: layout.regs + i * 8 }).localSet(i);
+            }
+            else
+            {
+                body.loadV128({ offset: layout.xmm + (i - 16) * 16 }).localSet(XMM + i - 16);
+            }
+        }
+        return body;
+    };
+    if (e.spills.length > 0)
+    {
+        b.insertAll(e.spills.map(({ at, reload })=>({ at,
+            body: reload ? load(new Body(256), used) : store(new Body(256), written) })));
     }
+    // The epilogue: every register written, the record folded, the flags and RIP.
+    const tail = store(new Body(256), written);
     tail.localGet(PK);
     tail.if();
     tail.localGet(PK).localGet(PS).localGet(PA).localGet(PB).localGet(PR).localGet(PC)
@@ -1904,14 +1958,7 @@ function emitRegion(layout, helpers, region, { slotOf, regionType }){
     tail.i32const(0).localGet(RIP).store('i64', { offset: layout.eip });
     tail.localGet(K).i32const(2).op(Op.i32shl).localGet(CODE).op(Op.i32or);
     // The prologue: every register the body touches, and the flags word.
-    const head = new Body(256);
-    for (let reg = 0; reg < 16; reg++)
-    {
-        if (b.uses(reg))
-        {
-            head.i32const(0).load('i64', { offset: layout.regs + reg * 8 }).localSet(reg);
-        }
-    }
+    const head = load(new Body(256), used);
     head.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);
     head.insert(head.length, b);
     head.insert(head.length, tail);
