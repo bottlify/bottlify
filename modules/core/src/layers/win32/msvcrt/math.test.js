@@ -205,6 +205,18 @@ test('atan, tanh and exp hand a NaN back as it came, payload and all', ()=>{
     }
 });
 
+test('a signalling NaN goes out quiet, its payload kept, as the x87 answers an operand NaN', ()=>{
+    // Wine's msvcrt test_math_functions: cosh, sinh and tanh of 0xfff0000123456780.
+    const { fpu, table } = build();
+    const nan = new Float64Array(new BigUint64Array([0xfff0000123456780n]).buffer)[0];
+    for (const name of ['cosh', 'sinh', 'tanh', 'exp', 'sqrt'])
+    {
+        table[name].handler(doubleSlots(nan));
+        const bits = new BigUint64Array(new Float64Array([fpu.result]).buffer)[0];
+        assert.equal(bits, 0xfff8000123456780n, name);
+    }
+});
+
 test('ldexp reaches what a double holds from a power of two a double does not', ()=>{
     const { fpu, table } = build();
     table.ldexp.handler([...doubleSlots(1e300), -1100 >>> 0]);

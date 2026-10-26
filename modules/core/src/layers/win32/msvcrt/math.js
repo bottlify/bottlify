@@ -116,6 +116,20 @@ const UNARY = {
  */
 const NAN_IS_DOMAIN = new Set(['atan', 'tanh', 'exp']);
 
+const NAN_BITS = new DataView(new ArrayBuffer(8));
+
+/**
+ * A NaN as the x87 answers it for an operand NaN: the operand itself, its
+ * payload kept and its quiet bit set -- a signalling NaN goes out quiet.
+ *
+ * @param {number} nan
+ */
+export function quieted(nan){
+    NAN_BITS.setFloat64(0, nan, true);
+    NAN_BITS.setUint8(6, NAN_BITS.getUint8(6) | 0x08);
+    return NAN_BITS.getFloat64(0, true);
+}
+
 /** @type {Record<string, (left: number, right: number) => number>} */
 const BINARY = {
     pow: Math.pow,
@@ -235,10 +249,13 @@ export function createMathFunctions(host){
 
     /** @param {string} name @param {(value: number) => number} compute */
     const unary = (name, compute)=>(/** @type {number} */ value)=>{
-        if (Number.isNaN(value) && NAN_IS_DOMAIN.has(name))
+        if (Number.isNaN(value))
         {
-            host.errno?.(EDOM);
-            return value;
+            if (NAN_IS_DOMAIN.has(name))
+            {
+                host.errno?.(EDOM);
+            }
+            return quieted(value);
         }
         return answer([value], compute(value));
     };
