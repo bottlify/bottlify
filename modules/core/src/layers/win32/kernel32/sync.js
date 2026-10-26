@@ -13,6 +13,7 @@ import { createChangeNotifications } from './changes.js';
 import { SELECTORS } from './seh.js';
 import { childWaitMark } from './threading.js';
 import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
+import { createThreadInfoFunctions } from './thread-info.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -438,6 +439,23 @@ export function createSyncFunctions(host){
     };
 
     return {
+        ...createThreadInfoFunctions({
+            kernel,
+            processors,
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            currentThread: host.currentThread,
+            park: host.park,
+            setLastError: host.setLastError,
+            allocate: host.allocate,
+            divergence: host.divergence,
+            threadTimes: (handle, at)=>{
+                const thread = threadOf(handle);
+                writeTimes([at, at + 8, at + 16, at + 24],
+                    (thread?.exitCode ?? null) !== null, thread?.cpuMs ?? 0);
+            },
+        }),
+
         /**
          * BOOL WaitForDebugEvent(LPDEBUG_EVENT lpDebugEvent, DWORD dwMilliseconds)
          *

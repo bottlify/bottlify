@@ -672,9 +672,6 @@ export function createQueryFunctions(host){
         /**
          * NTSTATUS NtOpenThread(PHANDLE Thread, ACCESS_MASK Access,
          *                       POBJECT_ATTRIBUTES Attributes, PCLIENT_ID Client)
-         * NTSTATUS NtQueryInformationThread(HANDLE Thread, THREADINFOCLASS Class,
-         *                                   PVOID Information, ULONG Length,
-         *                                   PULONG ReturnLength)
          * PRTL_DEBUG_INFORMATION RtlCreateQueryDebugBuffer(ULONG Size, BOOLEAN EventPair)
          * NTSTATUS RtlDestroyQueryDebugBuffer(PRTL_DEBUG_INFORMATION Buffer)
          * NTSTATUS RtlQueryProcessDebugInformation(ULONG Pid, ULONG Flags,
@@ -689,13 +686,6 @@ export function createQueryFunctions(host){
             argBytes: 16,
             handler: ()=>{
                 host.divergence?.('NtOpenThread', 'a thread cannot be opened by id; refused');
-                return STATUS.NOT_IMPLEMENTED;
-            },
-        },
-        NtQueryInformationThread: {
-            argBytes: 20,
-            handler: ()=>{
-                host.divergence?.('NtQueryInformationThread', 'refused');
                 return STATUS.NOT_IMPLEMENTED;
             },
         },

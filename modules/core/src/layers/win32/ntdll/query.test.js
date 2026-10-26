@@ -376,16 +376,15 @@ test('the debug-help queries are refused as unsupported and say so', ()=>{
     const said = [];
     const fns = /** @type {Record<string, any>} */ (createQueryFunctions({ ...fakeHost(),
         divergence: api=>said.push(api) }));
-    assert.deepEqual(['NtOpenThread', 'NtQueryInformationThread', 'RtlCreateQueryDebugBuffer',
+    assert.deepEqual(['NtOpenThread', 'RtlCreateQueryDebugBuffer',
         'RtlDestroyQueryDebugBuffer', 'RtlQueryProcessDebugInformation']
-        .map(name=>fns[name].argBytes), [16, 20, 8, 4, 12]);
+        .map(name=>fns[name].argBytes), [16, 8, 4, 12]);
     assert.equal(fns.NtOpenThread.handler([0, 0, 0, 0]), STATUS.NOT_IMPLEMENTED);
-    assert.equal(fns.NtQueryInformationThread.handler([0, 0, 0, 0, 0]), STATUS.NOT_IMPLEMENTED);
     assert.equal(fns.RtlCreateQueryDebugBuffer.handler([0, 0]), 0, 'no buffer');
     assert.equal(fns.RtlDestroyQueryDebugBuffer.handler([0]), STATUS.INVALID_PARAMETER);
     assert.equal(fns.RtlDestroyQueryDebugBuffer.handler([0x1000]), STATUS.SUCCESS);
     assert.equal(fns.RtlQueryProcessDebugInformation.handler([0, 0, 0]), STATUS.NOT_IMPLEMENTED);
-    assert.equal(said.length, 4);
+    assert.equal(said.length, 3);
 });
 
 test('SystemProcessInformation chains the idle process and each process with its threads', ()=>{
