@@ -14,6 +14,13 @@
  * So the pool keeps threads, grows when every one of them is busy, and hands
  * each callback to an idle one.
  *
+ * It grows by one thread at a time: while callbacks wait, one more thread is
+ * starting, and the next once that one has taken its first. Callbacks that
+ * return at once are run by the threads already there, as Windows' pool adds
+ * threads only while its own stay busy; a thread for every callback queued at
+ * once took a stack each and kept it, and a hundred work items left no room
+ * for the next thread a program made.
+ *
  * A pool thread is the wave notice thread's shape (`winmm/thread.js`): a loop
  * of a few guest instructions asks the host for the next callback, calls it,
  * asks again, and asking with nothing to do blocks the thread until a callback
@@ -42,6 +49,8 @@ const INVALID_HANDLE_VALUE = 0xffffffff;
 
 /** Flags of CreateTimerQueueTimer: a timer that fires once whatever its period. */
 const WT_EXECUTEONLYONCE = 0x00000008;
+/** A registered wait's callback runs on the wait thread rather than the pool's. */
+const WT_EXECUTEINWAITTHREAD = 0x00000004;
 
 /** What a wait answers: the object signalled, abandoned, or the time out. */
 const WAIT_OBJECT_0 = 0;
@@ -208,7 +217,9 @@ export function waitLoopCode(wait, after, at){
 
 /**
  * @typedef {Owner & { handle: number, object: number, callback: number, context: number,
- *     timeout: number, once: boolean, cancelled: boolean }} Wait
+ *     timeout: number, once: boolean, inWaitThread: boolean, cancelled: boolean,
+ *     left: boolean }} Wait
+ *     `left`: its thread is out of its loop, and asks for it by its handle no more.
  */
 
 /**
@@ -222,16 +233,34 @@ export function createThreadPool(host){
      * @property {any} thread
      * @property {number} record
      * @property {Job | null} job
+     * @property {Lane} lane
      */
+
+    /**
+     * Threads that take callbacks from one backlog: the pool's, and the wait
+     * thread's, which runs a WT_EXECUTEINWAITTHREAD callback where Windows
+     * runs it -- on the one thread its waits share, one callback after the
+     * other.
+     *
+     * @typedef {Object} Lane
+     * @property {string} name
+     * @property {number} max  threads at most
+     * @property {number} threads  made, started or not
+     * @property {Worker[]} idle
+     * @property {Job[]} backlog
+     * @property {number} starting  made and not yet at their first question
+     */
+
+    /** @param {string} name @param {number} max @returns {Lane} */
+    const makeLane = (name, max)=>({ name, max, threads: 0, idle: [], backlog: [], starting: 0 });
+    const poolLane = makeLane('thread pool', MAX_THREADS);
+    const waitLane = makeLane('wait thread', 1);
 
     /** @type {Map<any, Worker>} */
     const workers = new Map();
-    /** @type {Worker[]} */
-    const idle = [];
-    /** @type {Job[]} */
-    const backlog = [];
-    /** Threads made and not yet at their first question. */
-    let starting = 0;
+    /** The lane of each thread made and not yet at its first question. */
+    /** @type {Map<any, Lane>} */
+    const lanes = new Map();
     let loop = 0;
 
     /**
@@ -299,10 +328,13 @@ export function createThreadPool(host){
         let worker = workers.get(thread);
         if (!worker)
         {
-            worker = { thread, record: record >>> 0, job: null };
+            const lane = lanes.get(thread) ?? poolLane;
+            lanes.delete(thread);
+            worker = { thread, record: record >>> 0, job: null, lane };
             workers.set(thread, worker);
-            starting = Math.max(0, starting - 1);
+            lane.starting = Math.max(0, lane.starting - 1);
         }
+        const { lane } = worker;
         if (worker.job)
         {
             const done = worker.job;
@@ -310,19 +342,21 @@ export function createThreadPool(host){
             ran++;
             settle(done);
         }
-        const next = backlog.shift();
+        const next = lane.backlog.shift();
         if (next)
         {
             give(worker, next);
+            grow(lane);
             return RUN;
         }
-        idle.push(worker);
+        lane.idle.push(worker);
         kernel.block(thread, 'a thread pool callback');
         return host.park(thread);
     };
 
-    const spawn = ()=>{
-        if (workers.size + starting >= MAX_THREADS)
+    /** @param {Lane} lane */
+    const spawn = lane=>{
+        if (lane.threads >= lane.max)
         {
             return;
         }
@@ -338,35 +372,46 @@ export function createThreadPool(host){
             host.writeMemory(at, poolLoopCode(trap, at));
             loop = at;
         }
-        const thread = makeThread({ entry: loop, name: 'thread pool' });
+        const thread = makeThread({ entry: loop, name: lane.name });
         if (!thread)
         {
             return;
         }
         host.threadBlock?.(thread);
-        starting++;
+        lanes.set(thread, lane);
+        lane.threads++;
+        lane.starting++;
     };
 
     /**
-     * Hands a callback to an idle thread, or to the next one to ask, making
-     * one when every thread there is is busy.
+     * One more thread, while callbacks wait and none is on its way to them.
      *
-     * @param {Job} job
+     * @param {Lane} lane
      */
-    const dispatch = job=>{
+    const grow = lane=>{
+        if (lane.backlog.length > 0 && lane.starting === 0)
+        {
+            spawn(lane);
+        }
+    };
+
+    /**
+     * Hands a callback to an idle thread of its lane, or to the next one to
+     * ask, making one when every thread there is is busy.
+     *
+     * @param {Job} job @param {Lane} [lane]
+     */
+    const dispatch = (job, lane = poolLane)=>{
         job.owner.outstanding++;
-        const worker = idle.pop();
+        const worker = lane.idle.pop();
         if (worker)
         {
             give(worker, job);
             kernel.wake(worker.thread, RUN);
             return;
         }
-        backlog.push(job);
-        if (backlog.length > starting)
-        {
-            spawn();
-        }
+        lane.backlog.push(job);
+        grow(lane);
     };
 
     /**
@@ -615,9 +660,17 @@ export function createThreadPool(host){
     const waits = new Map();
     let waitLoop = 0;
 
-    /** @param {Wait} wait */
+    /**
+     * A wait unregistered is let go once its callbacks have returned and its
+     * thread has left its loop. Its handle is an address, which the next
+     * registration may be given: freed while the thread still waited, the
+     * thread woke into the new wait and ran its callback as its own.
+     *
+     * @param {Wait} wait
+     */
     const forget = wait=>{
-        if (wait.outstanding === 0 && waits.get(wait.handle) === wait)
+        if (wait.cancelled && wait.left && wait.outstanding === 0
+            && waits.get(wait.handle) === wait)
         {
             waits.delete(wait.handle);
             host.free?.(wait.handle);
@@ -641,13 +694,21 @@ export function createThreadPool(host){
     const waitDone = (/** @type {number[]} */ [handle, answer])=>{
         const wait = waits.get(handle >>> 0);
         const result = answer >>> 0;
-        if (!wait || wait.cancelled || result !== WAIT_OBJECT_0 && result !== WAIT_ABANDONED
-            && result !== WAIT_TIMEOUT)
+        if (!wait)
         {
             return 0;
         }
+        if (wait.cancelled || result !== WAIT_OBJECT_0 && result !== WAIT_ABANDONED
+            && result !== WAIT_TIMEOUT)
+        {
+            wait.left = true;
+            forget(wait);
+            return 0;
+        }
         dispatch({ entry: wait.callback,
-            args: [wait.context, result === WAIT_TIMEOUT ? 1 : 0], owner: wait });
+            args: [wait.context, result === WAIT_TIMEOUT ? 1 : 0], owner: wait },
+        wait.inWaitThread ? waitLane : poolLane);
+        wait.left = wait.once;
         return wait.once ? 0 : 1;
     };
 
@@ -685,14 +746,10 @@ export function createThreadPool(host){
         /** @type {Wait} */
         const wait = { handle, object: object >>> 0, callback: callback >>> 0,
             context: context >>> 0, timeout: timeout >>> 0,
-            once: (flags & WT_EXECUTEONLYONCE) !== 0, cancelled: false, outstanding: 0,
-            waiters: [] };
-        wait.settled = ()=>{
-            if (wait.cancelled)
-            {
-                forget(wait);
-            }
-        };
+            once: (flags & WT_EXECUTEONLYONCE) !== 0,
+            inWaitThread: (flags & WT_EXECUTEINWAITTHREAD) !== 0, cancelled: false, left: false,
+            outstanding: 0, waiters: [] };
+        wait.settled = ()=>forget(wait);
         const thread = makeThread({ entry: waitLoop, parameter: handle,
             name: 'registered wait', returnTo: host.threadReturn?.() });
         if (!thread)
@@ -720,7 +777,12 @@ export function createThreadPool(host){
         }
         wait.cancelled = true;
         const own = running()?.owner === wait ? 1 : 0;
-        const answer = complete(wait, event, own);
+        // Its own callback on the wait thread is the only one of it that can
+        // be running there, so nothing is left pending (Wine's kernel32
+        // test_RegisterWaitForSingleObject); one on the pool's is pending, as
+        // a timer's own callback deleting it is.
+        const answer = own === 1 && wait.inWaitThread && (event >>> 0) === 0 ? 1
+            : complete(wait, event, own);
         forget(wait);
         return answer;
     };
@@ -728,8 +790,8 @@ export function createThreadPool(host){
     return {
         diagnostics: ()=>({
             threads: workers.size,
-            idle: idle.length,
-            backlog: backlog.length,
+            idle: poolLane.idle.length + waitLane.idle.length,
+            backlog: poolLane.backlog.length + waitLane.backlog.length,
             ran,
             queues: queues.size,
             timers: timers.size,
@@ -869,8 +931,10 @@ export function createThreadPool(host){
              *
              * The callback is handed its context and whether the time ran out,
              * on a pool thread, each time the object is signalled or the time
-             * runs out -- once only with WT_EXECUTEONLYONCE. The flags that
-             * choose a kind of thread choose nothing here.
+             * runs out -- once only with WT_EXECUTEONLYONCE. With
+             * WT_EXECUTEINWAITTHREAD it runs on the wait thread, which every
+             * such wait shares, so their callbacks run one after another. The
+             * other flags that choose a kind of thread choose nothing here.
              */
             RegisterWaitForSingleObject: {
                 argBytes: 24,
