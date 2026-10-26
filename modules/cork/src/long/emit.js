@@ -150,7 +150,8 @@ const Op = Object.freeze({
     i64eq: 0x51, i64ne: 0x52, i64lts: 0x53, i64ltu: 0x54,
     i64gtu: 0x56, i64les: 0x57, i64leu: 0x58, i32add: 0x6a, i32sub: 0x6b, i32and: 0x71,
     i32or: 0x72, i32xor: 0x73,
-    i32shl: 0x74, i32shru: 0x76, i32remu: 0x70, i32popcnt: 0x69, i64popcnt: 0x7b,
+    i32shl: 0x74, i32shru: 0x76, i32rotl: 0x77, i32rotr: 0x78, i32remu: 0x70, i32popcnt: 0x69,
+    i64popcnt: 0x7b,
     i64add: 0x7c, i64sub: 0x7d, i64mul: 0x7e, i64divs: 0x7f, i64divu: 0x80, i64rems: 0x81,
     i64remu: 0x82, i64clz: 0x79, i64ctz: 0x7a, i64and: 0x83, i64or: 0x84,
     i64xor: 0x85, i64shl: 0x86, i64shrs: 0x87, i64shru: 0x88, i64rotl: 0x89, i64rotr: 0x8a,
@@ -613,6 +614,39 @@ class BlockEmitter {
         }
         b.op(Op.i32or).localSet(FL);
         this.drop();
+    }
+
+    /**
+     * A shift or rotate's result alone, by the count in `src` masked as the
+     * processor masks it: the flags are no one's (`instruction`). A rotate
+     * only of a doubleword or a quadword, which wasm rotates.
+     *
+     * @param {string} op @param {number} size
+     * @param {import('../decode/decoder.js').Operand} dst
+     * @param {import('../decode/decoder.js').Operand} src
+     */
+    shiftValue(op, size, dst, src){
+        const { b } = this;
+        this.read(dst);
+        if (op === 'sar' && size < 8)
+        {
+            const spare = BigInt(64 - size * 8);
+            b.i64const(spare).op(Op.i64shl).i64const(spare).op(Op.i64shrs);
+        }
+        if ((op === 'rol' || op === 'ror') && size === 4)
+        {
+            b.op(Op.i32wrap);
+            this.read(src);
+            b.op(Op.i32wrap).op(op === 'rol' ? Op.i32rotl : Op.i32rotr).op(Op.i64extendu);
+            this.write(dst);
+            return;
+        }
+        this.read(src);
+        b.i64const(size === 8 ? 63n : 31n).op(Op.i64and);
+        b.op(op === 'shr' ? Op.i64shru : op === 'sar' ? Op.i64shrs : op === 'rol' ? Op.i64rotl
+            : op === 'ror' ? Op.i64rotr : Op.i64shl);
+        // The bits past the operand go with the write.
+        this.write(dst);
     }
 
     /**
@@ -1201,6 +1235,16 @@ class BlockEmitter {
                     b.i64const(BigInt(count)).localSet(T1);
                     this.record(op === 'shr' ? Kind.SHR : op === 'sar' ? Kind.SAR : Kind.SHL, size,
                         ARITH);
+                    return true;
+                }
+                if ((this.live & ARITH) === 0 && (op !== 'rol' && op !== 'ror' || size >= 4))
+                {
+                    // By cl, where nothing reads a flag before the next write
+                    // of all of them: the flags it may write or leave matter
+                    // to nobody, so neither does the record before, and the
+                    // result is all there is to it.
+                    this.drop();
+                    this.shiftValue(op, size, dst, src);
                     return true;
                 }
                 this.settle();
