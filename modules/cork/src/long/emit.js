@@ -203,6 +203,11 @@ export function translates(instruction){
             return true;
         case 'shl': case 'sal': case 'shr': case 'sar': case 'rol': case 'ror':
             return true;
+        case 'stos': case 'movs':
+            // A 64-bit address, and a source of a segment with no base: what
+            // `string` copies in bulk. Anything else is the interpreter's.
+            return operands.every(operand=>operand.kind !== 'mem'
+                || operand.addressSize === 64 && operand.segment !== 4 && operand.segment !== 5);
         case 'push':
             return (operands[0].kind === 'imm' ? size : operands[0].size) === 8;
         case 'pop':
@@ -1428,6 +1433,9 @@ class BlockEmitter {
                 }
                 b.localSet(FL);
                 return true;
+            case 'stos': case 'movs':
+                this.string(instruction, index);
+                return true;
             case 'cld': case 'std':
                 // DF is no record's: FL holds it whatever is pending.
                 b.localGet(FL).i32const(~DF).op(Op.i32and);
@@ -1481,6 +1489,136 @@ class BlockEmitter {
         }
         // jcc: the region emitter branches on the condition.
         return { to: /** @type {number} */ (dst.target), cc, next };
+    }
+
+    /**
+     * `stos` or `movs`, with or without a repeat, going up: a page at a time,
+     * the elements that lie wholly on the pointers' current pages (as far as
+     * the count goes) stored by one `memory.fill` -- a fill of the value's
+     * byte, a loop of stores for any other value -- or one `memory.copy`, and
+     * the registers moved past them, as the 32-bit translator's `bulkString`
+     * does. Going down, an element across a page, a page closed to the access
+     * (or holding code, or watched), a pointer past 4 GiB, and a copy whose
+     * destination lies just ahead of its source, where the processor reads
+     * what it has just written, leave before the instruction with what is
+     * done done: the interpreter takes the rest of it, and faults where it
+     * faults. A `rep` counts as one instruction, the whole of it run here, as
+     * the interpreter counts and runs it.
+     *
+     * @param {import('../decode/decoder.js').Instruction} instruction @param {number} index
+     */
+    string(instruction, index){
+        const { b, layout } = this;
+        const { op, size, prefixes } = instruction;
+        const at = instruction.eip;
+        const movs = op === 'movs';
+        const repeat = prefixes.rep || prefixes.repne;
+        const shift = BigInt(Math.log2(size));
+        const RCX = 1;
+        const RSI = 6;
+        const RDI = 7;
+        const flags = pageFlagsAt(layout);
+        b.localGet(FL).i32const(DF).op(Op.i32and);
+        this.exitIf(index, at);
+        // Two labels around the turns: the end (1 from the loop's top level), the loop (0).
+        b.block();
+        b.loop();
+        this.nest += 2;
+        if (repeat)
+        {
+            b.localGet(RCX).op(Op.i64eqz).brIf(1);
+        }
+        /**
+         * Pushes the elements left on the pointer's page, as an i64.
+         * @param {number} pointer
+         */
+        const room = pointer=>{
+            b.i64const(0x1000n).localGet(pointer).i64const(0xfffn).op(Op.i64and).op(Op.i64sub)
+                .i64const(shift).op(Op.i64shru);
+        };
+        // T0: the elements this turn -- the count's, the pages' -- and none
+        // when one lies across a page.
+        room(RDI);
+        b.localSet(T0);
+        if (movs)
+        {
+            room(RSI);
+            b.localTee(T1).localGet(T0).localGet(T1).localGet(T0).op(Op.i64ltu)
+                .op(Op.select).localSet(T0);
+        }
+        if (repeat)
+        {
+            b.localGet(RCX).localGet(T0).localGet(RCX).localGet(T0).op(Op.i64ltu)
+                .op(Op.select).localSet(T0);
+        }
+        else
+        {
+            b.localGet(T0).i64const(0n).op(Op.i64ne).op(Op.i64extendu).localSet(T0);
+        }
+        b.localGet(T0).op(Op.i64eqz);
+        this.exitIf(index, at);
+        /**
+         * Leaves unless the pointer lies below 4 GiB on a page open to the access.
+         * @param {number} pointer @param {number} closed
+         */
+        const open = (pointer, closed)=>{
+            b.localGet(pointer).i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz);
+            this.exitIf(index, at);
+            b.localGet(pointer).op(Op.i32wrap).i32const(12).op(Op.i32shru)
+                .load('i32_8u', { offset: flags }).i32const(closed).op(Op.i32and);
+            this.exitIf(index, at);
+        };
+        open(RDI, PageFlag.INACCESSIBLE | PageFlag.HAS_CODE | PageFlag.WATCH);
+        // T1: the bytes.
+        b.localGet(T0).i64const(shift).op(Op.i64shl).localSet(T1);
+        if (movs)
+        {
+            open(RSI, PageFlag.INACCESSIBLE);
+            // Not 0 < the destination's lead on the source < the bytes:
+            // (lead - 1) >=u (bytes - 1), else the interpreter's.
+            b.localGet(RDI).localGet(RSI).op(Op.i64sub).i64const(1n).op(Op.i64sub)
+                .localGet(T1).i64const(1n).op(Op.i64sub).op(Op.i64ltu);
+            this.exitIf(index, at);
+            b.localGet(RDI).op(Op.i32wrap).i32const(layout.ramBase).op(Op.i32add)
+                .localGet(RSI).op(Op.i32wrap).i32const(layout.ramBase).op(Op.i32add)
+                .localGet(T1).op(Op.i32wrap).op(0xfc, [0x0a, 0x00, 0x00]); // memory.copy
+        }
+        else
+        {
+            // A value of one byte repeated is a fill; any other is stored an
+            // element at a time, still with no test between.
+            this.readReg(0, size);
+            b.localTee(T2).i64const(0xffn).op(Op.i64and)
+                .i64const(BigInt.asIntN(64, BigInt.asUintN(size * 8, -1n) / 0xffn))
+                .op(Op.i64mul)
+                .localGet(T2).op(Op.i64eq);
+            b.if();
+            b.localGet(RDI).op(Op.i32wrap).i32const(layout.ramBase).op(Op.i32add)
+                .localGet(T2).op(Op.i32wrap).localGet(T1).op(Op.i32wrap)
+                .op(0xfc, [0x0b, 0x00]); // memory.fill
+            b.else();
+            b.localGet(RDI).op(Op.i32wrap).localTee(A).localGet(T1).op(Op.i32wrap)
+                .op(Op.i32add).localSet(U);
+            b.loop();
+            b.localGet(T2);
+            this.storeAt(size);
+            b.localGet(A).i32const(size).op(Op.i32add).localTee(A).localGet(U).op(Op.i32ne)
+                .brIf(0);
+            b.end();
+            b.end();
+        }
+        for (const pointer of movs ? [RDI, RSI] : [RDI])
+        {
+            b.localGet(pointer).localGet(T1).op(Op.i64add).localSet(pointer);
+        }
+        if (repeat)
+        {
+            b.localGet(RCX).localGet(T0).op(Op.i64sub).localSet(RCX);
+            b.br(0);
+        }
+        b.end();
+        b.end();
+        this.nest -= 2;
     }
 
     /**
@@ -1903,15 +2041,20 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
         /** @type {number | null} */
         transfer: null,
     };
+    // Named as the 32-bit translator names its functions, so a CPU profile
+    // says which region, or which helper, the time went to.
+    m.nameFunction(helpers.flags, 'flags').nameFunction(helpers.shift, 'shift');
     if (transfers)
     {
         const transfer = transferFunction(layout, regionType);
         helpers.transfer = m.function(m.type({ params: [ValType.i64, ValType.i32],
             results: [ValType.i32] }), transfer.locals, transfer.body.toBytes());
+        m.nameFunction(helpers.transfer, 'transfer');
     }
     regions.forEach((region, index)=>{
         const body = emitRegion(layout, helpers, region, { slotOf, regionType, checkReads });
-        m.function(regionType, LOCALS, body.toBytes(), { exportAs: `r${index}` });
+        const at = m.function(regionType, LOCALS, body.toBytes(), { exportAs: `r${index}` });
+        m.nameFunction(at, `r${region.blocks[0].entry.toString(16).padStart(8, '0')}`);
     });
     return m.toBytes();
 }
@@ -1966,7 +2109,9 @@ function transferFunction(layout, regionType){
  * by being cut short goes on into the region's blocks where it holds them,
  * anything else leaves for code that may read every flag. A division counts
  * as reading every flag: its fault, taken by the interpreter, shows the
- * flags as they stand.
+ * flags as they stand to a handler that usually goes on elsewhere. A fault
+ * anywhere else may show a write the code after it overwrites dropped, as
+ * the 32-bit translator's does: its handler resumes that code.
  *
  * @param {LongBlock[]} blocks  in the region's address order
  * @param {Map<number, number>} indexOf

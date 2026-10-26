@@ -33,6 +33,8 @@ import { endsBlock, translates } from './emit.js';
 
 const CORPUS = JSON.parse(gunzipSync(readFileSync(new URL('../x64-corpus.json.gz',
     import.meta.url))).toString('utf8'));
+/** CF, PF, AF, ZF, SF and OF. */
+const STATUS = 0x8d5;
 /** Where the runner's exit jump goes: a closed page, whose fetch ends the case. */
 const EXIT = 0x1f000000;
 
@@ -259,6 +261,17 @@ function compare(cases, budget = 7, transfers = true, checkReads = undefined){
         const translated = run(translatedMachine, true, budget);
         const interpreted = run(interpretedMachine, false);
         exits += translated.fault === 'exit' ? 1 : 0;
+        if (translated.fault === interpreted.fault && /^[1-9]\d*@/.test(translated.fault))
+        {
+            // At a fault other than a division's, the status flags a write the
+            // code after it overwrites left are the translator's to drop, as
+            // the 32-bit translator drops them: the handler resumes the same
+            // code, which writes them again before it reads them.
+            for (const seen of [translated, interpreted])
+            {
+                seen.flags = (Number.parseInt(seen.flags, 16) & ~STATUS).toString(16);
+            }
+        }
         for (const key of /** @type {const} */ (['fault', 'rip', 'retired', 'flags', 'xmm',
             'data']))
         {
@@ -329,6 +342,56 @@ test('an access across into a closed page or past 4 GiB faults where the interpr
     assert.deepEqual(failures, []);
     // Some ran clean, most faulted: both ways were taken.
     assert.ok(exits > 0 && exits < cases.length, `${exits} of ${cases.length} ran to their exit`);
+});
+
+test('stos and movs run translated as interpreted: by pages, across them, into a closed one', ()=>{
+    const base = CORPUS.cases[0];
+    const cases = [];
+    // stos and movs of every width: byte, word, dword, qword.
+    const ops = [['aa', 'stos'], ['66ab', 'stos'], ['ab', 'stos'], ['48ab', 'stos'],
+        ['a4', 'movs'], ['66a5', 'movs'], ['a5', 'movs'], ['48a5', 'movs']];
+    for (const [opcode, op] of ops)
+    {
+        for (const prefix of ['f3', 'f2', ''])
+        {
+            for (const count of [0n, 1n, 3n, 100n, 1500n, 5000n])
+            {
+                // Inside the first page, at its end, across into the second,
+                // and toward the closed page past the data.
+                for (const at of [0x10, 0xffe, 0x1ff8 - 0x40, CORPUS.dataSize - 0x100])
+                {
+                    for (const down of [false, true])
+                    {
+                        const shapes = op === 'stos'
+                            ? [[0n, 0n], [0x4141414141414141n, 0n], [0x1234n, 0n]]
+                            // The source behind the destination by an element or two
+                            // (the processor copies forward through what it wrote), apart,
+                            // and ahead.
+                            : [[0n, -1n], [0n, -8n], [0n, 0x400n], [0n, 3n]];
+                        for (const [rax, lead] of shapes)
+                        {
+                            const regs = [...base.regs];
+                            const rdi = BigInt(CORPUS.dataAt + at);
+                            regs[0] = rax.toString(16);
+                            regs[1] = count.toString(16);
+                            regs[7] = rdi.toString(16);
+                            regs[6] = (op === 'movs' ? rdi + lead : rdi).toString(16);
+                            const code = `${down ? 'fd' : ''}${prefix}${opcode}fc`;
+                            const text = `${code} rcx=${count} rdi=+${at.toString(16)}`
+                                + ` rax=${rax.toString(16)} lead=${lead}`;
+                            cases.push({ ...base, text, code, regs });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const { failures, exits, stats } = compare(cases);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    // Some ran to the closed page, most did not; most ran translated.
+    assert.ok(exits > cases.length / 2 && exits < cases.length,
+        `${exits} of ${cases.length} ran to their exit`);
+    assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
 });
 
 test('a translated read wraps into RAM until the program faults on a page, then faults', ()=>{

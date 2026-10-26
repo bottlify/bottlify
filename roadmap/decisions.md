@@ -764,6 +764,18 @@ objects and the engine's own routines are ordered either way. A program that han
 another thread through plain stores alone (a flag after its payload) can see the flag first on
 such a host without the variant; `ordered: true` is the switch for it. *2026-10-23.*
 
+**At a fault, the status flags may be those from before a write the code after the fault overwrites.**
+Both translators drop a flag record that nothing reads before the next write of the same flags
+(`deadFlagPass` over the region, `liveFlagsOut` across its blocks), and the analysis follows the
+code a block's early exits go on into, not the exception: a page fault, a misaligned SSE access or
+a string instruction finished by the interpreter that faults shows the context an `EFLAGS` whose
+arithmetic flags may be older than the interpreter's. The handler that resumes the faulting
+instruction, as a guard page or a lazily committed buffer does, runs the same code, which writes
+those flags again before it reads them. A division counts as reading every flag in the long-mode
+translator, since a divide error's handler usually goes on elsewhere. Keeping every record alive
+up to every access that may fault would undo most of what the analysis saves. The long-mode gate
+compares the arithmetic flags at a divide error only. *2026-10-26.*
+
 ## C. Process model and porting
 
 **Process replacement, not two processes in one address space or two machines.** `CreateProcess`
