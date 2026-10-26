@@ -297,3 +297,16 @@ test('argument sizes match what the guest compiled against', ()=>{
     assert.equal(fns.RtlFreeAnsiString.argBytes, 4);
     assert.equal(fns.RtlFreeUnicodeString.argBytes, 4);
 });
+
+test('RtlCreateUnicodeStringFromAsciiz widens into a buffer of its own, for freeing', ()=>{
+    const host = fakeHost();
+    const fns = createCountedStringFunctions(host);
+    putAnsi(host, TEXT, 'testlib.dll');
+    assert.equal(fns.RtlCreateUnicodeStringFromAsciiz.argBytes, 8);
+    assert.equal(fns.RtlCreateUnicodeStringFromAsciiz.handler([DESTINATION, TEXT]), 1);
+    const made = descriptorAt(host, DESTINATION);
+    assert.deepEqual({ ...made, buffer: 0 }, { length: 22, maximumLength: 24, buffer: 0 });
+    assert.equal(host.readWideString(made.buffer), 'testlib.dll');
+    assert.equal(fns.RtlFreeUnicodeString.handler([DESTINATION]), 0);
+    assert.deepEqual(host.released, [made.buffer]);
+});

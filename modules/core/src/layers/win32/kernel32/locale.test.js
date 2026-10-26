@@ -1188,3 +1188,30 @@ test('GetLocaleInfo takes LOCALE_NEUTRAL (0) as the user\'s locale, as Windows d
     assert.equal(fns.GetLocaleInfoA.handler([0, ILANGUAGE, 0x100, 8]), 5);
     assert.equal(new TextDecoder().decode(host.bytes.subarray(0x100, 0x104)), '0409');
 });
+
+test('an LCID is named by its language and region, and a name finds its LCID', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    const nameAt = (/** @type {number} */ at, /** @type {number} */ count)=>
+        String.fromCharCode(...new Uint16Array(host.bytes.slice(at, at + count * 2).buffer));
+    assert.equal(fns.LCIDToLocaleName.handler([0x0409, 0, 0, 0]), 6, 'the room, asked with none');
+    assert.equal(fns.LCIDToLocaleName.handler([0x0407, 0x100, 16, 0]), 6);
+    assert.equal(nameAt(0x100, 6), 'de-DE\0');
+    assert.equal(fns.LCIDToLocaleName.handler([0x0400, 0x100, 16, 0]), 6, 'the user default');
+    assert.equal(nameAt(0x100, 5), 'en-US');
+    assert.equal(fns.LCIDToLocaleName.handler([0x0009, 0x100, 16, 0x08000000]), 3,
+        'LOCALE_ALLOW_NEUTRAL_NAMES: the language alone');
+    assert.equal(nameAt(0x100, 2), 'en');
+    assert.equal(fns.LCIDToLocaleName.handler([0x007f, 0x100, 16, 0]), 1, 'invariant: empty');
+    assert.equal(fns.LCIDToLocaleName.handler([0x0409, 0x100, 3, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(fns.LCIDToLocaleName.handler([0x0477, 0x100, 16, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    host.plantWide(0x200, 'FR-fr');
+    assert.equal(fns.LocaleNameToLCID.handler([0x200, 0]), 0x040c);
+    host.plantWide(0x200, '');
+    assert.equal(fns.LocaleNameToLCID.handler([0x200, 0]), 0x007f);
+    host.plantWide(0x200, 'xx-YY');
+    assert.equal(fns.LocaleNameToLCID.handler([0x200, 0]), 0);
+});

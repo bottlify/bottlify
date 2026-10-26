@@ -6,7 +6,7 @@
 
 import { UI_LANGUAGE } from '../../loader/internal/resources.js';
 import { createRefusals } from '../common/refusal.js';
-import { verLanguageName } from './languages.js';
+import { LOCALE_TAGS, verLanguageName } from './languages.js';
 import { STATUS } from '../ntdll/status.js';
 
 /**
@@ -407,6 +407,29 @@ const LOCALE_STRINGS = Object.freeze({
  * machine has, so a list naming only others is refused as naming none.
  */
 const LANGUAGE_NAMES = new Map([[UI_LANGUAGE, LOCALE_STRINGS[0x0000005C]]]);
+
+/**
+ * An LCID's locale name, or null for one no locale has: the defaults are
+ * this machine's, the invariant locale's is empty, and a language's neutral
+ * LANGID is that language -- alone when `neutral` allows it, else with its
+ * default region.
+ *
+ * @param {number} locale @param {boolean} neutral
+ */
+function localeTagOf(locale, neutral){
+    if (locale === LOCALE_INVARIANT)
+    {
+        return '';
+    }
+    const language = [0, LOCALE_USER_DEFAULT, LOCALE_SYSTEM_DEFAULT].includes(locale)
+        ? LCID_EN_US : locale & 0xffff;
+    if ((language >>> 10) === 0)
+    {
+        const tag = LOCALE_TAGS.get(language | 0x400) ?? null;
+        return tag === null ? null : neutral ? tag.split('-')[0] : tag;
+    }
+    return LOCALE_TAGS.get(language) ?? null;
+}
 
 /** CAL_RETURN_NUMBER, and the CALTYPEs that are numbers: ICALINTVALUE, ITWODIGITYEARMAX. */
 const CAL_RETURN_NUMBER = 0x20000000;
@@ -1821,6 +1844,65 @@ export function createLocaleFunctions(host){
                 const asked = locale >>> 0;
                 return asked === LOCALE_SYSTEM_DEFAULT || asked === LOCALE_USER_DEFAULT
                     || asked === 0 ? LCID_EN_US : asked;
+            },
+        },
+
+        /**
+         * int LCIDToLocaleName(LCID Locale, LPWSTR lpName, int cchName, DWORD dwFlags)
+         *
+         * The locale's name with its terminator, the room it needs when asked
+         * with none: the defaults are this machine's, the invariant locale's
+         * name is empty, and a language's neutral LCID is its language alone
+         * with LOCALE_ALLOW_NEUTRAL_NAMES -- its default region's without.
+         */
+        LCIDToLocaleName: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([locale, buffer, room, flags])=>{
+                const name = localeTagOf(locale >>> 0,
+                    ((flags >>> 0) & LOCALE_ALLOW_NEUTRAL_NAMES) !== 0);
+                if (name === null)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((room | 0) === 0)
+                {
+                    return name.length + 1;
+                }
+                if ((room | 0) < name.length + 1 || (buffer >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                writeWide(buffer >>> 0, `${name}\0`);
+                return name.length + 1;
+            },
+        },
+
+        /** LCID LocaleNameToLCID(LPCWSTR lpName, DWORD dwFlags): 0 for a name no locale has. */
+        LocaleNameToLCID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([name])=>{
+                if ((name >>> 0) === 0)
+                {
+                    return LCID_EN_US;
+                }
+                const asked = readWide(name >>> 0, host.stringLength(name >>> 0, 2)).toLowerCase();
+                if (asked === '')
+                {
+                    return LOCALE_INVARIANT;
+                }
+                for (const [language, tag] of LOCALE_TAGS)
+                {
+                    if (tag.toLowerCase() === asked)
+                    {
+                        return language;
+                    }
+                }
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
             },
         },
 
