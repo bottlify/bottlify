@@ -259,3 +259,35 @@ test('a hook for another process hears nothing of this one', ()=>{
     table.NotifyWinEvent.handler([EVENT_OBJECT_SHOW, HWND, OBJID_CLIENT, 0]);
     assert.equal(called.length, 0);
 });
+
+test('with no WinEvent hook installed, an event costs nothing: nothing is asked, nothing waits',
+    ()=>{
+        // The window manager raises one at every show, move and focus.
+        /** @type {string[]} */
+        const asked = [];
+        const { notify } = createWinEventHooks({
+            handles: { open: ()=>4, close: ()=>{} },
+            call: ()=>{
+                asked.push('call');
+                return 0;
+            },
+            callerThread: ()=>{
+                asked.push('callerThread');
+                return MAIN;
+            },
+            now: ()=>{
+                asked.push('now');
+                return 0;
+            },
+        }, {
+            windowThread: ()=>{
+                asked.push('windowThread');
+                return MAIN.id;
+            },
+            later: ()=>{
+                asked.push('later');
+            },
+        });
+        assert.equal(notify(EVENT_OBJECT_SHOW, HWND, 0, 0), 0, 'an answer, not a promise');
+        assert.deepEqual(asked, []);
+    });

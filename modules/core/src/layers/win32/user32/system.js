@@ -73,6 +73,11 @@ const SWP_NOACTIVATE = 0x0010;
 const WM_CHILDACTIVATE = 0x0022;
 const WM_WINDOWPOSCHANGING = 0x0046;
 const WM_WINDOWPOSCHANGED = 0x0047;
+/** The accessibility events placing a window raises, about the window itself. */
+const EVENT_OBJECT_SHOW = 0x8002;
+const EVENT_OBJECT_HIDE = 0x8003;
+const EVENT_OBJECT_LOCATIONCHANGE = 0x800b;
+const OBJID_WINDOW = 0;
 /** WINDOWPOS: hwnd, hwndInsertAfter, x, y, cx, cy, flags. */
 const WINDOWPOS_SIZE = 28;
 const SWP_SHOWWINDOW = 0x0040;
@@ -1022,6 +1027,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const wasShown = host.shown(record);
+        const wasVisible = (record.style & WS_VISIBLE) !== 0;
         const before = wasShown ? host.geometry.shapedRect(record) : null;
         const oldWidth = record.width;
         const oldHeight = record.height;
@@ -1095,9 +1101,16 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 redraw,
             });
         }
+        // EVENT_OBJECT_SHOW or _HIDE as the window's own visibility flips,
+        // before anything is painted or told (msg.c WmShowOverlappedSeq,
+        // WmHideOverlappedSeq).
+        const nowVisible = (record.style & WS_VISIBLE) !== 0;
+        const flipped = nowVisible === wasVisible ? 0
+            : host.winEvent?.(nowVisible ? EVENT_OBJECT_SHOW : EVENT_OBJECT_HIDE, record.hwnd,
+                OBJID_WINDOW, thread) ?? 0;
         // What it showed is framed and erased before it returns, as Windows
         // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
-        const erased = redrawn ? host.eraseShown?.(thread) ?? 1 : 1;
+        const erased = andThen(flipped, ()=>(redrawn ? host.eraseShown?.(thread) ?? 1 : 1));
         // A top-level window placed without SWP_NOACTIVATE is activated
         // before it hears WM_WINDOWPOSCHANGED; the active one hidden hands the
         // activation on after (msg.c WmShowOverlappedSeq,
@@ -1111,7 +1124,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // child, shown or not (user32's message tests, WmShowChildSeq_2 and
         // _4): an MDI child becomes the client's active one this way when its
         // program brings it to the top.
-        const told = andThen(andThen(activated, changed),
+        // EVENT_OBJECT_LOCATIONCHANGE once it has heard where it went.
+        const located = andThen(andThen(activated, changed), ()=>(moved || sized
+            ? host.winEvent?.(EVENT_OBJECT_LOCATIONCHANGE, record.hwnd, OBJID_WINDOW, thread) ?? 0
+            : 0));
+        const told = andThen(located,
             ()=>(handsOn ? host.activateOther?.(record, thread) ?? 0 : 0));
         if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
             && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)

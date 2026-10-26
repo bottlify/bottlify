@@ -4038,6 +4038,76 @@ test('input waits for a low-level hook of another thread until that thread looks
     assert.equal(called.length, 1);
 });
 
+test('the window manager raises its WinEvents among the messages where Windows does', ()=>{
+    // user32:msg's sequences: EVENT_OBJECT_CREATE after WM_CREATE, _SHOW after
+    // WM_WINDOWPOSCHANGING, _LOCATIONCHANGE after WM_WINDOWPOSCHANGED,
+    // _FOCUS between WM_KILLFOCUS and WM_SETFOCUS, _NAMECHANGE with
+    // WM_SETTEXT, _HIDE before WM_WINDOWPOSCHANGED, _DESTROY before WM_DESTROY.
+    const WM_SETFOCUS = 0x0007;
+    const WM_KILLFOCUS = 0x0008;
+    const WM_SETTEXT_ = 0x000c;
+    const WM_CREATE_ = 0x0001;
+    /**
+     * Messages and events in the order they came: a message by its number,
+     * an event as 'e' and its number.
+     *
+     * @type {(number | string)[]}
+     */
+    const order = [];
+    const context = setup({ heap: true,
+        reply: message=>{
+            order.push(message.message);
+            return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+                message.wParam, message.lParam]);
+        },
+        hookReply: (_entry, args)=>{
+            order.push(`e${args[1].toString(16)}`);
+            return 0;
+        } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    assert.notEqual(fns.SetWinEventHook.handler([1, 0x7fffffff, HINSTANCE, HOOK_PROC, 0, 0, 4]),
+        0);
+    const hwnd = createWindow(fns, memory);
+    const created = order.indexOf(WM_CREATE_);
+    assert.equal(order[created + 1], 'e8000', 'CREATE right after WM_CREATE');
+
+    order.length = 0;
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    const shown = order.indexOf('e8002');
+    assert.ok(shown > order.indexOf(WM_WINDOWPOSCHANGING)
+        && shown < order.indexOf(WM_WINDOWPOSCHANGED), order.join(' '));
+    assert.ok(order.indexOf('e3') > shown, 'EVENT_SYSTEM_FOREGROUND as it is activated');
+
+    const other = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd });
+    fns.SetFocus.handler([hwnd]);
+    order.length = 0;
+    fns.SetFocus.handler([other]);
+    assert.deepEqual(order.filter(item=>item === WM_KILLFOCUS || item === WM_SETFOCUS
+        || item === 'e8005'), [WM_KILLFOCUS, 'e8005', WM_SETFOCUS]);
+
+    order.length = 0;
+    fns.MoveWindow.handler([hwnd, 30, 40, 300, 200, 0]);
+    assert.ok(order.lastIndexOf('e800b') > order.lastIndexOf(WM_WINDOWPOSCHANGED), order.join(' '));
+
+    order.length = 0;
+    memory.putString(TITLE, 'Renamed');
+    fns.SetWindowTextA.handler([hwnd, TITLE]);
+    assert.deepEqual(order, [WM_SETTEXT_, 'e800c']);
+
+    order.length = 0;
+    fns.ShowWindow.handler([hwnd, SW_HIDE]);
+    const hidden = order.indexOf('e8003');
+    assert.ok(hidden > order.indexOf(WM_WINDOWPOSCHANGING)
+        && hidden < order.indexOf(WM_WINDOWPOSCHANGED), order.join(' '));
+
+    order.length = 0;
+    fns.DestroyWindow.handler([hwnd]);
+    assert.ok(order.indexOf('e8001') >= 0 && order.indexOf('e8001') < order.indexOf(WM_DESTROY),
+        order.join(' '));
+});
+
 test('a keyboard hook is shown every key message taken, and can discard it', ()=>{
     // A game that keeps its key state in a WH_KEYBOARD hook heard no key at
     // all while only CBT hooks were called: Enter on its title did nothing.

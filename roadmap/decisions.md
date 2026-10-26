@@ -496,6 +496,19 @@ counted (`moved.copied` in the device's shadow diagnostics). The price is a copy
 Call of Duty 4 locks part of its 4.5 MB skinning buffer with DISCARD every frame, and its moves
 copied 25.5 GB in a run of 326 s (27 620 moves, three executors, the fake GPU). *2026-10-24.*
 
+**A53. Each top-level window has a surface of its own, as Windows 7's desktop composes them; only
+what follows from that differs from what Windows' messages say.** The window manager keeps a
+picture per top-level window and the screen is composed from them, bottom to top, the way the
+Desktop Window Manager composes a Windows 7 desktop (`windows.js` `surfaceOf`, `surfaces`). The
+alternative, XP's model, keeps one screen and computes every window's visible region against the
+windows above it, so that a window paints only where it is seen and is told to repaint whatever
+another uncovers; with a surface per window none of that crosses windows, and a window moved over
+another neither damages it nor sends it WM_PAINT. The scope is exactly what follows from the
+surface: what a top-level window paints, when it is invalidated and repainted, and how it is
+clipped against its siblings at the top level. Everything else follows Windows and is a gap where
+it does not: the messages and their order, the WinEvents, activation and focus order, the CBT
+hook's sequences. A difference in those is not this decision. *2026-10-26.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

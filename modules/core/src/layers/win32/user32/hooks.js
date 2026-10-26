@@ -117,6 +117,12 @@ export function createWinEventHooks(host, { windowThread, later }){
      *        the caller of the call being handled otherwise.
      */
     const notify = (event, hwnd, object, child, thread)=>{
+        // The window manager raises an event at every show, move and focus:
+        // with nobody listening that is all it costs.
+        if (hooks.length === 0)
+        {
+            return 0;
+        }
         const caller = thread ?? host.callerThread?.();
         const raisedOn = threadIdOf(caller);
         const from = windowThread(hwnd) ?? raisedOn;
@@ -236,5 +242,5 @@ export function createWinEventHooks(host, { windowThread, later }){
         },
     };
 
-    return { table, notify };
+    return { table, notify, listening: ()=>hooks.length !== 0 };
 }
