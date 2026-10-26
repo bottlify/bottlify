@@ -616,10 +616,28 @@ class BlockEmitter {
     }
 
     /**
+     * The carry the flags hold into U, 0 or 1, for `adc` or `sbb`: straight
+     * from a pending record whose kind gives it, as `keepCarry` takes it --
+     * `cmp` then `sbb r, r`, a mask from a compare, folds nothing -- else
+     * from FL with the record folded. The instruction writes every status
+     * flag, so the record it replaces needs no other.
+     */
+    carryIn(){
+        const { b } = this;
+        if (this.pending && this.direct(this.pending, 1))
+        {
+            b.localSet(U);
+            return;
+        }
+        this.settle();
+        b.localGet(FL).i32const(CF).op(Op.i32and).localSet(U);
+    }
+
+    /**
      * Leaves a record: the operands and result as i64 locals T0, T1, T2.
      *
      * @param {number} kind @param {number} size @param {number} written
-     * @param {boolean} [carried]  the carry in is FL's CF, settled before
+     * @param {boolean} [carried]  the carry in is U's (`carryIn`)
      */
     record(kind, size, written, carried = false){
         const { b } = this;
@@ -633,7 +651,7 @@ class BlockEmitter {
             .localGet(T1).localSet(PB).localGet(T2).localSet(PR).i32const(written).localSet(PW);
         if (carried)
         {
-            b.localGet(FL).i32const(CF).op(Op.i32and).localSet(PC);
+            b.localGet(U).localSet(PC);
         }
         else
         {
@@ -1061,7 +1079,7 @@ class BlockEmitter {
                 placeMemory(dst.kind === 'mem' && op !== 'cmp');
                 if (carried)
                 {
-                    this.settle();
+                    this.carryIn();
                 }
                 this.read(dst);
                 b.localSet(T0);
@@ -1071,8 +1089,7 @@ class BlockEmitter {
                 b.op(adding ? Op.i64add : Op.i64sub);
                 if (carried)
                 {
-                    b.localGet(FL).i32const(CF).op(Op.i32and).op(Op.i64extendu)
-                        .op(adding ? Op.i64add : Op.i64sub);
+                    b.localGet(U).op(Op.i64extendu).op(adding ? Op.i64add : Op.i64sub);
                 }
                 b.i64const(maskOf(size)).op(Op.i64and).localSet(T2);
                 if (op !== 'cmp')
