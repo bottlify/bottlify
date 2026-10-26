@@ -21,8 +21,8 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import {
-    LOWER, UPPER, W_ALPHA, W_BLANK, W_CNTRL, W_DIGIT, W_LOWER, W_PUNCT, W_SPACE, W_UPPER,
-    W_XDIGIT, WEOF, WIDE_CLASSES,
+    LOWER, UPPER, WEOF, WIDE_CTYPE, CT_UPPER, CT_LOWER, CT_DIGIT, CT_SPACE, CT_PUNCT, CT_CONTROL,
+    CT_BLANK, CT_HEX, CT_LETTER, CT_ALPHA,
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
@@ -44,25 +44,43 @@ const MAX_STRING = 1 << 20;
  *           made on; without it `_wcsdup` stays unexported.
  */
 
+/** WEOF, and what no class is answered for. */
+const NO_CLASS = 0;
+
 /**
- * The bits `iswctype`'s mask is built from, at the values msvcrt's own
- * `<wctype.h>` gives them -- the same numbering `_isctype` uses, since a
- * guest builds both from the same header.
+ * msvcrt's class bits of a wide code unit: the table's below 0x100, and past
+ * it the unit's Unicode category, as the system's GetStringTypeW answers --
+ * a letter's case, a decimal digit of any script, a space separator as blank
+ * too, punctuation and symbols as punctuation, the full-width hex digits.
+ *
+ * @param {number} unit
  */
-const CT_UPPER = 0x0001;
-const CT_LOWER = 0x0002;
-const CT_DIGIT = 0x0004;
-const CT_SPACE = 0x0008;
-const CT_PUNCT = 0x0010;
-const CT_CONTROL = 0x0020;
-const CT_BLANK = 0x0040;
-const CT_HEX = 0x0080;
-/**
- * Set on an alpha character alongside `_UPPER`/`_LOWER`, never alone: a
- * caller asking `iswctype(c, _ALPHA)` passes `0x0100|_UPPER|_LOWER` and
- * matches on the overlap, the same as every other mask here.
- */
-const CT_ALPHA_MARK = 0x0100;
+export function wideClassOf(unit){
+    if (unit < WIDE_CTYPE.length)
+    {
+        return WIDE_CTYPE[unit];
+    }
+    if (unit === WEOF)
+    {
+        return NO_CLASS;
+    }
+    const character = String.fromCharCode(unit);
+    /** @param {RegExp} pattern @param {number} bits */
+    const when = (pattern, bits)=>(pattern.test(character) ? bits : 0);
+    return when(/[\p{Lu}\p{Lt}]/u, CT_UPPER) | when(/\p{Ll}/u, CT_LOWER)
+        | when(/\p{L}/u, CT_LETTER) | when(/\p{Nd}/u, CT_DIGIT)
+        | when(/\p{Zs}/u, CT_SPACE | CT_BLANK) | when(/[\p{Zl}\p{Zp}]/u, CT_SPACE)
+        | when(/[\p{P}\p{S}]/u, CT_PUNCT) | when(/\p{Cc}/u, CT_CONTROL)
+        | when(/[\uff10-\uff19\uff21-\uff26\uff41-\uff46]/, CT_HEX);
+}
+
+/** The classes each wide classifier asks for, in msvcrt's bits. */
+const WIDE_MASKS = Object.freeze({
+    iswalpha: CT_ALPHA, iswdigit: CT_DIGIT, iswalnum: CT_ALPHA | CT_DIGIT, iswspace: CT_SPACE,
+    iswupper: CT_UPPER, iswlower: CT_LOWER, iswpunct: CT_PUNCT, iswxdigit: CT_HEX,
+    iswcntrl: CT_CONTROL, iswprint: CT_BLANK | CT_PUNCT | CT_ALPHA | CT_DIGIT,
+    iswgraph: CT_PUNCT | CT_ALPHA | CT_DIGIT,
+});
 
 /**
  * @param {WideHost} host
@@ -562,63 +580,37 @@ export function createWideFunctions(host){
  * the classifiers and the case functions run in the guest.
  */
 export function createWideClassificationFunctions(){
-    const table = WIDE_CLASSES;
-    /** @param {string} name */
-    const inGuestEntry = name=>guestEntry(
+    /** @param {string} name @param {import('./guest-code.js').HostFallback} [fallback] */
+    const inGuestEntry = (name, fallback)=>guestEntry(
         /** @type {Function} */ (inGuest[/** @type {'iswalpha'} */ (name)]),
-        COMPILED[/** @type {'iswalpha'} */ (name)], {});
+        COMPILED[/** @type {'iswalpha'} */ (name)], {}, fallback);
 
     return {
-        /** int iswalpha/isdigit/... (wint_t) — the classifiers, under the C locale */
-        ...Object.fromEntries(['iswalpha', 'iswdigit', 'iswalnum', 'iswspace', 'iswupper',
-            'iswlower', 'iswpunct', 'iswxdigit', 'iswcntrl', 'iswprint', 'iswgraph',
-            'iswascii', 'towupper', 'towlower'].map(name=>[name, inGuestEntry(name)])),
+        /**
+         * int iswalpha/iswdigit/... (wint_t) -- the classifiers, under the C
+         * locale: msvcrt's bits of the class asked for, in the guest below
+         * 0x100 and on the host past it.
+         */
+        ...Object.fromEntries(Object.entries(WIDE_MASKS).map(([name, mask])=>[name,
+            inGuestEntry(name, { argBytes: 4,
+                handler: ([code])=>wideClassOf(code & 0xffff) & mask })])),
+        ...Object.fromEntries(['iswascii', 'towupper', 'towlower']
+            .map(name=>[name, inGuestEntry(name)])),
 
         /**
          * int iswctype(wint_t c, wctype_t type)
          *
-         * `_isctype` for a wide code unit: nonzero when `c` has any of the
-         * classes `type` names. Built from the same table the classifiers
-         * above are, translated to the bits a guest actually passes, since
-         * this table's own numbering exists only for the classifiers to share
-         * and was never meant to leave this function.
+         * The bits of `type` that `c` has: what each classifier above asks
+         * with its own mask.
          */
         iswctype: {
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([code, type])=>{
-                const unit = code & 0xffff;
-                if (unit === WEOF || unit >= table.length)
-                {
-                    return 0;
-                }
-                const classes = table[unit];
-                let real = 0;
-                if (classes & W_UPPER)
-                    real |= CT_UPPER;
-                if (classes & W_LOWER)
-                    real |= CT_LOWER;
-                if (classes & W_DIGIT)
-                    real |= CT_DIGIT;
-                if (classes & W_SPACE)
-                    real |= CT_SPACE;
-                if (classes & W_PUNCT)
-                    real |= CT_PUNCT;
-                if (classes & W_CNTRL)
-                    real |= CT_CONTROL;
-                if (classes & W_XDIGIT)
-                    real |= CT_HEX;
-                if (classes & W_BLANK)
-                    real |= CT_BLANK;
-                if (classes & W_ALPHA)
-                    real |= CT_ALPHA_MARK;
-                return (real & type) !== 0 ? 1 : 0;
-            },
+            handler: ([code, type])=>wideClassOf(code & 0xffff) & type & 0xffff,
         },
     };
 }
-
 
 /**
  * @typedef {Object} MultiByteFunctionsHost

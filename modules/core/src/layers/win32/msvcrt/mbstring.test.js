@@ -487,35 +487,43 @@ const runtime = ()=>{
     }));
 };
 
+/**
+ * Whether a classifier answers its class, as a program reads the answer:
+ * nonzero or not. @param {Record<string, any>} fns @param {string} name
+ * @param {...number} args
+ */
+const is = (fns, name, ...args)=>(fns[name].handler(args) !== 0 ? 1 : 0);
+
 test('iswspace classifies the spaces the C locale has, and a code unit it has not got', ()=>{
     const fns = runtime();
-    assert.equal(fns.iswspace.handler([0x20]), 1);
-    assert.equal(fns.iswspace.handler([0x09]), 1);
-    assert.equal(fns.iswspace.handler(['x'.charCodeAt(0)]), 0);
-    assert.equal(fns.iswspace.handler([0x85]), 0, 'NEL is a control in msvcrt.dll\'s table');
-    assert.equal(fns.iswspace.handler([0xa0]), 1, 'the no-break space is a space');
-    assert.equal(fns.iswspace.handler([0x4e2d]), 0, 'a CJK unit is nothing');
-    assert.equal(fns.iswspace.handler([0xffff]), 0, 'and WEOF is nothing at all');
+    assert.equal(is(fns, 'iswspace', 0x20), 1);
+    assert.equal(is(fns, 'iswspace', 0x09), 1);
+    assert.equal(is(fns, 'iswspace', 'x'.charCodeAt(0)), 0);
+    assert.equal(is(fns, 'iswspace', 0x85), 0, 'NEL is a control in msvcrt.dll\'s table');
+    assert.equal(is(fns, 'iswspace', 0xa0), 1, 'the no-break space is a space');
+    assert.equal(is(fns, 'iswspace', 0x4e2d), 0, 'a CJK unit is no space');
+    assert.equal(is(fns, 'iswspace', 0xffff), 0, 'and WEOF is nothing at all');
 });
 
 test('the Latin-1 letters are alpha with their case, the two signs among them are not', ()=>{
     const fns = runtime();
-    assert.equal(fns.iswalpha.handler([0xc0]), 1);
-    assert.equal(fns.iswalpha.handler([0xff]), 1);
-    assert.equal(fns.iswalnum.handler([0xc0]), 1, 'alpha carries alnum');
-    assert.equal(fns.iswalpha.handler([0xd7]), 0, 'multiplication is not a letter');
-    assert.equal(fns.iswalpha.handler([0xf7]), 0, 'and neither is division');
-    assert.equal(fns.iswpunct.handler([0xd7]), 1, 'it is punctuation');
-    assert.equal(fns.iswupper.handler([0xc9]), 1, 'É is upper');
-    assert.equal(fns.iswlower.handler([0xc9]), 0);
-    assert.equal(fns.iswlower.handler([0xe9]), 1, 'é is lower');
-    assert.equal(fns.iswlower.handler([0xdf]), 1, 'ß is lower, though it has no upper here');
-    assert.equal(fns.iswlower.handler([0xff]), 1);
-    assert.equal(fns.iswprint.handler([0xe9]), 1, 'a letter prints');
-    assert.equal(fns.iswgraph.handler([0xe9]), 1, 'and is graphic');
+    assert.equal(is(fns, 'iswalpha', 0xc0), 1);
+    assert.equal(is(fns, 'iswalpha', 0xff), 1);
+    assert.equal(is(fns, 'iswalnum', 0xc0), 1, 'alpha carries alnum');
+    assert.equal(is(fns, 'iswalpha', 0xd7), 0, 'multiplication is not a letter');
+    assert.equal(is(fns, 'iswalpha', 0xf7), 0, 'and neither is division');
+    assert.equal(is(fns, 'iswpunct', 0xd7), 1, 'it is punctuation');
+    assert.equal(is(fns, 'iswupper', 0xc9), 1, 'É is upper');
+    assert.equal(is(fns, 'iswlower', 0xc9), 0);
+    assert.equal(is(fns, 'iswlower', 0xe9), 1, 'é is lower');
+    assert.equal(is(fns, 'iswlower', 0xdf), 1, 'ß is lower, though it has no upper here');
+    assert.equal(is(fns, 'iswlower', 0xff), 1);
+    assert.equal(is(fns, 'iswprint', 0xe9), 1, 'a letter prints');
+    assert.equal(is(fns, 'iswgraph', 0xe9), 1, 'and is graphic');
     assert.equal(fns.towupper.handler([0xe9]), 0xe9, 'the C locale maps no case past ASCII');
-    assert.equal(fns.iswalpha.handler([0x4e2d]), 0, 'a CJK unit is not alpha here');
-    assert.equal(fns.iswalpha.handler([0xffff]), 0);
+    assert.equal(is(fns, 'iswalpha', 0x4e2d), 1,
+        'a CJK unit is a letter, as the system classes it');
+    assert.equal(is(fns, 'iswalpha', 0xffff), 0);
 });
 
 test('the Latin-1 signs are punctuation, three of them digits, none of them letters', ()=>{
@@ -524,16 +532,16 @@ test('the Latin-1 signs are punctuation, three of them digits, none of them lett
     const fns = runtime();
     for (let code = 0xa1; code <= 0xbf; code++)
     {
-        assert.equal(fns.iswpunct.handler([code]), 1, `0x${code.toString(16)}`);
-        assert.equal(fns.iswalpha.handler([code]), 0, `0x${code.toString(16)}`);
-        assert.equal(fns.iswgraph.handler([code]), 1, `0x${code.toString(16)}`);
+        assert.equal(is(fns, 'iswpunct', code), 1, `0x${code.toString(16)}`);
+        assert.equal(is(fns, 'iswalpha', code), 0, `0x${code.toString(16)}`);
+        assert.equal(is(fns, 'iswgraph', code), 1, `0x${code.toString(16)}`);
     }
-    assert.equal(fns.iswpunct.handler([0xa9]), 1, '©');
-    assert.equal(fns.iswalpha.handler([0xaa]), 0, 'ª');
-    assert.equal(fns.iswlower.handler([0xb5]), 0, 'µ');
-    assert.deepEqual([0xb2, 0xb3, 0xb9, 0xbc].map(code=>fns.iswdigit.handler([code])),
+    assert.equal(is(fns, 'iswpunct', 0xa9), 1, '©');
+    assert.equal(is(fns, 'iswalpha', 0xaa), 0, 'ª');
+    assert.equal(is(fns, 'iswlower', 0xb5), 0, 'µ');
+    assert.deepEqual([0xb2, 0xb3, 0xb9, 0xbc].map(code=>is(fns, 'iswdigit', code)),
         [1, 1, 1, 0], 'the superscripts two, three and one; a fraction is not');
-    assert.equal(fns.iswxdigit.handler([0xb2]), 0);
+    assert.equal(is(fns, 'iswxdigit', 0xb2), 0);
 });
 
 test('iswctype answers by the real msvcrt bit values, over the Latin-1 range', ()=>{
@@ -545,22 +553,23 @@ test('iswctype answers by the real msvcrt bit values, over the Latin-1 range', (
     const CONTROL = 0x0020;
     const BLANK = 0x0040;
     const ALPHA = 0x0103;
-    assert.equal(fns.iswctype.handler(['A'.charCodeAt(0), UPPER]), 1);
-    assert.equal(fns.iswctype.handler(['a'.charCodeAt(0), UPPER]), 0);
-    assert.equal(fns.iswctype.handler(['5'.charCodeAt(0), DIGIT]), 1);
-    assert.notEqual(fns.iswctype.handler([0xc0, ALPHA]), 0);
-    assert.equal(fns.iswctype.handler([0xc0, UPPER]), 1);
-    assert.equal(fns.iswctype.handler([0xe0, LOWER]), 1);
-    assert.equal(fns.iswctype.handler([0xd7, ALPHA]), 0, 'multiplication is not a letter');
-    assert.equal(fns.iswctype.handler([0x09, BLANK]), 1, 'the tab is blank in the wide table');
-    assert.equal(fns.iswctype.handler([0xa0, BLANK]), 1, 'and the no-break space');
-    assert.equal(fns.iswctype.handler([0x0a, BLANK]), 0);
-    assert.equal(fns.iswctype.handler([0x85, SPACE]), 0);
-    assert.equal(fns.iswctype.handler([0x85, CONTROL]), 1);
-    assert.equal(fns.iswctype.handler([0xb2, DIGIT]), 1);
-    // WEOF and anything past the Latin-1 table classify as nothing.
-    assert.equal(fns.iswctype.handler([0xffff, UPPER | DIGIT | ALPHA]), 0);
-    assert.equal(fns.iswctype.handler([0x4e2d, ALPHA]), 0, 'a CJK unit is nothing here');
+    assert.equal(is(fns, 'iswctype', 'A'.charCodeAt(0), UPPER), 1);
+    assert.equal(is(fns, 'iswctype', 'a'.charCodeAt(0), UPPER), 0);
+    assert.equal(is(fns, 'iswctype', '5'.charCodeAt(0), DIGIT), 1);
+    assert.notEqual(is(fns, 'iswctype', 0xc0, ALPHA), 0);
+    assert.equal(is(fns, 'iswctype', 0xc0, UPPER), 1);
+    assert.equal(is(fns, 'iswctype', 0xe0, LOWER), 1);
+    assert.equal(is(fns, 'iswctype', 0xd7, ALPHA), 0, 'multiplication is not a letter');
+    assert.equal(is(fns, 'iswctype', 0x09, BLANK), 1, 'the tab is blank in the wide table');
+    assert.equal(is(fns, 'iswctype', 0xa0, BLANK), 1, 'and the no-break space');
+    assert.equal(is(fns, 'iswctype', 0x0a, BLANK), 0);
+    assert.equal(is(fns, 'iswctype', 0x85, SPACE), 0);
+    assert.equal(is(fns, 'iswctype', 0x85, CONTROL), 1);
+    assert.equal(is(fns, 'iswctype', 0xb2, DIGIT), 1);
+    // WEOF classifies as nothing; past the Latin-1 table the system classes.
+    assert.equal(is(fns, 'iswctype', 0xffff, UPPER | DIGIT | ALPHA), 0);
+    assert.equal(fns.iswctype.handler([0x4e2d, ALPHA]), 0x100,
+        'a CJK unit is a letter without case');
 });
 
 test('the wide classifiers answer every ASCII code unit what the byte ones answer', ()=>{
@@ -577,36 +586,57 @@ test('the wide classifiers answer every ASCII code unit what the byte ones answe
         for (let code = 0; code < 0x80; code++)
         {
             const expected = wide === 'iswprint' && code === 0x09 ? 1 : fns[byte].handler([code]);
-            assert.equal(fns[wide].handler([code]), expected, `${wide}(0x${code.toString(16)})`);
+            assert.equal(is(fns, wide, code), expected, `${wide}(0x${code.toString(16)})`);
         }
     }
 });
 
 test('the wide classifiers that have no byte twin still answer the C locale', ()=>{
     const fns = runtime();
-    assert.equal(fns.iswdigit.handler(['7'.charCodeAt(0)]), 1);
-    assert.equal(fns.iswdigit.handler(['a'.charCodeAt(0)]), 0);
-    assert.equal(fns.iswxdigit.handler(['F'.charCodeAt(0)]), 1);
-    assert.equal(fns.iswxdigit.handler(['G'.charCodeAt(0)]), 0);
-    assert.equal(fns.iswupper.handler(['Z'.charCodeAt(0)]), 1);
-    assert.equal(fns.iswlower.handler(['z'.charCodeAt(0)]), 1);
-    assert.equal(fns.iswpunct.handler(['!'.charCodeAt(0)]), 1);
-    assert.equal(fns.iswpunct.handler([0xa0]), 0, 'the no-break space is not punctuation');
-    assert.equal(fns.iswcntrl.handler([0x01]), 1);
-    assert.equal(fns.iswcntrl.handler([0x80]), 1, 'the C1 controls are controls');
-    assert.equal(fns.iswcntrl.handler([0x9f]), 1);
-    assert.equal(fns.iswcntrl.handler([0x85]), 1);
-    assert.equal(fns.iswprint.handler([0x20]), 1);
-    assert.equal(fns.iswprint.handler([0x09]), 1, 'the tab is blank, and blanks print');
-    assert.equal(fns.iswprint.handler([0xa0]), 1, 'as the no-break space does');
-    assert.equal(fns.iswprint.handler([0x85]), 0);
-    assert.equal(fns.iswgraph.handler(['!'.charCodeAt(0)]), 1);
-    assert.equal(fns.iswgraph.handler([0x20]), 0, 'graph is print without the blanks');
-    assert.equal(fns.iswgraph.handler([0xa0]), 0);
+    assert.equal(is(fns, 'iswdigit', '7'.charCodeAt(0)), 1);
+    assert.equal(is(fns, 'iswdigit', 'a'.charCodeAt(0)), 0);
+    assert.equal(is(fns, 'iswxdigit', 'F'.charCodeAt(0)), 1);
+    assert.equal(is(fns, 'iswxdigit', 'G'.charCodeAt(0)), 0);
+    assert.equal(is(fns, 'iswupper', 'Z'.charCodeAt(0)), 1);
+    assert.equal(is(fns, 'iswlower', 'z'.charCodeAt(0)), 1);
+    assert.equal(is(fns, 'iswpunct', '!'.charCodeAt(0)), 1);
+    assert.equal(is(fns, 'iswpunct', 0xa0), 0, 'the no-break space is not punctuation');
+    assert.equal(is(fns, 'iswcntrl', 0x01), 1);
+    assert.equal(is(fns, 'iswcntrl', 0x80), 1, 'the C1 controls are controls');
+    assert.equal(is(fns, 'iswcntrl', 0x9f), 1);
+    assert.equal(is(fns, 'iswcntrl', 0x85), 1);
+    assert.equal(is(fns, 'iswprint', 0x20), 1);
+    assert.equal(is(fns, 'iswprint', 0x09), 1, 'the tab is blank, and blanks print');
+    assert.equal(is(fns, 'iswprint', 0xa0), 1, 'as the no-break space does');
+    assert.equal(is(fns, 'iswprint', 0x85), 0);
+    assert.equal(is(fns, 'iswgraph', '!'.charCodeAt(0)), 1);
+    assert.equal(is(fns, 'iswgraph', 0x20), 0, 'graph is print without the blanks');
+    assert.equal(is(fns, 'iswgraph', 0xa0), 0);
     assert.equal(fns.iswascii.handler(['a'.charCodeAt(0)]), 1);
     assert.equal(fns.iswascii.handler([0x7f]), 1);
     assert.equal(fns.iswascii.handler([0x80]), 0, 'iswascii answers the range, not a class');
     assert.equal(fns.iswascii.handler([0xffff]), 0);
+});
+
+test('the wide classifiers answer msvcrt\'s bits of their class, past 0xff too', ()=>{
+    // Wine's test_iswdigit: the class bit itself, for a digit of any script.
+    const fns = runtime();
+    for (const [code, bits] of [[0x30, 4], [0x39, 4], [0x61, 0], [0xff16, 4], [0x0660, 4],
+        [0x0ce6, 4]])
+    {
+        assert.equal(fns.iswdigit.handler([code]), bits, `0x${code.toString(16)}`);
+    }
+    assert.equal(fns.iswalpha.handler([0x61]), 0x102, 'a lower-case letter');
+    assert.equal(fns.iswalpha.handler([0x41]), 0x101);
+    assert.equal(fns.iswupper.handler([0x41]), 1);
+    assert.equal(fns.iswalpha.handler([0x0416]), 0x101, 'Ж');
+    assert.equal(fns.iswlower.handler([0x0436]), 2, 'ж');
+    assert.equal(fns.iswspace.handler([0x3000]), 8, 'the ideographic space');
+    assert.equal(fns.iswprint.handler([0x3000]), 0x40, 'and it is blank');
+    assert.equal(fns.iswpunct.handler([0x3001]), 0x10, 'the ideographic comma');
+    assert.equal(fns.iswxdigit.handler([0xff21]), 0x80, 'a full-width A is a hex digit');
+    assert.equal(fns.iswctype.handler([0xffff, 0xffff]), 0, 'WEOF is nothing');
+    assert.equal(fns.iswctype.handler([0xff16, 0x0107]), 4, 'iswctype answers the bits it has');
 });
 
 test('towupper and towlower fold the ASCII letters and pass the rest through', ()=>{
