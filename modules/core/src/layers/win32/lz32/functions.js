@@ -179,7 +179,7 @@ export function createLzFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, reopen, style])=>openFile(
-                host.readWideString?.(name >>> 0, MAX_PATH) ?? '', reopen, style),
+                host.readWideString?.(name >>> 0, MAX_PATH * 2) ?? '', reopen, style),
         },
 
         /**

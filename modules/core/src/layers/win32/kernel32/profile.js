@@ -504,7 +504,7 @@ export function createProfileFunctions(host){
         for (let at = list >>> 0; ;)
         {
             const entry = wide
-                ? host.readWideString?.(at, MAX_VALUE) ?? ''
+                ? host.readWideString?.(at, MAX_VALUE * 2) ?? ''
                 : host.readCString(at, MAX_VALUE);
             if (entry === '')
             {

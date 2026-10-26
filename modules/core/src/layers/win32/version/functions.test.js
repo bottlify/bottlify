@@ -795,3 +795,37 @@ test('VerLanguageName names the language a translation is in, as kernel32\'s cal
     assert.equal(version.VerLanguageNameA.handler([0x7777, 0x100, 64]), 16,
         'a language not in the table is named as the neutral one');
 });
+
+test('a wide path is read whole, not cut at half of MAX_PATH', ()=>{
+    // The reader's limit is in bytes; read in characters, a path of 200
+    // characters reached the volume cut to 130 and named another file.
+    const memory = new Uint8Array(0x2000);
+    const path = `C:\\${'d'.repeat(190)}\\x.dll`;
+    [...`${path}\0`].forEach((c, i)=>{
+        memory[0x100 + i * 2] = c.charCodeAt(0);
+    });
+    /** @type {string[]} */
+    const asked = [];
+    const host = {
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readCString: ()=>'',
+        // As the layer reads: the limit in bytes, a longer string cut there.
+        readWideString: (/** @type {number} */ a, /** @type {number} */ limit)=>{
+            let text = '';
+            for (let at = a; at + 2 <= a + limit && (memory[at] | memory[at + 1]) !== 0; at += 2)
+            {
+                text += String.fromCharCode(memory[at] | memory[at + 1] << 8);
+            }
+            return text;
+        },
+        setLastError: ()=>{},
+        files: /** @type {any} */ ({ stat: (/** @type {string} */ p)=>{
+            asked.push(p);
+            return null;
+        } }),
+    };
+    const version = /** @type {any} */ (createVersionFunctions(host));
+    assert.equal(version.GetFileVersionInfoSizeW.handler([0x100, 0]), 0);
+    assert.deepEqual(asked, [path]);
+});

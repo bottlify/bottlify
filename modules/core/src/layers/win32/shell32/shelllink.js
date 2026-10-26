@@ -176,7 +176,7 @@ const ansiReader = host=>({ read: address=>host.readCString(address, MAX_LINK_ST
  * @param {ShellLinkHost} host
  * @returns {{ read: (address: number) => string }} the wide reader
  */
-const wideReader = host=>({ read: address=>host.readWideString(address, MAX_LINK_STRING) });
+const wideReader = host=>({ read: address=>host.readWideString(address, MAX_LINK_STRING * 2) });
 
 /**
  * Writes `text` into a guest buffer as ANSI or wide, truncated to `cch`
@@ -599,7 +599,7 @@ export function createShellLink(host){
          * there but is no link fails, and leaves the state as it was.
          */
         Load: (state, [name])=>{
-            const path = host.readWideString(name >>> 0, MAX_LINK_STRING);
+            const path = host.readWideString(name >>> 0, MAX_LINK_STRING * 2);
             const files = host.files;
             const entry = files?.stat(path);
             if (!files || !entry || entry.exists === false || entry.isDirectory)
@@ -650,7 +650,7 @@ export function createShellLink(host){
          */
         Save: (state, [name, remember])=>{
             const given = (name >>> 0) === 0
-                ? null : host.readWideString(name >>> 0, MAX_LINK_STRING);
+                ? null : host.readWideString(name >>> 0, MAX_LINK_STRING * 2);
             const path = given ?? state.curFile;
             if (path === null)
             {
@@ -678,7 +678,7 @@ export function createShellLink(host){
         /** HRESULT SaveCompleted(LPCOLESTR pszFileName) */
         SaveCompleted: (state, [name])=>{
             state.curFile = (name >>> 0) === 0
-                ? null : host.readWideString(name >>> 0, MAX_LINK_STRING);
+                ? null : host.readWideString(name >>> 0, MAX_LINK_STRING * 2);
             state.dirty = false;
             return S_OK;
         },

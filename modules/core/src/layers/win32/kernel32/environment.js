@@ -354,7 +354,7 @@ export function createEnvironmentFunctions(host){
             /** @param {number[]} args */
             handler: ([name, buffer, size])=>{
                 const value = (name >>> 0) === 0 ? undefined
-                    : variables.get(host.readWideString(name >>> 0, 0x400));
+                    : variables.get(host.readWideString(name >>> 0, 0x400 * 2));
                 if (value === undefined)
                 {
                     host.setLastError(ERROR_ENVVAR_NOT_FOUND);
@@ -459,7 +459,7 @@ export function createEnvironmentFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const wanted = host.readWideString(name >>> 0, 0x400);
+                const wanted = host.readWideString(name >>> 0, 0x400 * 2);
                 if ((value >>> 0) === 0)
                 {
                     variables.delete(wanted);

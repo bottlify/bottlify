@@ -3296,7 +3296,7 @@ export function createWin32Module(){
 
                 'RPCRT4.dll': createRpcFunctions({
                     writeMemory, readCString, readMemory,
-                    readWideString: address=>readWideString(address, 1024),
+                    readWideString: address=>readWideString(address, 1024 * 2),
                     divergence: config?.divergence,
                     /** @param {number} bytes */
                     allocate: bytes=>heap.allocate(bytes),

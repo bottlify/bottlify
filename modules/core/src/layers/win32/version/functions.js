@@ -494,7 +494,7 @@ export function createVersionFunctions(host){
         : host.readCString(address >>> 0, MAX_PATH));
     /** @param {number} address */
     const wide = address=>((address >>> 0) === 0 ? ''
-        : host.readWideString?.(address >>> 0, MAX_PATH) ?? '');
+        : host.readWideString?.(address >>> 0, MAX_PATH * 2) ?? '');
 
     /**
      * GetFileVersionInfoSize, for either spelling: the block and the room its

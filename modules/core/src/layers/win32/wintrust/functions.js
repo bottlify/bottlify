@@ -243,7 +243,7 @@ export function createWintrustFunctions(host){
             }
             return answer(code);
         };
-        const bytes = readWhole(host.fullPath(host.readWideString(pathPointer, 260)));
+        const bytes = readWhole(host.fullPath(host.readWideString(pathPointer, 260 * 2)));
         return bytes instanceof Promise ? bytes.then(judge) : judge(bytes);
     };
 
@@ -288,7 +288,7 @@ export function createWintrustFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([name, flags])=>{
-                const path = host.fullPath(host.readWideString(name >>> 0, 260));
+                const path = host.fullPath(host.readWideString(name >>> 0, 260 * 2));
                 const stat = host.files.stat(path);
                 if (!stat || stat.isDirectory)
                 {

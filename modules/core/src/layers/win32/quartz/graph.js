@@ -266,7 +266,7 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  */
 function openMedia(host, path){
     const name = host.video && (path >>> 0) !== 0
-        ? host.readWideString?.(path >>> 0, MAX_PATH) ?? ''
+        ? host.readWideString?.(path >>> 0, MAX_PATH * 2) ?? ''
         : '';
     return name === '' ? null : host.video?.open(name) ?? null;
 }
@@ -902,8 +902,8 @@ export function createQuartz(host){
             return E_POINTER;
         }
         const sources = streaming;
-        const file = (path >>> 0) === 0 ? '' : stream.readWideString(path >>> 0, MAX_PATH);
-        const label = (name >>> 0) === 0 ? file : stream.readWideString(name >>> 0, MAX_PATH);
+        const file = (path >>> 0) === 0 ? '' : stream.readWideString(path >>> 0, MAX_PATH * 2);
+        const label = (name >>> 0) === 0 ? file : stream.readWideString(name >>> 0, MAX_PATH * 2);
         /** @param {VideoClip | null} clip */
         const took = clip=>{
             if (!clip || !clip.hasVideo)

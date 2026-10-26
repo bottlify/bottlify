@@ -313,7 +313,7 @@ export function createShlwapiFunctions(host){
 
     /** @param {number} address */
     const widePathAt = address=>((address >>> 0) === 0 || !host.readWideString
-        ? null : host.readWideString(address >>> 0, MAX_LENGTH));
+        ? null : host.readWideString(address >>> 0, MAX_LENGTH * 2));
 
     /** In the ANSI page a path is read in. @param {string} text */
     const narrow = text=>encodeAnsi(`${text}\0`);

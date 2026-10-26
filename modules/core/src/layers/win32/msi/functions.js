@@ -242,7 +242,8 @@ export function createMsiFunctions(host){
 
     /** @param {boolean} wide @returns {(address: number) => string | null} */
     const reader = wide=>address=>((address >>> 0) === 0 ? null : wide
-        ? host.readWideString(address >>> 0, MAX_TEXT) : host.readCString(address >>> 0, MAX_TEXT));
+        ? host.readWideString(address >>> 0, MAX_TEXT * 2)
+        : host.readCString(address >>> 0, MAX_TEXT));
 
     /** @param {string} text */
     const utf16 = text=>{
