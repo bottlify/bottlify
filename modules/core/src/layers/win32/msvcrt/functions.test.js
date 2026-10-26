@@ -1135,3 +1135,22 @@ test('_get_fmode and _set_fmode read and set _fmode, refusing a mode that is non
     assert.equal(fns._setmaxstdio.handler([1024]), 1024);
     assert.equal(fns._getmaxstdio.handler([]), 1024);
 });
+
+test('__crtGetStringTypeW is the system\'s GetStringTypeW behind an argument of its own', ()=>{
+    /** @type {number[][]} */
+    const asked = [];
+    const fns = /** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(), write: ()=>{},
+        callGuest: async()=>0,
+        stringTypes: (type, source, count, types)=>{
+            asked.push([type, source, count, types]);
+            return type === 1 ? 1 : 0;
+        } }));
+    assert.equal(fns.__crtGetStringTypeW.handler([0x1234, 1, 0x5000, 1, 0x6000]), 1);
+    assert.equal(fns.__crtGetStringTypeW.handler([0, 3, 0x5000, -1, 0x6000]), 0,
+        'what the system refuses, refused');
+    assert.deepEqual(asked, [[1, 0x5000, 1, 0x6000], [3, 0x5000, -1, 0x6000]]);
+    assert.equal(fns.__crtGetStringTypeW.argBytes, 20);
+    const without = /** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(),
+        write: ()=>{}, callGuest: async()=>0 }));
+    assert.equal(without.__crtGetStringTypeW, undefined, 'unexported without the system\'s');
+});

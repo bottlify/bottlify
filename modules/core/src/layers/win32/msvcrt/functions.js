@@ -211,6 +211,11 @@ const seededCode = (made, argBytes, handler)=>({
  *           runtime's own copy of it follows. Absent, the default one.
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
+ * @property {() => string} [imagePath]
+ *           Where the program's image is, as GetModuleFileName(NULL) names it:
+ *           `_pgmptr`. Absent, `_pgmptr` and its kin stay unexported.
+ * @property {(type: number, source: number, count: number, out: number) => number}
+ *           [stringTypes]  kernel32's GetStringTypeW, for `__crtGetStringTypeW`.
  * @property {number} [processId]  What `_getpid` answers: GetCurrentProcessId's number.
  * @property {(code: number) => any} [exitProcess]
  * @property {(code: number) => void} [exit]
@@ -1351,6 +1356,7 @@ export function createMsvcrtFunctions(host){
                 writeMemory: host.writeMemory,
                 allocate: host.allocate,
                 commandLine: host.commandLine,
+                ...host.imagePath ? { imagePath: host.imagePath } : {},
                 ...host.files ? {
                     expand: (/** @type {string} */ pattern)=>{
                         const { directory, pattern: last } = splitSearch(pattern);
@@ -1499,7 +1505,45 @@ export function createMsvcrtFunctions(host){
                 },
             }
             : {}),
-        ...(host.threads ? createThreadFunctions(host.threads) : {}),
+        ...(host.threads ? createThreadFunctions({
+            ...host.threads,
+            // `_beginthread`'s start routine, which ends in the runtime's own
+            // `_endthread`, and its block on the runtime's heap.
+            ...host.addressOf && host.allocate && host.free && host.allocateCode
+                && host.closeHandle && host.currentThread
+                ? {
+                    runtime: {
+                        endthread: ()=>/** @type {(name: string) => number} */ (
+                            host.addressOf)('_endthread'),
+                        allocate: host.allocate,
+                        free: host.free,
+                        allocateCode: host.allocateCode,
+                        readMemory: host.readMemory,
+                        writeMemory: host.writeMemory,
+                        closeHandle: host.closeHandle,
+                        currentThreadId: ()=>host.currentThread?.()?.id ?? 0,
+                    },
+                }
+                : {},
+        }) : {}),
+
+        /**
+         * BOOL __crtGetStringTypeW(DWORD unused, DWORD type, const wchar_t *source,
+         *                          int count, WORD *types)
+         *
+         * GetStringTypeW behind an argument of the runtime's own: the same
+         * answer, refusals included, as the system's call.
+         */
+        ...host.stringTypes ? {
+            __crtGetStringTypeW: {
+                convention: 'cdecl',
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([, type, source, count, types])=>
+                    /** @type {NonNullable<typeof host.stringTypes>} */ (host.stringTypes)(
+                        type >>> 0, source >>> 0, count | 0, types >>> 0),
+            },
+        } : {},
         ...(host.fpu
             ? createMathFunctions({
                 readMemory: host.readMemory,

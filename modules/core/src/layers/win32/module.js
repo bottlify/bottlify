@@ -2142,6 +2142,12 @@ export function createWin32Module(){
                         // The same command line GetCommandLineA reports, because a
                         // program is free to read either and compare them.
                         commandLine: ()=>config?.commandLine ?? `"${modules.imagePath()}"`,
+                        // `_pgmptr`: the path GetModuleFileName(NULL) names.
+                        imagePath: ()=>modules.imagePath(),
+                        // `__crtGetStringTypeW` answers as the system's call does.
+                        stringTypes: (type, source, count, types)=>
+                            libraries['KERNEL32.dll'].GetStringTypeW.handler(
+                                [type, source, count, types]) >>> 0,
                         // `exit` does not come back, so like ExitProcess it records
                         // the code and parks the calling thread rather than
                         // returning to a caller that no longer exists.
@@ -2201,9 +2207,9 @@ export function createWin32Module(){
                         // ended by the same calls, read from the table at the
                         // moment of the call, once it exists.
                         threads: {
-                            start: ({ entry, stackSize, parameter, threadIdOut })=>
+                            start: ({ entry, stackSize, parameter, threadIdOut, flags })=>
                                 libraries['KERNEL32.dll'].CreateThread.handler(
-                                    [0, stackSize, entry, parameter, 0, threadIdOut]) >>> 0,
+                                    [0, stackSize, entry, parameter, flags, threadIdOut]) >>> 0,
                             exit: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
                             sleep: ms=>libraries['KERNEL32.dll'].Sleep.handler([ms]),
                         },

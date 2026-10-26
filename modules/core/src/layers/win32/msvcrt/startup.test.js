@@ -83,6 +83,7 @@ function fakeMachine(commandLine = '"C:\\App\\Game.exe"', { version, expand } = 
             return at;
         },
         commandLine: ()=>commandLine,
+        imagePath: ()=>'C:\\App\\Game.exe',
         /** @param {number} entry */
         callGuest: entry=>{
             called.push(entry);
@@ -465,4 +466,22 @@ test('the version variables are GetVersion\'s figures, _HUGE is infinity, _envir
     const environ = dword('_environ');
     assert.notEqual(environ, 0, 'a vector, not null: a program walks it to its terminator');
     assert.equal(machine.u32(environ), 0, 'empty, as __getmainargs hands it');
+});
+
+test('_pgmptr and _wpgmptr hold the program\'s path, and their getters hand out the same', ()=>{
+    const { machine, fns } = fakeMachine();
+    const table = /** @type {Record<string, any>} */ (fns);
+    const narrow = new DataView(table._pgmptr.data().buffer).getUint32(0, true);
+    assert.equal(machine.string(narrow), 'C:\\App\\Game.exe');
+    const out = HEAP_BASE - 16;
+    assert.equal(table._get_pgmptr.handler([out]), 0);
+    assert.equal(machine.u32(out), narrow, 'the variable\'s own string');
+
+    const wide = new DataView(table._wpgmptr.data().buffer).getUint32(0, true);
+    assert.equal(table._get_wpgmptr.handler([out]), 0);
+    assert.equal(machine.u32(out), wide);
+    assert.equal(machine.u32(wide) & 0xffff, 'C'.charCodeAt(0));
+
+    const EINVAL = 22;
+    assert.equal(table._get_pgmptr.handler([0]), EINVAL, 'nowhere to write is EINVAL');
 });

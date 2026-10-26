@@ -32,7 +32,7 @@
 
 import { windowsVersion } from '../kernel32/versions.js';
 import { encodeAnsi } from '../kernel32/locale.js';
-import { createGlobals } from './globals.js';
+import { EINVAL, createGlobals } from './globals.js';
 
 /** `_XcptFilter`'s answer: this filter handles nothing and passes it on. */
 const EXCEPTION_CONTINUE_SEARCH = 0;
@@ -123,6 +123,9 @@ export function splitCommandLineWords(line){
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(bytes: number) => number} allocate
  * @property {() => string} commandLine
+ * @property {() => string} [imagePath]
+ *           The program's image, as GetModuleFileName(NULL) names it. Absent,
+ *           `_pgmptr`, `_wpgmptr` and their getters stay unexported.
  * @property {(pattern: string) => string[] | null} [expand]
  *           The names in a directory a wildcard pattern matches, null for a
  *           directory that is not there. Absent, no word is expanded.
@@ -300,6 +303,42 @@ export function createStartupFunctions(host){
             host.writeMemory(address, bytes);
         }
         return address;
+    };
+
+    /**
+     * `_pgmptr` and `_wpgmptr`, the program's path in the runtime's two
+     * widths, published once so the variable and its getter hand out the
+     * same string; and `_get_pgmptr` and `_get_wpgmptr`, which write that
+     * pointer where asked: 0, or EINVAL with nothing written for nowhere.
+     *
+     * @param {() => string} imagePath
+     */
+    const programPath = imagePath=>{
+        let narrow = 0;
+        let wide = 0;
+        const narrowPath = ()=>(narrow ||= publish(imagePath()));
+        const widePath = ()=>(wide ||= publishWide(imagePath()));
+        /** @param {() => number} pointer */
+        const getter = pointer=>({
+            convention: /** @type {'cdecl'} */ ('cdecl'),
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    globals.set(host.errnoName?.() ?? 'errno', EINVAL);
+                    return EINVAL;
+                }
+                host.writeMemory(out >>> 0, dword(pointer()));
+                return 0;
+            },
+        });
+        return {
+            _pgmptr: { data: ()=>dword(narrowPath()) },
+            _wpgmptr: { data: ()=>dword(widePath()) },
+            _get_pgmptr: getter(narrowPath),
+            _get_wpgmptr: getter(widePath),
+        };
     };
 
     /** @param {boolean} [wildcards] */
@@ -595,6 +634,8 @@ export function createStartupFunctions(host){
                 return bytes;
             },
         },
+
+        ...host.imagePath ? programPath(/** @type {() => string} */ (host.imagePath)) : {},
 
         /**
          * int _adjust_fdiv
