@@ -65,7 +65,6 @@ const ENDS = /^(ExitProcess|ExitThread|FatalAppExit[AW]|FatalExit|FreeLibraryAnd
 export const KNOWN = new Map([
     // Windows raises EXCEPTION_INT_DIVIDE_BY_ZERO; msvcrt's handler says so
     // instead of raising it (`common/raise.js` raises it).
-    ['msvcrt.dll!div', 'msvcrt: divide by zero, a processor exception on Windows'],
     // Guest code whose handler is the reference only: the guest's routine
     // reads registers or the x87 stack no handler is passed.
     ['ntdll.dll!_allshl', 'guest code: EDX:EAX and CL, which no handler is passed'],

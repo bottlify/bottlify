@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { besselJ, createMathFunctions } from './math.js';
 import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
+import { GUEST_EXCEPTION } from '../common/raise.js';
 import { EDOM, ERANGE } from './globals.js';
 import { fakeMemory, fakeFpu, doubleSlots } from './harness.test.js';
 
@@ -234,4 +235,23 @@ test('the Bessel functions of the first kind agree with their tables on both sid
     {
         assert.ok(Math.abs(besselJ(order, x) - expected) < 1e-12, `J${order}(${x})`);
     }
+});
+
+test('div and ldiv answer in EAX and EDX, and raise what idiv raises', ()=>{
+    /** @type {Record<string, number>} */
+    const registers = {};
+    const memory = fakeMemory();
+    const table = /** @type {Record<string, any>} */ (createMathFunctions({
+        readMemory: memory.readMemory, writeMemory: memory.writeMemory, fpu: fakeFpu(),
+        setRegisters: values=>Object.assign(registers, values),
+    }));
+    assert.equal(table.div.handler([-7, 2]) | 0, -3);
+    assert.equal(registers.edx | 0, -1, 'the remainder has the dividend\'s sign');
+    assert.equal(table.ldiv.handler([7, -2]) | 0, -3);
+    assert.equal(registers.edx | 0, 1);
+    /** @param {number[]} args @param {number} status */
+    const raises = (args, status)=>assert.throws(()=>table.div.handler(args),
+        (/** @type {any} */ error)=>error.code === GUEST_EXCEPTION && error.status === status);
+    raises([5, 0], 0xc0000094);
+    raises([-0x80000000, -1], 0xc0000095);
 });

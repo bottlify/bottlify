@@ -29,6 +29,7 @@
  * Both shapes need the FPU seam, so this whole table is conditional on it.
  */
 
+import { guestException } from '../common/raise.js';
 import { readDouble, returningDouble } from './float.js';
 import { EDOM, ERANGE } from './globals.js';
 import { guestEntry, guestExport } from './guest-code.js';
@@ -47,6 +48,10 @@ import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
  *
  *   mov eax, [esp+4]; cdq; idiv dword [esp+8]; ret
  */
+/** The exceptions `idiv` raises, as Windows reports them. */
+const STATUS_INTEGER_DIVIDE_BY_ZERO = 0xc0000094;
+const STATUS_INTEGER_OVERFLOW = 0xc0000095;
+
 const DIVIDE_CODE = Uint8Array.of(0x8b, 0x44, 0x24, 0x04, 0x99, 0xf7, 0x7c, 0x24, 0x08, 0xc3);
 
 /**
@@ -382,9 +387,15 @@ export function createMathFunctions(host){
             handler: ([numerator, denominator])=>{
                 const n = numerator | 0;
                 const d = denominator | 0;
-                if (d === 0 || n === -0x80000000 && d === -1)
+                // What `idiv` raises: a divide fault for zero, and the same
+                // fault for INT_MIN by -1, which Windows reports as overflow.
+                if (d === 0)
                 {
-                    throw new Error('div: the guest divided by zero, or INT_MIN by -1');
+                    throw guestException(STATUS_INTEGER_DIVIDE_BY_ZERO);
+                }
+                if (n === -0x80000000 && d === -1)
+                {
+                    throw guestException(STATUS_INTEGER_OVERFLOW);
                 }
                 const quotient = Math.trunc(n / d);
                 setRegisters({ edx: (n - quotient * d) >>> 0 });
