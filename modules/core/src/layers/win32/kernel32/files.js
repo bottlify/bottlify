@@ -29,7 +29,7 @@
  */
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
-import { fileAttributes, msToFileTime } from './filetime.js';
+import { fileAttributes, fileIndex, msToFileTime } from './filetime.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
 import { createResourceUpdates } from './resource-update.js';
@@ -2075,6 +2075,8 @@ export function createFileFunctions(host){
     const informationOf = (file, kind)=>{
         const entry = files.stat(file.path);
         const size = file.directory ? 0n : BigInt(entry?.size ?? 0);
+        // Whole clusters, as FileStandardInfo by handle counts them.
+        const allocated = (size + 4095n) & ~4095n;
         const attributes = fileAttributes(entry ?? { isDirectory: file.directory === true });
         const time = msToFileTime(entry?.modified ?? 0);
         /** @param {number} length @param {(view: DataView) => void} fill */
@@ -2095,13 +2097,9 @@ export function createFileFunctions(host){
             | (file.sequential ? FILE_SEQUENTIAL_ONLY : 0)
             | (file.deleteOnClose ? FILE_DELETE_ON_CLOSE : 0);
         const access = (file.read ? FILE_GENERIC_READ : 0) | (file.write ? FILE_GENERIC_WRITE : 0);
-        // A file's number on its volume: the same for the same path, which
-        // is what a program comparing two handles asks of it.
-        let index = 0x811c9dc5;
-        for (const unit of name.toLowerCase())
-        {
-            index = Math.imul(index ^ unit.charCodeAt(0), 0x01000193) >>> 0;
-        }
+        // A file's number on its volume, GetFileInformationByHandle's: the
+        // same for the same path, which is what comparing two handles asks.
+        const index = fileIndex(file.path);
         switch (kind)
         {
             case FILE_BASIC_INFORMATION:
@@ -2113,7 +2111,7 @@ export function createFileFunctions(host){
             case FILE_STANDARD_INFORMATION:
                 // AllocationSize, EndOfFile, NumberOfLinks, DeletePending, Directory.
                 return record(24, view=>{
-                    view.setBigUint64(0, size, true);
+                    view.setBigUint64(0, allocated, true);
                     view.setBigUint64(8, size, true);
                     view.setUint32(16, 1, true);
                     view.setUint8(20, file.deleteOnClose ? 1 : 0);
@@ -2157,7 +2155,7 @@ export function createFileFunctions(host){
                 // Four times, AllocationSize, EndOfFile, the attributes, padding.
                 return record(56, view=>{
                     times(view, 0);
-                    view.setBigUint64(32, size, true);
+                    view.setBigUint64(32, allocated, true);
                     view.setBigUint64(40, size, true);
                     view.setUint32(48, attributes, true);
                 });

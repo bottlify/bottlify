@@ -29,12 +29,16 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_MORE_DATA = 234;
+const ERROR_NOACCESS = 998;
+const ERROR_NO_MORE_FILES = 18;
 
 /** GetFileInformationByHandleEx's classes here, and the fixed ones' sizes. */
 const FILE_BASIC_INFO = 0;
 const FILE_STANDARD_INFO = 1;
 const FILE_NAME_INFO = 2;
 const FILE_ATTRIBUTE_TAG_INFO = 9;
+const FILE_ID_BOTH_DIRECTORY_INFO = 10;
+const FILE_ID_BOTH_DIRECTORY_RESTART_INFO = 11;
 const FILE_INFO_SIZES = new Map([
     [FILE_BASIC_INFO, 40], [FILE_STANDARD_INFO, 24], [FILE_ATTRIBUTE_TAG_INFO, 8],
 ]);
@@ -333,7 +337,16 @@ export function fileAttributes(entry){
  *                                hidden?: boolean } | null} stat
  * @property {(path: string, modified: number) => boolean} [setModified]
  *           Stamps a file's write time, in milliseconds since the epoch.
+ * @property {(path: string, pattern: string) => { name: string, isDirectory: boolean,
+ *     size: number, modified?: number, readOnly?: boolean, hidden?: boolean,
+ *     attributes?: number }[]} [list]
+ *           A directory's entries, for a listing by handle. Absent, a directory
+ *           lists only its dots.
  */
+
+/** FILE_ID_BOTH_DIR_INFO up to its name, and the boundary each entry starts on. */
+const ID_BOTH_DIR_FIXED = 104;
+const ENTRY_ALIGNMENT = 8;
 
 /** @param {string} text @returns {Uint8Array} UTF-16, NUL-terminated. */
 const wide = text=>{
@@ -401,6 +414,97 @@ export function createFileTimeFunctions(host){
     const timesOf = file=>{
         const written = msToFileTime(host.stat(file.path)?.modified ?? 0);
         return { created: written, accessed: written, written };
+    };
+
+    /**
+     * Where each open directory's listing by handle has got to: the entries
+     * taken at its first listing, and the next to give. A restart takes them
+     * again.
+     *
+     * @type {WeakMap<object, { entries: any[], next: number }>}
+     */
+    const listings = new WeakMap();
+
+    /**
+     * GetFileInformationByHandleEx's FileIdBothDirectoryInfo: as many of an
+     * open directory's entries as fit, each a FILE_ID_BOTH_DIR_INFO on an
+     * eight-byte boundary chained by NextEntryOffset, the last's zero; the
+     * next call goes on where this one stopped, and one past the end says
+     * ERROR_NO_MORE_FILES. A folder that is not a drive's root lists "." and
+     * ".." first, as a find does. No 8.3 names are kept, so ShortName is empty.
+     *
+     * @param {any} file @param {boolean} restart
+     * @param {number} buffer @param {number} room
+     */
+    const listDirectory = (file, restart, buffer, room)=>{
+        if (room === 0)
+        {
+            return fail(ERROR_BAD_LENGTH);
+        }
+        if (buffer === 0)
+        {
+            return fail(ERROR_NOACCESS);
+        }
+        const holder = host.stat(file.path);
+        if (!holder?.isDirectory)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        let listing = listings.get(file);
+        if (!listing || restart)
+        {
+            const dots = /^[A-Za-z]:\\?$/.test(file.path) ? []
+                : ['.', '..'].map(name=>({ ...holder, name, isDirectory: true, size: 0 }));
+            listing = { entries: [...dots, ...host.list?.(file.path, '*') ?? []], next: 0 };
+            listings.set(file, listing);
+        }
+        if (listing.next >= listing.entries.length)
+        {
+            return fail(ERROR_NO_MORE_FILES);
+        }
+        /** @type {{ start: number, record: Uint8Array }[]} */
+        const records = [];
+        let used = 0;
+        for (; listing.next < listing.entries.length; listing.next++)
+        {
+            const entry = listing.entries[listing.next];
+            const start = (used + ENTRY_ALIGNMENT - 1) & ~(ENTRY_ALIGNMENT - 1);
+            const length = ID_BOTH_DIR_FIXED + entry.name.length * 2;
+            if (start + length > room)
+            {
+                break;
+            }
+            const record = new Uint8Array(length);
+            const view = new DataView(record.buffer);
+            const time = msToFileTime(entry.modified ?? 0);
+            for (const at of [8, 16, 24, 32])
+            {
+                view.setBigUint64(at, time, true);
+            }
+            const size = BigInt(entry.isDirectory ? 0 : entry.size ?? 0);
+            view.setBigUint64(40, size, true);
+            view.setBigUint64(48, (size + 4095n) & ~4095n, true);
+            view.setUint32(56, fileAttributes(entry), true);
+            view.setUint32(60, entry.name.length * 2, true);
+            const own = entry.name === '.' ? file.path
+                : entry.name === '..' ? file.path.replace(/\\[^\\]*$/, '')
+                    : `${file.path}\\${entry.name}`;
+            view.setUint32(96, fileIndex(own), true);
+            [...entry.name].forEach((unit, at)=>view.setUint16(ID_BOTH_DIR_FIXED + at * 2,
+                unit.charCodeAt(0), true));
+            records.push({ start, record });
+            used = start + length;
+        }
+        if (records.length === 0)
+        {
+            return fail(ERROR_MORE_DATA);
+        }
+        records.forEach(({ start, record }, index)=>{
+            const after = records[index + 1];
+            new DataView(record.buffer).setUint32(0, after ? after.start - start : 0, true);
+            host.writeMemory(buffer + start, record);
+        });
+        return 1;
     };
 
     return {
@@ -616,6 +720,12 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
+                if ((kind >>> 0) === FILE_ID_BOTH_DIRECTORY_INFO
+                    || (kind >>> 0) === FILE_ID_BOTH_DIRECTORY_RESTART_INFO)
+                {
+                    return listDirectory(file, (kind >>> 0) === FILE_ID_BOTH_DIRECTORY_RESTART_INFO,
+                        buffer >>> 0, size >>> 0);
+                }
                 const entry = host.stat(file.path);
                 const room = size >>> 0;
                 const at = buffer >>> 0;
@@ -783,7 +893,7 @@ export function createFileTimeFunctions(host){
  *
  * @param {string} path
  */
-function fileIndex(path){
+export function fileIndex(path){
     let hash = 2166136261;
     const text = path.toLowerCase();
     for (let at = 0; at < text.length; at++)

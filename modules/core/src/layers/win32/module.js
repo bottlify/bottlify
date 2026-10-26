@@ -1922,6 +1922,8 @@ export function createWin32Module(){
                         // and the attributes a program set.
                         /** @param {string} path */
                         stat: path=>volume.stat(path),
+                        /** @param {string} path @param {string} pattern */
+                        list: (path, pattern)=>volume.list(path, pattern),
                         /** @param {string} path @param {number} modified */
                         setModified: (path, modified)=>filesystem.setModified(path, modified),
                     }),

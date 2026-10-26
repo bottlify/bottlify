@@ -321,3 +321,52 @@ test('TzSpecificLocalTimeToSystemTime reads daylight off the local clock, as Win
     assert.equal(fns.TzSpecificLocalTimeToSystemTime.handler([0, 0x100, 0]), 0);
     assert.deepEqual(errors, [87, 87]);
 });
+
+test('a directory lists by handle as many entries as fit, then goes on, then has no more', ()=>{
+    const bytes = new Uint8Array(0x1000);
+    /** @type {number[]} */
+    const errors = [];
+    const folder = { path: 'C:\\GAME', directory: true };
+    const fns = createFileTimeFunctions({
+        readMemory: (address, length)=>bytes.slice(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        setLastError: code=>{
+            errors.push(code);
+        },
+        resolveHandle: ()=>folder,
+        stat: ()=>({ exists: true, isDirectory: true, size: 0 }),
+        list: ()=>[{ name: 'SAVE.DAT', isDirectory: false, size: 5000 },
+            { name: 'DATA', isDirectory: true, size: 0 }],
+    });
+    const list = fns.GetFileInformationByHandleEx;
+    assert.equal(list.handler([8, 10, 0, 0]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(list.handler([8, 10, 0, 0x400]), 0);
+    assert.equal(errors.at(-1), 998, 'ERROR_NOACCESS');
+    assert.equal(list.handler([8, 10, 0x100, 0]), 0);
+    assert.equal(errors.at(-1), 24);
+
+    // ".", ".." and SAVE.DAT fit: 104 + 2 -> 112, 104 + 4 -> 224, 104 + 16 = 344.
+    assert.equal(list.handler([8, 10, 0x100, 344]), 1);
+    assert.equal(dword(bytes, 0x100), 112, 'the next entry on an eight-byte boundary');
+    assert.equal(dword(bytes, 0x100 + 60), 2, '"." named');
+    assert.equal(bytes[0x100 + 104], '.'.charCodeAt(0));
+    assert.equal(dword(bytes, 0x100 + 112), 112);
+    const third = 0x100 + 224;
+    assert.equal(dword(bytes, third), 0, 'the last of this call');
+    assert.equal(dword(bytes, third + 40), 5000, 'EndOfFile');
+    assert.equal(dword(bytes, third + 48), 8192, 'whole clusters');
+    assert.equal(dword(bytes, third + 56), 0x20, 'FILE_ATTRIBUTE_ARCHIVE');
+    assert.equal(dword(bytes, third + 60), 16);
+    assert.notEqual(dword(bytes, third + 96), 0, 'a file ID');
+
+    assert.equal(list.handler([8, 10, 0x100, 0x400]), 1, 'on from where it stopped');
+    assert.equal(dword(bytes, 0x100 + 56), 0x10, 'DATA, a directory');
+    assert.equal(dword(bytes, 0x100), 0);
+    assert.equal(list.handler([8, 10, 0x100, 0x400]), 0);
+    assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
+    assert.equal(list.handler([8, 11, 0x100, 112]), 1, 'a restart lists from the start');
+    assert.equal(dword(bytes, 0x100 + 60), 2);
+    assert.equal(list.handler([8, 10, 0x100, 100]), 0, 'no room for one entry');
+    assert.equal(errors.at(-1), 234, 'ERROR_MORE_DATA');
+});
