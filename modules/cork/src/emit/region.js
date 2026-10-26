@@ -4071,8 +4071,10 @@ const repeatedCompare = instruction=>(instruction.op === 'cmps' || instruction.o
     && (instruction.prefixes.rep === true || instruction.prefixes.repne === true);
 
 /**
- * The count of a shift or rotate masked to five bits, -1 when it is in cl,
- * null for any other instruction.
+ * The count of a shift or rotate masked to five bits, six for a 64-bit
+ * operand, -1 when it is in cl, null for any other instruction. `rcl` and
+ * `rcr` of a byte or a word by 9 or 17 still write flags: the processor
+ * leaves them only when the masked count is zero.
  *
  * @param {import('../decode/decoder.js').Instruction} instruction
  */
@@ -4082,5 +4084,9 @@ function shiftCount(instruction){
         return null;
     }
     const count = instruction.operands[instruction.operands.length - 1];
-    return count.kind === 'imm' ? (/** @type {number} */ (count.value) & 31) : -1;
+    if (count.kind !== 'imm')
+    {
+        return -1;
+    }
+    return /** @type {number} */ (count.value) & (instruction.size === 8 ? 63 : 31);
 }

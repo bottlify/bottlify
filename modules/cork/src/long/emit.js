@@ -17,7 +17,16 @@
  * operands, result, carry in, the flags it writes) that a helper turns into
  * the word only where something reads it, and at the exit; a record crosses
  * from block to block, and a condition is read from it directly where its
- * kind gives one (a compare and branch). A jump to a block of the region goes
+ * kind gives one (a compare and branch). It crosses from region to region
+ * too, through the state block (`longFlagRecord`), as the 32-bit
+ * translator's record does: a region that leaves or calls stores it unfolded,
+ * the next loads it, and the helper runs only where something reads a flag
+ * before an instruction writes them all; the host folds what is left when a
+ * run comes back to it (`foldFunction`). Which flags a later instruction can
+ * still read is the 32-bit translator's analysis (`liveFlagsOut`,
+ * `deadFlagPass`): a record whose flags no one reads before they are written
+ * again is dropped rather than folded, so an `inc` or a `test` after it does
+ * not call the helper. A jump to a block of the region goes
  * on inside the function, a jump back only until the instructions it retired
  * reach the module's `budget` global; any other leaves with RIP at the target.
  * A direct call is a wasm call of the callee's region (`callOut`), which
@@ -43,6 +52,7 @@ import { PageFlag } from '../runtime/pages.js';
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
 import { XMM, emitSimd, translatesSimd } from './simd.js';
 import { wrapIntoRam } from '../emit/memory.js';
+import { deadFlagPass, liveFlagsOut } from '../emit/region.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
 
@@ -260,6 +270,8 @@ class BlockEmitter {
          */
         this.branches = [];
         this.flagTable = pageFlagsAt(layout);
+        /** The flags something may read after the instruction being emitted. */
+        this.live = ARITH;
     }
 
     /** The depth of a branch to the exit block from here. */
@@ -532,6 +544,34 @@ class BlockEmitter {
         this.pending = null;
     }
 
+    /** The pending record and FL into the state block, unfolded, for the code a call or an exit goes to. */
+    storeRecord(){
+        storeRecord(this.b, this.layout);
+    }
+
+    /** The pending record and FL back from the state block: of a kind not known here. */
+    loadRecord(){
+        loadRecord(this.b, this.layout);
+        this.pending = undefined;
+    }
+
+    /**
+     * Before an instruction writes the flags `written`: the pending record
+     * folded where a flag it leaves as it was is read later, else dropped.
+     *
+     * @param {number} written
+     */
+    keep(written){
+        if ((ARITH & ~written & this.live) === 0)
+        {
+            this.drop();
+        }
+        else
+        {
+            this.settle();
+        }
+    }
+
     /** The pending record dropped unfolded: whatever was pending, the next write replaces. */
     drop(){
         if (this.pending !== null)
@@ -548,6 +588,12 @@ class BlockEmitter {
      */
     keepCarry(){
         const { b } = this;
+        if ((this.live & CF) === 0)
+        {
+            // Nothing reads the carry before it is written again.
+            this.drop();
+            return;
+        }
         if (!this.pending)
         {
             this.settle();
@@ -574,8 +620,9 @@ class BlockEmitter {
         const { b } = this;
         if ((written & ARITH) !== ARITH)
         {
-            // The record before holds flags this one leaves as they were.
-            this.settle();
+            // The record before holds flags this one leaves as they were:
+            // folded where something still reads them.
+            this.keep(written);
         }
         b.i32const(kind).localSet(PK).i32const(size).localSet(PS).localGet(T0).localSet(PA)
             .localGet(T1).localSet(PB).localGet(T2).localSet(PR).i32const(written).localSet(PW);
@@ -713,14 +760,7 @@ class BlockEmitter {
     setFlags(written){
         const { b } = this;
         b.localSet(U);
-        if ((written & ARITH) === ARITH)
-        {
-            this.drop();
-        }
-        else
-        {
-            this.settle();
-        }
+        this.keep(written);
         b.localGet(FL).i32const(~written).op(Op.i32and).localGet(U).i32const(written)
             .op(Op.i32and).op(Op.i32or).localSet(FL);
     }
@@ -1505,9 +1545,8 @@ class BlockEmitter {
         {
             b.localGet(RIP).localSet(T2);
         }
-        this.settle();
         this.spills.push({ at: b.length, reload: false });
-        b.i32const(0).localGet(FL).store('i32', { offset: layout.eflags });
+        this.storeRecord();
         b.globalGet(BUDGET).localGet(K).op(Op.i32sub).globalSet(BUDGET);
         b.i32const(0).localSet(K);
         b.globalGet(DEPTH).i32const(CALL_DEPTH).op(Op.i32geu)
@@ -1529,7 +1568,7 @@ class BlockEmitter {
         b.localSet(U);
         b.globalGet(DEPTH).i32const(1).op(Op.i32sub).globalSet(DEPTH);
         this.spills.push({ at: b.length, reload: true });
-        b.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);
+        this.loadRecord();
         b.i32const(0).load('i64', { offset: layout.eip }).localSet(RIP);
         b.localGet(U).i32const(LongExit.MISS).op(Op.i32eq);
         this.open();
@@ -1921,6 +1960,117 @@ function transferFunction(layout, regionType){
     return { body: b, locals: [ValType.i32, ValType.i32, ValType.i32, ValType.i32] };
 }
 
+/**
+ * The flags live after each instruction of each block, by the 32-bit
+ * translator's analysis: a block that ends in a jump, a conditional one or
+ * by being cut short goes on into the region's blocks where it holds them,
+ * anything else leaves for code that may read every flag. A division counts
+ * as reading every flag: its fault, taken by the interpreter, shows the
+ * flags as they stand.
+ *
+ * @param {LongBlock[]} blocks  in the region's address order
+ * @param {Map<number, number>} indexOf
+ * @returns {number[][]}
+ */
+function flagLiveness(blocks, indexOf){
+    const shaped = blocks.map(block=>{
+        const instructions = block.instructions.map(instruction=>(
+            instruction.op === 'div' || instruction.op === 'idiv'
+                ? { ...instruction, flagsRead: instruction.flagsRead | ARITH } : instruction));
+        const last = instructions[instructions.length - 1];
+        const next = last.eip + last.length;
+        const [operand] = last.operands;
+        const target = operand?.kind === 'rel' ? /** @type {number} */ (operand.target) : -1;
+        const exit = !endsBlock(last.op) ? { kind: 'fallthrough', targets: [], next }
+            : last.op === 'jmp' && target >= 0 ? { kind: 'jump', targets: [target], next }
+                : last.op.startsWith('j') && target >= 0 ? { kind: 'jcc', targets: [target], next }
+                    : { kind: 'leave', targets: [], next };
+        return { instructions, exit };
+    });
+    const out = liveFlagsOut(/** @type {any} */ (shaped), indexOf);
+    return shaped.map((block, index)=>{
+        /** @type {number[]} */
+        const after = [];
+        deadFlagPass(/** @type {any} */ (block), out[index], after);
+        return after;
+    });
+}
+
+/**
+ * The flag record's fields in the state block (`longFlagRecord`): kind and
+ * width, the two operands and the result, the carry in and the flags written.
+ */
+const Record = Object.freeze({ KIND: 0, SIZE: 4, A: 8, B: 16, R: 24, C: 32, W: 36 });
+
+/**
+ * Stores PK..PW and FL into the state block as they stand.
+ *
+ * @param {Body} b
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ */
+function storeRecord(b, layout){
+    const at = /** @type {number} */ (layout.longFlagRecord);
+    for (const [local, field, type] of /** @type {const} */ ([[PK, Record.KIND, 'i32'],
+        [PS, Record.SIZE, 'i32'], [PA, Record.A, 'i64'], [PB, Record.B, 'i64'],
+        [PR, Record.R, 'i64'], [PC, Record.C, 'i32'], [PW, Record.W, 'i32']]))
+    {
+        b.i32const(0).localGet(local).store(type, { offset: at + field });
+    }
+    b.i32const(0).localGet(FL).store('i32', { offset: layout.eflags });
+}
+
+/**
+ * Loads PK..PW and FL from the state block.
+ *
+ * @param {Body} b
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ */
+function loadRecord(b, layout){
+    const at = /** @type {number} */ (layout.longFlagRecord);
+    for (const [local, field, type] of /** @type {const} */ ([[PK, Record.KIND, 'i32'],
+        [PS, Record.SIZE, 'i32'], [PA, Record.A, 'i64'], [PB, Record.B, 'i64'],
+        [PR, Record.R, 'i64'], [PC, Record.C, 'i32'], [PW, Record.W, 'i32']]))
+    {
+        b.i32const(0).load(type, { offset: at + field }).localSet(local);
+    }
+    b.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);
+}
+
+/**
+ * A module over the memory whose `fold` folds the record a run left in the
+ * state block into its flags word and clears it: what the host calls when a
+ * run comes back to it, so the interpreter and the context a thread switch
+ * saves see a whole word.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {{ min: number, max?: number, shared?: boolean }} memoryLimits
+ */
+export function foldFunction(layout, memoryLimits){
+    const m = new ModuleBuilder();
+    m.importMemory('env', 'memory', memoryLimits);
+    const flags = flagsHelper();
+    const helper = m.function(m.type({ params: flags.params, results: flags.results }),
+        flags.locals, flags.body.toBytes());
+    const at = /** @type {number} */ (layout.longFlagRecord);
+    const b = new Body(256);
+    b.i32const(0).load('i32', { offset: at + Record.KIND });
+    b.if();
+    b.i32const(0);
+    b.i32const(0).load('i32', { offset: at + Record.KIND });
+    b.i32const(0).load('i32', { offset: at + Record.SIZE });
+    b.i32const(0).load('i64', { offset: at + Record.A });
+    b.i32const(0).load('i64', { offset: at + Record.B });
+    b.i32const(0).load('i64', { offset: at + Record.R });
+    b.i32const(0).load('i32', { offset: at + Record.C });
+    b.i32const(0).load('i32', { offset: at + Record.W });
+    b.i32const(0).load('i32', { offset: layout.eflags });
+    b.call(helper).store('i32', { offset: layout.eflags });
+    b.i32const(0).i32const(0).store('i32', { offset: at + Record.KIND });
+    b.end();
+    m.function(m.type({ params: [], results: [] }), [], b.toBytes(), { exportAs: 'fold' });
+    return m.toBytes();
+}
+
 /** A module whose `miss` answers `LongExit.MISS` having run nothing: an empty table slot. */
 export function missFunction(){
     const m = new ModuleBuilder();
@@ -1966,6 +2116,7 @@ function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads })
     /** @type {Map<number, number>} */
     const indexOf = new Map(blocks.map((block, index)=>[block.entry, index]));
     const first = /** @type {number} */ (indexOf.get(region.blocks[0].entry));
+    const liveAfter = flagLiveness(blocks, indexOf);
     // Label 0 is the region's entry, label i + 1 its block i.
     b.globalGet(LABEL).i32const(1).op(Op.i32sub).i32const(first).globalGet(LABEL)
         .op(Op.select).localSet(IDX);
@@ -1988,6 +2139,7 @@ function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads })
         let retired = 0;
         for (const instruction of block.instructions)
         {
+            e.live = liveAfter[index][retired] & ARITH;
             ending = e.instruction(instruction, retired);
             retired++;
             if (ending !== true)
@@ -2077,14 +2229,9 @@ function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads })
         b.insertAll(e.spills.map(({ at, reload })=>({ at,
             body: reload ? load(new Body(256), used) : store(new Body(256), written) })));
     }
-    // The epilogue: every register written, the record folded, the flags and RIP.
+    // The epilogue: every register written, the record as it stands, the flags and RIP.
     const tail = store(new Body(256), written);
-    tail.localGet(PK);
-    tail.if();
-    tail.localGet(PK).localGet(PS).localGet(PA).localGet(PB).localGet(PR).localGet(PC)
-        .localGet(PW).localGet(FL).call(helpers.flags).localSet(FL);
-    tail.end();
-    tail.i32const(0).localGet(FL).store('i32', { offset: layout.eflags });
+    storeRecord(tail, layout);
     tail.i32const(0).localGet(RIP).store('i64', { offset: layout.eip });
     tail.globalGet(BUDGET).localGet(K).op(Op.i32sub).globalSet(BUDGET);
     tail.localGet(CODE).op(Op.i32eqz);
@@ -2103,9 +2250,9 @@ function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads })
     }
     tail.end();
     tail.localGet(CODE);
-    // The prologue: every register the body touches, and the flags word.
+    // The prologue: every register the body touches, the flags word and the record.
     const head = load(new Body(256), used);
-    head.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);
+    loadRecord(head, layout);
     head.insert(head.length, b);
     head.insert(head.length, tail);
     return head;

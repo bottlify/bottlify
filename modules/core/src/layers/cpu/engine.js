@@ -65,6 +65,10 @@ export function engineContractProblem(engineModule, url){
  * @property {number} eip
  * @property {number} previousIp
  * @property {number} eflags       The eager word (hybrid: the emulator's `flags`).
+ * @property {number} [longFlagRecord] Long-mode translated code's own: the pending flag
+ *           record a region leaves for the next (kind and width i32, two operands and the
+ *           result i64, carry in and the flags written i32), kind 0 for none; folded into
+ *           `eflags` before the host reads them.
  * @property {number} [flagRecord] Cork's own: five i32 (kind, result, op1, op2, carry in) of
  *     the arithmetic record a region leaves instead of folding it into `eflags`; the word
  *     is whole only once `eflagsOf` has folded it. Absent (hybrid): the word is folded at exit.

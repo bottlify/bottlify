@@ -29,7 +29,8 @@ import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { features } from '../wasm/features.js';
 import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
-import { LongExit, emitRegions, endsBlock, missFunction, translates } from './emit.js';
+import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, translates }
+    from './emit.js';
 
 /** Instructions a block holds at most. */
 const BLOCK_LIMIT = 64;
@@ -92,6 +93,11 @@ export function createLongRunner(settings){
     // address has no region.
     const table = new WebAssembly.Table({ element: 'anyfunc', initial: 256 });
     const miss = new WebAssembly.Instance(new WebAssembly.Module(missFunction())).exports.miss;
+    // The record a run of regions leaves in the state block, folded into the
+    // flags word before anything but translated code looks at it.
+    const fold = /** @type {() => void} */ (new WebAssembly.Instance(
+        new WebAssembly.Module(foldFunction(layout, memoryLimits(memory))),
+        { env: { memory } }).exports.fold);
     /** @type {Map<number, number>} */
     const slots = new Map();
     /** @param {number} address */
@@ -410,6 +416,7 @@ export function createLongRunner(settings){
                     expect.value = -1n;
                     stats.entered++;
                     const answer = run();
+                    fold();
                     const retired = left - budgetGlobal.value;
                     state.retired += retired;
                     stats.translated += retired;
