@@ -47,6 +47,7 @@ import { createSortFunctions } from './sort.js';
 import { createRestartableFunctions } from './mbstate.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions, O_BINARY } from './io.js';
+import { withPipes } from './pipes.js';
 import { createEnvironment } from './environ.js';
 import { createMultiBytePage } from './mbcs.js';
 import { createLocaleFunctions } from './locale.js';
@@ -1042,9 +1043,12 @@ export function createMsvcrtFunctions(host){
 
     // The descriptor table the low-level calls hand out numbers from and the
     // streams stand on, so `_fileno(f)` is a number `_read` accepts.
-    const descriptors = host.files
+    // The volume with `_pipe`'s pipes in it, which the descriptors and
+    // streams on one read and write as they do a file.
+    const files = host.files ? withPipes(host.files) : null;
+    const descriptors = files
         ? createDescriptors({
-            files: host.files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
+            files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
             handles: host.handles,
             writeMemory: host.writeMemory,
             ioinfo: ()=>host.addressOf?.('__pioinfo') ?? 0,
@@ -1065,7 +1069,7 @@ export function createMsvcrtFunctions(host){
             readCString: host.readCString,
             allocate: host.allocate,
             free: host.free,
-            files: host.files,
+            files,
             write: host.write,
             iob: host.iob,
             errno,
@@ -1423,7 +1427,7 @@ export function createMsvcrtFunctions(host){
                 readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 readCString: host.readCString,
-                files: host.files,
+                files,
                 errno,
                 doserrno: code=>globals.set('doserrno', code),
                 divergence: host.divergence,
