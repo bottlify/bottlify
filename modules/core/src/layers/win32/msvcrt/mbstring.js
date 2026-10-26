@@ -27,6 +27,10 @@ import {
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
+import {
+    SHIFT_JIS, jisToShiftJis, shiftJisToJis, toHiragana, toKatakana, isKatakana, toFullWidth,
+    toHalfWidth, jisLevel,
+} from './kana.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -696,6 +700,20 @@ export function createMultiByteFunctions(narrow, host){
         handler: /** @type {Record<string, (args: number[]) => number>} */ (handlers)[name],
     });
 
+    /**
+     * A function of one character code that holds under page 932 alone:
+     * elsewhere it answers `otherwise`, or the code itself.
+     *
+     * @param {(code: number) => number} convert @param {number} [otherwise]
+     */
+    const underShiftJis = (convert, otherwise)=>({
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([code])=>(page.page() === SHIFT_JIS ? convert(code >>> 0)
+            : otherwise ?? code >>> 0),
+    });
+
     /** Rewrites the table a program reads, where the runtime's export of it was placed. */
     const publishTable = ()=>{
         const at = host.addressOf?.('_mbctype') ?? 0;
@@ -734,6 +752,20 @@ export function createMultiByteFunctions(narrow, host){
         _mbbtype: onHost('_mbbtype', 8),
         _mbsbtype: onHost('_mbsbtype', 8),
         _ismbclegal: onHost('_ismbclegal', 4),
+
+        // The Japanese conversions and tests (kana.js): under any page but
+        // 932 a conversion is its argument and a test is false.
+        _mbcjistojms: underShiftJis(jisToShiftJis),
+        _mbcjmstojis: underShiftJis(shiftJisToJis),
+        _mbctohira: underShiftJis(toHiragana),
+        _mbctokata: underShiftJis(toKatakana),
+        _mbbtombc: underShiftJis(toFullWidth),
+        _mbctombb: underShiftJis(toHalfWidth),
+        _ismbckata: underShiftJis(c=>(isKatakana(c) ? 1 : 0), 0),
+        _ismbchira: underShiftJis(c=>(c >= 0x829f && c <= 0x82f1 ? 1 : 0), 0),
+        _ismbcl0: underShiftJis(c=>(jisLevel(c) === 0 ? 1 : 0), 0),
+        _ismbcl1: underShiftJis(c=>(jisLevel(c) === 1 ? 1 : 0), 0),
+        _ismbcl2: underShiftJis(c=>(jisLevel(c) === 2 ? 1 : 0), 0),
 
         /**
          * int mblen(const char *text, size_t count) / size_t _mbstrlen(const char *text)
