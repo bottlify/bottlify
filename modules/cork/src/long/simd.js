@@ -5,8 +5,14 @@
  */
 
 /**
- * SSE to SSE2 in a long-mode region: the sixteen XMM registers as `v128`
- * locals, each instruction what `ir-simd.js` (through `ir64.js`) computes.
+ * SSE to SSE2 and MMX in a long-mode region: the sixteen XMM registers as
+ * `v128` locals, each instruction what `ir-simd.js` (through `ir64.js`)
+ * computes. An MMX register is the eight bytes of its x87 register in the
+ * state block, as the interpreter keeps it: an operation loads it into a
+ * `v128`'s low lane, the high one zero, runs the SSE form of the operation
+ * where the low lane's result is MMX's, and stores the low lane back; then
+ * the unit is in the MMX state (top zero, every register held), as `ir.js`
+ * leaves it, and a register written holds no quadword integer for the x87.
  *
  * Integer forms are one or a few wasm SIMD operations. Float arithmetic is
  * wasm's, which rounds as the model does (to nearest, denormals kept). A NaN
@@ -117,9 +123,9 @@ const MOVES = new Set(['movaps', 'movups', 'movapd', 'movupd', 'movdqa', 'movdqu
  */
 export function translatesSimd(instruction){
     const { op, operands } = instruction;
-    if (operands.some(operand=>operand.kind === 'mm'))
+    if (op === 'emms' || operands.some(operand=>operand.kind === 'mm'))
     {
-        return false;
+        return translatesMmx(instruction);
     }
     if (MOVES.has(op) || op in PACKED || op in UNPACK || op in SHIFTS)
     {
@@ -148,6 +154,32 @@ export function translatesSimd(instruction){
     }
 }
 
+/** The MMX forms beyond the packed operations, the unpacks and the shifts. */
+const MMX = new Set(['movd', 'movq', 'movntq', 'pandn', 'pmulhw', 'pmulhuw', 'pmuludq', 'psadbw',
+    'pmovmskb', 'pshufw', 'pextrw', 'pinsrw', 'emms']);
+/** The unpacks of an MMX register's high half, whose SSE forms take the high quadword's. */
+const MMX_UNPACK_HIGH = Object.freeze({
+    punpckhbw: [4, 20, 5, 21, 6, 22, 7, 23, 8, 24, 9, 25, 10, 26, 11, 27],
+    punpckhwd: words([2, 10, 3, 11, 4, 12, 5, 13]), punpckhdq: dwords([1, 5, 2, 6]),
+});
+
+/**
+ * Whether an MMX instruction is one this file translates: none that moves
+ * between an MMX and an XMM register (the conversions, `movq2dq`) or writes
+ * through rdi (`maskmovq`).
+ *
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ */
+function translatesMmx(instruction){
+    const { op, operands } = instruction;
+    if (operands.some(operand=>operand.kind === 'xmm'))
+    {
+        return false;
+    }
+    return MMX.has(op) || op in SHIFTS || /^punpck[lh](bw|wd|dq)$/.test(op)
+        || op in PACKED && !/ps$|pd$/.test(op);
+}
+
 /**
  * Emits an instruction `translatesSimd` takes.
  *
@@ -156,6 +188,26 @@ export function translatesSimd(instruction){
  * @param {number} index @param {number} at
  */
 export function emitSimd(e, instruction, index, at){
+    operation(e, instruction, index, at);
+    const { b } = e;
+    if (instruction.op === 'emms')
+    {
+        b.i32const(0).i32const(0xff).store('i32_8', { offset: e.layout.x87Empty, align: 0 });
+    }
+    else if (instruction.operands.some(operand=>operand.kind === 'mm'))
+    {
+        // Top zero and every register held: the two bytes side by side.
+        b.i32const(0).i32const(0).store('i32_16', { offset: e.layout.x87Top, align: 0 });
+    }
+}
+
+/**
+ * The instruction's own work, which `emitSimd` follows with the unit's state.
+ *
+ * @param {any} e @param {import('../decode/decoder.js').Instruction} instruction
+ * @param {number} index @param {number} at
+ */
+function operation(e, instruction, index, at){
     const { b } = e;
     const { op, operands } = instruction;
     const [dst, src, imm] = operands;
@@ -178,6 +230,10 @@ export function emitSimd(e, instruction, index, at){
         {
             b.localGet(XMM + operand.reg);
         }
+        else if (operand.kind === 'mm')
+        {
+            b.i32const(0).simdMem(S.load64Zero, { align: 0, offset: mmAt(e, operand.reg) });
+        }
         else if (operand.size === 16)
         {
             b.localGet(e.A).loadV128({ offset, align: 0 });
@@ -193,6 +249,13 @@ export function emitSimd(e, instruction, index, at){
         if (operand.kind === 'xmm')
         {
             b.localSet(XMM + operand.reg);
+            return;
+        }
+        if (operand.kind === 'mm')
+        {
+            b.localSet(V2).i32const(0).localGet(V2)
+                .simdMem(S.store64Lane, { align: 0, offset: mmAt(e, operand.reg), lane: 0 });
+            heldNoQuadword(e, operand.reg);
             return;
         }
         b.localSet(V2).localGet(e.A).localGet(V2);
@@ -230,6 +293,11 @@ export function emitSimd(e, instruction, index, at){
         b.op(lanes[0], lanes.slice(1));
         put(dst);
     };
+    if ((op === 'emms' || operands.some(operand=>operand.kind === 'mm'))
+        && mmx(e, instruction, vector, put, shuffle))
+    {
+        return;
+    }
     if (MOVES.has(op))
     {
         vector(src);
@@ -632,6 +700,106 @@ export function emitSimd(e, instruction, index, at){
         }
         default:
             throw new Error(`long emit: no SIMD form for ${op}`);
+    }
+}
+
+/** Where an MMX register's eight bytes lie in the state block. @param {any} e @param {number} reg */
+function mmAt(e, reg){
+    return e.layout.x87 + reg * 16;
+}
+
+/**
+ * An MMX register written: the x87 no longer finds in it the quadword
+ * integer a `fild` left (`x87Exact`), as `ir-simd.js` clears its bit.
+ *
+ * @param {any} e @param {number} reg
+ */
+function heldNoQuadword(e, reg){
+    const { b } = e;
+    const offset = /** @type {number} */ (e.layout.x87Exact);
+    b.i32const(0).i32const(0).load('i32_8u', { offset, align: 0 }).i32const(~(1 << reg) & 0xff)
+        .op(W.i32and).store('i32_8', { offset, align: 0 });
+}
+
+/**
+ * The MMX forms whose SSE form would not leave MMX's result in the low lane,
+ * or that SSE does not have; answers false for the rest, which the SSE forms
+ * emit on the low lanes.
+ *
+ * @param {any} e @param {import('../decode/decoder.js').Instruction} instruction
+ * @param {(operand: any) => void} vector @param {(operand: any) => void} put
+ * @param {(lanes: number[]) => void} shuffle
+ */
+function mmx(e, instruction, vector, put, shuffle){
+    const { b } = e;
+    const { op, operands } = instruction;
+    const [dst, src, imm] = operands;
+    const offset = e.layout.ramBase;
+    switch (op)
+    {
+        case 'emms':
+            return true;
+        case 'movd': case 'movq':
+        {
+            if (dst.kind !== 'mm' || src.kind !== 'reg')
+            {
+                return false;
+            }
+            // A doubleword zero-extended, a quadword whole.
+            const reg = /** @type {number} */ (dst.reg);
+            e.readReg(src.reg, src.size);
+            b.localSet(T0).i32const(0).localGet(T0)
+                .store('i64', { offset: mmAt(e, reg), align: 0 });
+            heldNoQuadword(e, reg);
+            return true;
+        }
+        case 'movntq':
+            vector(src);
+            put(dst);
+            return true;
+        case 'pshufw':
+        {
+            const s = /** @type {number} */ (imm.value);
+            const lanes = words([s & 3, s >> 2 & 3, s >> 4 & 3, s >> 6 & 3, 4, 5, 6, 7]);
+            vector(src);
+            b.localTee(V0).localGet(V0).simd(S.shuffle).op(lanes[0], lanes.slice(1));
+            put(dst);
+            return true;
+        }
+        case 'pextrw':
+            vector(src);
+            b.simd(S.i16x8ExtractLaneU).op(/** @type {number} */ (imm.value) & 3).op(W.i64extendu);
+            e.writeReg(dst.reg, 8);
+            return true;
+        case 'pinsrw':
+            vector(dst);
+            if (src.kind === 'reg')
+            {
+                e.readReg(src.reg, 4);
+                b.op(W.i32wrap);
+            }
+            else
+            {
+                b.localGet(e.A).load('i32_16u', { offset, align: 0 });
+            }
+            b.simd(S.i16x8ReplaceLane).op(/** @type {number} */ (imm.value) & 3);
+            put(dst);
+            return true;
+        case 'packsswb': case 'packssdw': case 'packuswb':
+            // Both operands' four (or two) lanes in one vector, narrowed: its low half.
+            vector(dst);
+            vector(src);
+            b.simd(S.shuffle).op(0, qwords([0, 2]).slice(1)).localTee(V0).localGet(V0)
+                .simd(PACKED[op]);
+            put(dst);
+            return true;
+        default:
+            if (op in MMX_UNPACK_HIGH)
+            {
+                shuffle(MMX_UNPACK_HIGH[/** @type {keyof typeof MMX_UNPACK_HIGH} */ (op)]);
+                return true;
+            }
+            return false;
     }
 }
 

@@ -605,12 +605,6 @@ export function createLongRunner(settings){
         },
 
         /**
-         * The program faulted on a page it cannot reach: reads test their pages
-         * from now on, and the regions that wrapped theirs into RAM go -- the
-         * same instruction would read RAM there where the interpreter faults.
-         * Once a run, as the 32-bit runtime's `readsFaulted`.
-         */
-        /**
          * A thread's stack, as the host names it: code translated on it ends
          * the stores through rsp that test no page.
          *
@@ -629,6 +623,12 @@ export function createLongRunner(settings){
             }
         },
 
+        /**
+         * The program faulted on a page it cannot reach: reads test their pages
+         * from now on, and the regions that wrapped theirs into RAM go -- the
+         * same instruction would read RAM there where the interpreter faults.
+         * Once a run, as the 32-bit runtime's `readsFaulted`.
+         */
         readsFaulted(){
             if (readsChecked || settings.checkReads === false)
             {

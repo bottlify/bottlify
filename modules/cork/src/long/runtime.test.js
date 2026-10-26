@@ -12,8 +12,9 @@
  * taking what a block stops before), once on the interpreter alone -- and
  * everything a program can see compared: the sixteen registers, RIP, the
  * instructions retired, the whole flags word (undefined flags included: the
- * translator keeps them as the model does), the XMM registers, the data
- * buffer, and a fault's vector and instruction.
+ * translator keeps them as the model does), the XMM registers, the x87 unit
+ * the MMX registers are part of, the data buffer, and a fault's vector and
+ * instruction.
  *
  * The interpreter is itself judged by the processor (`ir64-corpus.test.js`),
  * so this is the translator against the hardware one step removed, exact
@@ -260,6 +261,14 @@ function load(m, one){
     view.setUint32(layout.eflags, one.flags | 0x202, true);
     view.setUint32(layout.mxcsr, one.mxcsr ?? 0x1f80, true);
     bytes.set(one.xmm ?? fill(one.seed ^ CORPUS.xmmSeed, 256), layout.xmm);
+    // The x87 unit as `fninit` leaves it, its registers (the MMX ones) seeded,
+    // and some marked as holding a `fild`'s quadword, which an MMX write ends.
+    bytes.set(fill(one.seed ^ 0x87, 128), layout.x87);
+    bytes[layout.x87Top] = 0;
+    bytes[layout.x87Empty] = 0xff;
+    view.setUint16(layout.x87Control, 0x37f, true);
+    view.setUint16(layout.x87Status, 0, true);
+    bytes[/** @type {number} */ (layout.x87Exact)] = one.seed & 0xff;
     m.state.syncIn();
     m.state.halted = false;
     m.state.trapped.length = 0;
@@ -315,6 +324,10 @@ function run(m, translated, budget = 7){
         retired: String(state.retired),
         flags: view.getUint32(layout.eflags, true).toString(16),
         xmm: Buffer.from(bytes.subarray(layout.xmm, layout.xmm + 256)).toString('hex'),
+        x87: Buffer.from(bytes.subarray(layout.x87, layout.x87 + 128)).toString('hex')
+            + [layout.x87Top, layout.x87Empty, layout.x87Control, layout.x87Control + 1,
+                layout.x87Status, layout.x87Status + 1, /** @type {number} */ (layout.x87Exact)]
+                .map(at=>bytes[at].toString(16)).join(','),
         data: Buffer.from(bytes.subarray(CORPUS.dataAt, CORPUS.dataAt + CORPUS.dataSize))
             .toString('base64'),
     };
@@ -358,7 +371,7 @@ function compare(cases, budget = 7, transfers = true, checkReads = undefined,
             }
         }
         for (const key of /** @type {const} */ (['fault', 'rip', 'retired', 'flags', 'xmm',
-            'data']))
+            'x87', 'data']))
         {
             if (translated[key] !== interpreted[key])
             {
@@ -395,6 +408,37 @@ test('seeded long programs run translated as they run interpreted', ()=>{
         const { failures, stats, exits } = compare(cases, 7, transfers);
         // A division from the pool raises #DE in some (both ways alike); most run through.
         assert.ok(exits > cases.length * 0.6, `${exits} programs ran to their exit`);
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.ok(stats.translated > stats.interpreted * 2,
+            `translated ${stats.translated}, interpreted ${stats.interpreted}`);
+    }
+});
+
+/**
+ * MMX forms at 64 bits, as bytes: the saturating, multiplying, unpacking,
+ * packing, shuffling and shifting ones, moves among the MMX registers, the
+ * general ones and memory (through rbx, rsi and rdi, which hold the corpus's
+ * data pointers), with the integer and x87 instructions around them that
+ * leave and enter the MMX state.
+ */
+const MMX_POOL = [
+    '0f6f4b10', '0f6f5e08', '0f6f6718', '0f7f4320', '0f7f6e28', '0f7e5730', '0f6e7334',
+    '0fe74b38', '0f6ffb', '0f7fe8', '410f6ef8', '490f6ed1', '410f7eca', '490f7ee3', '480f7ec0',
+    '0f7ef1', '0fe9c3', '0fedc7', '0fddcc', '0fd8e3', '0fdbef', '0fdfc1', '0febd6', '0fefdb',
+    '0f75f6', '0f64d1', '0f764e10', '0ffcca', '0ffdca', '0ffedc', '0fd4c1', '0ffb13', '0f60d1',
+    '0f68d1', '0f61ff', '0f69cb', '0f62ff', '0f6ae8', '0f605f04', '0fe5e7', '0fd5cf', '0fe4d3',
+    '0ff4ca', '0ff5d9', '0ff6d4', '0fe0ca', '0fe3d8', '0fdac2', '0feee9', '0f70c11b',
+    '0f7053084e', '0f71e707', '0f73f310', '0f73d720', '0f72d121', '0f72e228', '0ff1c1', '0fd3d3',
+    '0fe16618', '0f63c1', '0f67d3', '0f6be5', '0fd7ca', '440fd7c8', '0fc5c802', '440fc5c307',
+    '0fc4e801', '0fc44f1206', 'b80180ff7f', '01c8', '4989c0', 'd9e8', '0f77',
+].map(hex=>Buffer.from(hex, 'hex'));
+
+test('MMX runs translated as interpreted, the x87 unit it leaves in its state included', ()=>{
+    const cases = Array.from({ length: 400 }, (_, i)=>program(MMX_POOL, 0x3d00 + i, 3 + i % 14));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits, stats } = compare(cases, budget);
+        assert.equal(exits, cases.length);
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(stats.translated > stats.interpreted * 2,
             `translated ${stats.translated}, interpreted ${stats.interpreted}`);

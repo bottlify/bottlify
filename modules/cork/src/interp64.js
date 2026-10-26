@@ -142,9 +142,11 @@ class BlockState64 {
     loadX87(){
         const { view, layout } = this;
         const unit = freshX87();
+        // As bits: a register MMX wrote holds a quadword, not a double, and the
+        // language leaves the bits of a NaN read as a float to the engine.
         for (let i = 0; i < 8; i++)
         {
-            unit.f80[i] = view.getFloat64(layout.x87 + i * 16, true);
+            unit.f80bits[i] = view.getBigInt64(layout.x87 + i * 16, true);
         }
         unit.top = view.getUint8(layout.x87Top) & 7;
         unit.empty = view.getUint8(layout.x87Empty);
@@ -167,7 +169,7 @@ class BlockState64 {
         const { view, layout } = this;
         for (let i = 0; i < 8; i++)
         {
-            view.setFloat64(layout.x87 + i * 16, unit.f80[i], true);
+            view.setBigInt64(layout.x87 + i * 16, unit.f80bits[i], true);
             if ((unit.x87Exact >>> i & 1) !== 0)
             {
                 view.setBigInt64(layout.x87 + i * 16 + 8, unit.x87Shadow[i], true);

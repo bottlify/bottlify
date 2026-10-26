@@ -33,7 +33,7 @@
 import { AF, CF, DF, OF, PF, SF, ZF } from './decode/table.js';
 import { Fault, Unsupported, condition } from './ir.js';
 import { cpuidLeaf, topologyOf } from './cpuid.js';
-import { evaluateSimd, isSimdOp } from './ir-simd.js';
+import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 import { evaluateX87, isX87Op } from './ir-x87.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
@@ -1012,9 +1012,10 @@ function strings(instruction, state, read, write, setFlags){
  */
 function simd(instruction, state){
     const { op, operands } = instruction;
-    if (operands.some(operand=>operand.kind === 'mm'))
+    if (op === 'emms' || operands.some(operand=>operand.kind === 'mm'))
     {
-        throw new Unsupported(`${op} on an MMX register`, instruction.eip);
+        mmx(instruction, state);
+        return;
     }
     const [dst, src] = operands;
     // A 16-byte memory operand of a legacy SSE instruction must be aligned,
@@ -1154,6 +1155,82 @@ function x87(instruction, state){
     if (instruction.operands[0]?.kind === 'reg')
     {
         setRegister(state, 0, 2, BigInt(view.reg[0] & 0xffff));
+    }
+}
+
+/**
+ * An MMX instruction, on the 32-bit model over a view of this state, as x87
+ * is: the MMX registers are the x87 unit's (`f80bits`), and any instruction
+ * on them but `emms` leaves the unit in the MMX state. What long mode adds,
+ * a quadword between an MMX register and a general one or memory (`movq`,
+ * REX.W `0F 6E`/`0F 7E`), is moved here; the general register an MMX
+ * instruction writes otherwise is a doubleword, zero-extended.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @param {State64} state
+ */
+function mmx(instruction, state){
+    const { op, operands } = instruction;
+    const [dst, src] = operands;
+    const unit = state.loadX87?.() ?? /** @type {X87State} */ (state.x87);
+    const quadword = (/** @type {import('./decode/decoder.js').Operand} */ operand)=>
+        operand.size === 8 && operand.kind !== 'mm';
+    if (op === 'movd' && (quadword(dst) || quadword(src)))
+    {
+        if (dst.kind === 'mm')
+        {
+            const value = src.kind === 'reg' ? state.r[/** @type {number} */ (src.reg)]
+                : state.memory.read(operandAddress64(state, src), 8);
+            unit.f80bits[/** @type {number} */ (dst.reg)] = BigInt.asIntN(64, value);
+            unit.x87Exact &= ~(1 << /** @type {number} */ (dst.reg));
+        }
+        else
+        {
+            const value = BigInt.asUintN(64, unit.f80bits[/** @type {number} */ (src.reg)]);
+            if (dst.kind === 'reg')
+            {
+                state.r[/** @type {number} */ (dst.reg)] = value;
+            }
+            else
+            {
+                state.memory.write(operandAddress64(state, dst), 8, value);
+            }
+        }
+        // The MMX state, as `mmxState` leaves an evaluation's.
+        unit.top = 0;
+        unit.empty = 0;
+        state.storeX87?.(unit);
+        return;
+    }
+    const view = /** @type {import('./ir.js').EvalState} */ (/** @type {unknown} */ ({
+        ...unit,
+        reg: Uint32Array.from(state.r, value=>Number(value & 0xffffffffn)),
+        xmm: state.xmm,
+        mxcsr: state.mxcsr,
+        eflags: state.rflags,
+        memory: {
+            read: (/** @type {number} */ at, /** @type {number} */ size)=>
+                Number(state.memory.read(BigInt(at), size)),
+            write: (/** @type {number} */ at, /** @type {number} */ size, /** @type {number} */ value)=>
+                state.memory.write(BigInt(at), size, BigInt(value >>> 0)),
+        },
+    }));
+    if (!evaluateSimd(instruction, view, operand=>Number(operandAddress64(state, operand))))
+    {
+        throw new Unsupported(op, instruction.eip);
+    }
+    if (op !== 'emms')
+    {
+        mmxState(view);
+    }
+    unit.top = view.top;
+    unit.empty = view.empty;
+    unit.x87Exact = view.x87Exact;
+    state.storeX87?.(unit);
+    if (dst?.kind === 'reg')
+    {
+        const reg = /** @type {number} */ (dst.reg);
+        setRegister(state, reg, 4, BigInt(view.reg[reg]));
     }
 }
 
