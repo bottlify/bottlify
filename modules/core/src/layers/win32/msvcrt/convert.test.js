@@ -414,3 +414,47 @@ test('_ecvt_s and _fcvt_s take the double in two slots: seven of them', ()=>{
     const { table } = build(fakeFpu());
     assert.deepEqual([table._ecvt_s.argBytes, table._fcvt_s.argBytes], [28, 28]);
 });
+
+test('_strtoi64 and _strtoui64 read 64 bits, the high half in EDX, out of range clamped', ()=>{
+    // Wine's msvcrt test__strtoi64.
+    const memory = fakeMemory();
+    let edx = 0;
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+        ...memory, errno: code=>errno.push(code), setRegisters: values=>{
+            edx = values.edx;
+        } }));
+    const end = memory.allocate(4);
+    /** @param {string} name @param {string} text @param {number} base */
+    const read = (name, text, base)=>{
+        const at = memory.put(text);
+        const low = table[name].handler([at, end, base]) >>> 0;
+        return { value: BigInt.asIntN(64, BigInt(edx >>> 0) << 32n | BigInt(low)),
+            read: memory.u32(end) - at };
+    };
+    for (const [text, base, value, read_] of /** @type {[string, number, bigint, number][]} */ ([
+        ['31923', 10, 31923n, 5], ['-213312', 10, -213312n, 7], ['12aa', 10, 12n, 2],
+        ['abc12', 10, 0n, 0], ['0x123', 10, 0n, 1], ['000123', 10, 123n, 6],
+        ['        12 212.31', 10, 12n, 10], ['31923', 16, 203043n, 5], ['abc12', 16, 703506n, 5],
+        ['0x123', 16, 291n, 5], ['0x123', 36, 1541019n, 5], ['-213312', 0, -213312n, 7],
+    ]))
+    {
+        assert.deepEqual(read('_strtoi64', text, base), { value, read: read_ }, `${text} ${base}`);
+    }
+    assert.deepEqual(errno, []);
+    read('_strtoi64', '-1', 10);
+    assert.equal(read('_strtoi64', ' ', 10).value, 0n, 'nothing read: EDX zero too');
+    assert.equal(read('_strtoi64', '99999999999999999999', 10).value, 0x7fffffffffffffffn);
+    assert.equal(read('_strtoi64', '-99999999999999999999', 10).value, -0x8000000000000000n);
+    assert.equal(BigInt.asUintN(64, read('_strtoui64', '99999999999999999999', 10).value),
+        0xffffffffffffffffn);
+    assert.equal(read('_strtoui64', '-99999999999999999999', 10).value, 1n);
+    assert.equal(BigInt.asUintN(64, read('_strtoui64', '-213312', 0).value),
+        BigInt.asUintN(64, -213312n));
+    assert.deepEqual(errno, [34, 34, 34, 34]);
+    const wide = memory.putWide('-1234567890123');
+    assert.equal(table._wcstoi64.handler([wide, 0, 10]) >>> 0,
+        Number(BigInt.asUintN(32, -1234567890123n)));
+    assert.equal(edx >>> 0, Number(BigInt.asUintN(64, -1234567890123n) >> 32n));
+});

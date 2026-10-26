@@ -35,6 +35,9 @@ const MAX_STRING = 1 << 20;
 const LONG_MAX = 0x7fffffffn;
 const LONG_MIN = -0x80000000n;
 const ULONG_MAX = 0xffffffffn;
+const INT64_MAX = 0x7fffffffffffffffn;
+const INT64_MIN = -0x8000000000000000n;
+const UINT64_MAX = 0xffffffffffffffffn;
 
 /** What `isspace` accepts, which is what every conversion skips first. */
 const WHITESPACE = ' \t\n\v\f\r';
@@ -283,6 +286,8 @@ export function scanDecimal(text){
  * @property {import('./float.js').FloatHost} [fpu]  Absent means the functions
  *           that return a double are not exported at all.
  * @property {(code: number) => void} [errno]  Where an out-of-range value says so.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           EDX, for a 64-bit answer.
  */
 
 /**
@@ -347,7 +352,7 @@ export function createConversionFunctions(host){
      * @param {(negative: boolean) => bigint} limit
      * @param {boolean} [wide]  A wide string, two bytes a character.
      */
-    const strtoInteger = (argBytes, convert, limit, wide = false)=>({
+    const strtoInteger = (argBytes, convert, limit, wide = false, sixtyFour = false)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
@@ -361,6 +366,10 @@ export function createConversionFunctions(host){
             writeInt(end, scanned ? string + scanned.end * (wide ? 2 : 1) : string);
             if (scanned === null)
             {
+                if (sixtyFour)
+                {
+                    host.setRegisters?.({ edx: 0 });
+                }
                 return 0;
             }
             // errno is set only when the value does not fit: a caller clears it
@@ -371,9 +380,37 @@ export function createConversionFunctions(host){
                 host.errno?.(ERANGE);
                 value = limit(scanned.negative);
             }
+            if (sixtyFour)
+            {
+                host.setRegisters?.({ edx: Number(BigInt.asUintN(64, value) >> 32n) });
+            }
             return Number(BigInt.asIntN(32, value));
         },
     });
+
+    /** @param {bigint} magnitude @param {boolean} negative */
+    const toInt64 = (magnitude, negative)=>{
+        const value = negative ? -magnitude : magnitude;
+        return value > INT64_MAX || value < INT64_MIN ? null : value;
+    };
+    /** @param {boolean} negative */
+    const int64Limit = negative=>(negative ? INT64_MIN : INT64_MAX);
+    /**
+     * The unsigned reading as strtoul's: a magnitude past the type clamped,
+     * then negated within it -- "-99999999999999999999" is 1 (Wine's
+     * msvcrt test__strtoi64).
+     *
+     * @param {bigint} magnitude @param {boolean} negative
+     */
+    const toUint64 = (magnitude, negative)=>{
+        if (magnitude > UINT64_MAX)
+        {
+            return null;
+        }
+        return negative ? BigInt.asUintN(64, -magnitude) : magnitude;
+    };
+    /** @param {boolean} negative */
+    const uint64Limit = negative=>(negative ? BigInt.asUintN(64, -UINT64_MAX) : UINT64_MAX);
 
     /**
      * The `_*toa` family: same shape, differing only in how the value is read.
@@ -580,6 +617,14 @@ export function createConversionFunctions(host){
         // of range -- errno is the calling thread's, and only the host
         // reaches it -- and a base it does not take; the handlers above
         // answer those, through a trap the code jumps to.
+        /**
+         * __int64 _strtoi64(const char *str, char **end, int base) and
+         * unsigned __int64 _strtoui64: strtol and strtoul in 64 bits, the
+         * high half in EDX; out of range clamped with ERANGE.
+         */
+        _strtoi64: strtoInteger(12, toInt64, int64Limit, false, true),
+        _strtoui64: strtoInteger(12, toUint64, uint64Limit, false, true),
+
         strtol: readMemory
             ? guestEntry(inGuest.strtol, COMPILED.strtol, { readMemory, writeMemory }, strtol)
             : strtol,
@@ -596,6 +641,14 @@ export function createConversionFunctions(host){
              */
             wcstol: strtoInteger(12, toLong, longLimit, true),
             wcstoul: strtoInteger(12, toUnsignedLong, unsignedLongLimit, true),
+
+            /**
+             * __int64 _wcstoi64(const wchar_t *str, wchar_t **end, int base)
+             * and unsigned __int64 _wcstoui64: the wide readings in 64 bits,
+             * the high half in EDX.
+             */
+            _wcstoi64: strtoInteger(12, toInt64, int64Limit, true, true),
+            _wcstoui64: strtoInteger(12, toUint64, uint64Limit, true, true),
 
             _wtoi: wideAtoi,
             _wtol: wideAtoi,

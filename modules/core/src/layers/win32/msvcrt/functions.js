@@ -44,6 +44,7 @@ import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
 import { createSortFunctions } from './sort.js';
+import { createRestartableFunctions } from './mbstate.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions, O_BINARY } from './io.js';
 import { createEnvironment } from './environ.js';
@@ -1106,6 +1107,17 @@ export function createMsvcrtFunctions(host){
         }),
     };
 
+    const wideClasses = createWideClassificationFunctions();
+    const secure = createSecureFunctions({ readMemory: host.readMemory,
+        writeMemory: host.writeMemory, errno });
+    const wideStrings = createWideFunctions({
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        readCString: host.readCString,
+        errno,
+        ...host.allocate ? { allocate: host.allocate } : {},
+    });
+
     return {
         ...narrow,
         // Bound to the byte functions above, so the two families cannot drift.
@@ -1118,9 +1130,8 @@ export function createMsvcrtFunctions(host){
             divergence: host.divergence,
             page: multiBytePage,
         }),
-        ...createWideClassificationFunctions(),
-        ...createSecureFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
-            errno }),
+        ...wideClasses,
+        ...secure,
         ...createErrorFunctions({
             writeMemory: host.writeMemory,
             allocate,
@@ -1248,13 +1259,28 @@ export function createMsvcrtFunctions(host){
                 return 0;
             },
         },
-        ...createWideFunctions({
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            readCString: host.readCString,
-            errno,
-            ...host.allocate ? { allocate: host.allocate } : {},
-        }),
+        ...wideStrings,
+        ...createRestartableFunctions({ readMemory: host.readMemory,
+            writeMemory: host.writeMemory, readCString: host.readCString, errno }),
+
+        // The `_l` forms take a locale, and the C locale is the only one a
+        // program can hold here: each is its plain form, the locale an
+        // argument more the caller cleans up.
+        ...Object.fromEntries(/** @type {[string, Record<string, any>, string, number][]} */ ([
+            ['_strnicmp_l', narrow, '_strnicmp', 16], ['_memicmp_l', narrow, '_memicmp', 16],
+            ['_tolower_l', narrow, 'tolower', 8], ['_toupper_l', narrow, 'toupper', 8],
+            ['_stricmp_l', narrow, '_stricmp', 12],
+            ['_wcsicmp_l', wideStrings, '_wcsicmp', 12],
+            ['_wcsnicmp_l', wideStrings, '_wcsnicmp', 16],
+            ['_towlower_l', wideClasses, 'towlower', 8],
+            ['_towupper_l', wideClasses, 'towupper', 8],
+        ]).filter(([, from, plain])=>from[plain])
+            .map(([name, from, plain, argBytes])=>[name, { ...from[plain], argBytes }])),
+
+        /**
+         * size_t __strncnt(const char *string, size_t count): strnlen.
+         */
+        __strncnt: secure.strnlen,
         ...createConversionFunctions({
             readCString: host.readCString,
             readMemory: host.readMemory,
@@ -1262,6 +1288,7 @@ export function createMsvcrtFunctions(host){
             allocate,
             fpu: host.fpu,
             errno,
+            ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
         }),
         ...createScanFunctions(host),
         ...createSortFunctions({
