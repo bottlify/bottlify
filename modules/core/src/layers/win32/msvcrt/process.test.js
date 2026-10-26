@@ -195,3 +195,9 @@ test('raise ignores, ends the process by default, or runs the handler set', asyn
     await fns.raise.handler([SIGTERM]);
     assert.deepEqual(exited, [3], 'SIG_DFL is _exit(3)');
 });
+
+test('_spawnvp and _spawnlp are _spawnv and _spawnl', ()=>{
+    const { fns } = build();
+    assert.equal(fns._spawnvp, fns._spawnv);
+    assert.equal(fns._spawnlp, fns._spawnl);
+});

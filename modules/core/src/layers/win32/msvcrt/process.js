@@ -159,7 +159,7 @@ export function createProcessFunctions(host){
         return found;
     };
 
-    return {
+    const table = {
         /**
          * void (*signal(int sig, void (*func)(int)))(int)
          *
@@ -278,5 +278,12 @@ export function createProcessFunctions(host){
                 return spawn(mode >>> 0, name, list);
             },
         },
+    };
+    return {
+        ...table,
+        // The PATH forms. The image is resolved as CreateProcess resolves
+        // the name; the runtime's own walk of PATH's directories is not made.
+        _spawnlp: table._spawnl,
+        _spawnvp: table._spawnv,
     };
 }
