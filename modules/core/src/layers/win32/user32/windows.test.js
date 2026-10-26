@@ -301,6 +301,8 @@ function setup({
     const clips = [];
     /** What GetKeyState answers for a key, as a test holds it. @type {Map<number, number>} */
     const keys = new Map();
+    /** Every event SendInput and its spellings handed the input layer. @type {any[]} */
+    const inputs = [];
 
     /** @type {import('./windows.js').WindowService | null} */
     /** @type {import('./windows.js').WindowService | null} */
@@ -326,6 +328,10 @@ function setup({
             return hookReply ? hookReply(entry, args) : 0;
         },
         callerThread: ()=>caller.current,
+        // What a program puts into the input stream itself, and where the
+        // cursor is for it to move from.
+        sendInput: event=>inputs.push(event),
+        cursor: ()=>({ x: 10, y: 20 }),
         // As the bridge answers: the thread named is the caller for what
         // `fn` runs before it awaits.
         answering: (thread, fn)=>{
@@ -378,7 +384,7 @@ function setup({
     };
 
     return { memory, handles, queue, keys, fns, dispatched, parked, tick, idlers, released,
-        called, divergences, errors, fills, presents, clips,
+        called, divergences, errors, fills, presents, clips, inputs,
         service: /** @type {import('./windows.js').WindowService} */ (
             /** @type {unknown} */ (service)) };
 }
@@ -3869,6 +3875,167 @@ test('an out-of-context WinEvent hook is called at its thread\'s next look at it
         'and is no message');
     assert.deepEqual(called.map(c=>[c.entry, c.args.slice(0, 6), c.thread]),
         [[HOOK_PROC, [hook, EVENT_OBJECT_SHOW, 0, -8 >>> 0, 0, 7], caller.current]]);
+});
+
+test('a WH_MOUSE_LL hook of the calling thread is shown each piece of injected mouse input '
+    + 'before it is queued, and can take it away', ()=>{
+    // user32:msg's MOUSE_LL test: mouse_event's move, button and move are
+    // heard as WM_MOUSEMOVE, WM_LBUTTONUP, WM_MOUSEMOVE, flagged injected.
+    const WH_MOUSE_LL = 14;
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    /** @type {number[][]} */
+    const shown = [];
+    let refuse = 0;
+    const context = setup({ heap: true, caller, threadExists: ()=>true,
+        hookReply: (_entry, args)=>{
+            const at = args[2];
+            shown.push([args[0], args[1],
+                ...[0, 4, 8, 12, 20].map(offset=>context.memory.u32(at + offset))]);
+            return refuse;
+        } });
+    const { fns, inputs } = context;
+    assert.notEqual(fns.SetWindowsHookExA.handler([WH_MOUSE_LL, HOOK_PROC, HINSTANCE, 0]), 0);
+    const MOUSEEVENTF_MOVE = 0x0001;
+    const MOUSEEVENTF_LEFTUP = 0x0004;
+    fns.mouse_event.handler([MOUSEEVENTF_MOVE, -1, 0, 0, 0x55]);
+    fns.mouse_event.handler([MOUSEEVENTF_LEFTUP, 0, 0, 0, 0]);
+    // [code, message, x, y, mouseData, flags, extra]
+    assert.deepEqual(shown, [[0, 0x0200, 9, 20, 0, 1, 0x55], [0, 0x0202, 10, 20, 0, 1, 0]]);
+    assert.equal(inputs.length, 2);
+    refuse = 1;
+    fns.mouse_event.handler([MOUSEEVENTF_LEFTUP, 0, 0, 0, 0]);
+    assert.equal(inputs.length, 2, 'taken away');
+});
+
+test('a WH_KEYBOARD_LL hook is shown an injected key with its KBDLLHOOKSTRUCT', async()=>{
+    const WH_KEYBOARD_LL = 13;
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    /** @type {number[][]} */
+    const shown = [];
+    const context = setup({ heap: true, caller, threadExists: ()=>true,
+        hookReply: (_entry, args)=>{
+            shown.push([args[1], ...[0, 4, 8, 16].map(at=>context.memory.u32(args[2] + at))]);
+            return 0;
+        } });
+    const { fns, memory, inputs } = context;
+    fns.SetWindowsHookExA.handler([WH_KEYBOARD_LL, HOOK_PROC, 0, 0]);
+    const INPUT = 0x10000;
+    const INPUT_KEYBOARD = 1;
+    const KEYEVENTF_KEYUP = 0x0002;
+    memory.writeMemory(INPUT, new Uint8Array(new Uint32Array([
+        INPUT_KEYBOARD, 0x41 | 0x1e << 16, 0, 0, 0x99, 0, 0,
+        INPUT_KEYBOARD, 0x41 | 0x1e << 16, KEYEVENTF_KEYUP, 0, 0, 0, 0]).buffer));
+    assert.equal(await fns.SendInput.handler([2, INPUT, 28]), 2);
+    // [message, vkCode, scanCode, flags, extra]: LLKHF_INJECTED, and LLKHF_UP on the release.
+    assert.deepEqual(shown, [[0x0100, 0x41, 0x1e, 0x10, 0x99], [0x0101, 0x41, 0x1e, 0x90, 0]]);
+    assert.equal(inputs.length, 2);
+});
+
+test('a low-level keyboard hook hears the key a press names and the message the keys make',
+    ()=>{
+        // user32:input's keyboard sequences: sides for shift, control and alt
+        // named without one, a scan code's key (the keypad's arrows with
+        // NumLock off), VK_PACKET for a character alone, and with Alt down a
+        // system key flagged LLKHF_ALTDOWN unless Control is down too.
+        const WH_KEYBOARD_LL = 13;
+        /** @type {number[][]} */
+        const shown = [];
+        const context = setup({ heap: true, hookReply: (_entry, args)=>{
+            shown.push([args[1], context.memory.u32(args[2]), context.memory.u32(args[2] + 4),
+                context.memory.u32(args[2] + 8)]);
+            return 0;
+        } });
+        const { fns, keys } = context;
+        fns.SetWindowsHookExA.handler([WH_KEYBOARD_LL, HOOK_PROC, 0, 0]);
+        /** @param {number} vk @param {number} scan @param {number} flags */
+        const press = (vk, scan, flags)=>{
+            shown.length = 0;
+            fns.keybd_event.handler([vk, scan, flags, 0]);
+            return shown[0];
+        };
+        const [UP, EXTENDED, SCANCODE] = [0x0002, 0x0001, 0x0008];
+        assert.deepEqual(press(0x10, 1, 0), [0x0100, 0xa0, 1, 0x10], 'VK_SHIFT is the left one');
+        assert.deepEqual(press(0x11, 1, EXTENDED), [0x0100, 0xa3, 1, 0x11],
+            'an extended VK_CONTROL the right one');
+        assert.deepEqual(press(0xa1, 1, 0), [0x0100, 0xa1, 1, 0x11], 'the right shift is extended');
+        assert.deepEqual(press(0, 0x36, SCANCODE), [0x0100, 0xa1, 0x36, 0x10]);
+        assert.deepEqual(press(0, 0x4b, SCANCODE), [0x0100, 0x25, 0x4b, 0x10], 'NumLock off: left');
+        keys.set(0x90, 0x01);
+        assert.deepEqual(press(0, 0x4b, SCANCODE), [0x0100, 0x64, 0x4b, 0x10], 'NumLock on: 4');
+        keys.delete(0x90);
+
+        assert.deepEqual(press(0xa4, 1, 0), [0x0104, 0xa4, 1, 0x30], 'Alt itself: a system key');
+        keys.set(0x12, 0x8000);
+        assert.deepEqual(press(0x46, 2, 0), [0x0104, 0x46, 2, 0x30]);
+        assert.deepEqual(press(0xa4, 3, UP), [0x0101, 0xa4, 3, 0x90], 'Alt let go: a plain key up');
+        keys.set(0x11, 0x8000);
+        assert.deepEqual(press(0x46, 4, 0), [0x0100, 0x46, 4, 0x10], 'Alt with Control: plain');
+    });
+
+test('a character put in alone is VK_PACKET, its whole code the scan code', async()=>{
+    const WH_KEYBOARD_LL = 13;
+    /** @type {number[][]} */
+    const shown = [];
+    const context = setup({ heap: true, hookReply: (_entry, args)=>{
+        shown.push([context.memory.u32(args[2]), context.memory.u32(args[2] + 4)]);
+        return 0;
+    } });
+    const { fns, memory } = context;
+    fns.SetWindowsHookExA.handler([WH_KEYBOARD_LL, HOOK_PROC, 0, 0]);
+    const INPUT = 0x10000;
+    const KEYEVENTF_UNICODE = 0x0004;
+    memory.writeMemory(INPUT, new Uint8Array(new Uint32Array([
+        1, 0x3c0 << 16, KEYEVENTF_UNICODE, 0, 0, 0, 0,
+        1, 0x11 | 0x3c0 << 16, KEYEVENTF_UNICODE, 0, 0, 0, 0]).buffer));
+    assert.equal(await fns.SendInput.handler([2, INPUT, 28]), 2);
+    assert.deepEqual(shown, [[0xe7, 0x3c0], [0xa2, 0xc0]],
+        'with a key named, the key (sided) and the low byte');
+});
+
+test('a move of nothing is not shown to a low-level mouse hook', ()=>{
+    const WH_MOUSE_LL = 14;
+    const { fns, called, inputs } = setup({ heap: true });
+    fns.SetWindowsHookExA.handler([WH_MOUSE_LL, HOOK_PROC, HINSTANCE, 0]);
+    fns.mouse_event.handler([0x0001, 0, 0, 0, 0]);
+    assert.equal(called.length, 0);
+    assert.equal(inputs.length, 1, 'and still goes in');
+    fns.mouse_event.handler([0x0001, 1, -1, 0, 0]);
+    assert.equal(called.length, 1);
+});
+
+test('input waits for a low-level hook of another thread until that thread looks at its queue, '
+    + 'or LowLevelHooksTimeout passes', async()=>{
+    // user32:msg's MOUSE_LL test from another thread: the main thread's hook
+    // hears the worker's mouse_event while the main thread pumps, because
+    // the worker is held in mouse_event until it has.
+    const WH_MOUSE_LL = 14;
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    /** @type {{ delay: number, fire: () => void }[]} */
+    const timers = [];
+    const { fns, called, inputs } = setup({ heap: true, caller, threadExists: ()=>true,
+        later: (delay, fire)=>{
+            timers.push({ delay, fire });
+            return true;
+        } });
+    fns.SetWindowsHookExA.handler([WH_MOUSE_LL, HOOK_PROC, HINSTANCE, 0]);
+    caller.current = { id: 8 };
+    const held = fns.mouse_event.handler([0x0001, 1, 0, 0, 0]);
+    assert.equal(called.length, 0, 'not on the thread putting it in');
+    assert.equal(inputs.length, 0, 'which waits for it');
+    assert.equal(timers[0].delay, 300);
+    caller.current = { id: 7 };
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_NOREMOVE]);
+    assert.deepEqual(called.map(c=>[c.entry, c.args[0], c.args[1],
+        /** @type {any} */ (c.thread).id]), [[HOOK_PROC, 0, 0x0200, 7]]);
+    assert.equal(await held, 0);
+    assert.equal(inputs.length, 1);
+
+    caller.current = { id: 8 };
+    const late = fns.mouse_event.handler([0x0001, 1, 0, 0, 0]);
+    timers[1].fire();
+    assert.equal(await late, 0);
+    assert.equal(inputs.length, 2, 'in after the timeout, the hook still to hear it');
+    assert.equal(called.length, 1);
 });
 
 test('a keyboard hook is shown every key message taken, and can discard it', ()=>{

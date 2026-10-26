@@ -226,6 +226,8 @@ const WH_MOUSE_LL = 14;
 const GLOBAL_ONLY_HOOKS = [WH_JOURNALRECORD, WH_JOURNALPLAYBACK, WH_SYSMSGFILTER, WH_KEYBOARD_LL,
     WH_MOUSE_LL];
 const ERROR_INVALID_HOOK_HANDLE = 1404;
+/** How long, in milliseconds, input waits for another thread's low-level hook: Windows' default. */
+const LOW_LEVEL_HOOKS_TIMEOUT = 300;
 const ERROR_INVALID_HOOK_FILTER = 1426;
 const ERROR_INVALID_FILTER_PROC = 1427;
 const ERROR_HOOK_NEEDS_HMOD = 1428;
@@ -2782,7 +2784,8 @@ export function createWindowFunctions(host){
      * global ones, newest first: the last of a thread's own passes on to the
      * newest global hook.
      *
-     * @type {{ handle: number, type: number, proc: number, thread: number }[]}
+     * @type {{ handle: number, type: number, proc: number, thread: number,
+     *     owner?: number | null }[]}
      */
     const hooks = [];
 
@@ -2821,6 +2824,73 @@ export function createWindowFunctions(host){
         const next = after === null ? chain[0] : chain.findIndex(hook=>hook.handle === after) < 0
             ? undefined : chain[chain.findIndex(hook=>hook.handle === after) + 1];
         return next && host.call ? host.call(next.proc, args, thread) : 0;
+    };
+
+    /**
+     * Shows an input event to the low-level hooks of a type before it is
+     * queued: the newest WH_KEYBOARD_LL or WH_MOUSE_LL hook, which reaches
+     * the older ones through CallNextHookEx, is called on the thread that
+     * installed it with the event's structure in guest memory. A hook of the
+     * thread putting the event in is called there and then; one of another
+     * thread is called as that thread next looks at its queue, and the
+     * thread putting the event in waits for it -- for LowLevelHooksTimeout
+     * at most, after which the event goes in as if nobody had objected.
+     * Either way an answer other than zero takes the event away. With no
+     * such hook nothing is made.
+     *
+     * @param {number} type @param {number} wParam  The message the event makes.
+     * @param {() => Uint8Array} structure  The MSLLHOOKSTRUCT or KBDLLHOOKSTRUCT.
+     * @param {unknown} [thread]  The thread putting the event in.
+     * @returns {number | Promise<number>}
+     */
+    const lowLevelHook = (type, wParam, structure, thread)=>{
+        const on = thread ?? host.callerThread?.();
+        const hook = chainOf(type, on)[0];
+        if (!hook || !host.call || !host.allocate)
+        {
+            return 0;
+        }
+        const call = host.call;
+        const allocate = host.allocate;
+        const bytes = structure();
+        /** @param {unknown} who */
+        const run = who=>{
+            const at = allocate(bytes.length);
+            host.writeMemory(at, bytes);
+            return andThen(call(hook.proc, [HC_ACTION, wParam >>> 0, at], who), answer=>{
+                host.release?.(at);
+                return answer;
+            });
+        };
+        const caller = threadIdOf(on);
+        if (hook.owner === undefined || hook.owner === null || caller === null
+            || hook.owner === caller)
+        {
+            return run(on);
+        }
+        const owner = hook.owner;
+        return new Promise(resolve=>{
+            let settled = false;
+            /** @param {number} answer */
+            const settle = answer=>{
+                if (!settled)
+                {
+                    settled = true;
+                    resolve(answer);
+                }
+            };
+            listOf(inbox, owner).push(/** @type {any} */ ({ run: (/** @type {unknown} */ who)=>
+                andThen(run(who), (/** @type {number} */ answer)=>{
+                    settle(answer);
+                    return 0;
+                }) }));
+            host.queue.sent?.(owner);
+            if (!host.later?.(LOW_LEVEL_HOOKS_TIMEOUT, ()=>settle(0)))
+            {
+                // No clock to time it out by: the event goes in now.
+                settle(0);
+            }
+        });
     };
 
     /**
@@ -6746,7 +6816,7 @@ export function createWindowFunctions(host){
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
-                heldByCaller,
+                heldByCaller, lowLevelHook,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
                 appear, beforeChange, afterChange, eraseShown, wholeOnScreen, moveBits, dragging,
@@ -7573,8 +7643,9 @@ export function createWindowFunctions(host){
          *                         DWORD dwThreadId)
          *
          * Every type is accepted, because a program installs its hooks at
-         * start-up and treats a refusal as fatal; a CBT, a keyboard, a mouse
-         * and a GetMessage hook are called, and the others say so once
+         * start-up and treats a refusal as fatal; a CBT, a keyboard, a mouse,
+         * a GetMessage hook and the two low-level ones (for the input a
+         * program puts in itself) are called, and the others say so once
          * rather than failing silently.
          *
          * What Windows refuses whatever the type is refused here too: a type
@@ -7610,11 +7681,13 @@ export function createWindowFunctions(host){
                     host.setLastError?.(ERROR_GLOBAL_ONLY_HOOK);
                     return 0;
                 }
-                const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0 };
+                const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0,
+                    owner: threadIdOf(host.callerThread?.()) };
                 hook.handle = host.handles.open('hook', hook);
                 hooks.push(hook);
                 if (hook.type !== WH_CBT && hook.type !== WH_KEYBOARD && hook.type !== WH_MOUSE
-                    && hook.type !== WH_GETMESSAGE)
+                    && hook.type !== WH_GETMESSAGE && hook.type !== WH_KEYBOARD_LL
+                    && hook.type !== WH_MOUSE_LL)
                 {
                     host.divergence?.('SetWindowsHookExA',
                         `hook type ${hook.type} is installed but never called`);

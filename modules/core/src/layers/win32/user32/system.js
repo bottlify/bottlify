@@ -277,6 +277,33 @@ const KEYEVENTF_EXTENDEDKEY = 0x0001;
 const KEYEVENTF_KEYUP = 0x0002;
 const KEYEVENTF_UNICODE = 0x0004;
 const KEYEVENTF_SCANCODE = 0x0008;
+/** The low-level hooks an injected event is shown before it is queued. */
+const WH_KEYBOARD_LL = 13;
+const WH_MOUSE_LL = 14;
+/** MSLLHOOKSTRUCT and KBDLLHOOKSTRUCT's flags: put in by a program, a key let go, extended. */
+const LLMHF_INJECTED = 0x01;
+const LLKHF_EXTENDED = 0x01;
+const LLKHF_INJECTED = 0x10;
+const LLKHF_ALTDOWN = 0x20;
+const LLKHF_UP = 0x80;
+const VK_PACKET = 0xe7;
+const VK_MENU = 0x12;
+const VK_LMENU = 0xa4;
+const VK_RMENU = 0xa5;
+const VK_CONTROL = 0x11;
+const VK_LCONTROL = 0xa2;
+const VK_RCONTROL = 0xa3;
+const VK_F10 = 0x79;
+const VK_SHIFT = 0x10;
+const VK_LSHIFT = 0xa0;
+const VK_RSHIFT = 0xa1;
+const VK_NUMLOCK = 0x90;
+/** The keys of the numeric keypad with NumLock off: VK_NUMPAD0..9, then VK_DECIMAL. */
+const KEYPAD_NAVIGATION = [0x2d, 0x23, 0x28, 0x22, 0x25, 0x0c, 0x27, 0x24, 0x26, 0x21];
+const VK_NUMPAD0 = 0x60;
+const VK_DECIMAL = 0x6e;
+const VK_DELETE = 0x2e;
+const WM_MOUSEMOVE = 0x0200;
 const ERROR_INVALID_PARAMETER = 87;
 /** The ids of the system's cursors SetSystemCursor replaces (OCR_NORMAL to OCR_APPSTARTING). */
 const SYSTEM_CURSOR_IDS = Object.freeze([32512, 32513, 32514, 32515, 32516, 32640, 32641, 32642,
@@ -1578,13 +1605,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * 0..65535 across the display, which is the only coordinate space the call
      * has, so it is scaled onto the screen here.
      *
-     * @param {{ dx: number, dy: number, data: number, flags: number }} event
+     * Each piece of it -- a move, a button, the wheel -- is first shown to
+     * the WH_MOUSE_LL hooks as the message it makes, with an MSLLHOOKSTRUCT
+     * flagged LLMHF_INJECTED (`lowLevelHook`): a hook of the calling thread
+     * that answers other than zero takes that piece away.
+     *
+     * @param {{ dx: number, dy: number, data: number, flags: number, extra?: number }} event
      *     The MOUSEINPUT's fields, as SendInput reads them or mouse_event takes them.
-     * @returns {boolean} whether anything was inserted.
+     * @returns {boolean | Promise<boolean>} whether anything was inserted.
      */
-    const injectMouse = ({ dx, dy, data, flags })=>{
-        let inserted = false;
-
+    const injectMouse = ({ dx, dy, data, flags, extra: extraInfo = 0 })=>{
+        /** @type {{ message: number, data?: number, input: any, quiet?: boolean }[]} */
+        const pieces = [];
+        const before = host.cursor?.() ?? { x: 0, y: 0 };
+        let at = before;
         if ((flags & MOUSEEVENTF_MOVE) !== 0)
         {
             /** @type {{ kind: string, dx?: number, dy?: number,
@@ -1594,28 +1628,35 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             {
                 move.x = Math.round((dx | 0) * (screen.width - 1) / 65535);
                 move.y = Math.round((dy | 0) * (screen.height - 1) / 65535);
+                at = { x: move.x, y: move.y };
             }
             else
             {
                 move.dx = dx | 0;
                 move.dy = dy | 0;
+                at = { x: Math.min(Math.max(before.x + move.dx, 0), screen.width - 1),
+                    y: Math.min(Math.max(before.y + move.dy, 0), screen.height - 1) };
             }
-            host.sendInput?.(move);
-            inserted = true;
+            // A move of nothing is not shown to the hooks, as Windows since
+            // 10 1709 does not show it.
+            pieces.push({ message: WM_MOUSEMOVE, input: move,
+                quiet: (flags & MOUSEEVENTF_ABSOLUTE) === 0 && move.dx === 0 && move.dy === 0 });
         }
 
-        /** @type {[number, string, boolean][]} */
+        /** @type {[number, string, boolean, number][]} */
         const presses = [
-            [MOUSEEVENTF_LEFTDOWN, 'left', true], [MOUSEEVENTF_LEFTUP, 'left', false],
-            [MOUSEEVENTF_RIGHTDOWN, 'right', true], [MOUSEEVENTF_RIGHTUP, 'right', false],
-            [MOUSEEVENTF_MIDDLEDOWN, 'middle', true], [MOUSEEVENTF_MIDDLEUP, 'middle', false],
+            [MOUSEEVENTF_LEFTDOWN, 'left', true, 0x0201],
+            [MOUSEEVENTF_LEFTUP, 'left', false, 0x0202],
+            [MOUSEEVENTF_RIGHTDOWN, 'right', true, 0x0204],
+            [MOUSEEVENTF_RIGHTUP, 'right', false, 0x0205],
+            [MOUSEEVENTF_MIDDLEDOWN, 'middle', true, 0x0207],
+            [MOUSEEVENTF_MIDDLEUP, 'middle', false, 0x0208],
         ];
-        for (const [flag, button, down] of presses)
+        for (const [flag, button, down, message] of presses)
         {
             if ((flags & flag) !== 0)
             {
-                host.sendInput?.({ kind: 'pointerButton', button, down });
-                inserted = true;
+                pieces.push({ message, input: { kind: 'pointerButton', button, down } });
             }
         }
         // The two extra buttons share a flag pair and name themselves in the
@@ -1623,24 +1664,85 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const extra = (data >>> 0) >>> 16;
         if ((flags & MOUSEEVENTF_XDOWN) !== 0)
         {
-            host.sendInput?.({ kind: 'pointerButton',
-                button: extra === 2 ? 'x2' : 'x1', down: true });
-            inserted = true;
+            pieces.push({ message: 0x020b, data: extra << 16, input: { kind: 'pointerButton',
+                button: extra === 2 ? 'x2' : 'x1', down: true } });
         }
         if ((flags & MOUSEEVENTF_XUP) !== 0)
         {
-            host.sendInput?.({ kind: 'pointerButton',
-                button: extra === 2 ? 'x2' : 'x1', down: false });
-            inserted = true;
+            pieces.push({ message: 0x020c, data: extra << 16, input: { kind: 'pointerButton',
+                button: extra === 2 ? 'x2' : 'x1', down: false } });
         }
         if ((flags & MOUSEEVENTF_WHEEL) !== 0)
         {
             // mouseData is the wheel delta itself, in WHEEL_DELTA (120) units,
             // which is what both the message and DirectInput carry.
-            host.sendInput?.({ kind: 'wheel', delta: data | 0 });
-            inserted = true;
+            pieces.push({ message: 0x020a, data: (data & 0xffff) << 16,
+                input: { kind: 'wheel', delta: data | 0 } });
         }
-        return inserted;
+        /** @param {number} index @returns {boolean | Promise<boolean>} */
+        const next = index=>{
+            const piece = pieces[index];
+            if (!piece)
+            {
+                return pieces.length !== 0;
+            }
+            // MSLLHOOKSTRUCT: pt, mouseData, flags, time, dwExtraInfo.
+            const structure = ()=>new Uint8Array(new Uint32Array([at.x, at.y, piece.data ?? 0,
+                LLMHF_INJECTED, Math.floor(host.now?.() ?? 0), extraInfo]).buffer);
+            const shown = piece.quiet ? 0
+                : host.lowLevelHook?.(WH_MOUSE_LL, piece.message, structure) ?? 0;
+            return andThen(shown, (/** @type {number} */ taken)=>{
+                if ((taken | 0) === 0)
+                {
+                    host.sendInput?.(piece.input);
+                }
+                return next(index + 1);
+            });
+        };
+        return next(0);
+    };
+
+    /**
+     * The virtual key a low-level keyboard hook is told of: a side for a
+     * shift, control or alt named without one (the right control and alt by
+     * the extended flag; a shift is the left one either way), the key a scan
+     * code names when the program named it by its scan code, and VK_PACKET
+     * for a character put in with no key named.
+     *
+     * @param {number} vk @param {number} scan @param {number} flags
+     */
+    const lowLevelKey = (vk, scan, flags)=>{
+        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0;
+        if ((flags & KEYEVENTF_UNICODE) !== 0 && vk === 0)
+        {
+            return VK_PACKET;
+        }
+        if ((flags & KEYEVENTF_SCANCODE) !== 0)
+        {
+            const named = mapVirtualKey(scan & 0xff, MAPVK_VSC_TO_VK_EX);
+            if (extended)
+            {
+                return named === VK_LCONTROL ? VK_RCONTROL : named === VK_LMENU ? VK_RMENU : named;
+            }
+            // The keypad's digits are its arrows and the rest while NumLock is off.
+            const numLock = ((host.keyState?.(VK_NUMLOCK) ?? 0) & 0x01) !== 0;
+            if (!numLock && named >= VK_NUMPAD0 && named < VK_NUMPAD0 + 10)
+            {
+                return KEYPAD_NAVIGATION[named - VK_NUMPAD0];
+            }
+            return !numLock && named === VK_DECIMAL ? VK_DELETE : named;
+        }
+        switch (vk)
+        {
+            case VK_SHIFT:
+                return VK_LSHIFT;
+            case VK_CONTROL:
+                return extended ? VK_RCONTROL : VK_LCONTROL;
+            case VK_MENU:
+                return extended ? VK_RMENU : VK_LMENU;
+            default:
+                return vk;
+        }
     };
 
     /**
@@ -1655,30 +1757,63 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * VK_PACKET and lets TranslateMessage alone turn it into WM_CHAR, so only
      * the down half of such a pair produces anything here.
      *
-     * @param {{ wVk: number, wScan: number, flags: number }} event
+     * The press is first shown to the WH_KEYBOARD_LL hooks, with a
+     * KBDLLHOOKSTRUCT flagged LLKHF_INJECTED (`lowLevelHook`): a hook of the
+     * calling thread that answers other than zero takes it away. The hook
+     * hears the message the keys as they are after the press make -- with
+     * Alt down and Control up a system key and LLKHF_ALTDOWN, so Alt's own
+     * release is a plain WM_KEYUP -- and a character put in by KEYEVENTF_UNICODE
+     * as VK_PACKET unless a virtual key was named beside it (user32:input's
+     * keyboard sequences).
+     *
+     * @param {{ wVk: number, wScan: number, flags: number, extra?: number }} event
      *     The KEYBDINPUT's fields, as SendInput reads them or keybd_event takes them.
-     * @returns {boolean} whether anything was inserted.
+     * @returns {boolean | Promise<boolean>} whether anything was inserted.
      */
-    const injectKeyboard = ({ wVk, wScan, flags })=>{
+    const injectKeyboard = ({ wVk, wScan, flags, extra = 0 })=>{
         const up = (flags & KEYEVENTF_KEYUP) !== 0;
-
-        if ((flags & KEYEVENTF_UNICODE) !== 0)
-        {
-            if (!up)
+        const unicode = (flags & KEYEVENTF_UNICODE) !== 0;
+        // The right shift is an extended key to a low-level hook whether or
+        // not the program said so.
+        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0
+            || ((flags & (KEYEVENTF_SCANCODE | KEYEVENTF_UNICODE)) === 0
+                && (wVk & 0xff) === VK_RSHIFT);
+        const vk = lowLevelKey(wVk & 0xff, wScan, flags);
+        // A scan code, or a character with a virtual key beside it, is
+        // reported by its low byte; a character alone whole.
+        const scan = unicode && (wVk & 0xff) === 0 ? wScan & 0xffff : wScan & 0xff;
+        /** Whether one of two keys is down once this press is in. @param {number[]} pair */
+        const held = pair=>(pair.includes(vk) ? !up
+            : ((host.keyState?.(pair[0]) ?? 0) & 0x8000) !== 0);
+        const alt = held([VK_MENU, VK_LMENU, VK_RMENU]);
+        const altOnly = alt && !held([VK_CONTROL, VK_LCONTROL, VK_RCONTROL]);
+        const message = (altOnly || vk === VK_F10 ? 0x0104 : 0x0100) + (up ? 1 : 0);
+        // KBDLLHOOKSTRUCT: vkCode, scanCode, flags, time, dwExtraInfo.
+        const shown = host.lowLevelHook?.(WH_KEYBOARD_LL, message, ()=>new Uint8Array(
+            new Uint32Array([vk, scan, LLKHF_INJECTED | (up ? LLKHF_UP : 0)
+                | (extended ? LLKHF_EXTENDED : 0) | (altOnly ? LLKHF_ALTDOWN : 0),
+            Math.floor(host.now?.() ?? 0), extra]).buffer)) ?? 0;
+        return andThen(shown, (/** @type {number} */ taken)=>{
+            if ((taken | 0) !== 0)
             {
-                host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan) });
+                return true;
             }
+            if (unicode)
+            {
+                if (!up)
+                {
+                    host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan) });
+                }
+                return true;
+            }
+            // A key named by its virtual key still carries the scan code the
+            // program wrote beside it, which is what DirectInput 8 reads.
+            const named = (flags & KEYEVENTF_SCANCODE) !== 0
+                ? { scan: wScan, extended }
+                : { vk: wVk, scanGiven: wScan, extended };
+            host.sendInput?.({ kind: 'key', ...named, down: !up });
             return true;
-        }
-
-        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0;
-        // A key named by its virtual key still carries the scan code the
-        // program wrote beside it, which is what DirectInput 8 reads.
-        const named = (flags & KEYEVENTF_SCANCODE) !== 0
-            ? { scan: wScan, extended }
-            : { vk: wVk, scanGiven: wScan, extended };
-        host.sendInput?.({ kind: 'key', ...named, down: !up });
-        return true;
+        });
     };
 
     /**
@@ -4367,33 +4502,37 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 }
                 const events = count >>> 0;
                 const at = inputs >>> 0;
-                let inserted = 0;
-                for (let index = 0; index < events; index++)
-                {
+                // One after the other: a low-level hook may run guest code
+                // between two of them.
+                /** @param {number} index @param {number} inserted @returns {any} */
+                const next = (index, inserted)=>{
+                    if (index >= events)
+                    {
+                        return inserted;
+                    }
                     const piece = at + index * INPUT_SIZE;
                     const type = readU32(piece);
                     if (type === INPUT_MOUSE)
                     {
-                        injectMouse({ dx: readI32(piece + 4), dy: readI32(piece + 8),
-                            data: readU32(piece + 12), flags: readU32(piece + 16) });
-                        inserted++;
+                        return andThen(injectMouse({ dx: readI32(piece + 4),
+                            dy: readI32(piece + 8), data: readU32(piece + 12),
+                            flags: readU32(piece + 16), extra: readU32(piece + 24) }),
+                        ()=>next(index + 1, inserted + 1));
                     }
-                    else if (type === INPUT_KEYBOARD)
+                    if (type === INPUT_KEYBOARD)
                     {
-                        injectKeyboard({ wVk: readU16(piece + 4),
-                            wScan: readU16(piece + 6), flags: readU32(piece + 8) });
-                        inserted++;
+                        return andThen(injectKeyboard({ wVk: readU16(piece + 4),
+                            wScan: readU16(piece + 6), flags: readU32(piece + 8),
+                            extra: readU32(piece + 16) }), ()=>next(index + 1, inserted + 1));
                     }
-                    else if (type === INPUT_HARDWARE)
+                    if (type === INPUT_HARDWARE)
                     {
-                        inserted++;
+                        return next(index + 1, inserted + 1);
                     }
-                    else
-                    {
-                        host.divergence?.('SendInput', `INPUT type ${type} is not injected`);
-                    }
-                }
-                return inserted;
+                    host.divergence?.('SendInput', `INPUT type ${type} is not injected`);
+                    return next(index + 1, inserted);
+                };
+                return next(0, 0);
             },
         },
 
@@ -4406,10 +4545,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         keybd_event: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([vk, scan, flags])=>{
-                injectKeyboard({ wVk: vk & 0xff, wScan: scan & 0xff, flags: flags >>> 0 });
-                return 0;
-            },
+            handler: ([vk, scan, flags, extra])=>andThen(injectKeyboard({ wVk: vk & 0xff,
+                wScan: scan & 0xff, flags: flags >>> 0, extra: extra >>> 0 }), ()=>0),
         },
 
         /**
@@ -4421,10 +4558,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         mouse_event: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([flags, dx, dy, data])=>{
-                injectMouse({ dx, dy, data, flags: flags >>> 0 });
-                return 0;
-            },
+            handler: ([flags, dx, dy, data, extra])=>andThen(injectMouse({ dx, dy, data,
+                flags: flags >>> 0, extra: extra >>> 0 }), ()=>0),
         },
 
         /**
@@ -4982,7 +5117,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, x, y])=>{
                 const VK_LBUTTON = 0x01;
-                const WM_MOUSEMOVE = 0x0200;
                 const WM_LBUTTONUP = 0x0202;
                 const WM_MOUSELAST = 0x020e;
                 const SM_CXDRAG = 68;
