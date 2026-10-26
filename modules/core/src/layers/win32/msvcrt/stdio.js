@@ -96,6 +96,7 @@ export const standardRecords = iob=>(iob === 0 ? []
  *           The console, for the standard streams.
  * @property {() => number} [iob]  Where `_iob` was placed, once it has been.
  * @property {(code: number) => void} [errno]  Where a failure says why.
+ * @property {() => number} [errnoValue]  What errno holds, for fopen_s to answer.
  * @property {import('./io.js').Descriptors} [descriptors]
  *           The runtime's descriptor table, shared with `_open` and the rest;
  *           absent, the streams keep one of their own.
@@ -603,6 +604,25 @@ export function createStdioFunctions(host){
     };
 
     /**
+     * fopen_s's body: the stream written through `out`, and 0 or the code
+     * errno was given.
+     *
+     * @param {number} out @param {number} path @param {number} mode
+     * @param {(address: number) => string} read
+     */
+    const openInto = (out, path, mode, read)=>{
+        if ((out >>> 0) === 0 || (path >>> 0) === 0 || (mode >>> 0) === 0)
+        {
+            fail(EINVAL);
+            return EINVAL;
+        }
+        return settle(openStream(read(path), read(mode)), record=>{
+            writeU32(out, record);
+            return record === 0 ? host.errnoValue?.() ?? EINVAL : 0;
+        });
+    };
+
+    /**
      * How many bytes of the stream a wide call takes to a character: the
      * two of a UTF-16 unit in a Unicode translation, where the descriptor
      * deals in them, and in binary mode, where they are what the file holds;
@@ -798,6 +818,18 @@ export function createStdioFunctions(host){
         fopen: cdecl(8, ([path, mode])=>openStream(
             (path >>> 0) === 0 ? '' : readString(path),
             (mode >>> 0) === 0 ? null : readString(mode))),
+
+        /**
+         * errno_t fopen_s(FILE **file, const char *filename, const char *mode)
+         *
+         * fopen answering why: 0 and the stream in `*file`, or errno's code
+         * and null there. No `file`, name or mode is EINVAL.
+         */
+        fopen_s: cdecl(12, ([out, path, mode])=>openInto(out, path, mode, readString)),
+
+        /** errno_t _wfopen_s(FILE **file, const wchar_t *filename, const wchar_t *mode) */
+        _wfopen_s: cdecl(12, ([out, path, mode])=>openInto(out, path, mode,
+            at=>wideStringAt(host.readMemory, at))),
 
         /** FILE *_wfopen(const wchar_t *filename, const wchar_t *mode) -- fopen, wide. */
         _wfopen: cdecl(8, ([path, mode])=>openStream(
@@ -1143,6 +1175,52 @@ export function createStdioFunctions(host){
         getc: fgetc,
 
         /**
+         * int _getw(FILE *stream)
+         *
+         * The next four bytes as a little-endian int, read as fread reads
+         * them -- a CR LF a text stream crosses is one LF. EOF, with the
+         * stream at its end, when fewer are left; a word that is -1 reads as
+         * EOF too, which the caller tells apart with feof.
+         */
+        _getw: cdecl(4, ([pointer])=>{
+            const stream = argument(pointer);
+            if (!stream || narrowRefused(stream))
+            {
+                return EOF;
+            }
+            if (!readable(stream))
+            {
+                raise(stream, IOERR);
+                return EOF;
+            }
+            return settle(take(stream, 4, false), bytes=>{
+                if (bytes.length < 4)
+                {
+                    raise(stream, IOEOF);
+                    return EOF;
+                }
+                return new DataView(bytes.buffer, bytes.byteOffset).getInt32(0, true);
+            });
+        }),
+
+        /** int _putw(int word, FILE *stream) -- its four bytes: the word, or EOF. */
+        _putw: cdecl(8, ([word, pointer])=>{
+            const stream = argument(pointer);
+            if (!stream || narrowRefused(stream))
+            {
+                return EOF;
+            }
+            if (!writable(stream))
+            {
+                refuseWrite(stream);
+                return EOF;
+            }
+            const bytes = new Uint8Array(4);
+            new DataView(bytes.buffer).setInt32(0, word | 0, true);
+            return emit(stream, bytes) === 4 ? word | 0 : EOF;
+        }),
+
+        /**
          * int _filbuf(FILE *stream)
          *
          * What the `getc` macro calls once it has counted `_cnt` below zero:
@@ -1485,6 +1563,20 @@ export function createStdioFunctions(host){
                 }),
             }
             : {}),
+
+        /**
+         * void setbuf(FILE *stream, char *buffer)
+         *
+         * setvbuf with the buffer's own size, BUFSIZ, or none for no buffer.
+         */
+        setbuf: cdecl(8, ([pointer, buffer])=>{
+            const stream = streamOf(pointer);
+            if (stream)
+            {
+                writeU32(stream.record + FILE_BUFSIZ, (buffer >>> 0) === 0 ? 0 : DEFAULT_BUFFER);
+            }
+            return 0;
+        }),
 
         /**
          * int setvbuf(FILE *stream, char *buffer, int mode, size_t size)

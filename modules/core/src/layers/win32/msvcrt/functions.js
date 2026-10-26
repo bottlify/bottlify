@@ -44,12 +44,12 @@ import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
-import { createDescriptors, createIoFunctions } from './io.js';
+import { createDescriptors, createIoFunctions, O_BINARY } from './io.js';
 import { createEnvironment } from './environ.js';
 import { createMultiBytePage } from './mbcs.js';
 import { createLocaleFunctions } from './locale.js';
 import { createProcessFunctions } from './process.js';
-import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
+import { O_UNICODE, bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -64,6 +64,14 @@ const MAX_STRING = 1 << 20;
 
 /** The largest number `rand` produces, which a caller scales its range by. */
 const RAND_MAX = 0x7fff;
+
+/** `_O_TEXT`, one of the two modes `_set_fmode` takes besides the Unicode ones. */
+const O_TEXT = 0x4000;
+
+/** The streams msvcrt allows open at once: 512 to start, 20 to 2048 when set. */
+const DEFAULT_STDIO = 512;
+const MIN_STDIO = 20;
+const MAX_STDIO = 2048;
 
 /** The variable `srand` and `rand` keep the generator in, and where it starts. */
 export const RAND_SEED = '_holdrand';
@@ -865,6 +873,7 @@ export function createMsvcrtFunctions(host){
             write: host.write,
             iob: host.iob,
             errno,
+            errnoValue: ()=>globals.get(errnoName()),
             descriptors: descriptors ?? undefined,
             varargs: varargsAt,
             setRegisters: host.setRegisters,
@@ -886,6 +895,8 @@ export function createMsvcrtFunctions(host){
     // The multibyte code page `_setmbcp` selects, which `_splitpath` reads
     // by as the `_mbs*` family does.
     const multiBytePage = createMultiBytePage();
+
+    let maxStdio = DEFAULT_STDIO;
 
     const narrow = {
         ...table,
@@ -922,6 +933,65 @@ export function createMsvcrtFunctions(host){
             doserrno: ()=>globals.get('doserrno'),
             setDoserrno: code=>globals.set('doserrno', code),
         }),
+
+        /** errno_t _get_fmode(int *mode): `_fmode`; no pointer is EINVAL. */
+        _get_fmode: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return EINVAL;
+                }
+                const bytes = new Uint8Array(4);
+                new DataView(bytes.buffer).setInt32(0, globals.get('fmode'), true);
+                host.writeMemory(pointer, bytes);
+                return 0;
+            },
+        },
+
+        /**
+         * errno_t _set_fmode(int mode): `_O_TEXT` or `_O_BINARY` -- or a
+         * Unicode translation -- into `_fmode`; anything else is EINVAL.
+         */
+        _set_fmode: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([mode])=>{
+                if (![O_TEXT, O_BINARY, ...O_UNICODE].includes(mode | 0))
+                {
+                    errno(EINVAL);
+                    return EINVAL;
+                }
+                globals.set('fmode', mode | 0);
+                return 0;
+            },
+        },
+
+        /**
+         * int _setmaxstdio(int count) / int _getmaxstdio(void)
+         *
+         * How many streams may be open at once: msvcrt takes 20 to 2048 and
+         * answers the count, -1 for one outside; streams here are not
+         * counted against it, so the number is only kept.
+         */
+        _setmaxstdio: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([count])=>{
+                if ((count | 0) < MIN_STDIO || (count | 0) > MAX_STDIO)
+                {
+                    return -1;
+                }
+                maxStdio = count | 0;
+                return maxStdio;
+            },
+        },
+        _getmaxstdio: { convention: 'cdecl', argBytes: 0, handler: ()=>maxStdio },
 
         /** errno_t rand_s(unsigned int *value) -- from the machine's random source */
         rand_s: {

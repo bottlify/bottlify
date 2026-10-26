@@ -1027,3 +1027,21 @@ test('rand_s fills an unsigned int from the random source and refuses no pointer
     assert.equal(fns.rand_s.handler([0x300]), 0);
     assert.equal(fns.rand_s.handler([0]), 22);
 });
+
+test('_get_fmode and _set_fmode read and set _fmode, refusing a mode that is none', ()=>{
+    const { host, fns: table } = setup();
+    const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (table));
+    const out = 0x300;
+    assert.equal(fns._get_fmode.handler([out]), 0);
+    assert.equal(new DataView(host.bytes.buffer).getInt32(out, true), 0);
+    assert.equal(fns._set_fmode.handler([0x8000]), 0);
+    assert.equal(fns._get_fmode.handler([out]), 0);
+    assert.equal(new DataView(host.bytes.buffer).getInt32(out, true), 0x8000);
+    assert.equal(fns._set_fmode.handler([0x1234]), 22);
+    assert.equal(fns._get_fmode.handler([0]), 22);
+    assert.equal(fns._setmaxstdio.handler([19]), -1);
+    assert.equal(fns._setmaxstdio.handler([2049]), -1);
+    assert.equal(fns._setmaxstdio.handler([1024]), 1024);
+    assert.equal(fns._getmaxstdio.handler([]), 1024);
+});

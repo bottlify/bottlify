@@ -1205,3 +1205,49 @@ test('tmpfile opens a new file for update in binary, each its own, removed when 
         assert.equal(files.stat(name)?.exists === true, false, `${name} is gone once closed`);
     }
 });
+
+test('_putw writes a word\'s four bytes and _getw reads them back, EOF at the end', ()=>{
+    const { memory, fns } = build();
+    const stream = fns.fopen.handler([memory.put('C:\\words.bin'), memory.put('w+b')]);
+    assert.equal(fns._putw.handler([0x2c312c30, stream]), 0x2c312c30);
+    assert.equal(fns._putw.handler([-2, stream]), -2);
+    assert.equal(fns.fseek.handler([stream, 0, 0]), 0);
+    assert.equal(fns._getw.handler([stream]), 0x2c312c30);
+    assert.equal(fns._getw.handler([stream]), -2);
+    assert.equal(fns.feof.handler([stream]), 0);
+    assert.equal(fns._getw.handler([stream]), -1, 'nothing left');
+    assert.notEqual(fns.feof.handler([stream]), 0);
+});
+
+test('_getw reads through a text stream\'s CR LF as one LF', ()=>{
+    const { memory, fns } = build();
+    const writer = fns.fopen.handler([memory.put('C:\\text.txt'), memory.put('wb')]);
+    fns.fwrite.handler([memory.put('a\r\nbc'), 1, 5, writer]);
+    fns.fclose.handler([writer]);
+    const stream = fns.fopen.handler([memory.put('C:\\text.txt'), memory.put('rt')]);
+    assert.equal(fns._getw.handler([stream]), 0x63620a61, 'a, LF, b, c');
+});
+
+test('fopen_s writes the stream through its pointer and answers errno\'s code', ()=>{
+    const { memory, fns, errno } = build();
+    const out = memory.allocate(4);
+    assert.equal(fns.fopen_s.handler([out, memory.put('C:\\data.bin'), memory.put('rb')]), 0);
+    assert.notEqual(memory.u32(out), 0);
+    assert.equal(fns.fopen_s.handler([0, memory.put('C:\\data.bin'), memory.put('rb')]), 22);
+    assert.equal(fns.fopen_s.handler([out, memory.put('C:\\data.bin'), memory.put('q')]), 22,
+        'not a mode');
+    assert.equal(memory.u32(out), 0, 'and no stream');
+    assert.ok(errno.includes(22));
+    assert.equal(fns._wfopen_s.handler([out, memory.putWide('C:\\data.bin'),
+        memory.putWide('rb')]), 0);
+    assert.notEqual(memory.u32(out), 0);
+});
+
+test('setbuf gives a stream BUFSIZ or no buffer', ()=>{
+    const { memory, fns } = build();
+    const stream = fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('rb')]);
+    fns.setbuf.handler([stream, 0]);
+    assert.equal(memory.u32(stream + 24), 0);
+    fns.setbuf.handler([stream, memory.allocate(512)]);
+    assert.equal(memory.u32(stream + 24), 4096);
+});
