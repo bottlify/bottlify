@@ -60,6 +60,9 @@ export function createX87Calls({ memory, layout }){
     const ram = layout.ramBase;
     const unit = layout.x87;
     const exactAt = /** @type {number} */ (layout.x87Exact);
+    // A region cannot grow the memory, so the view is made again once a run,
+    // where the runner says (`fresh`), and not at every instruction: a shared
+    // memory's `buffer` is a new object each time it is asked for.
     const fresh = ()=>{
         if (view.buffer !== memory.buffer || view.byteLength === 0)
         {
@@ -98,6 +101,9 @@ export function createX87Calls({ memory, layout }){
     }));
 
     return {
+        /** The view of the memory made again, at a run's start. */
+        fresh,
+
         /**
          * A number for the instruction, which the region passes back.
          *
@@ -116,7 +122,6 @@ export function createX87Calls({ memory, layout }){
          * @returns {number}  the flags word after it, or with `fnstsw ax` the status word
          */
         call(id, address, flags){
-            fresh();
             const instruction = instructions[id];
             for (let i = 0; i < 8; i++)
             {

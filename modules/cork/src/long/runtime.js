@@ -486,6 +486,7 @@ export function createLongRunner(settings){
          */
         run(state, budget, options = {}){
             fresh();
+            x87.fresh();
             const before = state.retired;
             const interpretedBefore = stats.interpreted;
             const limit = options.interpretLimit ?? Infinity;
