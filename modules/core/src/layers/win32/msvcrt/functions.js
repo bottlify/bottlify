@@ -18,7 +18,7 @@
  * undefined, the choice made here is written down at the function.
  */
 
-import { formatToString, guestAccess, varargsSlots } from './format.js';
+import { formatToString, guestAccess, sequentialArguments, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createSecureFunctions } from './secure.js';
 import { createErrorFunctions, messageOf } from './errors.js';
@@ -65,6 +65,12 @@ const MAX_STRING = 1 << 20;
 
 /** The largest number `rand` produces, which a caller scales its range by. */
 const RAND_MAX = 0x7fff;
+
+/** `_TRUNCATE`: a count that asks for as much as fits. */
+const TRUNCATE = 0xffffffff;
+
+/** `_set_output_format`'s one flag. */
+const TWO_DIGIT_EXPONENT = 1;
 
 /** The last category setlocale takes: LC_ALL is 0, LC_TIME 5. */
 const LC_MAX = 5;
@@ -259,6 +265,12 @@ export function createMsvcrtFunctions(host){
         host.writeMemory(pointer, packInto(new Uint8Array(text.length + 1), text));
     };
 
+    /** What `_set_output_format` was given: `_TWO_DIGIT_EXPONENT` or nothing. */
+    let outputFormat = 0;
+
+    /** The least digits of %e's exponent. */
+    const exponentDigits = ()=>((outputFormat & TWO_DIGIT_EXPONENT) !== 0 ? 2 : 3);
+
     /**
      * What a narrow printer writes: %S and %ls read wide strings, and the
      * text is bytes under the C locale (see `formatToString`), held in the
@@ -267,7 +279,8 @@ export function createMsvcrtFunctions(host){
      * @param {number} format @param {number[]} values
      */
     const narrowText = (format, values)=>formatToString(readString(format), values, readString,
-        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi, ...memoryAccess });
+        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
+            exponentDigits: exponentDigits(), ...memoryAccess });
 
     /** @param {number[]} args @param {number} fixed */
     const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));
@@ -304,7 +317,42 @@ export function createMsvcrtFunctions(host){
      * @param {number} format @param {number[]} values
      */
     const wideText = (format, values)=>formatToString(readWide(format), values, readString,
-        { readWideString: readWide, wide: true, ...memoryAccess });
+        { readWideString: readWide, wide: true, exponentDigits: exponentDigits(),
+            ...memoryAccess });
+
+    /**
+     * The `_p` printers' text: a format that names its arguments' positions
+     * read as the ordinary one it amounts to (`sequentialArguments`).
+     *
+     * @param {number} format @param {number[]} values @param {boolean} wide
+     */
+    const positionalText = (format, values, wide)=>{
+        const text = wide ? readWide(format) : readString(format);
+        const reordered = sequentialArguments(text, values);
+        return formatToString(reordered?.format ?? text, reordered?.slots ?? values, readString,
+            wide ? { readWideString: readWide, wide: true, exponentDigits: exponentDigits(),
+                ...memoryAccess }
+                : { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
+                    exponentDigits: exponentDigits(), ...memoryAccess });
+    };
+
+    /**
+     * The `_vswprintf_c` family's answer: the text and its terminator when
+     * both fit in `size` characters, else as much as fits with one and -1.
+     *
+     * @param {number} buffer @param {number} size @param {string} text
+     */
+    const cutWide = (buffer, size, text)=>{
+        const room = size >>> 0;
+        if ((buffer >>> 0) === 0 || room === 0)
+        {
+            errno(EINVAL);
+            return -1;
+        }
+        const kept = text.slice(0, room - 1);
+        host.writeMemory(buffer, bytesOfUnits([...unitsOfText(kept), 0]));
+        return text.length < room ? text.length : -1;
+    };
 
     /**
      * The _snwprintf family's answer: at most `count` characters, terminated
@@ -415,7 +463,16 @@ export function createMsvcrtFunctions(host){
             errno(EINVAL);
             return -1;
         }
-        const text = narrowText(format, values);
+        return boundedText(buffer, room, narrowText(format, values));
+    };
+
+    /**
+     * What a secure printer writes of a text in `room` bytes: all of it and
+     * its terminator, or an empty string, -1 and ERANGE.
+     *
+     * @param {number} buffer @param {number} room @param {string} text
+     */
+    const boundedText = (buffer, room, text)=>{
         if (text.length + 1 > room)
         {
             host.writeMemory(buffer, new Uint8Array(1));
@@ -767,6 +824,137 @@ export function createMsvcrtFunctions(host){
             },
         },
 
+        /** int _vswprintf(wchar_t *buffer, const wchar_t *format, va_list args) -- vswprintf */
+        _vswprintf: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([buffer, format, list])=>{
+                const text = wideText(format, varargsAt(list));
+                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
+                return text.length;
+            },
+        },
+
+        /**
+         * int _vswprintf_l(wchar_t *buffer, const wchar_t *format, _locale_t locale,
+         *                  va_list args)
+         *
+         * The `_l` printers take a locale, and the C locale is the only one a
+         * program can hold here.
+         */
+        _vswprintf_l: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, format, , list])=>{
+                const text = wideText(format, varargsAt(list));
+                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
+                return text.length;
+            },
+        },
+
+        /**
+         * int _vswprintf_c(wchar_t *buffer, size_t size, const wchar_t *format, va_list args)
+         * int _vswprintf_c_l(..., _locale_t locale, va_list args)
+         * int _vswprintf_p_l(..., _locale_t locale, va_list args) -- positions named
+         *
+         * At most `size` characters with the terminator: the text, or what
+         * fits of it terminated and -1.
+         */
+        _vswprintf_c: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, list])=>
+                cutWide(buffer, size, wideText(format, varargsAt(list))),
+        },
+        _vswprintf_c_l: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, , list])=>
+                cutWide(buffer, size, wideText(format, varargsAt(list))),
+        },
+        _vswprintf_p_l: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, , list])=>
+                cutWide(buffer, size, positionalText(format, varargsAt(list), true)),
+        },
+
+        /** int _vscwprintf(const wchar_t *format, va_list args) -- the length of the text */
+        _vscwprintf: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([format, list])=>{
+                if ((format >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return -1;
+                }
+                return wideText(format, varargsAt(list)).length;
+            },
+        },
+
+        /**
+         * int _vsnwprintf_s(wchar_t *buffer, size_t size, size_t count,
+         *                   const wchar_t *format, va_list args)
+         *
+         * At most `count` characters and a terminator in a buffer of `size`;
+         * cut short, -1 with what fit kept under _TRUNCATE or a count the
+         * buffer holds. A count the buffer cannot hold for a text that does
+         * not fit empties the buffer with ERANGE; no buffer, size or format
+         * is EINVAL -- as _vsnprintf_s, in wide characters.
+         */
+        _vsnwprintf_s: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([buffer, size, count, format, list])=>{
+                const room = size >>> 0;
+                if ((buffer >>> 0) === 0 || room === 0 || (format >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return -1;
+                }
+                const text = wideText(format, varargsAt(list));
+                const truncate = (count >>> 0) === TRUNCATE;
+                const limit = truncate ? room - 1 : Math.min(count >>> 0, room - 1);
+                if (!truncate && (count >>> 0) > room - 1 && text.length > room - 1)
+                {
+                    host.writeMemory(buffer, new Uint8Array(2));
+                    errno(ERANGE);
+                    return -1;
+                }
+                const kept = text.slice(0, limit);
+                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(kept), 0]));
+                return text.length > limit ? -1 : text.length;
+            },
+        },
+
+        /**
+         * int _vsprintf_p(char *buffer, size_t size, const char *format, va_list args)
+         *
+         * vsprintf_s with the arguments named by position: `%2$s %1$d`.
+         */
+        _vsprintf_p: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, list])=>{
+                if ((buffer >>> 0) === 0 || (format >>> 0) === 0 || (size >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return -1;
+                }
+                return boundedText(buffer, size >>> 0,
+                    positionalText(format, varargsAt(list), false));
+            },
+        },
+
         /**
          * int sprintf_s(char *buffer, size_t size, const char *format, ...)
          *
@@ -881,6 +1069,7 @@ export function createMsvcrtFunctions(host){
             iob: host.iob,
             errno,
             errnoValue: ()=>globals.get(errnoName()),
+            exponentDigits,
             descriptors: descriptors ?? undefined,
             varargs: varargsAt,
             setRegisters: host.setRegisters,
@@ -964,6 +1153,26 @@ export function createMsvcrtFunctions(host){
          * The runtimes that keep one end the process here instead (msvcr80.js).
          */
         _invalid_parameter: { convention: 'cdecl', argBytes: 20, handler: ()=>0 },
+
+        /**
+         * unsigned int _get_output_format(void) and
+         * unsigned int _set_output_format(unsigned int format)
+         *
+         * Whether %e and %g write the exponent in two digits at least
+         * (`_TWO_DIGIT_EXPONENT`) rather than three; the set answers the one
+         * before.
+         */
+        _get_output_format: { convention: 'cdecl', argBytes: 0, handler: ()=>outputFormat },
+        _set_output_format: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([format])=>{
+                const previous = outputFormat;
+                outputFormat = format & TWO_DIGIT_EXPONENT;
+                return previous;
+            },
+        },
 
         /** errno_t _get_fmode(int *mode): `_fmode`; no pointer is EINVAL. */
         _get_fmode: {

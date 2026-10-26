@@ -607,6 +607,90 @@ test('vswprintf is swprintf from a list: no count, the text and its terminator',
     assert.equal(units(0x200, 8), 'w\u3042|n|-5\0');
 });
 
+test('the wide printers of Wine\'s test_vswprintf, test_vscwprintf and test_vsnwprintf_s', ()=>{
+    const { fns, host } = setup();
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address @param {string} text */
+    const wide = (address, text)=>{
+        [...text, '\0'].forEach((c, at)=>view.setUint16(address + at * 2, c.charCodeAt(0), true));
+        return address;
+    };
+    /** @param {number} address */
+    const read = address=>{
+        let text = '';
+        for (let at = address; view.getUint16(at, true) !== 0; at += 2)
+        {
+            text += String.fromCharCode(view.getUint16(at, true));
+        }
+        return text;
+    };
+    const list = 0x180;
+    view.setUint32(list, wide(0x100, 'number'), true);
+    view.setUint32(list + 4, 123, true);
+    const format = wide(0x140, '%s %d');
+    assert.equal(fns._vswprintf.handler([0x200, format, list]), 10);
+    assert.equal(read(0x200), 'number 123');
+    assert.equal(fns._vswprintf_l.handler([0x200, format, 0, list]), 10);
+    assert.equal(fns._vswprintf_c.handler([0x200, 20, format, list]), 10);
+    assert.equal(fns._vswprintf_c.handler([0x200, 10, format, list]), -1);
+    assert.equal(read(0x200), 'number 12', 'what fits, terminated');
+    assert.equal(fns._vswprintf_c_l.handler([0x200, 20, format, 0, list]), 10);
+    assert.equal(fns._vswprintf_p_l.handler([0x200, 20, wide(0x160, '%2$d %1$s'), 0, list]), 10);
+    assert.equal(read(0x200), '123 number');
+    view.setUint32(list + 4, 1, true);
+    assert.equal(fns._vscwprintf.handler([format, list]), 8);
+
+    view.setUint32(list, 123, true);
+    const counted = wide(0x140, 'AB%uC');
+    for (const [size, answer, text] of /** @type {[number, number, string][]} */ ([
+        [14, 6, 'AB123C'], [12, 6, 'AB123C'], [7, 6, 'AB123C'], [6, -1, 'AB123'], [2, -1, 'A'],
+        [1, -1, '']]))
+    {
+        assert.equal(fns._vsnwprintf_s.handler([0x200, size, 0xffffffff, counted, list]), answer);
+        assert.equal(read(0x200), text, `${size}`);
+    }
+});
+
+test('_vsprintf_p reads the arguments by the positions the format names', ()=>{
+    // Wine's msvcrt test_vsprintf_p.
+    const { fns, host, put, at } = setup();
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number[]} values */
+    const list = values=>{
+        values.forEach((value, i)=>view.setUint32(0x180 + i * 4, value, true));
+        return 0x180;
+    };
+    const word = put(0x100, 'test');
+    for (const [format, values, answer, text] of
+        /** @type {[string, number[], number, string][]} */ ([
+            ['%s %d', [word, 1234], 9, 'test 1234'], ['%1$d', [1234, word], 4, '1234'],
+            ['%2$s %1$d', [1234, word], 9, 'test 1234'],
+            ['%2$*3$s %2$.*1$s', [2, word, 3], 7, 'test te'],
+        ]))
+    {
+        assert.equal(fns._vsprintf_p.handler([0x200, 1024, put(0x140, format), list(values)]),
+            answer, format);
+        assert.equal(at(0x200), text, format);
+    }
+});
+
+test('_set_output_format makes the exponent two digits at least', ()=>{
+    // Wine's msvcrt test__get_output_format.
+    const { fns, put, at } = setup();
+    const bytes = new DataView(new ArrayBuffer(8));
+    bytes.setFloat64(0, 1.23, true);
+    const slots = [bytes.getUint32(0, true), bytes.getUint32(4, true)];
+    const format = put(0x140, '%E');
+    assert.equal(fns._get_output_format.handler(), 0);
+    assert.equal(fns.sprintf.handler([0x200, format, ...slots]), 13);
+    assert.equal(at(0x200), '1.230000E+000');
+    assert.equal(fns._set_output_format.handler([1]), 0);
+    assert.equal(fns.sprintf.handler([0x200, format, ...slots]), 12);
+    assert.equal(at(0x200), '1.230000E+00');
+    assert.equal(fns._get_output_format.handler(), 1);
+    assert.equal(fns._set_output_format.handler([1]), 1);
+});
+
 test('_snprintf and _vsnprintf terminate only when the text is shorter than the count', ()=>{
     // Wine's ntdll test__snprintf, whose _snprintf is this one: "hello world"
     // into 11 leaves the X after it, "test" into 4 leaves the byte after it
