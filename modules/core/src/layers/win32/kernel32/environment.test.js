@@ -454,3 +454,44 @@ test('CreateEnvironmentBlock hands out the process\'s block, and Destroy frees i
     assert.equal(fns.CreateEnvironmentBlock.handler([0, 0, 1]), 0);
     assert.deepEqual(errors, [87], 'no pointer is ERROR_INVALID_PARAMETER');
 });
+
+test('a name finds its variable whatever its case, and the block keeps the first spelling', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    host.plant(0x100, 'SomeWildName');
+    host.plant(0x140, 'sOMEwILDnAME');
+    host.plant(0x180, 'SomeWildValue');
+    host.plant(0x1c0, '');
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x100, 0x180]), 1);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x140, 0x200, 64]), 13);
+    assert.equal(host.readAnsi(0x200), 'SomeWildValue');
+
+    // Set to empty through the other spelling: the same variable, now "".
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x140, 0x1c0]), 1);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0x200, 64]), 0);
+    assert.equal(host.readAnsi(0x200), '');
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0, 0]), 1, 'the terminator');
+    const block = fns.GetEnvironmentStringsA.handler();
+    let text = '';
+    for (let at = block; host.bytes[at] !== 0 || host.bytes[at + 1] !== 0; at++)
+    {
+        text += String.fromCharCode(host.bytes[at] || 10);
+    }
+    assert.match(text, /^SomeWildName=$/m);
+
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x140, 0]), 1, 'deleted by either spelling');
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0x200, 64]), 0);
+    assert.equal(host.errors.at(-1), ERROR_ENVVAR_NOT_FOUND);
+});
+
+test('a NULL name names nothing, and a NULL source expands to the empty string', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0, 0x200, 64]), 0);
+    assert.equal(fns.GetEnvironmentVariableW.handler([0, 0, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_ENVVAR_NOT_FOUND, ERROR_ENVVAR_NOT_FOUND]);
+    assert.equal(fns.SetEnvironmentVariableA.handler([0, 0]), 0);
+    assert.equal(host.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0, 0x200, 64]), 1);
+    assert.equal(fns.ExpandEnvironmentStringsW.handler([0, 0x200, 64]), 1);
+});

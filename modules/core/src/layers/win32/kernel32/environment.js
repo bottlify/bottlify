@@ -28,6 +28,7 @@ import {
 
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
+const ERROR_INVALID_PARAMETER = 87;
 
 /** sizeof(STARTUPINFOA). */
 const STARTUPINFOA_SIZE = 68;
@@ -101,7 +102,28 @@ export function createEnvironmentFunctions(host){
     let commandLineWideAddress = null;
     /** @type {Map<string, number>} */
     const blocks = new Map();
-    const variables = new Map(Object.entries(host.environment()));
+    /**
+     * Names compare without regard to case, as Windows compares them, and
+     * keep the spelling they were first set with: the block lists `Path` as
+     * it was given, and `PATH` finds it.
+     *
+     * @type {Map<string, { name: string, value: string }>}
+     */
+    const byFolded = new Map(Object.entries(host.environment())
+        .map(([name, value])=>[name.toUpperCase(), { name, value }]));
+    const variables = {
+        /** @param {string} name */
+        get: name=>byFolded.get(name.toUpperCase())?.value,
+        /** @param {string} name @param {string} value */
+        set: (name, value)=>{
+            const folded = name.toUpperCase();
+            byFolded.set(folded, { name: byFolded.get(folded)?.name ?? name, value });
+        },
+        /** @param {string} name */
+        delete: name=>byFolded.delete(name.toUpperCase()),
+        /** @returns {[string, string][]} */
+        entries: ()=>[...byFolded.values()].map(({ name, value })=>[name, value]),
+    };
 
     /**
      * Text in the ANSI page, which is how the memory layer reads what a
@@ -145,7 +167,7 @@ export function createEnvironmentFunctions(host){
             return held;
         }
 
-        const entries = [...variables].map(([name, value])=>`${name}=${value}`);
+        const entries = variables.entries().map(([name, value])=>`${name}=${value}`);
         const text = `${entries.map(entry=>`${entry}\0`).join('')}\0`;
         const bytes = wide ? new Uint8Array(text.length * 2) : encodeAnsi(text);
         if (wide)
@@ -292,8 +314,9 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, size])=>{
-                const wanted = host.readCString(name >>> 0, 0x400);
-                const value = variables.get(wanted);
+                // A NULL name names no variable.
+                const value = (name >>> 0) === 0 ? undefined
+                    : variables.get(host.readCString(name >>> 0, 0x400));
                 if (value === undefined)
                 {
                     host.setLastError(ERROR_ENVVAR_NOT_FOUND);
@@ -308,7 +331,8 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, size])=>{
-                const value = variables.get(host.readWideString(name >>> 0, 0x400));
+                const value = (name >>> 0) === 0 ? undefined
+                    : variables.get(host.readWideString(name >>> 0, 0x400));
                 if (value === undefined)
                 {
                     host.setLastError(ERROR_ENVVAR_NOT_FOUND);
@@ -323,6 +347,11 @@ export function createEnvironmentFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, value])=>{
+                if ((name >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 const wanted = host.readCString(name >>> 0, 0x400);
                 if ((value >>> 0) === 0)
                 {
@@ -354,7 +383,8 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
-                const expanded = expand(host.readCString(source >>> 0, 0x8000));
+                const expanded = (source >>> 0) === 0 ? ''
+                    : expand(host.readCString(source >>> 0, 0x8000));
                 if ((size >>> 0) >= expanded.length + 1 && (destination >>> 0) !== 0)
                 {
                     reportPath(expanded, destination, size);
@@ -373,7 +403,8 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
-                const expanded = expand(host.readWideString(source >>> 0, 0x8000));
+                const expanded = (source >>> 0) === 0 ? ''
+                    : expand(host.readWideString(source >>> 0, 0x8000));
                 if ((size >>> 0) >= expanded.length + 1 && (destination >>> 0) !== 0)
                 {
                     reportWidePath(expanded, destination, size);
@@ -402,6 +433,11 @@ export function createEnvironmentFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, value])=>{
+                if ((name >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 const wanted = host.readWideString(name >>> 0, 0x400);
                 if ((value >>> 0) === 0)
                 {
