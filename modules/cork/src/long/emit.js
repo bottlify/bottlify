@@ -155,7 +155,11 @@ const LOCALS = [
 ];
 /** The float scratch locals, past the vectors. */
 const F32 = XMM + 19;
-/** The `expect` global as the region was entered with it. */
+/**
+ * The `expect` global as the region was entered with it, kept across a call
+ * the region makes: the global holds it while the region runs, so it is no
+ * value the whole function keeps live, only one a call puts back.
+ */
 const EXPECTED = XMM + 23;
 /** The direction flag, which no record holds. */
 const DF = 1 << 10;
@@ -1801,6 +1805,7 @@ class BlockEmitter {
         b.br(this.exitDepth);
         this.close();
         b.globalGet(DEPTH).i32const(1).op(Op.i32add).globalSet(DEPTH);
+        b.globalGet(EXPECT).localSet(EXPECTED);
         b.i64const(BigInt(next)).globalSet(EXPECT);
         if (to === null)
         {
@@ -1810,7 +1815,7 @@ class BlockEmitter {
         {
             b.i32const(0).globalSet(LABEL).i32const(slot).callIndirect(regionType);
         }
-        b.localSet(U);
+        b.localSet(U).localGet(EXPECTED).globalSet(EXPECT);
         b.globalGet(DEPTH).i32const(1).op(Op.i32sub).globalSet(DEPTH);
         this.spills.push({ at: b.length, reload: true });
         this.loadRecord();
@@ -2397,7 +2402,6 @@ function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads, l
     // Label 0 is the region's entry, label i + 1 its block i.
     b.globalGet(LABEL).i32const(1).op(Op.i32sub).i32const(first).globalGet(LABEL)
         .op(Op.select).localSet(IDX);
-    b.globalGet(EXPECT).localSet(EXPECTED);
     b.block();
     b.loop();
     for (let i = 0; i < count; i++)
@@ -2513,7 +2517,7 @@ function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads, l
     tail.globalGet(BUDGET).localGet(K).op(Op.i32sub).globalSet(BUDGET);
     tail.localGet(CODE).op(Op.i32eqz);
     tail.if();
-    tail.localGet(RIP).localGet(EXPECTED).op(Op.i64eq);
+    tail.localGet(RIP).globalGet(EXPECT).op(Op.i64eq);
     tail.if();
     tail.i32const(LongExit.RETURNED).return();
     tail.end();
@@ -2521,8 +2525,7 @@ function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads, l
     {
         tail.globalGet(BUDGET).i32const(0).op(Op.i32gts);
         tail.if();
-        tail.localGet(EXPECTED).globalSet(EXPECT).localGet(RIP).i32const(LongExit.NEXT)
-            .returnCall(helpers.transfer);
+        tail.localGet(RIP).i32const(LongExit.NEXT).returnCall(helpers.transfer);
         tail.end();
     }
     tail.end();
