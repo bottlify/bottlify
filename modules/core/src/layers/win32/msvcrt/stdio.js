@@ -44,6 +44,8 @@ const FILE_FILE = 16;
  */
 const FILE_BUFSIZ = 24;
 const DEFAULT_BUFFER = 4096;
+/** An unbuffered stream's `_bufsiz`: the two bytes of its own `_charbuf`. */
+const UNBUFFERED = 2;
 
 /**
  * `_iob`: the runtime's own streams, stdin, stdout and stderr first, twenty
@@ -1573,7 +1575,8 @@ export function createStdioFunctions(host){
             const stream = streamOf(pointer);
             if (stream)
             {
-                writeU32(stream.record + FILE_BUFSIZ, (buffer >>> 0) === 0 ? 0 : DEFAULT_BUFFER);
+                writeU32(stream.record + FILE_BUFSIZ,
+                    (buffer >>> 0) === 0 ? UNBUFFERED : DEFAULT_BUFFER);
             }
             return 0;
         }),
@@ -1591,10 +1594,7 @@ export function createStdioFunctions(host){
             {
                 return -1;
             }
-            if (mode !== IONBF)
-            {
-                writeU32(stream.record + FILE_BUFSIZ, size >>> 0);
-            }
+            writeU32(stream.record + FILE_BUFSIZ, mode === IONBF ? UNBUFFERED : size >>> 0);
             return 0;
         }),
     };

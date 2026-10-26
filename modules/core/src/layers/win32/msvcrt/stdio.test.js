@@ -1247,7 +1247,7 @@ test('setbuf gives a stream BUFSIZ or no buffer', ()=>{
     const { memory, fns } = build();
     const stream = fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('rb')]);
     fns.setbuf.handler([stream, 0]);
-    assert.equal(memory.u32(stream + 24), 0);
+    assert.equal(memory.u32(stream + 24), 2, 'its _charbuf, as Wine\'s test_flsbuf reads');
     fns.setbuf.handler([stream, memory.allocate(512)]);
     assert.equal(memory.u32(stream + 24), 4096);
 });
