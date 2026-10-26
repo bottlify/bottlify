@@ -75,6 +75,9 @@ function digitValue(character){
     return -1;
 }
 
+/** Above the largest magnitude any integer conversion clamps at (2^64). */
+const PAST_EVERY_LIMIT = 1n << 72n;
+
 /**
  * The integer scanner behind strtol and strtoul, and scanf's integers.
  *
@@ -124,7 +127,13 @@ export function scanInteger(text, requestedBase, zeroBeforeX = false, prefix = t
         {
             break;
         }
-        magnitude = magnitude * BigInt(base) + BigInt(digit);
+        // Past every limit a caller compares with, more digits change
+        // nothing it can see: the magnitude stops growing, so a long run of
+        // them costs a step each rather than a multiplication of its length.
+        if (magnitude < PAST_EVERY_LIMIT)
+        {
+            magnitude = magnitude * BigInt(base) + BigInt(digit);
+        }
         at++;
     }
 
@@ -203,7 +212,13 @@ export function scanWideInteger(text, requestedBase){
     for (let digit = wideDigitValue(text[at]); digit >= 0 && digit < base;
         digit = wideDigitValue(text[at]))
     {
-        magnitude = magnitude * BigInt(base) + BigInt(digit);
+        // Past every limit a caller compares with, more digits change
+        // nothing it can see: the magnitude stops growing, so a long run of
+        // them costs a step each rather than a multiplication of its length.
+        if (magnitude < PAST_EVERY_LIMIT)
+        {
+            magnitude = magnitude * BigInt(base) + BigInt(digit);
+        }
         at++;
     }
     return at === start ? null : { magnitude, negative, end: at };

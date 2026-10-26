@@ -511,3 +511,17 @@ test('atof, strtod and their _l forms of no text are zero and EINVAL, the end nu
     table._strtod_l.handler([memory.put('12.5'), end, 0]);
     assert.equal(fpu.result, 12.5);
 });
+
+test('a long run of digits reads to its end, past every limit, at a step a digit', ()=>{
+    // A number written out in 64 KiB of digits still ends where the digits
+    // do and is past the 64 bits any conversion clamps at; it no longer
+    // costs a multiplication of its whole length per digit.
+    const digits = '9'.repeat(1 << 16);
+    const started = performance.now();
+    const scanned = scanInteger(`${digits}x`, 10);
+    assert.equal(scanned?.end, digits.length);
+    assert.ok((scanned?.magnitude ?? 0n) > (1n << 64n));
+    assert.ok(performance.now() - started < 1000, 'linear in the digits');
+    assert.equal(scanInteger('18446744073709551615', 10)?.magnitude, (1n << 64n) - 1n,
+        'below the cap every digit counts');
+});
