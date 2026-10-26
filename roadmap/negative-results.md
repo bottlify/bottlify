@@ -1661,3 +1661,18 @@ None yet.
 - **Decision.** No page file over guest memory. What can give memory back is the engine's own
   (JavaScript heaps, compiled modules); the guest's zone counts the heap up to the highest
   address it ever handed out.
+
+### 2026-10-26: a long-mode doubleword register read left unmasked after a doubleword write
+
+- **Idea.** The long-mode translator keeps each register in an i64 local and masks a 32-bit read
+  with `i64.and 0xffffffff`, 217 of them in one hot match-finder region of 7-Zip. A register
+  written as a doubleword earlier in the same block, not in a branch and not since as a
+  quadword, has its upper half zero already, so the read needs no mask.
+- **Workload.** 7-Zip 23.01 x64 (`7za.exe b -md18 -mmt1`) under the engine in node, the whole
+  benchmark, its total rating; both arms snapshots of the tree at cf1c5d31, one with the change.
+- **Values.** Before 1347 and 1255, after 1267 and 1270; two runs an arm, alternated. The arms'
+  spread (1255 to 1347 for the same code) is wider than any difference.
+- **Why.** Not measured further; V8 may drop the mask itself, or it costs too little to see.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
+- **Decision.** Not kept; the patch (a `narrow` set in the block emitter and a directed test of a
+  block entered with a wide register after a doubleword write) is not in the tree.
