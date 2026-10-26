@@ -26,6 +26,7 @@ import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
 import { cvtDigits } from './format.js';
+import { decimalToExtended } from './ldouble.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 
@@ -487,6 +488,32 @@ export function createConversionFunctions(host){
 
     const { readMemory, writeMemory } = host;
     const table = {
+        /**
+         * int __STRINGTOLD(_LDOUBLE *value, char **end, const char *text, int flags)
+         *
+         * strtod's reading of `text` into the x87's ten-byte extended, rounded
+         * once (ldouble.js): 0, 1 for an underflow, 2 for an overflow (the
+         * value an infinity), 4 when there is no number -- the value zero and
+         * `*end` the text itself. errno is not touched; `flags` asks for
+         * nothing msvcrt is known to read.
+         */
+        __STRINGTOLD: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([value, end, text])=>{
+                const { bytes, end: read, status } = decimalToExtended(readString(text));
+                host.writeMemory(value, bytes);
+                if ((end >>> 0) !== 0)
+                {
+                    const pointer = new Uint8Array(4);
+                    new DataView(pointer.buffer).setUint32(0, text + read >>> 0, true);
+                    host.writeMemory(end, pointer);
+                }
+                return status;
+            },
+        },
+
         // Code in the guest (`inguest.js`), which hands the host a value out
         // of range -- errno is the calling thread's, and only the host
         // reaches it -- and a base it does not take; the handlers above
