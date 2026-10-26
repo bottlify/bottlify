@@ -682,3 +682,25 @@ test('a handler that declines leaves the head where it was', async()=>{
 
     assert.equal(m.get(TEB), frames[0]);
 });
+
+test('a refused guest access is STATUS_ACCESS_VIOLATION, read or write and where', async()=>{
+    // Windows faults at the DLL's own instruction when a program hands it a
+    // pointer that is not there, and the program's handlers see the access
+    // violation: what it did and the address it could not reach.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+    const answer = await m.seh.raiseAccess({ address: 0xdeadbeef, mode: 'write' });
+    const [{ args: [record] }] = m.called;
+    assert.equal(m.get(record + RECORD.CODE), 0xc0000005);
+    assert.equal(m.get(record + RECORD.PARAMETER_COUNT), 2);
+    assert.equal(m.get(record + RECORD.INFORMATION), 1, 'a write');
+    assert.equal(m.get(record + RECORD.INFORMATION + 4), 0xdeadbeef);
+    assert.equal(answer, 0, 'continued, the call answers zero');
+
+    const read = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    read.registerFrames([0x51000]);
+    await read.seh.raiseAccess({ address: 0, mode: 'read' });
+    const [{ args: [readRecord] }] = read.called;
+    assert.deepEqual([read.get(readRecord + RECORD.INFORMATION),
+        read.get(readRecord + RECORD.INFORMATION + 4)], [0, 0]);
+});

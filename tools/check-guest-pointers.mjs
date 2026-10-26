@@ -315,6 +315,9 @@ async function build(){
             useHeap: ()=>{},
             publishInterface: ()=>0,
             label: ()=>{},
+            // Handlers are called here directly, not through the dispatcher:
+            // a fault stays the error it is, which this counts as allowed.
+            onGuestFault: ()=>{},
             callerThread: ()=>thread,
             callGuest: ()=>new Promise(()=>{}),
             /** @param {unknown} _ @param {() => unknown} fn */

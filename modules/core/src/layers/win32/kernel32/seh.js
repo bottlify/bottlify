@@ -779,6 +779,28 @@ export function createSeh(host){
         chain,
 
         /**
+         * A guest access a host call made for the program and memory refused,
+         * raised as the access violation Windows raises at the DLL's own
+         * instruction: the program's handlers see STATUS_ACCESS_VIOLATION
+         * with whether it read (0), wrote (1) or executed (8) and where, and
+         * one that continues gets the call back answering zero. Unhandled,
+         * the process ends with it, as on Windows.
+         *
+         * @param {{ address: number, mode: 'read' | 'write' | 'execute' }} fault
+         * @returns {Promise<any>}
+         */
+        raiseAccess: fault=>{
+            const registers = host.registers();
+            return raise({
+                code: STATUS.ACCESS_VIOLATION,
+                address: registers.eip,
+                parameters: [fault.mode === 'write' ? 1 : fault.mode === 'execute' ? 8 : 0,
+                    fault.address >>> 0],
+                raisedFrom: readU32(registers.esp >>> 0),
+            }).then(result=>(result.registers ? host.answerWith(0, result.registers) : 0));
+        },
+
+        /**
          * Whether a processor exception is one a program can be handed.
          *
          * @param {number} vector

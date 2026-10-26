@@ -1192,6 +1192,10 @@ export function createWin32Module(){
                     processEnded();
                 },
             });
+            // A host call's refused guest access is the program's exception,
+            // as Windows raises it in the DLL, not the end of the run.
+            bridge.onGuestFault?.((/** @type {{ address: number,
+                mode: 'read' | 'write' | 'execute' }} */ fault)=>seh.raiseAccess(fault));
 
             /**
              * Bytes put in guest memory for as long as `use` runs, a call it

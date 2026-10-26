@@ -792,6 +792,22 @@ export function createBridgeModule(){
                 }),
 
                 /**
+                 * Where a host call's refused guest access goes: raised in the
+                 * guest, as the access violation Windows raises inside the
+                 * DLL, by whoever dispatches exceptions -- this layer does
+                 * not. Without one, the refusal ends the run as before.
+                 *
+                 * @param {((fault: import('./internal/dispatch.js').GuestAccess)
+                 *     => Promise<number>) | null} raise
+                 */
+                onGuestFault(raise){
+                    if (live() && state.dispatcher)
+                    {
+                        state.dispatcher.guestFault = raise;
+                    }
+                },
+
+                /**
                  * Holds the running thread while a processor exception it took is
                  * offered to its handlers, the way a host call holds it while it
                  * waits: the thread is sent to the park loop from the vector's

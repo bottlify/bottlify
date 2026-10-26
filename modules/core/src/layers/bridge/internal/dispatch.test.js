@@ -1850,3 +1850,75 @@ test('a function kept out of the ring of recent calls is counted but not kept th
     assert.equal(dispatcher.detailed().at(-1).name, 'USER32.dll!ShowWindow',
         'and none, once cleared');
 });
+
+/** A refused guest access, as memory throws it. @param {'read' | 'write'} mode */
+const guestAccess = mode=>Object.assign(new Error(`Unmapped ${mode} at 0x0`),
+    { code: 'GUEST_ACCESS', address: 0, length: 4, mode });
+
+test('a refused guest access is raised in the guest; any other error stops the run', ()=>{
+    // Windows faults inside the DLL on a pointer that is not there and the
+    // program's handlers see STATUS_ACCESS_VIOLATION; an error of our own is
+    // a host bug, and is never turned into the program's exception.
+    const m = machine({ args: [0] });
+    /** @type {any[]} */
+    const suspended = [];
+    m.dispatcher.suspend = answer=>suspended.push(answer);
+    /** @type {any[]} */
+    const raised = [];
+    m.dispatcher.guestFault = fault=>{
+        raised.push(fault);
+        return Promise.resolve(0);
+    };
+    m.dispatcher.register(1, { ...STDCALL, name: 'KERNEL32.dll!lstrcpyA', argBytes: 4,
+        handler: ()=>{
+            throw guestAccess('write');
+        } });
+    m.dispatcher.register(2, { ...STDCALL, name: 'KERNEL32.dll!Broken', argBytes: 4,
+        handler: ()=>{
+            throw new TypeError('Cannot read properties of undefined');
+        } });
+    m.dispatcher.register(3, { ...STDCALL, name: 'KERNEL32.dll!Path', argBytes: 4,
+        handler: ()=>{
+            throw Object.assign(new Error('An empty path names nothing'), { code: 'INVALID_PATH' });
+        } });
+
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(raised.map(fault=>[fault.code, fault.mode]), [['GUEST_ACCESS', 'write']]);
+    assert.equal(suspended.length, 1, 'the call waits on the exception\'s dispatch');
+
+    assert.throws(()=>m.dispatcher.dispatch(2), TypeError);
+    assert.throws(()=>m.dispatcher.dispatch(3), /An empty path/);
+    assert.equal(raised.length, 1, 'neither was raised in the guest');
+
+    // Nobody to raise it: the refusal ends the run, as before.
+    m.dispatcher.guestFault = null;
+    assert.throws(()=>m.dispatcher.dispatch(1), /Unmapped write/);
+});
+
+test('a refused guest access after a handler waited is raised the same way', async()=>{
+    const m = machine({ args: [0] });
+    /** @type {any[]} */
+    const suspended = [];
+    m.dispatcher.suspend = answer=>suspended.push(answer);
+    /** @type {any[]} */
+    const raised = [];
+    m.dispatcher.guestFault = fault=>{
+        raised.push(fault);
+        return Promise.resolve(7);
+    };
+    m.dispatcher.register(1, { ...STDCALL, name: 'KERNEL32.dll!ReadFile', argBytes: 4,
+        handler: async()=>{
+            await null;
+            throw guestAccess('read');
+        } });
+    m.dispatcher.register(2, { ...STDCALL, name: 'KERNEL32.dll!Late', argBytes: 4,
+        handler: async()=>{
+            await null;
+            throw new RangeError('Invalid typed array length: -1');
+        } });
+    m.dispatcher.dispatch(1);
+    assert.equal(await suspended[0], 7, 'answered as the raise answers');
+    assert.equal(raised[0].mode, 'read');
+    m.dispatcher.dispatch(2);
+    await assert.rejects(suspended[1], RangeError);
+});
