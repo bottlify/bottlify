@@ -7,11 +7,12 @@
 /**
  * The cases of a long-mode switch: where a block's indirect jump goes through
  * a table the compiler laid out, read as data when the region is formed, so
- * the cases join the region and the jump becomes a branch among them
- * (`emit.js`'s `dispatch`), as the 32-bit translator's `switchTable` does at
- * 32 bits. The table is a hint for forming alone: the jump still goes where
- * the instruction computes, looked up in the entry hash, so a table read
- * wrong, or written since, sends the jump out of the region, never astray.
+ * the cases join the region and the jump becomes a branch among them by its
+ * index (`emit.js`'s `dispatch`), as the 32-bit translator's `switchTable`
+ * does at 32 bits. What was read is checked, not trusted: the jump still goes
+ * where the instruction computes, and a case's branch is taken only where
+ * that is the case read, so a table read wrong, or written since, sends the
+ * jump out of the region, never astray.
  *
  * Two shapes, the ones x64 compilers lay a switch out in:
  *
@@ -136,12 +137,15 @@ function testedOf(instructions, index, upTo){
 }
 
 /**
- * The case addresses of a block's indirect jump, where it goes through a
- * switch's table; null where it does not, or where the table cannot be read.
+ * A block's switch, where its indirect jump goes through a table: the
+ * register holding the index when the jump is made, and the case addresses
+ * by index; null where it does not, or where the table cannot be read.
+ *
+ * @typedef {{ index: number, cases: number[] }} Switch
  *
  * @param {Block} block @param {Iterable<Block>} blocks  the region's blocks so far
  * @param {(address: number) => number} read  a byte of guest memory; throws where it cannot
- * @returns {number[] | null}
+ * @returns {Switch | null}
  */
 export function switchCases(block, blocks, read){
     const { instructions } = block;
@@ -184,7 +188,7 @@ export function switchCases(block, blocks, read){
                 }
                 cases.push(word(table + i * 8, 4));
             }
-            return count > 0 ? cases : null;
+            return count > 0 ? { index, cases } : null;
         }
         return relativeCases(block, blocks, word);
     }
@@ -199,7 +203,7 @@ export function switchCases(block, blocks, read){
  *
  * @param {Block} block @param {Iterable<Block>} blocks
  * @param {(at: number, size: number) => number} word
- * @returns {number[] | null}
+ * @returns {Switch | null}
  */
 function relativeCases(block, blocks, word){
     const { instructions } = block;
@@ -250,7 +254,9 @@ function relativeCases(block, blocks, word){
         return null;
     }
     const baseValue = /** @type {number} */ (made.operands[1].disp) >>> 0;
-    if (!instructions.slice(at + 1, -2).every(one=>leaves(one, base) && leaves(one, r)))
+    // The index as the load used it stays where the jump is made.
+    if (!instructions.slice(at + 1, -2).every(one=>leaves(one, base) && leaves(one, r)
+        && leaves(one, index)) || r === index)
     {
         return null;
     }
@@ -269,5 +275,5 @@ function relativeCases(block, blocks, word){
         }
         cases.push(address);
     }
-    return count > 0 ? cases : null;
+    return count > 0 ? { index, cases } : null;
 }

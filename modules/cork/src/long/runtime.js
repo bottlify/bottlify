@@ -301,9 +301,9 @@ export function createLongRunner(settings){
                     // halves the region's, rather than its tail translated twice.
                     /** @type {import('./emit.js').LongBlock} */
                     const tail = { entry: at, instructions: inside.instructions.slice(index),
-                        ...inside.cases === undefined ? {} : { cases: inside.cases } };
+                        ...inside.switch === undefined ? {} : { switch: inside.switch } };
                     inside.instructions = inside.instructions.slice(0, index);
-                    delete inside.cases;
+                    delete inside.switch;
                     blocks.push(tail);
                     byStart.set(at, tail);
                     ordered.splice(place(at), 0, at);
@@ -328,11 +328,11 @@ export function createLongRunner(settings){
             ordered.splice(place(at), 0, at);
             size += endOf(block) - at;
             // A switch's cases join the region, its jump a branch among them.
-            const cases = switchCases(block, blocks, fetch);
-            if (cases !== null)
+            const found = switchCases(block, blocks, fetch);
+            if (found !== null)
             {
-                block.cases = cases;
-                queue.push(...cases);
+                block.switch = found;
+                queue.push(...found.cases);
                 stats.switches++;
             }
             queue.push(...successors(instructions));

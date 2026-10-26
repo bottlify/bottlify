@@ -1769,28 +1769,49 @@ class BlockEmitter {
     }
 
     /**
-     * An indirect jump to RIP among the region's own blocks: the entry hash's
-     * first slot for RIP looked at as the transfer looks at it, and where it
-     * names this region (its table slot) the dispatch loop goes round to the
-     * block at its label, while the budget lasts, as a jump back does. Else,
-     * on to the exit after it, which leaves through the transfer.
+     * A switch's jump to RIP among its cases in the region, by the index the
+     * table was read with: an index within the table branches to its case's
+     * stub, which goes on to the case's block where RIP is the case read when
+     * the region was formed -- forward straight to its label, back round the
+     * dispatch loop while the budget lasts, as a jump goes. Else, and for a
+     * case outside the region, on to the exit after it, which leaves through
+     * the transfer.
      *
+     * @param {import('./switch.js').Switch} which @param {Map<number, number>} indexOf
      * @param {number} here @param {number} count  the region's blocks
-     * @param {number} slot  the region's table slot
      */
-    dispatch(here, count, slot){
-        const { b, layout } = this;
+    dispatch(which, indexOf, here, count){
+        const { b } = this;
+        const targets = [...new Set(which.cases)].filter(target=>indexOf.has(target));
+        if (targets.length === 0)
+        {
+            return;
+        }
+        const stubOf = new Map(targets.map((target, stub)=>[target, stub]));
         b.block();
         this.nest++;
-        b.localGet(RIP).i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz).brIf(0);
-        b.localGet(RIP).op(Op.i32wrap).localTee(A).i32const(0x9e3779b1 | 0).op(Op.i32mul)
-            .i32const(layout.hashShift ?? 16).op(Op.i32shru).i32const(Tables.HASH_SLOT)
-            .op(Op.i32mul).i32const(layout.tables + Tables.HASH).op(Op.i32add).localTee(U)
-            .load('i32').localGet(A).op(Op.i32ne).brIf(0);
-        b.localGet(U).load('i32', { offset: 4 }).i32const(slot).op(Op.i32ne).brIf(0);
-        b.localGet(K).globalGet(BUDGET).op(Op.i32lts).op(Op.i32eqz).brIf(0);
-        b.localGet(U).load('i32_16u', { offset: 8 }).i32const(1).op(Op.i32sub).localSet(IDX)
-            .br(count - 1 - here + this.nest);
+        b.localGet(which.index).i64const(BigInt(which.cases.length)).op(Op.i64ltu).op(Op.i32eqz)
+            .brIf(0);
+        for (let stub = 0; stub < targets.length; stub++)
+        {
+            b.block();
+        }
+        b.localGet(which.index).op(Op.i32wrap).brTable(
+            which.cases.map(target=>stubOf.get(target) ?? targets.length), targets.length);
+        targets.forEach((target, stub)=>{
+            b.end();
+            // Inside the stubs after this one and the miss block.
+            const inside = targets.length - 1 - stub;
+            const to = /** @type {number} */ (indexOf.get(target));
+            b.localGet(RIP).i64const(BigInt(target)).op(Op.i64ne).brIf(inside);
+            if (to > here)
+            {
+                b.br(to - here - 1 + this.nest + inside);
+                return;
+            }
+            b.localGet(K).globalGet(BUDGET).op(Op.i32lts).op(Op.i32eqz).brIf(inside);
+            b.i32const(to).localSet(IDX).br(count - 1 - here + this.nest + inside);
+        });
         b.end();
         this.nest--;
     }
@@ -2134,8 +2155,8 @@ function shiftHelper(){
  * @property {number} entry
  * @property {import('../decode/decoder.js').Instruction[]} instructions  what it runs; the
  *     last a branch, or not when the block was cut short, and then it goes on past it
- * @property {number[]} [cases]  where its indirect jump goes through a switch's table
- *     (`switch.js`): the jump looks its target up among the region's blocks (`dispatch`)
+ * @property {import('./switch.js').Switch} [switch]  where its indirect jump goes through a
+ *     switch's table (`switch.js`): the jump branches among the cases by index (`dispatch`)
  */
 
 /**
@@ -2481,9 +2502,9 @@ function emitRegion(layout, helpers, region,
         }
         else if (ending.to === null)
         {
-            if (block.cases !== undefined)
+            if (block.switch !== undefined)
             {
-                e.dispatch(index, count, slotOf(region.blocks[0].entry));
+                e.dispatch(block.switch, indexOf, index, count);
             }
             b.br(e.exitDepth);
         }
