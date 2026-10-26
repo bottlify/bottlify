@@ -147,7 +147,7 @@ export function translatesSimd(instruction){
         case 'cvtsi2ss': case 'cvtsi2sd': case 'cvttss2si': case 'cvttsd2si': case 'cvtss2si':
         case 'cvtsd2si': case 'cvtdq2ps': case 'cvttps2dq': case 'cvtps2dq': case 'cvtdq2pd':
         case 'cvttpd2dq': case 'cvtpd2dq': case 'cvtss2sd': case 'cvtsd2ss': case 'cvtps2pd':
-        case 'cvtpd2ps':
+        case 'cvtpd2ps': case 'rcpps': case 'rcpss': case 'rsqrtps': case 'rsqrtss':
             return true;
         default:
             return false;
@@ -164,14 +164,18 @@ const MMX_UNPACK_HIGH = Object.freeze({
 });
 
 /**
- * Whether an MMX instruction is one this file translates: none that moves
- * between an MMX and an XMM register (the conversions, `movq2dq`) or writes
- * through rdi (`maskmovq`).
+ * Whether an MMX instruction is one this file translates: of those between
+ * an MMX and an XMM register the two moves alone, not the conversions; not
+ * `maskmovq`, which writes through rdi.
  *
  * @param {import('../decode/decoder.js').Instruction} instruction
  */
 function translatesMmx(instruction){
     const { op, operands } = instruction;
+    if (op === 'movq2dq' || op === 'movdq2q')
+    {
+        return true;
+    }
     if (operands.some(operand=>operand.kind === 'xmm'))
     {
         return false;
@@ -677,6 +681,41 @@ function operation(e, instruction, index, at){
             put(dst);
             return;
         }
+        case 'rcpps': case 'rcpss': case 'rsqrtps': case 'rsqrtss':
+        {
+            // As the model computes them, exactly: 1 / x, or 1 / sqrt(x), each
+            // lane widened to a double, worked there and rounded back once --
+            // a float's own division would round the root first.
+            const root = op.startsWith('rsqrt');
+            vector(src);
+            b.localSet(V0);
+            for (const high of [false, true])
+            {
+                b.f64const(1).simd(S.f64x2Splat).localGet(V0);
+                if (high)
+                {
+                    b.localGet(V0).simd(S.shuffle).op(8, [9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11,
+                        12, 13, 14, 15]);
+                }
+                b.simd(S.f64x2PromoteLowF32x4);
+                if (root)
+                {
+                    b.simd(S.f64x2Sqrt);
+                }
+                b.simd(S.f64x2Div).simd(S.f32x4DemoteF64x2Zero);
+            }
+            b.simd(S.shuffle).op(0, dwords([0, 1, 4, 5]).slice(1));
+            defaultNaN(e, false, 1);
+            if (op.endsWith('ss'))
+            {
+                mergeLow(false);
+            }
+            else
+            {
+                put(dst);
+            }
+            return;
+        }
         case 'cvtss2sd': case 'cvtsd2ss': case 'cvtps2pd': case 'cvtpd2ps':
         {
             // A NaN in goes to the interpreter, which carries its payload as the model does.
@@ -753,7 +792,9 @@ function mmx(e, instruction, vector, put, shuffle){
             heldNoQuadword(e, reg);
             return true;
         }
-        case 'movntq':
+        case 'movntq': case 'movq2dq': case 'movdq2q':
+            // A quadword as it is: into an XMM register's low half, the high
+            // one cleared, or out of it.
             vector(src);
             put(dst);
             return true;

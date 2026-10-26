@@ -1730,3 +1730,22 @@ None yet.
   was not in the machine code.
 - **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
 - **Decision.** Not kept.
+
+## 2026-10-26: a long-mode region of more or fewer blocks than 256 (16 KiB)
+
+The long-mode translator's regions take up to 256 blocks and 16 KiB of code (`REGION_LIMIT`,
+`REGION_BYTES` in `modules/cork/src/long/runtime.js`). Measured at 128/8 KiB, 512/32 KiB and
+1024/64 KiB against 256/16 KiB, node 22, the project's 4-core VM with other work on it (load
+1-2), arms alternated, each a fresh process:
+
+- Stockfish 8 x64, `bench 16 1 12`, nodes a second, 3 pairs each: 128 gave 163 657 / 158 749 /
+  150 741 against 176 443 / 173 865 / 176 653; 512 gave 184 656 / 194 036 / 201 026 against
+  171 690 / 184 466 / 179 770; 1024 gave 200 825 / 203 746 / 184 366 against 512's 189 614 /
+  186 487 / 194 546.
+- 7-Zip 23.01 x64 compressing the 8.4 MB file (`a -mx5 -md18 -mmt1`), ms: 512, 5 pairs,
+  8268 8676 8118 8325 7932 (median 8268) against 8054 7054 7466 8128 8186 (median 8054), and 3
+  earlier pairs 9460 6990 8276 against 9797 9054 8342; 1024, 3 pairs, 8349 9254 8771 against
+  8060 8444 8207.
+
+Larger regions helped Stockfish (+7 % at 512) and cost 7-Zip (-2.6 % at 512, -5 % at 1024);
+smaller ones cost Stockfish 10 %. No size won both; 256 kept.

@@ -430,7 +430,8 @@ const MMX_POOL = [
     '0ff4ca', '0ff5d9', '0ff6d4', '0fe0ca', '0fe3d8', '0fdac2', '0feee9', '0f70c11b',
     '0f7053084e', '0f71e707', '0f73f310', '0f73d720', '0f72d121', '0f72e228', '0ff1c1', '0fd3d3',
     '0fe16618', '0f63c1', '0f67d3', '0f6be5', '0fd7ca', '440fd7c8', '0fc5c802', '440fc5c307',
-    '0fc4e801', '0fc44f1206', 'b80180ff7f', '01c8', '4989c0', 'd9e8', '0f77',
+    '0fc4e801', '0fc44f1206', 'b80180ff7f', '01c8', '4989c0', 'd9e8', '0f77', 'f30fd6ca',
+    'f20fd6dc',
 ].map(hex=>Buffer.from(hex, 'hex'));
 
 test('MMX runs translated as interpreted, the x87 unit it leaves in its state included', ()=>{
@@ -857,6 +858,8 @@ const SSE_FORMS = [
     ['660fe6c1', 'cvttpd2dq xmm0, xmm1'], ['f20fe6c1', 'cvtpd2dq xmm0, xmm1'],
     ['f30f5ac1', 'cvtss2sd xmm0, xmm1'], ['f20f5ac1', 'cvtsd2ss xmm0, xmm1'],
     ['0f5ac1', 'cvtps2pd xmm0, xmm1'], ['660f5ac1', 'cvtpd2ps xmm0, xmm1'],
+    ['0f53c1', 'rcpps xmm0, xmm1'], ['f30f53d3', 'rcpss xmm2, xmm3'],
+    ['0f52c1', 'rsqrtps xmm0, xmm1'], ['f30f52d3', 'rsqrtss xmm2, xmm3'],
     ['660ff1c1', 'psllw xmm0, xmm1'], ['660fd2c1', 'psrld xmm0, xmm1'],
     ['660fe1c1', 'psraw xmm0, xmm1'], ['660fe2c1', 'psrad xmm0, xmm1'],
     ['660fd3c1', 'psrlq xmm0, xmm1'], ['660f73f03f', 'psllq xmm0, 63'],
