@@ -94,6 +94,12 @@ const FL = 17;
  * is a register fewer for the program's sixteen.
  */
 const PK = 18;
+/**
+ * The registers the state block holds newer than their locals, a bit each
+ * (`callSync`'s numbering): those a call's return left unloaded because no
+ * code it can reach touches them, which a store must then leave alone.
+ */
+const FRESH = 19;
 const PA = 20;
 const PB = 21;
 const PR = 22;
@@ -140,8 +146,8 @@ function unpack(b, { at, mask }){
     b.i32const(mask).op(Op.i32and);
 }
 
-// Locals 19, 23 and 24, the record's parts before they were packed in PK,
-// are unused, kept so the ones after them keep their numbers.
+// Locals 23 and 24, the record's parts before they were packed in PK, are
+// unused, kept so the ones after them keep their numbers; 19 is FRESH.
 const LOCALS = [
     ...new Array(16).fill(ValType.i64), ValType.i64, ValType.i32,
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32,
@@ -303,10 +309,13 @@ class BlockEmitter {
         this.G64 = F32 + 3;
         /**
          * Where calls store the registers before and take them back after,
-         * filled in once the region's whole use of them is known.
-         * @type {{ at: number, reload: boolean }[]}
+         * and the block making the call, filled in once the region's whole
+         * use of them is known (`callSync`).
+         * @type {{ at: number, reload: boolean, block: number }[]}
          */
         this.spills = [];
+        /** The block being emitted, by its index in the region. */
+        this.blockIndex = -1;
         /** Labels between the block's code and the exit block, ifs aside. */
         this.outer = 1;
         /**
@@ -1847,7 +1856,7 @@ class BlockEmitter {
         {
             b.localGet(RIP).localSet(T2);
         }
-        this.spills.push({ at: b.length, reload: false });
+        this.spills.push({ at: b.length, reload: false, block: this.blockIndex });
         this.storeRecord();
         b.globalGet(BUDGET).localGet(K).op(Op.i32sub).globalSet(BUDGET);
         b.i32const(0).localSet(K);
@@ -1870,7 +1879,7 @@ class BlockEmitter {
         }
         b.localSet(U).localGet(EXPECTED).globalSet(EXPECT);
         b.globalGet(DEPTH).i32const(1).op(Op.i32sub).globalSet(DEPTH);
-        this.spills.push({ at: b.length, reload: true });
+        this.spills.push({ at: b.length, reload: true, block: this.blockIndex });
         this.loadRecord();
         b.i32const(0).load('i64', { offset: layout.eip }).localSet(RIP);
         b.localGet(U).i32const(LongExit.MISS).op(Op.i32eq);
@@ -2316,26 +2325,163 @@ function flagLiveness(blocks, indexOf){
 }
 
 /**
- * The flag record's fields in the state block (`longFlagRecord`): kind and
- * width, the two operands and the result, the carry in and the flags written.
+ * What a guest call stores before it and loads after it, by the block it
+ * ends: registers numbered 0..15 for the general ones, 16..31 for XMM.
+ *
+ * @typedef {{ stores: number[], guarded: Set<number>, loads: Set<number>, fresh: number }} CallSync
  */
-const Record = Object.freeze({ KIND: 0, SIZE: 4, A: 8, B: 16, R: 24, C: 32, W: 36 });
 
 /**
- * Stores the record, unpacked, and FL into the state block as they stand.
+ * The state block around a region's guest calls. The block holds every
+ * register when the region starts and when a call returns; a call stores
+ * only what some way to it wrote since then, as the 32-bit translator's
+ * calls do. Its return loads only what the code it can reach in the region
+ * touches: a region that vectorised a loop holds all sixteen XMM registers,
+ * and calls made after that loop need none of them. A register written in
+ * the region and not loaded back is newer in the state block than in its
+ * local; its bit in FRESH says so until the next call's return, and a store
+ * of it -- at a later call or at the exit -- is made only where the bit is
+ * clear. No code it can reach writes it, so nothing else clears the bit,
+ * and no call it can reach stores it: such a register is loaded back, so
+ * only the exit tests FRESH.
+ *
+ * Where the blocks go is taken from their last instruction, with every way
+ * a branch could go: what is reachable is never less than the truth, so a
+ * load is never missed and a guard never left out.
+ *
+ * @param {LongBlock[]} blocks  in address order @param {Map<number, number>} indexOf
+ * @param {Set<number>[]} seen  by block, the locals it touches
+ * @param {Set<number>[]} wrote  by block, the locals it writes
+ * @param {{ reload: boolean, block: number }[]} spills  the calls' stores and loads
+ * @param {number[]} written  the registers the region writes anywhere
+ * @returns {{ calls: Map<number, CallSync>, guarded: Set<number> }}
+ */
+function callSync(blocks, indexOf, seen, wrote, spills, written){
+    /** A local's register number, or -1. @param {number} local */
+    const registerOf = local=>(local < 16 ? local : local >= XMM && local < XMM + 16
+        ? local - XMM + 16 : -1);
+    /** @param {Set<number>} locals */
+    const registers = locals=>new Set([...locals].map(registerOf).filter(r=>r >= 0));
+    const touches = seen.map(registers);
+    const writes = wrote.map(registers);
+    const calling = new Set(spills.map(spill=>spill.block));
+    const successors = blocks.map(block=>{
+        const last = block.instructions[block.instructions.length - 1];
+        const next = last.eip + last.length;
+        const [operand] = last.operands;
+        /** @type {number[]} */
+        const to = [];
+        if (!endsBlock(last.op) || last.op === 'call')
+        {
+            to.push(next);
+        }
+        else
+        {
+            if (operand?.kind === 'rel')
+            {
+                to.push(/** @type {number} */ (operand.target));
+            }
+            if (last.op !== 'jmp' && last.op !== 'ret')
+            {
+                to.push(next);
+            }
+            to.push(...block.switch?.cases ?? []);
+        }
+        return [...new Set(to.map(at=>indexOf.get(at)).filter(index=>index !== undefined))];
+    });
+    /** The blocks reachable from `from`, itself included. @param {number} from */
+    const reachable = from=>{
+        const found = new Set([from]);
+        const queue = [from];
+        while (queue.length > 0)
+        {
+            for (const next of successors[/** @type {number} */ (queue.pop())])
+            {
+                if (!found.has(next))
+                {
+                    found.add(next);
+                    queue.push(next);
+                }
+            }
+        }
+        return found;
+    };
+    const writtenSet = new Set(written);
+    // What some way to each block's start wrote since the state block last
+    // held it: a call's return holds it again.
+    /** @type {Set<number>[]} */
+    const dirty = blocks.map(()=>new Set());
+    for (let changed = true; changed;)
+    {
+        changed = false;
+        blocks.forEach((_, index)=>{
+            if (calling.has(index))
+            {
+                return;
+            }
+            const out = new Set([...dirty[index], ...writes[index]]);
+            for (const next of successors[index])
+            {
+                for (const r of out)
+                {
+                    if (!dirty[next].has(r))
+                    {
+                        dirty[next].add(r);
+                        changed = true;
+                    }
+                }
+            }
+        });
+    }
+    /** By calling block, what the call stores. */
+    const stores = new Map([...calling].map(block=>[block,
+        [...new Set([...dirty[block], ...writes[block]])].filter(r=>writtenSet.has(r))
+            .sort((x, y)=>x - y)]));
+    /** @type {Set<number>} */
+    const guarded = new Set();
+    /** @type {Map<number, CallSync>} */
+    const calls = new Map();
+    for (const block of calling)
+    {
+        const last = blocks[block].instructions[blocks[block].instructions.length - 1];
+        const back = indexOf.get(last.eip + last.length);
+        const reach = back === undefined ? new Set() : reachable(back);
+        // What the code it reaches touches, and what a call it reaches
+        // stores: a test at every such call costs more, in a loop, than the
+        // load it saves, so only the exit's stores are guarded.
+        /** @type {Set<number>} */
+        const loads = new Set();
+        for (const index of reach)
+        {
+            touches[index].forEach(r=>loads.add(r));
+            stores.get(index)?.forEach(r=>loads.add(r));
+        }
+        const fresh = written.filter(r=>!loads.has(r));
+        fresh.forEach(r=>guarded.add(r));
+        calls.set(block, { stores: /** @type {number[]} */ (stores.get(block)), guarded: new Set(),
+            loads, fresh: fresh.reduce((mask, r)=>mask | 1 << r, 0) });
+    }
+    return { calls, guarded };
+}
+
+/**
+ * The flag record's fields in the state block (`longFlagRecord`): its kind,
+ * width, carry in and the flags it writes packed as PK packs them, then the
+ * two operands and the result. A region stores and loads it at every exit
+ * and entry, a call's included, so it crosses as it lives in the region;
+ * only `fold` takes it apart.
+ */
+const Record = Object.freeze({ PACKED: 0, A: 8, B: 16, R: 24 });
+
+/**
+ * Stores the record and FL into the state block as they stand.
  *
  * @param {Body} b
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  */
 function storeRecord(b, layout){
     const at = /** @type {number} */ (layout.longFlagRecord);
-    for (const [part, field] of /** @type {const} */ ([[Packed.KIND, Record.KIND],
-        [Packed.SIZE, Record.SIZE], [Packed.CARRY, Record.C], [Packed.WRITTEN, Record.W]]))
-    {
-        b.i32const(0);
-        unpack(b, part);
-        b.store('i32', { offset: at + field });
-    }
+    b.i32const(0).localGet(PK).store('i32', { offset: at + Record.PACKED });
     for (const [local, field] of /** @type {const} */ ([[PA, Record.A], [PB, Record.B],
         [PR, Record.R]]))
     {
@@ -2345,29 +2491,14 @@ function storeRecord(b, layout){
 }
 
 /**
- * Loads the record, packed, and FL from the state block.
+ * Loads the record and FL from the state block.
  *
  * @param {Body} b
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  */
 function loadRecord(b, layout){
     const at = /** @type {number} */ (layout.longFlagRecord);
-    // No kind, nothing pending: PK 0 whatever the other fields hold.
-    for (const [part, field] of /** @type {const} */ ([[Packed.KIND, Record.KIND],
-        [Packed.SIZE, Record.SIZE], [Packed.CARRY, Record.C], [Packed.WRITTEN, Record.W]]))
-    {
-        b.i32const(0).load('i32', { offset: at + field });
-        if (part.at !== 0)
-        {
-            b.i32const(part.at).op(Op.i32shl);
-        }
-        if (part !== Packed.KIND)
-        {
-            b.op(Op.i32or);
-        }
-    }
-    b.i32const(0).i32const(0).load('i32', { offset: at + Record.KIND }).op(Op.select)
-        .localSet(PK);
+    b.i32const(0).load('i32', { offset: at + Record.PACKED }).localSet(PK);
     for (const [local, field] of /** @type {const} */ ([[PA, Record.A], [PB, Record.B],
         [PR, Record.R]]))
     {
@@ -2393,21 +2524,33 @@ export function foldFunction(layout, memoryLimits){
         flags.locals, flags.body.toBytes());
     const at = /** @type {number} */ (layout.longFlagRecord);
     const b = new Body(256);
-    b.i32const(0).load('i32', { offset: at + Record.KIND });
+    const PACKED = 0;
+    /** One part of the packed record, on the stack. @param {{ at: number, mask: number }} part */
+    const part = ({ at: shift, mask })=>{
+        b.localGet(PACKED);
+        if (shift !== 0)
+        {
+            b.i32const(shift).op(Op.i32shru);
+        }
+        b.i32const(mask).op(Op.i32and);
+    };
+    b.i32const(0).load('i32', { offset: at + Record.PACKED }).localSet(PACKED);
+    part(Packed.KIND);
     b.if();
     b.i32const(0);
-    b.i32const(0).load('i32', { offset: at + Record.KIND });
-    b.i32const(0).load('i32', { offset: at + Record.SIZE });
+    part(Packed.KIND);
+    part(Packed.SIZE);
     b.i32const(0).load('i64', { offset: at + Record.A });
     b.i32const(0).load('i64', { offset: at + Record.B });
     b.i32const(0).load('i64', { offset: at + Record.R });
-    b.i32const(0).load('i32', { offset: at + Record.C });
-    b.i32const(0).load('i32', { offset: at + Record.W });
+    part(Packed.CARRY);
+    part(Packed.WRITTEN);
     b.i32const(0).load('i32', { offset: layout.eflags });
     b.call(helper).store('i32', { offset: layout.eflags });
-    b.i32const(0).i32const(0).store('i32', { offset: at + Record.KIND });
+    b.i32const(0).i32const(0).store('i32', { offset: at + Record.PACKED });
     b.end();
-    m.function(m.type({ params: [], results: [] }), [], b.toBytes(), { exportAs: 'fold' });
+    m.function(m.type({ params: [], results: [] }), [ValType.i32], b.toBytes(),
+        { exportAs: 'fold' });
     return m.toBytes();
 }
 
@@ -2470,8 +2613,17 @@ function emitRegion(layout, helpers, region,
         b.block();
     }
     b.localGet(IDX).brTable(blocks.map((_, index)=>index), count - 1);
+    /** By block, the locals its code touches, and those it writes. @type {Set<number>[]} */
+    const seen = [];
+    /** @type {Set<number>[]} */
+    const wrote = [];
     blocks.forEach((block, index)=>{
         b.end();
+        b.seen = new Set();
+        b.written = new Set();
+        seen.push(b.seen);
+        wrote.push(b.written);
+        e.blockIndex = index;
         // Inside block `index`'s code: the labels of the blocks after it, the
         // loop, the exit.
         e.outer = count - index;
@@ -2534,14 +2686,25 @@ function emitRegion(layout, helpers, region,
     });
     b.end();
     b.end();
+    b.seen = null;
+    b.written = null;
     // Every register the region writes, stored, and every one it uses, loaded:
-    // at its exit and entry, and around each call it makes.
+    // at its exit and entry; around each call what `callSync` finds.
     const written = [...Array(32).keys()].filter(i=>b.writes(i < 16 ? i : XMM + i - 16));
     const used = [...Array(32).keys()].filter(i=>b.uses(i < 16 ? i : XMM + i - 16));
-    /** @param {Body} body @param {number[]} which */
-    const store = (body, which)=>{
+    const sync = callSync(blocks, indexOf, seen, wrote, e.spills, written);
+    /**
+     * @param {Body} body @param {number[]} which
+     * @param {Set<number>} [guarded]  those to store only where FRESH does not mark them
+     */
+    const store = (body, which, guarded)=>{
         for (const i of which)
         {
+            if (guarded?.has(i))
+            {
+                body.localGet(FRESH).i32const(1 << i).op(Op.i32and).op(Op.i32eqz);
+                body.if();
+            }
             body.i32const(0);
             if (i < 16)
             {
@@ -2550,6 +2713,10 @@ function emitRegion(layout, helpers, region,
             else
             {
                 body.localGet(XMM + i - 16).storeV128({ offset: layout.xmm + (i - 16) * 16 });
+            }
+            if (guarded?.has(i))
+            {
+                body.end();
             }
         }
         return body;
@@ -2572,11 +2739,22 @@ function emitRegion(layout, helpers, region,
     };
     if (e.spills.length > 0)
     {
-        b.insertAll(e.spills.map(({ at, reload })=>({ at,
-            body: reload ? load(new Body(256), used) : store(new Body(256), written) })));
+        b.insertAll(e.spills.map(({ at, reload, block })=>{
+            const site = /** @type {CallSync} */ (sync.calls.get(block));
+            if (!reload)
+            {
+                return { at, body: store(new Body(256), site.stores, site.guarded) };
+            }
+            const body = load(new Body(256), used.filter(i=>site.loads.has(i)));
+            if (sync.guarded.size > 0)
+            {
+                body.i32const(site.fresh).localSet(FRESH);
+            }
+            return { at, body };
+        }));
     }
     // The epilogue: every register written, the record as it stands, the flags and RIP.
-    const tail = store(new Body(256), written);
+    const tail = store(new Body(256), written, sync.guarded);
     storeRecord(tail, layout);
     tail.i32const(0).localGet(RIP).store('i64', { offset: layout.eip });
     tail.globalGet(BUDGET).localGet(K).op(Op.i32sub).globalSet(BUDGET);
@@ -2597,6 +2775,10 @@ function emitRegion(layout, helpers, region,
     tail.localGet(CODE);
     // The prologue: every register the body touches, the flags word and the record.
     const head = load(new Body(256), used);
+    if (sync.guarded.size > 0)
+    {
+        head.i32const(0).localSet(FRESH);
+    }
     loadRecord(head, layout);
     head.insert(head.length, b);
     head.insert(head.length, tail);

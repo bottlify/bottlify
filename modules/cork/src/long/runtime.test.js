@@ -695,6 +695,33 @@ test('calls from region to region return where they were made, and leave where t
     assert.ok(entered['100000 true'] * 2 < entered['100000 false'], JSON.stringify(entered));
 });
 
+test('a call loads back only what the code after it touches, and no store undoes a callee', ()=>{
+    //         jmp start
+    // f1:     add ebx, 7; movd xmm3, ebx; ret          writes what the caller then leaves alone
+    // f2:     lea rax, [rbx + 100]; movd edx, xmm3     reads it, and writes it,
+    //         add ebx, 3; paddd xmm3, xmm3; ret        which the caller's exit must keep
+    // body:   test r10, r10; jz b
+    //         mov ebx, 1; movd xmm3, ebx; jmp q        one way to q writes rbx and xmm3,
+    // b:      call f1                                  the other comes from f1's return,
+    // q:      call f2                                  whose values the call must keep
+    //         add r13, rax; add r13, rdx; ret
+    // start:  mov r12d, 4
+    // again:  call body; dec r12d; jnz again           the later rounds' calls in wasm
+    const code = 'eb3983c307660f6edbc3488d4364660f7eda83c303660ffedbc34d85d2740bbb01000000660f6edb'
+        + 'eb05e8d3ffffffe8d6ffffff4901c54901d5c341bc04000000e8d4ffffff41ffcc75f6';
+    const cases = CORPUS.cases.slice(0, 8).map((/** @type {any} */ one, /** @type {number} */ i)=>{
+        const regs = [...one.regs];
+        regs[10] = i % 2 === 0 ? '0' : '1';
+        return { ...one, text: `fresh ${i}`, code, regs };
+    });
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits } = compare(cases, budget);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+    }
+});
+
 test('indirect calls are wasm calls that return where they were made', ()=>{
     // start:  mov esi, 3
     // again:  lea rdx, [rip + fib]; mov ecx, 10; call rdx; add [rbx], rax

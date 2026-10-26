@@ -196,6 +196,12 @@ export class Body {
          * @type {Set<number> | null}
          */
         this.written = null;
+        /**
+         * Where the locals read or written from now on are added too, when
+         * given: the long-mode emitter's account of what each block touches.
+         * @type {Set<number> | null}
+         */
+        this.seen = null;
     }
 
     /** Whether the body reads or writes a local. @param {number} index */
@@ -217,6 +223,7 @@ export class Body {
             this.touched = grown;
         }
         this.touched[index] |= how;
+        this.seen?.add(index);
         if (how === 3)
         {
             this.written?.add(index);

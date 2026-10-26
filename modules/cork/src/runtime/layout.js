@@ -348,7 +348,8 @@ function longLayout(state, ramBase, ramSize, hashSlots){
         callProfile: state + 592,
         origin: state + 728,
         // Translated long-mode code's pending flag record (`long/emit.js`):
-        // kind, width, two operands, result, carry in, the flags it writes.
+        // kind, width, carry in and the flags it writes in one word, then
+        // the two operands and the result.
         longFlagRecord: state + 736,
         nanFirst: state + STATE_BLOCK_SIZE_64,
         tables: ramBase + ramSize,
