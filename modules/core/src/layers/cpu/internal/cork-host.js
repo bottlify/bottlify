@@ -709,7 +709,12 @@ export function createCorkHost(config){
         // translated twice, never once per executor.
         ...(executors > 1 && executor !== 0 && typeof engine.sharedLayout === 'function'
             ? { sharedLayout: engine.sharedLayout(own) } : {}),
+        // In long mode this runtime is only the page table's owner: it forms
+        // and runs nothing, the long runner does. Fed the samples every slice
+        // credits, it decoded 64-bit code as 32-bit, published it in the hash
+        // the long runner shares, and ran it over the 64-bit block.
         config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
+            ...long ? { translate: false } : {},
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
