@@ -3781,9 +3781,10 @@ const SEVERITY = /** @type {Record<string, string>} */ ({
  * whose program may call a missing import in a loop and would fill the page's
  * queue with a clone and a wake-up per call. And a position rather than a
  * happening: `cursor-moved` fires at every move of the mouse, and written down
- * it laps everything else out of the ring.
+ * it laps everything else out of the ring. Nor `bundle-fetching`, at each start and end
+ * of the range requests, which the bundle's own read counts account for.
  */
-const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved']);
+const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved', 'bundle-fetching']);
 
 /**
  * Every event the run reports also goes to its journal, so that one ordered
@@ -5243,6 +5244,8 @@ async function buildApp(options){
                     fetched = new Promise(resolve=>{
                         arrived = resolve;
                     });
+                    // A page shows that a stall is the bundle arriving, not the game.
+                    events.emit('bundle-fetching', { fetching: true });
                 }
                 return blocks.fetch(needed).finally(()=>{
                     fetching--;
@@ -5252,6 +5255,7 @@ async function buildApp(options){
                         fetched = null;
                         arrived = ()=>{};
                         open();
+                        events.emit('bundle-fetching', { fetching: false });
                     }
                 });
             },

@@ -188,6 +188,7 @@ counts the frames that went so.
 | `error` | the failure | A failure inside the engine. |
 | `fallback` | `{ asked, detail, mode, concurrency }` | The run could not have what it asked for (`concurrency` without shared memory) and runs as `mode` and `concurrency` say; `detail` says why. |
 | `present-failed` | the failure | A frame could not be shown. |
+| `bundle-fetching` | `{ fetching }` | The program waits on bundle data not yet on this device (`true`), or has all it asked for again (`false`): a page can say a stall is the download. |
 | `bundle`, `bundle-*` | details | The bundle was opened; a fetch is retried, a block is unavailable, prefetch, translations it carries. |
 | `libraries`, `libraries-missing`, `library-*`, `import-unresolved`, `unimplemented` | names | Which DLLs were bound, which are missing, which imports nothing implements. |
 | `process-*` | details | A child process was created, started, replaced or ended. |
