@@ -639,17 +639,21 @@ test('stos and movs run translated as interpreted: by pages, across them, into a
             for (const count of [0n, 1n, 3n, 100n, 1500n, 5000n])
             {
                 // Inside the first page, at its end, across into the second,
-                // and toward the closed page past the data.
-                for (const at of [0x10, 0xffe, 0x1ff8 - 0x40, CORPUS.dataSize - 0x100])
+                // and toward the closed page past the data, an element across
+                // into it.
+                for (const at of [0x10, 0xffe, 0x1ff8 - 0x40, CORPUS.dataSize - 0x100,
+                    CORPUS.dataSize - 0x103])
                 {
                     for (const down of [false, true])
                     {
                         const shapes = op === 'stos'
                             ? [[0n, 0n], [0x4141414141414141n, 0n], [0x1234n, 0n]]
-                            // The source behind the destination by an element or two
-                            // (the processor copies forward through what it wrote), apart,
-                            // and ahead.
-                            : [[0n, -1n], [0n, -8n], [0n, 0x400n], [0n, 3n]];
+                            // The source behind the destination by an element or two, or
+                            // by bytes that are no whole elements, or by a hundred (the
+                            // processor copies forward through what it wrote), apart, and
+                            // ahead.
+                            : [[0n, -1n], [0n, -8n], [0n, -3n], [0n, -6n], [0n, -100n],
+                                [0n, 0x400n], [0n, 3n]];
                         for (const [rax, lead] of shapes)
                         {
                             const regs = [...base.regs];

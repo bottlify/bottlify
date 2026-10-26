@@ -1831,13 +1831,17 @@ class BlockEmitter {
      * the count goes) stored by one `memory.fill` -- a fill of the value's
      * byte, a loop of stores for any other value -- or one `memory.copy`, and
      * the registers moved past them, as the 32-bit translator's `bulkString`
-     * does. Going down, an element across a page, a page closed to the access
-     * (or holding code, or watched), a pointer past 4 GiB, and a copy whose
-     * destination lies just ahead of its source, where the processor reads
-     * what it has just written, leave before the instruction with what is
-     * done done: the interpreter takes the rest of it, and faults where it
-     * faults. A `rep` counts as one instruction, the whole of it run here, as
-     * the interpreter counts and runs it.
+     * does; an element across a page is a turn of its own, both its pages
+     * tested. Going down, a page closed to the access (or holding code, or
+     * watched), a pointer past 4 GiB, and a copy whose destination lies
+     * ahead of its source by less than an element leave before the
+     * instruction with what is done done: the interpreter takes the rest of
+     * it, and faults where it faults. A copy whose destination lies just
+     * ahead of its source, by an element or more, where the processor reads
+     * what it has just written, copies the source's first bytes over and
+     * over, in copies that each double the last. A `rep` counts as one
+     * instruction, the whole of it run here, as the interpreter counts and
+     * runs it.
      *
      * @param {import('../decode/decoder.js').Instruction} instruction @param {number} index
      */
@@ -1889,33 +1893,82 @@ class BlockEmitter {
         {
             b.localGet(T0).i64const(0n).op(Op.i64ne).op(Op.i64extendu).localSet(T0);
         }
-        b.localGet(T0).op(Op.i64eqz);
-        this.exitIf(index, at);
         /**
-         * Leaves unless the pointer lies below 4 GiB on a page open to the access.
-         * @param {number} pointer @param {number} closed
+         * Leaves unless the pointer, `by` bytes on, lies below 4 GiB on a page
+         * open to the access.
+         * @param {number} pointer @param {number} closed @param {number} [by]
          */
-        const open = (pointer, closed)=>{
-            b.localGet(pointer).i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz);
+        const open = (pointer, closed, by = 0)=>{
+            b.localGet(pointer);
+            if (by !== 0)
+            {
+                b.i64const(BigInt(by)).op(Op.i64add);
+            }
+            b.localTee(T3).i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz);
             this.exitIf(index, at);
-            b.localGet(pointer).op(Op.i32wrap).i32const(12).op(Op.i32shru)
+            b.localGet(T3).op(Op.i32wrap).i32const(12).op(Op.i32shru)
                 .load('i32_8u', { offset: flags }).i32const(closed).op(Op.i32and);
             this.exitIf(index, at);
         };
-        open(RDI, PageFlag.INACCESSIBLE | PageFlag.HAS_CODE | PageFlag.WATCH);
+        const written = PageFlag.INACCESSIBLE | PageFlag.HAS_CODE | PageFlag.WATCH;
+        // None: the next element lies across a page, of either pointer. It
+        // alone, its last byte's page open as well; the pages are tested
+        // again for the elements after it.
+        b.localGet(T0).op(Op.i64eqz);
+        this.open();
+        open(RDI, written, size - 1);
+        if (movs)
+        {
+            open(RSI, PageFlag.INACCESSIBLE, size - 1);
+        }
+        b.i64const(1n).localSet(T0);
+        this.close();
+        open(RDI, written);
         // T1: the bytes.
         b.localGet(T0).i64const(shift).op(Op.i64shl).localSet(T1);
         if (movs)
         {
             open(RSI, PageFlag.INACCESSIBLE);
-            // Not 0 < the destination's lead on the source < the bytes:
-            // (lead - 1) >=u (bytes - 1), else the interpreter's.
-            b.localGet(RDI).localGet(RSI).op(Op.i64sub).i64const(1n).op(Op.i64sub)
+            /** Pushes a pointer's place in memory, as an i32. @param {number} pointer */
+            const placed = pointer=>{
+                b.localGet(pointer).op(Op.i32wrap).i32const(layout.ramBase).op(Op.i32add);
+            };
+            // T2: the destination's lead on the source. 0 < lead < the bytes,
+            // (lead - 1) <u (bytes - 1): the processor reads what it has just
+            // written, the source's first `lead` bytes over and over.
+            b.localGet(RDI).localGet(RSI).op(Op.i64sub).localTee(T2).i64const(1n).op(Op.i64sub)
                 .localGet(T1).i64const(1n).op(Op.i64sub).op(Op.i64ltu);
+            this.open();
+            // A lead under an element: an element's own read meets its write.
+            b.localGet(T2).i64const(BigInt(size)).op(Op.i64ltu);
             this.exitIf(index, at);
-            b.localGet(RDI).op(Op.i32wrap).i32const(layout.ramBase).op(Op.i32add)
-                .localGet(RSI).op(Op.i32wrap).i32const(layout.ramBase).op(Op.i32add)
-                .localGet(T1).op(Op.i32wrap).op(0xfc, [0x0a, 0x00, 0x00]); // memory.copy
+            // Copies from the source's start to where the last one ended (U
+            // bytes in, the first `lead` long), each as long as what lies
+            // written between them -- whole periods, so the bytes line up --
+            // and the next twice as long; none reads what it writes.
+            b.i32const(0).localSet(U);
+            b.localGet(T2).localSet(T3);
+            b.loop();
+            placed(RDI);
+            b.localGet(U).op(Op.i32add);
+            placed(RSI);
+            b.localGet(T3).op(Op.i32wrap).op(0xfc, [0x0a, 0x00, 0x00]); // memory.copy
+            b.localGet(U).localGet(T3).op(Op.i32wrap).op(Op.i32add).localSet(U);
+            // T3: what is left, then the next copy's bytes, the less of it and lead + U.
+            b.localGet(T1).localGet(U).op(Op.i64extendu).op(Op.i64sub).localTee(T3)
+                .op(Op.i64eqz).op(Op.i32eqz);
+            b.if();
+            b.localGet(T3).localGet(T2).localGet(U).op(Op.i64extendu).op(Op.i64add)
+                .localGet(T3).localGet(T2).localGet(U).op(Op.i64extendu).op(Op.i64add)
+                .op(Op.i64ltu).op(Op.select).localSet(T3);
+            b.br(1);
+            b.end();
+            b.end();
+            this.otherwise();
+            placed(RDI);
+            placed(RSI);
+            b.localGet(T1).op(Op.i32wrap).op(0xfc, [0x0a, 0x00, 0x00]); // memory.copy
+            this.close();
         }
         else
         {
