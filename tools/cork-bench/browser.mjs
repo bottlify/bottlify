@@ -12,7 +12,7 @@
  *
  *     node tools/cork-bench/browser.mjs [name...] [--arms JSON] [--runs N]
  *         [--warm N] [--iters N] [--paired [--rounds N] [--block N]]
- *         [--js-flags FLAGS] [--json]
+ *         [--js-flags FLAGS] [--bits 64] [--json]
  *
  *     --arms '{"base":{"root":"/tmp/base"},"head":{},"off":{"cork":{"floatSingles":false}}}'
  *     --arms '{"one":{},"two":{"executors":2,"cork":{"atomic":true}}}'  (a process of two)
@@ -64,7 +64,9 @@ const pairing = args.includes('--paired');
 const rounds = Number(flag('--rounds', '40'));
 const block = Number(flag('--block', '10'));
 const only = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.startsWith('--'));
-const names = readdirSync(join(HERE, 'images')).filter(file=>file.endsWith('.bin'))
+const bits = Number(flag('--bits', '32'));
+const names = readdirSync(join(HERE, bits === 64 ? 'images64' : 'images'))
+    .filter(file=>file.endsWith('.bin'))
     .map(file=>file.slice(0, -4)).filter(name=>only.length === 0
         || only.some(prefix=>name.startsWith(prefix))).sort();
 
@@ -114,11 +116,11 @@ async function newTab(){
 async function job(arm, name){
     const message = arm < 0
         ? { arms: labels.map((label, i)=>({ root: `/a${i}/`, cork: arms[label].cork ?? {},
-            executors: arms[label].executors ?? 1, executor: arms[label].executor ?? 0 })),
-        name, warm, rounds, block }
+            executors: arms[label].executors ?? 1, executor: arms[label].executor ?? 0, bits })),
+        name, warm, rounds, block, bits }
         : { root: `/a${arm}/`, name, warm, iters, cork: arms[labels[arm]].cork ?? {},
             executors: arms[labels[arm]].executors ?? 1,
-            executor: arms[labels[arm]].executor ?? 0 };
+            executor: arms[labels[arm]].executor ?? 0, bits };
     const tab = await newTab();
     try
     {

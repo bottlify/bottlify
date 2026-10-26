@@ -14,9 +14,9 @@ const engineOf = async root=>({
     engine: await import(`${root}modules/cork/src/index.js`),
 });
 
-/** @param {string} root @param {string} name */
-const imageOf = async(root, name)=>new Uint8Array(await (await fetch(
-    `${root}tools/cork-bench/images/${name}.bin`)).arrayBuffer());
+/** @param {string} root @param {string} name @param {number} [bits] */
+const imageOf = async(root, name, bits = 32)=>new Uint8Array(await (await fetch(
+    `${root}tools/cork-bench/${bits === 64 ? 'images64' : 'images'}/${name}.bin`)).arrayBuffer());
 
 /** @param {any} data */
 async function answer(data){
@@ -25,15 +25,15 @@ async function answer(data){
     if (data.arms !== undefined)
     {
         const arms = [];
-        for (const { root, cork, executors, executor } of data.arms)
+        for (const { root, cork, executors, executor, bits } of data.arms)
         {
-            arms.push({ ...await engineOf(root), cork, executors, executor });
+            arms.push({ ...await engineOf(root), cork, executors, executor, bits });
         }
-        return paired(arms, await imageOf(data.arms[0].root, data.name), data);
+        return paired(arms, await imageOf(data.arms[0].root, data.name, data.bits), data);
     }
-    const { root, name, warm, iters, cork, executors, executor } = data;
-    const { host, iteration } = hostOf({ ...await engineOf(root), cork, executors, executor },
-        await imageOf(root, name));
+    const { root, name, warm, iters, cork, executors, executor, bits } = data;
+    const { host, iteration } = hostOf({ ...await engineOf(root), cork, executors, executor,
+        bits }, await imageOf(root, name, bits));
     const coldAt = performance.now();
     iteration();
     const coldMs = performance.now() - coldAt;
@@ -48,7 +48,8 @@ async function answer(data){
         retired += iteration();
     }
     return { usPerIter: (performance.now() - startedAt) * 1000 / iters, coldMs,
-        instructions: retired / iters, regions: host.cork().counters().regions,
+        instructions: retired / iters,
+        regions: bits === 64 ? host.corkDiagnostics().long.regions : host.cork().counters().regions,
         eax: (host.readReg32('eax') >>> 0).toString(16) };
 }
 

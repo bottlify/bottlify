@@ -12,7 +12,7 @@
  * `browser.mjs` takes them:
  *
  *     node --no-liftoff tools/cork-bench/pair.mjs [name...] --arms JSON
- *         [--warm 100] [--rounds 40] [--block 10] [--json]
+ *         [--warm 100] [--rounds 40] [--block 10] [--bits 64] [--json]
  *
  * Two arms of the same tree are the control: their ratio is 1 within the
  * quartiles a run on this machine gives.
@@ -33,7 +33,8 @@ const labels = Object.keys(arms);
 const plan = { warm: Number(flag('--warm', '100')), rounds: Number(flag('--rounds', '40')),
     block: Number(flag('--block', '10')) };
 const only = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.startsWith('--'));
-const images = new URL('images/', import.meta.url);
+const bits = Number(flag('--bits', '32'));
+const images = new URL(bits === 64 ? 'images64/' : 'images/', import.meta.url);
 const names = readdirSync(images).filter(file=>file.endsWith('.bin'))
     .map(file=>file.slice(0, -4)).filter(name=>only.length === 0
         || only.some(prefix=>name.startsWith(prefix))).sort();
@@ -47,6 +48,7 @@ for (const label of labels)
         ...await import(new URL('modules/core/src/layers/cpu/internal/cork-host.js', root).href),
         engine: await import(new URL('modules/cork/src/index.js', root).href),
         cork: arms[label].cork ?? {},
+        bits,
     });
 }
 const rows = [];

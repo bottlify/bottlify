@@ -34,7 +34,9 @@ const ours = new Set(['--metric', '--runs']);
 const passed = rest.filter((one, at)=>!ours.has(one) && !ours.has(rest[at - 1]));
 const only = passed.filter((one, at)=>!one.startsWith('--') && !passed[at - 1]?.startsWith('--'));
 const options = passed.filter(one=>!only.includes(one));
-const names = readdirSync(new URL('images/', import.meta.url))
+// `--bits 64` passes on to bench.mjs, and names the 64-bit images.
+const images = options[options.indexOf('--bits') + 1] === '64' ? 'images64/' : 'images/';
+const names = readdirSync(new URL(images, import.meta.url))
     .filter(file=>file.endsWith('.bin')).map(file=>file.slice(0, -4))
     .filter(name=>only.length === 0 || only.some(prefix=>name.startsWith(prefix))).sort();
 const bench = new URL('bench.mjs', import.meta.url).pathname;
