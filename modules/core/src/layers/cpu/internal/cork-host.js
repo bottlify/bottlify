@@ -740,6 +740,16 @@ export function createCorkHost(config){
         runtime.pages?.markRange(0, runsFrom, PAGE_NO_EXECUTE);
     }
 
+    // Long mode's translator: blocks over the 64-bit block, the interpreter
+    // taking what they leave (`createLongRunner`); `translate: false` keeps it
+    // off, as it keeps the 32-bit one off.
+    const longRunner = long && corkConfig?.translate !== false
+        && typeof engine.createLongRunner === 'function' && runtime.pages
+        ? engine.createLongRunner({ memory, layout, pages: runtime.pages,
+            hot: corkConfig?.hotThreshold ?? 2,
+            below: runsFrom })
+        : null;
+
     /**
      * A host write over translated code drops the regions made of a byte it
      * changed (`stored`); one that writes the bytes already there drops none.
@@ -751,6 +761,11 @@ export function createCorkHost(config){
     const invalidate = (address, length, guest = false)=>{
         if (length <= 0)
         {
+            return;
+        }
+        if (longRunner !== null)
+        {
+            longRunner.invalidate(address, length);
             return;
         }
         if (sharedAt >= 0)
@@ -1253,22 +1268,27 @@ export function createCorkHost(config){
         let thrown = null;
         try
         {
-            engine.interpret64(state, budget, {
-                force,
-                shouldStop: ()=>state.trapped.length > 0,
-                onStep: (/** @type {number} */ at)=>{
-                    lastStart = at;
-                    if (at < runsFrom)
-                    {
-                        throw Object.assign(new Error('a fetch from the null range'),
-                            { vector: PAGE_FAULT, eip: at });
-                    }
-                    if (((at - parkBase) >>> 0) > 2)
-                    {
-                        noteStart(at);
-                    }
-                },
-            });
+            const onStep = (/** @type {number} */ at)=>{
+                lastStart = at;
+                if (at < runsFrom)
+                {
+                    throw Object.assign(new Error('a fetch from the null range'),
+                        { vector: PAGE_FAULT, eip: at });
+                }
+                if (((at - parkBase) >>> 0) > 2)
+                {
+                    noteStart(at);
+                }
+            };
+            if (longRunner !== null)
+            {
+                longRunner.run(state, budget, { onStep });
+            }
+            else
+            {
+                engine.interpret64(state, budget,
+                    { force, shouldStop: ()=>state.trapped.length > 0, onStep });
+            }
         }
         catch (e){
             const fault = /** @type {{ vector?: number, eip?: number, op?: string }} */ (e);
