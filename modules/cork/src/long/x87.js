@@ -62,6 +62,13 @@ export const x87Stores = op=>STORES.has(op);
 export function createX87Calls({ memory, layout }){
     /** @type {import('../decode/decoder.js').Instruction[][]} */
     const runs = [];
+    /** For each run, each instruction's memory operand by its place among the run's: -1 none. */
+    /** @type {Int8Array[]} */
+    const places = [];
+    // The address the instruction being evaluated is handed: one function for
+    // every instruction, not a closure made for each.
+    let current = 0;
+    const addressOf = ()=>current;
     const words = new Uint32Array(16);
     /** By register, its shadow at the last instruction of a run it was exact after. */
     const lastShadow = new BigInt64Array(8);
@@ -120,6 +127,9 @@ export function createX87Calls({ memory, layout }){
          */
         add(run){
             runs.push(run);
+            let next = 0;
+            places.push(Int8Array.from(run, instruction=>(instruction.operands
+                .some(operand=>operand.kind === 'mem') ? next++ : -1)));
             return runs.length - 1;
         },
 
@@ -127,11 +137,13 @@ export function createX87Calls({ memory, layout }){
          * Runs run `id` over the unit in the state block.
          *
          * @param {number} id @param {number} flags  the flags word, whole
-         * @param {...number} addresses  its memory operands', placed, in order
+         * @param {number} a0 @param {number} a1 @param {number} a2 @param {number} a3
+         *     its memory operands', placed, in order (the region passes all four)
          * @returns {number}  the flags word after it, or with `fnstsw ax` the status word
          */
-        call(id, flags, ...addresses){
+        call(id, flags, a0, a1, a2, a3){
             const run = runs[id];
+            const place = places[id];
             for (let i = 0; i < 8; i++)
             {
                 words[i * 2] = view.getUint32(unit + i * 16, true);
@@ -151,16 +163,17 @@ export function createX87Calls({ memory, layout }){
                 }
             }
             state.eflags = flags;
-            let placed = 0;
             // The registers exact after any instruction of the run, and each
             // one's shadow then: what goes back, as a call an instruction would
             // have left it -- not a shadow an exchange put beside a double since.
             let shadowed = 0;
-            for (const instruction of run)
+            for (let k = 0; k < run.length; k++)
             {
-                const address = instruction.operands.some(operand=>operand.kind === 'mem')
-                    ? addresses[placed++] : 0;
-                if (!evaluateX87(instruction, state, ()=>address))
+                const instruction = run[k];
+                const which = place[k];
+                current = which === 0 ? a0 : which === 1 ? a1 : which === 2 ? a2
+                    : which === 3 ? a3 : 0;
+                if (!evaluateX87(instruction, state, addressOf))
                 {
                     throw new Error(`long x87: no case for ${instruction.op}`);
                 }
