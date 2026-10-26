@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createProcessFunctions } from './process.js';
+import { fakeMemory } from './harness.test.js';
 
 const EINVAL = 22;
 const ENOENT = 2;
@@ -200,4 +201,34 @@ test('_spawnvp and _spawnlp are _spawnv and _spawnl', ()=>{
     const { fns } = build();
     assert.equal(fns._spawnvp, fns._spawnv);
     assert.equal(fns._spawnlp, fns._spawnl);
+});
+
+test('__pxcptinfoptrs: a thread\'s cell, null while an exception signal\'s handler runs', async()=>{
+    // Wine's msvcrt test___pxcptinfoptrs: SIGSEGV's handler sees null, and
+    // the value set before comes back after; SIGABRT's sees it unchanged.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const seen = [];
+    const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
+        errno: ()=>{},
+        allocate: memory.allocate,
+        writeMemory: memory.writeMemory,
+        readU32: memory.u32,
+        callGuest: async()=>{
+            seen.push(memory.u32(cell));
+            return 0;
+        },
+    }));
+    const cell = fns.__pxcptinfoptrs.handler([]);
+    assert.notEqual(cell, 0);
+    assert.equal(memory.u32(cell), 0);
+    assert.equal(fns.__pxcptinfoptrs.handler([]), cell, 'one cell a thread');
+    memory.setU32(cell, 0xdeadbeef);
+    for (const signal of [11, 22])
+    {
+        fns.signal.handler([signal, 0x5000]);
+        assert.equal(await fns.raise.handler([signal]), 0);
+        assert.equal(memory.u32(cell), 0xdeadbeef);
+    }
+    assert.deepEqual(seen, [0, 0xdeadbeef]);
 });

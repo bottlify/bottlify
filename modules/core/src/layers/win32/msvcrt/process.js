@@ -47,6 +47,8 @@ const DEFAULT_ACTION_EXIT = 3;
 /** The code a raised SIGFPE's handler is given as its second argument: _FPE_EXPLICITGEN. */
 const FPE_EXPLICITGEN = 0x8c;
 const SIGFPE = 8;
+/** The signals an exception is raised as: SIGILL, SIGFPE and SIGSEGV. */
+const EXCEPTION_SIGNALS = new Set([4, 8, 11]);
 
 /** _spawn's modes: _P_WAIT, _P_NOWAIT, _P_OVERLAY, _P_NOWAITO, _P_DETACH. */
 const SPAWN_MODES = 5;
@@ -72,6 +74,8 @@ const MOST_ARGUMENTS = 1024;
  * @property {(handle: number) => void} [closeHandle]
  * @property {(address: number) => string} [readCString]
  * @property {(address: number) => number} [readU32]
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  */
 
 /**
@@ -159,7 +163,52 @@ export function createProcessFunctions(host){
         return found;
     };
 
+    /**
+     * Each thread's `_pxcptinfoptrs`, made the first time it is asked for.
+     *
+     * @type {Map<any, number>}
+     */
+    const pointerCells = new Map();
+
+    /** The calling thread's cell, zero where no memory can hold one. */
+    const exceptionPointers = ()=>{
+        const thread = host.currentThread?.() ?? null;
+        let cell = pointerCells.get(thread) ?? 0;
+        if (cell === 0 && host.allocate && host.writeMemory)
+        {
+            cell = host.allocate(4);
+            if (cell !== 0)
+            {
+                writeCell(cell, 0);
+                pointerCells.set(thread, cell);
+            }
+        }
+        return cell;
+    };
+
+    /** @param {number} cell */
+    const readCell = cell=>host.readU32?.(cell) ?? 0;
+
+    /** @param {number} cell @param {number} value */
+    const writeCell = (cell, value)=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        host.writeMemory?.(cell, bytes);
+    };
+
     const table = {
+        /**
+         * void **__pxcptinfoptrs(void)
+         *
+         * Where the calling thread's runtime keeps the EXCEPTION_POINTERS of
+         * the exception a signal handler was called for: null until one is.
+         */
+        __pxcptinfoptrs: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>exceptionPointers(),
+        },
+
         /**
          * void (*signal(int sig, void (*func)(int)))(int)
          *
@@ -218,7 +267,19 @@ export function createProcessFunctions(host){
                     throw new Error('raise: no way into guest code to run a signal handler');
                 handlers.set(number, 0);
                 const args = number === SIGFPE ? [number, FPE_EXPLICITGEN] : [number];
+                // A signal an exception raises sees no exception's pointers
+                // while its handler runs: there was none, raise is a call.
+                const pointers = EXCEPTION_SIGNALS.has(number) ? exceptionPointers() : 0;
+                const kept = pointers === 0 ? 0 : readCell(pointers);
+                if (pointers !== 0)
+                {
+                    writeCell(pointers, 0);
+                }
                 await host.callGuest(action, args, host.currentThread?.());
+                if (pointers !== 0)
+                {
+                    writeCell(pointers, kept);
+                }
                 return 0;
             },
         },

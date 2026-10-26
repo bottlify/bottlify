@@ -43,6 +43,7 @@ import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
+import { createSortFunctions } from './sort.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions, O_BINARY } from './io.js';
 import { createEnvironment } from './environ.js';
@@ -954,6 +955,16 @@ export function createMsvcrtFunctions(host){
                 || globals.address('mb_cur_max', 1),
         },
 
+        /**
+         * void _invalid_parameter(const wchar_t *expression, const wchar_t *function,
+         *     const wchar_t *file, unsigned int line, uintptr_t reserved)
+         *
+         * msvcrt.dll keeps no handler to call, and returns: the caller goes
+         * on to answer its own failure (Wine's msvcrt test__invalid_parameter).
+         * The runtimes that keep one end the process here instead (msvcr80.js).
+         */
+        _invalid_parameter: { convention: 'cdecl', argBytes: 20, handler: ()=>0 },
+
         /** errno_t _get_fmode(int *mode): `_fmode`; no pointer is EINVAL. */
         _get_fmode: {
             convention: 'cdecl',
@@ -1044,12 +1055,21 @@ export function createMsvcrtFunctions(host){
             errno,
         }),
         ...createScanFunctions(host),
+        ...createSortFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            callGuest: host.callGuest,
+            errno,
+            ...host.currentThread ? { currentThread: host.currentThread } : {},
+        }),
         ...createCxxFunctions(host),
         ...createProcessFunctions({
             errno,
             readCString: readString,
             readU32: at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
                 .getUint32(0, true),
+            allocate,
+            writeMemory: host.writeMemory,
             ...host.launch ? { launch: host.launch } : {},
             ...host.closeHandle ? { closeHandle: host.closeHandle } : {},
             callGuest: host.callGuest,
