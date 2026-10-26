@@ -29,13 +29,16 @@ export { permits } from './cli.js';
  *     host?: string,
  *     server?: import('node:http').Server,
  *     path?: string,
- *     origins?: string[],
+ *     origins?: string[] | ((request: import('node:http').IncomingMessage) => boolean),
  *     maxConnections?: number,
  *     maxConnectionsPerAddress?: number,
  *     addressOf?: (request: import('node:http').IncomingMessage) => string,
  * }} RelayServerOptions
  *     `server` and `path` attach the relay to an existing HTTP or HTTPS
  *     server at one path instead of listening on a port of its own.
+ *     `origins` lists the pages that may open a link, or answers for a
+ *     request: a relay inside a launcher admits its own pages, whatever address
+ *     it was reached at (`request.headers.host`).
  *     `maxConnections` (1024) and `maxConnectionsPerAddress` (16) bound the
  *     links at once, the second by the address `addressOf` names: the socket's
  *     own by default, or a header a proxy in front sets, such as Cloudflare's
@@ -66,7 +69,8 @@ export function createRelayServer(options = {}){
         // only place to decide whose pages may use this relay is here.
         // The bounds are checked here too, so one address opening links in a
         // loop is refused before a handshake rather than after a join.
-        allow: request=>(!origins || origins.includes(String(request.headers.origin ?? '')))
+        allow: request=>(!origins || (typeof origins === 'function' ? origins(request) === true
+            : origins.includes(String(request.headers.origin ?? ''))))
             && total < maxConnections && (open.get(addressOf(request)) ?? 0) < maxPerAddress,
     }, (connection, request)=>{
         const address = addressOf(request);
