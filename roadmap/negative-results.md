@@ -1641,3 +1641,23 @@ None yet.
   (WebKit 26.6, WPE, headless).
 - **Decision.** Not kept; the patch (`readPixels` with a `convert` flag, digests by
   `BOTTLIFY_DIAGNOSTICS`) is not in the tree.
+
+### 2026-10-26: a guest page written out and zeroed gives the tab no memory back on an iPhone
+
+- **Idea.** A page file for guest memory: past a ceiling, write a cold page's bytes to a file,
+  zero the page, fault it back on its next access. A browser cannot hand a WebAssembly memory's
+  page back to the system, so the page file frees memory only if the system takes a zeroed page
+  for free (a memory compressor's single-value pages).
+- **Workload.** A test page: one `WebAssembly.Memory` of 2048 MiB (not shared), written in 64 MiB
+  chunks of xorshift output with 200 ms between chunks. Mode A keeps what it wrote; mode B zeroes
+  each chunk right after writing it, three passes over the memory. Progress kept in
+  `localStorage` after each chunk, so a tab the system ends says how far it got.
+- **Values.** Mode A ended by the system at 1856 and 1664 MB written; mode B at 1728 and
+  1728 MB written, holding no random data at either point. Two runs a mode, in the order A, B,
+  B, A.
+- **Why.** The tab is charged for every page it ever touched, whatever the page holds now.
+- **Machine.** The user's iPhone, the page opened in the Claude app's viewer; model and iOS
+  version not recorded.
+- **Decision.** No page file over guest memory. What can give memory back is the engine's own
+  (JavaScript heaps, compiled modules); the guest's zone counts the heap up to the highest
+  address it ever handed out.

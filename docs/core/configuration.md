@@ -51,7 +51,7 @@ more (`src/memory-zones.js`):
 
 | Zone | Ceiling | What it holds |
 | --- | --- | --- |
-| guest | 1 GiB | What the program holds of its RAM: its images, its threads' stacks and the heap's blocks it was handed. The RAM itself (`memorySize`) is an address space: a page the program never touched costs the tab nothing. |
+| guest | 1 GiB | What the program took of its RAM: its images, its threads' stacks and its heap up to the highest address the heap ever handed out (a page touched once is the tab's for good: a browser cannot give it back, and zeroing it frees nothing). The RAM itself (`memorySize`) is an address space: a page the program never touched costs the tab nothing. |
 | translation | 256 MiB | The translator's tables past the RAM, every executor's, and its modules with their compiled code. The cpu layer gives cork what the tables leave (`cork.config.cacheBytes`, unless the run names one), split among the executors' runtimes, each of which makes its own instances: all of it to one executor, else three quarters to the process's own executor and the rest shared by the others. Past its part a runtime lets the modules gone longest without running go, and brings one back from the translation store when it is reached again. |
 | heaps | 256 MiB | The engine's own memory: the bundle's blocks held where no storage takes them (64 MiB at most, the least recently read let go first), its decoded blocks (16 MiB at most), mirrors of guest memory behind a played device, kept texels, sound rings, the translation store's index. |
 

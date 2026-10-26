@@ -3860,13 +3860,22 @@ async function buildApp(options){
     const byName = new Map();
     /** @type {Map<number, any>} */
     const byBase = new Map();
+    /** The heap up to the highest address it ever handed out: what of it the tab pays for. */
+    const heapTouched = ()=>{
+        const handedTo = core.api('win32')?.heap?.()?.handedTo?.();
+        return typeof handedTo === 'number' ? Math.max(0, handedTo - HEAP_BASE) : NOT_MEASURED;
+    };
     /**
      * What the program holds of its RAM now, by pool (`memory-zones.js`): the
      * images mapped below the heap (one in the heap is a block of it), the
      * first thread's stack where it is not under the stub table, and the
-     * heap's blocks handed out; the other threads' stacks are the kernel's to
-     * say. What the program took, not the RAM: the pages past it are an
-     * address space the tab does not pay for.
+     * heap up to the highest address it ever handed out; the other threads'
+     * stacks are the kernel's to say. A page of guest memory touched once is
+     * the tab's for good -- a browser cannot give it back, and an iPhone ended
+     * a tab at the same 1.7 GB written whether the pages were zeroed again or
+     * not (`roadmap/negative-results.md`) -- so a block freed still counts,
+     * and the pages past the highest one are an address space the tab does
+     * not pay for.
      */
     const guestHeld = ()=>{
         let images = 0;
@@ -3879,7 +3888,7 @@ async function buildApp(options){
             mainStack: mainStack.initialStack === undefined
                 ? Math.max(mainImage.stackReserve >>> 0, 0x10000)
                 : mainStack.initialStack - STACK_POOL_START,
-            heap: core.api('win32')?.heap?.()?.diagnostics?.()?.used ?? NOT_MEASURED,
+            heap: heapTouched(),
         };
     };
     /**
