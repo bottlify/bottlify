@@ -71,6 +71,14 @@ const REFORMS = 3;
 const REFORM_SHARE = 0.05;
 
 /**
+ * Regions formed, each a module of its own, before they are gathered into
+ * one (`pack`): a call or transfer between instances, every region with its
+ * own copy of the transfer, cost calls512-scatter-x64 (512 functions called
+ * through a table) 24 ns an instruction where one module of them took 4.
+ */
+const PACK_REGIONS = 32;
+
+/**
  * The times a store leaves its region at one address before the region is
  * formed again testing it to the granule (`granular`): a store to a page that
  * holds code leaves for the interpreter, which drops what it wrote over; one
@@ -104,6 +112,8 @@ const VOLATILE_HOLD_MS = 2000;
  * @property {number[]} hashed  its blocks' indices in the entry hash
  * @property {boolean} wrapped  made while reads wrapped into RAM untested
  * @property {boolean} loose  made while stores through rsp went untested (`looseStacks`)
+ * @property {import('./emit.js').LongRegion} [region]  what it was emitted from, its body kept
+ *     for a pack (`pack`)
  */
 
 /**
@@ -112,7 +122,7 @@ const VOLATILE_HOLD_MS = 2000;
  *     pages: import('../runtime/pages.js').PageTable,
  *     hot?: number, below?: number, transfers?: boolean, checkReads?: boolean,
  *     looseStacks?: boolean, defaultNaNNegative?: boolean, leafCalls?: boolean,
- *     callTargets?: boolean, volatileWindowMs?: number }} settings
+ *     callTargets?: boolean, volatileWindowMs?: number, packRegions?: number }} settings
  *     `below`: no block starts under it (the host's null range, whose fetch faults on
  *     the interpreter); `transfers`: regions go on into each other through the entry
  *     hash with tail calls, where the host has them (off where a tail call into another
@@ -130,13 +140,14 @@ const VOLATILE_HOLD_MS = 2000;
  *     run's own thread, then started again on the engine's first tier, cost x264 and
  *     zstd more than the callees formed in gave back (roadmap/negative-results.md,
  *     2026-10-26); `volatileWindowMs`, the window a page's
- *     code is written `VOLATILE_AFTER` times in before it is left to the interpreter
+ *     code is written `VOLATILE_AFTER` times in before it is left to the interpreter;
+ *     `packRegions`, the regions formed before they are gathered into one module
  */
 export function createLongRunner(settings){
     const { memory, layout, pages, hot = 2, below = 0x10000,
         transfers = features().tailCalls, leafCalls = true, callTargets = false,
         defaultNaNNegative = features().defaultNaNNegative,
-        volatileWindowMs = VOLATILE_WINDOW_MS } = settings;
+        volatileWindowMs = VOLATILE_WINDOW_MS, packRegions = PACK_REGIONS } = settings;
     let readsChecked = settings.checkReads === true;
     /** Whether regions are made loose: until code is translated on a stack. */
     let loose = settings.looseStacks !== false;
@@ -151,7 +162,9 @@ export function createLongRunner(settings){
     const limits = memoryLimits(memory);
     const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0,
         entered: 0, readSwitches: 0, stackSwitches: 0, switches: 0, leaves: 0, predicted: 0,
-        quiet: 0, deferred: 0, volatilePages: 0, granular: 0 };
+        quiet: 0, deferred: 0, volatilePages: 0, granular: 0, packs: 0, packed: 0 };
+    /** The regions formed since the last pack, each its own module. @type {LongEntry[]} */
+    const unpacked = [];
     /** By address, the times a region left before the instruction there. @type {Map<number, number>} */
     const exitsAt = new Map();
     /** The stores tested to the granule (`GRANULAR_AFTER`). @type {Set<number>} */
@@ -565,15 +578,12 @@ export function createLongRunner(settings){
         if (blocks.length > 0)
         {
             record.wrapped = !readsChecked;
-            const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
-                slotOf, { transfers, checkReads: readsChecked, looseStacks: loose,
-                    defaultNaNNegative, x87Id: run=>x87.add(run), granular,
-                    formCalls: leafCalls, profileCalls: profileAt >= 0 }));
-            const instance = new WebAssembly.Instance(module,
-                { env: { memory, table, budget: budgetGlobal, depth, label, expect,
-                    x87: x87.call } });
-            const run = /** @type {() => number} */ (instance.exports.r0);
+            /** @type {import('./emit.js').LongRegion} */
+            const region = { blocks };
+            record.region = region;
+            const run = instantiate([region])[0];
             record.run = run;
+            unpacked.push(record);
             const slot = slotOf(entry);
             table.set(slot, run);
             // Block i, in the address order the emitter lays them out in, is label i + 1;
@@ -630,6 +640,53 @@ export function createLongRunner(settings){
             return form(entry);
         }
         return record;
+    };
+
+    /**
+     * A module of the regions given, instantiated: their functions in their
+     * order. A region emitted before is taken as its body stands (`LongRegion`).
+     *
+     * @param {import('./emit.js').LongRegion[]} regions
+     * @returns {(() => number)[]}
+     */
+    const instantiate = regions=>{
+        const module = new WebAssembly.Module(emitRegions(layout, limits, regions, slotOf,
+            { transfers, checkReads: readsChecked, looseStacks: loose, defaultNaNNegative,
+                x87Id: run=>x87.add(run), granular, formCalls: leafCalls,
+                profileCalls: profileAt >= 0 }));
+        const { exports } = new WebAssembly.Instance(module,
+            { env: { memory, table, budget: budgetGlobal, depth, label, expect, x87: x87.call } });
+        return regions.map((_, index)=>/** @type {() => number} */ (exports[`r${index}`]));
+    };
+
+    /**
+     * Gathers the regions formed since the last pack that are still live into
+     * one module (`PACK_REGIONS`): their bodies as emitted, each table slot and
+     * entry moved to its function there. Only between runs, with no frame of a
+     * module it leaves on the stack.
+     */
+    const pack = ()=>{
+        const live = unpacked.filter(record=>entries.get(record.entry) === record
+            && record.run !== null);
+        unpacked.length = 0;
+        if (live.length < 2)
+        {
+            unpacked.push(...live);
+            return;
+        }
+        const runs = instantiate(live.map(record=>
+            /** @type {import('./emit.js').LongRegion} */ (record.region)));
+        live.forEach((record, index)=>{
+            const slot = slotOf(record.entry);
+            table.set(slot, runs[index]);
+            record.run = runs[index];
+            for (const at of record.hashed)
+            {
+                hashed.retable(at, runs[index], slot);
+            }
+        });
+        stats.packs++;
+        stats.packed += live.length;
     };
 
     /**
@@ -832,6 +889,10 @@ export function createLongRunner(settings){
          * @returns {number}  retired
          */
         run(state, budget, options = {}){
+            if (unpacked.length >= packRegions)
+            {
+                pack();
+            }
             fresh();
             x87.fresh();
             if (profileAt >= 0)

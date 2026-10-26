@@ -2466,6 +2466,10 @@ function shiftHelper(){
 /**
  * @typedef {Object} LongRegion
  * @property {LongBlock[]} blocks  the first entered from outside
+ * @property {{ bytes: Uint8Array, hints: any[] }} [body]  its function's body as first
+ *     emitted, which a later module of it takes as it is (`emitRegions`): every module of
+ *     the same options numbers its imports, helpers and types alike, and a region reaches
+ *     no other function of its module but through the table
  */
 
 /**
@@ -2547,11 +2551,15 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
         m.nameFunction(helpers.transfer, 'transfer');
     }
     regions.forEach((region, index)=>{
-        const body = emitRegion(layout, helpers, region,
-            { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative, formCalls,
-                profileCalls });
-        const at = m.function(regionType, LOCALS, body.toBytes(),
-            { exportAs: `r${index}`, hints: body.hints });
+        if (region.body === undefined)
+        {
+            const body = emitRegion(layout, helpers, region,
+                { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative, formCalls,
+                    profileCalls });
+            region.body = { bytes: body.toBytes(), hints: body.hints };
+        }
+        const at = m.function(regionType, LOCALS, region.body.bytes,
+            { exportAs: `r${index}`, hints: region.body.hints });
         m.nameFunction(at, `r${region.blocks[0].entry.toString(16).padStart(8, '0')}`);
     });
     return m.toBytes();

@@ -65,6 +65,9 @@ function fill(seed, size){
  * @param {boolean} [leafCalls]  false: every call a wasm call, no callee formed in
  * @param {number} [volatileWindowMs]  the runner's: none by default, so that the cases'
  *     code, written over for each, is never left to the interpreter
+ *
+ * Its regions are gathered into one module every three (`packRegions`), so every case
+ * runs packed regions beside fresh ones.
  */
 function machine(transfers = true, checkReads = undefined, looseStacks = undefined,
     defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0)
@@ -80,7 +83,7 @@ function machine(transfers = true, checkReads = undefined, looseStacks = undefin
     }
     const pages = createPageTable(memory, layout);
     const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads,
-        looseStacks, leafCalls, volatileWindowMs, callTargets: true,
+        looseStacks, leafCalls, volatileWindowMs, callTargets: true, packRegions: 3,
         ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }) });
     const state = blockState64({ memory, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
@@ -774,6 +777,8 @@ test('calls from region to region return where they were made, and leave where t
                 assert.deepEqual(failures, [],
                     `budget ${budget}, transfers ${transfers}, leafCalls ${leafCalls}`);
                 assert.equal(exits, cases.length);
+                // Many short runs: regions gathered into modules between them.
+                assert.ok(budget > 7 || stats.packs > 0, JSON.stringify(stats));
                 entered[`${budget} ${transfers} ${leafCalls}`] = stats.entered;
             }
         }
