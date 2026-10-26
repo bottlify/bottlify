@@ -62,10 +62,11 @@ function fakeHost(size = 0x1000){
         systemTimeMs: ()=>clock.wallMs,
         /** @param {number} code */
         setLastError: code=>errors.push(code),
-        /** @param {number} handle */
-        resolveHandle(handle){
+        /** @param {number} handle @param {string} [type] */
+        resolveHandle(handle, type){
             const held = handles.get(handle);
-            if (!held)
+            // A child's thread is the one kind told apart by its type here.
+            if (!held || (type === 'process-thread') !== (held.handleType === 'process-thread'))
             {
                 throw new Error(`bad handle ${handle}`);
             }
@@ -582,6 +583,34 @@ test('the processor features answered are the ones a 32-bit x86 with SSE2 has', 
     assert.equal(fns.IsProcessorFeaturePresent.handler([99]), 0, 'and nothing unknown');
 });
 
+
+test('a child\'s thread reports the exit code the child gives, until its end is known here',
+    async()=>{
+        const host = /** @type {any} */ (fakeHost());
+        /** @type {any[]} */
+        const asked = [];
+        host.askChild = (/** @type {any} */ record, /** @type {any} */ call)=>{
+            asked.push([record, call]);
+            return Promise.resolve({ result: 1, error: null,
+                outs: [null, new Uint8Array([42, 0, 0, 0])] });
+        };
+        host.setLastErrorFor = ()=>{};
+        const fns = createSystemFunctions(host);
+        const child = { exitCode: STILL_ACTIVE };
+        /** @type {any} */
+        const remote = { handleType: 'process-thread', process: child, threadId: 0x30,
+            handle: 0x84, exitCode: null, exited: null };
+        host.handles.set(0x44, remote);
+
+        assert.equal(await fns.GetExitCodeThread.handler([0x44, 0x200]), 1);
+        assert.deepEqual(asked, [[child, { call: 'GetExitCodeThread', args: [0x84, { out: 4 }] }]]);
+        assert.equal(host.view.getUint32(0x200, true), 42);
+
+        remote.exitCode = 7;
+        assert.equal(fns.GetExitCodeThread.handler([0x44, 0x200]), 1);
+        assert.equal(host.view.getUint32(0x200, true), 7, 'known here, not asked');
+        assert.equal(asked.length, 1);
+    });
 
 test('a thread reports STILL_ACTIVE until it has exited, then the code it left with', ()=>{
     const host = fakeHost();

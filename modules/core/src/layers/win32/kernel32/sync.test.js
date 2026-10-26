@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createSyncFunctions } from './sync.js';
 import { createCriticalSections, enterCode, leaveCode, tryEnterCode } from './critical.js';
 import { INTERLOCKED } from './interlocked.js';
+import { childThread } from './cross-process.js';
 
 const CS_LOCK_COUNT = 0x04;
 const CS_RECURSION_COUNT = 0x08;
@@ -815,7 +816,7 @@ test('resuming a child\'s first thread is asked of the child, where it runs', as
         errors.push({ thread, code });
     const fns = createSyncFunctions(host);
     const child = { imagePath: 'C:\\App\\child.exe', threadId: 0x2c };
-    host.register(0x24, 'process-thread', child);
+    host.register(0x24, 'process-thread', childThread(child, 0x2c));
 
     assert.equal(await fns.ResumeThread.handler([0x24]), 1, 'the count the child\'s thread had');
     assert.deepEqual(asked, [{ record: child, call: { call: 'ResumeThread',
@@ -828,7 +829,8 @@ test('a child no run can ask fails the resume with ERROR_ACCESS_DENIED', ()=>{
     // Answering as if resumed would tell the launcher its child is running.
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    host.register(0x24, 'process-thread', { imagePath: 'C:\\App\\child.exe', threadId: 0x2c });
+    host.register(0x24, 'process-thread',
+        childThread({ imagePath: 'C:\\App\\child.exe', threadId: 0x2c }, 0x2c));
 
     assert.equal(fns.ResumeThread.handler([0x24]), WAIT_FAILED);
     assert.equal(fns.SuspendThread.handler([0x24]), WAIT_FAILED);

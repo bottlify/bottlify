@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { serveCall, takeAnswer, askChild, after } from './cross-process.js';
+import { serveCall, takeAnswer, askChild, after, childThread, threadArg, threadEnd }
+    from './cross-process.js';
 
 /**
  * A child's kernel32 over a small memory: calls recorded, a last error kept,
@@ -156,4 +157,57 @@ test('an answer later sets the error of the thread that asked, whichever runs th
 test('after makes the same of a result now and one later', async()=>{
     assert.equal(after(2, value=>value + 1), 3);
     assert.equal(await after(Promise.resolve(2), value=>value + 1), 3);
+});
+
+test('a child\'s thread is one object whichever handle names it, asked for by handle or id', ()=>{
+    const record = { exitCode: 259 };
+    const first = childThread(record, 0x2c);
+    assert.equal(childThread(record, 0x2c), first);
+    assert.deepEqual(threadArg(first), { thread: 0x2c }, 'the first thread, by its id');
+    assert.equal(threadArg(childThread(record, 0x30, 0x84)), 0x84,
+        'one the parent made, by the child\'s own handle to it');
+});
+
+test('a wait on a child\'s thread ends once the child says it has, with its code', async()=>{
+    /** @type {any[]} */
+    const set = [];
+    const kernel = {
+        createEvent: (/** @type {any} */ options)=>({ ...options }),
+        setEvent: (/** @type {any} */ event)=>set.push(event),
+    };
+    let asks = 0;
+    /** @type {(() => void)[]} */
+    const later = [];
+    const host = {
+        kernel,
+        later: (/** @type {() => void} */ look)=>later.push(look),
+        askChild: ()=>{
+            asks++;
+            const code = asks < 3 ? 259 : 42;
+            return Promise.resolve({ result: 1, error: null,
+                outs: [null, new Uint8Array([code, code >> 8, 0, 0])] });
+        },
+    };
+    const thread = childThread({ exitCode: 259 }, 0x30, 0x84);
+    const event = threadEnd(host, thread);
+    assert.equal(threadEnd(host, thread), event, 'one event, however many wait');
+    for (let round = 0; round < 3; round++)
+    {
+        await new Promise(resolve=>setImmediate(resolve));
+        later.shift()?.();
+    }
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(asks, 3, 'asked again while it still ran');
+    assert.deepEqual(set, [event]);
+    assert.equal(thread.exitCode, 42);
+
+    // A child gone, or one that has the thread no more, has ended it.
+    const gone = childThread({ exitCode: 7, completed: true }, 0x2c);
+    threadEnd({ kernel, askChild: ()=>null }, gone);
+    assert.equal(gone.exitCode, 7);
+    const refused = childThread({ exitCode: 259 }, 0x2c);
+    threadEnd({ kernel, askChild: ()=>Promise.resolve({ result: 0, error: 87, outs: [] }) },
+        refused);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(refused.exitCode, 0);
 });

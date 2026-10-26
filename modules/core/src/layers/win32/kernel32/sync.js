@@ -13,7 +13,7 @@ import { createChangeNotifications } from './changes.js';
 import { SELECTORS } from './seh.js';
 import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
 import { createThreadInfoFunctions } from './thread-info.js';
-import { askChild } from './cross-process.js';
+import { askChild, threadArg, threadEnd } from './cross-process.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -378,6 +378,7 @@ export function createSyncFunctions(host){
      * @returns {number | Promise<number> | null}
      */
     const onChildThread = (handle, name, rest, into = [])=>{
+        /** @type {import('./cross-process.js').ChildThread | null} */
         const child = (handle >>> 0) === CURRENT_THREAD ? null : object(handle, 'process-thread');
         if (!child)
         {
@@ -385,8 +386,8 @@ export function createSyncFunctions(host){
         }
         const asked = host.setLastErrorFor ? askChild({ askChild: host.askChild,
             writeMemory: host.writeMemory, currentThread: host.currentThread,
-            setLastErrorFor: host.setLastErrorFor }, child,
-        { call: name, args: [{ thread: child.threadId >>> 0 }, ...rest] }, [null, ...into]) : null;
+            setLastErrorFor: host.setLastErrorFor }, child.process,
+        { call: name, args: [threadArg(child), ...rest] }, [null, ...into]) : null;
         if (asked === null)
         {
             host.setLastError?.(ERROR_ACCESS_DENIED);
@@ -778,9 +779,13 @@ export function createSyncFunctions(host){
                         return WAIT_FAILED;
                     }
                     // A child process is in a set as the event its exit sets,
-                    // one already set for one the engine answered for.
-                    objects.push(kernel.handles.typeOf?.(untagged(handle)) === 'process'
-                        ? target.exited : target);
+                    // one already set for one the engine answered for; a
+                    // child's thread as the one this process sets once the
+                    // child says it has ended.
+                    const kind = kernel.handles.typeOf?.(untagged(handle));
+                    objects.push(kind === 'process' ? target.exited
+                        : kind === 'process-thread'
+                            ? threadEnd({ kernel, askChild: host.askChild }, target) : target);
                     indices.push(at);
                 }
 

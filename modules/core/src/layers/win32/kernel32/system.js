@@ -25,6 +25,7 @@
 import { lstrcpyCode, lstrlenCode } from './lstr.js';
 import { assemble } from '../msvcrt/guest-code.js';
 import { createWin9xFunctions } from './win9x.js';
+import { askChild, threadArg } from './cross-process.js';
 import {
     PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION, createProcessors,
 } from './processor.js';
@@ -241,6 +242,9 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, type?: string) => any} resolveHandle
  * @property {() => any} currentThread
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child, for the exit code of one of its threads.
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {(code: number) => void} exit
  * @property {() => any} park
  * @property {(bytes: number) => number} [allocate]
@@ -1235,7 +1239,24 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, code])=>{
-                const target = thread(handle);
+                // A child's thread is asked where the child runs, until its
+                // end is known here.
+                /** @type {import('./cross-process.js').ChildThread | null} */
+                const remote = (handle >>> 0) === CURRENT_THREAD ? null
+                    : object(handle, 'process-thread');
+                if (remote && remote.exitCode === null && host.setLastErrorFor)
+                {
+                    const asked = askChild({ askChild: host.askChild,
+                        writeMemory: host.writeMemory, currentThread: host.currentThread,
+                        setLastErrorFor: host.setLastErrorFor }, remote.process,
+                    { call: 'GetExitCodeThread', args: [threadArg(remote), { out: 4 }] },
+                    [null, code >>> 0]);
+                    if (asked !== null)
+                    {
+                        return asked;
+                    }
+                }
+                const target = remote ?? thread(handle);
                 if (!target)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
@@ -1243,7 +1264,8 @@ export function createSystemFunctions(host){
                 }
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(
-                    0, target.exitCode ?? STILL_ACTIVE, true);
+                    0, remote && remote.exitCode === null ? remote.process.exitCode ?? 0
+                        : target.exitCode ?? STILL_ACTIVE, true);
                 host.writeMemory(code >>> 0, bytes);
                 return 1;
             },

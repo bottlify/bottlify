@@ -359,6 +359,47 @@ function setup(names){
     return { kernel, fns, host, parked, current, written, errors };
 }
 
+test('CreateRemoteThread into a child is the child\'s CreateThread, the handle this one\'s',
+    async()=>{
+        // The thread runs where the child does, at an address in its memory;
+        // the parent is handed a handle of its own naming the child's
+        // thread, and its id.
+        const { kernel, fns, host, written, current } = setup();
+        /** @type {any[]} */
+        const asked = [];
+        host.askChild = (record, call)=>{
+            asked.push({ record, call });
+            return Promise.resolve({ result: 0x84, error: null,
+                outs: [null, null, null, null, null, new Uint8Array([0x30, 0, 0, 0])] });
+        };
+        /** @type {any[]} */
+        const errors = [];
+        host.setLastErrorFor = (thread, code)=>errors.push([thread, code]);
+        const child = { imagePath: 'C:\\App\\child.exe', threadId: 0x2c };
+        const process = kernel.handles.open('process', child);
+        Object.assign(kernel, { processes: { all: ()=>[child] } });
+
+        const handle = await fns.CreateRemoteThread.handler(
+            [process, 0, 0x10000, 0x7f0000, 37, 4, 0x405000]);
+        assert.deepEqual(asked, [{ record: child, call: { call: 'CreateThread',
+            args: [0, 0x10000, 0x7f0000, 37, 4, { out: 4 }] } }]);
+        assert.equal(kernel.handles.typeOf(handle), 'process-thread');
+        assert.deepEqual(kernel.handles.resolve(handle, 'process-thread'), {
+            process: child, threadId: 0x30, handle: 0x84, exitCode: null, exited: null });
+        assert.deepEqual([...written.get(0x405000) ?? []], [0x30, 0, 0, 0], 'and its id');
+        assert.deepEqual(errors, [], 'no error where the child set none');
+        void current;
+
+        // OpenThread finds it by that id from now on.
+        const again = fns.OpenThread.handler([0x1fffff, 0, 0x30]);
+        assert.equal(kernel.handles.resolve(again, 'process-thread'),
+            kernel.handles.resolve(handle, 'process-thread'));
+
+        // A child no run can ask is refused.
+        host.askChild = ()=>null;
+        assert.equal(fns.CreateRemoteThread.handler([process, 0, 0, 0x7f0000, 0, 0, 0]), 0);
+    });
+
 test('CreateThread makes a thread and does not switch to it', ()=>{
     const { kernel, fns, parked } = setup();
 
@@ -387,10 +428,9 @@ test('CreateThread begins the thread where the libraries are told of it, its rou
     assert.equal(kernel.state.created[1].start, undefined);
 });
 
-test('CreateRemoteThread into this process is CreateThread, and into another is refused', ()=>{
+test('CreateRemoteThread into this process is CreateThread, and into no process is refused', ()=>{
     // kernel32's process and thread tests: the stack of a remote thread of
-    // our own process; a child, which runs only after this process, cannot
-    // be given one.
+    // our own process.
     const { kernel, fns, errors } = setup();
     const handle = fns.CreateRemoteThread.handler(
         [0xffffffff, 0, 0x10000, 0x401000, 0xdead, 0, 0x405000]);
@@ -1420,7 +1460,8 @@ test("OpenThread opens a live thread or a child's first, and refuses any other",
     };
     assert.notEqual(fns.OpenThread.handler([0x1f03ff, 0, 0x10]), 0);
     assert.notEqual(fns.OpenThread.handler([0x1f03ff, 0, 0x304]), 0);
-    assert.deepEqual(opened, [['thread', live], ['process-thread', child]]);
+    assert.deepEqual(opened, [['thread', live], ['process-thread',
+        { process: child, threadId: 0x304, handle: 0, exitCode: null, exited: null }]]);
     assert.equal(fns.OpenThread.handler([0x1f03ff, 0, 0x14]), 0, 'an ended thread');
     assert.equal(fns.OpenThread.handler([0x1f03ff, 0, 0x999]), 0, 'nobody');
     assert.deepEqual(errors.slice(-2), [87, 87]);

@@ -414,7 +414,8 @@ test('PROCESS_INFORMATION comes back filled in with usable handles', ()=>{
     assert.equal(host.view.getUint32(information + 12, true), child.threadId);
 
     assert.equal(host.kernel.handles.resolve(child.handle, 'process'), child);
-    assert.equal(host.kernel.handles.resolve(child.threadHandle, 'process-thread'), child);
+    assert.equal(host.kernel.handles.resolve(child.threadHandle, 'process-thread').process, child,
+        'the child\'s first thread');
 });
 
 test('OpenProcess finds the program itself and the children it made, and nothing else', ()=>{
@@ -630,7 +631,7 @@ test('the launcher every spelling shares finds one image and opens the handles',
     assert.equal(made.commandLine, '"C:\\App\\child.exe" /s');
     assert.notEqual(made.handle, 0);
     assert.equal(host.kernel.handles.resolve(made.handle, 'process'), made);
-    assert.equal(host.kernel.handles.resolve(made.threadHandle, 'process-thread'), made);
+    assert.equal(host.kernel.handles.resolve(made.threadHandle, 'process-thread').process, made);
     assert.deepEqual(host.requests.map((/** @type {any} */ r)=>r.imagePath),
         ['C:\\App\\child.exe'], 'and the request left the process as it was recorded');
 });

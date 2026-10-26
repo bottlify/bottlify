@@ -72,9 +72,12 @@ differently raises a `divergence` event naming the API.
 - With `concurrency` 1 a child started with `CreateProcess` takes turns with its parent on one
   thread; with 2 or 4 they run at once (`concurrency` in [api.md](api.md)). A parent reaches into
   its child -- its memory (`VirtualAllocEx`, `VirtualFreeEx`, `VirtualProtectEx`,
-  `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory` and ntdll's forms) and its first
-  thread (`SuspendThread`, `ResumeThread`, `GetThreadContext`) -- either way. Not yet:
-  `CreateRemoteThread` into a child, `SetThreadContext`, and reading another process's TEB or PEB.
+  `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory` and ntdll's forms), its first
+  thread (`SuspendThread`, `ResumeThread`, `GetThreadContext`), and a thread it makes there with
+  `CreateRemoteThread`, which it waits on and reads the exit code of -- either way. A wait on a
+  child's thread is answered within a few milliseconds of its end, asked of the child until
+  then. Not yet: `SetThreadContext`, `OpenThread` of a child's thread the parent was not told of,
+  and reading another process's TEB or PEB.
 - In `compatible` mode a child is silent: its sound has no output to go to beside its parent's.
 - With `concurrency` 2 or 4 a process's own journal (its calls, phase profile and frames) stays in
   its worker: the run's log holds the events every process reports and what the engine's thread

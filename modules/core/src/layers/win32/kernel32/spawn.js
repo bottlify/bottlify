@@ -36,7 +36,7 @@
 import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { STARTUPINFO, readStartupInfo } from './startup-info.js';
-import { askChild } from './cross-process.js';
+import { askChild, childThread } from './cross-process.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -444,12 +444,12 @@ export function createSpawner(host){
                 // it is never what this process hands over to.
                 completed: isRedistributableInstaller(path),
             });
-            // Both handles name the same record, and every spelling of "start a
-            // program" hands one out: a parent waits on the first and resumes
-            // the second, and neither is a different object here because the
-            // child has exactly one thread until it is really running.
+            // Every spelling of "start a program" hands both out: a parent
+            // waits on the process and resumes, suspends or reads the thread,
+            // which is the child's first, reached where the child runs.
             made.handle = kernel.handles.open('process', made);
-            made.threadHandle = kernel.handles.open('process-thread', made);
+            made.threadHandle = kernel.handles.open('process-thread',
+                childThread(made, made.threadId));
             // A child its parent debugs reports its creation and its exit to
             // WaitForDebugEvent.
             made.debugEvents = (flags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS)) !== 0

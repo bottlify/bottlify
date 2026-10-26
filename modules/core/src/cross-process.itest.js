@@ -317,3 +317,70 @@ for (const seed of [1, 2, 3, 4, 5, 6])
             }
         });
 }
+
+test('a thread a parent makes in its child runs there, and is waited on and read from here',
+    { timeout: 180000 }, async t=>{
+        // Wine's kernel32 test_CreateRemoteThread: code written into the
+        // child, a thread started at it with a parameter, the parent waiting
+        // on the thread and reading its exit code -- the parameter plus five.
+        const parent = buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'VirtualAllocEx', 'WriteProcessMemory',
+                'CreateRemoteThread', 'WaitForSingleObject', 'GetExitCodeThread',
+                'TerminateProcess', 'ExitProcess'] },
+            data: {
+                command: ascii('C:\\App\\child.exe'),
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+                // mov eax, [esp + 4]; add eax, 5; ret 4
+                routine: [0x8b, 0x44, 0x24, 0x04, 0x83, 0xc0, 0x05, 0xc2, 0x04, 0x00],
+                remote: u32(0),
+                id: u32(0),
+                code: u32(0),
+                waited: u32(0xffffffff),
+            },
+            codeSize: 0x100,
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, CREATE_SUSPENDED, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                // remote = VirtualAllocEx(hProcess, 0, 0x1000, MEM_COMMIT | MEM_RESERVE,
+                //     PAGE_EXECUTE_READWRITE)
+                0x6a, 0x40, 0x68, ...u32(0x3000), 0x68, ...u32(0x1000), 0x6a, 0,
+                0xff, 0x35, ...u32(at('info')), 0xff, 0x15, ...u32(iat('VirtualAllocEx')),
+                0xa3, ...u32(at('remote')),
+                // WriteProcessMemory(hProcess, remote, routine, 10, 0)
+                0x6a, 0, 0x6a, 10, 0x68, ...u32(at('routine')), 0x50,
+                0xff, 0x35, ...u32(at('info')), 0xff, 0x15, ...u32(iat('WriteProcessMemory')),
+                // CreateRemoteThread(hProcess, 0, 0, remote, 37, 0, &id)
+                0x68, ...u32(at('id')), 0x6a, 0, 0x6a, 37, 0xff, 0x35, ...u32(at('remote')),
+                0x6a, 0, 0x6a, 0, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('CreateRemoteThread')),
+                0x89, 0xc6, // mov esi, eax
+                // waited = WaitForSingleObject(thread, INFINITE)
+                0x6a, 0xff, 0x56, 0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                0xa3, ...u32(at('waited')),
+                // GetExitCodeThread(thread, &code)
+                0x68, ...u32(at('code')), 0x56, 0xff, 0x15, ...u32(iat('GetExitCodeThread')),
+                // TerminateProcess(hProcess, 0): its first thread never ran
+                0x6a, 0, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('TerminateProcess')),
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                // ExitProcess(code + (waited << 8) + (id != 0) << 16)
+                0x31, 0xc0, 0x83, 0x3d, ...u32(at('id')), 0x00, 0x0f, 0x95, 0xc0,
+                0xc1, 0xe0, 0x10, 0x8b, 0x0d, ...u32(at('waited')), 0xc1, 0xe1, 0x08, 0x01, 0xc8,
+                0x03, 0x05, ...u32(at('code')), 0x50,
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        for (const [name, concurrency, through] of /** @type {const} */ ([
+            ['on its parent\'s thread', 1, false],
+            ['in a worker of its own', 2, false],
+            ['beside a parent in a worker, through the run', 2, true],
+        ]))
+        {
+            const run = await observed(parent, concurrency, through, t);
+            assert.equal(run.code >>> 0, (1 << 16) + 42, name);
+        }
+    });

@@ -54,6 +54,7 @@ export const CROSS_CALLS = new Set([
     'VirtualAlloc', 'VirtualFree', 'VirtualProtect', 'VirtualQuery',
     'ReadProcessMemory', 'WriteProcessMemory',
     'SuspendThread', 'ResumeThread', 'GetThreadContext', 'SetThreadContext',
+    'CreateThread', 'GetExitCodeThread',
 ]);
 
 /**
@@ -212,20 +213,139 @@ const ERROR_ACCESS_DENIED = 5;
  *
  * @param {AskHost} host @param {any} record  The child's process record.
  * @param {CrossCall} call @param {(number | null)[]} into
+ * @param {(answer: CrossAnswer, result: number) => number} [adopt]  What the
+ *        call answers in this process, made of the child's answer: a handle of
+ *        its own for one the child made.
  * @returns {Promise<number> | null}
  */
-export function askChild(host, record, call, into){
+export function askChild(host, record, call, into, adopt){
     const asked = host.askChild?.(record, call) ?? null;
     if (asked === null)
     {
         return null;
     }
     const thread = host.currentThread();
-    return asked.then(answer=>takeAnswer(answer ?? { result: 0, error: ERROR_ACCESS_DENIED,
-        outs: [] }, into, {
-        writeMemory: host.writeMemory,
-        setLastError: code=>host.setLastErrorFor(thread, code),
-    }));
+    return asked.then(given=>{
+        const answer = given ?? { result: 0, error: ERROR_ACCESS_DENIED, outs: [] };
+        const result = takeAnswer(answer, into, {
+            writeMemory: host.writeMemory,
+            setLastError: code=>host.setLastErrorFor(thread, code),
+        });
+        return adopt ? adopt(answer, result) >>> 0 : result;
+    });
+}
+
+/** What GetExitCodeThread answers for a thread still running. */
+const STILL_ACTIVE = 259;
+/** How long a parent waiting on a thread of its child leaves between its questions. */
+const THREAD_LOOK_MS = 2;
+
+/**
+ * A thread of a child, as its parent's handles name it: one object per
+ * thread, whichever handle names it, so every wait on it and every exit code
+ * read of it share its end.
+ *
+ * @typedef {{ process: any, threadId: number, handle: number, exitCode: number | null,
+ *     exited: any }} ChildThread
+ */
+
+/**
+ * The child's thread of that id. `handle` is the child's own handle to it,
+ * kept open where the parent made the thread (CreateRemoteThread), so the
+ * thread's exit code outlives it as it does on Windows while a handle stands;
+ * zero where the child is asked for it by id.
+ *
+ * @param {any} record  The child's process record.
+ * @param {number} threadId @param {number} [handle]
+ * @returns {ChildThread}
+ */
+export function childThread(record, threadId, handle = 0){
+    /** @type {Map<number, ChildThread>} */
+    const threads = record.threads ??= new Map();
+    let thread = threads.get(threadId >>> 0);
+    if (!thread)
+    {
+        thread = { process: record, threadId: threadId >>> 0, handle: handle >>> 0,
+            exitCode: null, exited: null };
+        threads.set(thread.threadId, thread);
+    }
+    return thread;
+}
+
+/**
+ * How a call names a child's thread: by the child's own handle to it, or by
+ * its id, opened for the call.
+ *
+ * @param {ChildThread} thread @returns {CrossArg}
+ */
+export const threadArg = thread=>(thread.handle !== 0 ? thread.handle
+    : { thread: thread.threadId });
+
+/**
+ * @typedef {Object} ThreadEndHost
+ * @property {{ createEvent: (options: any) => any, setEvent: (event: any) => void }} kernel
+ * @property {AskHost['askChild']} [askChild]
+ * @property {(look: () => void, ms: number) => void} [later]
+ */
+
+/**
+ * The event a child's thread ends: what a wait on it waits on. Nothing of
+ * the child's reaches this process as its thread ends, so the parent asks
+ * the child, between its turns, until the thread has an exit code; a child
+ * gone, or one the run cannot ask, has ended all its threads, its first with
+ * the process's code.
+ *
+ * @param {ThreadEndHost} host @param {ChildThread} thread
+ */
+export function threadEnd(host, thread){
+    if (thread.exited)
+    {
+        return thread.exited;
+    }
+    const event = host.kernel.createEvent({ manualReset: true, signalled: false });
+    thread.exited = event;
+    /** @param {number} code */
+    const end = code=>{
+        thread.exitCode = code >>> 0;
+        host.kernel.setEvent(event);
+    };
+    const record = thread.process;
+    const gone = ()=>end(record.exitCode === STILL_ACTIVE ? 0 : record.exitCode ?? 0);
+    const look = ()=>{
+        if (record.completed)
+        {
+            gone();
+            return;
+        }
+        const asked = host.askChild?.(record, { call: 'GetExitCodeThread',
+            args: [threadArg(thread), { out: 4 }] }) ?? null;
+        if (asked === null)
+        {
+            gone();
+            return;
+        }
+        asked.then(answer=>{
+            const bytes = answer?.outs[1];
+            const code = answer?.result && bytes
+                ? new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true) : null;
+            if (!answer || !answer.result)
+            {
+                // Refused: the child has no such thread now, which is a thread
+                // that has gone.
+                gone();
+            }
+            else if (code !== STILL_ACTIVE)
+            {
+                end(code ?? 0);
+            }
+            else
+            {
+                (host.later ?? setTimeout)(look, THREAD_LOOK_MS);
+            }
+        }, gone);
+    };
+    look();
+    return event;
 }
 
 /**

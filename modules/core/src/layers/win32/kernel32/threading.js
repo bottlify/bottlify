@@ -7,6 +7,7 @@
 import { encodeAnsi } from './locale.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
+import { askChild, childThread, threadEnd } from './cross-process.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, eventStateCode, releaseMutexCode,
     waitOneCode } from './wait-one.js';
@@ -56,6 +57,7 @@ const ERROR_FILE_NOT_FOUND = 2;
 const MAX_NAME = 260;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
 /** ReleaseSemaphore past the semaphore's maximum. */
 const ERROR_TOO_MANY_POSTS = 298;
@@ -97,6 +99,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child, for a thread made or waited on there.
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {(thread: any, code: number) => Promise<number> | null} [endThread]
  *           Ends a thread that ended itself, and the process with it when it
  *           was the last: null once it has, or the promise of telling the
@@ -953,6 +958,20 @@ export function createThreadingFunctions(host){
                         : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
                 }
 
+                // A child's thread ends where the child runs; the wait is on
+                // the event this process sets once the child says it has.
+                if (kindOf(handle >>> 0) === 'process-thread')
+                {
+                    const ended = threadEnd({ kernel, askChild: host.askChild }, target);
+                    if (wait === 0)
+                    {
+                        return kernel.poll(ended, thread) ?? WAIT_TIMEOUT;
+                    }
+                    return settle(kernel.wait(ended, thread, wait === INFINITE
+                        ? undefined
+                        : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
+                }
+
                 // A timer is ordinary here. Its signal is a property of the
                 // object and the kernel's clock, not of this wait: the clock
                 // sets it when the due time arrives whether this call came
@@ -1453,7 +1472,8 @@ export function createThreadingFunctions(host){
          * HANDLE OpenThread(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwThreadId)
          *
          * A new handle to a thread of this process that has not ended, or to
-         * the first thread of a child it started; any other id is refused.
+         * a thread of a child it started that it knows the id of -- the first,
+         * or one it made there; any other id is refused.
          */
         OpenThread: {
             argBytes: 12,
@@ -1467,10 +1487,10 @@ export function createThreadingFunctions(host){
                     return kernel.handles.open('thread', own);
                 }
                 const child = (kernel.processes?.all() ?? []).find((/** @type {any} */ made)=>
-                    (made.threadId >>> 0) === wanted);
+                    (made.threadId >>> 0) === wanted || made.threads?.has(wanted));
                 if (child)
                 {
-                    return kernel.handles.open('process-thread', child);
+                    return kernel.handles.open('process-thread', childThread(child, wanted));
                 }
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
@@ -1599,10 +1619,9 @@ export function createThreadingFunctions(host){
      *                           LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD)
      * HANDLE CreateRemoteThreadEx(..., LPPROC_THREAD_ATTRIBUTE_LIST, LPDWORD)
      *
-     * A thread in this process is CreateThread's; one in a child cannot be
-     * made, since a child runs only once this process has nothing left to do,
-     * and is refused with ERROR_NOT_SUPPORTED rather than answered with a
-     * thread that would never run where it was asked to.
+     * A thread in this process is CreateThread's. One in a child is the
+     * child's CreateThread, made where the child runs, at an address in its
+     * memory; this process gets a handle of its own to it, and its id.
      *
      * @param {number} process @param {number[]} rest  CreateThread's six arguments.
      */
@@ -1613,12 +1632,31 @@ export function createThreadingFunctions(host){
             host.setLastError(ERROR_INVALID_HANDLE);
             return 0;
         }
-        if (!target.current)
+        if (target.current)
         {
-            host.setLastError(ERROR_NOT_SUPPORTED);
+            return table.CreateThread.handler(rest);
+        }
+        const [, stack, start, parameter, flags, idOut] = rest;
+        const asked = host.setLastErrorFor ? askChild({ askChild: host.askChild,
+            writeMemory: host.writeMemory, currentThread: host.currentThread,
+            setLastErrorFor: host.setLastErrorFor }, target,
+        { call: 'CreateThread', args: [0, stack >>> 0, start >>> 0, parameter >>> 0,
+            flags >>> 0, { out: 4 }] }, [null, null, null, null, null, idOut >>> 0],
+        (answer, made)=>{
+            const bytes = answer.outs[5];
+            if (made === 0 || !bytes)
+            {
+                return 0;
+            }
+            const id = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+            return kernel.handles.open('process-thread', childThread(target, id, made));
+        }) : null;
+        if (asked === null)
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
             return 0;
         }
-        return table.CreateThread.handler(rest);
+        return asked;
     };
 
     return {

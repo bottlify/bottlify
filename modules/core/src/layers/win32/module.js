@@ -1688,6 +1688,9 @@ export function createWin32Module(){
                     }),
                     ...createThreadingFunctions({
                         kernel,
+                        // A thread made in a child, and one waited on there.
+                        askChild: config?.askChild,
+                        setLastErrorFor: setErrorOn,
                         readMemory,
                         readCString,
                         readWideString,
@@ -2035,6 +2038,9 @@ export function createWin32Module(){
                     ...activation.functions,
                     ...createSystemFunctions({
                         processors,
+                        // A child's thread's exit code, asked where it runs.
+                        askChild: config?.askChild,
+                        setLastErrorFor: setErrorOn,
                         // TerminateProcess wakes whoever waits on the child it ends.
                         wake: (/** @type {any} */ thread, /** @type {number} */ result)=>
                             kernel.wake(thread, result),
