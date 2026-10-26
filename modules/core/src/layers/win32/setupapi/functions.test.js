@@ -73,10 +73,25 @@ async function machine(){
         }
         return decodeAnsi(bytes.subarray(at, end));
     };
+    /** @param {number} at @param {number} max  In bytes. */
+    const readWideString = (at, max)=>{
+        let text = '';
+        for (let index = at; index + 1 < at + max; index += 2)
+        {
+            const unit = view.getUint16(index, true);
+            if (unit === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(unit);
+        }
+        return text;
+    };
     const fns = createSetupapiFunctions({
         readMemory: (at, length)=>bytes.subarray(at, at + length),
         writeMemory: (at, data)=>bytes.set(data, at),
         readCString,
+        readWideString,
         setLastError: code=>errors.push(code >>> 0),
         setLastErrorFor: (_thread, code)=>errors.push(code >>> 0),
         files: volume,
@@ -120,6 +135,13 @@ async function machine(){
         argAt += text.length + 16;
         return at;
     };
+    /** @param {string} text */
+    const wstr = text=>{
+        const at = argAt;
+        [...text, '\0'].forEach((c, index)=>view.setUint16(at + index * 2, c.charCodeAt(0), true));
+        argAt += text.length * 2 + 16;
+        return at;
+    };
     /** @param {number} size */
     const buffer = size=>{
         const at = argAt;
@@ -155,7 +177,8 @@ async function machine(){
         return at;
     };
     return {
-        fns, view, errors, str, buffer, file, contents, callback, readCString, volume, hive,
+        fns, view, errors, str, wstr, buffer, file, contents, callback, readCString,
+        readWideString, volume, hive,
         u32: (/** @type {number} */ at)=>view.getUint32(at, true),
         lastError: ()=>errors.at(-1),
     };
@@ -1041,4 +1064,99 @@ test('SPINST_REGISTRY carries out a section\'s DelReg and AddReg, HKR the predef
             'Software\\Product');
         assert.deepEqual([...(user ? m.hive.getValue(user, 'Relative')?.data ?? [] : [])],
             [7, 0, 0, 0], 'HKR is HKEY_CURRENT_USER here');
+    });
+
+test('a line\'s fields are counted, read as integers, and its section\'s next match found',
+    async()=>{
+        // Wine's setupapi test_SetupGetIntField and test_GLE.
+        const m = await machine();
+        m.file('C:\\src\\n.inf', [
+            '[Version]', 'Signature="$Chicago$"', '[Section]',
+            'Key=48,0x4,Field1,,-12,017', '123=x', 'Other=1', 'Key2=a', 'Key=last',
+        ].join('\r\n'));
+        const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\n.inf'), 0,
+            INF_STYLE_WIN4, 0]);
+        const context = m.buffer(16);
+        const value = m.buffer(4);
+        assert.equal(m.fns.SetupFindFirstLineA.handler([inf, m.str('Section'), 0, context]), 1);
+        assert.equal(m.fns.SetupGetFieldCount.handler([context]), 6, 'the key not counted');
+        /** @param {number} index */
+        const int = index=>{
+            m.view.setInt32(value, -1, true);
+            const ok = m.fns.SetupGetIntField.handler([context, index, value]);
+            return ok ? m.view.getInt32(value, true) : `error ${m.lastError()}`;
+        };
+        assert.equal(int(1), 48);
+        assert.equal(int(2), 4, 'hexadecimal by its prefix');
+        assert.equal(int(3), `error ${ERROR_INVALID_DATA}`);
+        assert.equal(int(4), 0, 'an empty field is 0');
+        assert.equal(int(5), -12);
+        assert.equal(int(6), 15, 'octal by its leading zero');
+        assert.equal(int(0), `error ${ERROR_INVALID_DATA}`, 'the key, which is no number');
+        assert.equal(int(7), `error ${ERROR_INVALID_PARAMETER}`);
+
+        assert.equal(m.fns.SetupFindNextMatchLineA.handler([context, m.str('KEY'), context]), 1);
+        assert.equal(m.view.getUint32(context + 12, true), 4, 'the next Key, case aside');
+        assert.equal(m.fns.SetupFindNextMatchLineA.handler([context, m.str('Other'), context]),
+            0, 'only after the line given');
+        assert.equal(m.lastError(), ERROR_LINE_NOT_FOUND);
+        assert.equal(m.fns.SetupFindFirstLineA.handler([inf, m.str('Section'), m.str('123'),
+            context]), 1);
+        assert.equal(m.fns.SetupFindNextMatchLineA.handler([context, 0, context]), 1,
+            'no key, the next line');
+        assert.equal(m.view.getUint32(context + 12, true), 2);
+    });
+
+test('sections enumerate in file order, and the W forms count WCHARs', async()=>{
+    // Wine's setupapi test_enum_sections.
+    const ERROR_NO_MORE_ITEMS = 259;
+    const m = await machine();
+    m.file('C:\\src\\e.inf', ['[Version]', 'Signature="$Chicago$"', '[s1]', 'foo=bar',
+        '[Strings]', 'a=b'].join('\r\n'));
+    const inf = await m.fns.SetupOpenInfFileW.handler([m.wstr('C:\\src\\e.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    assert.notEqual(inf, INVALID_HANDLE_VALUE, 'opened by its wide name');
+    const needed = m.buffer(4);
+    const out = m.buffer(64);
+    assert.equal(m.fns.SetupEnumInfSectionsA.handler([inf, 1, 0, 0, needed]), 1);
+    assert.equal(m.u32(needed), 3);
+    assert.equal(m.fns.SetupEnumInfSectionsA.handler([inf, 1, 0, 64, needed]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_USER_BUFFER, 'a size and no buffer');
+    assert.equal(m.fns.SetupEnumInfSectionsA.handler([inf, 2, out, 64, needed]), 1);
+    assert.equal(m.readCString(out, 64), 'Strings');
+    assert.equal(m.fns.SetupEnumInfSectionsW.handler([inf, 0, out, 64, needed]), 1);
+    assert.equal(m.readWideString(out, 64), 'Version');
+    assert.equal(m.u32(needed), 8, 'characters, not bytes');
+    assert.equal(m.fns.SetupEnumInfSectionsA.handler([inf, 3, out, 64, needed]), 0);
+    assert.equal(m.lastError(), ERROR_NO_MORE_ITEMS);
+
+    const context = m.buffer(16);
+    assert.equal(m.fns.SetupFindFirstLineW.handler([inf, m.wstr('s1'), m.wstr('FOO'),
+        context]), 1);
+    assert.equal(m.fns.SetupGetLineTextW.handler([context, 0, 0, 0, out, 3, needed]), 0);
+    assert.equal(m.lastError(), ERROR_INSUFFICIENT_BUFFER, 'three WCHARs are too few for four');
+    assert.equal(m.fns.SetupGetLineTextW.handler([context, 0, 0, 0, out, 4, needed]), 1);
+    assert.equal(m.readWideString(out, 64), 'bar');
+    assert.equal(m.u32(needed), 4);
+});
+
+test('pSetupGetField hands out the field itself, wide, for as long as the INF is open',
+    async()=>{
+        // Wine's setupapi test_pSetupGetField: a field is kept to 4096 characters.
+        const m = await machine();
+        m.file('C:\\src\\f.inf', ['[Version]', 'Signature="$Windows NT$"', '[Branch]',
+            `RTMQFE="%RTMGFE_NAME%",SP1RTM,${'a'.repeat(4097)}`, '[Strings]',
+            'RTMQFE_NAME = "RTMQFE"'].join('\r\n'));
+        const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\f.inf'), 0,
+            INF_STYLE_WIN4, 0]);
+        const context = m.buffer(16);
+        assert.equal(m.fns.SetupFindFirstLineA.handler([inf, m.str('Branch'), 0, context]), 1);
+        const fields = [0, 1, 2, 3].map(index=>m.fns.pSetupGetField.handler([context, index]));
+        assert.deepEqual(fields.slice(0, 3).map(at=>m.readWideString(at, 64)),
+            ['RTMQFE', '%RTMGFE_NAME%', 'SP1RTM']);
+        assert.equal(m.readWideString(fields[3], 10000).length, 4096);
+        assert.equal(m.fns.pSetupGetField.handler([context, 1]), fields[1],
+            'the same field, the same string');
+        assert.equal(m.fns.pSetupGetField.handler([context, 4]), 0);
+        assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
     });

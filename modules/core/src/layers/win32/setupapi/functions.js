@@ -162,6 +162,34 @@ export function createSetupapiFunctions(host){
     const ansi = text=>encodeAnsi(`${text}\0`);
     /** @param {number} address */
     const text = address=>((address >>> 0) === 0 ? null : host.readCString(address >>> 0, 4096));
+    /**
+     * A string argument in the call's width: UTF-16 for a W call.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const textOf = (address, wide)=>{
+        if (!wide)
+        {
+            return text(address);
+        }
+        return (address >>> 0) === 0 ? null
+            : /** @type {NonNullable<typeof host.readWideString>} */ (host.readWideString)(
+                address >>> 0, 8192);
+    };
+    /** Terminated, in the call's width. @param {string} value @param {boolean} wide */
+    const encodeIn = (value, wide)=>{
+        if (!wide)
+        {
+            return ansi(value);
+        }
+        const bytes = new Uint8Array((value.length + 1) * 2);
+        const view = new DataView(bytes.buffer);
+        for (let at = 0; at < value.length; at++)
+        {
+            view.setUint16(at * 2, value.charCodeAt(at), true);
+        }
+        return bytes;
+    };
     /** @param {number} code @param {number} [result] */
     const fail = (code, result = 0)=>{
         host.setLastError(code);
@@ -245,7 +273,10 @@ export function createSetupapiFunctions(host){
      * An open INF: what a HINF names, and the user DIRIDs set on it.
      *
      * @typedef {{ inf: import('./inf.js').Inf, path: string,
-     *     list: import('./inf.js').InfSection[], ids: Map<number, string> }} OpenInf
+     *     list: import('./inf.js').InfSection[], ids: Map<number, string>,
+     *     fields?: Map<string, number> }} OpenInf
+     * `fields`: the wide copies `pSetupGetField` handed out, by section, line
+     * and field, given back when the INF is closed.
      */
 
     /**
@@ -357,19 +388,24 @@ export function createSetupapiFunctions(host){
      * string calls do: the size needed, terminator included, whether or not
      * a buffer came; too small a buffer is ERROR_INSUFFICIENT_BUFFER.
      *
+     * Sizes count the call's characters: bytes for an A call, WCHARs for a
+     * W one.
+     *
      * @param {string} value @param {number} buffer @param {number} size @param {number} required
+     * @param {boolean} [wide]
      */
-    const answerText = (value, buffer, size, required)=>{
-        const bytes = ansi(value);
+    const answerText = (value, buffer, size, required, wide = false)=>{
+        const bytes = encodeIn(value, wide);
+        const characters = wide ? bytes.length / 2 : bytes.length;
         if ((required >>> 0) !== 0)
         {
-            writeU32(required, bytes.length);
+            writeU32(required, characters);
         }
         if ((buffer >>> 0) === 0)
         {
             return 1;
         }
-        if ((size >>> 0) < bytes.length)
+        if ((size >>> 0) < characters)
         {
             return fail(ERROR_INSUFFICIENT_BUFFER);
         }
@@ -696,6 +732,17 @@ export function createSetupapiFunctions(host){
             + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
     };
 
+    /**
+     * A call's ANSI and wide entries: the one factory, told whether the
+     * call's strings are UTF-16, under each name.
+     *
+     * @template {string} N @template T
+     * @param {N} name @param {(wide: boolean) => T} make
+     * @returns {Record<`${N}A` | `${N}W`, T>}
+     */
+    const bothWidths = (name, make)=>/** @type {Record<`${N}A` | `${N}W`, T>} */ (
+        /** @type {unknown} */ ({ [`${name}A`]: make(false), [`${name}W`]: make(true) }));
+
     return {
         /**
          * HINF SetupOpenInfFileA(PCSTR FileName, PCSTR InfClass, DWORD InfStyle,
@@ -706,16 +753,16 @@ export function createSetupapiFunctions(host){
          * does not parse (with the line in ErrorLine), is not of a style
          * asked for, or not of the class asked for.
          */
-        SetupOpenInfFileA: {
+        ...bothWidths('SetupOpenInfFile', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([namePointer, classPointer, style, errorLine])=>{
-                const name = text(namePointer);
+                const name = textOf(namePointer, wide);
                 if (name === null || name === '')
                 {
                     return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
                 }
-                const wanted = text(classPointer);
+                const wanted = textOf(classPointer, wide);
                 const thread = host.callerThread();
                 const candidates = infCandidates(name);
                 const path = candidates.find(place=>host.files.stat(place)) ?? candidates[0];
@@ -751,15 +798,17 @@ export function createSetupapiFunctions(host){
                 const loaded = loadInf(path);
                 return 'then' in loaded ? loaded.then(finish) : finish(loaded);
             },
-        },
+        })),
 
         /** VOID SetupCloseInfFile(HINF InfHandle) -- a handle that names no INF is ignored. */
         SetupCloseInfFile: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                if (openInf(handle))
+                const open = openInf(handle);
+                if (open)
                 {
+                    open.fields?.forEach(address=>host.free(address));
                     host.handles.close(handle >>> 0);
                 }
                 return 0;
@@ -774,7 +823,7 @@ export function createSetupapiFunctions(host){
          * whose key matches it, case aside. ERROR_LINE_NOT_FOUND for either
          * missing, the section included.
          */
-        SetupFindFirstLineA: {
+        ...bothWidths('SetupFindFirstLine', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, sectionPointer, keyPointer, context])=>{
@@ -783,9 +832,9 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const name = (text(sectionPointer) ?? '').toLowerCase();
+                const name = (textOf(sectionPointer, wide) ?? '').toLowerCase();
                 const index = open.list.findIndex(section=>section.name.toLowerCase() === name);
-                const key = text(keyPointer)?.toLowerCase() ?? null;
+                const key = textOf(keyPointer, wide)?.toLowerCase() ?? null;
                 const lines = index < 0 ? [] : open.list[index].lines;
                 const line = key === null
                     ? (lines.length > 0 ? 0 : -1)
@@ -797,7 +846,7 @@ export function createSetupapiFunctions(host){
                 writeContext(context, handle, index, line);
                 return fail(ERROR_SUCCESS, 1);
             },
-        },
+        })),
 
         /**
          * BOOL SetupFindNextLine(PINFCONTEXT ContextIn, PINFCONTEXT ContextOut)
@@ -830,7 +879,7 @@ export function createSetupapiFunctions(host){
          * A line's fields after the key, joined by commas, found by context
          * or else by section and key.
          */
-        SetupGetLineTextA: {
+        ...bothWidths('SetupGetLineText', wide=>({
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([context, handle, sectionPointer, keyPointer, buffer, size, required])=>{
@@ -855,8 +904,8 @@ export function createSetupapiFunctions(host){
                     {
                         return fail(ERROR_INVALID_HANDLE);
                     }
-                    const key = (text(keyPointer) ?? '').toLowerCase();
-                    line = open.inf.section(text(sectionPointer) ?? '')?.lines
+                    const key = (textOf(keyPointer, wide) ?? '').toLowerCase();
+                    line = open.inf.section(textOf(sectionPointer, wide) ?? '')?.lines
                         .find(entry=>entry.key?.toLowerCase() === key);
                     if (!line)
                     {
@@ -865,10 +914,10 @@ export function createSetupapiFunctions(host){
                 }
                 const value = line.fields.map(field=>expand(/** @type {OpenInf} */ (open), field))
                     .join(',');
-                const answered = answerText(value, buffer, size, required);
+                const answered = answerText(value, buffer, size, required, wide);
                 return answered ? fail(ERROR_SUCCESS, 1) : 0;
             },
-        },
+        })),
 
         /**
          * BOOL SetupGetStringFieldA(PINFCONTEXT Context, DWORD FieldIndex,
@@ -878,7 +927,7 @@ export function createSetupapiFunctions(host){
          * `=` does not have -- and field N the Nth value after it. A field
          * that is not there is ERROR_INVALID_PARAMETER.
          */
-        SetupGetStringFieldA: {
+        ...bothWidths('SetupGetStringField', wide=>({
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([context, index, buffer, size, required])=>{
@@ -898,10 +947,10 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const answered = answerText(expand(open, field), buffer, size, required);
+                const answered = answerText(expand(open, field), buffer, size, required, wide);
                 return answered ? fail(ERROR_SUCCESS, 1) : 0;
             },
-        },
+        })),
 
         /**
          * BOOL SetupGetBinaryField(PINFCONTEXT Context, DWORD FieldIndex,
@@ -957,7 +1006,7 @@ export function createSetupapiFunctions(host){
          * (Wine's setupapi test_GLE) -- how a caller tells a missing section
          * from an empty one, as it does probing for a platform-decorated one.
          */
-        SetupGetLineCountA: {
+        ...bothWidths('SetupGetLineCount', wide=>({
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, sectionPointer])=>{
@@ -966,11 +1015,11 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE, -1);
                 }
-                const section = open.inf.section(text(sectionPointer) ?? '');
+                const section = open.inf.section(textOf(sectionPointer, wide) ?? '');
                 return section ? fail(ERROR_SUCCESS, section.lines.length)
                     : fail(ERROR_SECTION_NOT_FOUND, -1);
             },
-        },
+        })),
 
         /**
          * BOOL SetupGetLineByIndexA(HINF InfHandle, PCSTR Section, DWORD Index,
@@ -979,7 +1028,7 @@ export function createSetupapiFunctions(host){
          * ERROR_LINE_NOT_FOUND for a section that is not there as well as
          * for an index past its end.
          */
-        SetupGetLineByIndexA: {
+        ...bothWidths('SetupGetLineByIndex', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, sectionPointer, index, context])=>{
@@ -988,7 +1037,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const name = (text(sectionPointer) ?? '').toLowerCase();
+                const name = (textOf(sectionPointer, wide) ?? '').toLowerCase();
                 const section = open.list.findIndex(entry=>entry.name.toLowerCase() === name);
                 if (section < 0 || (index >>> 0) >= open.list[section].lines.length)
                 {
@@ -996,6 +1045,195 @@ export function createSetupapiFunctions(host){
                 }
                 writeContext(context, handle, section, index >>> 0);
                 return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupFindNextMatchLineA(PINFCONTEXT ContextIn, PCSTR Key,
+         *                              PINFCONTEXT ContextOut), and the W form
+         *
+         * The next line of the section whose key is Key, case aside, or with
+         * no key the next line; ERROR_LINE_NOT_FOUND past the last.
+         */
+        ...bothWidths('SetupFindNextMatchLine', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [contextIn, keyPointer, contextOut])=>{
+                const at = readContext(contextIn);
+                const open = openInf(at.handle);
+                const lines = open?.list[at.section]?.lines;
+                if (!lines)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const key = textOf(keyPointer, wide)?.toLowerCase() ?? null;
+                const found = lines.findIndex((entry, index)=>index > at.line
+                    && (key === null || entry.key?.toLowerCase() === key));
+                if (found < 0)
+                {
+                    return fail(ERROR_LINE_NOT_FOUND);
+                }
+                writeContext(contextOut, at.handle, at.section, found);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupEnumInfSectionsA(HINF InfHandle, UINT Index, PSTR Buffer,
+         *                            DWORD Size, UINT *SizeNeeded), and the W form
+         *
+         * The name of the INF's section of that index, in file order; past
+         * the last, ERROR_NO_MORE_ITEMS. The size needed is reported first;
+         * no buffer with a size is ERROR_INVALID_USER_BUFFER.
+         */
+        ...bothWidths('SetupEnumInfSections', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, index, buffer, size, needed])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const section = open.list[index >>> 0];
+                if (!section)
+                {
+                    return fail(ERROR_NO_MORE_ITEMS);
+                }
+                if ((buffer >>> 0) === 0 && (size >>> 0) !== 0)
+                {
+                    if ((needed >>> 0) !== 0)
+                    {
+                        writeU32(needed, section.name.length + 1);
+                    }
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                return answerText(section.name, buffer, size, needed, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * DWORD SetupGetFieldCount(PINFCONTEXT Context)
+         *
+         * The fields after the key: a line of several fields and no `=` has
+         * them all.
+         */
+        SetupGetFieldCount: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([context])=>{
+                const at = readContext(context);
+                const line = openInf(at.handle)?.list[at.section]?.lines[at.line];
+                return line ? fail(ERROR_SUCCESS, line.fields.length)
+                    : fail(ERROR_INVALID_PARAMETER);
+            },
+        },
+
+        /**
+         * BOOL SetupGetIntField(PINFCONTEXT Context, DWORD FieldIndex, PINT IntegerValue)
+         *
+         * The field as strtol reads it with its base from its prefix (0x
+         * hexadecimal, 0 octal), the whole field a number; an empty field is
+         * 0. Anything else is ERROR_INVALID_DATA, the value untouched.
+         */
+        SetupGetIntField: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([context, index, value])=>{
+                const at = readContext(context);
+                const open = openInf(at.handle);
+                const line = open?.list[at.section]?.lines[at.line];
+                if (!open || !line)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const raw = (index >>> 0) === 0 ? line.key : line.fields[(index >>> 0) - 1];
+                if (raw === null || raw === undefined)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const field = expand(open, raw).trim();
+                const number = /^([+-]?)(?:0x([0-9a-f]+)|(0[0-7]*)|([1-9][0-9]*))$/i.exec(field);
+                if (field !== '' && !number)
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                let magnitude = 0;
+                if (number)
+                {
+                    magnitude = number[2] !== undefined ? Number.parseInt(number[2], 16)
+                        : number[3] !== undefined ? Number.parseInt(number[3], 8)
+                            : Number(number[4]);
+                    magnitude = Math.min(magnitude, number[1] === '-' ? 0x80000000 : 0x7fffffff);
+                }
+                writeU32(value, number?.[1] === '-' ? -magnitude : magnitude);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupGetMultiSzFieldA(PINFCONTEXT Context, DWORD FieldIndex,
+         *     PSTR ReturnBuffer, DWORD ReturnBufferSize, LPDWORD RequiredSize),
+         *     and the W form
+         *
+         * The fields from FieldIndex (1-based) to the end of the line, each
+         * terminated, and an empty string after the last.
+         */
+        ...bothWidths('SetupGetMultiSzField', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [context, index, buffer, size, required])=>{
+                const at = readContext(context);
+                const open = openInf(at.handle);
+                const line = open?.list[at.section]?.lines[at.line];
+                const first = index >>> 0;
+                if (!open || !line || first === 0 || first > line.fields.length)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const joined = `${line.fields.slice(first - 1)
+                    .map(field=>expand(open, field)).join('\0')}\0`;
+                return answerText(joined, buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * PCWSTR pSetupGetField(PINFCONTEXT Context, DWORD FieldIndex)
+         *
+         * The field itself, wide, kept with the INF until it is closed;
+         * field 0 the key. NULL with ERROR_INVALID_PARAMETER for a field the
+         * line has not.
+         */
+        pSetupGetField: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([context, index])=>{
+                const at = readContext(context);
+                const open = openInf(at.handle);
+                const line = open?.list[at.section]?.lines[at.line];
+                const raw = !line ? undefined
+                    : (index >>> 0) === 0 ? line.key : line.fields[(index >>> 0) - 1];
+                if (!open || raw === null || raw === undefined)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                open.fields ??= new Map();
+                const name = `${at.section}:${at.line}:${index >>> 0}`;
+                let address = open.fields.get(name);
+                if (address === undefined)
+                {
+                    const bytes = encodeIn(expand(open, raw), true);
+                    address = host.allocate(bytes.length);
+                    if (!address)
+                    {
+                        return fail(ERROR_NOT_ENOUGH_MEMORY);
+                    }
+                    host.writeMemory(address, bytes);
+                    open.fields.set(name, address);
+                }
+                return fail(ERROR_SUCCESS, address);
             },
         },
 
@@ -1007,7 +1245,7 @@ export function createSetupapiFunctions(host){
          * directory unassigns the id, and id 0 unassigns every one; an id
          * below DIRID_USER is ERROR_INVALID_PARAMETER.
          */
-        SetupSetDirectoryIdA: {
+        ...bothWidths('SetupSetDirectoryId', wide=>({
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, id, directoryPointer])=>{
@@ -1026,7 +1264,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const directory = text(directoryPointer);
+                const directory = textOf(directoryPointer, wide);
                 if (directory === null)
                 {
                     open.ids.delete(number);
@@ -1037,7 +1275,7 @@ export function createSetupapiFunctions(host){
                 }
                 return fail(ERROR_SUCCESS, 1);
             },
-        },
+        })),
 
         /**
          * BOOL SetupOpenAppendInfFileA(PCSTR FileName, HINF InfHandle, PUINT ErrorLine)
@@ -1049,7 +1287,7 @@ export function createSetupapiFunctions(host){
          * SetupOpenInfFile looks for it; a file that does not parse leaves
          * its line in ErrorLine.
          */
-        SetupOpenAppendInfFileA: {
+        ...bothWidths('SetupOpenAppendInfFile', wide=>({
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([namePointer, handle, errorLine])=>{
@@ -1058,7 +1296,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const name = text(namePointer);
+                const name = textOf(namePointer, wide);
                 let names = name === null ? null : [name];
                 if (names === null)
                 {
@@ -1098,7 +1336,7 @@ export function createSetupapiFunctions(host){
                     : finish(/** @type {({ open: OpenInf } | { error: number, line: number })[]} */
                         (loads));
             },
-        },
+        })),
 
         /**
          * BOOL SetupGetInfInformationA(LPCVOID InfSpec, DWORD SearchControl,
@@ -1111,7 +1349,7 @@ export function createSetupapiFunctions(host){
          * The size needed is reported whatever the buffer; a NULL buffer
          * with a size no smaller than that is ERROR_INVALID_PARAMETER.
          */
-        SetupGetInfInformationA: {
+        ...bothWidths('SetupGetInfInformation', wide=>({
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([spec, search, buffer, size, required])=>{
@@ -1126,7 +1364,7 @@ export function createSetupapiFunctions(host){
                     const version = open.inf.section('Version')?.lines ?? [];
                     const data = [open.path, ...version.map(line=>
                         `${line.key ?? ''}=${line.fields.join(',')}`), ''];
-                    const strings = data.map(ansi);
+                    const strings = data.map(value=>encodeIn(value, wide));
                     const total = 8 + strings.reduce((sum, bytes)=>sum + bytes.length, 0) - 1;
                     if ((required >>> 0) !== 0)
                     {
@@ -1163,7 +1401,7 @@ export function createSetupapiFunctions(host){
                     const open = openInf(spec);
                     return open ? answer(open) : fail(ERROR_INVALID_HANDLE);
                 }
-                const name = text(spec);
+                const name = textOf(spec, wide);
                 if (name === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -1188,7 +1426,7 @@ export function createSetupapiFunctions(host){
                 };
                 return 'then' in loaded ? loaded.then(finish) : finish(loaded);
             },
-        },
+        })),
 
         /**
          * BOOL SetupIterateCabinetA(PCSTR CabinetFile, DWORD Reserved,
