@@ -1773,3 +1773,26 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   profile is written on every indirect call in one run of two.
 - **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
 - **Decision.** Off by default (`callTargets: false`); the long tests run with it on.
+
+### 2026-10-26: long-mode packs merged by levels
+
+- **Idea.** Beside the long-mode runner's packs of 32 regions (a8bc8c90), merge packs as they
+  pile up, two of a level into one of the next (32, 64, 128, ...), so a program of thousands of
+  regions has few modules and its transfers and calls stay inside one instance more often.
+- **Workload.** cork-bench at 64 bits, every x64 workload. Arms: the tree at a8bc8c90 as it is,
+  and the same with the merging; `core`, `tools` and `node_modules` shared. Chromium
+  (`browser.mjs --bits 64 --paired --rounds 40`, 100 warm iterations, Chrome for Testing
+  153.0.8010.12 headless), two independent runs; node 22.22 (`bench.mjs --warm 30 --iters 50
+  --reps 3`), arms alternated, two runs an arm. Checksums equal in every run.
+- **Values.** Chromium, merged / packs, median ratio [q25 q75], run 1 then run 2: patch-x64
+  1.103 [1.019 1.167], 1.138 [1.051 1.204]; load-x64 1.279 [0.988 1.422], 1.171 [0.989 1.382];
+  calls4096-scatter 0.947 [0.929 1.001], 0.993 [0.926 1.053]; lua 0.993, 0.992; the other 14
+  within 0.977-1.023. Node: calls4096-scatter steady 6195 / 5848 -> 4638 / 4455 us an iteration;
+  lua cold 779 / 767 -> 1138 / 974 ms; load steady 976 / 885 -> 1335 / 946 us. In the long tests
+  the merges did happen (by level 103, 52, 21, 10, 5, 1, 1).
+- **Why (not measured).** Every merge compiles a growing module again and its code starts over on
+  V8's first tier; patch and load drop and form regions all the time.
+- **Machine.** A cloud container (Xeon 2.10 GHz, 4 cores), node 22.22; GPU, driver and power
+  plan not recorded.
+- **Decision.** Not taken; packs of 32 stay. A later try would merge only packs that have lost
+  no region for a while.
