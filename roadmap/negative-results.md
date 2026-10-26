@@ -1697,3 +1697,20 @@ None yet.
 - **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
 - **Decision.** Not kept. The generator of nested programs stays in the long gate; the layout
   (`structureOf`, a control stack in the block emitter, entries filed by it) is not in the tree.
+
+### 2026-10-26: a long-mode store's page test as one load of two pages' flags
+
+- **Idea.** A long-mode store tests its address below 4 GiB, its page's flags, and, when it may
+  reach the next page, that page's flags: three branches. As the 32-bit translator's
+  `checkAccess` does, one `i32.load16_u` of the flags of the page and the next with the address's
+  high half `or`ed in makes it one branch, the exact page and 4 GiB tests left to a slow path.
+- **Workload.** 7-Zip 23.01 x64 (`7za.exe b -md18 -mmt1`, then `b 4 -md18 -mmt1` for a steadier
+  rating) under the engine in node; both arms snapshots of the tree at ef381217, one with the
+  change. The long gate passed with it, with a new case (an address past 4 GiB whose low half
+  lies on an open page) that its mutations failed.
+- **Values.** One pass: before 1389, 1569, 1479; after 1475, 1397, 1639. Four passes: before
+  1616, 1576; after 1569, 1542. Runs alternated.
+- **Why.** Not measured further; the always-taken 16-bit load and the folded high half cost
+  about what the branches they replace did.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
+- **Decision.** Not kept; the new gate case is.

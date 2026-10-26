@@ -422,7 +422,9 @@ test('an access across into a closed page or past 4 GiB faults where the interpr
         'ff33', '480103'])
     {
         for (const rbx of [BigInt(end - 8), BigInt(end - 4), BigInt(end - 2), BigInt(end - 1),
-            BigInt(CORPUS.dataAt - 1), 1n << 32n, (1n << 32n) - 4n, (1n << 64n) - 4n])
+            BigInt(CORPUS.dataAt - 1), 1n << 32n, (1n << 32n) - 4n, (1n << 64n) - 4n,
+            // Past 4 GiB with an open page under its low half.
+            (1n << 32n) + BigInt(CORPUS.dataAt + 16)])
         {
             cases.push(edge(code, rbx));
         }
