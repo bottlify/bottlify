@@ -1,6 +1,6 @@
 {
   "name": "@bottlify/cork",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "type": "module",
   "license": "MPL-2.0",
   "description": "Cork: a user-mode x86-32 to WebAssembly translator, an execution engine @bottlify/core's cpu layer loads by URL when a launch selects it",

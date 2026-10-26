@@ -1,6 +1,6 @@
 {
   "name": "@bottlify/core",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Run unchanged Windows programs and games in a browser tab, on a Windows environment written from scratch over WebGPU, Web Audio and OPFS.",
   "type": "module",
   "license": "MPL-2.0",
@@ -87,7 +87,7 @@
     "src/zstd.js"
   ],
   "dependencies": {
-    "@bottlify/cork": "~1.0.2"
+    "@bottlify/cork": "~1.1.0"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
