@@ -556,6 +556,46 @@ test('the cases of a switch join its region, its jump going among them as interp
     }
 });
 
+test('a switch whose table base is set before its block joins its region all the same', ()=>{
+    // Clang's tables, the base's lea hoisted out of the loop:
+    //         lea r13, [rip + table]; xor esi, esi; lea rax, [rip + loop]; jmp rax
+    // loop:   mov eax, esi; and eax, 3; cmp rax, 3; ja next     entered through a register:
+    //         movsxd rcx, [r13 + rax*4]; add rcx, r13; jmp rcx  the base only in r13
+    // c0..c3: add [rbx], 1 / add [rbx], 10 / [rbx] *= 3 / sub [rbx], 7; jmp next
+    // next:   inc esi; cmp esi, 200; jb loop
+    //         lea r12, [rip + table2]; xor esi, esi; jmp loop2
+    // loop2:  as loop through r12 and table2                   the lea in the region
+    // d0..d3: xor [rbx + 8], rsi / add 5 / rol 3 / not; next2: as next
+    //         xor esi, esi; lea rax, [rip + loop3]; jmp rax
+    // loop3:  mov ecx, esi; and ecx, 3; cmp rcx, 3; ja next3   the index written over
+    //         movsxd rcx, [r13 + rcx*4 - 16]; add rcx, r13; jmp rcx   by the table's read
+    // e0..e3: add [rbx + 16], 3 / [rbx + 16] *= 5 / xor rsi / ror 7; next3: as next; jmp done
+    // table3, table, table2: the cases' offsets from table (table3's) or their own table
+    const code = '4c8d2ddd00000031f6488d0502000000ffe089f083e0034883f803772349634c85004c01e9ffe148'
+        + '830301eb134883030aeb0d486b1303488913eb0448832b07ffc681fec800000072c84c8d25a30000'
+        + '0031f6eb0089f083e0034883f803772149630c844c01e1ffe148317308eb124883430805eb0b48c1'
+        + '430803eb0448f75308ffc681fec800000072ca31f6488d0502000000ffe089f183e1034883f90377'
+        + '2749634c8df04c01e9ffe14883431003eb16486b53100548895310eb0b48317310eb0548c14b1007'
+        + 'ffc681fec800000072c4eb30c7ffffffceffffffd9ffffffdfffffff43ffffff49ffffff4fffffff'
+        + '58ffffff75ffffff7bffffff82ffffff89ffffff';
+    const cases = CORPUS.cases.slice(0, 3).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `hoisted switch ${i}`, code }));
+    for (const [budget, transfers] of /** @type {const} */ ([[7, true], [100000, true], [100000, false]]))
+    {
+        const { failures, exits, stats } = compare(cases, budget, transfers);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+        // The three tables read in every case, each loop one region with its
+        // cases: a jump whose table was not read left for regions of its
+        // cases, more regions over the three cases than the 9 these make.
+        assert.ok(stats.switches >= 3 * cases.length && stats.regions <= 3 * cases.length,
+            JSON.stringify(stats));
+        // Without the transfer every case the dispatch missed goes out to the
+        // host: 459 to 609 entries with the index taken after the read.
+        assert.ok(transfers || stats.entered <= 3 * cases.length, JSON.stringify(stats));
+    }
+});
+
 test('an access across into a closed page or past 4 GiB faults where the interpreter faults', ()=>{
     const base = CORPUS.cases[0];
     const end = CORPUS.dataAt + CORPUS.dataSize;

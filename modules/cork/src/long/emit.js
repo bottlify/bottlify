@@ -163,8 +163,8 @@ const LOCALS = [
     ...new Array(16).fill(ValType.i64), ValType.i64, ValType.i32,
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32,
     ValType.i64, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32, ValType.i32,
-    // Local 36 is unused, kept so the ones after it keep their numbers.
-    ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i32,
+    // Local 36 is a switch's index kept from before its table's read (`SWITCH`).
+    ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64,
     // XMM0..15 and three scratch vectors (simd.js), two f32s and two f64s.
     ...new Array(19).fill(ValType.v128), ValType.f32, ValType.f32, ValType.f64, ValType.f64,
     // The address the wasm call waiting for this one expects it to return to.
@@ -172,6 +172,8 @@ const LOCALS = [
     // The memory operands' addresses of an x87 run (`x87`).
     ValType.i32, ValType.i32, ValType.i32, ValType.i32,
 ];
+/** A switch's index, where the table's read writes its register over (`Switch.before`). */
+const SWITCH = 36;
 /** The float scratch locals, past the vectors. */
 const F32 = XMM + 19;
 /**
@@ -1999,15 +2001,16 @@ class BlockEmitter {
             return;
         }
         const stubOf = new Map(targets.map((target, stub)=>[target, stub]));
+        const held = which.before === undefined ? which.index : SWITCH;
         b.block();
         this.nest++;
-        b.localGet(which.index).i64const(BigInt(which.cases.length)).op(Op.i64ltu).op(Op.i32eqz)
+        b.localGet(held).i64const(BigInt(which.cases.length)).op(Op.i64ltu).op(Op.i32eqz)
             .unlikely().brIf(0);
         for (let stub = 0; stub < targets.length; stub++)
         {
             b.block();
         }
-        b.localGet(which.index).op(Op.i32wrap).brTable(
+        b.localGet(held).op(Op.i32wrap).brTable(
             which.cases.map(target=>stubOf.get(target) ?? targets.length), targets.length);
         targets.forEach((target, stub)=>{
             b.end();
@@ -3084,6 +3087,10 @@ function emitRegion(layout, helpers, region,
                 retired += run - i;
                 i = run - 1;
                 continue;
+            }
+            if (block.switch?.before === i)
+            {
+                b.localGet(block.switch.index).localSet(SWITCH);
             }
             e.live = liveAfter[index][retired] & ARITH;
             ending = e.instruction(list[i], retired);

@@ -140,14 +140,19 @@ function testedOf(instructions, index, upTo){
  * A block's switch, where its indirect jump goes through a table: the
  * register holding the index when the jump is made, and the case addresses
  * by index; null where it does not, or where the table cannot be read.
+ * `before`, where the table's read writes the index register over (Clang's
+ * `movsxd rcx, [b + rcx*4]`), is that read's place in the block: the index
+ * is the register as it was there, kept aside for the jump.
  *
- * @typedef {{ index: number, cases: number[] }} Switch
+ * @typedef {{ index: number, cases: number[], before?: number }} Switch
  *
  * @param {Block} block @param {Iterable<Block>} blocks  the region's blocks so far
  * @param {(address: number) => number} read  a byte of guest memory; throws where it cannot
+ * @param {((reg: number) => number) | null} [valueOf]  a register's value as the region is
+ *     formed, for a table base set before the block and outside the region
  * @returns {Switch | null}
  */
-export function switchCases(block, blocks, read){
+export function switchCases(block, blocks, read, valueOf = null){
     const { instructions } = block;
     const jump = instructions[instructions.length - 1];
     if (jump.op !== 'jmp')
@@ -190,7 +195,7 @@ export function switchCases(block, blocks, read){
             }
             return count > 0 ? { index, cases } : null;
         }
-        return relativeCases(block, blocks, word);
+        return relativeCases(block, blocks, word, valueOf);
     }
     catch {
         return null;
@@ -199,13 +204,14 @@ export function switchCases(block, blocks, read){
 
 /**
  * `jmp r` after `r = load32(b + i*4 + d) + b`, b a `lea b, [rip + x]` of the
- * block: the doubleword tables, signed (`movsxd`) or not (`mov`).
+ * block, or set before it: the doubleword tables, signed (`movsxd`) or not (`mov`).
  *
  * @param {Block} block @param {Iterable<Block>} blocks
  * @param {(at: number, size: number) => number} word
+ * @param {((reg: number) => number) | null} valueOf
  * @returns {Switch | null}
  */
-function relativeCases(block, blocks, word){
+function relativeCases(block, blocks, word, valueOf){
     const { instructions } = block;
     const jump = instructions[instructions.length - 1];
     const [target] = jump.operands;
@@ -248,15 +254,38 @@ function relativeCases(block, blocks, word){
     {
         lea--;
     }
-    const made = instructions[lea];
-    if (made?.op !== 'lea' || !made.operands[1].rip || made.operands[0].size !== 8)
+    /** @type {number | null} */
+    let baseValue;
+    if (lea >= 0)
     {
-        return null;
+        const made = instructions[lea];
+        if (made.op !== 'lea' || !made.operands[1].rip || made.operands[0].size !== 8)
+        {
+            return null;
+        }
+        baseValue = /** @type {number} */ (made.operands[1].disp) >>> 0;
     }
-    const baseValue = /** @type {number} */ (made.operands[1].disp) >>> 0;
-    // The index as the load used it stays where the jump is made.
+    else
+    {
+        // Set before the block, as Clang hoists it out of an interpreter's
+        // loop: the one lea of it among the region's blocks, else what the
+        // register holds as the region is formed. Either is a guess the
+        // dispatch checks, a case taken only where the jump goes to it.
+        const leas = new Set([...blocks].flatMap(one=>one.instructions)
+            .filter(one=>one.op === 'lea' && one.operands[0]?.kind === 'reg'
+                && one.operands[0].reg === base && one.operands[0].size === 8
+                && one.operands[1].rip)
+            .map(one=>/** @type {number} */ (one.operands[1].disp) >>> 0));
+        baseValue = leas.size === 1 ? [...leas][0] : valueOf?.(base) ?? null;
+        if (baseValue === null || baseValue < 0 || baseValue >= 2 ** 32)
+        {
+            return null;
+        }
+    }
+    // The index as the load used it stays where the jump is made, or is the
+    // load's own register, kept from before it.
     if (!instructions.slice(at + 1, -2).every(one=>leaves(one, base) && leaves(one, r)
-        && leaves(one, index)) || r === index)
+        && leaves(one, index)))
     {
         return null;
     }
@@ -275,5 +304,9 @@ function relativeCases(block, blocks, word){
         }
         cases.push(address);
     }
-    return count > 0 ? { index, cases } : null;
+    if (count === 0)
+    {
+        return null;
+    }
+    return r === index ? { index, cases, before: at } : { index, cases };
 }

@@ -548,7 +548,7 @@ export function createLongRunner(settings){
             ordered.splice(place(at), 0, at);
             size += endOf(block) - at;
             // A switch's cases join the region, its jump a branch among them.
-            const found = switchCases(block, blocks, fetch);
+            const found = switchCases(block, blocks, fetch, registerValue);
             if (found !== null)
             {
                 block.switch = found;
@@ -776,6 +776,14 @@ export function createLongRunner(settings){
             }
         }
     };
+
+    /**
+     * A register's value in the state block, as it stands while a region is
+     * formed: for a switch's table base set before its block (`switchCases`).
+     *
+     * @param {number} reg
+     */
+    const registerValue = reg=>Number(view.getBigUint64(layout.regs + reg * 8, true));
 
     /**
      * Decides an indirect call sampled `PREDICT_AFTER` times, as the 32-bit
