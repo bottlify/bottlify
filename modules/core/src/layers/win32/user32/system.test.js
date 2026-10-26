@@ -2839,6 +2839,10 @@ test('GetClipboardFormatName reads back a fixed and a registered name', ()=>{
     assert.equal(memory.bytes[OUT + 8], 0, 'and it is terminated');
 
     assert.equal(fns.GetClipboardFormatNameW.handler([0xffff, OUT, 20]), 0, 'no such format');
+    // Wine's clipboard test: a size of zero with no buffer answers zero and
+    // writes nothing -- there is no room even for the terminator.
+    assert.equal(fns.GetClipboardFormatNameA.handler([id, 0, 0]), 0);
+    assert.equal(fns.GetClipboardFormatNameW.handler([id, 0, 0]), 0);
     assert.deepEqual([fns.GetClipboardFormatNameA.argBytes, fns.GetClipboardFormatNameW.argBytes],
         [12, 12]);
 });

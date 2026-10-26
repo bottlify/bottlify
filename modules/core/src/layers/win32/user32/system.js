@@ -3847,7 +3847,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([format, name, count])=>{
                 const text = clipboardFormatName(format >>> 0);
-                if (text === null)
+                // No room, not even for the terminator: nothing is written,
+                // and a NULL buffer is what such a caller passes.
+                if (text === null || (count | 0) <= 0)
                 {
                     return 0;
                 }
@@ -3859,7 +3861,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([format, name, count])=>{
                 const text = clipboardFormatName(format >>> 0);
-                if (text === null)
+                if (text === null || (count | 0) <= 0)
                 {
                     return 0;
                 }
