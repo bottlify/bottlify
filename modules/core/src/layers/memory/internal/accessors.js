@@ -274,17 +274,19 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         {
             return;
         }
+        // Refused before anything is made: a buffer the length of a span
+        // that is not there -- a program's memset of a stray pointer and
+        // size -- is gigabytes the host would allocate only to throw away.
+        regions.assert(address, length, 'write');
         // An executable target has the emulator's compiler to tell, and the
         // write path is what tells it. That is a guest code page rather than a
         // heap block, so it is rare, and a buffer there costs nothing worth
-        // saving. An unmapped address lands here too, and is refused by the
-        // same assertion a write would have made.
+        // saving.
         if (!raw.fillData || regions.executable(address))
         {
             write(address, new Uint8Array(length).fill(value & 0xff));
             return;
         }
-        regions.assert(address, length, 'write');
         if (charge)
         {
             // Once for the range, as the equivalent write would be charged.

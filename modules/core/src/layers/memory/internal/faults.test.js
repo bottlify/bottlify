@@ -71,3 +71,11 @@ test('a string longer than the limit is unterminated; one cut by its region is a
     assert.equal(wideLong.code, UNTERMINATED);
     assert.equal(caught(()=>accessors.readCString(0, 16)).code, GUEST_ACCESS);
 });
+
+test('a fill of a span that is not there is refused before a buffer is made of it', ()=>{
+    const { accessors } = setup();
+    const started = performance.now();
+    const refused = caught(()=>accessors.fillBytes(0xdeadbeef, 0, 0xdeadbeef));
+    assert.deepEqual([refused.code, refused.mode], [GUEST_ACCESS, 'write']);
+    assert.ok(performance.now() - started < 100, 'no 3.7 GB buffer on the way');
+});
