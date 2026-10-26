@@ -39,12 +39,13 @@ const align = (value, to)=>Math.ceil(value / to) * to;
  *        options.resolveImport
  *   Returns the guest address to write into the IAT, or null if unavailable.
  * @param {number} [options.base]  Load address; defaults to the image's own ImageBase.
+ * @param {boolean} [options.wide]  A 64-bit (PE32+) image is taken, not refused.
  * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
  *        [options.missing]  Where a call to an import nothing claims should land.
  * @returns {LoadedImage}
  */
-export function buildImage(file, { resolveImport, base, missing }){
-    const mapped = mapImage(file, base);
+export function buildImage(file, { resolveImport, base, missing, wide = false }){
+    const mapped = mapImage(file, base, { wide });
     return { ...mapped, unresolved: bindImports(mapped, resolveImport, missing) };
 }
 
@@ -60,11 +61,12 @@ export function buildImage(file, { resolveImport, base, missing }){
  *
  * @param {Uint8Array} file
  * @param {number} [base]
+ * @param {{ wide?: boolean }} [options]  `wide`: a 64-bit (PE32+) image is taken
  * @returns {{ base: number, entryPoint: number, bytes: Uint8Array, file: Uint8Array,
  *             image: import('./pe.js').PeImage }}
  */
-export function mapImage(file, base){
-    const image = parsePe(file);
+export function mapImage(file, base, { wide = false } = {}){
+    const image = parsePe(file, { wide });
     const loadBase = base ?? image.imageBase;
 
     if (loadBase !== image.imageBase && !image.relocatable)
@@ -138,6 +140,11 @@ export function bindImports({ bytes, file, image }, resolveImport, missing){
     /** @type {string[]} */
     const unresolved = [];
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    // A PE32+ slot is a pointer eight bytes wide; every address here is below 4 GiB.
+    /** @param {number} at @param {number} address */
+    const setSlot = (at, address)=>(image.bits === 64
+        ? view.setBigUint64(at, BigInt(address >>> 0), true)
+        : view.setUint32(at, address >>> 0, true));
 
     for (const { dll, entries } of readImports(file, image))
     {
@@ -150,11 +157,11 @@ export function bindImports({ bytes, file, image }, resolveImport, missing){
                 const stub = missing?.(dll, entry.name, entry.ordinal) ?? null;
                 if (stub !== null)
                 {
-                    view.setUint32(entry.iatRva, stub >>> 0, true);
+                    setSlot(entry.iatRva, stub);
                 }
                 continue;
             }
-            view.setUint32(entry.iatRva, address >>> 0, true);
+            setSlot(entry.iatRva, address);
         }
     }
     return unresolved;

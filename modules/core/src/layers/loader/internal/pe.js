@@ -5,7 +5,7 @@
  */
 
 /**
- * PE32 parsing: headers, sections, imports, base relocations.
+ * PE32 and PE32+ parsing: headers, sections, imports, base relocations.
  *
  * Pure functions over a byte array — nothing here touches guest memory. Mapping
  * an image is a separate step (image.js) so the parsing can be tested against a
@@ -15,7 +15,11 @@
 const DOS_MAGIC = 0x5a4d; // "MZ"
 const PE_SIGNATURE = 0x00004550; // "PE\0\0"
 const MACHINE_I386 = 0x014c;
+const MACHINE_AMD64 = 0x8664;
 const PE32_MAGIC = 0x010b;
+const PE32_PLUS_MAGIC = 0x020b;
+/** The COFF characteristic that says an image's relocations were taken out. */
+const IMAGE_FILE_RELOCS_STRIPPED = 0x0001;
 
 /** Data directory indices we care about. */
 export const DIR_EXPORT = 0;
@@ -44,6 +48,7 @@ const SECTION_MEM_WRITE = 0x80000000;
 
 /**
  * @typedef {Object} PeImage
+ * @property {32 | 64} bits            PE32 (i386) or PE32+ (x86-64).
  * @property {number} imageBase        Preferred load address.
  * @property {number} entryPointRva
  * @property {number} timeDateStamp    The linker's build timestamp, from the COFF header.
@@ -62,12 +67,15 @@ const SECTION_MEM_WRITE = 0x80000000;
  */
 
 /**
- * Parses the headers of a 32-bit PE image.
+ * Parses the headers of a PE image: a 32-bit one, or with `wide` a 64-bit
+ * (PE32+, x86-64) one too. Without it a 64-bit image is refused as before, so
+ * nothing that loads into a 32-bit process takes one.
  *
  * @param {Uint8Array} bytes
+ * @param {{ wide?: boolean }} [options]
  * @returns {PeImage}
  */
-export function parsePe(bytes){
+export function parsePe(bytes, { wide = false } = {}){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
     if (bytes.length < 0x40 || view.getUint16(0, true) !== DOS_MAGIC)
@@ -82,25 +90,34 @@ export function parsePe(bytes){
 
     const coff = peOffset + 4;
     const machine = view.getUint16(coff, true);
-    if (machine !== MACHINE_I386)
+    if (machine !== MACHINE_I386 && !(wide && machine === MACHINE_AMD64))
     {
-        throw new Error(`unsupported machine 0x${machine.toString(16)}: only i386 is supported`);
+        throw new Error(`unsupported machine 0x${machine.toString(16)}: only i386`
+            + `${wide ? ' and x86-64 are' : ' is'} supported`);
     }
+    const bits = machine === MACHINE_AMD64 ? 64 : 32;
     const sectionCount = view.getUint16(coff + 2, true);
     const optionalSize = view.getUint16(coff + 16, true);
 
     const optional = coff + 20;
-    if (view.getUint16(optional, true) !== PE32_MAGIC)
+    if (view.getUint16(optional, true) !== (bits === 64 ? PE32_PLUS_MAGIC : PE32_MAGIC))
     {
-        throw new Error('unsupported image: only PE32 (32-bit) is supported');
+        throw new Error(`unsupported image: a ${bits === 64 ? 'x86-64 one must be PE32+'
+            : 'i386 one must be PE32'}`);
     }
+    // PE32+ drops BaseOfData and widens ImageBase and the four stack and heap
+    // sizes to eight bytes, which moves everything from the stack reserve on.
+    /** @param {number} at a field PE32 has four bytes wide and PE32+ eight */
+    const wideField = at=>(bits === 64 ? Number(view.getBigUint64(at, true))
+        : view.getUint32(at, true));
+    const tail = bits === 64 ? 16 : 0;
 
-    const directoryCount = view.getUint32(optional + 92, true);
+    const directoryCount = view.getUint32(optional + 92 + tail, true);
     /** @type {{ address: number, size: number }[]} */
     const directories = [];
     for (let i = 0; i < directoryCount; i++)
     {
-        const at = optional + 96 + i * 8;
+        const at = optional + 96 + tail + i * 8;
         directories.push({ address: view.getUint32(at, true), size: view.getUint32(at + 4, true) });
     }
 
@@ -124,8 +141,10 @@ export function parsePe(bytes){
     }
 
     const relocDirectory = directories[DIR_BASERELOC];
+    const characteristics = view.getUint16(coff + 18, true);
     return {
-        imageBase: view.getUint32(optional + 28, true),
+        bits,
+        imageBase: bits === 64 ? wideField(optional + 24) : view.getUint32(optional + 28, true),
         entryPointRva: view.getUint32(optional + 16, true),
         // Fourth COFF field, right after the two the machine check already
         // read: machine (2 bytes), section count (2), then this.
@@ -138,12 +157,15 @@ export function parsePe(bytes){
         // built against a megabyte will use a megabyte, and giving it less
         // fails as a read below the mapped stack rather than as a stack
         // overflow, somewhere unrelated to the code that asked for the space.
-        stackReserve: view.getUint32(optional + 72, true),
-        stackCommit: view.getUint32(optional + 76, true),
+        stackReserve: wideField(optional + 72),
+        stackCommit: wideField(optional + 72 + (bits === 64 ? 8 : 4)),
         // Plenty of pre-2000 executables ship without a relocation directory and
         // simply cannot be moved: every absolute address in them assumes ImageBase.
-        relocatable: relocDirectory !== undefined && relocDirectory.size > 0,
-        library: (view.getUint16(coff + 18, true) & IMAGE_FILE_DLL) !== 0,
+        // An x86-64 image addresses its own code and data relative to RIP and may
+        // need no fixup at all: it is movable unless its relocations were stripped.
+        relocatable: relocDirectory !== undefined && relocDirectory.size > 0
+            || bits === 64 && (characteristics & IMAGE_FILE_RELOCS_STRIPPED) === 0,
+        library: (characteristics & IMAGE_FILE_DLL) !== 0,
         sections,
         directories,
     };
@@ -184,6 +206,16 @@ export function readImports(bytes, image){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const fileOffset = (/** @type {number} */ rva)=>rvaToFileOffset(image, rva);
 
+    // A thunk is a pointer: eight bytes in PE32+, its ordinal flag the top bit.
+    const width = image.bits === 64 ? 8 : 4;
+    /** @param {number} at @returns {{ zero: boolean, ordinal: boolean, low: number }} */
+    const thunkAt = at=>{
+        const low = view.getUint32(at, true);
+        const high = width === 8 ? view.getUint32(at + 4, true) : 0;
+        return width === 8
+            ? { zero: low === 0 && high === 0, ordinal: (high & 0x80000000) !== 0, low }
+            : { zero: low === 0, ordinal: (low & 0x80000000) !== 0, low };
+    };
     /** @type {ImportedDll[]} */
     const result = [];
     for (let descriptor = fileOffset(directory.address); ; descriptor += 20)
@@ -201,22 +233,23 @@ export function readImports(bytes, image){
         const thunkRva = iltRva !== 0 ? iltRva : iatRva;
         for (let i = 0; ; i++)
         {
-            const thunk = view.getUint32(fileOffset(thunkRva + i * 4), true);
-            if (thunk === 0)
+            const thunk = thunkAt(fileOffset(thunkRva + i * width));
+            if (thunk.zero)
             {
                 break;
             }
-            if ((thunk & 0x80000000) !== 0)
+            if (thunk.ordinal)
             {
-                entries.push({ name: null, ordinal: thunk & 0xffff, iatRva: iatRva + i * 4 });
+                entries.push({ name: null, ordinal: thunk.low & 0xffff,
+                    iatRva: iatRva + i * width });
             }
             else
             {
                 // IMAGE_IMPORT_BY_NAME: a hint word followed by a zero-terminated name.
                 entries.push({
-                    name: readCString(bytes, fileOffset(thunk) + 2),
+                    name: readCString(bytes, fileOffset(thunk.low & 0x7fffffff) + 2),
                     ordinal: null,
-                    iatRva: iatRva + i * 4,
+                    iatRva: iatRva + i * width,
                 });
             }
         }
@@ -404,6 +437,10 @@ export function applyRelocations(mapped, image, delta){
         return 0;
     }
     const directory = image.directories[DIR_BASERELOC];
+    if ((!directory || directory.size === 0) && image.bits === 64 && image.relocatable)
+    {
+        return 0;
+    }
     if (!directory || directory.size === 0)
     {
         throw new Error(
@@ -433,12 +470,22 @@ export function applyRelocations(mapped, image, delta){
             {
                 continue; // IMAGE_REL_BASED_ABSOLUTE: padding, skip
             }
-            if (type !== 3)
-            {
-                throw new Error(`unsupported relocation type ${type}`); // only HIGHLOW on i386
-            }
             const target = pageRva + offset;
-            view.setUint32(target, view.getUint32(target, true) + delta >>> 0, true);
+            if (type === 3)
+            {
+                // IMAGE_REL_BASED_HIGHLOW: a 32-bit address.
+                view.setUint32(target, view.getUint32(target, true) + delta >>> 0, true);
+            }
+            else if (type === 10)
+            {
+                // IMAGE_REL_BASED_DIR64: a 64-bit one.
+                view.setBigUint64(target, BigInt.asUintN(64,
+                    view.getBigUint64(target, true) + BigInt(delta)), true);
+            }
+            else
+            {
+                throw new Error(`unsupported relocation type ${type}`);
+            }
             applied++;
         }
         block += blockSize;

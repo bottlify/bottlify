@@ -306,3 +306,70 @@ test('an export directory the image cannot hold is refused with its reason, not 
     assert.equal(fixed.refused, null);
     assert.deepEqual(fixed.exports.map(entry=>entry.name), ['Alpha']);
 });
+
+const FIXTURE64 = new URL('../../../../test/fixtures/hello64.exe', import.meta.url);
+const file64 = new Uint8Array(readFileSync(FIXTURE64));
+
+test('an x86-64 image is refused unless the caller takes 64-bit images', ()=>{
+    // Whatever loads into a 32-bit process keeps refusing one.
+    assert.throws(()=>parsePe(file64), /unsupported machine 0x8664/);
+    assert.throws(()=>mapImage(file64), /unsupported machine 0x8664/);
+});
+
+test('headers of an x86-64 console executable, from its PE32+ fields', ()=>{
+    const image = parsePe(file64, { wide: true });
+    assert.equal(image.bits, 64);
+    assert.equal(parsePe(file, { wide: true }).bits, 32);
+    // Eight bytes wide in PE32+, and above 4 GiB by the linker's default.
+    assert.equal(image.imageBase, 0x140000000);
+    assert.equal(image.subsystem, 3);
+    assert.equal(image.entryPointRva, 0x1000);
+    assert.equal(image.stackReserve, 0x100000);
+    assert.equal(image.stackCommit, 0x1000);
+    // No relocation directory, nothing stripped: code that addresses itself
+    // relative to RIP moves with no fixup at all.
+    assert.equal(image.directories[5]?.size ?? 0, 0);
+    assert.equal(image.relocatable, true);
+    const delta = 0x400000 - 0x140000000;
+    assert.equal(applyRelocations(new Uint8Array(image.sizeOfImage), image, delta), 0);
+});
+
+test('an x86-64 image imports through eight-byte thunks and binds eight-byte slots', ()=>{
+    const image = parsePe(file64, { wide: true });
+    const imports = readImports(file64, image);
+    assert.deepEqual(imports.map(({ dll, entries })=>[dll, entries.map(entry=>entry.name)]),
+        [['KERNEL32.dll', ['ExitProcess', 'GetStdHandle', 'WriteFile']]]);
+    const [first, second, third] = imports[0].entries;
+    assert.equal(second.iatRva - first.iatRva, 8);
+    assert.equal(third.iatRva - second.iatRva, 8);
+
+    const stubs = { ExitProcess: 0x80000030, GetStdHandle: 0x00100010, WriteFile: 0x00100020 };
+    const loaded = buildImage(file64, { wide: true, base: 0x400000,
+        resolveImport: (dll, name)=>stubs[/** @type {keyof typeof stubs} */ (name)] ?? null });
+    assert.equal(loaded.base, 0x400000);
+    assert.equal(loaded.entryPoint, 0x401000);
+    assert.deepEqual(loaded.unresolved, []);
+    const view = new DataView(loaded.bytes.buffer);
+    // Zero-extended: an address at or past 2 GiB is not sign-extended into the high half.
+    assert.equal(view.getBigUint64(first.iatRva, true), 0x80000030n);
+    assert.equal(view.getBigUint64(second.iatRva, true), 0x00100010n);
+});
+
+test('DIR64 relocations move eight-byte addresses by a delta that crosses 4 GiB', ()=>{
+    // One block for page 0x1000: a DIR64 at +0x10, an ABSOLUTE pad, a HIGHLOW at +0x20.
+    const mapped = new Uint8Array(0x3000);
+    const view = new DataView(mapped.buffer);
+    view.setBigUint64(0x1010, 0x140001234n, true);
+    view.setUint32(0x1020, 0x00401000, true);
+    view.setUint32(0x2000, 0x1000, true);
+    view.setUint32(0x2004, 14, true);
+    view.setUint16(0x2008, 10 << 12 | 0x010, true);
+    view.setUint16(0x200a, 0, true);
+    view.setUint16(0x200c, 3 << 12 | 0x020, true);
+    const image = /** @type {import('./pe.js').PeImage} */ ({ ...parsePe(file64, { wide: true }),
+        directories: [{ address: 0, size: 0 }, { address: 0, size: 0 }, { address: 0, size: 0 },
+            { address: 0, size: 0 }, { address: 0, size: 0 }, { address: 0x2000, size: 14 }] });
+    assert.equal(applyRelocations(mapped, image, 0x400000 - 0x140000000), 2);
+    assert.equal(view.getBigUint64(0x1010, true), 0x401234n);
+    assert.equal(view.getUint32(0x1020, true), (0x00401000 + 0x400000 - 0x140000000) >>> 0);
+});

@@ -26,7 +26,9 @@ import { fileURLToPath } from 'node:url';
  * The executables are committed, so a test run needs none of this: run it
  * after changing a source, with clang, lld-link and llvm-dlltool on the PATH.
  * `/Brepro` keeps the output byte-identical from one build to the next. Named
- * fixtures alone are built when names are given.
+ * fixtures alone are built when names are given. An x86-64 fixture is built
+ * for x86_64-pc-windows-msvc against import libraries of its own, at the
+ * linker's default base above 4 GiB, which the loader moves below it.
  *
  *     node scripts/build-fixtures.mjs [name...]
  */
@@ -136,6 +138,7 @@ const PROGRAMS = [
     { name: 'windows', source: 'windows.c', cxx: false },
     { name: 'overlap', source: 'overlap.c', cxx: false },
     { name: 'effect', source: 'effect.c', cxx: false },
+    { name: 'hello64', source: 'hello64.c', cxx: false, x64: true },
 ];
 
 /** The fixtures named on the command line, or every one. */
@@ -168,8 +171,16 @@ try
 {
     /** @type {string[]} */
     const libraries = [];
+    /** @type {string[]} */
+    const libraries64 = [];
     for (const [dll, { undecorated = [], decorated = [] }] of Object.entries(IMPORTS))
     {
+        // x64 names carry no stdcall suffix: one convention, undecorated.
+        const names64 = [...undecorated, ...decorated].map(name=>name.replace(/@\d+/, ''));
+        const base64 = join(work, `${dll}-x64`);
+        await writeFile(`${base64}.def`, `LIBRARY ${dll}\nEXPORTS\n${names64.join('\n')}\n`);
+        run('llvm-dlltool', ['-m', 'i386:x86-64', '-d', `${base64}.def`, '-l', `${base64}.lib`]);
+        libraries64.push(`${base64}.lib`);
         for (const [kind, names, kill] of /** @type {const} */ ([
             ['undecorated', undecorated, true], ['decorated', decorated, false],
         ]))
@@ -190,9 +201,20 @@ try
     run('clang', ['--target=i686-pc-windows-msvc', '-c', join(SOURCES, 'support.c'),
         '-o', support]);
 
-    for (const { name, source, cxx } of chosen)
+    for (const { name, source, cxx, x64 } of chosen)
     {
         const object = join(work, `${name}.obj`);
+        if (x64)
+        {
+            run('clang', ['--target=x86_64-pc-windows-msvc', '-O2', '-fms-extensions',
+                '-fno-stack-protector', '-mno-stack-arg-probe', '-c', join(SOURCES, source),
+                '-o', object]);
+            run('lld-link', ['/nologo', '/entry:mainCRTStartup', '/subsystem:console',
+                '/nodefaultlib', '/Brepro', `/out:${join(FIXTURES, `${name}.exe`)}`, object,
+                ...libraries64]);
+            console.log(`test/fixtures/${name}.exe`);
+            continue;
+        }
         run('clang', [
             '--target=i686-pc-windows-msvc', '-O1', '-fms-extensions',
             ...cxx ? ['-fexceptions', '-fcxx-exceptions', '-fno-rtti'] : [],
