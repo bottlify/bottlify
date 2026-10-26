@@ -1142,6 +1142,7 @@ export function createMsvcrtFunctions(host){
                 readCString: host.readCString,
                 files: host.files,
                 errno,
+                doserrno: code=>globals.set('doserrno', code),
                 divergence: host.divergence,
                 setRegisters: host.setRegisters,
             }, descriptors)

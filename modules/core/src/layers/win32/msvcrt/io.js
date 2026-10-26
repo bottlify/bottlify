@@ -29,11 +29,14 @@ import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from '../kernel32/console.
 import { decodeAnsi } from '../kernel32/locale.js';
 import { EACCES, EBADF, EEXIST, EINVAL, EMFILE, ENOENT, ENOSPC } from './globals.js';
 import {
-    O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf, foldUnits, markIn,
-    markOf, textOfUnits, unitsOf, unmarkedEncodingOf, wideStringAt,
+    O_U16TEXT, O_U8TEXT, O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf,
+    foldUnits, markIn, markOf, textOfUnits, unitsOf, unmarkedEncodingOf, wideStringAt,
 } from './widetext.js';
 
 /** `_open` flags, at msvcrt's values (fcntl.h). */
+/** The system error a read or write without the access answers. */
+const ERROR_ACCESS_DENIED = 5;
+
 const O_WRONLY = 0x0001;
 const O_RDWR = 0x0002;
 const O_ACCMODE = 0x0003;
@@ -69,13 +72,23 @@ const INVALID_HANDLE_VALUE = -1;
  * section.
  */
 const IOINFO = Object.freeze({
-    BLOCK: 32, SIZE: 36, BLOCKS: MAX_DESCRIPTORS / 32, HANDLE: 0, WXFLAG: 4,
+    BLOCK: 32, SIZE: 36, BLOCKS: MAX_DESCRIPTORS / 32, HANDLE: 0, WXFLAG: 4, EXFLAG: 8,
 });
 /** `wxflag`'s bits: open, appending, a character device, text mode. */
 const WX_OPEN = 0x01;
 const WX_APPEND = 0x20;
 const WX_TTY = 0x40;
 const WX_TEXT = 0x80;
+/**
+ * `exflag`'s bits: the Unicode translation a descriptor was opened in --
+ * UTF-8, UTF-16, and with `_O_WTEXT` the mark of one still to be told from
+ * the file -- and that its lock was made, which every open does. They stay
+ * when the descriptor closes.
+ */
+const EF_UTF8 = 0x01;
+const EF_UTF16 = 0x02;
+const EF_CRIT_INIT = 0x04;
+const EF_UNK_UNICODE = 0x08;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -312,8 +325,11 @@ export function createDescriptors(host){
     table.set(1, onConsole(HANDLE_STDOUT, { text: true }));
     table.set(2, onConsole(HANDLE_STDERR, { text: true }));
 
+    /** Each number's `exflag`, kept past its descriptor's close. @type {Map<number, number>} */
+    const exflags = new Map();
+
     /**
-     * A descriptor's `__pioinfo` entry, its handle and `wxflag`: a number not
+     * A descriptor's `__pioinfo` entry, its handle, `wxflag` and `exflag`: a number not
      * open has no handle. A file's handle is made only when one is asked
      * for, so until then the entry holds none, though `wxflag` says it is
      * open.
@@ -322,9 +338,17 @@ export function createDescriptors(host){
      */
     const entryOf = fd=>{
         const descriptor = table.get(fd);
-        const bytes = new Uint8Array(IOINFO.WXFLAG + 1);
-        new DataView(bytes.buffer).setInt32(IOINFO.HANDLE,
-            descriptor?.handle || INVALID_HANDLE_VALUE, true);
+        const bytes = new Uint8Array(IOINFO.EXFLAG + 4);
+        const view = new DataView(bytes.buffer);
+        view.setInt32(IOINFO.HANDLE, descriptor?.handle || INVALID_HANDLE_VALUE, true);
+        if (descriptor)
+        {
+            const unicode = descriptor.unicode ?? 0;
+            exflags.set(fd, EF_CRIT_INIT | (unicode === O_U8TEXT ? EF_UTF8 : 0)
+                | (unicode === O_U16TEXT || unicode === O_WTEXT ? EF_UTF16 : 0)
+                | (unicode === O_WTEXT ? EF_UNK_UNICODE : 0));
+        }
+        view.setInt32(IOINFO.EXFLAG, exflags.get(fd) ?? 0, true);
         bytes[IOINFO.WXFLAG] = !descriptor ? 0 : WX_OPEN | (descriptor.append ? WX_APPEND : 0)
             | (descriptor.console !== undefined ? WX_TTY : 0) | (descriptor.text ? WX_TEXT : 0);
         return bytes;
@@ -857,6 +881,7 @@ export function createDescriptors(host){
  * @property {any} files  The volume: stat and currentDirectory, besides what
  *           the descriptors use.
  * @property {(code: number) => void} [errno]
+ * @property {(code: number) => void} [doserrno]  Where the system's reason goes.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call refuses what real Windows would have done.
  * @property {(values: Record<string, number>) => void} [setRegisters]
@@ -878,6 +903,21 @@ export function createIoFunctions(host, descriptors){
      * @param {(args: number[]) => number | Promise<number>} handler
      */
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
+
+    /**
+     * A read or a write the descriptor refuses: EBADF, and for one open the
+     * other way the system's own reason in `_doserrno`, ERROR_ACCESS_DENIED,
+     * as ReadFile on a handle without the access answers.
+     *
+     * @param {Descriptor | undefined | null} descriptor
+     */
+    const refuse = descriptor=>{
+        fail(EBADF);
+        if (descriptor)
+        {
+            host.doserrno?.(ERROR_ACCESS_DENIED);
+        }
+    };
 
     /** @param {number} milliseconds */
     const seconds = milliseconds=>Math.floor((milliseconds ?? 0) / 1000) >>> 0;
@@ -1262,7 +1302,7 @@ export function createIoFunctions(host, descriptors){
             const descriptor = descriptors.get(fd | 0);
             if (!descriptor || !descriptor.read)
             {
-                fail(EBADF);
+                refuse(descriptor);
                 return -1;
             }
             const wanted = count >>> 0;
@@ -1333,7 +1373,7 @@ export function createIoFunctions(host, descriptors){
             const descriptor = descriptors.get(fd | 0);
             if (!descriptor || !descriptor.write)
             {
-                fail(EBADF);
+                refuse(descriptor);
                 return -1;
             }
             const wanted = count >>> 0;

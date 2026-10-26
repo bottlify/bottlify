@@ -860,6 +860,19 @@ test('__pioinfo holds each descriptor of its first block as a program reads it i
         'no handle until one is asked for');
     const asked = fns._get_osfhandle.handler([opened]);
     assert.deepEqual(entry(opened), { handle: asked, wxflag: WX_OPEN | WX_TEXT });
+
+    // exflag: the Unicode translation and the lock made, kept past the close.
+    /** @param {number} fd */
+    const exflag = fd=>view.getInt32(TABLE + 256 + fd * 36 + 8, true);
+    const unicode = fns._open.handler([memory.put('C:\\game\\info.tst'),
+        O_CREAT | O_TRUNC | O_WRONLY | O_WTEXT, 0]);
+    assert.equal(exflag(unicode), 0x02 | 0x04 | 0x08, 'EF_UTF16 | EF_CRIT_INIT | EF_UNK_UNICODE');
+    assert.equal(fns._close.handler([unicode]), 0);
+    assert.equal(exflag(unicode), 0x0e);
+    assert.equal(entry(unicode).wxflag, 0);
+    assert.equal(exflag(unicode + 4), 0, 'a number never opened');
+    const utf8 = fns._open.handler([memory.put('C:\\game\\info.tst'), O_RDONLY | O_U8TEXT, 0]);
+    assert.equal(exflag(utf8), 0x01 | 0x04);
 });
 
 test('_wopen, _sopen and _wsopen open as _open does, the share flag ignored', ()=>{
@@ -930,4 +943,24 @@ test('_creat makes or truncates a file for reading and writing, in _fmode\'s tra
     }
     const { memory, fns } = build();
     assert.ok(fns._wcreat.handler([memory.putWide('C:\\game\\new.tst'), 0]) > 2);
+});
+
+test('a read or write the descriptor is not open for leaves ERROR_ACCESS_DENIED in _doserrno', ()=>{
+    // Wine's msvcrt test_fileops: read on a write-only descriptor, write on a read-only one.
+    const memory = fakeMemory();
+    const files = fakeVolume({ 'C:\\game\\data.bin': bytesOf('abc') });
+    /** @type {number[]} */
+    const reasons = [];
+    const descriptors = createDescriptors({ files, errno: ()=>{} });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({
+        ...memory, files, errno: ()=>{}, doserrno: code=>reasons.push(code),
+    }, descriptors));
+    const path = memory.put('C:\\game\\data.bin');
+    const writeOnly = fns._open.handler([path, O_WRONLY, 0]);
+    const readOnly = fns._open.handler([path, O_RDONLY, 0]);
+    const scratch = memory.allocate(4);
+    assert.equal(fns._read.handler([writeOnly, scratch, 1]), -1);
+    assert.equal(fns._write.handler([readOnly, scratch, 1]), -1);
+    assert.equal(fns._read.handler([77, scratch, 1]), -1);
+    assert.deepEqual(reasons, [5, 5], 'a number not open leaves it alone');
 });
