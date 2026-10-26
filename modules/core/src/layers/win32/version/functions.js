@@ -216,6 +216,7 @@ export function systemVersionResource(
 }
 
 const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
 
@@ -435,7 +436,22 @@ export function createVersionFunctions(host){
      * @param {string} path @param {(code: number) => void} fail
      * @returns {Uint8Array | null | Promise<Uint8Array | null>}
      */
-    const resourceFor = (path, fail)=>after(host.versionInfo?.(path) ?? null, resource=>{
+    const resourceFor = (path, fail)=>{
+        if (path === '')
+        {
+            fail(ERROR_PATH_NOT_FOUND);
+            return null;
+        }
+        return resourceOf(path, fail);
+    };
+
+    /**
+     * The same, for a path that names something.
+     *
+     * @param {string} path @param {(code: number) => void} fail
+     * @returns {Uint8Array | null | Promise<Uint8Array | null>}
+     */
+    const resourceOf = (path, fail)=>after(host.versionInfo?.(path) ?? null, resource=>{
         if (resource)
         {
             return resource;
@@ -450,10 +466,35 @@ export function createVersionFunctions(host){
         return null;
     });
 
+    /**
+     * The entry at a path, or null when the path names nothing the volume
+     * has -- a drive that is not there among them.
+     *
+     * @param {string} path
+     */
+    const statOrNull = path=>{
+        try
+        {
+            return host.files?.stat(path) ?? null;
+        }
+        catch (e){
+            if (typeof (/** @type {{ code?: unknown }} */ (e)?.code) === 'string'
+                && /** @type {{ code: string }} */ (e).code !== 'GUEST_ACCESS')
+            {
+                return null;
+            }
+            throw e;
+        }
+    };
+
+    // A NULL string is the empty one: a path that names no file, the root
+    // of a version block.
     /** @param {number} address */
-    const narrow = address=>host.readCString(address >>> 0, MAX_PATH);
+    const narrow = address=>((address >>> 0) === 0 ? ''
+        : host.readCString(address >>> 0, MAX_PATH));
     /** @param {number} address */
-    const wide = address=>host.readWideString?.(address >>> 0, MAX_PATH) ?? '';
+    const wide = address=>((address >>> 0) === 0 ? ''
+        : host.readWideString?.(address >>> 0, MAX_PATH) ?? '');
 
     /**
      * GetFileVersionInfoSize, for either spelling: the block and the room its
@@ -637,11 +678,9 @@ export function createVersionFunctions(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([flags, fileName, , appDir, curDir, curDirLen, destDir, destDirLen])=>{
-                const leaf = host.readCString(fileName >>> 0, MAX_PATH);
+                const leaf = narrow(fileName);
                 const shared = ((flags >>> 0) & VFFF_ISSHAREDFILE) !== 0;
-                const destination = shared
-                    ? SYSTEM_DIRECTORY
-                    : host.readCString(appDir >>> 0, MAX_PATH);
+                const destination = shared ? SYSTEM_DIRECTORY : narrow(appDir);
                 const candidates = shared ? [destination, WINDOWS_DIRECTORY] : [destination];
                 const current = candidates.find(
                     dir=>host.files?.stat(joinPath(dir, leaf))?.exists) ?? '';
@@ -750,12 +789,14 @@ export function createVersionFunctions(host){
                     return VIF_CANNOTCREATE;
                 }
                 /** @param {number} dir @param {number} name */
-                const join = (dir, name)=>joinPath(
-                    host.readCString(dir >>> 0, MAX_PATH), host.readCString(name >>> 0, MAX_PATH));
+                const join = (dir, name)=>joinPath(narrow(dir), narrow(name));
                 const source = join(srcDir, srcName);
                 const destination = join(destDir, destName);
 
-                const stat = host.files.stat(source);
+                // No name, or a drive that is not there, is a source that
+                // cannot be read.
+                const stat = (srcName >>> 0) === 0 || (destName >>> 0) === 0 ? null
+                    : statOrNull(source);
                 if (!stat || !stat.exists || stat.isDirectory)
                 {
                     return VIF_CANNOTREADSRC;
