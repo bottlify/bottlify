@@ -333,7 +333,7 @@ function pageRoom(address, size, down){
         : offset > 0x1000 - size ? 0 : (offset / size | 0) + 1;
 }
 
-class BlockMemory {
+export class BlockMemory {
     /**
      * @param {WebAssembly.Memory} memory
      * @param {import('../../core/src/layers/cpu/engine.js').StateLayout} layout

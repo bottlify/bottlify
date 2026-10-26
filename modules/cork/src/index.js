@@ -32,9 +32,10 @@ import { replaySlice } from './testing/differential.js';
 export {
     ownLayout, executorLayout, executorBytes, sharedLayout, basesOf, pagesFor, layoutId, Tables,
     tablesSize, blockFields, LOW_STATE,
-    STATE_BLOCK_SIZE, PAGE,
+    STATE_BLOCK_SIZE, STATE_BLOCK_SIZE_64, stateBlockSize, PAGE,
 } from './runtime/layout.js';
 export { interpret, blockState } from './interp.js';
+export { interpret64, blockState64 } from './interp64.js';
 export {
     createWasmInterpreter, WasmExit, WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS,
     WASM_INTERPRETER_STATICS_AT, HOT_SLOTS,

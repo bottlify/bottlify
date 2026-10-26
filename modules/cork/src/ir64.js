@@ -66,6 +66,10 @@ const signOf = size=>1n << BigInt(size * 8 - 1);
  * @property {Memory64} memory
  * @property {boolean} halted
  * @property {number} retired
+ * @property {number[]} trapped    the values written to the trap port, in order
+ * @property {{ trapPort: number, read: (port: number, size: number) => number,
+ *     write: (port: number, size: number, value: number) => void }} [ports]
+ *     the machine's I/O ports; absent, every `out` is a trap-port write
  * @property {() => bigint} [rdtsc]
  * @property {{ processors?: number, processor?: number }} [layout]
  * @property {number} [processor]
@@ -83,7 +87,7 @@ export function createState64(memory, { rip = 0n, rsp = 0n, fsBase = 0n, gsBase 
     const r = new BigUint64Array(16);
     r[4] = rsp;
     return { r, rip, rflags: IF | 2, fsBase, gsBase, xmm: new Uint32Array(64), mxcsr: 0x1f80,
-        memory, halted: false, retired: 0 };
+        memory, halted: false, retired: 0, trapped: [] };
 }
 
 /** @param {bigint} value */
@@ -718,6 +722,27 @@ export function evaluate64(instruction, state){
             throw new Fault(Number(read(operands[0])), Number(next));
         case 'ud2': case 'ud1':
             throw fault(6);
+        case 'out':
+        {
+            // The trap port, as the 32-bit model sees it: the value is recorded
+            // and whoever runs the model answers it. Any other port is a device's.
+            const port = Number(read(operands[0]) & 0xffffn);
+            const value = Number(read(operands[1]) & 0xffffffffn);
+            if (state.ports === undefined || port === state.ports.trapPort)
+            {
+                state.trapped.push(value);
+                break;
+            }
+            state.ports.write(port, operands[1].size, value);
+            break;
+        }
+        case 'in':
+        {
+            const port = Number(read(operands[1]) & 0xffffn);
+            write(operands[0], BigInt(state.ports
+                ? state.ports.read(port, operands[0].size) >>> 0 : 0xffffffff));
+            break;
+        }
         case 'cpuid':
         {
             const answer = cpuidLeaf(Number(state.r[0] & 0xffffffffn),

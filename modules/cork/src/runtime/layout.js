@@ -19,6 +19,14 @@
 
 /** Bytes the state block takes in cork's own layout. */
 export const STATE_BLOCK_SIZE = 512;
+/**
+ * Bytes it takes in the 64-bit layout: sixteen quadword registers and sixteen
+ * XMM registers do not fit in 512. A thread's context is the whole block either way.
+ */
+export const STATE_BLOCK_SIZE_64 = 1024;
+
+/** The state block's size in a layout. @param {{ bits: 32 | 64 }} layout */
+export const stateBlockSize = layout=>(layout.bits === 64 ? STATE_BLOCK_SIZE_64 : STATE_BLOCK_SIZE);
 
 /** A wasm page. */
 export const PAGE = 65536;
@@ -225,16 +233,17 @@ export const LOW_STATE = 4096;
  * limit one subtraction makes rather than a constant built in two.
  *
  * @param {{ ramSize: number, hashSlots?: number, processors?: number,
- *     ramBase?: number }} options
+ *     ramBase?: number, bits?: 32 | 64 }} options
  *     `hashSlots`: the entry hash's, a power of two (`Tables.HASH_SLOTS` unless given);
  *     `processors`: the process's executors, which `cpuid` says the machine has --
  *     a field only past one, so one processor's layout, and its translations, are
  *     what they were;
- *     `ramBase`: `PAGE` (the default) or 0
+ *     `ramBase`: `PAGE` (the default) or 0;
+ *     `bits`: 64 for long mode's state block (`longLayout`), one executor's
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1,
-    ramBase = PAGE })
+    ramBase = PAGE, bits = 32 })
 {
     if (!(hashSlots >= 1 << 10 && hashSlots <= 1 << 26 && (hashSlots & (hashSlots - 1)) === 0))
     {
@@ -246,6 +255,14 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         throw new Error(`cork: guest RAM at ${ramBase}, not at 0 or one page in`);
     }
     const state = ramBase === 0 ? LOW_STATE : 0;
+    if (bits === 64)
+    {
+        if (processors > 1)
+        {
+            throw new Error('cork: long mode runs on one executor so far');
+        }
+        return longLayout(state, ramBase, ramSize, hashSlots);
+    }
     const fields = {
         bits: /** @type {32} */ (32),
         ramBase,
@@ -291,6 +308,49 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         // looked at against (`spentTest`), so a slice ends there however long
         // it was given -- only where other executors run beside this one.
         ...processors > 1 ? { processors, processor: 0, interrupt: state + 2048 } : {},
+    };
+    return { ...fields, id: layoutId(fields) };
+}
+
+/**
+ * The 64-bit state block (`STATE_BLOCK_SIZE_64`): the sixteen general
+ * registers as quadwords, RIP, the flags word (eager: no record, which only
+ * translated code leaves), the x87 block as the 32-bit layout has it, sixteen
+ * XMM registers and FS's and GS's bases as quadwords; the counter, the call
+ * profile and `origin` past them, `nanFirst` past the block.
+ *
+ * @param {number} state @param {number} ramBase @param {number} ramSize
+ * @param {number} hashSlots
+ * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
+ */
+function longLayout(state, ramBase, ramSize, hashSlots){
+    const fields = {
+        bits: /** @type {64} */ (64),
+        ramBase,
+        ramSize,
+        regs: state,
+        eip: state + 128,
+        previousIp: state + 136,
+        eflags: state + 144,
+        flagsChanged: -1,
+        x87: state + 160,
+        x87Format: /** @type {'f64'} */ ('f64'),
+        x87Top: state + 288,
+        x87Empty: state + 289,
+        x87Control: state + 290,
+        x87Status: state + 292,
+        x87Exact: state + 294,
+        xmm: state + 304,
+        mxcsr: state + 560,
+        fsBase: state + 568,
+        gsBase: state + 576,
+        counter: state + 584,
+        callProfile: state + 592,
+        origin: state + 728,
+        nanFirst: state + STATE_BLOCK_SIZE_64,
+        tables: ramBase + ramSize,
+        codePages: -1,
+        hashShift: 32 - Math.log2(hashSlots),
     };
     return { ...fields, id: layoutId(fields) };
 }
