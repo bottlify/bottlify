@@ -167,7 +167,7 @@ export function createWideFunctions(host){
         return { at, found: at < text.length };
     };
 
-    return {
+    const wide = {
         /** size_t wcslen(const wchar_t *) -- in the guest */
         wcslen: guestEntry(inGuest.wcslen, COMPILED.wcslen, host),
 
@@ -541,6 +541,16 @@ export function createWideFunctions(host){
             },
         },
     };
+
+    return {
+        ...wide,
+        // The collating forms: under the C locale the order is the units'
+        // own, and each is its comparison.
+        wcscoll: wide.wcscmp,
+        _wcsicoll: wide._wcsicmp,
+        _wcsncoll: wide.wcsncmp,
+        _wcsnicoll: wide._wcsnicmp,
+    };
 }
 
 /**
@@ -647,6 +657,10 @@ export function createMultiByteFunctions(narrow, host){
         _mbscpy: 'strcpy',
         _mbscat: 'strcat',
         _mbsdup: '_strdup',
+        // Under the C locale a collation is the bytes' order.
+        _stricoll: '_stricmp',
+        _strncoll: 'strncmp',
+        _strnicoll: '_strnicmp',
         // A classifier, not a string function: one character code in, one
         // flag out, and a space or a digit is a byte in every page.
         _ismbcspace: 'isspace',

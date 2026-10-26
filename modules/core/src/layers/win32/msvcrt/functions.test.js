@@ -199,6 +199,37 @@ test('strncmp stops after n bytes, and n of zero compares nothing', ()=>{
         'the terminator against a letter');
 });
 
+test('under the C locale each collating comparison is its ordinal one, narrow and wide', ()=>{
+    const { host, fns: table, put } = setup();
+    const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (table));
+    /** @param {number} address @param {string} text */
+    const putWide = (address, text)=>{
+        [...text, '\0'].forEach((c, at)=>{
+            host.bytes[address + at * 2] = c.charCodeAt(0);
+            host.bytes[address + at * 2 + 1] = 0;
+        });
+        return address;
+    };
+    /** @type {[string, string, string, number | null, number][]} */
+    const cases = [['_strncoll', 'ABC', 'ABCD', 3, 0], ['_strncoll', 'ABC', 'ABCD', 10, -1],
+        ['_strncoll', 'ABCD', 'ABC', 10, 1], ['_strncoll', 'AB D', 'AB-D', 4, -1],
+        ['_strnicoll', 'abc', 'ABCD', 3, 0], ['_strnicoll', 'abc', 'ABCD', 10, -1],
+        ['_strnicoll', 'abcd', 'ABC', 10, 1], ['_strnicoll', 'abce', 'ABCf', 3, 0],
+        ['_stricoll', 'abcd', 'ABCD', null, 0], ['_stricoll', 'abc', 'ABCD', null, -1]];
+    for (const [name, left, right, count, sign] of cases)
+    {
+        const narrowArgs = [put(0x100, left), put(0x140, right), ...count === null ? [] : [count]];
+        const wideArgs = [putWide(0x200, left), putWide(0x280, right),
+            ...count === null ? [] : [count]];
+        const wideName = name.replace('_str', '_wcs');
+        assert.equal(Math.sign(fns[name].handler(narrowArgs) | 0), sign, `${name} ${left}`);
+        assert.equal(Math.sign(fns[wideName].handler(wideArgs) | 0), sign, `${wideName} ${left}`);
+    }
+    assert.equal(Math.sign(fns.wcscoll.handler([putWide(0x200, 'ABC'), putWide(0x280, 'ABCD')])
+        | 0), -1);
+});
+
 test('_stricmp ignores case, and only for ASCII letters', ()=>{
     const { fns, put } = setup();
     assert.equal(fns._stricmp.handler([put(0x100, 'Hello'), put(0x110, 'hELLO')]), 0);
