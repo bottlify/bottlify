@@ -187,15 +187,15 @@ export function createLongRunner(settings){
         {
             return [next];
         }
-        const [operand] = last.operands;
-        if (operand?.kind !== 'rel')
-        {
-            return [];
-        }
         if (last.op === 'call')
         {
             // The callee is a region of its own, called; its return comes back here.
             return [next];
+        }
+        const [operand] = last.operands;
+        if (operand?.kind !== 'rel')
+        {
+            return [];
         }
         const target = /** @type {number} */ (operand.target);
         return last.op === 'jmp' ? [target] : [target, next];

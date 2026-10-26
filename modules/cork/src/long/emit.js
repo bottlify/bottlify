@@ -1238,8 +1238,9 @@ class BlockEmitter {
                 {
                     return { to: /** @type {number} */ (dst.target), call: true, next };
                 }
+                // The target in RIP, for the call (`callOut`) or the exit.
                 b.localGet(T2).localSet(RIP);
-                return { to: null };
+                return { to: null, call: true, next };
             case 'ret':
                 this.placePop(index, at);
                 this.loadAt(8);
@@ -1473,20 +1474,36 @@ class BlockEmitter {
     }
 
     /**
-     * A direct call as a wasm call: what the block retired charged, the
-     * registers and flags to the block, the region at `to` called through its
-     * table slot at its entry, expecting `next`; everything taken back from the
-     * block after, and on into the block at `next` when the callee returned
-     * there (`LongExit.RETURNED`), else out as it left. Too deep, out of
-     * budget, or a slot holding no region yet, leaves with RIP at the target,
-     * the return address already pushed.
+     * A call as a wasm call: what the block retired charged, the registers
+     * and flags to the block, the callee called expecting `next` -- a direct
+     * call's region at `to` through its table slot at its entry, an indirect
+     * call's (`to` null, the target in RIP) through the module's transfer, as
+     * the 32-bit translator's `callAndReturn` calls it; everything taken back
+     * from the block after, and on into the block at `next` when the callee
+     * returned there (`LongExit.RETURNED`), else out as it left. Too deep, out
+     * of budget, or no region at the target yet, leaves with RIP at the
+     * target, the return address already pushed.
      *
-     * @param {number} to @param {number} next @param {number} slot
+     * @param {number | null} to @param {number} next @param {number} slot
      * @param {number} regionType @param {Map<number, number>} indexOf
      * @param {number} here @param {number} count
      */
     callOut(to, next, slot, regionType, indexOf, here, count){
         const { b, layout } = this;
+        const transfer = this.helpers.transfer;
+        if (to === null && transfer === null)
+        {
+            b.br(this.exitDepth);
+            return;
+        }
+        /** RIP at the target: a direct call's constant, an indirect call's kept in T2. */
+        const atTarget = ()=>{
+            (to === null ? b.localGet(T2) : b.i64const(BigInt(to))).localSet(RIP);
+        };
+        if (to === null)
+        {
+            b.localGet(RIP).localSet(T2);
+        }
         this.settle();
         this.spills.push({ at: b.length, reload: false });
         b.i32const(0).localGet(FL).store('i32', { offset: layout.eflags });
@@ -1495,18 +1512,28 @@ class BlockEmitter {
         b.globalGet(DEPTH).i32const(CALL_DEPTH).op(Op.i32geu)
             .globalGet(BUDGET).i32const(0).op(Op.i32les).op(Op.i32or);
         this.open();
-        b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
+        atTarget();
+        b.br(this.exitDepth);
         this.close();
         b.globalGet(DEPTH).i32const(1).op(Op.i32add).globalSet(DEPTH);
-        b.i32const(0).globalSet(LABEL).i64const(BigInt(next)).globalSet(EXPECT);
-        b.i32const(slot).callIndirect(regionType).localSet(U);
+        b.i64const(BigInt(next)).globalSet(EXPECT);
+        if (to === null)
+        {
+            b.localGet(T2).i32const(LongExit.MISS).call(/** @type {number} */ (transfer));
+        }
+        else
+        {
+            b.i32const(0).globalSet(LABEL).i32const(slot).callIndirect(regionType);
+        }
+        b.localSet(U);
         b.globalGet(DEPTH).i32const(1).op(Op.i32sub).globalSet(DEPTH);
         this.spills.push({ at: b.length, reload: true });
         b.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);
         b.i32const(0).load('i64', { offset: layout.eip }).localSet(RIP);
         b.localGet(U).i32const(LongExit.MISS).op(Op.i32eq);
         this.open();
-        b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
+        atTarget();
+        b.br(this.exitDepth);
         this.close();
         b.localGet(U).i32const(LongExit.RETURNED).op(Op.i32ne);
         this.open();
@@ -1839,8 +1866,8 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     if (transfers)
     {
         const transfer = transferFunction(layout, regionType);
-        helpers.transfer = m.function(m.type({ params: [ValType.i64], results: [ValType.i32] }),
-            transfer.locals, transfer.body.toBytes());
+        helpers.transfer = m.function(m.type({ params: [ValType.i64, ValType.i32],
+            results: [ValType.i32] }), transfer.locals, transfer.body.toBytes());
     }
     regions.forEach((region, index)=>{
         const body = emitRegion(layout, helpers, region, { slotOf, regionType, checkReads });
@@ -1850,10 +1877,12 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
 }
 
 /**
- * The transfer: RIP (its parameter) looked up in the entry hash as the
+ * The transfer: RIP (its first parameter) looked up in the entry hash as the
  * 32-bit translator's transfer probes it (`finishModule`), the slot's region
- * tail-called at the slot's label; a miss answers `LongExit.NEXT`, for the
- * host. Every entry here is under `ANY_TOP`: long mode keeps no x87 top in
+ * tail-called at the slot's label; a miss answers the second parameter --
+ * `LongExit.NEXT` from a region's exit, which has left RIP in the state for
+ * the host, `LongExit.MISS` from a call, which goes on to leave at its
+ * target. Every entry here is under `ANY_TOP`: long mode keeps no x87 top in
  * its regions' keys.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
@@ -1862,10 +1891,11 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
 function transferFunction(layout, regionType){
     const hash = layout.tables + Tables.HASH;
     const rip = 0;
-    const index = 1;
-    const at = 2;
-    const key = 3;
-    const eip = 4;
+    const missed = 1;
+    const index = 2;
+    const at = 3;
+    const key = 4;
+    const eip = 5;
     const b = new Body(256);
     b.block();
     // Past the window, or EIP 0 -- an empty slot's key -- is in no slot.
@@ -1886,7 +1916,7 @@ function transferFunction(layout, regionType){
     b.br(0);
     b.end();
     b.end();
-    b.i32const(LongExit.NEXT);
+    b.localGet(missed);
     return { body: b, locals: [ValType.i32, ValType.i32, ValType.i32, ValType.i32] };
 }
 
@@ -1970,14 +2000,14 @@ function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads })
             const last = block.instructions[block.instructions.length - 1];
             e.go(last.eip + last.length, indexOf, index, count);
         }
+        else if (ending.call)
+        {
+            e.callOut(ending.to, /** @type {number} */ (ending.next),
+                ending.to === null ? -1 : slotOf(ending.to), regionType, indexOf, index, count);
+        }
         else if (ending.to === null)
         {
             b.br(e.exitDepth);
-        }
-        else if (ending.call)
-        {
-            e.callOut(ending.to, /** @type {number} */ (ending.next), slotOf(ending.to), regionType,
-                indexOf, index, count);
         }
         else if (ending.cc === undefined)
         {
@@ -2066,7 +2096,8 @@ function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads })
     {
         tail.globalGet(BUDGET).i32const(0).op(Op.i32gts);
         tail.if();
-        tail.localGet(EXPECTED).globalSet(EXPECT).localGet(RIP).returnCall(helpers.transfer);
+        tail.localGet(EXPECTED).globalSet(EXPECT).localGet(RIP).i32const(LongExit.NEXT)
+            .returnCall(helpers.transfer);
         tail.end();
     }
     tail.end();

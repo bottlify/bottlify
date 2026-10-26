@@ -410,6 +410,56 @@ test('calls from region to region return where they were made, and leave where t
     assert.ok(entered['100000 true'] * 2 < entered['100000 false'], JSON.stringify(entered));
 });
 
+test('indirect calls are wasm calls that return where they were made', ()=>{
+    // start:  mov esi, 3
+    // again:  lea rdx, [rip + fib]; mov ecx, 10; call rdx; add [rbx], rax
+    //         lea rax, [rip + small]; mov [rbx + 64], rax; mov ecx, 7
+    //         call qword [rbx + 64]; add [rbx + 8], rax; dec esi; jnz again; jmp done
+    // fib:    cmp ecx, 2; jb small; push rcx; dec ecx; lea rdx, [rip + fib]; call rdx
+    //         pop rcx; push rax; sub ecx, 2; call fib; pop rdx; add rax, rdx; ret
+    // small:  mov eax, ecx; ret
+    // done:
+    const code = 'be03000000488d1527000000b90a000000ffd2480103488d053600000048894340b9070000'
+        + '00ff534048014308ffce75d4eb2383f902721b51ffc9488d15f1ffffffffd2595083e902e8e5ff'
+        + 'ffff5a4801d0c389c8c3';
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `indirect ${i}`, code }));
+    /** @type {Record<string, number>} */
+    const entered = {};
+    for (const budget of [7, 100000])
+    {
+        for (const transfers of [true, false])
+        {
+            const { failures, exits, stats } = compare(cases, budget, transfers);
+            assert.deepEqual(failures, [], `budget ${budget}, transfers ${transfers}`);
+            assert.equal(exits, cases.length);
+            entered[`${budget} ${transfers}`] = stats.entered;
+        }
+    }
+    assert.ok(entered['100000 true'] * 4 < entered['100000 false'], JSON.stringify(entered));
+});
+
+test('a function called indirectly that jumps out past its caller does not return to it', ()=>{
+    // start:  mov esi, 2
+    // again:  xor eax, eax; call f
+    // after:  add [rbx], rax; dec esi; jnz again; jmp done
+    // f:      lea rdx, [rip + g]; call rdx; mov eax, 1000; ret
+    // g:      mov eax, 7; add rsp, 16; lea rdx, [rip + after]; jmp rdx
+    // done:
+    // g leaves both frames by a jump to `after`, where the call to f waits:
+    // the wasm call to g waits at f's `mov`, and must not take it for its own.
+    const code = 'be0200000031c0e809000000480103ffce75f2eb21488d1508000000ffd2b8e8030000c3b8'
+        + '070000004883c410488d15d8ffffffffe2';
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `jumped out ${i}`, code }));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits } = compare(cases, budget);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+    }
+});
+
 test('a region left by a jump goes on expecting the return its caller waits for', ()=>{
     // start:  mov esi, 2
     // again:  mov ecx, 3; xor eax, eax; call f; add [rbx], rax; dec esi; jnz again; jmp done
