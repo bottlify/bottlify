@@ -2706,6 +2706,7 @@ export function createWindowFunctions(host){
      * @param {any} record @param {number} index @param {number} value
      * @param {boolean} [unicode]  Set through SetWindowLongW: a procedure set
      *     so reads wide text, and one set through the ANSI form reads bytes.
+     * @returns {boolean | undefined} false when the change is refused
      */
     const writeLong = (record, index, value, unicode = false)=>{
         switch (index | 0){
@@ -2713,19 +2714,36 @@ export function createWindowFunctions(host){
                 record.wndProc = value >>> 0;
                 record.unicode = unicode;
                 return;
-            case GWL_HWNDPARENT:
-                // A window on the desktop is given an owner this way; any
-                // other is moved to another parent.
+            case GWL_HWNDPARENT: {
+                // A window whose parent is the desktop is given an owner this
+                // way, never itself; any other is moved to another parent, the
+                // desktop making it one of the desktop's (win.c
+                // test_parent_owner). Neither may close a loop.
+                const target = live(value >>> 0);
+                const toDesktop = (value >>> 0) === 0 || target === desktop;
+                if (record === desktop || ((value >>> 0) !== 0 && !target))
+                {
+                    return false;
+                }
                 if (record.parent === 0)
                 {
-                    record.owner = value >>> 0;
+                    if (target === record)
+                    {
+                        return false;
+                    }
+                    record.owner = toDesktop ? 0 : target.hwnd;
                 }
                 else
                 {
-                    record.parent = value >>> 0;
+                    if (!toDesktop && (target === record || isDescendant(target, record)))
+                    {
+                        return false;
+                    }
+                    record.parent = toDesktop ? 0 : target.hwnd;
                 }
                 tell(record);
-                return;
+                return true;
+            }
             case GWL_ID:
                 record.id = value >>> 0;
                 return;
@@ -7642,8 +7660,7 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 const previous = readLong(record, index);
-                writeLong(record, index, value);
-                return previous;
+                return writeLong(record, index, value) === false ? 0 : previous;
             },
         },
 
@@ -7665,8 +7682,7 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 const previous = readLong(record, index);
-                writeLong(record, index, value, true);
-                return previous;
+                return writeLong(record, index, value, true) === false ? 0 : previous;
             },
         },
 

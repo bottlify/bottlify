@@ -2175,10 +2175,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const startY = top ? vertGap : size.height - vertGap - height;
         let x = startX;
         let y = startY;
+        /** @type {number[][]} */
+        const moves = [];
         for (const icon of icons)
         {
-            setWindowPos([icon.hwnd, 0, x, y, 0, 0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+            moves.push([icon.hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
             if ((arrange & ARW_UP) === 0)
             {
                 x += right ? -across : across;
@@ -2198,7 +2199,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 }
             }
         }
-        return icons.length;
+        return andThen(oneAfterAnother(moves), ()=>icons.length);
     };
 
     /**
@@ -2235,15 +2236,29 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     };
 
     /**
-     * Places one arranged window: a window without a sizing frame keeps its
-     * size and only moves.
+     * Where one arranged window goes, as SetWindowPos's arguments: a window
+     * without a sizing frame keeps its size and only moves.
      *
      * @param {any} record @param {number} x @param {number} y
      * @param {number} width @param {number} height
      */
-    const arrangeOne = (record, x, y, width, height)=>setWindowPos([record.hwnd, 0, x, y,
+    const arrangeOne = (record, x, y, width, height)=>[record.hwnd, 0, x, y,
         width, height, SWP_NOZORDER | SWP_NOACTIVATE
-            | ((record.style & WS_THICKFRAME) !== 0 ? 0 : SWP_NOSIZE)]);
+            | ((record.style & WS_THICKFRAME) !== 0 ? 0 : SWP_NOSIZE)];
+
+    /**
+     * SetWindowPos for each window in turn: each may run its procedure, and
+     * the next is placed once the one before has returned.
+     *
+     * @param {number[][]} moves  SetWindowPos's arguments, one set a window.
+     * @returns {number | Promise<number>}
+     */
+    const oneAfterAnother = moves=>{
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>(at >= moves.length ? 0
+            : andThen(setWindowPos(moves[at]), ()=>next(at + 1)));
+        return next(0);
+    };
 
     /** @param {number} index */
     const metric = index=>{
@@ -3242,6 +3257,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 const height = Math.floor((area.bottom - area.top) * 3 / 4);
                 let x = area.left;
                 let y = area.top;
+                /** @type {number[][]} */
+                const moves = [];
                 for (const [at, record] of [...found.windows].reverse().entries())
                 {
                     if (at > 0)
@@ -3249,9 +3266,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                         x = x + spacing + width > area.right ? area.left : x + spacing;
                         y = y + spacing + height > area.bottom ? area.top : y + spacing;
                     }
-                    arrangeOne(record, x, y, width, height);
+                    moves.push(arrangeOne(record, x, y, width, height));
                 }
-                return found.windows.length;
+                return andThen(oneAfterAnother(moves), ()=>found.windows.length);
             },
         },
 
@@ -3286,18 +3303,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 const shorter = Math.floor(tiles.length / columns);
                 const longer = tiles.length % columns;
                 let at = 0;
+                /** @type {number[][]} */
+                const moves = [];
                 for (let column = 0; column < columns; column++)
                 {
                     const rows = shorter + (column >= columns - longer ? 1 : 0);
                     const height = Math.floor((area.bottom - area.top) / rows);
                     for (let row = 0; row < rows; row++, at++)
                     {
-                        arrangeOne(tiles[at], area.left + column * Math.floor(
+                        moves.push(arrangeOne(tiles[at], area.left + column * Math.floor(
                             (area.right - area.left) / columns), area.top + row * height, width,
-                        height);
+                        height));
                     }
                 }
-                return tiles.length;
+                return andThen(oneAfterAnother(moves), ()=>tiles.length);
             },
         },
 

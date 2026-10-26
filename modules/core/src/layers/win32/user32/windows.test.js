@@ -4220,6 +4220,85 @@ test('a window SetWindowPos only resizes hears no WM_NCPAINT before WM_WINDOWPOS
     assert.equal(seen.slice(0, changed).includes(WM_NCPAINT), false, seen.join(' '));
 });
 
+test('GWLP_HWNDPARENT moves a child, gives a window on the desktop its owner, and never closes a '
+    + 'loop', ()=>{
+    // win.c test_parent_owner. Setting a desktop child's owner to itself once
+    // made it its own parent, and the window manager walked up for ever.
+    const GWLP_HWNDPARENT = -8;
+    const GA_PARENT = 1;
+    const GW_OWNER = 4;
+    const { fns, memory } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const main = createWindow(fns, memory);
+    const main2 = createWindow(fns, memory);
+    const child = createWindow(fns, memory, { style: WS_CHILD, parent: main });
+    const moved = createWindow(fns, memory, { style: WS_CHILD, parent: main });
+    const desktop = fns.GetDesktopWindow.handler();
+    /** @param {number} value */
+    const set = value=>fns.SetWindowLongA.handler([moved, GWLP_HWNDPARENT, value]);
+    const parentOf = ()=>fns.GetAncestor.handler([moved, GA_PARENT]);
+    assert.equal(set(main2), main);
+    assert.equal(parentOf(), main2);
+    assert.equal(set(child), main2);
+    assert.equal(parentOf(), child);
+    assert.equal(set(desktop), child);
+    assert.equal(parentOf(), desktop);
+    assert.equal(fns.GetWindowLongA.handler([moved, GWLP_HWNDPARENT]), 0);
+    // A child of the desktop now: its owner from here on, never itself.
+    assert.equal(set(moved), 0);
+    assert.equal(fns.GetWindow.handler([moved, GW_OWNER]), 0);
+    assert.equal(parentOf(), desktop);
+    assert.equal(set(child), 0);
+    assert.equal(fns.GetWindow.handler([moved, GW_OWNER]), child);
+    assert.equal(set(0), child);
+    assert.equal(fns.GetWindow.handler([moved, GW_OWNER]), 0);
+    assert.equal(fns.SetWindowLongA.handler([desktop, GWLP_HWNDPARENT, main2]), 0,
+        'not on the desktop');
+    // A child cannot be put under its own child.
+    const inner = createWindow(fns, memory, { style: WS_CHILD, parent: child });
+    assert.equal(fns.SetWindowLongA.handler([child, GWLP_HWNDPARENT, inner]), 0);
+    assert.equal(fns.GetAncestor.handler([child, GA_PARENT]), main);
+});
+
+test('TileWindows places the windows one after the other, each once the one before has '
+    + 'returned', async()=>{
+    // win.c test_tile_windows: tiling a parent's children all at once had
+    // their procedures running side by side, and the program crashed.
+    let running = 0;
+    let most = 0;
+    const context = setup({ heap: true, reply: message=>{
+        if (message.message !== WM_WINDOWPOSCHANGING)
+        {
+            return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+                message.wParam, message.lParam]);
+        }
+        running++;
+        most = Math.max(most, running);
+        return Promise.resolve().then(()=>{
+            running--;
+            return 0;
+        });
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const WS_CAPTION = 0x00c00000;
+    const WS_THICKFRAME = 0x00040000;
+    const parent = await createWindow(fns, memory, { style: WS_VISIBLE });
+    for (let at = 0; at < 3; at++)
+    {
+        await createWindow(fns, memory, {
+            style: WS_CHILD | WS_VISIBLE | WS_CAPTION | WS_THICKFRAME, parent });
+    }
+    most = 0;
+    assert.equal(await fns.TileWindows.handler([parent, 0, 0, 0, 0]), 3);
+    assert.equal(most, 1);
+    most = 0;
+    assert.equal(await fns.CascadeWindows.handler([parent, 0, 0, 0, 0]), 3);
+    assert.equal(most, 1);
+});
+
 test('a keyboard hook is shown every key message taken, and can discard it', ()=>{
     // A game that keeps its key state in a WH_KEYBOARD hook heard no key at
     // all while only CBT hooks were called: Enter on its title did nothing.
