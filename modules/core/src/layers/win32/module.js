@@ -28,6 +28,7 @@ import {
 import { createThreadPool } from './kernel32/pool.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
+import { createActivationContexts } from './kernel32/actctx.js';
 import { PROCESSOR, createProcessors } from './kernel32/processor.js';
 import { createPdhFunctions, createPowrprofFunctions } from './power/functions.js';
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
@@ -229,6 +230,23 @@ const IMAGEHLP_EXPORTS = new Set([
     'SymGetLineFromAddr64', 'SymGetModuleInfo64', 'SymEnumerateModules64',
     'SearchTreeForFile',
 ]);
+
+/**
+ * The activation context table without its section lookups --
+ * FindActCtxSectionStringA/W and ntdll's RtlFindActivationContextSectionString
+ * -- which stay unexported (decisions.md) until the real Visual C++ runtimes'
+ * own checks have been run against them.
+ *
+ * @param {Record<string, any>} functions
+ */
+function withoutLookups(functions){
+    const { FindActCtxSectionStringA, FindActCtxSectionStringW, ...rest } = functions;
+    void FindActCtxSectionStringA;
+    void FindActCtxSectionStringW;
+    const { RtlFindActivationContextSectionString, ...natives } = rest.CreateActCtxA.natives;
+    void RtlFindActivationContextSectionString;
+    return { ...rest, CreateActCtxA: { ...rest.CreateActCtxA, natives } };
+}
 
 /**
  * The DirectX a bottle's graphics choice names, by major version; undefined
@@ -1599,6 +1617,61 @@ export function createWin32Module(){
                 return crtHeapHandle;
             };
 
+            /** The library names this layer's table answers, lower-cased. */
+            /** @type {Set<string> | null} */
+            let answered = null;
+            const answeredNames = ()=>{
+                answered ??= new Set(Object.keys(libraries).map(name=>name.toLowerCase()));
+                return answered;
+            };
+
+            // Activation contexts: built from manifests on the volume and in
+            // the modules, answered from guest memory (`actctx.js`).
+            const activation = createActivationContexts({
+                readMemory, writeMemory, readCString, readWideString,
+                setLastError: setError,
+                allocate: bytes=>heap.allocate(bytes),
+                allocateCode: bytes=>heap.allocateCode(bytes),
+                free: address=>heap.free(address),
+                teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                readFile: async path=>{
+                    const entry = volume.stat(path);
+                    const node = entry && !entry.isDirectory
+                        ? volume.open(path, { read: true }) : null;
+                    if (!entry || !node)
+                    {
+                        return null;
+                    }
+                    try
+                    {
+                        return await volume.read(node, 0, entry.size);
+                    }
+                    finally
+                    {
+                        volume.close(node);
+                    }
+                },
+                stat: path=>volume.stat(path),
+                list: (path, pattern)=>volume.list(path, pattern),
+                // A source named relative to the current directory, as the
+                // file calls resolve one.
+                fullPath: path=>(/^([A-Za-z]:|\\\\)/.test(path) ? path
+                    : `${filesystem.currentDirectory().replace(/\\+$/, '')}\\${path}`),
+                imagePath: ()=>modules.imagePath(),
+                moduleResource: (base, type, id)=>{
+                    const entry = modules.findResource?.(base, type, id) ?? null;
+                    return entry ? readMemory((modules.moduleBase?.(base) ?? base) + entry.rva,
+                        entry.size) : null;
+                },
+                fileResource: (path, type, id)=>config?.fileResource?.(path, type, id) ?? null,
+                moduleAt: address=>modules.containing?.(address)?.base ?? null,
+                modulePath,
+                answers: name=>answeredNames().has(name.toLowerCase()),
+                encodeAnsi,
+                decodeAnsi,
+                divergence: config?.divergence,
+            });
+
             libraries = {
                 'KERNEL32.dll': {
                     ...createConsoleFunctions({
@@ -1947,6 +2020,11 @@ export function createWin32Module(){
                         environment: startingEnvironment,
                         startup: ()=>config?.startup ?? null,
                     }),
+                    // Activation contexts (`actctx.js`). FindActCtxSectionStringA/W
+                    // and ntdll's lookup are held back (decisions.md): a C runtime
+                    // finding them checks its own load against the context, and
+                    // that has to be measured against the real runtimes first.
+                    ...withoutLookups(activation.functions),
                     ...createSystemFunctions({
                         processors,
                         // TerminateProcess wakes whoever waits on the child it ends.
@@ -3597,6 +3675,13 @@ export function createWin32Module(){
                  * @returns {Promise<number>}
                  */
                 callEntryPoint: image=>callEntryPoint(image),
+
+                /**
+                 * The activation contexts as the loader uses them: the process
+                 * default from the program's manifest, a library's own, and
+                 * where a context puts a DLL (`actctx.js`).
+                 */
+                activationContexts: ()=>activation.loaderApi,
 
                 /**
                  * Device contexts over pixels this layer did not allocate.

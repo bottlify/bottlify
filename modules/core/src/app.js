@@ -2045,6 +2045,10 @@ export function withLibraryExtension(name){
     return file.includes('.') ? name : `${name}.dll`;
 }
 
+/** RT_MANIFEST: an image's manifests, 1 a program's own and 2 a library's. */
+const RT_MANIFEST = 24;
+const ISOLATIONAWARE_MANIFEST = 2;
+
 /** Where Windows looks for a bare library name after the program's own directory. */
 const SYSTEM_LIBRARY_DIRECTORIES = ['C:\\WINDOWS\\system32\\', 'C:\\WINDOWS\\'];
 
@@ -2482,7 +2486,6 @@ export function versionResourceOf(filesystem, path, blocks = null, tries = 4){
  * @returns {import('./layers/win32/kernel32/versions.js').ProgramCompatibility}
  */
 export function compatibilityOf(executable){
-    const RT_MANIFEST = 24;
     const image = parsePe(executable, { wide: true });
     const view = new DataView(executable.buffer, executable.byteOffset, executable.byteLength);
     // MajorOperatingSystemVersion and its minor, forty bytes into the optional
@@ -2501,6 +2504,34 @@ export function compatibilityOf(executable){
     const bytes = executable.subarray(at, at + found.size);
     const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le' : 'utf-8';
     return { supportedOS: supportedOsOf(new TextDecoder(encoding).decode(bytes)), imageVersion };
+}
+
+/**
+ * One resource of an image's bytes, by type and numeric id, or null for a
+ * file that is not an image or has none.
+ *
+ * @param {Uint8Array | null} file @param {number} type @param {number} id
+ * @returns {Uint8Array | null}
+ */
+export function resourceOfImage(file, type, id){
+    if (!file)
+    {
+        return null;
+    }
+    try
+    {
+        const image = parsePe(file, { wide: true });
+        const found = findResource(file, image, type, id);
+        if (!found)
+        {
+            return null;
+        }
+        const at = rvaToFileOffset(image, found.rva);
+        return file.slice(at, at + found.size);
+    }
+    catch {
+        return null;
+    }
 }
 
 /**
@@ -2693,6 +2724,13 @@ export async function mapShippedLibraries(options){
     const { executable, imagePath, filesystem, loader, blocks, events, isSystem,
         isKnownDll, byName, byBase } = options;
     const directory = imagePath.slice(0, imagePath.lastIndexOf('\\') + 1);
+    /**
+     * Where the process's activation context puts a library, when it does:
+     * the program's manifest names the assembly it is in.
+     *
+     * @type {(name: string) => { path: string, source: string | null } | null}
+     */
+    const redirect = name=>(isKnownDll(name) ? null : options.redirect?.(name) ?? null);
 
     /**
      * The first place a bare library name is on the volume: beside the program,
@@ -2704,7 +2742,7 @@ export async function mapShippedLibraries(options){
      * @param {string} name
      * @returns {string}
      */
-    const placeOf = name=>libraryCandidates(name, imagePath, undefined,
+    const placeOf = name=>redirect(name)?.path ?? libraryCandidates(name, imagePath, undefined,
         { ours: isSystem(name) }).find(candidate=>{
         try
         {
@@ -2716,6 +2754,8 @@ export async function mapShippedLibraries(options){
         }
     }) ?? `${directory}${name}`;
 
+    const shipped = shippedLibraryReader(filesystem, blocks, imagePath,
+        (name, wanted)=>isSystem(name) && (options.covers?.(name, wanted) ?? true));
     const { order, missing } = await planDependencies({
         entry: executable,
         entryName: imagePath.slice(
@@ -2726,8 +2766,17 @@ export async function mapShippedLibraries(options){
         // bring is looked for in the system directories the engine fills, which
         // is where the runtime a title links against actually lives. Only when
         // neither has it does the engine's own table answer.
-        readLibrary: shippedLibraryReader(filesystem, blocks, imagePath,
-            (name, wanted)=>isSystem(name) && (options.covers?.(name, wanted) ?? true)),
+        readLibrary: async(name, wanted)=>{
+            // An assembly's DLL is read from where the context puts it -- or
+            // is the engine's own, when the engine answers it.
+            const found = redirect(name);
+            if (found)
+            {
+                return found.source === null ? null
+                    : await readWholeFile(filesystem, blocks, found.source);
+            }
+            return shipped(name, wanted);
+        },
     });
 
     if (missing.length > 0)
@@ -4864,6 +4913,12 @@ async function buildApp(options){
             // The Windows the machine is, and what the program says it knows,
             // which is all Windows 10 needs to decide what to tell it.
             windows: options.windows,
+            // A resource of an image on the volume, read as data: an
+            // assembly's manifest in a DLL that CreateActCtx and the private
+            // assembly search read.
+            fileResource: async(/** @type {string} */ path, /** @type {number} */ type,
+                /** @type {number} */ id)=>resourceOfImage(
+                await readWholeFile(core.api('filesystem'), blocks, path), type, id),
             directx: options.graphicsApi
                 ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
             compatibility: compatibilityOf(options.executable),
@@ -5317,6 +5372,8 @@ async function buildApp(options){
     kernel.processes?.runBeside?.(typeof options.beside === 'function');
     const loader = core.api('loader');
     const win32 = core.api('win32');
+    /** The activation contexts the loader looks libraries up through (`actctx.js`). */
+    const activation = /** @type {any} */ (win32.activationContexts)?.() ?? null;
     const bridge = core.api('bridge');
     const graphics = core.api('graphics');
     const audio = core.api('audio');
@@ -5999,9 +6056,11 @@ async function buildApp(options){
      * @param {number} [flags]
      * @param {any} [thread]  Whose LoadLibrary this answers, for a library loaded
      *     as another's dependency: by then the processor is someone else's.
+     * @param {number} [importer]  The base of the library whose import this is:
+     *     its own activation context is looked in first.
      * @returns {number | Promise<number>}
      */
-    const loadLibraryAtRuntime = (requested, flags = 0, thread = undefined)=>{
+    const loadLibraryAtRuntime = (requested, flags = 0, thread = undefined, importer = 0)=>{
         const name = withLibraryExtension(requested);
         if ((flags & LOAD_AS_DATA) !== 0)
         {
@@ -6042,10 +6101,16 @@ async function buildApp(options){
         // re-mapping and re-binding a megabyte of library is most of what the
         // machine then does with its time.
         const loaded = findModule(name);
-        const candidates = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.file))
-            ? libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-                filesystem.currentDirectory(), { ours: loaded !== null })
-            : [];
+        const searched = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.file));
+        // A bare name an activation context redirects is that assembly's
+        // file -- or the engine's own, when the engine answers it -- and is
+        // looked for nowhere else.
+        const redirected = searched && !/[\\/]/.test(name)
+            ? activation?.redirect(name, activation.moduleContext(importer)) ?? null : null;
+        const candidates = !searched ? []
+            : redirected ? (redirected.source === null ? [] : [redirected.source])
+                : libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
+                    filesystem.currentDirectory(), { ours: loaded !== null });
         if (candidates.length > 0)
         {
             // Looked for before anything is awaited: a title probes for
@@ -6110,6 +6175,26 @@ async function buildApp(options){
                     // point run: a program loaded by name is mapped for what
                     // it holds, and its entry point is its main.
                     const inert = unresolved || !image.library;
+                    // Where it is: the assembly's directory for one a context
+                    // redirected, whichever file its bytes were read from.
+                    const path = redirected?.path ?? wanted;
+                    // Its own activation context, from its manifest: where its
+                    // own imports are looked for first. One whose assemblies
+                    // cannot be found is refused, as Windows refuses the load.
+                    const own = inert || !activation ? null
+                        : await activation.moduleContextFrom(
+                            resourceOfImage(file, RT_MANIFEST, ISOLATIONAWARE_MANIFEST), path);
+                    if (own && 'refused' in own)
+                    {
+                        memory.unregister(name);
+                        librarySpace.giveBack(base);
+                        events.emit('libraries-missing', { names: [name], reason: own.refused });
+                        return 0;
+                    }
+                    if (own)
+                    {
+                        activation.bindModule(base, own.handle);
+                    }
                     const held = {
                         name, base, size: image.sizeOfImage,
                         /** @param {string} exported */
@@ -6121,7 +6206,7 @@ async function buildApp(options){
                         // loaded at run time has to keep its own.
                         file,
                         image,
-                        path: wanted,
+                        path,
                     };
                     // Registered before its own imports are bound, so a library
                     // that imports back into itself -- or into one still being
@@ -6171,7 +6256,8 @@ async function buildApp(options){
                         {
                             if (findModule(dependency.dll) === null)
                             {
-                                const got = await loadLibraryAtRuntime(dependency.dll, 0, asked);
+                                const got = await loadLibraryAtRuntime(dependency.dll, 0, asked,
+                                    base);
                                 if (got === 0)
                                 {
                                     absent.push(dependency.dll);
@@ -6247,13 +6333,27 @@ async function buildApp(options){
                         ...threadLocalImages.get(base)?.callbacks ?? [],
                         ...held.entryPoint && held.entryPoint !== base ? [held.entryPoint] : [],
                     ];
-                    for (const routine of routines)
+                    // Under its own activation context, or the one it was
+                    // found through, as Windows runs a DllMain: a runtime that
+                    // checks how it was loaded looks itself up in it.
+                    const teb = asked?.tebAddress ?? 0;
+                    const cookie = routines.length === 0 || !activation ? 0
+                        : activation.activate(activation.moduleContext(base)
+                            || redirected?.context || 0, teb);
+                    try
                     {
-                        await bridge.callGuest({
-                            entry: routine,
-                            args: [base, DLL_PROCESS_ATTACH, 0],
-                            thread: asked,
-                        });
+                        for (const routine of routines)
+                        {
+                            await bridge.callGuest({
+                                entry: routine,
+                                args: [base, DLL_PROCESS_ATTACH, 0],
+                                thread: asked,
+                            });
+                        }
+                    }
+                    finally
+                    {
+                        activation?.deactivate(cookie, teb);
                     }
                     if (routines.length > 0)
                     {
@@ -6520,6 +6620,20 @@ async function buildApp(options){
             + `${mainImage.sizeOfImage.toString(16)} lies in the heap and is not free there`);
     }
 
+    // The program's activation context, before any library is looked for:
+    // the assemblies its manifest names decide where some of them are, and a
+    // context that cannot be built -- an assembly found nowhere -- ends the
+    // start, as Windows ends it.
+    const unbuilt = await activation?.processDefaultFrom(
+        resourceOfImage(options.executable, RT_MANIFEST, 1), options.imagePath ?? 'C:\\app.exe')
+        ?? null;
+    if (unbuilt !== null)
+    {
+        events.emit('activation-context-failed', { reason: unbuilt });
+        throw Object.assign(new Error(`the side-by-side configuration is incorrect: ${unbuilt}`),
+            { reason: 'side-by-side', code: 'SXS_CANT_GEN_ACTCTX' });
+    }
+
     // The libraries the program brought with it, before the program itself.
     //
     // Every one is mapped before any is bound, because they import each other:
@@ -6542,6 +6656,7 @@ async function buildApp(options){
                 ? table.addressOf(entry.name) : table.addressOfOrdinal(entry.ordinal)) !== null);
         },
         isKnownDll,
+        redirect: (/** @type {string} */ name)=>activation?.redirect(name) ?? null,
         byName, byBase,
         // Straight after the system modules, which is the first address nothing
         // else has claimed, and up to the pool of thread stacks.
