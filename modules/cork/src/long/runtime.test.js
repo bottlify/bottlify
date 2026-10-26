@@ -860,6 +860,35 @@ test('an indirect call\'s sampled callees are formed in and run as interpreted',
     }
 });
 
+test('a callee predicted on code since rewritten is not formed in from what replaced it', ()=>{
+    //         mov edi, 0x20002000                        a buffer two pages on
+    //         mov dword [rdi], 0x01c58349; mov byte [rdi + 4], 0xc3     add r13, 1; ret
+    //         mov rsi, rdi; lea r8, [rbx + 0x100]; mov ecx, 3000
+    //         call caller                                its callee predicted, formed in
+    //         mov qword [rdi], 0                         the buffer's code gone,
+    //         lea rsi, [rip + f]; lea r8, [rdi + 0x800]  its page now data the loop writes
+    //         mov ecx, 3000; call caller; jmp done
+    // caller: mov [r8], rcx; call rsi; dec ecx; jnz caller; ret
+    // f:      add r13, 2; ret
+    // done:
+    const code = 'bf00200020c7074983c501c64704c34889fe4c8d8300010000b9b80b0000e82100000048c707'
+        + '00000000488d351d0000004c8d8700080000b9b80b0000e802000000eb0f498908ffd6ffc975f7c3'
+        + '4983c502c3';
+    const cases = CORPUS.cases.slice(0, 2).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `rewritten callee ${i}`, code }));
+    for (const budget of [7, 1000])
+    {
+        const { failures, exits, stats } = compare(cases, budget);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+        assert.ok(stats.predicted >= 1, JSON.stringify(stats));
+        // Formed again with the old callee's address, the caller's region took
+        // the zeros there for code, over a thousand blocks of them, and their
+        // page with them: every store of the loop left it.
+        assert.ok(stats.blocks < 200 && stats.exits < 20, JSON.stringify(stats));
+    }
+});
+
 test('indirect calls are wasm calls that return where they were made', ()=>{
     // start:  mov esi, 3
     // again:  lea rdx, [rip + fib]; mov ecx, 10; call rdx; add [rbx], rax

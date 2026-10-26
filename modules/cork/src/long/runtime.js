@@ -773,7 +773,21 @@ export function createLongRunner(settings){
          * @param {number} address @param {number} size
          */
         invalidate(address, size){
-            for (let page = address >>> 12; page <= (address + size - 1) >>> 12; page++)
+            const first = address >>> 12;
+            const last = (address + size - 1) >>> 12;
+            // A call's prediction is of the code that was there: one whose call
+            // or callee lay on a page written is made again from samples of what
+            // is there now. Kept, a callee's address in code since rewritten
+            // formed whatever stands there, data among it, and its pages taken
+            // for code made every store to them a way out.
+            for (const [site, callees] of predictions)
+            {
+                if ([site, ...callees].some(at=>at >>> 12 >= first && at >>> 12 <= last))
+                {
+                    predictions.delete(site);
+                }
+            }
+            for (let page = first; page <= last; page++)
             {
                 const starts = byPage.get(page);
                 if (starts === undefined)
