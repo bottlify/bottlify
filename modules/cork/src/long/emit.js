@@ -222,7 +222,8 @@ export const endsBlock = op=>op === 'jmp' || op === 'call' || op === 'ret' || op
 class BlockEmitter {
     /**
      * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
-     * @param {{ flags: number, shift: number }} helpers  function indices
+     * @param {{ flags: number, shift: number, transfer: number | null }} helpers  function
+     *     indices; `transfer` none without transfers
      * @param {boolean} checkReads  reads test their pages, rather than wrap into RAM
      */
     constructor(layout, helpers, checkReads){
