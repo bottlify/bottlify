@@ -11,7 +11,8 @@
  * here as a C runtime's tlssup does), a second thread, a wait on an array of
  * handles, a routine the system calls back with an argument (the TLS callback
  * told of a thread's end), quadword answers in RAX, and the pointers in
- * localeconv's structure and CommandLineToArgvW's array. Each check prints a line; the exit code counts
+ * localeconv's structure and CommandLineToArgvW's array, and the interlocked
+ * arithmetic kernel32 exports. Each check prints a line; the exit code counts
  * the checks that failed.
  */
 
@@ -88,6 +89,12 @@ __declspec(dllimport) QWORD __stdcall GetTickCount64(void);
 __declspec(dllimport) WCHAR *__stdcall GetCommandLineW(void);
 __declspec(dllimport) WCHAR **__stdcall CommandLineToArgvW(const WCHAR *line, int *count);
 __declspec(dllimport) long __stdcall RtlGetVersion(OSVERSIONINFOW *info);
+__declspec(dllimport) long __stdcall InterlockedIncrement(volatile long *addend);
+__declspec(dllimport) long __stdcall InterlockedDecrement(volatile long *addend);
+__declspec(dllimport) long __stdcall InterlockedExchange(volatile long *target, long value);
+__declspec(dllimport) long __stdcall InterlockedExchangeAdd(volatile long *addend, long value);
+__declspec(dllimport) long __stdcall InterlockedCompareExchange(volatile long *destination,
+    long exchange, long comparand);
 
 /* The image's thread-local storage, declared as a C runtime's tlssup does. */
 #pragma section(".tls", read, write)
@@ -252,6 +259,21 @@ void mainCRTStartup(void)
     check("mbrtowc converts a byte", mbrtowc(&unit, "A", 1, &state) == 1 && unit == 'A'
         && mbrtowc(&unit, "", 1, &state) == 0
         && mbrtowc(&unit, "A", 0, &state) == (QWORD)-2);
+
+    volatile long shared = 5;
+    long seen = InterlockedIncrement(&shared);
+    check("InterlockedIncrement answers the value after", seen == 6 && shared == 6);
+    seen = InterlockedDecrement(&shared);
+    check("InterlockedDecrement answers the value after", seen == 5 && shared == 5);
+    seen = InterlockedExchange(&shared, 42);
+    check("InterlockedExchange answers the value before", seen == 5 && shared == 42);
+    seen = InterlockedExchangeAdd(&shared, -50);
+    check("InterlockedExchangeAdd answers the value before", seen == 42 && shared == -8);
+    seen = InterlockedCompareExchange(&shared, 7, -8);
+    check("InterlockedCompareExchange exchanges where the comparand matches",
+        seen == -8 && shared == 7);
+    seen = InterlockedCompareExchange(&shared, 9, 1);
+    check("and leaves the value where it does not", seen == 7 && shared == 7);
 
     int count = 0;
     WCHAR **args = CommandLineToArgvW(GetCommandLineW(), &count);

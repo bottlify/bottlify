@@ -470,6 +470,22 @@ test('each interlocked routine is its one locked instruction, and pops what it w
             assert.deepEqual([...code.slice(0, 4)], [0x8b, 0x4c, 0x24, 0x04],
                 'the pointer from the first argument');
         }
+        // At 64 bits the same instruction on [rcx], the value from EDX and
+        // the comparand from R8D, and a plain ret: x64 has its callers pop.
+        assert.ok(holds(InterlockedIncrement.long, [0xf0, 0x0f, 0xc1, 0x01, 0xff, 0xc0]),
+            'lock xadd [rcx], eax; inc eax');
+        assert.ok(holds(InterlockedDecrement.long, [0xf0, 0x0f, 0xc1, 0x01, 0xff, 0xc8]),
+            'lock xadd [rcx], eax; dec eax');
+        assert.ok(holds(InterlockedExchange.long, [0x89, 0xd0, 0x87, 0x01]),
+            'mov eax, edx; xchg [rcx], eax');
+        assert.ok(holds(InterlockedExchangeAdd.long, [0x89, 0xd0, 0xf0, 0x0f, 0xc1, 0x01]),
+            'mov eax, edx; lock xadd [rcx], eax');
+        assert.ok(holds(InterlockedCompareExchange.long,
+            [0x44, 0x89, 0xc0, 0xf0, 0x0f, 0xb1, 0x11]), 'mov eax, r8d; lock cmpxchg [rcx], edx');
+        for (const { long } of Object.values(INTERLOCKED))
+        {
+            assert.equal(long[long.length - 1], 0xc3, 'ret');
+        }
     });
 
 test('waiting for all of several objects reports one answer, not an index', ()=>{

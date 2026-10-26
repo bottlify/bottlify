@@ -58,6 +58,8 @@ const IMPORTS = {
             'EnterCriticalSection@4', 'LeaveCriticalSection@4', 'TryEnterCriticalSection@4',
             'DeleteCriticalSection@4', 'GetCurrentProcess@0', 'GetProcessAffinityMask@12',
             'GetTickCount@0', 'GetTickCount64@0', 'GetCommandLineW@0',
+            'InterlockedIncrement@4', 'InterlockedDecrement@4', 'InterlockedExchange@8',
+            'InterlockedExchangeAdd@8', 'InterlockedCompareExchange@12',
         ],
     },
     'SHELL32.dll': {

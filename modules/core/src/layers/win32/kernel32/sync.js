@@ -329,13 +329,15 @@ export function createSyncFunctions(host){
 
     /**
      * An interlocked export: guest code, one locked instruction on the
-     * program's dword (`interlocked.js`), with nothing to trap into.
+     * program's dword (`interlocked.js`), with nothing to trap into; in a
+     * 64-bit process its x86-64 (`long`).
      *
      * @param {keyof typeof INTERLOCKED} name
      */
     const interlockedExport = name=>({
         argBytes: INTERLOCKED[name].argBytes,
         guest: ()=>interlockedAt(name),
+        long: ()=>INTERLOCKED[name].long,
     });
 
     /**
