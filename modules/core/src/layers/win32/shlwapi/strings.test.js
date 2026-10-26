@@ -65,6 +65,11 @@ test('StrChr finds the first place a character is, StrRChr the last', ()=>{
     const m = shlwapiMachine();
     const wide = m.put('x\u4e2dy', true);
     assert.equal(m.fns.StrChrW.handler([wide, 0x4e2d]), wide + 2, 'a wide character beyond a byte');
+    // Wine's test_StrChrW: a string of 16 352 characters is searched to its end.
+    const long = m.put(Array.from({ length: 16352 }, (_, i)=>String.fromCharCode(32 + i)).join(''),
+        true);
+    assert.equal(m.fns.StrChrW.handler([long, 16383]), long + (16383 - 32) * 2);
+    assert.equal(m.fns.StrChrW.handler([long + 2, 32]), 0);
     const narrow = m.put('x\u20acy');
     assert.equal(m.fns.StrChrA.handler([narrow, 0x80]), narrow + 1,
         'an ANSI byte is the page\'s character');
