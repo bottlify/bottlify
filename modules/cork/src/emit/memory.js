@@ -56,27 +56,29 @@ export function readsWrapped(context){
 }
 
 /**
- * Wraps the address in `addr` into RAM for a read left untested: with RAM a
- * power of two, one `and`; with any other size, an address past RAM is taken
- * modulo the largest power of two below it, and one inside RAM is left as it
- * is, without a branch. Both read RAM where the access would have raised #GP.
- * A RAM of 1.5 or 3 GB tested every read before (the access's page flags
- * loaded and tested, an exit for the fault): a load was 46 bytes of wasm.
+ * Wraps the address in the i32 local `addr` into RAM for a read left
+ * untested: with RAM a power of two, one `and`; with any other size, an
+ * address past RAM is taken modulo the largest power of two below it, and one
+ * inside RAM is left as it is, without a branch. Both read RAM where the
+ * access would have raised #GP. A RAM of 1.5 or 3 GB tested every read before
+ * (the access's page flags loaded and tested, an exit for the fault): a load
+ * was 46 bytes of wasm. The long-mode emitter wraps its reads the same way.
  *
  * @param {import('./region.js').RegionEmitter['b']} b
  * @param {number} ramSize
+ * @param {number} [addr]  the local, the 32-bit emitter's `Local.addr` unless given
  */
-function wrapIntoRam(b, ramSize){
+export function wrapIntoRam(b, ramSize, addr = Local.addr){
     if ((ramSize & ramSize - 1) === 0)
     {
-        b.localGet(Local.addr).i32const(ramSize - 1).op(I32.and).localSet(Local.addr);
+        b.localGet(addr).i32const(ramSize - 1).op(I32.and).localSet(addr);
         return;
     }
     const below = 2 ** Math.floor(Math.log2(ramSize));
-    b.localGet(Local.addr);
-    b.localGet(Local.addr).i32const(below - 1).op(I32.and);
-    b.localGet(Local.addr).i32const(ramSize | 0).op(I32.ltU);
-    b.select().localSet(Local.addr);
+    b.localGet(addr);
+    b.localGet(addr).i32const(below - 1).op(I32.and);
+    b.localGet(addr).i32const(ramSize | 0).op(I32.ltU);
+    b.select().localSet(addr);
 }
 
 /**

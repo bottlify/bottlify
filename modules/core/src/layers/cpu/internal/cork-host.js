@@ -928,6 +928,7 @@ export function createCorkHost(config){
             && !engineHolds(page.address >>> 0))
         {
             runtime.readsFaulted?.();
+            longRunner?.readsFaulted();
         }
         if (faultHandler?.(fault) !== true)
         {

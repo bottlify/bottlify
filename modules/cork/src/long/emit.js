@@ -28,10 +28,13 @@
  * state exactly as the interpreter (`interp64.js`) wants it: an instruction it
  * has no case for, an address at or past 4 GiB, a page the program cannot
  * reach, a store into translated code or a watched page, a stack word of 16
- * bits. Every check an instruction needs is made before anything it writes, so
- * an exit never leaves half an instruction behind. `ir64.js` is the
- * reference: each case here computes what its case there computes, the flags
- * it leaves undefined kept as they were.
+ * bits. A read is not tested unless `checkReads`: its address is wrapped into
+ * RAM, as the 32-bit translator wraps its reads (`wrapIntoRam`), and reads
+ * there where the interpreter would fault. Every check an instruction needs
+ * is made before anything it writes, so an exit never leaves half an
+ * instruction behind. `ir64.js` is the reference: each case here computes
+ * what its case there computes, the flags it leaves undefined kept as they
+ * were.
  */
 
 import { Body, EMPTY, ModuleBuilder, ValType } from '../wasm/encoder.js';
@@ -39,6 +42,7 @@ import { Tables, hashSlotsOf, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
 import { XMM, emitSimd, translatesSimd } from './simd.js';
+import { wrapIntoRam } from '../emit/memory.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
 
@@ -219,10 +223,12 @@ class BlockEmitter {
     /**
      * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
      * @param {{ flags: number, shift: number }} helpers  function indices
+     * @param {boolean} checkReads  reads test their pages, rather than wrap into RAM
      */
-    constructor(layout, helpers){
+    constructor(layout, helpers, checkReads){
         this.layout = layout;
         this.helpers = helpers;
+        this.checkReads = checkReads;
         this.b = new Body(1024);
         /** Ifs opened inside the block being emitted. */
         this.nest = 0;
@@ -416,6 +422,12 @@ class BlockEmitter {
     place(operand, store, index, address){
         const { b } = this;
         this.effective(operand);
+        if (!store && !this.checkReads)
+        {
+            b.op(Op.i32wrap).localSet(A);
+            wrapIntoRam(b, this.layout.ramSize, A);
+            return;
+        }
         b.localTee(T0).i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz);
         this.exitIf(index, address);
         b.localGet(T0).op(Op.i32wrap).localSet(A);
@@ -924,10 +936,27 @@ class BlockEmitter {
         this.checkPage(true, index, address, 8);
     }
 
-    /** RSP into A, checked as a load. @param {number} index @param {number} address */
+    /** RSP into A, as a read is placed. @param {number} index @param {number} address */
     placePop(index, address){
+        this.b.localGet(4).localSet(T1);
+        this.placeRead(index, address);
+    }
+
+    /**
+     * The address in T1 into A for a read of eight bytes: wrapped into RAM,
+     * or with `checkReads` checked as `place` checks one.
+     *
+     * @param {number} index @param {number} address
+     */
+    placeRead(index, address){
         const { b } = this;
-        b.localGet(4).localTee(T1).i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz);
+        if (!this.checkReads)
+        {
+            b.localGet(T1).op(Op.i32wrap).localSet(A);
+            wrapIntoRam(b, this.layout.ramSize, A);
+            return;
+        }
+        b.localGet(T1).i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz);
         this.exitIf(index, address);
         b.localGet(T1).op(Op.i32wrap).localSet(A);
         this.checkPage(false, index, address, 8);
@@ -1380,11 +1409,8 @@ class BlockEmitter {
                 return true;
             case 'leave':
                 // rsp from rbp, then rbp popped from there.
-                b.localGet(5).localTee(T1).i64const(32n).op(Op.i64shru).op(Op.i64eqz)
-                    .op(Op.i32eqz);
-                this.exitIf(index, at);
-                b.localGet(T1).op(Op.i32wrap).localSet(A);
-                this.checkPage(false, index, at, 8);
+                b.localGet(5).localSet(T1);
+                this.placeRead(index, at);
                 this.loadAt(8);
                 b.localGet(T1).i64const(8n).op(Op.i64add).localSet(4).localSet(5);
                 return true;
@@ -1782,10 +1808,12 @@ function shiftHelper(){
  * @param {LongRegion[]} regions
  * @param {(address: number) => number} slotOf  the table slot of the region at an address,
  *     which holds `missFunction` until there is one
- * @param {{ transfers?: boolean }} [options]
+ * @param {{ transfers?: boolean, checkReads?: boolean }} [options]  `checkReads`: reads
+ *     test their pages, rather than wrap into RAM
  * @returns {Uint8Array<ArrayBuffer>}
  */
-export function emitRegions(layout, memoryLimits, regions, slotOf, { transfers = false } = {}){
+export function emitRegions(layout, memoryLimits, regions, slotOf, options = {}){
+    const { transfers = false, checkReads = false } = options;
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
@@ -1815,7 +1843,7 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, { transfers =
             transfer.locals, transfer.body.toBytes());
     }
     regions.forEach((region, index)=>{
-        const body = emitRegion(layout, helpers, region, { slotOf, regionType });
+        const body = emitRegion(layout, helpers, region, { slotOf, regionType, checkReads });
         m.function(regionType, LOCALS, body.toBytes(), { exportAs: `r${index}` });
     });
     return m.toBytes();
@@ -1894,10 +1922,11 @@ export function missFunction(){
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ flags: number, shift: number, transfer: number | null }} helpers
  * @param {LongRegion} region
- * @param {{ slotOf: (address: number) => number, regionType: number }} link
+ * @param {{ slotOf: (address: number) => number, regionType: number, checkReads: boolean }}
+ *     link
  */
-function emitRegion(layout, helpers, region, { slotOf, regionType }){
-    const e = new BlockEmitter(layout, helpers);
+function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads }){
+    const e = new BlockEmitter(layout, helpers, checkReads);
     const { b } = e;
     // In address order: a jump forward, most of them, is a branch out to the
     // target's label, or no branch at all.

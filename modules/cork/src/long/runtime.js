@@ -45,21 +45,26 @@ const REGION_LIMIT = 32;
  * @property {[number, number][]} ranges  the bytes it was made of, [from, to)
  * @property {(() => number) | null} run
  * @property {number[]} hashed  its blocks' indices in the entry hash
+ * @property {boolean} wrapped  made while reads wrapped into RAM untested
  */
 
 /**
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
  *     pages: import('../runtime/pages.js').PageTable,
- *     hot?: number, below?: number, transfers?: boolean }} settings  `below`: no block
- *     starts under it (the host's null range, whose fetch faults on the interpreter);
- *     `transfers`: regions go on into each other through the entry hash with tail
- *     calls, where the host has them (off where a tail call into another instance
- *     faults: iOS's `crossTailCalls`)
+ *     hot?: number, below?: number, transfers?: boolean, checkReads?: boolean }} settings
+ *     `below`: no block starts under it (the host's null range, whose fetch faults on
+ *     the interpreter); `transfers`: regions go on into each other through the entry
+ *     hash with tail calls, where the host has them (off where a tail call into another
+ *     instance faults: iOS's `crossTailCalls`); `checkReads`: true, translated reads
+ *     test their pages; false, they wrap into RAM for good; unset, they wrap until
+ *     the program faults on a page it cannot reach (`readsFaulted`), as the 32-bit
+ *     runtime's do
  */
 export function createLongRunner(settings){
     const { memory, layout, pages, hot = 2, below = 0x10000,
         transfers = features().tailCalls } = settings;
+    let readsChecked = settings.checkReads === true;
     /** @type {Map<number, LongEntry>} */
     const entries = new Map();
     /** @type {Map<number, number>} */
@@ -68,7 +73,7 @@ export function createLongRunner(settings){
     const byPage = new Map();
     const limits = memoryLimits(memory);
     const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0,
-        entered: 0 };
+        entered: 0, readSwitches: 0 };
     /**
      * The instructions run on the interpreter one at a time -- the one a block
      * stopped before, or a start no block holds -- by mnemonic, counted each
@@ -230,11 +235,12 @@ export function createLongRunner(settings){
             }
         }
         /** @type {LongEntry} */
-        const record = { entry, ranges: [], run: null, hashed: [] };
+        const record = { entry, ranges: [], run: null, hashed: [], wrapped: false };
         if (blocks.length > 0)
         {
+            record.wrapped = !readsChecked;
             const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
-                slotOf, { transfers }));
+                slotOf, { transfers, checkReads: readsChecked }));
             const instance = new WebAssembly.Instance(module,
                 { env: { memory, table, budget: budgetGlobal, depth, label, expect } });
             const run = /** @type {() => number} */ (instance.exports.r0);
@@ -275,6 +281,34 @@ export function createLongRunner(settings){
         }
         entries.set(entry, record);
         return record;
+    };
+
+    /**
+     * Forgets the start at `entry` and its region: its table slot misses from
+     * now on, and so do transfers to its blocks.
+     *
+     * @param {number} entry
+     */
+    const drop = entry=>{
+        const record = entries.get(entry);
+        entries.delete(entry);
+        if (record?.run)
+        {
+            table.set(slotOf(entry), miss);
+            for (const index of record.hashed)
+            {
+                hashed.remove(index);
+            }
+        }
+        stats.dropped++;
+        // Its pages keep a start that is gone.
+        for (const [from, to] of record?.ranges ?? [])
+        {
+            for (let page = from >>> 12; page <= (to - 1) >>> 12; page++)
+            {
+                byPage.get(page)?.delete(entry);
+            }
+        }
     };
 
     return {
@@ -410,31 +444,34 @@ export function createLongRunner(settings){
                 {
                     continue;
                 }
-                byPage.delete(page);
-                for (const entry of starts)
+                for (const entry of [...starts])
                 {
-                    const record = entries.get(entry);
-                    entries.delete(entry);
-                    if (record?.run)
-                    {
-                        // Calls into it miss from now on, and so do transfers.
-                        table.set(slotOf(entry), miss);
-                        for (const index of record.hashed)
-                        {
-                            hashed.remove(index);
-                        }
-                    }
-                    stats.dropped++;
-                    // Its other pages keep a start that is gone.
-                    for (const [from, to] of record?.ranges ?? [])
-                    {
-                        for (let other = from >>> 12; other <= (to - 1) >>> 12; other++)
-                        {
-                            byPage.get(other)?.delete(entry);
-                        }
-                    }
+                    drop(entry);
                 }
+                byPage.delete(page);
                 pages.clearCode(page);
+            }
+        },
+
+        /**
+         * The program faulted on a page it cannot reach: reads test their pages
+         * from now on, and the regions that wrapped theirs into RAM go -- the
+         * same instruction would read RAM there where the interpreter faults.
+         * Once a run, as the 32-bit runtime's `readsFaulted`.
+         */
+        readsFaulted(){
+            if (readsChecked || settings.checkReads === false)
+            {
+                return;
+            }
+            readsChecked = true;
+            stats.readSwitches++;
+            for (const record of [...entries.values()])
+            {
+                if (record.wrapped)
+                {
+                    drop(record.entry);
+                }
             }
         },
     };

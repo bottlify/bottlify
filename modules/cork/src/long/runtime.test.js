@@ -55,8 +55,9 @@ function fill(seed, size){
  * A machine with the corpus's data and code areas open and every other page closed.
  *
  * @param {boolean} [transfers]  regions go on into each other without the host
+ * @param {boolean} [checkReads]  translated reads test their pages from the start
  */
-function machine(transfers = true){
+function machine(transfers = true, checkReads = undefined){
     const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
@@ -67,7 +68,7 @@ function machine(transfers = true){
         flags.fill(0, at >>> 12, (at + size) >>> 12);
     }
     const pages = createPageTable(memory, layout);
-    const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers });
+    const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads });
     const state = blockState64({ memory, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
     return { layout, memory, state, runner, view: new DataView(memory.buffer) };
@@ -241,9 +242,10 @@ function run(m, translated, budget = 7){
  * @param {any[]} cases @param {number} [budget]  each translated run's
  * @param {boolean} [transfers]  the translated machine's regions go on into each
  *     other without the host: both ways must be the interpreter's
+ * @param {boolean} [checkReads]  its reads test their pages, as the interpreter's do
  */
-function compare(cases, budget = 7, transfers = true){
-    const translatedMachine = machine(transfers);
+function compare(cases, budget = 7, transfers = true, checkReads = undefined){
+    const translatedMachine = machine(transfers, checkReads);
     const interpretedMachine = machine();
     /** @type {string[]} */
     const failures = [];
@@ -322,10 +324,38 @@ test('an access across into a closed page or past 4 GiB faults where the interpr
             cases.push(edge(code, rbx));
         }
     }
-    const { failures, exits } = compare(cases);
+    // Reads tested, as a program that has faulted on a read once has them.
+    const { failures, exits } = compare(cases, 7, true, true);
     assert.deepEqual(failures, []);
     // Some ran clean, most faulted: both ways were taken.
     assert.ok(exits > 0 && exits < cases.length, `${exits} of ${cases.length} ran to their exit`);
+});
+
+test('a translated read wraps into RAM until the program faults on a page, then faults', ()=>{
+    // mov rax, [rbx] with rbx on the closed page past the data; then hlt-free exit.
+    const base = CORPUS.cases[0];
+    const closed = CORPUS.dataAt + CORPUS.dataSize + 0x10;
+    const regs = [...base.regs];
+    regs[3] = closed.toString(16);
+    const one = { ...base, text: 'read a closed page', code: '488b03', regs };
+    const m = machine();
+    load(m, one);
+    const wrapped = run(m, true);
+    // RAM a power of two here: the address itself, which is in RAM, read as it stands.
+    assert.equal(wrapped.fault, 'exit', 'the translated read did not test its page');
+    const ram = new DataView(m.memory.buffer).getBigUint64(closed, true);
+    assert.equal(wrapped.regs[0], ram.toString(16));
+    m.runner.readsFaulted();
+    assert.equal(m.runner.stats.readSwitches, 1);
+    load(m, one);
+    const faulted = run(m, true);
+    const interpreted = run((()=>{
+        const other = machine();
+        load(other, one);
+        return other;
+    })(), false);
+    assert.equal(faulted.fault, interpreted.fault, 'after the switch it faults as the interpreter');
+    assert.notEqual(faulted.fault, 'exit');
 });
 
 test('an instruction whose two operands are one register runs translated as interpreted', ()=>{
