@@ -10,7 +10,9 @@
  * is met, and from then on runs as one wasm call until it jumps out or spends
  * its budget; what no region holds -- a cold start, the instruction a block
  * stopped before -- runs on the long-mode interpreter (`interp64.js`) over the
- * same state block.
+ * same state block. A direct call from one region into another is a wasm
+ * call through a table holding every region at its address's slot, so the
+ * host is crossed only where a call nests too deep or finds no region.
  *
  * A region's bytes are marked as translated code in the page table, so a
  * store into them -- which a region itself never makes, it stops before --
@@ -22,7 +24,7 @@ import { MODE_64, decode } from '../decode/decoder.js';
 import { pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
-import { LongExit, emitRegions, endsBlock, translates } from './emit.js';
+import { LongExit, emitRegions, endsBlock, missFunction, translates } from './emit.js';
 
 /** Instructions a block holds at most. */
 const BLOCK_LIMIT = 64;
@@ -37,7 +39,6 @@ const REGION_LIMIT = 32;
  * @property {number} entry
  * @property {[number, number][]} ranges  the bytes it was made of, [from, to)
  * @property {(() => number) | null} run
- * @property {WebAssembly.Global | null} budget  its module's
  */
 
 /**
@@ -59,6 +60,30 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
     let view = new DataView(memory.buffer);
     let bytes = new Uint8Array(memory.buffer);
     const flagsAt = pageFlagsAt(layout);
+    // The regions by slot, which calls from region to region go through: a
+    // slot is an address's for good, holding the miss function while the
+    // address has no region.
+    const table = new WebAssembly.Table({ element: 'anyfunc', initial: 256 });
+    const miss = new WebAssembly.Instance(new WebAssembly.Module(missFunction())).exports.miss;
+    /** @type {Map<number, number>} */
+    const slots = new Map();
+    /** @param {number} address */
+    const slotOf = address=>{
+        let slot = slots.get(address);
+        if (slot === undefined)
+        {
+            slot = slots.size;
+            if (slot >= table.length)
+            {
+                table.grow(table.length);
+            }
+            table.set(slot, miss);
+            slots.set(address, slot);
+        }
+        return slot;
+    };
+    const budgetGlobal = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
+    const depth = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
     const fresh = ()=>{
         if (view.byteLength === 0 || view.buffer !== memory.buffer)
         {
@@ -130,9 +155,14 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
             return [next];
         }
         const [operand] = last.operands;
-        if (last.op === 'call' || operand?.kind !== 'rel')
+        if (operand?.kind !== 'rel')
         {
             return [];
+        }
+        if (last.op === 'call')
+        {
+            // The callee is a region of its own, called; its return comes back here.
+            return [next];
         }
         const target = /** @type {number} */ (operand.target);
         return last.op === 'jmp' ? [target] : [target, next];
@@ -172,13 +202,15 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
             }
         }
         /** @type {LongEntry} */
-        const record = { entry, ranges: [], run: null, budget: null };
+        const record = { entry, ranges: [], run: null };
         if (blocks.length > 0)
         {
-            const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }]));
-            const instance = new WebAssembly.Instance(module, { env: { memory } });
+            const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
+                slotOf));
+            const instance = new WebAssembly.Instance(module,
+                { env: { memory, table, budget: budgetGlobal, depth } });
             record.run = /** @type {() => number} */ (instance.exports.r0);
-            record.budget = /** @type {WebAssembly.Global} */ (instance.exports.budget);
+            table.set(slotOf(entry), record.run);
             for (const block of blocks)
             {
                 const last = block.instructions[block.instructions.length - 1];
@@ -262,8 +294,8 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
                 }
                 if (block !== undefined)
                 {
-                    /** @type {WebAssembly.Global} */ (block.budget).value =
-                        budget - (state.retired - before);
+                    budgetGlobal.value = budget - (state.retired - before);
+                    depth.value = 0;
                     const answer = /** @type {() => number} */ (block.run)();
                     state.retired += answer >>> 2;
                     stats.translated += answer >>> 2;
@@ -303,6 +335,11 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
                 {
                     const record = entries.get(entry);
                     entries.delete(entry);
+                    if (record?.run)
+                    {
+                        // Calls into it miss from now on.
+                        table.set(slotOf(entry), miss);
+                    }
                     stats.dropped++;
                     // Its other pages keep a start that is gone.
                     for (const [from, to] of record?.ranges ?? [])

@@ -6,11 +6,12 @@
 
 /**
  * The long-mode translator judged by the long-mode interpreter: every case of
- * the hardware corpus (`x64-corpus.json.gz`) run twice over the same machine
- * -- once as translated blocks (each start translated the first time it is
- * met, the interpreter taking what a block stops before), once on the
- * interpreter alone -- and everything a program can see compared: the
- * sixteen registers, RIP, the whole flags word (undefined flags included: the
+ * the hardware corpus (`x64-corpus.json.gz`), seeded programs drawn from it
+ * and directed ones run twice over the same machine -- once as translated
+ * regions (each start translated the first time it is met, the interpreter
+ * taking what a block stops before), once on the interpreter alone -- and
+ * everything a program can see compared: the sixteen registers, RIP, the
+ * instructions retired, the whole flags word (undefined flags included: the
  * translator keeps them as the model does), the XMM registers, the data
  * buffer, and a fault's vector and instruction.
  *
@@ -173,6 +174,7 @@ function load(m, one){
     m.state.syncIn();
     m.state.halted = false;
     m.state.trapped.length = 0;
+    m.state.retired = 0;
 }
 
 /**
@@ -180,8 +182,9 @@ function load(m, one){
  * and answers what the program can see.
  *
  * @param {ReturnType<typeof machine>} m @param {boolean} translated
+ * @param {number} [budget]
  */
-function run(m, translated){
+function run(m, translated, budget = 7){
     const { layout, memory, state, runner, view } = m;
     let fault;
     try
@@ -190,8 +193,8 @@ function run(m, translated){
         {
             if (translated)
             {
-                // A small budget, so runs end between blocks as well as at faults.
-                runner.run(state, 7);
+                // A small budget by default, so runs end between blocks as well as at faults.
+                runner.run(state, budget);
                 // The host writes the state back after a run (cork-host's
                 // `settle`): RIP and the flags must be the blocks' own.
                 state.syncOut();
@@ -220,6 +223,7 @@ function run(m, translated){
         regs: [...new BigUint64Array(memory.buffer, layout.regs, 16)]
             .map(value=>value.toString(16)),
         rip: view.getBigUint64(layout.eip, true).toString(16),
+        retired: String(state.retired),
         flags: view.getUint32(layout.eflags, true).toString(16),
         xmm: Buffer.from(bytes.subarray(layout.xmm, layout.xmm + 256)).toString('hex'),
         data: Buffer.from(bytes.subarray(CORPUS.dataAt, CORPUS.dataAt + CORPUS.dataSize))
@@ -230,9 +234,9 @@ function run(m, translated){
 /**
  * Runs every case on both machines and answers the differences.
  *
- * @param {any[]} cases
+ * @param {any[]} cases @param {number} [budget]  each translated run's
  */
-function compare(cases){
+function compare(cases, budget = 7){
     const translatedMachine = machine();
     const interpretedMachine = machine();
     /** @type {string[]} */
@@ -244,10 +248,11 @@ function compare(cases){
         translatedMachine.runner.invalidate(CORPUS.codeAt, CORPUS.codeSize);
         load(translatedMachine, one);
         load(interpretedMachine, one);
-        const translated = run(translatedMachine, true);
+        const translated = run(translatedMachine, true, budget);
         const interpreted = run(interpretedMachine, false);
         exits += translated.fault === 'exit' ? 1 : 0;
-        for (const key of /** @type {const} */ (['fault', 'rip', 'flags', 'xmm', 'data']))
+        for (const key of /** @type {const} */ (['fault', 'rip', 'retired', 'flags', 'xmm',
+            'data']))
         {
             if (translated[key] !== interpreted[key])
             {
@@ -327,4 +332,32 @@ test('an instruction whose two operands are one register runs translated as inte
     })));
     const { failures } = compare(cases);
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+});
+
+test('calls from region to region return where they were made, and leave where they cannot', ()=>{
+    // start:  mov ecx, 12; call fib; mov [rbx], rax          fib(12), nested wasm calls
+    //         mov ecx, 80; call depth; mov [rbx + 8], rax     deeper than CALL_DEPTH
+    //         call skip; mov qword [rbx + 16], 1             skip returns 8 bytes on,
+    //         mov qword [rbx + 24], 2                          past the first store
+    //         call cold; mov [rbx + 32], rax; jmp done       cold starts untranslated
+    // fib:    cmp ecx, 2; jb small; push rcx; dec ecx; call fib; pop rcx; push rax;
+    //         sub ecx, 2; call fib; pop rdx; add rax, rdx; ret
+    // small:  mov eax, ecx; ret
+    // depth:  test ecx, ecx; jz zero; dec ecx; call depth; inc rax; ret
+    // zero:   xor eax, eax; ret
+    // skip:   add qword [rsp], 8; ret
+    // cold:   pxor xmm0, xmm0; mov eax, 7; ret
+    // done:
+    const code = 'b90c000000e831000000488903b950000000e84300000048894308e84c00000048c7431001'
+        + '00000048c7431802000000e83d00000048894320eb4183f902721751ffc9e8f3ffffff595083e902e8'
+        + 'e9ffffff5a4801d0c389c8c385c9740bffc9e8f5ffffff48ffc0c331c0c34883042408c3660fefc0b8'
+        + '07000000c3';
+    const cases = CORPUS.cases.slice(0, 8).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `calls ${i}`, code }));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits } = compare(cases, budget);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+    }
 });

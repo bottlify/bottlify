@@ -20,6 +20,9 @@
  * kind gives one (a compare and branch). A jump to a block of the region goes
  * on inside the function, a jump back only until the instructions it retired
  * reach the module's `budget` global; any other leaves with RIP at the target.
+ * A direct call is a wasm call of the callee's region (`callOut`), which
+ * returns into the caller's block after the call when the callee's `ret`
+ * lands there.
  *
  * What the block cannot do itself it leaves before the instruction, with the
  * state exactly as the interpreter (`interp64.js`) wants it: an instruction it
@@ -44,7 +47,16 @@ export const LongExit = Object.freeze({
     NEXT: 0,
     /** It stopped before the instruction at RIP, which the interpreter runs. */
     INTERPRET: 1,
+    /** Nothing ran: the table slot called holds no region yet (`missFunction`). */
+    MISS: 3,
 });
+
+/**
+ * Calls a region makes into others as wasm calls, nested at most this deep:
+ * deeper, a call leaves for the host, which starts again from the top. The
+ * engine's stack holds a frame a level, and iOS's is small.
+ */
+export const CALL_DEPTH = 64;
 
 /** Lazy flag kinds, the helper's (`flagsHelper`). */
 const Kind = Object.freeze({ ADD: 1, ADC: 2, SUB: 3, SBB: 4, LOGIC: 5, INC: 6, DEC: 7, IMUL: 8,
@@ -75,11 +87,13 @@ const IDX = 32;
 const U = 33;
 const T4 = 34;
 const T5 = 35;
+/** The budget a call set aside for itself while its callee runs. */
+const SAVED = 36;
 const LOCALS = [
     ...new Array(16).fill(ValType.i64), ValType.i64, ValType.i32,
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32,
     ValType.i64, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32, ValType.i32,
-    ValType.i32, ValType.i32, ValType.i64, ValType.i64,
+    ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i32,
 ];
 /** The direction flag, which no record holds. */
 const DF = 1 << 10;
@@ -89,8 +103,13 @@ const DF = 1 << 10;
  */
 const LOCKABLE = new Set(['add', 'adc', 'sub', 'sbb', 'and', 'or', 'xor', 'inc', 'dec', 'neg',
     'not', 'xadd', 'cmpxchg', 'bts', 'btr', 'btc', 'xchg']);
-/** The module's one global: instructions a call may retire before it leaves. */
+/**
+ * The globals every region module imports, shared: the instructions a call
+ * may retire before it leaves, and how deep the calls from region to region
+ * are nested now.
+ */
 const BUDGET = 0;
+const DEPTH = 1;
 
 /** The wasm opcodes this emitter writes, by name. */
 const Op = Object.freeze({
@@ -164,9 +183,10 @@ export const endsBlock = op=>op === 'jmp' || op === 'call' || op === 'ret' || op
 /**
  * How a block ended: on into the next instruction (`true`), or by a jump --
  * to `to`, known, or to wherever RIP was set (`to` null); a conditional one
- * goes to `next` when `cc` does not hold.
+ * goes to `next` when `cc` does not hold; a direct call (`call`) returns to
+ * `next`.
  *
- * @typedef {true | { to: number | null, cc?: number, next?: number }} Ending
+ * @typedef {true | { to: number | null, cc?: number, next?: number, call?: boolean }} Ending
  */
 
 /**
@@ -1147,7 +1167,7 @@ class BlockEmitter {
                 b.localGet(T1).localSet(4);
                 if (dst.kind === 'rel')
                 {
-                    return { to: /** @type {number} */ (dst.target) };
+                    return { to: /** @type {number} */ (dst.target), call: true, next };
                 }
                 b.localGet(T2).localSet(RIP);
                 return { to: null };
@@ -1384,6 +1404,59 @@ class BlockEmitter {
             this.close();
         }
         b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
+    }
+
+    /**
+     * A direct call as a wasm call: the registers and flags to the block, the
+     * region at `to` called through its table slot with what is left of the
+     * budget, everything taken back from the block after; on into the block
+     * at `next` when the callee returned there, else out with what it left.
+     * Too deep, or a slot holding no region yet, leaves for the host with RIP
+     * at the target, the return address already pushed.
+     *
+     * @param {number} to @param {number} next @param {number} slot
+     * @param {number} regionType @param {Map<number, number>} indexOf
+     * @param {number} here @param {number} count
+     */
+    callOut(to, next, slot, regionType, indexOf, here, count){
+        const { b, layout } = this;
+        this.settle();
+        for (let reg = 0; reg < 16; reg++)
+        {
+            b.i32const(0).localGet(reg).store('i64', { offset: layout.regs + reg * 8 });
+        }
+        b.i32const(0).localGet(FL).store('i32', { offset: layout.eflags });
+        b.globalGet(DEPTH).i32const(CALL_DEPTH).op(Op.i32geu);
+        this.open();
+        b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
+        this.close();
+        // What is left of the budget, none once this function has run past it.
+        b.globalGet(BUDGET).localTee(SAVED).localGet(K).op(Op.i32sub).i32const(0)
+            .localGet(SAVED).localGet(K).op(Op.i32gtu).op(Op.select).globalSet(BUDGET);
+        b.globalGet(DEPTH).i32const(1).op(Op.i32add).globalSet(DEPTH);
+        b.i32const(slot).callIndirect(regionType).localSet(U);
+        b.globalGet(DEPTH).i32const(1).op(Op.i32sub).globalSet(DEPTH);
+        b.localGet(SAVED).globalSet(BUDGET);
+        b.localGet(K).localGet(U).i32const(2).op(Op.i32shru).op(Op.i32add).localSet(K);
+        for (let reg = 0; reg < 16; reg++)
+        {
+            b.i32const(0).load('i64', { offset: layout.regs + reg * 8 }).localSet(reg);
+        }
+        b.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);
+        b.i32const(0).load('i64', { offset: layout.eip }).localSet(RIP);
+        b.localGet(U).i32const(3).op(Op.i32and).i32const(LongExit.MISS).op(Op.i32eq);
+        this.open();
+        b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
+        this.close();
+        b.localGet(U).i32const(3).op(Op.i32and).localTee(CODE);
+        this.open();
+        b.br(this.exitDepth);
+        this.close();
+        b.localGet(RIP).i64const(BigInt(next)).op(Op.i64ne);
+        this.open();
+        b.br(this.exitDepth);
+        this.close();
+        this.go(next, indexOf, here, count);
     }
 
     /** Reverses the bytes of the i64 on the stack. */
@@ -1664,22 +1737,28 @@ function shiftHelper(){
  */
 
 /**
- * A module of region functions over the memory, exported as `r<index>`, and
- * the `budget` global they read.
+ * A module of region functions over the memory, exported as `r<index>`. It
+ * imports, from `env`, the memory, the table of regions by slot that its
+ * calls go through, and the `budget` and `depth` globals every region module
+ * shares.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout  64-bit
  * @param {{ min: number, max?: number, shared?: boolean }} memoryLimits  the memory's, in pages
  * @param {LongRegion[]} regions
+ * @param {(address: number) => number} slotOf  the table slot of the region at an address,
+ *     which holds `missFunction` until there is one
  * @returns {Uint8Array<ArrayBuffer>}
  */
-export function emitRegions(layout, memoryLimits, regions){
+export function emitRegions(layout, memoryLimits, regions, slotOf){
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
     }
     const m = new ModuleBuilder();
     m.importMemory('env', 'memory', memoryLimits);
-    m.exportGlobal('budget', m.global(ValType.i32, true, 0));
+    m.importTable('env', 'table', 1);
+    m.importGlobal('env', 'budget', ValType.i32, true);
+    m.importGlobal('env', 'depth', ValType.i32, true);
     const flags = flagsHelper();
     const shift = shiftHelper();
     const flagsType = m.type({ params: flags.params, results: flags.results });
@@ -1690,9 +1769,19 @@ export function emitRegions(layout, memoryLimits, regions){
         shift: m.function(shiftType, shift.locals, shift.body.toBytes()),
     };
     regions.forEach((region, index)=>{
-        const body = emitRegion(layout, helpers, region);
+        const body = emitRegion(layout, helpers, region, { slotOf, regionType });
         m.function(regionType, LOCALS, body.toBytes(), { exportAs: `r${index}` });
     });
+    return m.toBytes();
+}
+
+/** A module whose `miss` answers `LongExit.MISS` having run nothing: an empty table slot. */
+export function missFunction(){
+    const m = new ModuleBuilder();
+    const type = m.type({ params: [], results: [ValType.i32] });
+    const body = new Body(8);
+    body.i32const(LongExit.MISS);
+    m.function(type, [], body.toBytes(), { exportAs: 'miss' });
     return m.toBytes();
 }
 
@@ -1715,8 +1804,9 @@ export function emitRegions(layout, memoryLimits, regions){
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ flags: number, shift: number }} helpers @param {LongRegion} region
+ * @param {{ slotOf: (address: number) => number, regionType: number }} link
  */
-function emitRegion(layout, helpers, region){
+function emitRegion(layout, helpers, region, { slotOf, regionType }){
     const e = new BlockEmitter(layout, helpers);
     const { b } = e;
     // In address order: a jump forward, most of them, is a branch out to the
@@ -1764,6 +1854,11 @@ function emitRegion(layout, helpers, region){
         else if (ending.to === null)
         {
             b.br(e.exitDepth);
+        }
+        else if (ending.call)
+        {
+            e.callOut(ending.to, /** @type {number} */ (ending.next), slotOf(ending.to), regionType,
+                indexOf, index, count);
         }
         else if (ending.cc === undefined)
         {
