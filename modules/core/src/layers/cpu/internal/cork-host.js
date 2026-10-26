@@ -1902,7 +1902,10 @@ export function createCorkHost(config){
          */
         registerFile: ()=>(long ? null : reg32),
         /** @param {number} base @param {number} size */
-        noteStack: (base, size)=>runtime.noteStack(base, size),
+        noteStack: (base, size)=>{
+            runtime.noteStack(base, size);
+            longRunner?.noteStack(base, size);
+        },
         /**
          * @param {number} address @param {number} length
          * @returns {number[] | null}

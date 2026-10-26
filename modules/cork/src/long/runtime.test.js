@@ -58,8 +58,9 @@ function fill(seed, size){
  *
  * @param {boolean} [transfers]  regions go on into each other without the host
  * @param {boolean} [checkReads]  translated reads test their pages from the start
+ * @param {boolean} [looseStacks]  false: stores through rsp test their pages too
  */
-function machine(transfers = true, checkReads = undefined){
+function machine(transfers = true, checkReads = undefined, looseStacks = undefined){
     const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
@@ -70,7 +71,8 @@ function machine(transfers = true, checkReads = undefined){
         flags.fill(0, at >>> 12, (at + size) >>> 12);
     }
     const pages = createPageTable(memory, layout);
-    const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads });
+    const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads,
+        looseStacks });
     const state = blockState64({ memory, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
     return { layout, memory, state, runner, view: new DataView(memory.buffer) };
@@ -392,6 +394,34 @@ test('stos and movs run translated as interpreted: by pages, across them, into a
     assert.ok(exits > cases.length / 2 && exits < cases.length,
         `${exits} of ${cases.length} ran to their exit`);
     assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+});
+
+test('a store through rsp tests no page until code is translated on a noted stack', ()=>{
+    // mov dword [rsp], 0x90c8ff48 over the next instruction, inc rax; nop, which
+    // it makes dec rax: code on the page rsp points into.
+    const code = 'c7042448ffc89048ffc090';
+    const regs = [...CORPUS.cases[0].regs];
+    regs[0] = '10';
+    regs[4] = (CORPUS.codeAt + 7).toString(16);
+    const one = { ...CORPUS.cases[0], text: 'store over the code through rsp', code, regs };
+    /** @param {ReturnType<typeof machine>} m @param {boolean} translated */
+    const rax = (m, translated)=>{
+        m.runner.invalidate(CORPUS.codeAt, CORPUS.codeSize);
+        load(m, one);
+        return run(m, translated).regs[0];
+    };
+    const interpreted = rax(machine(), false);
+    assert.equal(interpreted, 'f');
+    // Tested, as the interpreter does it.
+    assert.equal(rax(machine(true, undefined, false), true), interpreted);
+    // Loose, with the code's page named a stack: made again tested, once.
+    const noted = machine();
+    noted.runner.noteStack(CORPUS.codeAt, 0x1000);
+    assert.equal(rax(noted, true), interpreted);
+    assert.equal(noted.runner.stats.stackSwitches, 1);
+    // Loose with no stack named there, the store went untested: the code it
+    // wrote over ran as it was, which a thread's stack never holds.
+    assert.equal(rax(machine(), true), '11');
 });
 
 test('a translated read wraps into RAM until the program faults on a page, then faults', ()=>{

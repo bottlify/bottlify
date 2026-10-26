@@ -241,11 +241,13 @@ class BlockEmitter {
      * @param {{ flags: number, shift: number, transfer: number | null }} helpers  function
      *     indices; `transfer` none without transfers
      * @param {boolean} checkReads  reads test their pages, rather than wrap into RAM
+     * @param {boolean} looseStacks  a store through rsp alone tests no page
      */
-    constructor(layout, helpers, checkReads){
+    constructor(layout, helpers, checkReads, looseStacks){
         this.layout = layout;
         this.helpers = helpers;
         this.checkReads = checkReads;
+        this.looseStacks = looseStacks;
         this.b = new Body(1024);
         /** Ifs opened inside the block being emitted. */
         this.nest = 0;
@@ -441,7 +443,9 @@ class BlockEmitter {
     place(operand, store, index, address){
         const { b } = this;
         this.effective(operand);
-        if (!store && !this.checkReads)
+        const stack = this.looseStacks && operand.base === 4 && (operand.index ?? -1) < 0
+            && !operand.rip && operand.segment !== 4 && operand.segment !== 5;
+        if (!store && !this.checkReads || store && stack)
         {
             b.op(Op.i32wrap).localSet(A);
             wrapIntoRam(b, this.layout.ramSize, A);
@@ -1027,6 +1031,12 @@ class BlockEmitter {
     /** RSP less eight into A, checked as a store; the new RSP in T1. @param {number} index @param {number} address */
     placePush(index, address){
         const { b } = this;
+        if (this.looseStacks)
+        {
+            b.localGet(4).i64const(8n).op(Op.i64sub).localTee(T1).op(Op.i32wrap).localSet(A);
+            wrapIntoRam(b, this.layout.ramSize, A);
+            return;
+        }
         b.localGet(4).i64const(8n).op(Op.i64sub).localTee(T1)
             .i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz);
         this.exitIf(index, address);
@@ -2074,12 +2084,15 @@ function shiftHelper(){
  * @param {LongRegion[]} regions
  * @param {(address: number) => number} slotOf  the table slot of the region at an address,
  *     which holds `missFunction` until there is one
- * @param {{ transfers?: boolean, checkReads?: boolean }} [options]  `checkReads`: reads
- *     test their pages, rather than wrap into RAM
+ * @param {{ transfers?: boolean, checkReads?: boolean, looseStacks?: boolean }} [options]
+ *     `checkReads`: reads test their pages, rather than wrap into RAM; `looseStacks`: a
+ *     store through rsp alone tests no page either (the 32-bit translator's
+ *     `looseStacks`), its address wrapped into RAM: no translated code lies on a
+ *     thread's stack while the runner makes regions so
  * @returns {Uint8Array<ArrayBuffer>}
  */
 export function emitRegions(layout, memoryLimits, regions, slotOf, options = {}){
-    const { transfers = false, checkReads = false } = options;
+    const { transfers = false, checkReads = false, looseStacks = false } = options;
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
@@ -2113,7 +2126,8 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
         m.nameFunction(helpers.transfer, 'transfer');
     }
     regions.forEach((region, index)=>{
-        const body = emitRegion(layout, helpers, region, { slotOf, regionType, checkReads });
+        const body = emitRegion(layout, helpers, region,
+            { slotOf, regionType, checkReads, looseStacks });
         const at = m.function(regionType, LOCALS, body.toBytes(), { exportAs: `r${index}` });
         m.nameFunction(at, `r${region.blocks[0].entry.toString(16).padStart(8, '0')}`);
     });
@@ -2309,11 +2323,11 @@ export function missFunction(){
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ flags: number, shift: number, transfer: number | null }} helpers
  * @param {LongRegion} region
- * @param {{ slotOf: (address: number) => number, regionType: number, checkReads: boolean }}
- *     link
+ * @param {{ slotOf: (address: number) => number, regionType: number, checkReads: boolean,
+ *     looseStacks: boolean }} link
  */
-function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads }){
-    const e = new BlockEmitter(layout, helpers, checkReads);
+function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads, looseStacks }){
+    const e = new BlockEmitter(layout, helpers, checkReads, looseStacks);
     const { b } = e;
     // In address order: a jump forward, most of them, is a branch out to the
     // target's label, or no branch at all.

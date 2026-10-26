@@ -47,25 +47,33 @@ const REGION_LIMIT = 32;
  * @property {(() => number) | null} run
  * @property {number[]} hashed  its blocks' indices in the entry hash
  * @property {boolean} wrapped  made while reads wrapped into RAM untested
+ * @property {boolean} loose  made while stores through rsp went untested (`looseStacks`)
  */
 
 /**
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
  *     pages: import('../runtime/pages.js').PageTable,
- *     hot?: number, below?: number, transfers?: boolean, checkReads?: boolean }} settings
+ *     hot?: number, below?: number, transfers?: boolean, checkReads?: boolean,
+ *     looseStacks?: boolean }} settings
  *     `below`: no block starts under it (the host's null range, whose fetch faults on
  *     the interpreter); `transfers`: regions go on into each other through the entry
  *     hash with tail calls, where the host has them (off where a tail call into another
  *     instance faults: iOS's `crossTailCalls`); `checkReads`: true, translated reads
  *     test their pages; false, they wrap into RAM for good; unset, they wrap until
  *     the program faults on a page it cannot reach (`readsFaulted`), as the 32-bit
- *     runtime's do
+ *     runtime's do; `looseStacks`, unless false, a store through rsp alone tests no page
+ *     until code is translated on a page of a thread's stack (`noteStack`), as the
+ *     32-bit runtime's do
  */
 export function createLongRunner(settings){
     const { memory, layout, pages, hot = 2, below = 0x10000,
         transfers = features().tailCalls } = settings;
     let readsChecked = settings.checkReads === true;
+    /** Whether regions are made loose: until code is translated on a stack. */
+    let loose = settings.looseStacks !== false;
+    /** The pages of the threads' stacks the host named (`noteStack`). @type {Set<number>} */
+    const stackPages = new Set();
     /** @type {Map<number, LongEntry>} */
     const entries = new Map();
     /** @type {Map<number, number>} */
@@ -74,7 +82,7 @@ export function createLongRunner(settings){
     const byPage = new Map();
     const limits = memoryLimits(memory);
     const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0,
-        entered: 0, readSwitches: 0 };
+        entered: 0, readSwitches: 0, stackSwitches: 0 };
     /**
      * The instructions run on the interpreter one at a time -- the one a block
      * stopped before, or a start no block holds -- by mnemonic, counted each
@@ -241,12 +249,12 @@ export function createLongRunner(settings){
             }
         }
         /** @type {LongEntry} */
-        const record = { entry, ranges: [], run: null, hashed: [], wrapped: false };
+        const record = { entry, ranges: [], run: null, hashed: [], wrapped: false, loose };
         if (blocks.length > 0)
         {
             record.wrapped = !readsChecked;
             const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
-                slotOf, { transfers, checkReads: readsChecked }));
+                slotOf, { transfers, checkReads: readsChecked, looseStacks: loose }));
             const instance = new WebAssembly.Instance(module,
                 { env: { memory, table, budget: budgetGlobal, depth, label, expect } });
             const run = /** @type {() => number} */ (instance.exports.r0);
@@ -286,7 +294,44 @@ export function createLongRunner(settings){
             }
         }
         entries.set(entry, record);
+        if (loose && record.ranges.some(([from, to])=>{
+            for (let page = from >>> 12; page <= (to - 1) >>> 12; page++)
+            {
+                if (stackPages.has(page))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }))
+        {
+            // Made loose on a stack: made again, tested.
+            stackCodeSeen();
+            return form(entry);
+        }
         return record;
+    };
+
+    /**
+     * Code is translated on a page of a thread's stack: the regions that store
+     * through rsp untested go, and every region from now on tests them -- a
+     * store through rsp could write the code itself. Once a run, as the 32-bit
+     * runtime's `stackCodeSeen`.
+     */
+    const stackCodeSeen = ()=>{
+        if (!loose)
+        {
+            return;
+        }
+        loose = false;
+        stats.stackSwitches++;
+        for (const record of [...entries.values()])
+        {
+            if (record.loose && record.run !== null)
+            {
+                drop(record.entry);
+            }
+        }
     };
 
     /**
@@ -470,6 +515,25 @@ export function createLongRunner(settings){
          * same instruction would read RAM there where the interpreter faults.
          * Once a run, as the 32-bit runtime's `readsFaulted`.
          */
+        /**
+         * A thread's stack, as the host names it: code translated on it ends
+         * the stores through rsp that test no page.
+         *
+         * @param {number} base @param {number} size
+         */
+        noteStack(base, size){
+            const first = base >>> 12;
+            const last = (base + Math.max(size, 1) - 1) >>> 12;
+            for (let page = first; page <= last; page++)
+            {
+                stackPages.add(page);
+                if (byPage.has(page))
+                {
+                    stackCodeSeen();
+                }
+            }
+        },
+
         readsFaulted(){
             if (readsChecked || settings.checkReads === false)
             {
