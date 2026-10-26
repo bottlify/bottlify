@@ -1785,10 +1785,10 @@ export class RegionEmitter {
             const b = this.b = new Body();
             // At a guest call, what the state block holds already stays: only
             // what some way to the call wrote since it last held it is stored.
-            const stale = site === undefined ? null
-                : new Set([...onEntry[site.block] ?? [], ...site.written]);
+            const entered = site === undefined ? undefined : onEntry[site.block];
             /** @param {number} local */
-            const due = local=>stale === null || stale.has(local);
+            const due = local=>site === undefined || site.written.has(local)
+                || entered?.has(local) === true;
             for (let r = 0; r < (regs === 'none' ? 0 : 8); r++)
             {
                 const offset = layout.regs + r * 4;
@@ -1888,11 +1888,21 @@ export class RegionEmitter {
             {
                 continue;
             }
-            const out = new Set([...into[i], ...(site === undefined ? written : site.written)]);
+            // Added from both into each way's set, not joined into a set of
+            // their own first: the join was a tenth of what translating made
+            // for the collector.
+            const own = site === undefined ? written : site.written;
             for (const j of ways[i])
             {
                 const before = into[j].size;
-                for (const local of out)
+                if (j !== i)
+                {
+                    for (const local of into[i])
+                    {
+                        into[j].add(local);
+                    }
+                }
+                for (const local of own)
                 {
                     into[j].add(local);
                 }
