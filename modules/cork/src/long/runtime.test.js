@@ -812,6 +812,32 @@ test('a callee formed in reads what a wasm call before it left in the state bloc
     }
 });
 
+test('an indirect call\'s sampled callees are formed in and run as interpreted', ()=>{
+    //         mov ecx, 20000
+    // loop:   mov eax, ecx; xor edx, edx; mov r9d, 3; div r9d    edx = ecx % 3
+    //         lea rax, [rip + f0]; shl edx, 3; add rax, rdx
+    //         lea r10, [rcx + 7]                                 written before the call,
+    //         call rax                                           stored by the next one
+    //         call g; dec ecx; jnz loop; jmp done
+    // f0..f2: add rbx, 1 / 2 / 4; ret                            eight bytes apart
+    // g:      add rbx, r10; call h; ret                          no leaf: a wasm call
+    // h:      ret
+    // done:
+    const code = 'b9204e000089c831d241b90300000041f7f1488d0517000000c1e2034801d04c8d5107ffd0'
+        + 'e81e000000ffc975d7eb224883c301c39090904883c302c39090904883c304c3909090'
+        + '4c01d3e801000000c3c3';
+    const cases = CORPUS.cases.slice(0, 2).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `predicted ${i}`, code }));
+    for (const budget of [7, 1000])
+    {
+        const { failures, exits, stats } = compare(cases, budget);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+        // All three callees decided and formed in.
+        assert.ok(stats.predicted >= 3, JSON.stringify(stats));
+    }
+});
+
 test('indirect calls are wasm calls that return where they were made', ()=>{
     // start:  mov esi, 3
     // again:  lea rdx, [rip + fib]; mov ecx, 10; call rdx; add [rbx], rax

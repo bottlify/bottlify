@@ -47,7 +47,7 @@
  */
 
 import { Body, EMPTY, ModuleBuilder, ValType } from '../wasm/encoder.js';
-import { Tables, hashSlotsOf, pageFlagsAt } from '../runtime/layout.js';
+import { CALL_STRIDE, Tables, hashSlotsOf, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
 import { XMM, emitSimd, translatesSimd } from './simd.js';
@@ -1891,6 +1891,34 @@ class BlockEmitter {
     }
 
     /**
+     * An indirect call's target, in RIP, noted in the layout's call profile
+     * while the runner has its flag up, as the 32-bit translator's
+     * `profileCall` notes one: about one call in `CALL_STRIDE` kept, picked by
+     * the count's golden ratio hash rather than every n-th, in sixteen pairs
+     * of the call's address and its target. Off, one load and a branch.
+     *
+     * @param {number} site  the call's address
+     */
+    profileCall(site){
+        const { b } = this;
+        const at = /** @type {number} */ (this.layout.callProfile);
+        const stride = Math.log2(CALL_STRIDE);
+        b.i32const(0).load('i32', { offset: at });
+        this.open();
+        b.i32const(0).i32const(0).load('i32', { offset: at + 4 }).localTee(A).i32const(1)
+            .op(Op.i32add).store('i32', { offset: at + 4 });
+        b.localGet(A).i32const(0x9e3779b1 | 0).op(Op.i32mul).i32const(32 - stride)
+            .op(Op.i32shru).op(Op.i32eqz);
+        this.open();
+        b.localGet(A).i32const(stride).op(Op.i32shru).i32const(15).op(Op.i32and)
+            .i32const(3).op(Op.i32shl).localTee(A).i32const(site | 0)
+            .store('i32', { offset: at + 8 });
+        b.localGet(A).localGet(RIP).op(Op.i32wrap).store('i32', { offset: at + 12 });
+        this.close();
+        this.close();
+    }
+
+    /**
      * A call as a wasm call: what the block retired charged, the registers
      * and flags to the block, the callee called expecting `next` -- a direct
      * call's region at `to` through its table slot at its entry, an indirect
@@ -2282,6 +2310,10 @@ function shiftHelper(){
  *     last a branch, or not when the block was cut short, and then it goes on past it
  * @property {import('./switch.js').Switch} [switch]  where its indirect jump goes through a
  *     switch's table (`switch.js`): the jump branches among the cases by index (`dispatch`)
+ * @property {number[]} [targets]  the callees its indirect call was predicted to (the
+ *     runner's `sampleCalls`), formed into the region: the call compares its target with
+ *     each and jumps there
+ * @property {boolean} [quiet]  its indirect call is sampled no more
  */
 
 /**
@@ -2306,7 +2338,7 @@ function shiftHelper(){
  * @param {(address: number) => number} slotOf  the table slot of the region at an address,
  *     which holds `missFunction` until there is one
  * @param {{ transfers?: boolean, checkReads?: boolean, looseStacks?: boolean,
- *     defaultNaNNegative?: boolean, formCalls?: boolean,
+ *     defaultNaNNegative?: boolean, formCalls?: boolean, profileCalls?: boolean,
  *     x87Id?: ((instruction: import('../decode/decoder.js').Instruction) => number) | null }}
  *     [options]  `defaultNaNNegative`, the host's
  *     (`features`): false puts an invalid operation's NaN right (`simd.js`); `x87Id`
@@ -2317,12 +2349,14 @@ function shiftHelper(){
  *     `looseStacks`), its address wrapped into RAM: no translated code lies on a
  *     thread's stack while the runner makes regions so; `formCalls`, unless false, a
  *     direct call whose callee the region holds is a push and a jump into it, and that
- *     callee's rets jump back past the call (`formedReturns`)
+ *     callee's rets jump back past the call (`formedReturns`); `profileCalls`: an
+ *     indirect call not `quiet` notes its target in the layout's call profile
+ *     (`profileCall`)
  * @returns {Uint8Array<ArrayBuffer>}
  */
 export function emitRegions(layout, memoryLimits, regions, slotOf, options = {}){
     const { transfers = false, checkReads = false, looseStacks = false,
-        defaultNaNNegative = true, x87Id = null, formCalls = true } = options;
+        defaultNaNNegative = true, x87Id = null, formCalls = true, profileCalls = false } = options;
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
@@ -2362,7 +2396,8 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     }
     regions.forEach((region, index)=>{
         const body = emitRegion(layout, helpers, region,
-            { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative, formCalls });
+            { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative, formCalls,
+                profileCalls });
         const at = m.function(regionType, LOCALS, body.toBytes(),
             { exportAs: `r${index}`, hints: body.hints });
         m.nameFunction(at, `r${region.blocks[0].entry.toString(16).padStart(8, '0')}`);
@@ -2483,6 +2518,7 @@ function regionSuccessors(blocks, indexOf, returns, formCalls){
             {
                 to.push(/** @type {number} */ (operand.target));
             }
+            to.push(...block.targets ?? []);
         }
         else
         {
@@ -2519,15 +2555,17 @@ function formedReturns(blocks, indexOf){
     {
         const last = block.instructions[block.instructions.length - 1];
         const next = last.eip + last.length;
-        const callee = last.operands[0]?.kind === 'rel' ? last.operands[0].target : undefined;
-        if (last.op !== 'call' || callee === undefined || !indexOf.has(callee)
-            || !indexOf.has(next))
+        const [operand] = last.operands;
+        const direct = operand?.kind === 'rel' ? /** @type {number} */ (operand.target) : -1;
+        const callees = (direct >= 0 ? [direct] : block.targets ?? [])
+            .filter(callee=>indexOf.has(callee));
+        if (last.op !== 'call' || callees.length === 0 || !indexOf.has(next))
         {
             continue;
         }
         /** @type {Set<number>} */
         const seen = new Set();
-        const work = [callee];
+        const work = [...callees];
         while (work.length > 0)
         {
             const index = indexOf.get(/** @type {number} */ (work.pop()));
@@ -2625,19 +2663,20 @@ function callSync(blocks, indexOf, seen, wrote, spills, written, returns, formCa
     };
     const writtenSet = new Set(written);
     // What some way to each block's start wrote since the state block last
-    // held it: a call's return holds it again.
+    // held it: a call's return holds it again. A predicted callee formed in
+    // is reached from the calling block by a jump, before its call stores
+    // anything: that way takes what the block has.
     /** @type {Set<number>[]} */
     const dirty = blocks.map(()=>new Set());
     for (let changed = true; changed;)
     {
         changed = false;
-        blocks.forEach((_, index)=>{
-            if (calling.has(index))
-            {
-                return;
-            }
+        blocks.forEach((block, index)=>{
+            const ways = calling.has(index) ? (block.targets ?? [])
+                .map(target=>indexOf.get(target)).filter(next=>next !== undefined)
+                : successors[index];
             const out = new Set([...dirty[index], ...writes[index]]);
-            for (const next of successors[index])
+            for (const next of /** @type {number[]} */ (ways))
             {
                 for (const r of out)
                 {
@@ -2804,11 +2843,12 @@ export function missFunction(){
  * @param {BlockEmitter['helpers']} helpers
  * @param {LongRegion} region
  * @param {{ slotOf: (address: number) => number, regionType: number, checkReads: boolean,
- *     looseStacks: boolean, defaultNaNNegative: boolean, formCalls: boolean }} link
+ *     looseStacks: boolean, defaultNaNNegative: boolean, formCalls: boolean,
+ *     profileCalls: boolean }} link
  *     `formCalls`: a direct call whose callee the region holds is a jump into it
  */
 function emitRegion(layout, helpers, region,
-    { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative, formCalls })
+    { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative, formCalls, profileCalls })
 {
     const e = new BlockEmitter(layout, helpers, checkReads, looseStacks);
     e.defaultNaNNegative = defaultNaNNegative;
@@ -2895,6 +2935,25 @@ function emitRegion(layout, helpers, region,
         }
         else if (ending.call)
         {
+            if (ending.to === null)
+            {
+                // A predicted callee formed in: on into it where the target is its.
+                for (const target of block.targets ?? [])
+                {
+                    if (indexOf.has(target))
+                    {
+                        b.localGet(RIP).i64const(BigInt(target)).op(Op.i64eq);
+                        e.open();
+                        e.go(target, indexOf, index, count);
+                        e.close();
+                    }
+                }
+                if (profileCalls && block.quiet !== true)
+                {
+                    const site = block.instructions[block.instructions.length - 1].eip;
+                    e.profileCall(site);
+                }
+            }
             e.callOut(ending.to, /** @type {number} */ (ending.next),
                 ending.to === null ? -1 : slotOf(ending.to), regionType, indexOf, index, count);
         }
