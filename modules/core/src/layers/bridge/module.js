@@ -792,12 +792,13 @@ export function createBridgeModule(){
                 }),
 
                 /**
-                 * Where a host call's refused guest access goes: raised in the
-                 * guest, as the access violation Windows raises inside the
-                 * DLL, by whoever dispatches exceptions -- this layer does
-                 * not. Without one, the refusal ends the run as before.
+                 * Where a host call's refused guest access, or an exception a
+                 * handler raised, goes: raised in the guest -- the access
+                 * violation as Windows raises it inside the DLL -- by whoever
+                 * dispatches exceptions; this layer does not. Without one,
+                 * either ends the run.
                  *
-                 * @param {((fault: import('./internal/dispatch.js').GuestAccess)
+                 * @param {((raised: import('./internal/dispatch.js').GuestRaise)
                  *     => Promise<number>) | null} raise
                  */
                 onGuestFault(raise){

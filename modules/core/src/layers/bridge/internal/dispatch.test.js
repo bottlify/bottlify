@@ -1922,3 +1922,23 @@ test('a refused guest access after a handler waited is raised the same way', asy
     m.dispatcher.dispatch(2);
     await assert.rejects(suspended[1], RangeError);
 });
+
+test('an exception a handler raises on purpose goes to the guest the same way', ()=>{
+    // InitializeCriticalSectionEx's STATUS_INVALID_HANDLE and the like: the
+    // handler throws the exception Windows' function raises.
+    const m = machine({ args: [0] });
+    m.dispatcher.suspend = ()=>{};
+    /** @type {any[]} */
+    const raised = [];
+    m.dispatcher.guestFault = what=>{
+        raised.push(what);
+        return Promise.resolve(0);
+    };
+    m.dispatcher.register(1, { ...STDCALL, name: 'KERNEL32.dll!InitializeCriticalSectionEx',
+        argBytes: 4, handler: ()=>{
+            throw Object.assign(new Error('raised'),
+                { code: 'GUEST_EXCEPTION', status: 0xc0000008, flags: 0, parameters: [] });
+        } });
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(raised.map(what=>[what.code, what.status]), [['GUEST_EXCEPTION', 0xc0000008]]);
+});

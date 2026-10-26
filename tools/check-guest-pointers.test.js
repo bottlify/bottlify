@@ -12,6 +12,8 @@ const fault = ()=>Object.assign(new Error('Unmapped read at 0x0'), { code: 'GUES
 
 test('a fault passes, a stand-in is not measured, anything else is a host throw', ()=>{
     assert.equal(classify(fault()), 'fault');
+    assert.equal(classify(Object.assign(new Error('raised'), { code: 'GUEST_EXCEPTION' })),
+        'fault', 'an exception raised in the guest on purpose');
     assert.equal(classify(Object.assign(new Error('x'), { code: STAND_IN })), 'unmeasured');
     assert.equal(classify(new TypeError('Cannot read properties of undefined')), 'throw');
     assert.equal(classify(Object.assign(new Error('An empty path names nothing'),

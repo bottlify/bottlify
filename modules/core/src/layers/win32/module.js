@@ -33,6 +33,7 @@ import { createPdhFunctions, createPowrprofFunctions } from './power/functions.j
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
+import { GUEST_EXCEPTION } from './common/raise.js';
 import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry.js';
 import { createThreadCalls, DLL_THREAD_DETACH } from './kernel32/thread-calls.js';
 import { createCrtSeh } from './msvcrt/seh.js';
@@ -1193,9 +1194,10 @@ export function createWin32Module(){
                 },
             });
             // A host call's refused guest access is the program's exception,
-            // as Windows raises it in the DLL, not the end of the run.
-            bridge.onGuestFault?.((/** @type {{ address: number,
-                mode: 'read' | 'write' | 'execute' }} */ fault)=>seh.raiseAccess(fault));
+            // as Windows raises it in the DLL, not the end of the run; so is
+            // an exception a handler raises (`common/raise.js`).
+            bridge.onGuestFault?.((/** @type {any} */ raised)=>(raised.code === GUEST_EXCEPTION
+                ? seh.raiseException(raised) : seh.raiseAccess(raised)));
 
             /**
              * Bytes put in guest memory for as long as `use` runs, a call it

@@ -704,3 +704,16 @@ test('a refused guest access is STATUS_ACCESS_VIOLATION, read or write and where
     assert.deepEqual([read.get(readRecord + RECORD.INFORMATION),
         read.get(readRecord + RECORD.INFORMATION + 4)], [0, 0]);
 });
+
+test('an exception a handler raises reaches the program with its code and '
+    + 'information', async()=>{
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+    const answer = await m.seh.raiseException({ status: 0xc0000094, flags: 0, parameters: [7] });
+    const [{ args: [record] }] = m.called;
+    assert.equal(m.get(record + RECORD.CODE), 0xc0000094);
+    assert.equal(m.get(record + RECORD.FLAGS), 0);
+    assert.equal(m.get(record + RECORD.PARAMETER_COUNT), 1);
+    assert.equal(m.get(record + RECORD.INFORMATION), 7);
+    assert.equal(answer, 0, 'continued, the call answers zero');
+});

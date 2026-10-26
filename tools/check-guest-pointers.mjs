@@ -6,7 +6,8 @@
 
 /**
  * Fails when a host handler throws anything but a guest access fault on a
- * guest pointer it was handed.
+ * guest pointer it was handed -- or an exception it raises in the guest on
+ * purpose, as Windows' function does.
  *
  * A host call answers a bad pointer, an empty string or a wrong length as
  * Windows does: an error code, or the access violation the processor would
@@ -48,6 +49,8 @@ const LAYERS = join(ROOT, 'modules', 'core', 'src', 'layers');
 
 /** What memory calls a refused guest access. */
 const GUEST_ACCESS = 'GUEST_ACCESS';
+/** An exception a handler raises in the guest on purpose (`win32/common/raise.js`). */
+const GUEST_EXCEPTION = 'GUEST_EXCEPTION';
 /** What a stand-in throws for a member it does not have. */
 export const STAND_IN = 'STAND_IN';
 
@@ -60,16 +63,9 @@ const ENDS = /^(ExitProcess|ExitThread|FatalAppExit[AW]|FatalExit|FreeLibraryAnd
  * @type {Map<string, string>}
  */
 export const KNOWN = new Map([
-    // Windows raises EXCEPTION_INT_DIVIDE_BY_ZERO; the handler has no way to
-    // raise it in the guest yet, and says so instead (`win32/ntdll`,
-    // `win32/msvcrt`).
-    ['msvcrt.dll!div', 'divide by zero: a processor exception on Windows'],
-    ['ntdll.dll!_alldiv', 'divide by zero: a processor exception on Windows'],
-    ['ntdll.dll!_allrem', 'divide by zero: a processor exception on Windows'],
-    ['ntdll.dll!_aulldiv', 'divide by zero: a processor exception on Windows'],
-    ['ntdll.dll!_aullrem', 'divide by zero: a processor exception on Windows'],
-    ['ntdll.dll!_alldvrm', 'divide by zero: a processor exception on Windows'],
-    ['ntdll.dll!_aulldvrm', 'divide by zero: a processor exception on Windows'],
+    // Windows raises EXCEPTION_INT_DIVIDE_BY_ZERO; msvcrt's handler says so
+    // instead of raising it (`common/raise.js` raises it).
+    ['msvcrt.dll!div', 'msvcrt: divide by zero, a processor exception on Windows'],
     // Guest code whose handler is the reference only: the guest's routine
     // reads registers or the x87 stack no handler is passed.
     ['ntdll.dll!_allshl', 'guest code: EDX:EAX and CL, which no handler is passed'],
@@ -99,7 +95,8 @@ export const KNOWN = new Map([
  */
 export function classify(error){
     const code = /** @type {{ code?: unknown }} */ (error)?.code;
-    return code === GUEST_ACCESS ? 'fault' : code === STAND_IN ? 'unmeasured' : 'throw';
+    return code === GUEST_ACCESS || code === GUEST_EXCEPTION ? 'fault'
+        : code === STAND_IN ? 'unmeasured' : 'throw';
 }
 
 /**
