@@ -35,7 +35,7 @@
  */
 
 import { Body, EMPTY, ModuleBuilder, ValType } from '../wasm/encoder.js';
-import { pageFlagsAt } from '../runtime/layout.js';
+import { Tables, hashSlotsOf, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
 import { XMM, emitSimd, translatesSimd } from './simd.js';
@@ -48,6 +48,11 @@ export const LongExit = Object.freeze({
     NEXT: 0,
     /** It stopped before the instruction at RIP, which the interpreter runs. */
     INTERPRET: 1,
+    /**
+     * It went to the address the wasm call waiting for it expects (`callOut`):
+     * the caller goes on there. The host never sees it.
+     */
+    RETURNED: 2,
     /** Nothing ran: the table slot called holds no region yet (`missFunction`). */
     MISS: 3,
 });
@@ -88,18 +93,21 @@ const IDX = 32;
 const U = 33;
 const T4 = 34;
 const T5 = 35;
-/** The budget a call set aside for itself while its callee runs. */
-const SAVED = 36;
 const LOCALS = [
     ...new Array(16).fill(ValType.i64), ValType.i64, ValType.i32,
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32,
     ValType.i64, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32, ValType.i32,
+    // Local 36 is unused, kept so the ones after it keep their numbers.
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i32,
     // XMM0..15 and three scratch vectors (simd.js), two f32s and two f64s.
     ...new Array(19).fill(ValType.v128), ValType.f32, ValType.f32, ValType.f64, ValType.f64,
+    // The address the wasm call waiting for this one expects it to return to.
+    ValType.i64,
 ];
 /** The float scratch locals, past the vectors. */
 const F32 = XMM + 19;
+/** The `expect` global as the region was entered with it. */
+const EXPECTED = XMM + 23;
 /** The direction flag, which no record holds. */
 const DF = 1 << 10;
 /**
@@ -109,17 +117,23 @@ const DF = 1 << 10;
 const LOCKABLE = new Set(['add', 'adc', 'sub', 'sbb', 'and', 'or', 'xor', 'inc', 'dec', 'neg',
     'not', 'xadd', 'cmpxchg', 'bts', 'btr', 'btc', 'xchg']);
 /**
- * The globals every region module imports, shared: the instructions a call
- * may retire before it leaves, and how deep the calls from region to region
- * are nested now.
+ * The globals every region module imports, shared: the instructions left to
+ * run before the host takes over again, which every region charges with what
+ * it retired as it leaves or calls; how deep the calls from region to region
+ * are nested now; the label of the block a region is entered at (0 its
+ * entry, `i + 1` its block `i`); and the address the wasm call waiting for
+ * the region expects it to return to, -1 for none.
  */
 const BUDGET = 0;
 const DEPTH = 1;
+const LABEL = 2;
+const EXPECT = 3;
 
 /** The wasm opcodes this emitter writes, by name. */
 const Op = Object.freeze({
     i32eqz: 0x45, i32eq: 0x46, i32ne: 0x47, i32ltu: 0x49, i32gtu: 0x4b, i32leu: 0x4d,
-    i32geu: 0x4f, i64eqz: 0x50, i64eq: 0x51, i64ne: 0x52, i64lts: 0x53, i64ltu: 0x54,
+    i32geu: 0x4f, i32mul: 0x6c, i32lts: 0x48, i32gts: 0x4a, i32les: 0x4c, i64eqz: 0x50,
+    i64eq: 0x51, i64ne: 0x52, i64lts: 0x53, i64ltu: 0x54,
     i64gtu: 0x56, i64les: 0x57, i64leu: 0x58, i32add: 0x6a, i32sub: 0x6b, i32and: 0x71,
     i32or: 0x72, i32xor: 0x73,
     i32shl: 0x74, i32shru: 0x76, i32remu: 0x70, i32popcnt: 0x69, i64popcnt: 0x7b,
@@ -1424,7 +1438,7 @@ class BlockEmitter {
         if (index !== undefined)
         {
             // A jump back is what can loop: the budget bounds it.
-            b.localGet(K).globalGet(BUDGET).op(Op.i32ltu);
+            b.localGet(K).globalGet(BUDGET).op(Op.i32lts);
             this.open();
             b.i32const(index).localSet(IDX).br(count - 1 - here + this.nest);
             this.close();
@@ -1433,12 +1447,13 @@ class BlockEmitter {
     }
 
     /**
-     * A direct call as a wasm call: the registers and flags to the block, the
-     * region at `to` called through its table slot with what is left of the
-     * budget, everything taken back from the block after; on into the block
-     * at `next` when the callee returned there, else out with what it left.
-     * Too deep, or a slot holding no region yet, leaves for the host with RIP
-     * at the target, the return address already pushed.
+     * A direct call as a wasm call: what the block retired charged, the
+     * registers and flags to the block, the region at `to` called through its
+     * table slot at its entry, expecting `next`; everything taken back from the
+     * block after, and on into the block at `next` when the callee returned
+     * there (`LongExit.RETURNED`), else out as it left. Too deep, out of
+     * budget, or a slot holding no region yet, leaves with RIP at the target,
+     * the return address already pushed.
      *
      * @param {number} to @param {number} next @param {number} slot
      * @param {number} regionType @param {Map<number, number>} indexOf
@@ -1449,32 +1464,27 @@ class BlockEmitter {
         this.settle();
         this.spills.push({ at: b.length, reload: false });
         b.i32const(0).localGet(FL).store('i32', { offset: layout.eflags });
-        b.globalGet(DEPTH).i32const(CALL_DEPTH).op(Op.i32geu);
+        b.globalGet(BUDGET).localGet(K).op(Op.i32sub).globalSet(BUDGET);
+        b.i32const(0).localSet(K);
+        b.globalGet(DEPTH).i32const(CALL_DEPTH).op(Op.i32geu)
+            .globalGet(BUDGET).i32const(0).op(Op.i32les).op(Op.i32or);
         this.open();
         b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
         this.close();
-        // What is left of the budget, none once this function has run past it.
-        b.globalGet(BUDGET).localTee(SAVED).localGet(K).op(Op.i32sub).i32const(0)
-            .localGet(SAVED).localGet(K).op(Op.i32gtu).op(Op.select).globalSet(BUDGET);
         b.globalGet(DEPTH).i32const(1).op(Op.i32add).globalSet(DEPTH);
+        b.i32const(0).globalSet(LABEL).i64const(BigInt(next)).globalSet(EXPECT);
         b.i32const(slot).callIndirect(regionType).localSet(U);
         b.globalGet(DEPTH).i32const(1).op(Op.i32sub).globalSet(DEPTH);
-        b.localGet(SAVED).globalSet(BUDGET);
-        b.localGet(K).localGet(U).i32const(2).op(Op.i32shru).op(Op.i32add).localSet(K);
         this.spills.push({ at: b.length, reload: true });
         b.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);
         b.i32const(0).load('i64', { offset: layout.eip }).localSet(RIP);
-        b.localGet(U).i32const(3).op(Op.i32and).i32const(LongExit.MISS).op(Op.i32eq);
+        b.localGet(U).i32const(LongExit.MISS).op(Op.i32eq);
         this.open();
         b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
         this.close();
-        b.localGet(U).i32const(3).op(Op.i32and).localTee(CODE);
+        b.localGet(U).i32const(LongExit.RETURNED).op(Op.i32ne);
         this.open();
-        b.br(this.exitDepth);
-        this.close();
-        b.localGet(RIP).i64const(BigInt(next)).op(Op.i64ne);
-        this.open();
-        b.br(this.exitDepth);
+        b.localGet(U).localSet(CODE).br(this.exitDepth);
         this.close();
         this.go(next, indexOf, here, count);
     }
@@ -1759,17 +1769,23 @@ function shiftHelper(){
 /**
  * A module of region functions over the memory, exported as `r<index>`. It
  * imports, from `env`, the memory, the table of regions by slot that its
- * calls go through, and the `budget` and `depth` globals every region module
- * shares.
+ * calls and transfers go through, and the globals every region module shares
+ * (`BUDGET`, `DEPTH`, `LABEL`, `EXPECT`).
+ *
+ * With `transfers`, a region that leaves for an address with budget left
+ * goes on there without the host where the entry hash (`entries.js`, in the
+ * layout's tables) names a block: the module's transfer function probes it
+ * and tail-calls that region at the block's label.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout  64-bit
  * @param {{ min: number, max?: number, shared?: boolean }} memoryLimits  the memory's, in pages
  * @param {LongRegion[]} regions
  * @param {(address: number) => number} slotOf  the table slot of the region at an address,
  *     which holds `missFunction` until there is one
+ * @param {{ transfers?: boolean }} [options]
  * @returns {Uint8Array<ArrayBuffer>}
  */
-export function emitRegions(layout, memoryLimits, regions, slotOf){
+export function emitRegions(layout, memoryLimits, regions, slotOf, { transfers = false } = {}){
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
@@ -1779,6 +1795,8 @@ export function emitRegions(layout, memoryLimits, regions, slotOf){
     m.importTable('env', 'table', 1);
     m.importGlobal('env', 'budget', ValType.i32, true);
     m.importGlobal('env', 'depth', ValType.i32, true);
+    m.importGlobal('env', 'label', ValType.i32, true);
+    m.importGlobal('env', 'expect', ValType.i64, true);
     const flags = flagsHelper();
     const shift = shiftHelper();
     const flagsType = m.type({ params: flags.params, results: flags.results });
@@ -1787,12 +1805,61 @@ export function emitRegions(layout, memoryLimits, regions, slotOf){
     const helpers = {
         flags: m.function(flagsType, flags.locals, flags.body.toBytes()),
         shift: m.function(shiftType, shift.locals, shift.body.toBytes()),
+        /** @type {number | null} */
+        transfer: null,
     };
+    if (transfers)
+    {
+        const transfer = transferFunction(layout, regionType);
+        helpers.transfer = m.function(m.type({ params: [ValType.i64], results: [ValType.i32] }),
+            transfer.locals, transfer.body.toBytes());
+    }
     regions.forEach((region, index)=>{
         const body = emitRegion(layout, helpers, region, { slotOf, regionType });
         m.function(regionType, LOCALS, body.toBytes(), { exportAs: `r${index}` });
     });
     return m.toBytes();
+}
+
+/**
+ * The transfer: RIP (its parameter) looked up in the entry hash as the
+ * 32-bit translator's transfer probes it (`finishModule`), the slot's region
+ * tail-called at the slot's label; a miss answers `LongExit.NEXT`, for the
+ * host. Every entry here is under `ANY_TOP`: long mode keeps no x87 top in
+ * its regions' keys.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {number} regionType
+ */
+function transferFunction(layout, regionType){
+    const hash = layout.tables + Tables.HASH;
+    const rip = 0;
+    const index = 1;
+    const at = 2;
+    const key = 3;
+    const eip = 4;
+    const b = new Body(256);
+    b.block();
+    // Past the window, or EIP 0 -- an empty slot's key -- is in no slot.
+    b.localGet(rip).i64const(32n).op(Op.i64shru).op(Op.i64eqz).op(Op.i32eqz).brIf(0);
+    b.localGet(rip).op(Op.i32wrap).localTee(eip).op(Op.i32eqz).brIf(0);
+    b.localGet(eip).i32const(0x9e3779b1 | 0).op(Op.i32mul).i32const(layout.hashShift ?? 16)
+        .op(Op.i32shru).localSet(index);
+    b.loop();
+    b.localGet(index).i32const(Tables.HASH_SLOT).op(Op.i32mul).i32const(hash).op(Op.i32add)
+        .localTee(at).load('i32').localTee(key).localGet(eip).op(Op.i32eq);
+    b.if();
+    b.localGet(at).load('i32_16u', { offset: 8 }).globalSet(LABEL);
+    b.localGet(at).load('i32', { offset: 4 }).returnCallIndirect(regionType);
+    b.end();
+    b.localGet(key).op(Op.i32eqz).brIf(1);
+    b.localGet(index).i32const(1).op(Op.i32add).i32const(hashSlotsOf(layout) - 1)
+        .op(Op.i32and).localSet(index);
+    b.br(0);
+    b.end();
+    b.end();
+    b.i32const(LongExit.NEXT);
+    return { body: b, locals: [ValType.i32, ValType.i32, ValType.i32, ValType.i32] };
 }
 
 /** A module whose `miss` answers `LongExit.MISS` having run nothing: an empty table slot. */
@@ -1820,10 +1887,13 @@ export function missFunction(){
  * the blocks in address order, so a jump forward is a branch out to the
  * target's label (or no branch, into the next block) and only a jump back
  * goes round the loop, with IDX set, while the budget lasts; anything else
- * leaves for the exit with RIP set. Then the epilogue storing what it wrote.
+ * leaves for the exit with RIP set. Then the epilogue storing what it wrote,
+ * charging the budget with what it retired, and going on: back to the call
+ * waiting at RIP, into the region the entry hash names there, or out.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ flags: number, shift: number }} helpers @param {LongRegion} region
+ * @param {{ flags: number, shift: number, transfer: number | null }} helpers
+ * @param {LongRegion} region
  * @param {{ slotOf: (address: number) => number, regionType: number }} link
  */
 function emitRegion(layout, helpers, region, { slotOf, regionType }){
@@ -1836,10 +1906,10 @@ function emitRegion(layout, helpers, region, { slotOf, regionType }){
     /** @type {Map<number, number>} */
     const indexOf = new Map(blocks.map((block, index)=>[block.entry, index]));
     const first = /** @type {number} */ (indexOf.get(region.blocks[0].entry));
-    if (first !== 0)
-    {
-        b.i32const(first).localSet(IDX);
-    }
+    // Label 0 is the region's entry, label i + 1 its block i.
+    b.globalGet(LABEL).i32const(1).op(Op.i32sub).i32const(first).globalGet(LABEL)
+        .op(Op.select).localSet(IDX);
+    b.globalGet(EXPECT).localSet(EXPECTED);
     b.block();
     b.loop();
     for (let i = 0; i < count; i++)
@@ -1956,7 +2026,22 @@ function emitRegion(layout, helpers, region, { slotOf, regionType }){
     tail.end();
     tail.i32const(0).localGet(FL).store('i32', { offset: layout.eflags });
     tail.i32const(0).localGet(RIP).store('i64', { offset: layout.eip });
-    tail.localGet(K).i32const(2).op(Op.i32shl).localGet(CODE).op(Op.i32or);
+    tail.globalGet(BUDGET).localGet(K).op(Op.i32sub).globalSet(BUDGET);
+    tail.localGet(CODE).op(Op.i32eqz);
+    tail.if();
+    tail.localGet(RIP).localGet(EXPECTED).op(Op.i64eq);
+    tail.if();
+    tail.i32const(LongExit.RETURNED).return();
+    tail.end();
+    if (helpers.transfer !== null)
+    {
+        tail.globalGet(BUDGET).i32const(0).op(Op.i32gts);
+        tail.if();
+        tail.localGet(EXPECTED).globalSet(EXPECT).localGet(RIP).returnCall(helpers.transfer);
+        tail.end();
+    }
+    tail.end();
+    tail.localGet(CODE);
     // The prologue: every register the body touches, and the flags word.
     const head = load(new Body(256), used);
     head.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);

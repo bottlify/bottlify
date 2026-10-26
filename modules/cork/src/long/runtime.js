@@ -11,8 +11,11 @@
  * its budget; what no region holds -- a cold start, the instruction a block
  * stopped before -- runs on the long-mode interpreter (`interp64.js`) over the
  * same state block. A direct call from one region into another is a wasm
- * call through a table holding every region at its address's slot, so the
- * host is crossed only where a call nests too deep or finds no region.
+ * call through a table holding every region at its address's slot, and a
+ * region that leaves for an address another region holds a block at goes on
+ * there through the entry hash in the layout's tables (`entries.js`, the
+ * 32-bit translator's), with a tail call: the host is crossed only where a
+ * call nests too deep, the budget is spent, or no region holds the address.
  *
  * A region's bytes are marked as translated code in the page table, so a
  * store into them -- which a region itself never makes, it stops before --
@@ -21,7 +24,9 @@
  */
 
 import { MODE_64, decode } from '../decode/decoder.js';
-import { pageFlagsAt } from '../runtime/layout.js';
+import { Tables, pageFlagsAt } from '../runtime/layout.js';
+import { ANY_TOP, createEntries } from '../runtime/entries.js';
+import { features } from '../wasm/features.js';
 import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
 import { LongExit, emitRegions, endsBlock, missFunction, translates } from './emit.js';
@@ -39,16 +44,22 @@ const REGION_LIMIT = 32;
  * @property {number} entry
  * @property {[number, number][]} ranges  the bytes it was made of, [from, to)
  * @property {(() => number) | null} run
+ * @property {number[]} hashed  its blocks' indices in the entry hash
  */
 
 /**
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
  *     pages: import('../runtime/pages.js').PageTable,
- *     hot?: number, below?: number }} options  `below`: no block starts under it
- *     (the host's null range, whose fetch faults on the interpreter)
+ *     hot?: number, below?: number, transfers?: boolean }} settings  `below`: no block
+ *     starts under it (the host's null range, whose fetch faults on the interpreter);
+ *     `transfers`: regions go on into each other through the entry hash with tail
+ *     calls, where the host has them (off where a tail call into another instance
+ *     faults: iOS's `crossTailCalls`)
  */
-export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x10000 }){
+export function createLongRunner(settings){
+    const { memory, layout, pages, hot = 2, below = 0x10000,
+        transfers = features().tailCalls } = settings;
     /** @type {Map<number, LongEntry>} */
     const entries = new Map();
     /** @type {Map<number, number>} */
@@ -56,7 +67,18 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
     /** The starts whose regions have bytes on each page. @type {Map<number, Set<number>>} */
     const byPage = new Map();
     const limits = memoryLimits(memory);
-    const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0 };
+    const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0,
+        entered: 0 };
+    /**
+     * The instructions run on the interpreter one at a time -- the one a block
+     * stopped before, or a start no block holds -- by mnemonic, counted each
+     * time: where translated code is missing, weighted by how often.
+     *
+     * @type {Map<string, number>}
+     */
+    const steppedOps = new Map();
+    /** The mnemonic at an address, decoded once. @type {Map<number, string>} */
+    const opAt = new Map();
     let view = new DataView(memory.buffer);
     let bytes = new Uint8Array(memory.buffer);
     const flagsAt = pageFlagsAt(layout);
@@ -84,6 +106,12 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
     };
     const budgetGlobal = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
     const depth = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
+    const label = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
+    const expect = new WebAssembly.Global({ value: 'i64', mutable: true }, -1n);
+    // Every block of every region, by address: what a region's transfer probes
+    // (in memory) and the host's loop looks up (in its map).
+    const hashed = createEntries({ memory, hashBase: layout.tables + Tables.HASH,
+        shift: layout.hashShift });
     const fresh = ()=>{
         if (view.byteLength === 0 || view.buffer !== memory.buffer)
         {
@@ -202,15 +230,21 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
             }
         }
         /** @type {LongEntry} */
-        const record = { entry, ranges: [], run: null };
+        const record = { entry, ranges: [], run: null, hashed: [] };
         if (blocks.length > 0)
         {
             const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
-                slotOf));
+                slotOf, { transfers }));
             const instance = new WebAssembly.Instance(module,
-                { env: { memory, table, budget: budgetGlobal, depth } });
-            record.run = /** @type {() => number} */ (instance.exports.r0);
-            table.set(slotOf(entry), record.run);
+                { env: { memory, table, budget: budgetGlobal, depth, label, expect } });
+            const run = /** @type {() => number} */ (instance.exports.r0);
+            record.run = run;
+            const slot = slotOf(entry);
+            table.set(slot, run);
+            // Block i, in the address order the emitter lays them out in, is label i + 1.
+            [...blocks].sort((x, y)=>x.entry - y.entry).forEach((block, index)=>{
+                record.hashed.push(hashed.add(block.entry, run, index + 1, ANY_TOP, slot));
+            });
             for (const block of blocks)
             {
                 const last = block.instructions[block.instructions.length - 1];
@@ -246,6 +280,12 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
     return {
         stats,
 
+        /** The counts, and the twenty instructions most often stepped one at a time. */
+        diagnostics: ()=>({
+            ...stats,
+            stepped: Object.fromEntries([...steppedOps].sort((a, b)=>b[1] - a[1]).slice(0, 20)),
+        }),
+
         /**
          * Runs up to about `budget` instructions from the block's RIP; stops
          * after a trap-port write or a `hlt`, as `interpret64` does. Counts
@@ -264,6 +304,24 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
             const before = state.retired;
             /** Up to `count` instructions interpreted, to the next jump. @param {number} count */
             const step = count=>{
+                if (count === 1)
+                {
+                    const at = Number(view.getBigUint64(layout.eip, true));
+                    let op = opAt.get(at);
+                    if (op === undefined)
+                    {
+                        try
+                        {
+                            const instruction = decode(fetch, at, MODE_64);
+                            op = 'refused' in instruction ? '(refused)' : instruction.op;
+                        }
+                        catch {
+                            op = '(fault)';
+                        }
+                        opAt.set(at, op);
+                    }
+                    steppedOps.set(op, (steppedOps.get(op) ?? 0) + 1);
+                }
                 state.syncIn();
                 stats.interpreted += interpret64(state, count,
                     { force: true, shouldStop: ()=>true, onStep: options.onStep });
@@ -274,32 +332,54 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
             {
                 const rip = view.getBigUint64(layout.eip, true);
                 const at = Number(rip);
-                let block = rip < 2n ** 32n ? entries.get(at) : undefined;
-                if (block === undefined && rip < 2n ** 32n)
+                /** @type {(() => number) | null} */
+                let run = null;
+                let entryLabel = 0;
+                if (rip < 2n ** 32n)
                 {
-                    const seen = (visits.get(at) ?? 0) + 1;
-                    visits.set(at, seen);
-                    if (seen >= hot)
+                    const index = hashed.entryOf(at);
+                    if (index >= 0)
                     {
-                        visits.delete(at);
-                        block = form(at);
+                        const found = hashed.at(index);
+                        run = /** @type {() => number} */ (/** @type {unknown} */ (found.fn));
+                        entryLabel = found.label;
+                    }
+                    else
+                    {
+                        let block = entries.get(at);
+                        if (block === undefined)
+                        {
+                            const seen = (visits.get(at) ?? 0) + 1;
+                            visits.set(at, seen);
+                            if (seen >= hot)
+                            {
+                                visits.delete(at);
+                                block = form(at);
+                            }
+                        }
+                        if (block?.run === null)
+                        {
+                            // A start whose first instruction no block holds: that one
+                            // instruction here, and a block from the next.
+                            step(1);
+                            continue;
+                        }
+                        run = block?.run ?? null;
                     }
                 }
-                if (block?.run === null)
+                if (run !== null)
                 {
-                    // A start whose first instruction no block holds: that one
-                    // instruction here, and a block from the next.
-                    step(1);
-                    continue;
-                }
-                if (block !== undefined)
-                {
-                    budgetGlobal.value = budget - (state.retired - before);
+                    const left = budget - (state.retired - before);
+                    budgetGlobal.value = left;
                     depth.value = 0;
-                    const answer = /** @type {() => number} */ (block.run)();
-                    state.retired += answer >>> 2;
-                    stats.translated += answer >>> 2;
-                    if ((answer & 3) === LongExit.NEXT)
+                    label.value = entryLabel;
+                    expect.value = -1n;
+                    stats.entered++;
+                    const answer = run();
+                    const retired = left - budgetGlobal.value;
+                    state.retired += retired;
+                    stats.translated += retired;
+                    if (answer !== LongExit.INTERPRET)
                     {
                         continue;
                     }
@@ -337,8 +417,12 @@ export function createLongRunner({ memory, layout, pages, hot = 2, below = 0x100
                     entries.delete(entry);
                     if (record?.run)
                     {
-                        // Calls into it miss from now on.
+                        // Calls into it miss from now on, and so do transfers.
                         table.set(slotOf(entry), miss);
+                        for (const index of record.hashed)
+                        {
+                            hashed.remove(index);
+                        }
                     }
                     stats.dropped++;
                     // Its other pages keep a start that is gone.

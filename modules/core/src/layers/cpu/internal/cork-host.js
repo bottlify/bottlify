@@ -747,7 +747,10 @@ export function createCorkHost(config){
         && typeof engine.createLongRunner === 'function' && runtime.pages
         ? engine.createLongRunner({ memory, layout, pages: runtime.pages,
             hot: corkConfig?.hotThreshold ?? 2,
-            below: runsFrom })
+            below: runsFrom,
+            // Every long region is a module of its own: where a tail call into
+            // another instance faults, the host goes between them.
+            ...corkConfig?.crossTailCalls === false ? { transfers: false } : {} })
         : null;
 
     /**
@@ -1650,6 +1653,7 @@ export function createCorkHost(config){
             ...runtime.diagnostics(),
             ...wasmTier === null ? {} : { interpretedRelaxedReads: wasmTier.relaxedReads() },
             ...untiered.length === 0 ? {} : { untiered: [...untiered] },
+            ...longRunner === null ? {} : { long: longRunner.diagnostics() },
         }),
 
         /** Lets the machine run: slices until it halts or is stopped. */

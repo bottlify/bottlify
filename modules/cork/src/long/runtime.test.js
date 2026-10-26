@@ -51,8 +51,12 @@ function fill(seed, size){
     return data;
 }
 
-/** A machine with the corpus's data and code areas open and every other page closed. */
-function machine(){
+/**
+ * A machine with the corpus's data and code areas open and every other page closed.
+ *
+ * @param {boolean} [transfers]  regions go on into each other without the host
+ */
+function machine(transfers = true){
     const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
@@ -63,7 +67,7 @@ function machine(){
         flags.fill(0, at >>> 12, (at + size) >>> 12);
     }
     const pages = createPageTable(memory, layout);
-    const runner = createLongRunner({ memory, layout, pages, hot: 1 });
+    const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers });
     const state = blockState64({ memory, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
     return { layout, memory, state, runner, view: new DataView(memory.buffer) };
@@ -235,9 +239,11 @@ function run(m, translated, budget = 7){
  * Runs every case on both machines and answers the differences.
  *
  * @param {any[]} cases @param {number} [budget]  each translated run's
+ * @param {boolean} [transfers]  the translated machine's regions go on into each
+ *     other without the host: both ways must be the interpreter's
  */
-function compare(cases, budget = 7){
-    const translatedMachine = machine();
+function compare(cases, budget = 7, transfers = true){
+    const translatedMachine = machine(transfers);
     const interpretedMachine = machine();
     /** @type {string[]} */
     const failures = [];
@@ -284,12 +290,15 @@ test('seeded long programs run translated as they run interpreted', ()=>{
     assert.ok(instructions.length > 1000, `${instructions.length} instructions in the pool`);
     const cases = Array.from({ length: 600 },
         (_, i)=>program(instructions, 0x5eed + i, 20 + i % 60));
-    const { failures, stats, exits } = compare(cases);
-    // A division from the pool raises #DE in some (both ways alike); most run through.
-    assert.ok(exits > cases.length * 0.6, `${exits} programs ran to their exit`);
-    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
-    assert.ok(stats.translated > stats.interpreted * 2,
-        `translated ${stats.translated}, interpreted ${stats.interpreted}`);
+    for (const transfers of [true, false])
+    {
+        const { failures, stats, exits } = compare(cases, 7, transfers);
+        // A division from the pool raises #DE in some (both ways alike); most run through.
+        assert.ok(exits > cases.length * 0.6, `${exits} programs ran to their exit`);
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.ok(stats.translated > stats.interpreted * 2,
+            `translated ${stats.translated}, interpreted ${stats.interpreted}`);
+    }
 });
 
 test('an access across into a closed page or past 4 GiB faults where the interpreter faults', ()=>{
@@ -354,6 +363,39 @@ test('calls from region to region return where they were made, and leave where t
         + '07000000c3';
     const cases = CORPUS.cases.slice(0, 8).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `calls ${i}`, code }));
+    /** @type {Record<string, number>} */
+    const entered = {};
+    for (const budget of [7, 100000])
+    {
+        for (const transfers of [true, false])
+        {
+            const { failures, exits, stats } = compare(cases, budget, transfers);
+            assert.deepEqual(failures, [], `budget ${budget}, transfers ${transfers}`);
+            assert.equal(exits, cases.length);
+            entered[`${budget} ${transfers}`] = stats.entered;
+        }
+    }
+    // The returns past a call too deep and the jumps out of a region go on
+    // in wasm: the host enters regions less often.
+    assert.ok(entered['100000 true'] * 2 < entered['100000 false'], JSON.stringify(entered));
+});
+
+test('a region left by a jump goes on expecting the return its caller waits for', ()=>{
+    // start:  mov esi, 2
+    // again:  mov ecx, 3; xor eax, eax; call f; add [rbx], rax; dec esi; jnz again; jmp done
+    // f:      call g                                 a call made inside f's region
+    // L:      inc eax; dec ecx; jz fret; lea rdx, [rip + far]; jmp rdx
+    // fret:   ret
+    // g:      ret
+    // far:    add eax, 100; lea rdx, [rip + L]; jmp rdx
+    // done:
+    // The second pass calls f as a wasm call waiting at `add`; far, entered by a
+    // transfer, leaves for L, the address f's own call to g waited at: only the
+    // return `add` expects may end the wasm call, not that one.
+    const code = 'be02000000b90300000031c0e809000000480103ffce75edeb22e810000000ffc0ffc97409'
+        + '488d1504000000ffe2c3c383c064488d15e5ffffffffe2';
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `expect ${i}`, code }));
     for (const budget of [7, 100000])
     {
         const { failures, exits } = compare(cases, budget);
