@@ -35,6 +35,7 @@
 
 import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 import { encodeAnsi } from './locale.js';
+import { STARTUPINFO, readStartupInfo } from './startup-info.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -490,6 +491,8 @@ export function createSpawner(host){
  *           caller assembled it. Built here otherwise, from the same fields.
  * @property {number} [processId]  The running program's own identifier.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => import('./startup-info.js').StartupRecord | null} [startup]
+ *           This process's own, whose desktop a child named none of inherits.
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]
  *           Writes into this process through the pages' protection
  *           (`writeThroughProtection`); false when not all of it is mapped.
@@ -635,8 +638,14 @@ export function createSpawnFunctions(host){
      * @param {string} line
      * @param {number} flags @param {number} information @param {number} [startup]
      * @param {string} [directory]
+     * @param {boolean} [wide]  CreateProcessW's, whose STARTUPINFO's strings are wide.
      */
-    const create = (named, line, flags, information, startup = 0, directory = '')=>{
+    const create = (named, line, flags, information, startup = 0, directory = '', wide = false)=>{
+        // Cleared first: a call that fails leaves no handle or id in it.
+        if ((information >>> 0) !== 0)
+        {
+            host.writeMemory(information >>> 0, new Uint8Array(PROCESS_INFORMATION_SIZE));
+        }
         const refused = createRefusal(named, line);
         if (refused !== 0)
         {
@@ -650,10 +659,15 @@ export function createSpawnFunctions(host){
             return 0;
         }
         made.standardFiles = standardFiles(startup >>> 0);
+        // What the child's GetStartupInfo answers: values, since the child
+        // may be built on another thread from what crosses to it.
+        made.startup = (startup >>> 0) === 0 ? null : readStartupInfo(
+            host.readMemory(startup >>> 0, STARTUPINFO.SIZE),
+            address=>(wide ? host.readWideString(address, MAX_PATH * 2)
+                : host.readCString(address, MAX_PATH)),
+            host.startup?.()?.desktop ?? null);
         if ((information >>> 0) !== 0)
         {
-            const bytes = new Uint8Array(PROCESS_INFORMATION_SIZE);
-            host.writeMemory(information >>> 0, bytes);
             writeDword((information >>> 0) + PI_PROCESS_HANDLE, made.handle);
             writeDword((information >>> 0) + PI_THREAD_HANDLE, made.threadHandle);
             writeDword((information >>> 0) + PI_PROCESS_ID, made.id);
@@ -688,7 +702,8 @@ export function createSpawnFunctions(host){
                     ? ''
                     : host.readCString(commandLine >>> 0, MAX_COMMAND_LINE),
                 flags >>> 0, information, startup,
-                (directory >>> 0) === 0 ? '' : host.readCString(directory >>> 0, MAX_PATH)),
+                (directory >>> 0) === 0 ? '' : host.readCString(directory >>> 0, MAX_PATH),
+                false),
         },
 
         /** BOOL CreateProcessW(...) — the same call, read as wide strings. */
@@ -703,7 +718,8 @@ export function createSpawnFunctions(host){
                     ? ''
                     : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE * 2),
                 flags >>> 0, information, startup,
-                (directory >>> 0) === 0 ? '' : host.readWideString(directory >>> 0, MAX_PATH * 2)),
+                (directory >>> 0) === 0 ? '' : host.readWideString(directory >>> 0, MAX_PATH * 2),
+                true),
         },
 
         /**

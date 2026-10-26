@@ -216,6 +216,15 @@ test('CreateProcess refuses a malformed name before it looks for a file', ()=>{
     }
     assert.equal(host.kernel.processes.all().length, 0, 'and none of them started anything');
 
+    // A refusal, and a file not there, leave nothing in PROCESS_INFORMATION.
+    for (const line of [' child.exe', 'missing.exe'])
+    {
+        host.bytes.fill(0x0a, 0x300, 0x310);
+        assert.equal(fns.CreateProcessA.handler(
+            [0, putAnsi(host, 0x200, line), 0, 0, 0, 0, 0, 0, 0, 0x300]), 0);
+        assert.deepEqual([...host.bytes.subarray(0x300, 0x310)], new Array(16).fill(0), line);
+    }
+
     // Trailing spaces inside the quotes are not, and .exe is still added.
     assert.equal(fns.CreateProcessA.handler(
         [0, putAnsi(host, 0x200, '"child " /s'), 0, 0, 0, 0, 0, 0, 0, 0]), 1);
@@ -271,6 +280,36 @@ test('QueryFullProcessImageName answers this process\'s image and a child\'s', (
     assert.equal(ask('QueryFullProcessImageNameA', [child, 0, 0x400], 260), 1);
     assert.equal(ansi(), 'C:\\App\\child.exe');
     assert.equal(fns.QueryFullProcessImageNameW.argBytes, 16);
+});
+
+test('the child is handed the STARTUPINFO its parent gave, a NULL desktop the parent\'s', ()=>{
+    // Wine's kernel32 test_Startup reads it back in the child.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    host.startup = ()=>({ desktop: 'winsta0\\default' });
+    const fns = createSpawnFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x400, 68, true);
+    view.setUint32(0x400 + 12, putAnsi(host, 0x500, 'I\'m the title string'), true);
+    view.setUint32(0x400 + 16, 0x34343434, true);
+    view.setUint32(0x400 + 44, 1, true);
+    view.setUint16(0x400 + 48, 1, true);
+
+    assert.equal(fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0x400, 0]), 1);
+    const { startup } = host.kernel.processes.all()[0];
+    assert.equal(startup.title, 'I\'m the title string');
+    assert.equal(startup.desktop, 'winsta0\\default', 'none named: the parent\'s own');
+    assert.equal(startup.x, 0x34343434);
+    assert.equal(startup.flags, 1);
+    assert.equal(startup.showWindow, 1);
+
+    view.setUint32(0x400 + 12, putWide(host, 0x600, 'wide'), true);
+    assert.equal(fns.CreateProcessW.handler(
+        [putWide(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0x400, 0]), 1);
+    assert.equal(host.kernel.processes.all()[1].startup.title, 'wide', 'read in the call\'s width');
+    assert.equal(fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+    assert.equal(host.kernel.processes.all()[2].startup, null, 'no STARTUPINFO, nothing handed');
 });
 
 test('a name with no extension gets .exe, as CreateProcess gives it', ()=>{

@@ -22,6 +22,7 @@
  */
 
 import { encodeAnsi } from './locale.js';
+import { startupInfoBytes } from './startup-info.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
@@ -29,9 +30,6 @@ import {
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
 const ERROR_INVALID_PARAMETER = 87;
-
-/** sizeof(STARTUPINFOA). */
-const STARTUPINFOA_SIZE = 68;
 
 /** Where Windows lives, as a program of this era expects to find it. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -46,6 +44,9 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  * @property {(code: number) => void} setLastError
  * @property {() => string} commandLine
  * @property {() => Record<string, string>} environment
+ * @property {() => import('./startup-info.js').StartupRecord | null} [startup]
+ *           What the parent's CreateProcess was handed, null for a process
+ *           no parent described.
  */
 
 /**
@@ -234,22 +235,33 @@ export function createEnvironmentFunctions(host){
     };
 
     /**
-     * VOID GetStartupInfoA(LPSTARTUPINFOA lpStartupInfo)
+     * VOID GetStartupInfoA/W(LPSTARTUPINFO lpStartupInfo)
      *
-     * Every field but the size is zero, and that is a real answer rather than
-     * a placeholder: no parent handed this process a desktop, a title, a
-     * window position or a set of standard handles to inherit, and dwFlags of
-     * zero is precisely how a program is told not to read the rest.
+     * What the parent handed CreateProcess, its strings in the call's width
+     * and written once, since a caller keeps the pointers. A process no
+     * parent started has every field but the size zero, and that is a real
+     * answer: nothing handed it a desktop, a title, a window position or
+     * standard handles, and dwFlags of zero says not to read the rest.
+     *
+     * @param {boolean} wide
      */
-    const startupInfo = {
-        argBytes: 4,
-        /** @param {number[]} args */
-        handler: ([info])=>{
-            const bytes = new Uint8Array(STARTUPINFOA_SIZE);
-            new DataView(bytes.buffer).setUint32(0, STARTUPINFOA_SIZE, true);
-            host.writeMemory(info >>> 0, bytes);
-            return 0;
-        },
+    const startupInfo = wide=>{
+        /** @type {{ desktop: number, title: number } | null} */
+        let strings = null;
+        return {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [info])=>{
+                const record = host.startup?.() ?? null;
+                const write = wide ? writeWideString : writeAnsi;
+                strings ??= {
+                    desktop: record?.desktop == null ? 0 : write(record.desktop),
+                    title: record?.title == null ? 0 : write(record.title),
+                };
+                host.writeMemory(info >>> 0, startupInfoBytes(record, strings));
+                return 0;
+            },
+        };
     };
 
     return {
@@ -414,14 +426,13 @@ export function createEnvironmentFunctions(host){
         },
 
         /** VOID GetStartupInfoA(LPSTARTUPINFOA lpStartupInfo) */
-        GetStartupInfoA: startupInfo,
+        GetStartupInfoA: startupInfo(false),
 
         /**
          * VOID GetStartupInfoW(LPSTARTUPINFOW lpStartupInfo): the same answer,
-         * STARTUPINFOW being STARTUPINFOA's size with its three strings wide,
-         * and none of them given.
+         * STARTUPINFOW being STARTUPINFOA's size with its strings wide.
          */
-        GetStartupInfoW: startupInfo,
+        GetStartupInfoW: startupInfo(true),
 
         /**
          * BOOL SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue)

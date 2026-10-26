@@ -269,7 +269,7 @@ test('GetEnvironmentVariableW reads a variable by a wide name into a wide buffer
     assert.notEqual(fns.GetEnvironmentStringsA.handler(), 0, 'the block under its A name too');
 });
 
-test('the startup record names its own size and nothing else', ()=>{
+test('a process no parent started has a startup record of its size and nothing else', ()=>{
     // dwFlags of zero is how a program is told not to read the rest, so every
     // other field being zero is the answer rather than a placeholder.
     const host = fakeHost();
@@ -282,8 +282,6 @@ test('the startup record names its own size and nothing else', ()=>{
     assert.equal(view.getUint32(0x300 + 44, true), 0, 'dwFlags');
     assert.deepEqual([...host.bytes.slice(0x304, 0x300 + STARTUPINFOA_SIZE)],
         new Array(STARTUPINFOA_SIZE - 4).fill(0));
-    assert.equal(fns.GetStartupInfoW, fns.GetStartupInfoA,
-        'the wide record is the same size, with no strings to give either');
 });
 
 test('the system directory is inside the windows one, as a program assumes', ()=>{

@@ -1900,6 +1900,7 @@ export function createWin32Module(){
                         // because the pointer is handed out once and callers keep it.
                         commandLine: ()=>config?.commandLine ?? `"${modules.imagePath()}"`,
                         environment: startingEnvironment,
+                        startup: ()=>config?.startup ?? null,
                     }),
                     ...createSystemFunctions({
                         processors,
@@ -1950,6 +1951,7 @@ export function createWin32Module(){
                         spawner,
                         patchMemory: (address, bytes)=>
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
+                        startup: ()=>config?.startup ?? null,
                     }),
                     ...seh.table,
                     ...createModuleFunctions({

@@ -662,3 +662,85 @@ test('a child\'s first thread is the thread its parent was told of: GetCurrentTh
     assert.deepEqual(childCodes, [told], 'and the child\'s first thread answers that one');
     assert.notEqual(told, 1, 'which is not the parent\'s first thread');
 });
+
+test('a child reads the STARTUPINFO its parent handed CreateProcess, whichever way it runs',
+    { timeout: 120000 }, async t=>{
+        // Wine's kernel32 test_Startup: the child's GetStartupInfo is its
+        // parent's STARTUPINFO, field for field, its title a string of its own.
+        /**
+         * Each generation hands its child a dwX of its own: a child given its
+         * parent's own record rather than the one asked for answers wrongly.
+         *
+         * @param {boolean} waits @param {string} [command] @param {number} [x]
+         */
+        const parent = (waits, command = 'C:\\App\\child.exe', x = 0x3412)=>buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
+                'GetExitCodeProcess', 'ExitProcess'] },
+            data: {
+                command: ascii(command),
+                title: ascii('T'),
+                // cb, lpReserved, lpDesktop, lpTitle (patched below), dwX, ...
+                startup: [...u32(68), ...u32(0), ...u32(0), ...u32(0), ...u32(x),
+                    ...new Array(24).fill(0), ...u32(1), 1, 0, ...new Array(18).fill(0)],
+                info: new Array(16).fill(0),
+                code: u32(0),
+            },
+            codeSize: 0x80,
+            code: ({ iat, at })=>[
+                // startup.lpTitle = &title
+                0xc7, 0x05, ...u32(at('startup') + 12), ...u32(at('title')),
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                ...waits ? [
+                    0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                    0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                    // GetExitCodeProcess(info.hProcess, &code); ExitProcess(code)
+                    0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+                    0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+                    0xff, 0x35, ...u32(at('code')),
+                ] : [0x6a, 0],
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const child = buildExe({
+            imports: { 'KERNEL32.dll': ['GetStartupInfoA', 'ExitProcess'] },
+            data: { si: new Array(68).fill(0xcc) },
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('si')), 0xff, 0x15, ...u32(iat('GetStartupInfoA')),
+                // eax = dwX + (dwFlags << 16) + (wShowWindow << 20) + (*lpTitle << 24)
+                0xa1, ...u32(at('si') + 16),
+                0x8b, 0x0d, ...u32(at('si') + 44), 0xc1, 0xe1, 0x10, 0x01, 0xc8,
+                0x0f, 0xb7, 0x0d, ...u32(at('si') + 48), 0xc1, 0xe1, 0x14, 0x01, 0xc8,
+                0x8b, 0x0d, ...u32(at('si') + 12), 0x0f, 0xb6, 0x09, 0xc1, 0xe1, 0x18, 0x01, 0xc8,
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const expected = (0x3412 + (1 << 16) + (1 << 20) + (0x54 << 24)) >>> 0;
+        // The last: the run's two workers hold the two processes between,
+        // and the child runs beside its parent, in that one's worker.
+        for (const [name, waits, concurrency, through] of /** @type {const} */ ([
+            ['its parent waiting on it', true, 1, false],
+            ['in its parent\'s place', false, 1, false],
+            ['in a worker of its own', true, 2, false],
+            ['beside its parent in its parent\'s worker', true, 2, true],
+        ]))
+        {
+            const app = await createApp({
+                executable: through ? parent(true, 'C:\\App\\middle.exe', 0x1111)
+                    : parent(waits),
+                imagePath: 'C:\\App\\parent.exe',
+                engine: 'cork',
+                concurrency,
+                storage: { load: async()=>({ files: [
+                    { path: 'C:\\App\\child.exe', bytes: child },
+                    { path: 'C:\\App\\middle.exe',
+                        bytes: parent(true, 'C:\\App\\inner.exe', 0x2222) },
+                    { path: 'C:\\App\\inner.exe', bytes: parent(true) },
+                ] }) },
+            });
+            t.after(()=>app.dispose());
+            assert.equal((await app.run({ timeoutMs: 60000 })) >>> 0, expected, name);
+        }
+    });
