@@ -71,12 +71,24 @@ const K = 30;
 const CODE = 31;
 /** The block of the region the dispatch loop goes to. */
 const IDX = 32;
+/** Scratch: an i32, and two more i64s for a wide product. */
+const U = 33;
+const T4 = 34;
+const T5 = 35;
 const LOCALS = [
     ...new Array(16).fill(ValType.i64), ValType.i64, ValType.i32,
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32,
     ValType.i64, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32, ValType.i32,
-    ValType.i32,
+    ValType.i32, ValType.i32, ValType.i64, ValType.i64,
 ];
+/** The direction flag, which no record holds. */
+const DF = 1 << 10;
+/**
+ * What `lock` may prefix here: one executor runs a long-mode process, so a
+ * locked access is a plain one.
+ */
+const LOCKABLE = new Set(['add', 'adc', 'sub', 'sbb', 'and', 'or', 'xor', 'inc', 'dec', 'neg',
+    'not', 'xadd', 'cmpxchg', 'bts', 'btr', 'btc', 'xchg']);
 /** The module's one global: instructions a call may retire before it leaves. */
 const BUDGET = 0;
 
@@ -87,7 +99,8 @@ const Op = Object.freeze({
     i64gtu: 0x56, i64les: 0x57, i64leu: 0x58, i32add: 0x6a, i32sub: 0x6b, i32and: 0x71,
     i32or: 0x72, i32xor: 0x73,
     i32shl: 0x74, i32shru: 0x76, i32remu: 0x70, i32popcnt: 0x69, i64popcnt: 0x7b,
-    i64add: 0x7c, i64sub: 0x7d, i64mul: 0x7e, i64divs: 0x7f, i64and: 0x83, i64or: 0x84,
+    i64add: 0x7c, i64sub: 0x7d, i64mul: 0x7e, i64divs: 0x7f, i64divu: 0x80, i64rems: 0x81,
+    i64remu: 0x82, i64clz: 0x79, i64ctz: 0x7a, i64and: 0x83, i64or: 0x84,
     i64xor: 0x85, i64shl: 0x86, i64shrs: 0x87, i64shru: 0x88, i64rotl: 0x89, i64rotr: 0x8a,
     i32wrap: 0xa7, i64extends: 0xac, i64extendu: 0xad, i64ext8: 0xc2, i64ext16: 0xc3,
     i64ext32: 0xc4, select: 0x1b,
@@ -106,7 +119,7 @@ export function translates(instruction){
     const { op, operands, size, prefixes } = instruction;
     // A repeat prefix on a branch is a hint (`rep ret`, `bnd jmp`); on anything
     // translated here but a string instruction it means nothing either.
-    if (prefixes.lock
+    if ((prefixes.lock && !LOCKABLE.has(op))
         || operands.some(operand=>operand.kind !== 'reg' && operand.kind !== 'mem'
             && operand.kind !== 'imm' && operand.kind !== 'rel'))
     {
@@ -119,10 +132,19 @@ export function translates(instruction){
         case 'xor': case 'test': case 'inc': case 'dec': case 'neg': case 'not':
         case 'jmp': case 'ret': case 'cwde': case 'cdq': case 'bswap': case 'call':
             return true;
-        case 'imul':
-            return operands.length > 1;
-        case 'xchg':
-            return operands.every(operand=>operand.kind === 'reg');
+        case 'imul': case 'mul': case 'div': case 'idiv': case 'xadd': case 'cmpxchg':
+        case 'bsf': case 'bsr': case 'popcnt': case 'xchg': case 'clc': case 'stc': case 'cmc':
+        case 'cld': case 'std': case 'lahf': case 'sahf':
+            return true;
+        case 'leave':
+            return size === 8;
+        case 'bt': case 'bts': case 'btr': case 'btc':
+            // A register's bit offset into memory reaches past the operand.
+            return operands[0].kind === 'reg' || operands[1].kind === 'imm';
+        case 'pause': case 'lfence': case 'mfence': case 'sfence': case 'prefetch':
+        case 'prefetchw': case 'prefetchnta': case 'prefetcht0': case 'prefetcht1':
+        case 'prefetcht2': case 'movnti':
+            return true;
         case 'shl': case 'sal': case 'shr': case 'sar': case 'rol': case 'ror':
             return true;
         case 'push':
@@ -170,6 +192,11 @@ class BlockEmitter {
          * @type {{ kind: number, size: number } | null | undefined}
          */
         this.pending = undefined;
+        /**
+         * `pending` where each branch `open` began.
+         * @type {Array<{ kind: number, size: number } | null | undefined>}
+         */
+        this.branches = [];
         this.flagTable = pageFlagsAt(layout);
     }
 
@@ -184,11 +211,32 @@ class BlockEmitter {
     open(type = EMPTY){
         this.b.if(type);
         this.nest++;
+        this.branches.push(this.pending);
+    }
+
+    /** The other way of the branch `open` began. */
+    otherwise(){
+        this.unchanged();
+        this.b.else();
     }
 
     close(){
+        this.unchanged();
+        this.branches.pop();
         this.b.end();
         this.nest--;
+    }
+
+    /**
+     * What the emitter knows of the pending record holds for the code after
+     * a branch only if the branch did not change it: a record folded on one
+     * way is still pending on the other.
+     */
+    unchanged(){
+        if (this.pending !== this.branches[this.branches.length - 1])
+        {
+            throw new Error('long emit: the flag record folded or left inside a branch');
+        }
     }
 
     /**
@@ -588,6 +636,227 @@ class BlockEmitter {
         return false;
     }
 
+    /**
+     * The flags in `written` from the i32 on the stack, the rest as they were:
+     * a record pending folded first, whose flags this leaves.
+     *
+     * @param {number} written
+     */
+    setFlags(written){
+        const { b } = this;
+        b.localSet(U);
+        if ((written & ARITH) === ARITH)
+        {
+            this.drop();
+        }
+        else
+        {
+            this.settle();
+        }
+        b.localGet(FL).i32const(~written).op(Op.i32and).localGet(U).i32const(written)
+            .op(Op.i32and).op(Op.i32or).localSet(FL);
+    }
+
+    /**
+     * One-operand mul and imul: the accumulator by the operand, the product
+     * into AX or rdx:rax; CF and OF where the high half is more than the low
+     * half's extension.
+     *
+     * @param {boolean} signed @param {number} size
+     * @param {import('../decode/decoder.js').Operand} operand @param {number} defined
+     */
+    multiply(signed, size, operand, defined){
+        const { b } = this;
+        const bits = BigInt(size * 8);
+        /** The i64 on the stack sign-extended from the operand size. */
+        const extend = ()=>{
+            if (size < 8)
+            {
+                b.i64const(64n - bits).op(Op.i64shl).i64const(64n - bits).op(Op.i64shrs);
+            }
+        };
+        this.readReg(0, size);
+        if (signed)
+        {
+            extend();
+        }
+        b.localSet(T0);
+        this.read(operand);
+        if (signed)
+        {
+            extend();
+        }
+        b.localSet(T1);
+        if (size < 8)
+        {
+            // The whole product fits a quadword.
+            b.localGet(T0).localGet(T1).op(Op.i64mul).localSet(T2);
+            if (size === 1)
+            {
+                b.localGet(T2);
+                this.writeReg(0, 2);
+            }
+            else
+            {
+                b.localGet(T2);
+                this.writeReg(0, size);
+                b.localGet(T2).i64const(bits).op(signed ? Op.i64shrs : Op.i64shru);
+                this.writeReg(2, size);
+            }
+            // Overflow: the product is not its own low half extended.
+            b.localGet(T2);
+            if (signed)
+            {
+                extend();
+            }
+            else
+            {
+                b.i64const(maskOf(size)).op(Op.i64and);
+            }
+            b.localGet(T2).op(Op.i64ne);
+        }
+        else
+        {
+            // 64 by 64: the high half from 32-bit pieces, unsigned, then
+            // corrected for the signs.
+            const lo32 = (/** @type {number} */ local)=>b.localGet(local).i64const(0xffffffffn)
+                .op(Op.i64and);
+            const hi32 = (/** @type {number} */ local)=>b.localGet(local).i64const(32n).op(Op.i64shru);
+            lo32(T0); lo32(T1); b.op(Op.i64mul).i64const(32n).op(Op.i64shru);
+            hi32(T0); lo32(T1); b.op(Op.i64mul).op(Op.i64add).localSet(T4);
+            lo32(T0); hi32(T1); b.op(Op.i64mul);
+            b.localGet(T4).i64const(0xffffffffn).op(Op.i64and).op(Op.i64add).localSet(T5);
+            hi32(T0); hi32(T1); b.op(Op.i64mul).localGet(T4).i64const(32n).op(Op.i64shru)
+                .op(Op.i64add).localGet(T5).i64const(32n).op(Op.i64shru).op(Op.i64add)
+                .localSet(T2);
+            if (signed)
+            {
+                b.localGet(T2).localGet(T1).i64const(0n).localGet(T0).i64const(0n).op(Op.i64lts)
+                    .op(Op.select).op(Op.i64sub)
+                    .localGet(T0).i64const(0n).localGet(T1).i64const(0n).op(Op.i64lts)
+                    .op(Op.select).op(Op.i64sub).localSet(T2);
+            }
+            b.localGet(T0).localGet(T1).op(Op.i64mul).localTee(T4);
+            this.writeReg(0, 8);
+            b.localGet(T2);
+            this.writeReg(2, 8);
+            b.localGet(T2);
+            if (signed)
+            {
+                b.localGet(T4).i64const(63n).op(Op.i64shrs).op(Op.i64ne);
+            }
+            else
+            {
+                b.i64const(0n).op(Op.i64ne);
+            }
+        }
+        b.localSet(U).i32const(CF | OF).i32const(0).localGet(U).op(Op.select);
+        this.setFlags(defined);
+    }
+
+    /**
+     * One-operand div and idiv: rdx:rax (AX for a byte) by the operand, the
+     * quotient and remainder back; flags untouched. Where the dividend is
+     * wider than a quadword, the divisor zero or the quotient too big, the
+     * block leaves before it: the interpreter divides, or raises #DE.
+     *
+     * @param {boolean} signed @param {number} size
+     * @param {import('../decode/decoder.js').Operand} operand
+     * @param {number} index @param {number} address
+     */
+    divide(signed, size, operand, index, address){
+        const { b } = this;
+        const bits = BigInt(size * 8);
+        const mask = maskOf(size);
+        /** The i64 on the stack sign-extended from `width` bits. @param {bigint} width */
+        const extend = width=>{
+            if (width < 64n)
+            {
+                b.i64const(64n - width).op(Op.i64shl).i64const(64n - width).op(Op.i64shrs);
+            }
+        };
+        this.read(operand);
+        if (signed)
+        {
+            extend(bits);
+        }
+        b.localTee(T1).op(Op.i64eqz);
+        this.exitIf(index, address);
+        // The dividend in T0, as a quadword.
+        if (size === 1)
+        {
+            this.readReg(0, 2);
+            if (signed)
+            {
+                extend(16n);
+            }
+            b.localSet(T0);
+        }
+        else if (size < 8)
+        {
+            this.readReg(2, size);
+            b.i64const(bits).op(Op.i64shl);
+            this.readReg(0, size);
+            b.op(Op.i64or);
+            if (signed)
+            {
+                extend(bits * 2n);
+            }
+            b.localSet(T0);
+        }
+        else
+        {
+            // Only a dividend that is rax extended: rdx zero, or rax's sign.
+            b.localGet(2);
+            if (signed)
+            {
+                b.localGet(0).i64const(63n).op(Op.i64shrs);
+            }
+            else
+            {
+                b.i64const(0n);
+            }
+            b.op(Op.i64ne);
+            this.exitIf(index, address);
+            b.localGet(0).localSet(T0);
+        }
+        if (signed)
+        {
+            // The one quotient wasm traps on, and an overflow the processor raises anyway.
+            b.localGet(T0).i64const(-(1n << 63n)).op(Op.i64eq).localGet(T1).i64const(-1n)
+                .op(Op.i64eq).op(Op.i32and);
+            this.exitIf(index, address);
+        }
+        b.localGet(T0).localGet(T1).op(signed ? Op.i64divs : Op.i64divu).localSet(T2);
+        // A quotient that does not fit the operand size is #DE.
+        if (size < 8)
+        {
+            b.localGet(T2);
+            if (signed)
+            {
+                extend(bits);
+            }
+            else
+            {
+                b.i64const(mask).op(Op.i64and);
+            }
+            b.localGet(T2).op(Op.i64ne);
+            this.exitIf(index, address);
+        }
+        b.localGet(T0).localGet(T1).op(signed ? Op.i64rems : Op.i64remu).localSet(T4);
+        if (size === 1)
+        {
+            b.localGet(T4).i64const(0xffn).op(Op.i64and).i64const(8n).op(Op.i64shl)
+                .localGet(T2).i64const(0xffn).op(Op.i64and).op(Op.i64or);
+            this.writeReg(0, 2);
+            return;
+        }
+        b.localGet(T2).i64const(mask).op(Op.i64and);
+        this.writeReg(0, size);
+        b.localGet(T4).i64const(mask).op(Op.i64and);
+        this.writeReg(2, size);
+    }
+
     // --- the stack ---
 
     /** RSP less eight into A, checked as a store; the new RSP in T1. @param {number} index @param {number} address */
@@ -731,6 +1000,12 @@ class BlockEmitter {
                 return true;
             case 'imul':
             {
+                if (operands.length === 1)
+                {
+                    placeMemory(false);
+                    this.multiply(true, size, dst, defined);
+                    return true;
+                }
                 const [left, right] = operands.length === 3 ? [src, operands[2]] : [dst, src];
                 placeMemory(false);
                 // Both factors signed at the operand size: their whole product
@@ -785,13 +1060,20 @@ class BlockEmitter {
                 return true;
             }
             case 'xchg':
+            {
+                placeMemory(true);
                 this.read(dst);
                 b.localSet(T0);
                 this.read(src);
-                this.write(dst);
-                b.localGet(T0);
-                this.write(src);
+                b.localSet(T1);
+                // The memory side first: with one executor the lock is nothing more.
+                const [first, second] = src.kind === 'mem' ? [src, dst] : [dst, src];
+                b.localGet(first === dst ? T1 : T0);
+                this.write(first);
+                b.localGet(second === dst ? T1 : T0);
+                this.write(second);
                 return true;
+            }
             case 'bswap':
                 this.read(dst);
                 if (size === 8)
@@ -876,6 +1158,176 @@ class BlockEmitter {
                     .i64const(8n + BigInt(operands.length === 1 ? /** @type {number} */ (dst.value) : 0))
                     .op(Op.i64add).localSet(4);
                 return { to: null };
+            case 'pause': case 'lfence': case 'mfence': case 'sfence': case 'prefetch':
+            case 'prefetchw': case 'prefetchnta': case 'prefetcht0': case 'prefetcht1':
+            case 'prefetcht2':
+                return true;
+            case 'movnti':
+                placeMemory(true);
+                this.read(src);
+                this.write(dst);
+                return true;
+            case 'mul':
+                placeMemory(false);
+                this.multiply(false, size, dst, defined);
+                return true;
+            case 'div': case 'idiv':
+                placeMemory(false);
+                this.divide(op === 'idiv', size, dst, index, at);
+                return true;
+            case 'xadd':
+                placeMemory(dst.kind === 'mem');
+                this.read(dst);
+                b.localSet(T0);
+                this.read(src);
+                b.localTee(T1).localGet(T0).op(Op.i64add).i64const(maskOf(size)).op(Op.i64and)
+                    .localSet(T2);
+                // The memory side first; between registers the destination
+                // last, so `xadd rax, rax` keeps the sum.
+                if (dst.kind === 'mem')
+                {
+                    b.localGet(T2);
+                    this.write(dst);
+                    b.localGet(T0);
+                    this.write(src);
+                }
+                else
+                {
+                    b.localGet(T0);
+                    this.write(src);
+                    b.localGet(T2);
+                    this.write(dst);
+                }
+                this.record(Kind.ADD, size, defined);
+                return true;
+            case 'cmpxchg':
+                placeMemory(dst.kind === 'mem');
+                this.readReg(0, size);
+                b.localSet(T0);
+                this.read(dst);
+                b.localTee(T1).localGet(T0).localGet(T1).op(Op.i64sub).i64const(maskOf(size))
+                    .op(Op.i64and).localSet(T2);
+                b.localGet(T0).op(Op.i64eq);
+                this.open();
+                this.read(src);
+                this.write(dst);
+                this.otherwise();
+                // A memory destination is written back with what it held; a
+                // register one is left whole.
+                if (dst.kind === 'mem')
+                {
+                    b.localGet(T1);
+                    this.write(dst);
+                }
+                b.localGet(T1);
+                this.writeReg(0, size);
+                this.close();
+                this.record(Kind.SUB, size, defined);
+                return true;
+            case 'bsf': case 'bsr':
+                placeMemory(false);
+                // Folded before the branch, whose ways both write ZF.
+                this.settle();
+                this.read(src);
+                b.localTee(T0).op(Op.i64eqz);
+                this.open();
+                b.i32const(ZF);
+                this.setFlags(defined);
+                this.otherwise();
+                // The destination is written only from a source with a bit set.
+                if (op === 'bsf')
+                {
+                    b.localGet(T0).op(Op.i64ctz);
+                }
+                else
+                {
+                    b.i64const(63n).localGet(T0).op(Op.i64clz).op(Op.i64sub);
+                }
+                this.write(dst);
+                b.i32const(0);
+                this.setFlags(defined);
+                this.close();
+                return true;
+            case 'popcnt':
+                placeMemory(false);
+                this.read(src);
+                b.localTee(T0).op(Op.i64popcnt);
+                this.write(dst);
+                b.localGet(T0).op(Op.i64eqz).i32const(6).op(Op.i32shl);
+                this.setFlags(ARITH);
+                return true;
+            case 'bt': case 'bts': case 'btr': case 'btc':
+            {
+                placeMemory(dst.kind === 'mem' && op !== 'bt');
+                this.read(dst);
+                b.localSet(T0);
+                this.read(src);
+                b.i64const(BigInt(size * 8 - 1)).op(Op.i64and).localSet(T1);
+                if (op !== 'bt')
+                {
+                    b.localGet(T0).i64const(1n).localGet(T1).op(Op.i64shl);
+                    if (op === 'btr')
+                    {
+                        b.i64const(-1n).op(Op.i64xor).op(Op.i64and);
+                    }
+                    else
+                    {
+                        b.op(op === 'bts' ? Op.i64or : Op.i64xor);
+                    }
+                    this.write(dst);
+                }
+                b.localGet(T0).localGet(T1).op(Op.i64shru).op(Op.i32wrap).i32const(1).op(Op.i32and);
+                this.setFlags(defined);
+                return true;
+            }
+            case 'clc': case 'stc': case 'cmc':
+                this.settle();
+                b.localGet(FL);
+                if (op === 'cmc')
+                {
+                    b.i32const(CF).op(Op.i32xor);
+                }
+                else
+                {
+                    b.i32const(~CF).op(Op.i32and);
+                    if (op === 'stc')
+                    {
+                        b.i32const(CF).op(Op.i32or);
+                    }
+                }
+                b.localSet(FL);
+                return true;
+            case 'cld': case 'std':
+                // DF is no record's: FL holds it whatever is pending.
+                b.localGet(FL).i32const(~DF).op(Op.i32and);
+                if (op === 'std')
+                {
+                    b.i32const(DF).op(Op.i32or);
+                }
+                b.localSet(FL);
+                return true;
+            case 'lahf':
+                this.settle();
+                b.localGet(FL).i32const(0xd5).op(Op.i32and).i32const(2).op(Op.i32or)
+                    .op(Op.i64extendu);
+                this.writeReg(0, 1, true);
+                return true;
+            case 'sahf':
+                this.settle();
+                b.localGet(FL).i32const(~0xd5).op(Op.i32and);
+                this.readReg(0, 1, true);
+                b.op(Op.i32wrap).i32const(0xd5).op(Op.i32and).op(Op.i32or).localSet(FL);
+                return true;
+            case 'leave':
+                // rsp from rbp, then rbp popped from there.
+                b.localGet(5).localTee(T1).i64const(32n).op(Op.i64shru).op(Op.i64eqz)
+                    .op(Op.i32eqz);
+                this.exitIf(index, at);
+                b.localGet(T1).op(Op.i32wrap).localSet(A);
+                this.checkPage(false, index, at, 8);
+                this.loadAt(8);
+                b.localGet(T1).i64const(8n).op(Op.i64add).localSet(4).localSet(5);
+                return true;
             default:
                 break;
         }
@@ -1330,7 +1782,7 @@ function emitRegion(layout, helpers, region){
             e.condition(ending.cc);
             e.open();
             e.go(ending.to, indexOf, index, count);
-            b.else();
+            e.otherwise();
             e.go(/** @type {number} */ (ending.next), indexOf, index, count);
             e.close();
             // Both ways branched: nothing falls into the next block.
