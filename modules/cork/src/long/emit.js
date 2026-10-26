@@ -192,7 +192,8 @@ const EXPECT = 3;
 /** The wasm opcodes this emitter writes, by name. */
 const Op = Object.freeze({
     i32eqz: 0x45, i32eq: 0x46, i32ne: 0x47, i32ltu: 0x49, i32gtu: 0x4b, i32leu: 0x4d,
-    i32geu: 0x4f, i32mul: 0x6c, i32lts: 0x48, i32gts: 0x4a, i32les: 0x4c, i64eqz: 0x50,
+    i32geu: 0x4f, i32ges: 0x4e, i32mul: 0x6c, i32lts: 0x48, i32gts: 0x4a, i32les: 0x4c,
+    i64eqz: 0x50,
     i64eq: 0x51, i64ne: 0x52, i64lts: 0x53, i64ltu: 0x54,
     i64gtu: 0x56, i64les: 0x57, i64leu: 0x58, i32add: 0x6a, i32sub: 0x6b, i32and: 0x71,
     i32or: 0x72, i32xor: 0x73,
@@ -341,6 +342,13 @@ class BlockEmitter {
         this.flagTable = pageFlagsAt(layout);
         /** The flags something may read after the instruction being emitted. */
         this.live = ARITH;
+        /**
+         * The start of the block being emitted when it loops onto itself, its
+         * code inside a wasm loop (`emitRegion`), else -1; and the nesting
+         * just inside that loop.
+         */
+        this.selfEntry = -1;
+        this.selfAt = 0;
     }
 
     /** The depth of a branch to the exit block from here. */
@@ -355,6 +363,18 @@ class BlockEmitter {
         this.b.if(type);
         this.nest++;
         this.branches.push(this.pending);
+    }
+
+    /**
+     * An `if` whose body is a way out rarely taken -- a page not open, an
+     * address past 4 GiB, a spent budget, a call too deep or with no region,
+     * an instruction left to the interpreter -- marked unlikely, as the
+     * 32-bit emitter's `openGuard` marks its slow paths: the engine then lays
+     * the body out of line, and the spills its exit needs with it.
+     */
+    guard(){
+        this.b.unlikely();
+        this.open();
     }
 
     /** The other way of the branch `open` began. */
@@ -400,7 +420,7 @@ class BlockEmitter {
 
     /** With an i32 condition on the stack: leave before the instruction when it holds. */
     exitIf(/** @type {number} */ index, /** @type {number} */ address){
-        this.open();
+        this.guard();
         this.exitBefore(index, address);
         this.close();
     }
@@ -534,7 +554,7 @@ class BlockEmitter {
             // Across a page: the last byte's page as well.
             b.localGet(A).i32const(0xfff).op(Op.i32and).i32const(0x1000 - size)
                 .op(Op.i32gtu);
-            this.open();
+            this.guard();
             b.localGet(A).i32const(size - 1).op(Op.i32add).i32const(12).op(Op.i32shru)
                 .load('i32_8u', { offset: this.flagTable }).i32const(flags).op(Op.i32and);
             this.exitIf(index, address);
@@ -1770,6 +1790,16 @@ class BlockEmitter {
      */
     go(to, indexOf, here, count){
         const { b } = this;
+        if (to === this.selfEntry)
+        {
+            // The block's own start, round its loop while the budget lasts.
+            b.localGet(K).globalGet(BUDGET).op(Op.i32ges);
+            this.guard();
+            b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
+            this.close();
+            b.br(this.nest - this.selfAt);
+            return;
+        }
         const index = indexOf.get(to);
         if (index !== undefined && index > here)
         {
@@ -1782,10 +1812,12 @@ class BlockEmitter {
         if (index !== undefined)
         {
             // A jump back is what can loop: the budget bounds it.
-            b.localGet(K).globalGet(BUDGET).op(Op.i32lts);
-            this.open();
-            b.i32const(index).localSet(IDX).br(count - 1 - here + this.nest);
+            b.localGet(K).globalGet(BUDGET).op(Op.i32ges);
+            this.guard();
+            b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
             this.close();
+            b.i32const(index).localSet(IDX).br(count - 1 - here + this.nest);
+            return;
         }
         b.i64const(BigInt(to)).localSet(RIP).br(this.exitDepth);
     }
@@ -1813,7 +1845,7 @@ class BlockEmitter {
         b.block();
         this.nest++;
         b.localGet(which.index).i64const(BigInt(which.cases.length)).op(Op.i64ltu).op(Op.i32eqz)
-            .brIf(0);
+            .unlikely().brIf(0);
         for (let stub = 0; stub < targets.length; stub++)
         {
             b.block();
@@ -1825,13 +1857,13 @@ class BlockEmitter {
             // Inside the stubs after this one and the miss block.
             const inside = targets.length - 1 - stub;
             const to = /** @type {number} */ (indexOf.get(target));
-            b.localGet(RIP).i64const(BigInt(target)).op(Op.i64ne).brIf(inside);
+            b.localGet(RIP).i64const(BigInt(target)).op(Op.i64ne).unlikely().brIf(inside);
             if (to > here)
             {
                 b.br(to - here - 1 + this.nest + inside);
                 return;
             }
-            b.localGet(K).globalGet(BUDGET).op(Op.i32lts).op(Op.i32eqz).brIf(inside);
+            b.localGet(K).globalGet(BUDGET).op(Op.i32ges).unlikely().brIf(inside);
             b.i32const(to).localSet(IDX).br(count - 1 - here + this.nest + inside);
         });
         b.end();
@@ -1875,7 +1907,7 @@ class BlockEmitter {
         b.i32const(0).localSet(K);
         b.globalGet(DEPTH).i32const(CALL_DEPTH).op(Op.i32geu)
             .globalGet(BUDGET).i32const(0).op(Op.i32les).op(Op.i32or);
-        this.open();
+        this.guard();
         atTarget();
         b.br(this.exitDepth);
         this.close();
@@ -1896,12 +1928,12 @@ class BlockEmitter {
         this.loadRecord();
         b.i32const(0).load('i64', { offset: layout.eip }).localSet(RIP);
         b.localGet(U).i32const(LongExit.MISS).op(Op.i32eq);
-        this.open();
+        this.guard();
         atTarget();
         b.br(this.exitDepth);
         this.close();
         b.localGet(U).i32const(LongExit.RETURNED).op(Op.i32ne);
-        this.open();
+        this.guard();
         b.localGet(U).localSet(CODE).br(this.exitDepth);
         this.close();
         this.go(next, indexOf, here, count);
@@ -2309,7 +2341,8 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     regions.forEach((region, index)=>{
         const body = emitRegion(layout, helpers, region,
             { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative });
-        const at = m.function(regionType, LOCALS, body.toBytes(), { exportAs: `r${index}` });
+        const at = m.function(regionType, LOCALS, body.toBytes(),
+            { exportAs: `r${index}`, hints: body.hints });
         m.nameFunction(at, `r${region.blocks[0].entry.toString(16).padStart(8, '0')}`);
     });
     return m.toBytes();
@@ -2701,6 +2734,20 @@ function emitRegion(layout, helpers, region,
         // loop, the exit.
         e.outer = count - index;
         e.pending = undefined;
+        // A block whose jump comes back to its own start -- the shape of most
+        // inner loops -- is a wasm loop with a direct branch on its back edge,
+        // as the 32-bit emitter makes it, sparing the dispatch's round trip
+        // each turn.
+        const jump = block.instructions[block.instructions.length - 1];
+        const self = jump !== undefined && jump.op.startsWith('j')
+            && jump.operands[0]?.kind === 'rel' && jump.operands[0].target === block.entry;
+        if (self)
+        {
+            b.loop();
+            e.nest++;
+            e.selfAt = e.nest;
+            e.selfEntry = block.entry;
+        }
         /** @type {Ending} */
         let ending = true;
         let retired = 0;
@@ -2755,6 +2802,12 @@ function emitRegion(layout, helpers, region,
             e.close();
             // Both ways branched: nothing falls into the next block.
             b.unreachable();
+        }
+        if (self)
+        {
+            b.end();
+            e.nest--;
+            e.selfEntry = -1;
         }
     });
     b.end();

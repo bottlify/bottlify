@@ -690,6 +690,27 @@ test('a run comes back once it has interpreted its limit, the budget left over',
     assert.ok(m.state.retired < 1000000);
 });
 
+test('a block that loops onto itself goes round in wasm until its budget is spent', ()=>{
+    // mov ecx, 30000; l: add rax, rcx; dec ecx; jnz l
+    const code = 'b9307500004801c8ffc975f9';
+    const m = machine();
+    load(m, { ...CORPUS.cases[0], code });
+    const translated = m.runner.stats.translated;
+    /** @type {number[]} */
+    const runs = [];
+    for (let i = 0; i < 40; i++)
+    {
+        const before = m.state.retired;
+        m.runner.run(m.state, 1000);
+        runs.push(m.state.retired - before);
+    }
+    // Each run its budget, and at most the rest of the turn it was spent in.
+    assert.ok(runs.every(retired=>retired >= 1000 && retired < 1003), runs.join(' '));
+    assert.ok(m.runner.stats.translated - translated > 30000);
+    const { failures } = compare([{ ...CORPUS.cases[0], text: 'self loop', code }], 1000);
+    assert.deepEqual(failures, []);
+});
+
 test('calls from region to region return where they were made, and leave where they cannot', ()=>{
     // start:  mov ecx, 12; call fib; mov [rbx], rax          fib(12), nested wasm calls
     //         mov ecx, 80; call depth; mov [rbx + 8], rax     deeper than CALL_DEPTH
