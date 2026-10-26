@@ -1918,8 +1918,10 @@ export function createWin32Module(){
                         setLastError: setError,
                         /** @param {number} handle @param {string} [type] */
                         resolveHandle: (handle, type)=>kernel.handles.resolve(handle, type),
+                        // The volume's, as every file call reads it: `isDirectory`,
+                        // and the attributes a program set.
                         /** @param {string} path */
-                        stat: path=>filesystem.stat(path),
+                        stat: path=>volume.stat(path),
                         /** @param {string} path @param {number} modified */
                         setModified: (path, modified)=>filesystem.setModified(path, modified),
                     }),
