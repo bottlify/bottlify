@@ -100,21 +100,96 @@ test('ctime and asctime share one buffer, as documented', ()=>{
     assert.equal(table.asctime.handler([table.localtime.handler([seconds])]), first);
 });
 
+/** WALL's fields. */
+const WALL_TM = { sec: 56, min: 34, hour: 12, mday: 3, mon: 6, year: 103, wday: 4, yday: 183,
+    isdst: 0 };
+
+/** A struct tm's fields in their order, sec..isdst. @param {number[]} fields */
+const tmOf = fields=>{
+    const [sec, min, hour, mday, mon, year, wday, yday, isdst] = fields;
+    return { sec, min, hour, mday, mon, year, wday, yday, isdst };
+};
+
 test('strftime renders the fields a program actually asks for', ()=>{
-    const when = new Date(WALL);
-    assert.equal(strftime('%Y-%m-%d %H:%M:%S', when), '2003-07-03 12:34:56');
-    assert.equal(strftime('%a %b %j %p %I', when), 'Thu Jul 184 PM 12');
-    assert.equal(strftime('100%%', when), '100%');
-    assert.equal(strftime('%q!', when), '!', 'an unknown specifier is dropped');
+    assert.equal(strftime('%Y-%m-%d %H:%M:%S', WALL_TM), '2003-07-03 12:34:56');
+    assert.equal(strftime('%a %b %j %p %I', WALL_TM), 'Thu Jul 184 PM 12');
+    assert.equal(strftime('100%%', WALL_TM), '100%');
 });
 
-test('strftime writes nothing at all when the result would not fit', ()=>{
+test('strftime refuses a conversion msvcrt does not know', ()=>{
+    for (const format of ['%C', '%D', '%e', '%F', '%h', '%n', '%R', '%t', '%T', '%u', 'a%e',
+        '%q!', 'end %'])
+    {
+        assert.equal(strftime(format, WALL_TM), null, format);
+    }
+    assert.equal(strftime('e%#%e', WALL_TM), 'e%e', '%#% is a percent sign');
+});
+
+test('strftime reads the fields as they are, unnormalised', ()=>{
+    const epoch = tmOf([0, 0, 0, 1, 0, 70, 4, 0, 0]);
+    const thirtieth = tmOf([0, 0, 0, 30, 1, 70, 4, 0, 0]);
+    assert.equal(strftime('%c', epoch), '01/01/70 00:00:00');
+    assert.equal(strftime('%c', thirtieth), '02/30/70 00:00:00');
+    assert.equal(strftime('%#c', thirtieth), 'Thursday, February 30, 1970 00:00:00');
+    assert.equal(strftime('%#x', thirtieth), 'Thursday, February 30, 1970');
+    assert.equal(strftime('%X', tmOf([0, 0, 14, 1, 0, 70, 4, 0, 0])), '14:00:00');
+    assert.equal(strftime('%I %j %#M %p %#d', epoch), '12 001 0 AM 1');
+    assert.equal(strftime('%U %W', epoch), '00 00');
+    assert.equal(strftime('%U %W', tmOf([0, 0, 0, 1, 0, 70, 0, 0, 0])), '01 00');
+    assert.equal(strftime('%U %W', tmOf([0, 0, 0, 1, 0, 70, 0, 365, 0])), '53 52');
+    assert.equal(strftime('%a', tmOf([0, 0, 0, 1, 0, 70, 7, 0, 0])), null, 'no eighth day');
+    assert.equal(strftime('%H', tmOf([0, 0, 24, 1, 0, 70, 4, 0, 0])), null);
+});
+
+test('strftime reads no struct for a format of plain text', ()=>{
+    assert.equal(strftime('copy', null), 'copy');
+    assert.equal(strftime('%c', null), null);
+});
+
+test('strftime leaves an empty string when the result would not fit', ()=>{
     const { memory, table } = build();
     const buffer = memory.allocate(32);
     memory.writeMemory(buffer, new Uint8Array(32).fill(0x2e));
     const block = table.localtime.handler([memory.allocate(4)]);
     assert.equal(table.strftime.handler([buffer, 4, memory.put('%Y-%m-%d'), block]), 0);
-    assert.equal(memory.text(buffer)[0], '.', 'the buffer is untouched');
+    assert.equal(memory.text(buffer), '', 'no truncated text');
+});
+
+test('strftime answers a null struct, a null buffer and a refused format as Windows does', ()=>{
+    const { memory, table } = build();
+    const buffer = memory.allocate(32);
+    const block = table.localtime.handler([memory.allocate(4)]);
+    assert.equal(table.strftime.handler([buffer, 32, memory.put('copy'), 0]), 4);
+    assert.equal(memory.text(buffer), 'copy');
+    assert.equal(table.strftime.handler([0, 0, memory.put('copy'), block]), 0);
+    assert.equal(table.strftime.handler([buffer, 32, memory.put('a%e'), block]), 0);
+    assert.equal(memory.text(buffer), '');
+});
+
+test('_Strftime expands a locale\'s pictures letter by letter', ()=>{
+    const names = { ...C_TIME_NAMES, shortDays: ['d1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7'],
+        days: [1, 2, 3, 4, 5, 6, 7].map(n=>`day${n}`),
+        shortMonths: Array.from({ length: 12 }, (_, n)=>`m${n + 1}`),
+        months: Array.from({ length: 12 }, (_, n)=>`mon${n + 1}`), am: 'tam', pm: 'tpm' };
+    const at = (/** @type {number} */ hour)=>tmOf([0, 0, hour, 1, 0, 70, 0, 0, 0]);
+    /** @type {[string, string, number][]} */
+    const time = [['MMM', 'm1', 1], ['h', '1', 1], ['hh', '01', 1], ['hhh', 'h01', 1],
+        ['hhhh', 'hh01', 1], ['H', '1', 1], ['HHH', 'H13', 13], ['m', '0', 0], ['sss', 's00', 0],
+        ['t', 't', 0], ['tt', 'tam', 0], ['ttttttttt', 'tam', 0], ['a', 'tam', 0],
+        ['AAAAA', 'tam', 0]];
+    for (const [picture, expected, hour] of time)
+    {
+        assert.equal(strftime('%X', at(hour), { ...names, time: picture }), expected, picture);
+    }
+    /** @type {[string, string][]} */
+    const date = [['d', '1'], ['dd', '01'], ['ddd', 'd1'], ['dddd', 'day1'], ['ddddd', 'dday1'],
+        ['M', '1'], ['MMMM', 'mon1'], ['MMMMM', 'Mmon1'], ['y', 'y'], ['yy', '70'],
+        ['yyy', 'y70'], ['yyyy', '1970'], ['yyyyy', 'y1970'], ['ggggggggggg', 'ggggggggggg']];
+    for (const [picture, expected] of date)
+    {
+        assert.equal(strftime('%x', at(0), { ...names, shortDate: picture }), expected, picture);
+        assert.equal(strftime('%#x', at(0), { ...names, longDate: picture }), expected, picture);
+    }
 });
 
 test('strftime keeps the upper-half bytes of its format as they were', ()=>{
@@ -264,7 +339,7 @@ const putTm = (memory, fields)=>{
 };
 
 test('strftime\'s # flag gives the long date and drops a number\'s leading zeros', ()=>{
-    const when = new Date(Date.UTC(2005, 2, 4, 7, 8, 9));
+    const when = tmOf([9, 8, 7, 4, 2, 105, 5, 62, 0]);
     assert.equal(strftime('%x|%X|%c', when), '03/04/05|07:08:09|03/04/05 07:08:09');
     assert.equal(strftime('%#x', when), 'Friday, March 04, 2005');
     assert.equal(strftime('%#c', when), 'Friday, March 04, 2005 07:08:09');
@@ -272,7 +347,7 @@ test('strftime\'s # flag gives the long date and drops a number\'s leading zeros
 });
 
 test('strftime takes a locale\'s names and pictures in place of the C locale\'s', ()=>{
-    const when = new Date(Date.UTC(2005, 2, 4, 15, 8, 9));
+    const when = tmOf([9, 8, 15, 4, 2, 105, 5, 62, 0]);
     const names = { ...C_TIME_NAMES, shortDays: C_TIME_NAMES.shortDays.map(d=>d.toUpperCase()),
         am: 'vm', pm: 'nm', shortDate: "d.M.yyyy 'r.'", time: 'h:mm tt' };
     assert.equal(strftime('%a %p %x %X', when, names), 'FRI nm 4.3.2005 r. 3:08 nm');
