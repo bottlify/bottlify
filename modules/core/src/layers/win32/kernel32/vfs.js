@@ -37,6 +37,24 @@ const CHANGE_SIZE = 0x008;
 const CHANGE_LAST_WRITE = 0x010;
 
 /**
+ * The FILE_ACTION_ a change to one name is, as ReadDirectoryChangesW reports
+ * it. A rename is its old name and its new one; seen from a watch that holds
+ * only one of the two, it is a name removed or a name added.
+ */
+export const FILE_ACTION_ADDED = 1;
+export const FILE_ACTION_REMOVED = 2;
+export const FILE_ACTION_MODIFIED = 3;
+export const FILE_ACTION_RENAMED_OLD_NAME = 4;
+export const FILE_ACTION_RENAMED_NEW_NAME = 5;
+
+/**
+ * One change as a watch is told it: what happened, and to which name, from
+ * the watched directory down, as the volume spells it.
+ *
+ * @typedef {{ action: number, name: string }} ChangeRecord
+ */
+
+/**
  * @param {any} fs  The filesystem layer's API.
  * @param {((blocks: any[]) => Promise<void>) | null} [fetchBlocks]
  *        Brings absent bundle blocks in. Absent itself when nothing is mounted
@@ -165,7 +183,7 @@ export function createVolume(fs, fetchBlocks = null){
      * it asked for, what to tell, and whether anyone still holds it.
      *
      * @type {Set<{ directory: string, subtree: boolean, filter: number,
-     *     changed: () => void, alive: () => boolean }>}
+     *     changed: (records: ChangeRecord[]) => void, alive: () => boolean }>}
      */
     const watches = new Set();
 
@@ -177,9 +195,10 @@ export function createVolume(fs, fetchBlocks = null){
      */
     const openedAt = new WeakMap();
 
+    /** @param {string} path  The volume's own spelling, no trailing separator. */
+    const spelled = path=>attempt(()=>fs.resolve(path).path, path).replace(/\\+$/, '');
     /** @param {string} path  The volume's own spelling, folded, no trailing separator. */
-    const canonical = path=>attempt(()=>fs.resolve(path).path, path)
-        .replace(/\\+$/, '').toLowerCase();
+    const canonical = path=>spelled(path).toLowerCase();
 
     /**
      * A change to one name, told to every watch over the directory it is in
@@ -187,17 +206,22 @@ export function createVolume(fs, fetchBlocks = null){
      * filter asks about it. Removing the watched directory itself is told
      * too, as Windows tells it. Nothing is worked out while nothing watches.
      *
-     * One operation is one change, whatever names it touches: a rename is
-     * told once to a watch that sees both its names.
+     * One operation is one telling, whatever names it touches: a rename is
+     * told once to a watch that sees both its names, as the records of
+     * both. The watched directory's own removal is told with no record;
+     * its rename is not told.
      *
      * @param {string | string[]} paths @param {number} kind  FILE_NOTIFY_CHANGE_ flags.
+     * @param {number | number[]} actions  FILE_ACTION_ of each path.
      */
-    const changed = (paths, kind)=>{
+    const changed = (paths, kind, actions)=>{
         if (watches.size === 0)
         {
             return;
         }
-        const names = (Array.isArray(paths) ? paths : [paths]).map(canonical);
+        const given = Array.isArray(paths) ? paths : [paths];
+        const names = given.map(spelled);
+        const acts = Array.isArray(actions) ? actions : given.map(()=>actions);
         for (const watch of [...watches])
         {
             if (!watch.alive())
@@ -205,15 +229,35 @@ export function createVolume(fs, fetchBlocks = null){
                 watches.delete(watch);
                 continue;
             }
-            const within = names.some(name=>{
-                const parent = name.slice(0, Math.max(name.lastIndexOf('\\'), 0));
-                return parent === watch.directory
-                    || (watch.subtree && parent.startsWith(`${watch.directory}\\`))
-                    || (name === watch.directory && kind === CHANGE_DIR_NAME);
-            });
-            if (within && (watch.filter & kind) !== 0)
+            if ((watch.filter & kind) === 0)
             {
-                watch.changed();
+                continue;
+            }
+            // Its removal is told; its move is not, as Windows does neither
+            // more nor less.
+            const self = names.some((name, index)=>name.toLowerCase() === watch.directory
+                && kind === CHANGE_DIR_NAME && acts[index] === FILE_ACTION_REMOVED);
+            /** @type {ChangeRecord[]} */
+            const records = [];
+            names.forEach((name, index)=>{
+                const folded = name.toLowerCase();
+                const parent = folded.slice(0, Math.max(folded.lastIndexOf('\\'), 0));
+                if (parent === watch.directory
+                    || (watch.subtree && parent.startsWith(`${watch.directory}\\`)))
+                {
+                    records.push({ action: acts[index],
+                        name: name.slice(watch.directory.length + 1) });
+                }
+            });
+            if (records.length === 1 && acts.length === 2)
+            {
+                // Half a rename: the name left the watch, or came into it.
+                records[0].action = records[0].action === FILE_ACTION_RENAMED_OLD_NAME
+                    ? FILE_ACTION_REMOVED : FILE_ACTION_ADDED;
+            }
+            if (records.length > 0 || self)
+            {
+                watch.changed(records);
             }
         }
     };
@@ -245,7 +289,7 @@ export function createVolume(fs, fetchBlocks = null){
             {
                 return false;
             }
-            changed(path, CHANGE_ATTRIBUTES);
+            changed(path, CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
             if (attributes === null)
             {
                 recorded.delete(keyOf(path));
@@ -265,7 +309,7 @@ export function createVolume(fs, fetchBlocks = null){
         setModified(path, modified){
             return attempt(()=>{
                 fs.setModified(path, modified);
-                changed(path, CHANGE_LAST_WRITE);
+                changed(path, CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
                 return true;
             }, false);
         },
@@ -290,11 +334,11 @@ export function createVolume(fs, fetchBlocks = null){
                 openedAt.set(node, path);
                 if (existed === false)
                 {
-                    changed(path, CHANGE_FILE_NAME);
+                    changed(path, CHANGE_FILE_NAME, FILE_ACTION_ADDED);
                 }
                 else if (existed && mode.truncate)
                 {
-                    changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                    changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
                 }
             }
             return node;
@@ -345,7 +389,7 @@ export function createVolume(fs, fetchBlocks = null){
             const path = watches.size > 0 ? openedAt.get(node) : undefined;
             if (path !== undefined && bytes.length > 0)
             {
-                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
             }
             return written;
         },
@@ -385,7 +429,7 @@ export function createVolume(fs, fetchBlocks = null){
             const path = watches.size > 0 ? openedAt.get(node) : undefined;
             if (path !== undefined)
             {
-                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
             }
         },
 
@@ -436,7 +480,8 @@ export function createVolume(fs, fetchBlocks = null){
                     fs.deleteFile(path);
                 }
                 carry(path, null);
-                changed(path, entry.directory ? CHANGE_DIR_NAME : CHANGE_FILE_NAME);
+                changed(path, entry.directory ? CHANGE_DIR_NAME : CHANGE_FILE_NAME,
+                    FILE_ACTION_REMOVED);
                 return true;
             }, false);
         },
@@ -446,7 +491,7 @@ export function createVolume(fs, fetchBlocks = null){
             const made = attempt(()=>fs.createDirectory(path), false);
             if (made !== false)
             {
-                changed(path, CHANGE_DIR_NAME);
+                changed(path, CHANGE_DIR_NAME, FILE_ACTION_ADDED);
             }
             return made;
         },
@@ -459,7 +504,8 @@ export function createVolume(fs, fetchBlocks = null){
             {
                 const kind = attempt(()=>fs.stat(to), null)?.directory
                     ? CHANGE_DIR_NAME : CHANGE_FILE_NAME;
-                changed([from, to], kind);
+                changed([from, to], kind,
+                    [FILE_ACTION_RENAMED_OLD_NAME, FILE_ACTION_RENAMED_NEW_NAME]);
             }
             return true;
         }, false),
@@ -470,7 +516,7 @@ export function createVolume(fs, fetchBlocks = null){
          * nobody holds it any more.
          *
          * @param {string} path @param {boolean} subtree @param {number} filter
-         * @param {() => void} notify @param {() => boolean} alive
+         * @param {(records: ChangeRecord[]) => void} notify @param {() => boolean} alive
          * @returns {{ close: () => void }}
          */
         watch(path, subtree, filter, notify, alive){

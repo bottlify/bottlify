@@ -2287,6 +2287,117 @@ test('a volume\'s own name opens as its drive\'s root', ()=>{
     assert.equal(error.code, 5, 'the volume itself is not the caller\'s to read');
 });
 
+/**
+ * Stands a watch in for the volume's, keeping what it was asked and whom to tell.
+ *
+ * @param {any} files
+ */
+function stubWatch(files){
+    /** @type {{ asked: any[], notify: any }} */
+    const kept = { asked: [], notify: null };
+    /** @param {string} path @param {boolean} subtree @param {number} filter @param {any} notify */
+    const watch = (path, subtree, filter, notify)=>{
+        kept.asked.push({ path, subtree, filter });
+        kept.notify = notify;
+        return { close: ()=>{} };
+    };
+    files.watch = watch;
+    return kept;
+}
+
+test('ReadDirectoryChangesW keeps changes until asked; the first call sets the watch', async()=>{
+    /** @type {string[]} */
+    const reset = [];
+    /** @type {{ thread: any, routine: number, args: number[] }[]} */
+    const queued = [];
+    const { memory, files, fns, error, at } = setup({
+        resetEvent: (/** @type {number} */ handle)=>reset.push(`reset ${handle}`),
+        currentThread: ()=>'main',
+        queueApc: (/** @type {any} */ thread, /** @type {number} */ routine,
+            /** @type {number[]} */ args)=>queued.push({ thread, routine, args }),
+    });
+    files.mkdir('C:\\GAME\\SAVES');
+    const stub = stubWatch(files);
+    const watches = stub.asked;
+    const told = (/** @type {any[]} */ records)=>stub.notify(records);
+    const directory = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\SAVES'), GENERIC_READ, 3, 0,
+        OPEN_EXISTING, 0x02000000 | 0x40000000, 0]);
+    const read = fns.ReadDirectoryChangesW;
+    assert.equal(read.argBytes, 32);
+    const buffer = 0x600;
+    const ov = 0x500;
+    memory.bytes.fill(0, ov, ov + 20);
+    memory.writeMemory(ov + 16, new Uint8Array([0x44, 0, 0, 0]));
+
+    assert.equal(read.handler([0, 0, 0, 0, 0, 0, 0, 0]), 0);
+    assert.equal(error.code, 87, 'no filter is a bad parameter, before the handle');
+    assert.equal(read.handler([directory, buffer, 0x100, 0, 0x200, 0, ov, 0]), 0);
+    assert.equal(error.code, 87, 'a filter flag that is none');
+    assert.equal(read.handler([0x999, buffer, 0x100, 0, 1, 0, ov, 0]), 0);
+    assert.equal(error.code, 6);
+
+    assert.equal(read.handler([directory, buffer, 0x100, 1, 0x3, 0, ov, 0]), 1);
+    assert.deepEqual(watches, [{ path: 'C:\\GAME\\SAVES', subtree: true, filter: 3 }]);
+    assert.equal(memory.dword(ov), 0x103, 'STATUS_PENDING');
+    assert.deepEqual(reset, ['reset 68'], 'its event cleared');
+    told([{ action: 1, name: 'hoo' }]);
+    assert.equal(memory.dword(ov), 0, 'STATUS_SUCCESS');
+    assert.equal(memory.dword(ov + 4), 0x12, 'one record, unpadded');
+    assert.equal(memory.dword(buffer), 0);
+    assert.equal(memory.dword(buffer + 4), 1, 'FILE_ACTION_ADDED');
+    assert.equal(memory.dword(buffer + 8), 6);
+    assert.equal(memory.bytes[buffer + 12], 'h'.charCodeAt(0));
+
+    told([{ action: 4, name: 'a' }, { action: 5, name: 'bb' }]);
+    assert.equal(read.handler([directory, buffer, 0x100, 0, 0x10, 0, ov, 0]), 1,
+        'kept since; the later filter is not looked at');
+    assert.equal(watches.length, 1);
+    assert.equal(memory.dword(buffer), 16, 'the next on a four-byte boundary');
+    assert.equal(memory.dword(buffer + 16 + 4), 5);
+    assert.equal(memory.dword(ov + 4), 16 + 16);
+
+    assert.equal(read.handler([directory, buffer, 0x10, 0, 3, 0, ov, 0]), 1);
+    told([{ action: 2, name: 'hoo' }]);
+    assert.equal(memory.dword(ov), 0x10c, 'STATUS_NOTIFY_ENUM_DIR: no room');
+    assert.equal(memory.dword(ov + 4), 0);
+
+    const resets = reset.length;
+    assert.equal(read.handler([directory, buffer, 0x100, 0, 3, 0, ov, 0x7000]), 1);
+    told([{ action: 3, name: 'x' }]);
+    assert.deepEqual(queued, [{ thread: 'main', routine: 0x7000, args: [0, 14, ov] }],
+        'the routine told on the calling thread');
+    assert.equal(reset.length, resets, 'with a routine the event is not touched');
+
+    const waiting = read.handler([directory, buffer, 0x100, 0, 3, 0x580, 0, 0]);
+    assert.ok(waiting instanceof Promise, 'a synchronous call waits');
+    told([{ action: 2, name: 'x' }]);
+    assert.equal(await waiting, 1);
+    assert.equal(memory.dword(0x580), 14);
+
+    files.put('C:\\GAME\\SAVES\\ONE.DAT', 'x');
+    const file = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\SAVES\\ONE.DAT'), GENERIC_READ, 0,
+        0, OPEN_EXISTING, 0, 0]);
+    assert.equal(read.handler([file, buffer, 0x100, 0, 3, 0, ov, 0]), 0);
+    assert.equal(error.code, 87, 'a file is no directory to watch');
+});
+
+test('a watch made with no room loses every change and says so', ()=>{
+    const { memory, files, fns, at } = setup();
+    files.mkdir('C:\\GAME\\SAVES');
+    const stub = stubWatch(files);
+    const told = (/** @type {any[]} */ records)=>stub.notify(records);
+    const directory = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\SAVES'), GENERIC_READ, 3, 0,
+        OPEN_EXISTING, 0x02000000 | 0x40000000, 0]);
+    const ov = 0x500;
+    memory.bytes.fill(0, ov, ov + 20);
+    assert.equal(fns.ReadDirectoryChangesW.handler([directory, 0, 0, 0, 3, 0, ov, 0]), 1);
+    told([{ action: 1, name: 'hoo' }]);
+    assert.equal(memory.dword(ov), 0x10c);
+    assert.equal(fns.ReadDirectoryChangesW.handler([directory, 0x600, 0x100, 0, 3, 0, ov, 0]), 1);
+    told([{ action: 2, name: 'hoo' }]);
+    assert.equal(memory.dword(ov), 0x10c, 'the first call\'s room is the watch\'s');
+});
+
 test('CreateHardLink answers as a volume without links does, and says so', ()=>{
     /** @type {string[]} */
     const said = [];

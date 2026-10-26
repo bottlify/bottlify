@@ -231,3 +231,37 @@ test('attributes a program set follow the name through a rename and go with a de
     assert.equal(vol.stat('C:\\moved\\a.txt')?.attributes, undefined);
     assert.equal(vol.setAttributes('C:\\nothing', 1), false, 'no name, nothing to carry them');
 });
+
+test('a watch is told what happened to which name, below the directory it watches', async()=>{
+    const { volume: vol } = await volume();
+    assert.ok(vol.mkdir('C:\\Watched'));
+    /** @type {{ action: number, name: string }[][]} */
+    const told = [];
+    const all = 0x1f;
+    const watch = vol.watch('C:\\watched', true, all, (/** @type {any} */ records)=>{
+        told.push(records);
+    }, ()=>true);
+
+    assert.ok(vol.mkdir('C:\\Watched\\Sub'));
+    const node = vol.open('C:\\Watched\\Sub\\Save.dat', { read: true, write: true, create: true });
+    vol.write(node, 0, new Uint8Array([1]));
+    vol.close(node);
+    assert.ok(vol.rename('C:\\Watched\\Sub\\Save.dat', 'C:\\Watched\\Save.dat'));
+    assert.ok(vol.rename('C:\\Watched\\Save.dat', 'C:\\Elsewhere.dat'));
+    assert.equal(vol.remove('C:\\Watched\\Sub'), true);
+    assert.deepEqual(told, [
+        [{ action: 1, name: 'Sub' }],
+        [{ action: 1, name: 'Sub\\Save.dat' }],
+        [{ action: 3, name: 'Sub\\Save.dat' }],
+        [{ action: 4, name: 'Sub\\Save.dat' }, { action: 5, name: 'Save.dat' }],
+        [{ action: 2, name: 'Save.dat' }],
+        [{ action: 2, name: 'Sub' }],
+    ], 'added, modified, a rename by both names, a rename out of the watch as a removal');
+    watch.close();
+
+    const own = /** @type {any[]} */ ([]);
+    vol.watch('C:\\Watched', false, 0x2, (/** @type {any} */ records)=>own.push(records),
+        ()=>true);
+    assert.ok(vol.rename('C:\\Watched', 'C:\\Moved'));
+    assert.deepEqual(own, [], 'the watched directory moved is not told');
+});

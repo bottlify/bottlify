@@ -2065,6 +2065,17 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,
                         writeConsole: (handle, text)=>sink(handle, text),
+                        // As the ports' signalEvent: a stale hEvent is the
+                        // program's mistake, and starting the I/O does not fault on it.
+                        resetEvent: handle=>{
+                            try
+                            {
+                                kernel.resetEvent(kernel.handles.resolve(handle, 'event'));
+                            }
+                            catch (e){
+                                void e;
+                            }
+                        },
                         handles,
                         namedObjects,
                         currentThread: ()=>kernel.currentThread(),

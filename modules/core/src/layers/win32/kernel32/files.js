@@ -79,6 +79,14 @@ const ERROR_HANDLE_EOF = 38;
 const OVERLAPPED_INTERNAL = 0;
 const OVERLAPPED_INTERNAL_HIGH = 4;
 const OVERLAPPED_OFFSET = 8;
+const OVERLAPPED_EVENT = 16;
+
+/** ReadDirectoryChangesW's statuses, and the error a completion routine is told. */
+const STATUS_PENDING = 0x103;
+const STATUS_NOTIFY_ENUM_DIR = 0x10c;
+const ERROR_NOTIFY_ENUM_DIR = 1022;
+/** Every FILE_NOTIFY_CHANGE_ flag. */
+const FILE_NOTIFY_CHANGE_ALL = 0x17f;
 
 /** The failure value of each of the four APIs that has its own. */
 const INVALID_HANDLE_VALUE = 0xffffffff;
@@ -341,6 +349,11 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  * @property {(path: string, attributes: number | null) => boolean} [setAttributes]
  *           Records the attributes a program set on a name; `null` forgets
  *           them. Absent, SetFileAttributes changes nothing a later call sees.
+ * @property {(path: string, subtree: boolean, filter: number,
+ *     notify: (records: import('./vfs.js').ChangeRecord[]) => void,
+ *     alive: () => boolean) => { close: () => void }} [watch]
+ *           Tells `notify` of each change under a directory `filter` asks about.
+ *           Absent, ReadDirectoryChangesW is refused.
  */
 
 /**
@@ -362,6 +375,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *     CreateFile or NtCreateFile refused, with the error and what was asked
  * @property {(handle: number, text: string) => void} writeConsole
  *           Where a write to a standard handle goes instead of the filesystem.
+ * @property {(handle: number) => void} [resetEvent]
+ *           Clears an OVERLAPPED's event when an operation on it starts pending.
  * @property {() => string[]} [drives]  the drive letters, for the mount manager
  * @property {(letter: string) => any} [volume]  a drive's volume, its `kind` read
  * @property {{ open: (type: string, object: any) => number,
@@ -2168,6 +2183,180 @@ export function createFileFunctions(host){
     };
 
     /**
+     * Each open directory's change watch, set by its first ReadDirectoryChangesW
+     * and kept with that call's filter, subtree and buffer length -- later
+     * calls' own are not looked at, as Windows keeps the first. Changes come
+     * whether or not a call is waiting and are kept until one takes them;
+     * more than the first buffer held are lost, and the next call is told
+     * so (STATUS_NOTIFY_ENUM_DIR, nothing written).
+     *
+     * @type {WeakMap<object, { watch: { close: () => void }, room: number,
+     *     records: import('./vfs.js').ChangeRecord[], overflowed: boolean,
+     *     waiting: ((records: import('./vfs.js').ChangeRecord[] | null) => void)[] }>}
+     */
+    const directoryWatches = new WeakMap();
+
+    /**
+     * What a watch has kept, handed over and forgotten: its records, or null
+     * when there were more than it could hold.
+     *
+     * @param {{ records: import('./vfs.js').ChangeRecord[], overflowed: boolean }} kept
+     */
+    const taken = kept=>{
+        const records = kept.overflowed ? null : kept.records;
+        kept.records = [];
+        kept.overflowed = false;
+        return records;
+    };
+
+    /**
+     * Changes as FILE_NOTIFY_INFORMATION records, each on a four-byte boundary
+     * chained by NextEntryOffset, the last's zero and unpadded.
+     *
+     * @param {import('./vfs.js').ChangeRecord[]} records
+     */
+    const notifyRecords = records=>{
+        /** @type {number[]} */
+        const starts = [];
+        let end = 0;
+        for (const record of records)
+        {
+            const start = (end + 3) & ~3;
+            starts.push(start);
+            end = start + 12 + record.name.length * 2;
+        }
+        const bytes = new Uint8Array(end);
+        const view = new DataView(bytes.buffer);
+        records.forEach((record, index)=>{
+            const at = starts[index];
+            view.setUint32(at, index + 1 < records.length ? starts[index + 1] - at : 0, true);
+            view.setUint32(at + 4, record.action, true);
+            view.setUint32(at + 8, record.name.length * 2, true);
+            [...record.name].forEach((unit, offset)=>view.setUint16(at + 12 + offset * 2,
+                unit.charCodeAt(0), true));
+        });
+        return bytes;
+    };
+
+    /**
+     * BOOL ReadDirectoryChangesW(HANDLE hDirectory, LPVOID lpBuffer,
+     *     DWORD nBufferLength, BOOL bWatchSubtree, DWORD dwNotifyFilter,
+     *     LPDWORD lpBytesReturned, LPOVERLAPPED lpOverlapped,
+     *     LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+     *
+     * Changes kept since the last call answer at once; otherwise a
+     * synchronous call waits for the next, and an overlapped one returns
+     * pending (Internal STATUS_PENDING, its event cleared) and completes
+     * as overlapped reads do: the event and the port, or the routine queued
+     * to the calling thread with the event left alone.
+     */
+    const readDirectoryChanges = {
+        argBytes: 32,
+        /** @param {number[]} args */
+        handler: ([handle, buffer, length, subtree, filter, returned, overlapped, routine])=>{
+            const asked = filter >>> 0;
+            if (asked === 0 || (asked & ~FILE_NOTIFY_CHANGE_ALL) !== 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const directory = object(handle, 'file') ?? object(handle, 'directory');
+            if (!directory)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if (!directory.directory && host.handles.typeOf?.(handle >>> 0) !== 'directory')
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            if (!files.watch)
+            {
+                host.divergence?.('ReadDirectoryChangesW', 'the volume tells no changes');
+                return fail(ERROR_INVALID_FUNCTION);
+            }
+            let state = directoryWatches.get(directory);
+            if (!state)
+            {
+                const kept = { watch: { close: ()=>{} }, room: length >>> 0,
+                    records: /** @type {import('./vfs.js').ChangeRecord[]} */ ([]),
+                    overflowed: false,
+                    waiting: /** @type {((records: any) => void)[]} */ ([]) };
+                kept.watch = files.watch(directory.path, (subtree >>> 0) !== 0, asked, records=>{
+                    if (records.length === 0)
+                    {
+                        return;
+                    }
+                    kept.records.push(...records);
+                    if (notifyRecords(kept.records).length > kept.room)
+                    {
+                        kept.records = [];
+                        kept.overflowed = true;
+                    }
+                    kept.waiting.shift()?.(taken(kept));
+                }, ()=>host.handles.holds?.(directory) ?? true);
+                directoryWatches.set(directory, kept);
+                state = kept;
+            }
+            const watched = state;
+            const pointer = overlapped >>> 0;
+            const thread = host.currentThread?.() ?? null;
+            /**
+             * Writes what a call is given and says how it ended.
+             *
+             * @param {import('./vfs.js').ChangeRecord[] | null} records
+             */
+            const give = records=>{
+                const bytes = records === null ? null : notifyRecords(records);
+                const fits = bytes !== null && bytes.length <= (length >>> 0)
+                    && (buffer >>> 0) !== 0;
+                if (fits)
+                {
+                    host.writeMemory(buffer >>> 0, bytes);
+                }
+                const count = fits ? bytes.length : 0;
+                const status = fits ? 0 : STATUS_NOTIFY_ENUM_DIR;
+                if (pointer === 0)
+                {
+                    writeDwordIf(returned >>> 0, count);
+                    return 1;
+                }
+                if ((routine >>> 0) !== 0)
+                {
+                    writeDword(pointer + OVERLAPPED_INTERNAL, status);
+                    writeDword(pointer + OVERLAPPED_INTERNAL_HIGH, count);
+                    host.queueApc?.(thread, routine >>> 0,
+                        [status === 0 ? ERROR_SUCCESS : ERROR_NOTIFY_ENUM_DIR, count, pointer]);
+                    return 1;
+                }
+                host.ports?.completed(handle >>> 0, count, pointer);
+                writeDword(pointer + OVERLAPPED_INTERNAL, status);
+                writeDword(pointer + OVERLAPPED_INTERNAL_HIGH, count);
+                return 1;
+            };
+            if (watched.records.length > 0 || watched.overflowed)
+            {
+                return give(taken(watched));
+            }
+            if (pointer === 0)
+            {
+                return new Promise(resolve=>{
+                    watched.waiting.push(records=>resolve(give(records)));
+                });
+            }
+            writeDword(pointer + OVERLAPPED_INTERNAL, STATUS_PENDING);
+            if ((routine >>> 0) === 0)
+            {
+                const event = (readDword(pointer + OVERLAPPED_EVENT) & ~1) >>> 0;
+                if (event !== 0)
+                {
+                    host.resetEvent?.(event);
+                }
+            }
+            watched.waiting.push(give);
+            return 1;
+        },
+    };
+
+    /**
      * A control code sent to an open handle: the mount manager answers its
      * own; a file or directory on the volume is no driver's, and answers
      * none; anything else is no file object.
@@ -3445,6 +3634,8 @@ export function createFileFunctions(host){
          * not handle, so a program asking a disk or a VxD for something
          * takes the documented no.
          */
+        ReadDirectoryChangesW: readDirectoryChanges,
+
         DeviceIoControl: {
             argBytes: 32,
             /** @param {number[]} args */
