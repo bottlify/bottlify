@@ -28,10 +28,14 @@ const FIRST_ATOM = 0xc000;
 const LAST_ATOM = 0xffff;
 /** A value below this, passed as a name, is an integer atom, not a pointer. */
 const MAX_INTEGER_ATOM = 0x10000;
-/** ERROR_SUCCESS, cleared on the calls that report through the error slot. */
-const ERROR_SUCCESS = 0;
-/** A name longer than this is a pointer that is not a string. */
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_MORE_DATA = 234;
+/** The longest name an atom holds, in characters of the form it was given in. */
 const MAX_ATOM_NAME = 255;
+/** What memory calls a string with no terminator within the limit read. */
+const UNTERMINATED = 'UNTERMINATED';
 
 /**
  * @typedef {Object} AtomHost
@@ -58,24 +62,58 @@ export function createAtomFunctions(host){
 
     /**
      * A name argument: below 64 KiB it is an integer atom passed by value, so
-     * it is returned as itself; otherwise it is a pointer to a string.
+     * it is returned as itself; otherwise it is a pointer to a string, and a
+     * string `#1234` is the integer atom 1234 as well. An integer in the
+     * string range, or a name longer than an atom holds, is no name at all:
+     * the call fails with ERROR_INVALID_PARAMETER. Only the zero atom fails
+     * without saying so.
      *
      * @param {number} pointer @param {boolean} [wide]
-     * @returns {{ integer: number } | { text: string }}
+     * @returns {{ integer: number } | { text: string } | null}
      */
     const nameOf = (pointer, wide = false)=>{
         const raw = pointer >>> 0;
         if (raw < MAX_INTEGER_ATOM)
         {
-            return { integer: raw };
+            return integerName(raw);
         }
-        return { text: wide ? host.readWideString?.(raw, MAX_ATOM_NAME) ?? ''
-            : host.readCString(raw, MAX_ATOM_NAME) };
+        let text;
+        try
+        {
+            // One terminator past the longest name: a name that has none by
+            // then is too long, whatever follows it.
+            text = wide ? host.readWideString?.(raw, (MAX_ATOM_NAME + 1) * 2) ?? ''
+                : host.readCString(raw, MAX_ATOM_NAME + 1);
+        }
+        catch (e){
+            if (/** @type {{ code?: string }} */ (e)?.code !== UNTERMINATED)
+            {
+                throw e;
+            }
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return null;
+        }
+        const integer = /^#(\d+)$/.exec(text);
+        return integer ? integerName(Number(integer[1])) : { text };
+    };
+
+    /** @param {number} value @returns {{ integer: number } | null} */
+    const integerName = value=>{
+        if (value >= FIRST_ATOM)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return null;
+        }
+        return { integer: value };
     };
 
     /** @param {number} pointer @param {boolean} [wide] @returns {number} */
     const add = (pointer, wide = false)=>{
         const name = nameOf(pointer, wide);
+        if (name === null)
+        {
+            return 0;
+        }
         if ('integer' in name)
         {
             return name.integer;
@@ -94,13 +132,16 @@ export function createAtomFunctions(host){
         const atom = next++;
         byName.set(key, { atom, count: 1 });
         byAtom.set(atom, name.text);
-        host.setLastError?.(ERROR_SUCCESS);
         return atom;
     };
 
     /** @param {number} pointer @param {boolean} [wide] @returns {number} */
     const find = (pointer, wide = false)=>{
         const name = nameOf(pointer, wide);
+        if (name === null)
+        {
+            return 0;
+        }
         if ('integer' in name)
         {
             return name.integer;
@@ -147,19 +188,50 @@ export function createAtomFunctions(host){
      * The name, in the ANSI page it was read in or in UTF-16; the size is in
      * characters of the form asked for.
      *
+     * The two tables answer a short buffer each its own way, and programs
+     * see the difference. The local one writes what fits with a terminator
+     * and answers its length. The global one in ANSI writes the same but
+     * answers zero with ERROR_MORE_DATA; in UTF-16 it writes as many
+     * characters as fit, the terminator only if there is room for it, and
+     * answers how many it wrote. A size of zero writes nothing.
+     *
      * @param {number} atom @param {number} buffer @param {number} size
-     * @param {boolean} [wide]
+     * @param {boolean} wide @param {boolean} global
      * @returns {number} the length written, without the terminator
      */
-    const name = (atom, buffer, size, wide = false)=>{
-        const value = atom >>> 0;
-        const text = value < FIRST_ATOM ? `#${value}` : byAtom.get(value);
-        if (text === undefined || (size >>> 0) === 0)
+    const name = (atom, buffer, size, wide, global)=>{
+        const value = atom >>> 0 & 0xffff;
+        if (value === 0)
         {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        const kept = text.slice(0, (size >>> 0) - 1);
+        const text = value < FIRST_ATOM ? `#${value}` : byAtom.get(value);
+        if (text === undefined)
+        {
+            host.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        const room = size >>> 0;
+        const short = global ? ERROR_MORE_DATA : ERROR_INSUFFICIENT_BUFFER;
+        if (room === 0)
+        {
+            host.setLastError?.(short);
+            return 0;
+        }
+        if (global && wide)
+        {
+            const kept = text.slice(0, room);
+            host.writeMemory(buffer >>> 0, encodeWide(kept.length < room ? `${kept}\0` : kept));
+            return kept.length;
+        }
+        const kept = text.slice(0, room - 1);
         host.writeMemory(buffer >>> 0, wide ? encodeWide(`${kept}\0`) : encodeAnsi(`${kept}\0`));
+        if (kept.length < text.length && (global || kept.length === 0))
+        {
+            host.setLastError?.(short);
+            return 0;
+        }
         return kept.length;
     };
 
@@ -185,21 +257,21 @@ export function createAtomFunctions(host){
         /** UINT GetAtomNameA(ATOM nAtom, LPSTR lpBuffer, int nSize) */
         GetAtomNameA: {
             argBytes: 12,
-            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size),
+            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size, false, false),
         },
         GlobalGetAtomNameA: {
             argBytes: 12,
-            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size),
+            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size, false, true),
         },
 
         /** UINT GetAtomNameW(ATOM nAtom, LPWSTR lpBuffer, int nSize) -- the same table */
         GetAtomNameW: {
             argBytes: 12,
-            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size, true),
+            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size, true, false),
         },
         GlobalGetAtomNameW: {
             argBytes: 12,
-            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size, true),
+            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size, true, true),
         },
     };
 }
