@@ -174,6 +174,12 @@ export function createModuleFunctions(host){
             }
             return base;
         };
+        // An empty name names no file; the search would find the program's
+        // own directory and answer with whatever it holds.
+        if (name.trim() === '')
+        {
+            return settle(0);
+        }
         const answer = loadOnce(name, flags);
         // The directory SetDllDirectory named, for a bare name nothing else
         // found. Windows looks there before the system directories rather
@@ -303,6 +309,12 @@ export function createModuleFunctions(host){
         return text.length;
     };
 
+    /** A NULL name, or the reserved file handle given: no library, and nothing read. */
+    const noName = ()=>{
+        host.setLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+
     /** @param {number} handle */
     const freeLibrary = handle=>{
         const module = host.byBase(handle >>> 0) ?? host.dataFile?.(handle >>> 0) ?? null;
@@ -328,7 +340,8 @@ export function createModuleFunctions(host){
         LoadLibraryA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>load(host.readCString(name >>> 0, MAX_NAME)),
+            handler: ([name])=>((name >>> 0) === 0 ? noName()
+                : load(host.readCString(name >>> 0, MAX_NAME))),
         },
 
         /**
@@ -343,10 +356,9 @@ export function createModuleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, file, flags])=>{
-                if ((file >>> 0) !== 0)
+                if ((file >>> 0) !== 0 || (name >>> 0) === 0)
                 {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
+                    return noName();
                 }
                 return load(host.readCString(name >>> 0, MAX_NAME), flags >>> 0);
             },
@@ -355,10 +367,9 @@ export function createModuleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, file, flags])=>{
-                if ((file >>> 0) !== 0)
+                if ((file >>> 0) !== 0 || (name >>> 0) === 0)
                 {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
+                    return noName();
                 }
                 return load(host.readWideString(name >>> 0, MAX_NAME * 2), flags >>> 0);
             },
@@ -506,7 +517,8 @@ export function createModuleFunctions(host){
         LoadLibraryW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>load(host.readWideString(name >>> 0, MAX_NAME * 2)),
+            handler: ([name])=>((name >>> 0) === 0 ? noName()
+                : load(host.readWideString(name >>> 0, MAX_NAME * 2))),
         },
 
         /**

@@ -275,6 +275,27 @@ test('LoadLibraryEx refuses a file handle, which is reserved and must be NULL', 
     assert.deepEqual(asked, [], 'nothing was loaded');
 });
 
+test('a NULL name loads nothing and reads nothing: ERROR_INVALID_PARAMETER', ()=>{
+    /** @type {string[]} */
+    const asked = [];
+    const f = hostFor({ load: name=>{ asked.push(name); return 0x1000; } });
+    const fns = createModuleFunctions(f.host);
+    for (const call of [fns.LoadLibraryA, fns.LoadLibraryW])
+    {
+        assert.equal(call.handler([0]), 0);
+        assert.equal(f.lastError(), 87);
+    }
+    for (const call of [fns.LoadLibraryExA, fns.LoadLibraryExW])
+    {
+        assert.equal(call.handler([0, 0, 0]), 0);
+        assert.equal(f.lastError(), 87);
+    }
+    f.say(0x400000, '');
+    assert.equal(fns.LoadLibraryExA.handler([0x400000, 0, 0]), 0, 'nor does an empty one');
+    assert.equal(f.lastError(), 126, 'ERROR_MOD_NOT_FOUND');
+    assert.deepEqual(asked, []);
+});
+
 test('FreeLibrary takes back a data file by the handle LoadLibraryEx gave out', ()=>{
     // A library loaded as data is no module -- GetModuleHandle does not find
     // it -- so its handle, the base with a low bit set, is looked up apart.
