@@ -65,6 +65,9 @@ const MAX_STRING = 1 << 20;
 /** The largest number `rand` produces, which a caller scales its range by. */
 const RAND_MAX = 0x7fff;
 
+/** The last category setlocale takes: LC_ALL is 0, LC_TIME 5. */
+const LC_MAX = 5;
+
 /** `_O_TEXT`, one of the two modes `_set_fmode` takes besides the Unicode ones. */
 const O_TEXT = 0x4000;
 
@@ -502,14 +505,17 @@ export function createMsvcrtFunctions(host){
          * locale with no data behind it here, which is reported as the
          * divergence it is and refused, the way an unset locale is on the
          * real runtime: the previous setting stands and null comes back.
-         * `locale` is read before `category` is used for anything, since a
-         * query (`locale` null) never touches the category at all.
+         * A category past LC_TIME is no category, and null.
          */
         setlocale: {
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, locale])=>{
+            handler: ([category, locale])=>{
+                if ((category >>> 0) > LC_MAX)
+                {
+                    return 0;
+                }
                 if (locale !== 0 && readString(locale) !== 'C' && readString(locale) !== '')
                 {
                     host.divergence?.('setlocale',
@@ -933,6 +939,20 @@ export function createMsvcrtFunctions(host){
             doserrno: ()=>globals.get('doserrno'),
             setDoserrno: code=>globals.set('doserrno', code),
         }),
+
+        /**
+         * int ___mb_cur_max_func(void) and int *__p___mb_cur_max(void)
+         *
+         * The widest multibyte character of the locale, a byte in the C
+         * locale, and where `__mb_cur_max` holds it.
+         */
+        ___mb_cur_max_func: { convention: 'cdecl', argBytes: 0, handler: ()=>1 },
+        __p___mb_cur_max: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>(host.addressOf?.('__mb_cur_max') ?? 0)
+                || globals.address('mb_cur_max', 1),
+        },
 
         /** errno_t _get_fmode(int *mode): `_fmode`; no pointer is EINVAL. */
         _get_fmode: {

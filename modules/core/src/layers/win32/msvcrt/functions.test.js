@@ -758,6 +758,12 @@ test('setlocale carries the C locale, and only the C locale', ()=>{
         'a locale with no data behind it fails, rather than lying about it');
     assert.equal(divergences.length, 1);
     assert.equal(divergences[0][0], 'setlocale');
+    assert.equal(fns.setlocale.handler([20, memory.put('C')]), 0,
+        'no category 20: Wine\'s test_setlocale');
+    assert.equal(fns.setlocale.handler([5, memory.put('C')]), queried, 'LC_TIME is one');
+    assert.equal(fns.___mb_cur_max_func.handler([]), 1);
+    const cell = fns.__p___mb_cur_max.handler([]);
+    assert.equal(memory.u32(cell), 1, 'a byte, the C locale\'s widest character');
 });
 
 test('rand draws this runtime own sequence, and srand starts it where told', ()=>{
