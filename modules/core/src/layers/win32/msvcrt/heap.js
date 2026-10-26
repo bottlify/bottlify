@@ -53,6 +53,10 @@ import {
 /** A pointer's size: what an aligned block keeps below itself, and its least alignment. */
 const POINTER = 4;
 
+/** The small-block threshold's step and its most. */
+const SBH_STEP = 16;
+const SBH_MAX = 1016;
+
 /**
  * @param {HeapHost} host
  */
@@ -66,6 +70,79 @@ export function createHeapFunctions(host){
      */
     let newHandler = 0;
     let newMode = 0;
+    let sbhThreshold = 0;
+
+    /**
+     * Where an aligned block keeps the address malloc gave: the
+     * pointer-aligned slot just below it.
+     *
+     * @param {number} block
+     */
+    const savedSlot = block=>(block - POINTER & ~(POINTER - 1)) >>> 0;
+
+    /** The address malloc gave for an aligned block. @param {number} block */
+    const alignedBase = block=>{
+        const saved = host.readMemory(savedSlot(block), POINTER);
+        return new DataView(saved.buffer, saved.byteOffset, POINTER).getUint32(0, true);
+    };
+
+    /**
+     * _aligned_offset_malloc's body.
+     *
+     * @param {number} size @param {number} alignment @param {number} offset
+     */
+    const alignedAllocate = (size, alignment, offset)=>{
+        if ((alignment & (alignment - 1)) !== 0 || size === 0 || offset >= size)
+        {
+            host.errno?.(EINVAL);
+            return 0;
+        }
+        const step = Math.max(alignment, POINTER);
+        const bytes = size + step + POINTER;
+        const base = bytes > 0xffffffff ? 0 : malloc(bytes);
+        if (base === 0)
+        {
+            host.errno?.(ENOMEM);
+            return 0;
+        }
+        const block = Math.ceil((base + POINTER + offset) / step) * step - offset;
+        const saved = new Uint8Array(POINTER);
+        new DataView(saved.buffer).setUint32(0, base, true);
+        host.writeMemory(savedSlot(block), saved);
+        return block;
+    };
+
+    /**
+     * _aligned_offset_realloc's body.
+     *
+     * @param {number} block @param {number} size @param {number} alignment
+     * @param {number} offset
+     */
+    const alignedResize = (block, size, alignment, offset)=>{
+        if (block === 0)
+        {
+            return alignedAllocate(size, alignment, offset);
+        }
+        if (size === 0)
+        {
+            host.free(alignedBase(block));
+            return 0;
+        }
+        const moved = alignedAllocate(size, alignment, offset);
+        if (moved === 0)
+        {
+            return 0;
+        }
+        const base = alignedBase(block);
+        const held = Math.max(0, (host.block(base)?.size ?? 0) - (block - base));
+        const kept = Math.min(held, size);
+        if (kept > 0)
+        {
+            host.writeMemory(moved, host.readMemory(block, kept).slice());
+        }
+        host.free(base);
+        return moved;
+    };
 
     /**
      * An allocation that failed, retried for as long as the new handler says
@@ -315,41 +392,55 @@ export function createHeapFunctions(host){
 
         /**
          * void *_aligned_malloc(size_t size, size_t alignment)
+         * void *_aligned_offset_malloc(size_t size, size_t alignment, size_t offset)
          *
-         * A block at a multiple of `alignment`, a power of two -- zero counts
-         * -- carved from a malloc block large enough to move it up that far.
-         * The address malloc gave is kept in the pointer just below the one
-         * handed out, which is where _aligned_free looks for it; nothing is
-         * aligned to less than a pointer, so that slot is always whole. Any
-         * other alignment, or a size of zero, is NULL and EINVAL, and a
-         * failed allocation ENOMEM (Wine's msvcrt test_aligned, and the
-         * documentation).
+         * A block whose byte at `offset` -- none, for the first -- sits at a
+         * multiple of `alignment`, a power of two (zero counts), carved from
+         * a malloc block large enough to move it up that far. The address
+         * malloc gave is kept in the pointer-aligned slot just below the
+         * block, which is where _aligned_free looks for it. Any other
+         * alignment, a size of zero or an offset not inside the block is
+         * NULL and EINVAL, and a failed allocation ENOMEM (Wine's msvcrt
+         * test_aligned, and the documentation).
          */
         _aligned_malloc: {
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([size, alignment])=>{
-                const align = alignment >>> 0;
-                if ((align & (align - 1)) !== 0 || (size >>> 0) === 0)
-                {
-                    host.errno?.(EINVAL);
-                    return 0;
-                }
-                const step = Math.max(align, POINTER);
-                const bytes = (size >>> 0) + step + POINTER;
-                const base = bytes > 0xffffffff ? 0 : malloc(bytes);
-                if (base === 0)
-                {
-                    host.errno?.(ENOMEM);
-                    return 0;
-                }
-                const block = Math.ceil((base + POINTER) / step) * step;
-                const saved = new Uint8Array(POINTER);
-                new DataView(saved.buffer).setUint32(0, base, true);
-                host.writeMemory(block - POINTER, saved);
-                return block;
-            },
+            handler: ([size, alignment])=>alignedAllocate(size >>> 0, alignment >>> 0, 0),
+        },
+        _aligned_offset_malloc: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([size, alignment, offset])=>
+                alignedAllocate(size >>> 0, alignment >>> 0, offset >>> 0),
+        },
+
+        /**
+         * void *_aligned_realloc(void *block, size_t size, size_t alignment)
+         * void *_aligned_offset_realloc(void *block, size_t size, size_t alignment,
+         *                               size_t offset)
+         *
+         * A new aligned block with as much of the old one's bytes as both
+         * hold, the old one freed: no block is an allocation, a size of zero
+         * a free answering NULL. A request the allocation would refuse is
+         * NULL with EINVAL, the old block kept -- the alignment and offset
+         * may differ from the ones it was made with.
+         */
+        _aligned_realloc: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([block, size, alignment])=>
+                alignedResize(block >>> 0, size >>> 0, alignment >>> 0, 0),
+        },
+        _aligned_offset_realloc: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([block, size, alignment, offset])=>
+                alignedResize(block >>> 0, size >>> 0, alignment >>> 0, offset >>> 0),
         },
 
         /** void _aligned_free(void *block) -- NULL does nothing. */
@@ -360,13 +451,43 @@ export function createHeapFunctions(host){
             handler: ([block])=>{
                 if ((block >>> 0) !== 0)
                 {
-                    const saved = host.readMemory((block >>> 0) - POINTER, POINTER);
-                    host.free(new DataView(saved.buffer, saved.byteOffset, POINTER)
-                        .getUint32(0, true));
+                    host.free(alignedBase(block >>> 0));
                 }
                 return 0;
             },
         },
+
+        /**
+         * int _set_sbh_threshold(size_t size) and size_t _get_sbh_threshold(void)
+         *
+         * The size below which the old runtime took a block from its
+         * small-block heap: kept rounded up to sixteen, up to 1016 -- past it
+         * the call fails with 0 -- and zero for none. Every block here comes
+         * from one heap, so the number is only kept.
+         */
+        _set_sbh_threshold: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([size])=>{
+                if ((size >>> 0) > SBH_MAX)
+                {
+                    return 0;
+                }
+                sbhThreshold = Math.ceil((size >>> 0) / SBH_STEP) * SBH_STEP;
+                return 1;
+            },
+        },
+        _get_sbh_threshold: { convention: 'cdecl', argBytes: 0, handler: ()=>sbhThreshold },
+
+        ...host.heapHandle ? {
+            /** intptr_t _get_heap_handle(void) -- the runtime's own heap, not the process's. */
+            _get_heap_handle: {
+                convention: 'cdecl',
+                argBytes: 0,
+                handler: ()=>/** @type {() => number} */ (host.heapHandle)(),
+            },
+        } : {},
 
         // The C++ operators, by their decorated names, because that is what a
         // compiled object actually imports. Failure is a null return: this
