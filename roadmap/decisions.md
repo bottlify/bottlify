@@ -859,6 +859,22 @@ that lands, this decision stands. On the `cork2` branch the copying is gone: the
 share one registry hive, one volume (the drives, their writable layers and the bundle mount) and
 one numbering of process and thread ids, so a child's writes are its parent's as they are made.
 *2026-10-05.*
+Reconsidered: **a child runs beside its parent from `CreateProcess` on, at every concurrency.**
+At concurrency 1 a child used to have no machine until its parent waited on it or exited, when it
+was run in the parent's place; a parent could therefore never reach into it (`VirtualAllocEx`,
+`ReadProcessMemory`, `WriteProcessMemory`, `SuspendThread` on its thread, `GetThreadContext`), and
+a parent that spun on `GetExitCodeProcess` or its message loop had to be detected as waiting. Now
+the child's machine is built when `CreateProcess` returns and takes turns with its parent on the
+same thread (in a worker of its own at concurrency 2 and 4, as before); `CREATE_SUSPENDED` builds
+it with its first thread suspended until `ResumeThread`; a wait on its handle is a wait on the
+manual-reset event its exit sets; a launcher that exits leaves its child running, and the run's
+code is the last process's. A call a parent makes in its child is sent there and made with the
+child's own kernel32 (`kernel32/cross-process.js`), whichever way the child runs; a seeded gate
+(`cross-process.itest.js`) compares what the parent sees down the three ways. Rejected: (B), a
+child left lazy until its parent first reaches into it, then started beside it. It changed less,
+but kept two ways for a child to run at the default concurrency, chosen by whether the parent
+happened to touch it, the second without a gate; and a program cannot tell why its child had not
+started. *2026-10-26.*
 
 **Only Windows system libraries are reimplemented; a redistributable middleware runtime is ours to
 reimplement too (§B above); anything else a game ships in its own directory is loaded and run as

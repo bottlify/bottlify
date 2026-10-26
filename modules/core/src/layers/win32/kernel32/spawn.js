@@ -36,12 +36,14 @@
 import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { STARTUPINFO, readStartupInfo } from './startup-info.js';
+import { askChild } from './cross-process.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
 /** ReadProcessMemory of a range nothing is at. */
 const ERROR_PARTIAL_COPY = 299;
@@ -222,7 +224,8 @@ const directoryOf = path=>path.slice(0, Math.max(
 
 /**
  * @typedef {Object} Spawner
- * @property {(named: string, line: string, flags: number, directory?: string) => any} launch
+ * @property {(named: string, line: string, flags: number, directory?: string,
+ *     handed?: Record<string, any>) => any} launch
  *           Records a child and opens the handles on it, or answers null when
  *           the image is not there. `named` is the image when the caller
  *           already knows it and '' when only the command line is there to find
@@ -419,7 +422,7 @@ export function createSpawner(host){
     };
 
     return {
-        launch(named, line, flags, directory = ''){
+        launch(named, line, flags, directory = '', handed = {}){
             const found = named === ''
                 ? imageFromCommandLine(line)
                 : { path: resolveImage(named), line };
@@ -461,6 +464,10 @@ export function createSpawner(host){
                 made.startDirectory = directory.trim() !== '' ? qualify(directory.trim())
                     : host.currentDirectory?.();
             }
+            // What the caller hands the child -- its STARTUPINFO, environment
+            // and parent -- is on the record before anyone is told of it: the
+            // child is built from it the moment it is.
+            Object.assign(made, handed);
             host.spawned?.(made);
             return made;
         },
@@ -497,6 +504,10 @@ export function createSpawner(host){
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => import('./startup-info.js').StartupRecord | null} [startup]
  *           This process's own, whose desktop a child named none of inherits.
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child where it runs; absent, no child is reached.
+ * @property {() => any} [currentThread]
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {() => Record<string, string>} [environment]
  *           This process's variables as they are now, which a child given no
  *           block inherits.
@@ -529,6 +540,33 @@ export function createSpawnFunctions(host){
             void e;
             return null;
         }
+    };
+
+    /**
+     * A call made in the child a handle names, where it runs
+     * (`cross-process.js`): ERROR_INVALID_HANDLE for a handle that names no
+     * child, ERROR_ACCESS_DENIED for one the run cannot reach.
+     *
+     * @param {number} handle @param {import('./cross-process.js').CrossCall} call
+     * @param {(number | null)[]} into
+     */
+    const inChild = (handle, call, into)=>{
+        const target = processOf(handle);
+        if (!target)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        const asked = host.currentThread && host.setLastErrorFor ? askChild({
+            askChild: host.askChild, writeMemory: host.writeMemory,
+            currentThread: host.currentThread, setLastErrorFor: host.setLastErrorFor,
+        }, target, call, into) : null;
+        if (asked === null)
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
+            return 0;
+        }
+        return asked;
     };
 
     /** @param {number} address */
@@ -700,25 +738,26 @@ export function createSpawnFunctions(host){
             host.setLastError(refused);
             return 0;
         }
-        const made = record(named ?? '', line, flags, directory);
+        const made = record(named ?? '', line, flags, directory, {
+            standardFiles: standardFiles(startup >>> 0),
+            // What the child's GetStartupInfo answers: values, since the child
+            // may be built on another thread from what crosses to it.
+            startup: (startup >>> 0) === 0 ? null : readStartupInfo(
+                host.readMemory(startup >>> 0, STARTUPINFO.SIZE),
+                address=>(wide ? host.readWideString(address, MAX_PATH * 2)
+                    : host.readCString(address, MAX_PATH)),
+                host.startup?.()?.desktop ?? null),
+            // The process that started it, which its own snapshot names.
+            parentId: (host.processId ?? 0) >>> 0,
+            // The block asked for, or this process's variables as they are now.
+            environment: (environment >>> 0) === 0 ? host.environment?.() ?? null
+                : environmentBlock(environment >>> 0, (flags & CREATE_UNICODE_ENVIRONMENT) !== 0),
+        });
         if (!made)
         {
             host.setLastError(ERROR_FILE_NOT_FOUND);
             return 0;
         }
-        made.standardFiles = standardFiles(startup >>> 0);
-        // What the child's GetStartupInfo answers: values, since the child
-        // may be built on another thread from what crosses to it.
-        made.startup = (startup >>> 0) === 0 ? null : readStartupInfo(
-            host.readMemory(startup >>> 0, STARTUPINFO.SIZE),
-            address=>(wide ? host.readWideString(address, MAX_PATH * 2)
-                : host.readCString(address, MAX_PATH)),
-            host.startup?.()?.desktop ?? null);
-        // The process that started it, which its own snapshot names.
-        made.parentId = (host.processId ?? 0) >>> 0;
-        // The block asked for, or this process's variables as they are now.
-        made.environment = (environment >>> 0) === 0 ? host.environment?.() ?? null
-            : environmentBlock(environment >>> 0, (flags & CREATE_UNICODE_ENVIRONMENT) !== 0);
         if ((information >>> 0) !== 0)
         {
             writeDword((information >>> 0) + PI_PROCESS_HANDLE, made.handle);
@@ -982,13 +1021,11 @@ export function createSpawnFunctions(host){
                 }
                 else
                 {
-                    const target = processOf(handle);
-                    if (!target)
-                    {
-                        host.setLastError(ERROR_INVALID_HANDLE);
-                        return 0;
-                    }
-                    target.patches.push({ address: base >>> 0, bytes });
+                    // Written where the child runs, through its own protection.
+                    return inChild(handle, { call: 'WriteProcessMemory',
+                        args: [CURRENT_PROCESS, base >>> 0, { in: bytes }, count,
+                            (written >>> 0) === 0 ? 0 : { out: 4 }] },
+                    [null, null, null, null, written >>> 0]);
                 }
 
                 if ((written >>> 0) !== 0)
@@ -1004,11 +1041,10 @@ export function createSpawnFunctions(host){
          * BOOL ReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress,
          *   LPVOID lpBuffer, SIZE_T nSize, SIZE_T *lpNumberOfBytesRead)
          *
-         * Against the running process this reads memory. A child's image is
-         * not mapped yet, so what it holds is the bytes written into it and
-         * nothing else: a read inside those answers them, the last write to a
-         * byte winning as it would in memory, and any other is ERROR_PARTIAL_COPY,
-         * what Windows says of memory it cannot read.
+         * Against the running process this reads memory; against a child the
+         * same read is made in the child, where it runs. A range that leaves
+         * mapped memory is ERROR_PARTIAL_COPY, what Windows says of memory it
+         * cannot read.
          */
         ReadProcessMemory: {
             argBytes: 20,
@@ -1035,25 +1071,10 @@ export function createSpawnFunctions(host){
                 }
                 else
                 {
-                    const target = processOf(handle);
-                    if (!target)
-                    {
-                        host.setLastError(ERROR_INVALID_HANDLE);
-                        return 0;
-                    }
-                    const gathered = new Uint8Array(count);
-                    const covered = new Uint8Array(count);
-                    for (const { address, bytes: patch } of target.patches ?? [])
-                    {
-                        const start = Math.max(address, from);
-                        const end = Math.min(address + patch.length, from + count);
-                        for (let at = start; at < end; at++)
-                        {
-                            gathered[at - from] = patch[at - address];
-                            covered[at - from] = 1;
-                        }
-                    }
-                    bytes = covered.every(byte=>byte === 1) ? gathered : null;
+                    return inChild(handle, { call: 'ReadProcessMemory',
+                        args: [CURRENT_PROCESS, from, (buffer >>> 0) === 0 ? 0 : { out: count },
+                            count, (read >>> 0) === 0 ? 0 : { out: 4 }] },
+                    [null, null, buffer >>> 0, null, read >>> 0]);
                 }
                 if (bytes === null)
                 {

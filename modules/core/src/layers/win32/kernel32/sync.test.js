@@ -22,6 +22,7 @@ const WAIT_ABANDONED_0 = 0x00000080;
 const WAIT_TIMEOUT = 0x00000102;
 const WAIT_FAILED = 0xffffffff;
 const ERROR_SIGNAL_REFUSED = 156;
+const ERROR_ACCESS_DENIED = 5;
 
 /** What the bridge hands back for a call that cannot answer yet. */
 const PARKED = Object.freeze({ parked: true });
@@ -785,7 +786,6 @@ test('a thread resumed while queued behind a released section takes it', ()=>{
 test('a thread that has ended cannot be suspended', ()=>{
     // Wine's thread test: SuspendThread on a thread that has finished answers
     // (DWORD)-1, with ERROR_ACCESS_DENIED.
-    const ERROR_ACCESS_DENIED = 5;
     const host = fakeHost();
     Object.assign(host.kernel, { ThreadState: { TERMINATED: 'terminated' } });
     const fns = createSyncFunctions(host);
@@ -798,19 +798,41 @@ test('a thread that has ended cannot be suspended', ()=>{
     assert.equal(other.suspendCount ?? 0, 0, 'and nothing is counted');
 });
 
-test('resuming a suspended child is what arms the replacement', ()=>{
+test('resuming a child\'s first thread is asked of the child, where it runs', async()=>{
     // CREATE_SUSPENDED, WriteProcessMemory, ResumeThread is how a launcher
-    // hollows its child. The handle names a process record rather than a
-    // thread -- there is no thread until the child is really running -- so
-    // without this it resolves as nothing and the resume is silently lost.
-    const host = fakeHost();
+    // hollows its child. The thread is the child's, so its count is too: the
+    // call is made there, on the thread of the id CreateProcess answered.
+    const host = /** @type {any} */ (fakeHost());
+    /** @type {any[]} */
+    const asked = [];
+    host.askChild = (/** @type {any} */ record, /** @type {any} */ call)=>{
+        asked.push({ record, call });
+        return Promise.resolve({ result: 1, error: 0, outs: [null] });
+    };
+    /** @type {any[]} */
+    const errors = [];
+    host.setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
+        errors.push({ thread, code });
     const fns = createSyncFunctions(host);
-    const child = { imagePath: 'C:\\App\\child.exe', suspended: true };
+    const child = { imagePath: 'C:\\App\\child.exe', threadId: 0x2c };
     host.register(0x24, 'process-thread', child);
 
-    assert.equal(fns.ResumeThread.handler([0x24]), 1, 'a suspended child had a count of one');
-    assert.equal(child.suspended, false);
-    assert.equal(fns.ResumeThread.handler([0x24]), 0, 'and resuming again does nothing');
+    assert.equal(await fns.ResumeThread.handler([0x24]), 1, 'the count the child\'s thread had');
+    assert.deepEqual(asked, [{ record: child, call: { call: 'ResumeThread',
+        args: [{ thread: 0x2c }] } }]);
+    assert.deepEqual(errors, [{ thread: host.threads.first, code: 0 }],
+        'the last error set on the thread that asked');
+});
+
+test('a child no run can ask fails the resume with ERROR_ACCESS_DENIED', ()=>{
+    // Answering as if resumed would tell the launcher its child is running.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x24, 'process-thread', { imagePath: 'C:\\App\\child.exe', threadId: 0x2c });
+
+    assert.equal(fns.ResumeThread.handler([0x24]), WAIT_FAILED);
+    assert.equal(fns.SuspendThread.handler([0x24]), WAIT_FAILED);
+    assert.deepEqual(host.errors, [ERROR_ACCESS_DENIED, ERROR_ACCESS_DENIED]);
 });
 
 test('argument sizes match what the guest compiled against', ()=>{
@@ -829,118 +851,81 @@ test('argument sizes match what the guest compiled against', ()=>{
 
 // --- waiting on a child process ---
 
-test('a wait on a set holding a child process is where the parent hands over', ()=>{
-    // A child never signals while its parent can look: it takes this process's
-    // place rather than running beside it. So the thread stops here for good,
-    // and the replacement is what happens instead of the wait returning. Left
-    // to the ordinary path this joins a queue on an object with no signal and
-    // is reported as a deadlock.
+/**
+ * A child as the kernel records it: running beside its parent, its exit the
+ * manual-reset event the kernel sets when it ends.
+ *
+ * @param {ReturnType<typeof fakeHost>} host
+ */
+const childOf = host=>({ imagePath: 'C:\\App\\child.exe',
+    exited: host.kernel.createEvent({ manualReset: true }) });
+
+test('a wait on a set holding a child is a wait on its exit', ()=>{
+    // The child runs beside its parent, so its exit is an ordinary signal:
+    // the parent blocks on it like on any other object, until it is set.
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\war3.exe' };
+    const child = childOf(host);
     host.register(0x20, 'process', child);
     new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
 
     assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, INFINITE]), PARKED);
-    assert.equal(child.waiters.length, 1, 'noted on the child, to be woken when it exits');
-    assert.equal(host.kernel.state.blocked.length, 1);
-    assert.match(host.kernel.state.blocked[0].reason, /child process/);
-    assert.deepEqual(host.kernel.state.timed, [],
-        'and it never went through the ordinary wait at all');
+    assert.equal(host.kernel.state.blocked.length, 1, 'blocked like any other wait');
+
+    child.exited.signalled = true;
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, INFINITE]), WAIT_OBJECT_0);
+    assert.equal(child.exited.signalled, true, 'an exit stays signalled for every waiter');
 });
 
-test('a child among other objects still hands over, waiting for all or any', ()=>{
-    // A wait for any is noted on the child, whose own place in the set is the
-    // answer unless something else in it came first; a wait for all cannot be
-    // satisfied by the child alone, and is left to the replacement.
+test('polling a set with a running child times out rather than blocking', ()=>{
+    // A zero timeout is a question, not a wait: a program checking whether
+    // its child has finished is told it has not, and goes on.
     for (const all of [0, 1])
     {
         const host = fakeHost();
         const fns = createSyncFunctions(host);
-        /** @type {any} */
-        const child = { imagePath: 'C:\\App\\war3.exe' };
-        host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
-        host.register(0x20, 'process', child);
+        host.register(0x10, 'event',
+            host.kernel.createEvent({ signalled: true, manualReset: true }));
+        host.register(0x20, 'process', childOf(host));
         const view = new DataView(host.bytes.buffer);
-        view.setUint32(0x400, 0x10, true);
-        view.setUint32(0x404, 0x20, true);
+        view.setUint32(0x400, 0x20, true);
+        view.setUint32(0x404, 0x10, true);
 
-        assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, all, INFINITE]), PARKED,
-            `bWaitAll=${all}`);
-        assert.deepEqual(child.waiters?.map((/** @type {any} */ one)=>one.result),
-            all ? undefined : [1], `bWaitAll=${all}`);
-        assert.equal(child.handsOver, all ? true : undefined,
-            'the child alone cannot answer a wait for all of them: the parent hands over');
+        assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, all, 0]),
+            all ? WAIT_TIMEOUT : WAIT_OBJECT_0 + 1, `bWaitAll=${all}`);
+        assert.equal(host.kernel.state.blocked.length, 0, 'and did not join a queue');
     }
 });
 
-test('polling a set with a child says it is still running rather than blocking', ()=>{
-    // A zero timeout is a question, not a wait. Parking on it would stop a
-    // program that was only checking whether its child had finished.
+test('a child that has exited satisfies a wait for all of a set with it', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\war3.exe' };
-    host.register(0x20, 'process', child);
-    new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
-
-    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_TIMEOUT);
-    assert.equal(host.kernel.state.blocked.length, 0, 'and did not join the queue');
-    assert.equal(child.handsOver, undefined, 'a question hands nothing over');
-});
-
-test('polling for all of a set with a child can never be satisfied', ()=>{
-    // Every other object being ready is not enough: the child is never ready,
-    // so "all of them" never is either -- and answering otherwise tells a
-    // program its child has finished.
-    const host = fakeHost();
-    const fns = createSyncFunctions(host);
+    const child = childOf(host);
+    child.exited.signalled = true;
     host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
-    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+    host.register(0x20, 'process', child);
     const view = new DataView(host.bytes.buffer);
     view.setUint32(0x400, 0x10, true);
     view.setUint32(0x404, 0x20, true);
 
-    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 1, 0]), WAIT_TIMEOUT);
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 1, 0]), WAIT_OBJECT_0);
 });
 
-test('polling for any of a set with a child still reports one that is ready', ()=>{
-    const host = fakeHost();
-    const fns = createSyncFunctions(host);
-    host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
-    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
-    const view = new DataView(host.bytes.buffer);
-    view.setUint32(0x400, 0x20, true);
-    view.setUint32(0x404, 0x10, true);
-
-    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, 0]), WAIT_OBJECT_0,
-        'the event, which is the only thing in the set that can be');
-});
-
-test('an event of the set the child signalled before it exited is the answer, taken', ()=>{
+test('an event the running child signals answers a wait for any before its exit', ()=>{
     // A launcher waits for its game's process or a named event the game sets
-    // once it is running. The game opens the event by name and signals it; on
-    // Windows that wakes the launcher, which goes on while the game runs. Here
-    // the launcher only resumes once the game has exited -- and must still be
-    // told the event came first, not that the game ended.
+    // once it is running; the game, beside it, sets the event, and the
+    // launcher goes on while the game runs.
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\war3.exe' };
     const event = host.kernel.createEvent({ signalled: false, manualReset: false });
-    host.register(0x20, 'process', child);
+    host.register(0x20, 'process', childOf(host));
     host.register(0x10, 'event', event);
     const view = new DataView(host.bytes.buffer);
     view.setUint32(0x400, 0x20, true);
     view.setUint32(0x404, 0x10, true);
 
-    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, INFINITE]), PARKED);
-    const [waiter] = child.waiters;
-    assert.equal(waiter.settle(), 0, 'nothing signalled: the child exiting is the answer');
-
     event.signalled = true;
-    assert.equal(waiter.settle(), 1, 'the event the child set came before its exit');
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, INFINITE]), WAIT_OBJECT_0 + 1);
     assert.equal(event.signalled, false, 'and the wait took it, as an auto-reset event is taken');
 });
 

@@ -363,12 +363,6 @@ const hashText = (hash, text)=>{
  * @property {{ memory: WebAssembly.Memory, guestEnd: number } | null} [reusedMemory]
  *           The memory of a process of the run that has gone, for this one to
  *           take: set by the run, not something a caller supplies.
- * @property {boolean} [refuseReplacement]
- *           Stop rather than replace this process with a child it asked for. A
- *           replacement erases every log and ring of the run that asked for it,
- *           once per iteration of a loop that keeps asking, so this is how the
- *           machine is made to stand still at the point of the request with the
- *           evidence still in it.
  * @property {boolean} [exitNotice]
  *           Whether a run the program ended with exit code 0 says so to the
  *           player: a `message-box` of the engine's own (`exit: { code }`,
@@ -1990,6 +1984,21 @@ export async function bytesAt(url){
 }
 
 /**
+ * A promise and the means to settle it, for what waits on something that is
+ * made later -- a child's machine, its link.
+ *
+ * @returns {{ promise: Promise<void>, settle: () => void }}
+ */
+function settled(){
+    /** @type {() => void} */
+    let settle = ()=>{};
+    const promise = new Promise(resolve=>{
+        settle = ()=>resolve(undefined);
+    });
+    return { promise, settle };
+}
+
+/**
  * Where a program starts: its own directory.
  *
  * That is where the shell puts a process it starts from an icon or a disc's
@@ -2255,37 +2264,6 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory){
          */
         moduleBase: instance=>moduleOf(instance)?.base ?? 0,
     };
-}
-
-/**
- * Sorts a parent's deferred writes into the ones that land in the child's image
- * and the ones that do not.
- *
- * A launcher that hollows its child writes into it while it is suspended, which
- * here is a write against an image nothing has mapped yet. The writes are kept
- * and replayed at the addresses they name -- but only inside the image they were
- * meant for. One outside it was addressing a mapping this process does not have,
- * and putting those bytes down anyway would corrupt whatever really is there
- * while looking, from the guest's side, like the child being wrong.
- *
- * @param {{ address: number, bytes: Uint8Array }[]} patches
- * @param {number} base
- * @param {number} size
- * @returns {{ applied: { address: number, bytes: Uint8Array }[],
- *             refused: { address: number, bytes: Uint8Array }[] }}
- */
-export function placePatches(patches, base, size){
-    /** @type {{ address: number, bytes: Uint8Array }[]} */
-    const applied = [];
-    /** @type {{ address: number, bytes: Uint8Array }[]} */
-    const refused = [];
-    for (const patch of patches)
-    {
-        const inside = patch.address >= base
-            && patch.address + patch.bytes.length <= base + size;
-        (inside ? applied : refused).push(patch);
-    }
-    return { applied, refused };
 }
 
 /**
@@ -3885,7 +3863,6 @@ function journalEvents(events, into){
  * @param {AppOptions & {
  *     events?: any,
  *     seed?: { path: string, bytes?: Uint8Array, delete?: boolean }[],
- *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
  *     system?: { namedObjects: Map<string, any>, registry: any, bundle: any, windows?: any,
@@ -3893,6 +3870,8 @@ function journalEvents(events, into){
  *     mainThreadId?: number,
  *     beside?: (request: any) => void,
  *     terminate?: (request: any, code: number) => boolean,
+ *     askChild?: (request: any, call: any) => Promise<any> | null,
+ *     suspended?: boolean,
  *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
  * }} options
@@ -5266,10 +5245,23 @@ async function buildApp(options){
                     suspended: request.suspended,
                     trace: formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
                 });
+                // Started at CreateProcess, beside this process, as on Windows:
+                // a parent reaches into it before its next turn, and one made
+                // suspended is there to be written into, its first thread
+                // waiting for ResumeThread.
+                if (options.beside && !request.completed)
+                {
+                    kernel.processes.started(request);
+                    options.beside(request);
+                }
             },
             // A child running beside this process, ended where it runs.
             terminate: (/** @type {any} */ request, /** @type {number} */ code)=>
                 options.terminate?.(request, code) ?? false,
+            // And a call made in it, answered where it runs: null for a
+            // child the run does not have.
+            askChild: (/** @type {any} */ request, /** @type {any} */ call)=>
+                options.askChild?.(request, call) ?? null,
             /** @param {any} thread */
             threadBlock: thread=>{
                 if (!threadBlocks)
@@ -5379,9 +5371,6 @@ async function buildApp(options){
     const lentTranslators = new Map();
     const memory = core.api('memory');
     const kernel = core.api('kernel');
-    // Children run beside this process where the run runs processes at once:
-    // a wait on one is timed from the moment it is made.
-    kernel.processes?.runBeside?.(typeof options.beside === 'function');
     const loader = core.api('loader');
     const win32 = core.api('win32');
     /** The activation contexts the loader looks libraries up through (`actctx.js`). */
@@ -6757,24 +6746,6 @@ async function buildApp(options){
         loader.bindDelayed(library.mapped, resolveImport, missingImport);
     }
 
-    // What the process that asked for this one wrote into it before it existed.
-    // This is the first moment at which the addresses those writes name mean
-    // anything, because it is the first moment the image is there.
-    if (options.patches && options.patches.length > 0)
-    {
-        const { applied, refused } = placePatches(
-            options.patches, image.base, mainModule.image.sizeOfImage);
-        for (const patch of applied)
-        {
-            memory.writeBytes(patch.address, patch.bytes);
-        }
-        events.emit('process-patched', {
-            applied: applied.length,
-            refused: refused.map(patch=>
-                `${patch.address.toString(16)}+${patch.bytes.length}`),
-        });
-    }
-
     // Somewhere to put what a process needs before it starts: thread-local
     // blocks, and the stub that sets them up -- and, ahead of that, a site
     // hook's trampoline, which needs guest heap room before TLS does. Its own
@@ -7126,6 +7097,13 @@ async function buildApp(options){
         // ExitThread with its answer, as Windows' process start routine sees to.
         returnTo: win32.threadReturn(),
     });
+    // CREATE_SUSPENDED: the process is there, and nothing of it runs -- not
+    // its libraries' initialisers either, which run on this thread -- until
+    // its parent's ResumeThread reaches it.
+    if (options.suspended)
+    {
+        kernel.suspendThread(mainThread);
+    }
     // Its thread-local blocks are the ones the startup stub hands TlsSetValue.
     holdBlock(mainThread, process.createThreadBlock({
         id: mainThread.id,
@@ -7440,29 +7418,6 @@ async function buildApp(options){
         return events.emit('error', { reason, error: thrown, trace, text }) ?? thrown;
     };
 
-    /**
-     * Ends the run because a child is to take this process's place.
-     *
-     * Reached from the two places a parent can be finished: it exited, or it is
-     * waiting on a handle only the replacement could ever signal. Nothing is
-     * torn down here -- `run` returns and the caller above rebuilds, which is
-     * the one place in the engine that owns a process lifecycle.
-     *
-     * @param {any} request
-     */
-    const handOver = request=>{
-        events.emit('process-replace', {
-            image: request.imagePath,
-            commandLine: request.commandLine,
-            patches: request.patches.length,
-        });
-        if (options.refuseReplacement)
-        {
-            throw fail('process-replacement-refused', new Error(
-                `refusing to replace this process with ${request.imagePath}`));
-        }
-    };
-
     /** This process's memory, once it has gone (`spareMemory`). @type {{ memory: WebAssembly.Memory, guestEnd: number } | null} */
     let spare = null;
 
@@ -7730,15 +7685,6 @@ async function buildApp(options){
                     // their own rather than an unmeasured constant.
                     journal.begin('poll', journal.PhaseKind.HOST);
                     const failure = bridge.failure();
-                    let replacing = kernel.processes.pending();
-                    // Where processes run at once, a child starts now, beside
-                    // this one, rather than waiting to take its place.
-                    if (replacing && options.beside)
-                    {
-                        kernel.processes.started(replacing);
-                        options.beside(replacing);
-                        replacing = null;
-                    }
                     const code = win32.exitCode();
                     const fault = cpu.fault();
                     journal.end('poll');
@@ -7750,14 +7696,6 @@ async function buildApp(options){
 
                     if (code !== null)
                     {
-                        // A parent that exits after starting a child has handed
-                        // over; it has not finished. Saying so as an exit would
-                        // report the launcher's code as the program's.
-                        if (replacing)
-                        {
-                            handOver(replacing);
-                            return code;
-                        }
                         events.emit('exit', { code });
                         return code;
                     }
@@ -7772,19 +7710,6 @@ async function buildApp(options){
                         const error = new Error(fault.text);
                         Object.assign(error, { code: 'GUEST_FAULT', fault });
                         throw fail('guest-fault', error);
-                    }
-
-                    // A parent polling a child that has not run -- its exit
-                    // code, a wait that does not block -- in a loop that never
-                    // blocks is waiting on it: the child runs now, beside it,
-                    // as it would once the parent blocked on its handle.
-                    if (replacing?.polled && win32.childWaitedOn(replacing))
-                    {
-                        events.emit('process-child', {
-                            image: replacing.imagePath,
-                            commandLine: replacing.commandLine,
-                        });
-                        return 0;
                     }
 
                     let step;
@@ -7880,27 +7805,6 @@ async function buildApp(options){
                     // and the event loop, theirs still running.
                     if (!step.ran && !step.elsewhere)
                     {
-                        // Nobody is ready. When a child is waiting to be started
-                        // that is not a deadlock but its turn: the parent has not
-                        // exited, so it is not finished -- blocked on the child's
-                        // handle, sleeping between polls of its exit code, or idle
-                        // in its message loop -- and the child runs beside it,
-                        // the parent going on afterwards, which the caller above
-                        // arranges. Only a wait for all of a set the child cannot
-                        // answer alone still hands the parent over.
-                        if (replacing)
-                        {
-                            if (win32.childWaitedOn(replacing))
-                            {
-                                events.emit('process-child', {
-                                    image: replacing.imagePath,
-                                    commandLine: replacing.commandLine,
-                                });
-                                return 0;
-                            }
-                            handOver(replacing);
-                            return 0;
-                        }
                         // Nothing ready is not the same as nothing to wait
                         // for. A thread parked on a host call that has not
                         // answered is deliberately not a candidate -- that is
@@ -8582,20 +8486,6 @@ async function buildApp(options){
         exitCode: ()=>win32.exitCode(),
 
         /**
-         * The child that is to take this process's place, once `run` has
-         * returned. Null while the program is still its own.
-         */
-        replacement: ()=>kernel.processes.pending(),
-
-        /**
-         * Whether that child runs beside this process rather than in its
-         * place: whenever this process has not exited. It goes on afterwards.
-         *
-         * @param {any} request
-         */
-        waitingOn: (/** @type {any} */ request)=>win32.childWaitedOn(request),
-
-        /**
          * A child that ran beside this process has exited with this code: the
          * threads waiting on it wake. The screen is the run's presenter's to
          * compose again, from the pictures of the processes left.
@@ -8613,6 +8503,13 @@ async function buildApp(options){
          * @param {number} code
          */
         terminate: (/** @type {number} */ code)=>win32.terminate(code),
+
+        /**
+         * A call its parent makes in this process, between its turns.
+         *
+         * @param {import('./layers/win32/kernel32/cross-process.js').CrossCall} call
+         */
+        answerCall: (/** @type {any} */ call)=>win32.answerCall(call),
 
         /**
          * A file off this process's volume, waited for if it is not here yet.
@@ -8834,11 +8731,9 @@ const REPORT_WAIT_MS = 1000;
 const DIVERGENCES_KEPT = 128;
 
 /**
- * How many replacement requests are remembered.
- *
- * The ring exists because a replacement erases its own evidence: the machine it
- * was asked for in is gone, and every log and counter in it with it. A launcher
- * that re-execs in a loop would otherwise leave nothing but its last iteration.
+ * How many CreateProcess requests are remembered, each with the guest's stack
+ * at the call: a launcher that starts itself again in a loop would otherwise
+ * leave nothing to say which call started which.
  */
 const REPLACEMENT_HISTORY = 16;
 
@@ -9917,18 +9812,16 @@ export async function createApp(options){
             // With concurrency a child runs from CreateProcess on, beside
             // its parent, as on Windows; otherwise it waits for the parent to
             // have nothing left to run, and runs in its place.
-            beside: processesAtOnce
-                ? (/** @type {any} */ request)=>startBeside(self, request) : undefined,
-            terminate: processesAtOnce ? terminateBeside : undefined,
+            beside: (/** @type {any} */ request)=>startBeside(self, request),
+            terminate: terminateBeside,
+            askChild: askBeside,
             // Only where processes run at once: one run in its parent's place
             // has the parent paused, which wakes nothing. A process that joined
             // the run's system from a worker of its own is never the run's only
             // one -- its parent at least stands -- so what it waits on is
             // another's to answer, and the run, not it, says when it is over.
-            othersRunning: processesAtOnce
-                ? ()=>Boolean(options.system) || starting > 0 || across > 0
-                    || [...standing].some(other=>other !== self)
-                : undefined }));
+            othersRunning: ()=>Boolean(options.system) || starting > 0 || across > 0
+                || [...standing].some(other=>other !== self) }));
         self = built;
         standing.add(built);
         processes.set(process, built);
@@ -10250,90 +10143,6 @@ export async function createApp(options){
     };
 
     /**
-     * Runs a child on a machine of its own while its parent waits on it, and
-     * gives the parent back what the child left: the files it wrote, the
-     * registry it changed, and its exit code, which wakes the parent's wait.
-     *
-     * The parent's machine is left standing, paused where it blocked; the
-     * child's is built beside it, run through `own.run` -- so a child that
-     * starts children of its own is handled the same way -- and disposed.
-     * This is how a parent that goes on after its child works: an installer
-     * that runs a setup stage and then finishes, a launcher that waits for the
-     * game to close.
-     *
-     * @param {{ current: any, main: boolean }} line  The processes this one is of.
-     * @param {any} parent @param {any} request @param {any} runOptions
-     */
-    const runBeside = async(line, parent, request, runOptions)=>{
-        const image = request.image ?? await parent.readImage(request.imagePath);
-        if (!image)
-        {
-            throw new Error(`cannot start ${request.imagePath}: it is not on the volume`);
-        }
-        noteLogSequence();
-        mediaInstance = parent.media.instance() ?? mediaInstance;
-        const sound = ownSound();
-        line.current = await build({
-            executable: image,
-            imagePath: request.imagePath,
-            commandLine: request.commandLine,
-            patches: request.patches,
-            processId: request.id,
-            mainThreadId: request.threadId,
-            standardFiles: request.standardFiles,
-            startDirectory: request.startDirectory,
-            startup: request.startup ?? null,
-            parentProcessId: request.parentId ?? 0,
-            ...request.environment ? { environment: request.environment } : {},
-            audio: sound.options,
-        });
-        sound.announce(line.current);
-        replayLogLevels();
-        stand(line.current);
-        bindLogLevels();
-        events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence });
-        const parentImage = imagePath;
-        if (line.main)
-        {
-            imagePath = request.imagePath;
-        }
-
-        // The parent runs nothing until its child is done: a message sent to
-        // its windows meanwhile would wait for ever, and is refused instead.
-        system.windows?.hold(processIds.get(parent), true);
-        let code;
-        try
-        {
-            code = await runProcesses(runOptions, line, true);
-        }
-        finally
-        {
-            system.windows?.hold(processIds.get(parent), false);
-        }
-        imagePath = parentImage;
-
-        // What an installer's second stage laid down is what the first stage
-        // goes on to find: its drives and its registry are the parent's own,
-        // the run's, so what it wrote is there already.
-        const child = line.current;
-        await retire(child);
-        noteLogSequence();
-        mediaInstance = child.media.instance() ?? mediaInstance;
-        await child.dispose();
-        keepMemory(child);
-        sound.giveBack();
-
-        line.current = parent;
-        replayLogLevels();
-        stand(parent);
-        bindLogLevels();
-        // Its picture goes with it: no window of the run is drawn from it.
-        presenter?.forget?.(request.id);
-        parent.childExited(request, code);
-        events.emit('process-resumed', { image: request.imagePath, code });
-    };
-
-    /**
      * The children running beside their parents, with concurrency: each
      * one's run, until it exits.
      *
@@ -10561,7 +10370,8 @@ export async function createApp(options){
      *     its parent, as the run reaches it: where its image is read, and the
      *     sound it lends
      * @param {any} request
-     * @param {{ link: ReturnType<typeof openLink> | null, code: number | null }} [reach]
+     * @param {{ link: ReturnType<typeof openLink> | null, code: number | null,
+     *     opened?: () => void }} [reach]
      *     how its parent's TerminateProcess reaches it: given its link once
      *     there is one, and the code it was ended with before then
      * @returns {Promise<{ code: number, diagnostics?: any, systemLibraries?: string[] }>}
@@ -10608,6 +10418,8 @@ export async function createApp(options){
                 start: (/** @type {any} */ asked)=>startAcrossFor(link, asked),
                 terminate: (/** @type {number} */ id, /** @type {number} */ code)=>
                     terminateBeside({ id }, code),
+                ask: (/** @type {number} */ id, /** @type {any} */ call)=>
+                    askBeside({ id }, call),
             },
             // The parent's open files the child writes its output and error
             // into: one position, the parent's, which the child's writes move.
@@ -10628,6 +10440,7 @@ export async function createApp(options){
         if (reach)
         {
             reach.link = link;
+            reach.opened?.();
             if (reach.code !== null)
             {
                 terminateAcross(link, reach.code);
@@ -10702,8 +10515,8 @@ export async function createApp(options){
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,
+                        suspended: request.suspended === true,
                         ...request.environment ? { environment: request.environment } : {},
-                        patches: request.patches,
                         processId: request.id,
                         mainThreadId: request.threadId,
                         // Named, not handed: the position stays here.
@@ -10746,7 +10559,8 @@ export async function createApp(options){
      * moment each is asked for: how its parent's TerminateProcess reaches it
      * wherever it runs, holding the code until it can take it.
      *
-     * @type {Map<number, { terminate: (code: number) => void }>}
+     * @type {Map<number, { terminate: (code: number) => void,
+     *     ask: (call: any) => Promise<any> }>}
      */
     const reachable = new Map();
 
@@ -10786,15 +10600,24 @@ export async function createApp(options){
      */
     const startAcross = (from, request, exited, over)=>{
         across++;
-        /** @type {{ link: ReturnType<typeof openLink> | null, code: number | null }} */
+        /** @type {{ link: ReturnType<typeof openLink> | null, code: number | null,
+         *     opened?: () => void }} */
         const reach = { link: null, code: null };
-        reachable.set(request.id, { terminate: code=>{
-            reach.code = code;
-            if (reach.link)
-            {
-                terminateAcross(reach.link, code);
-            }
-        } });
+        const opened = settled();
+        reachable.set(request.id, {
+            terminate: code=>{
+                reach.code = code;
+                if (reach.link)
+                {
+                    terminateAcross(reach.link, code);
+                }
+            },
+            // Asked across its link once there is one; null for a child that
+            // went before it had one.
+            ask: call=>opened.promise.then(()=>(reach.link
+                ? reach.link.call('control', 'ask', [call]) : null)),
+        });
+        reach.opened = opened.settle;
         const running = (async()=>{
             /** @type {{ code: number, diagnostics?: any, systemLibraries?: string[] }} */
             let ended;
@@ -10810,6 +10633,7 @@ export async function createApp(options){
             {
                 across--;
                 reachable.delete(request.id);
+                opened.settle();
             }
             const { code, diagnostics } = ended;
             lastBesideCode = code;
@@ -10986,8 +10810,8 @@ export async function createApp(options){
                 startDirectory: request.startDirectory,
                 startup: request.startup ?? null,
                 parentId: request.parentId ?? 0,
+                suspended: request.suspended === true,
                 ...request.environment ? { environment: request.environment } : {},
-                patches: request.patches,
                 id: request.id,
                 threadId: request.threadId,
                 standardFiles: request.standardFiles && Object.fromEntries(
@@ -11002,22 +10826,33 @@ export async function createApp(options){
             childrenAcross.delete(request.id);
             sound?.giveBack();
         }
+        events.emit('process-child', { image: request.imagePath,
+            commandLine: request.commandLine });
         // Running from the moment it is asked for, not from when its machine
         // is built: a parent that waits on it at once is waiting on something
         // that will answer, not stuck.
         starting++;
         /** @type {{ line: { current: any } | null, code: number | null }} */
         const reach = { line: null, code: null };
-        reachable.set(request.id, { terminate: code=>{
-            if (reach.line)
-            {
-                reach.line.current.terminate(code);
-            }
-            else
-            {
-                reach.code = code;
-            }
-        } });
+        const built = settled();
+        reachable.set(request.id, {
+            terminate: code=>{
+                if (reach.line)
+                {
+                    reach.line.current.terminate(code);
+                }
+                else
+                {
+                    reach.code = code;
+                }
+            },
+            // Answered on a later microtask, once its machine is built: never
+            // inside the parent's host call, and never inside a turn of its
+            // own, which runs to its end before a microtask does. Null for a
+            // child that did not start.
+            ask: call=>built.promise.then(()=>(reach.line
+                ? Promise.resolve().then(()=>reach.line?.current.answerCall(call)) : null)),
+        });
         const running = (async()=>{
             /** @type {any} */
             let child = null;
@@ -11038,13 +10873,13 @@ export async function createApp(options){
                         executable: image,
                         imagePath: request.imagePath,
                         commandLine: request.commandLine,
-                        patches: request.patches,
                         processId: request.id,
                         mainThreadId: request.threadId,
                         standardFiles: request.standardFiles,
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,
+                        suspended: request.suspended === true,
                         ...request.environment ? { environment: request.environment } : {},
                         audio: sound.options,
                     });
@@ -11061,6 +10896,7 @@ export async function createApp(options){
             if (!child)
             {
                 reachable.delete(request.id);
+                built.settle();
                 sound.giveBack();
                 parent.childExited(request, 2);
                 return 2;
@@ -11072,6 +10908,7 @@ export async function createApp(options){
                 sequenceBase: logSequence });
             const line = { current: child, main: false };
             reach.line = line;
+            built.settle();
             if (reach.code !== null)
             {
                 child.terminate(reach.code);
@@ -11114,6 +10951,28 @@ export async function createApp(options){
     };
 
     /**
+     * A parent's call in a child it started (`cross-process.js`), made where
+     * the child runs -- on this thread, in a worker of its own, or through
+     * the run for a process that joined it from a worker -- and answered
+     * there; null for a child the run does not have.
+     *
+     * @param {{ id: number }} request @param {any} call
+     * @returns {Promise<any> | null}
+     */
+    function askBeside(request, call){
+        const child = reachable.get(request.id);
+        if (child)
+        {
+            return child.ask(call);
+        }
+        if (childrenAcross.has(request.id))
+        {
+            return options.system?.processes?.ask?.(request.id, call) ?? null;
+        }
+        return null;
+    }
+
+    /**
      * A parent's TerminateProcess on a child running beside it: ended where
      * it runs -- on this thread, in a worker of its own, or through the run
      * for a process that joined it from a worker -- and its parent told as
@@ -11147,103 +11006,33 @@ export async function createApp(options){
      * @returns {Promise<number>} the last program's exit code
      */
     const runProcesses = async(runOptions, line = mainLine, nested = false)=>{
-        while (true)
+        const code = await line.current.run(runOptions);
+        // Run out: nothing it holds wakes another process now.
+        standing.delete(line.current);
+        if (line.main && !nested)
         {
-            const code = await line.current.run(runOptions);
-            const request = line.current.replacement();
-            if (!request)
+            // Its servers end with it: its references go back, and what they
+            // write before they stop is its to keep.
+            const ending = line.current;
+            await classTable.ended(names.get(ending));
+            while (servers.size > 0)
             {
-                // Run out: nothing it holds wakes another process now.
-                standing.delete(line.current);
-                if (line.main && !nested)
+                await Promise.allSettled([...servers]);
+            }
+            // A launcher that started its game and went is not the end of the
+            // run: the game is, and its code is the run's.
+            if (besides.size > 0)
+            {
+                while (besides.size > 0)
                 {
-                    // Its servers end with it: its references go back, and
-                    // what they write before they stop is its to keep.
-                    const ending = line.current;
-                    await classTable.ended(names.get(ending));
-                    while (servers.size > 0)
-                    {
-                        await Promise.allSettled([...servers]);
-                    }
-                    // A launcher that started its game and went is not the
-                    // end of the run: the game is, and its code is the run's.
-                    if (besides.size > 0)
-                    {
-                        while (besides.size > 0)
-                        {
-                            await Promise.allSettled([...besides]);
-                        }
-                        noticeExit(lastBesideCode);
-                        return lastBesideCode;
-                    }
-                    noticeExit(code);
+                    await Promise.allSettled([...besides]);
                 }
-                return code;
+                noticeExit(lastBesideCode);
+                return lastBesideCode;
             }
-
-            if (line.current.waitingOn(request))
-            {
-                await runBeside(line, line.current, request, runOptions);
-                continue;
-            }
-
-            // Read before the tear-down. What the process wrote stays on the
-            // run's drives when it goes: an extractor that unpacked its
-            // payload and then started it leaves the payload where the child
-            // finds it.
-            const child = request.image ?? await line.current.readImage(request.imagePath);
-            // The sequence the journal reached, read while the machine that
-            // wrote it still stands. The child's journal continues from
-            // here, so the cursor a reader is holding points into it rather
-            // than past the end of a block that started over.
-            const written = journalOf(line.current.diagnostics())?.metrics?.journal?.written;
-            if (typeof written === 'number')
-            {
-                logSequence = written;
-            }
-            // Likewise read while it stands: the decoder the parent made is
-            // handed to the child so the same compiled module and linear
-            // memory serve both, and only the parent still holds it.
-            mediaInstance = line.current.media.instance() ?? mediaInstance;
-            await retire(line.current);
-            await line.current.dispose();
-            keepMemory(line.current);
-
-            if (!child)
-            {
-                throw new Error(
-                    `cannot start ${request.imagePath}: it is not on the volume`);
-            }
-
-            line.current = await build({
-                executable: child,
-                imagePath: request.imagePath,
-                commandLine: request.commandLine,
-                startDirectory: request.startDirectory,
-                startup: request.startup ?? null,
-                parentProcessId: request.parentId ?? 0,
-                ...request.environment ? { environment: request.environment } : {},
-                patches: request.patches,
-                processId: request.id,
-                mainThreadId: request.threadId,
-            });
-            if (line.main)
-            {
-                imagePath = request.imagePath;
-            }
-            replayLogLevels();
-            stand(line.current);
-            bindLogLevels();
-            // The child's journal is a fresh block, continuing the parent's
-            // sequence. Whoever holds a reader of its own -- the page's
-            // keeper -- is told where it starts so it can be handed the
-            // block: a drain cursor taken before the swap is above zero and
-            // below the child's first record, and only this says so.
-            events.emit('process-started', {
-                image: request.imagePath,
-                sequenceBase: logSequence,
-            });
+            noticeExit(code);
         }
+        return code;
     };
 
     /**
@@ -11283,6 +11072,13 @@ export async function createApp(options){
          * null where the run has none.
          */
         translationPool: ()=>translationPool?.diagnostics() ?? null,
+        /**
+         * A call this process's parent makes in it (`cross-process.js`): the
+         * process the run was started for, not a child it stands for now.
+         *
+         * @param {any} call
+         */
+        answerCall: (/** @type {any} */ call)=>mainLine.current.answerCall(call),
         /**
          * Every process standing, each with its image and its own diagnostics:
          * the facade speaks for one of them, and an install several processes
@@ -11351,9 +11147,8 @@ export async function createApp(options){
         presenter: ()=>presenter,
 
         /**
-         * The last few replacement requests, each with the guest's stack at the
-         * call that made it -- kept out here so that honouring one does not
-         * take the record of it away.
+         * The last few CreateProcess requests, each with the guest's stack at
+         * the call that made it.
          */
         replacements: ()=>[...requested],
     };

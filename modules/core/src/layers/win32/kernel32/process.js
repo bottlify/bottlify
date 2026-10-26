@@ -155,6 +155,9 @@ const ERROR_NOACCESS = 998;
 
 /**
  * @typedef {Object} ProcessHost
+ * @property {ReturnType<typeof createThreadState>} [threadState]  The process's, where
+ *     another part of it keeps the last error too: one state, so a call made between
+ *     turns leaves its error where GetLastError then reads it.
  * @property {number} [performanceFrequency]  Ticks a second of the performance counter
  *     (`PERFORMANCE_FREQUENCY` by default); a whole number a 32-bit immediate holds.
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -229,11 +232,18 @@ const ERROR_NOACCESS = 998;
  */
 export function createThreadState(currentThread, memory = null){
     /**
+     * The state of a call made between turns, when no thread is running: a
+     * parent's call made in this process (`cross-process.js`) leaves its
+     * error here, not in whichever thread ran last.
+     */
+    const between = {};
+
+    /**
      * @param {any} [thread]  Whose state. Defaults to the thread that is running.
      *   Naming one is for an answer produced on somebody else's turn: a call
      *   that parked has no turn of its own left in which to record its result.
      */
-    const stateOf = (thread = currentThread())=>{
+    const stateOf = (thread = currentThread() ?? between)=>{
         if (!thread.kernel32)
         {
             thread.kernel32 = {
@@ -262,7 +272,7 @@ export function createThreadState(currentThread, memory = null){
     };
 
     /** @param {any} [thread] */
-    const lastErrorOf = (thread = currentThread())=>{
+    const lastErrorOf = (thread = currentThread() ?? between)=>{
         const teb = blockOf(thread);
         return teb !== 0 && memory
             ? memory.readU32(teb + TEB.LAST_ERROR)
@@ -274,7 +284,7 @@ export function createThreadState(currentThread, memory = null){
         lastErrorOf,
         setErrorOn,
         /** @param {number} code */
-        setError: code=>setErrorOn(currentThread(), code),
+        setError: code=>setErrorOn(currentThread() ?? between, code),
     };
 }
 
@@ -599,7 +609,8 @@ export function createProcessFunctions(host){
         /** @param {number} address @param {number} value */
         writeU32: (address, value)=>host.writeMemory(address, new Uint8Array(dword(value))),
     };
-    const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
+    const { stateOf, setError, lastErrorOf } = host.threadState
+        ?? createThreadState(host.currentThread, memory);
     const processors = host.processors ?? createProcessors();
 
     /** @param {number} group  A WORD: ALL_PROCESSOR_GROUPS or 0, the only one. */

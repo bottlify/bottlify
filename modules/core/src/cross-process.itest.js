@@ -1,0 +1,319 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The gate of the calls a parent makes in its child: one mechanism -- the
+ * call sent to the child and made there -- over three ways a child runs, on
+ * its parent's thread, in a worker of its own, and beside a parent that runs
+ * in a worker, reached through the run. Seeded programs make the same calls
+ * down each; everything the parent can observe -- each result, the last
+ * error after it, every byte the calls wrote back, the child's exit code --
+ * is written out and compared.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createApp } from './app.js';
+import { buildExe } from '../../../tools/make-pe.mjs';
+
+/** @param {number} value */
+const u32 = value=>[value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
+/** @param {string} text */
+const ascii = text=>[...text].map(character=>character.charCodeAt(0)).concat(0);
+
+/** @param {number} seed */
+function random(seed){
+    let state = seed >>> 0;
+    return ()=>{
+        state = (state + 0x6d2b79f5) >>> 0;
+        let mixed = Math.imul(state ^ state >>> 15, 1 | state);
+        mixed ^= mixed + Math.imul(mixed ^ mixed >>> 7, 61 | mixed);
+        return ((mixed ^ mixed >>> 14) >>> 0) / 2 ** 32;
+    };
+}
+
+const CREATE_SUSPENDED = 4;
+const CONTEXT_BYTES = 0x2cc;
+const OPS = 28;
+
+/**
+ * A parent that starts the child suspended, makes a seeded run of calls in
+ * it, resumes it, waits for it and writes, in hex on its standard output,
+ * every result, last error and byte that came back.
+ *
+ * @param {number} seed
+ */
+function seededParent(seed){
+    const next = random(seed);
+    /** @param {number} below */
+    const pick = below=>Math.floor(next() * below);
+    /** @type {{ name: string, args: (number | 'process' | 'thread' | [string, number])[],
+     *     extra: number, before?: [number, number], store?: string }[]} */
+    const ops = [];
+    let suspended = 1;
+    /** Where each op's answer goes in `out`: result, last error, then its bytes. */
+    let size = 0;
+    const slot = (/** @type {number} */ extra)=>{
+        const at = size;
+        size += 8 + ((extra + 3) & ~3);
+        return at;
+    };
+    /** An address in the child: a region it was given, at an offset, or none. */
+    const where = ()=>(next() < 0.85
+        ? /** @type {[string, number]} */ ([`base${pick(4)}`, pick(3) * 0x1000 + pick(64) * 4])
+        : 0x10 + pick(0x100) * 4);
+    for (let index = 0; index < OPS; index++)
+    {
+        const kind = pick(10);
+        if (kind <= 1)
+        {
+            const protect = [4, 2, 0x40, 1][pick(4)];
+            ops.push({ name: 'VirtualAllocEx', args: ['process', 0,
+                (1 + pick(3)) * 0x1000 - pick(2) * 0x80, 0x3000, protect], extra: 0,
+            store: `base${pick(4)}` });
+            continue;
+        }
+        if (kind === 2)
+        {
+            const count = 1 + pick(48);
+            ops.push({ name: 'WriteProcessMemory', args: ['process', where(),
+                ['payload', pick(64)], count, ['out', 8]], extra: 4 });
+            continue;
+        }
+        if (kind === 3)
+        {
+            const count = 1 + pick(48);
+            ops.push({ name: 'ReadProcessMemory', args: ['process', where(), ['out', 12], count,
+                ['out', 8]], extra: 4 + count });
+            continue;
+        }
+        if (kind === 4)
+        {
+            ops.push({ name: 'VirtualQueryEx', args: ['process', where(), ['out', 8], 28],
+                extra: 28 });
+            continue;
+        }
+        if (kind === 5)
+        {
+            ops.push({ name: 'VirtualProtectEx', args: ['process', where(),
+                1 + pick(0x2000), [4, 2, 0x40, 0x20][pick(4)], ['out', 8]], extra: 4 });
+            continue;
+        }
+        if (kind === 6)
+        {
+            const release = next() < 0.6;
+            ops.push({ name: 'VirtualFreeEx', args: ['process', where(),
+                release ? 0 : 0x1000, release ? 0x8000 : 0x4000], extra: 0 });
+            continue;
+        }
+        if (kind === 7)
+        {
+            ops.push({ name: 'SuspendThread', args: ['thread'], extra: 0 });
+            suspended++;
+            continue;
+        }
+        if (kind === 8 && suspended > 1)
+        {
+            ops.push({ name: 'ResumeThread', args: ['thread'], extra: 0 });
+            suspended--;
+            continue;
+        }
+        // CONTEXT_CONTROL | CONTEXT_INTEGER, set in the record before the call.
+        ops.push({ name: 'GetThreadContext', args: ['thread', ['out', 8]], extra: CONTEXT_BYTES,
+            before: [8, 0x10003] });
+    }
+    // The child may run now: resumed to zero, it exits, and its code is seen.
+    while (suspended > 0)
+    {
+        ops.push({ name: 'ResumeThread', args: ['thread'], extra: 0 });
+        suspended--;
+    }
+    const places = ops.map(op=>slot(op.extra));
+    const exitAt = slot(0);
+    const payload = Array.from({ length: 128 }, ()=>pick(256));
+    const exe = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'GetExitCodeProcess',
+            'GetLastError', 'SetLastError', 'GetStdHandle', 'WriteFile', 'ExitProcess',
+            ...new Set(ops.map(op=>op.name))] },
+        data: {
+            command: ascii('C:\\App\\child.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            base0: u32(0), base1: u32(0), base2: u32(0), base3: u32(0),
+            payload,
+            out: new Array(size).fill(0),
+            hex: new Array(size * 2).fill(0),
+            digits: ascii('0123456789abcdef'),
+            written: u32(0),
+        },
+        codeSize: 0x2000,
+        code: ({ iat, at })=>{
+            /** @param {string} name */
+            const call = name=>[0xff, 0x15, ...u32(iat(name))];
+            /** @param {number | 'process' | 'thread' | [string, number]} arg @param {number} place */
+            const push = (arg, place)=>{
+                if (typeof arg === 'number')
+                {
+                    return [0x68, ...u32(arg)];
+                }
+                if (arg === 'process' || arg === 'thread')
+                {
+                    return [0xff, 0x35, ...u32(at('info') + (arg === 'process' ? 0 : 4))];
+                }
+                const [name, offset] = arg;
+                if (name === 'out')
+                {
+                    return [0x68, ...u32(at('out') + place + offset)];
+                }
+                if (name === 'payload')
+                {
+                    return [0x68, ...u32(at('payload') + offset)];
+                }
+                // mov eax, [base]; add eax, offset; push eax
+                return [0xa1, ...u32(at(name)), 0x05, ...u32(offset), 0x50];
+            };
+            const code = [
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, CREATE_SUSPENDED, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                ...call('CreateProcessA'),
+            ];
+            ops.forEach((op, index)=>{
+                const place = places[index];
+                if (op.before)
+                {
+                    code.push(0xc7, 0x05, ...u32(at('out') + place + op.before[0]),
+                        ...u32(op.before[1]));
+                }
+                // A last error of its own before each call: one the call set
+                // is told from one it left.
+                code.push(0x68, ...u32(0xe0000000 + index), ...call('SetLastError'));
+                for (const arg of [...op.args].reverse())
+                {
+                    code.push(...push(arg, place));
+                }
+                code.push(...call(op.name));
+                code.push(0xa3, ...u32(at('out') + place));
+                if (op.store)
+                {
+                    code.push(0xa3, ...u32(at(op.store)));
+                }
+                code.push(...call('GetLastError'), 0xa3, ...u32(at('out') + place + 4));
+            });
+            code.push(
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')), ...call('WaitForSingleObject'),
+                0x68, ...u32(at('out') + exitAt), 0xff, 0x35, ...u32(at('info')),
+                ...call('GetExitCodeProcess'),
+                // Each byte of `out` as two hex digits in `hex`.
+                0xbe, ...u32(at('out')), 0xbf, ...u32(at('hex')), 0xb9, ...u32(size),
+                0x0f, 0xb6, 0x06, 0x89, 0xc2, 0xc1, 0xe8, 0x04,
+                0x8a, 0x80, ...u32(at('digits')), 0x88, 0x07,
+                0x83, 0xe2, 0x0f, 0x8a, 0x92, ...u32(at('digits')), 0x88, 0x57, 0x01,
+                0x46, 0x83, 0xc7, 0x02, 0x49, 0x75, 0xdb,
+                // WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), hex, size * 2, &written, 0)
+                0x6a, 0, 0x68, ...u32(at('written')), 0x68, ...u32(size * 2),
+                0x68, ...u32(at('hex')), 0x6a, 0xf5, ...call('GetStdHandle'), 0x50,
+                ...call('WriteFile'),
+                0x6a, 0, ...call('ExitProcess'),
+            );
+            return code;
+        },
+    });
+    /**
+     * The calls, each with what it answered, as the parent wrote them.
+     *
+     * @param {string} text
+     */
+    const calls = text=>ops.map((op, index)=>{
+        const at = places[index] * 2;
+        const word = (/** @type {number} */ from)=>text.slice(at + from * 2, at + from * 2 + 8);
+        return `${index} ${op.name} ${word(0)} ${word(4)} ${text.slice(at + 16,
+            at + 16 + Math.min(op.extra, 32) * 2)}`;
+    });
+    return { exe, calls };
+}
+
+/** A parent that starts `command` and exits with its child's code. */
+function launcher(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
+            'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            command: ascii('C:\\App\\parent.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            code: u32(0),
+        },
+        codeSize: 0x60,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0xff, 0x35, ...u32(at('code')),
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+}
+
+const child = buildExe({
+    imports: { 'KERNEL32.dll': ['ExitProcess'] },
+    code: ({ iat })=>[0x6a, 0x2a, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+});
+
+/**
+ * What a seeded parent wrote, run one way.
+ *
+ * @param {Uint8Array} parent @param {import('./mode.js').Concurrency} concurrency
+ * @param {boolean} through
+ * @param {import('node:test').TestContext} t
+ */
+async function observed(parent, concurrency, through, t){
+    const app = await createApp({
+        executable: through ? launcher() : parent,
+        imagePath: through ? 'C:\\App\\launcher.exe' : 'C:\\App\\parent.exe',
+        engine: 'cork',
+        concurrency,
+        storage: { load: async()=>({ files: [
+            { path: 'C:\\App\\child.exe', bytes: child },
+            { path: 'C:\\App\\parent.exe', bytes: parent },
+        ] }) },
+    });
+    t.after(()=>app.dispose());
+    /** @type {string[]} */
+    const output = [];
+    app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+        output.push(text));
+    const code = await app.run({ timeoutMs: 60000 });
+    return { code, text: output.join('') };
+}
+
+for (const seed of [1, 2, 3, 4, 5, 6])
+{
+    test(`a parent's calls in its child answer alike however the child runs (seed ${seed})`,
+        { timeout: 180000 }, async t=>{
+            const { exe: parent, calls } = seededParent(seed);
+            const same = await observed(parent, 1, false, t);
+            assert.equal(same.code, 0);
+            const text = same.text.match(/[0-9a-f]+/)?.[0] ?? '';
+            assert.ok(text.length > OPS * 16, `the parent wrote what it saw: ${same.text}`);
+            assert.equal(text.slice(-16, -8), '2a000000', 'and saw its child exit with its code');
+            for (const [name, concurrency, through] of /** @type {const} */ ([
+                ['in a worker of its own', 2, false],
+                ['beside a parent in a worker, through the run', 2, true],
+            ]))
+            {
+                const other = await observed(parent, concurrency, through, t);
+                assert.deepEqual(calls(other.text.match(/[0-9a-f]+/)?.[0] ?? ''), calls(text),
+                    name);
+                assert.equal(other.text.match(/[0-9a-f]+/)?.[0], text, name);
+            }
+        });
+}

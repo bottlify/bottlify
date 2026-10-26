@@ -259,6 +259,9 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  *           Ends a thread's wait with its answer: how a thread waiting on a
  *           child another one terminates goes on. Without it that thread
  *           stays waiting.
+ * @property {(child: any, code: number) => void} [finishChild]
+ *           A child that ended without running: its exit code, and its event
+ *           set. Absent, the code alone, where nothing waits on an event.
  * @property {(child: any, code: number) => boolean} [terminateChild]
  *           Ends a child that is running beside this process, with the code:
  *           false where the run cannot reach it.
@@ -1217,10 +1220,6 @@ export function createSystemFunctions(host){
                 new DataView(bytes.buffer).setUint32(
                     0, child ? child.exitCode : STILL_ACTIVE, true);
                 host.writeMemory(code >>> 0, bytes);
-                if (child && child.exitCode === STILL_ACTIVE && !child.started)
-                {
-                    child.polled = true;
-                }
                 return 1;
             },
         },
@@ -1284,8 +1283,14 @@ export function createSystemFunctions(host){
                     {
                         return 1;
                     }
-                    child.exitCode = code >>> 0;
-                    child.completed = true;
+                    if (host.finishChild)
+                    {
+                        host.finishChild(child, code >>> 0);
+                    }
+                    else
+                    {
+                        Object.assign(child, { exitCode: code >>> 0, completed: true });
+                    }
                     const waiters = (child.waiters ?? []).filter(
                         (/** @type {any} */ waiter)=>waiter.live?.() ?? true);
                     child.waiters = [];

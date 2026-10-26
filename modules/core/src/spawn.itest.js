@@ -308,13 +308,15 @@ const ascii = text=>[...text].map(character=>character.charCodeAt(0)).concat(0);
 
 /**
  * A launcher: it names an event, starts its game, and waits for either the
- * game's process or the event, exiting with the index WaitForMultipleObjects
- * answered. The game opens the event by name, signals it, and exits.
+ * game's process or the event; then it waits for the game to end and exits
+ * with the index WaitForMultipleObjects answered, the last of the two to go.
+ * The game opens the event by name, signals it, and exits a moment later:
+ * whenever the launcher reaches its wait, the event came first.
  */
 function buildLauncher(){
     const parent = buildExe({
         imports: { 'KERNEL32.dll': ['CreateEventA', 'CreateProcessA',
-            'WaitForMultipleObjects', 'ExitProcess'] },
+            'WaitForMultipleObjects', 'WaitForSingleObject', 'ExitProcess'] },
         data: {
             name: ascii('LAUNCHED_OK'),
             command: ascii('C:\\App\\game.exe'),
@@ -322,7 +324,7 @@ function buildLauncher(){
             info: new Array(16).fill(0),
             set: new Array(8).fill(0),
         },
-        codeSize: 0x60,
+        codeSize: 0x80,
         code: ({ iat, at })=>[
             // CreateEventA(0, 0, 0, name)
             0x68, ...u32(at('name')), 0x6a, 0, 0x6a, 0, 0x6a, 0,
@@ -337,17 +339,22 @@ function buildLauncher(){
             // WaitForMultipleObjects(2, set, FALSE, INFINITE)
             0x6a, 0xff, 0x6a, 0, 0x68, ...u32(at('set')), 0x6a, 2,
             0xff, 0x15, ...u32(iat('WaitForMultipleObjects')),
-            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),              // exit with its answer
+            0x89, 0xc6,                                                // mov esi, eax
+            // WaitForSingleObject(info.hProcess, INFINITE)
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x56, 0xff, 0x15, ...u32(iat('ExitProcess')),              // exit with its answer
         ],
     });
     const game = buildExe({
-        imports: { 'KERNEL32.dll': ['OpenEventA', 'SetEvent', 'ExitProcess'] },
+        imports: { 'KERNEL32.dll': ['OpenEventA', 'SetEvent', 'Sleep', 'ExitProcess'] },
         data: { name: ascii('LAUNCHED_OK') },
         code: ({ iat, at })=>[
             // OpenEventA(EVENT_ALL_ACCESS, FALSE, name)
             0x68, ...u32(at('name')), 0x6a, 0, 0x68, ...u32(0x1f0003),
             0xff, 0x15, ...u32(iat('OpenEventA')),
             0x50, 0xff, 0x15, ...u32(iat('SetEvent')),
+            0x68, ...u32(200), 0xff, 0x15, ...u32(iat('Sleep')),       // Sleep(200)
             0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
         ],
     });
@@ -356,10 +363,9 @@ function buildLauncher(){
 
 test('a launcher waiting on its game or the event the game sets is woken by the event',
     { timeout: 60000 }, async t=>{
-        // Warcraft III's front end waits so, and takes the game's process
-        // ending first for a failure to start. The game ran beside it here and
-        // the launcher resumed only once it had exited -- with the process's
-        // index, though the event had come first.
+        // A front end that waits so takes the game's process ending first
+        // for a failure to start: the event the game sets while it runs is
+        // the answer, though the game exits right after.
         const { parent, game } = buildLauncher();
         const app = await createApp({
             executable: parent,
@@ -375,7 +381,8 @@ test('a launcher waiting on its game or the event the game sets is woken by the 
  * A setup that runs a helper and polls for it rather than waiting: it starts
  * the helper, asks GetExitCodeProcess until the answer is no longer
  * STILL_ACTIVE, sleeping a millisecond between, and exits with the helper's
- * code plus one. The helper exits with 7.
+ * code plus one. The helper counts down from four million, which takes it
+ * many turns, and exits with 7.
  */
 /** @param {boolean} [sleeps]  Whether it sleeps between polls, or spins. */
 function buildPoller(sleeps = true){
@@ -410,7 +417,10 @@ function buildPoller(sleeps = true){
     });
     const helper = buildExe({
         imports: { 'KERNEL32.dll': ['ExitProcess'] },
-        code: ({ iat })=>[0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        code: ({ iat })=>[
+            0xb9, ...u32(4000000), 0x49, 0x75, 0xfd, // mov ecx, 4000000; count: dec ecx; jnz count
+            0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
     });
     return { parent, helper };
 }
@@ -419,10 +429,8 @@ test('a parent that polls its child\'s exit code goes on after it, as one waitin
     { timeout: 60000 }, async t=>{
         // GetExitCodeProcess answers STILL_ACTIVE while the child runs, and a
         // setup asking it between one-millisecond sleeps is waiting for its
-        // helper as surely as one blocked on the handle. It was taken for a
-        // parent with nothing left to do and replaced by the helper, so the
-        // run ended with the helper's exit: an installer vanished once a
-        // shortcut helper it started had finished.
+        // helper as surely as one blocked on the handle: the run goes on
+        // after the helper, with the setup's own exit.
         const { parent, helper } = buildPoller();
         const app = await createApp({
             executable: parent,
@@ -437,8 +445,6 @@ test('a parent that polls its child\'s exit code goes on after it, as one waitin
         const lifecycle = [];
         app.on('process-child', (/** @type {any} */ event)=>
             lifecycle.push(`child ${event.image}`));
-        app.on('process-replace', (/** @type {any} */ event)=>
-            lifecycle.push(`replaced by ${event.image}`));
         app.on('process-resumed', (/** @type {any} */ event)=>
             lifecycle.push(`resumed ${event.code}`));
         assert.equal(await app.run({ timeoutMs: 30000 }), 8,
@@ -449,9 +455,9 @@ test('a parent that polls its child\'s exit code goes on after it, as one waitin
 test('a parent that polls its child\'s exit code without ever blocking still lets it run',
     { timeout: 60000 }, async t=>{
         // A setup that pumps its messages and asks the exit code between
-        // them never blocks, so a child waiting for its parent to have
-        // nothing left to run never ran: the setup polled for ever. The poll
-        // is the wait.
+        // them never blocks. Its child runs beside it on the same thread, so
+        // the two share it: the child is given turns while the parent spins,
+        // and finishes a count that takes it many of them.
         const { parent, helper } = buildPoller(false);
         const app = await createApp({
             executable: parent,
@@ -466,8 +472,6 @@ test('a parent that polls its child\'s exit code without ever blocking still let
         const lifecycle = [];
         app.on('process-child', (/** @type {any} */ event)=>
             lifecycle.push(`child ${event.image}`));
-        app.on('process-replace', (/** @type {any} */ event)=>
-            lifecycle.push(`replaced by ${event.image}`));
         app.on('process-resumed', (/** @type {any} */ event)=>
             lifecycle.push(`resumed ${event.code}`));
         assert.equal(await app.run({ timeoutMs: 30000 }), 8,
@@ -492,7 +496,7 @@ function buildSignalled(){
             info: new Array(16).fill(0),
             event: new Array(4).fill(0),
         },
-        codeSize: 0x60,
+        codeSize: 0x80,
         code: ({ iat, at })=>[
             // CreateEventA(0, 0, 0, name)
             0x68, ...u32(at('name')), 0x6a, 0, 0x6a, 0, 0x6a, 0,
@@ -530,8 +534,6 @@ test('a parent waiting on something its child sets, not on the child, outlives t
         const lifecycle = [];
         app.on('process-child', (/** @type {any} */ event)=>
             lifecycle.push(`child ${event.image}`));
-        app.on('process-replace', (/** @type {any} */ event)=>
-            lifecycle.push(`replaced by ${event.image}`));
         app.on('process-resumed', (/** @type {any} */ event)=>
             lifecycle.push(`resumed ${event.code}`));
         assert.equal(await app.run({ timeoutMs: 30000 }), 3, 'the parent\'s own exit');
@@ -671,9 +673,9 @@ test('a child reads the STARTUPINFO its parent handed CreateProcess, whichever w
          * Each generation hands its child a dwX of its own: a child given its
          * parent's own record rather than the one asked for answers wrongly.
          *
-         * @param {boolean} waits @param {string} [command] @param {number} [x]
+         * @param {string} [command] @param {number} [x]
          */
-        const parent = (waits, command = 'C:\\App\\child.exe', x = 0x3412)=>buildExe({
+        const parent = (command = 'C:\\App\\child.exe', x = 0x3412)=>buildExe({
             imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
                 'GetExitCodeProcess', 'ExitProcess'] },
             data: {
@@ -693,14 +695,12 @@ test('a child reads the STARTUPINFO its parent handed CreateProcess, whichever w
                 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
                 0x68, ...u32(at('command')), 0x6a, 0,
                 0xff, 0x15, ...u32(iat('CreateProcessA')),
-                ...waits ? [
-                    0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
-                    0xff, 0x15, ...u32(iat('WaitForSingleObject')),
-                    // GetExitCodeProcess(info.hProcess, &code); ExitProcess(code)
-                    0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
-                    0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
-                    0xff, 0x35, ...u32(at('code')),
-                ] : [0x6a, 0],
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                // GetExitCodeProcess(info.hProcess, &code); ExitProcess(code)
+                0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+                0xff, 0x35, ...u32(at('code')),
                 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
@@ -720,24 +720,22 @@ test('a child reads the STARTUPINFO its parent handed CreateProcess, whichever w
         const expected = (0x3412 + (1 << 16) + (1 << 20) + (0x54 << 24)) >>> 0;
         // The last: the run's two workers hold the two processes between,
         // and the child runs beside its parent, in that one's worker.
-        for (const [name, waits, concurrency, through] of /** @type {const} */ ([
-            ['its parent waiting on it', true, 1, false],
-            ['in its parent\'s place', false, 1, false],
-            ['in a worker of its own', true, 2, false],
-            ['beside its parent in its parent\'s worker', true, 2, true],
+        for (const [name, concurrency, through] of /** @type {const} */ ([
+            ['beside its parent on one thread', 1, false],
+            ['in a worker of its own', 2, false],
+            ['beside its parent in its parent\'s worker', 2, true],
         ]))
         {
             const app = await createApp({
-                executable: through ? parent(true, 'C:\\App\\middle.exe', 0x1111)
-                    : parent(waits),
+                executable: through ? parent('C:\\App\\middle.exe', 0x1111) : parent(),
                 imagePath: 'C:\\App\\parent.exe',
                 engine: 'cork',
                 concurrency,
                 storage: { load: async()=>({ files: [
                     { path: 'C:\\App\\child.exe', bytes: child },
                     { path: 'C:\\App\\middle.exe',
-                        bytes: parent(true, 'C:\\App\\inner.exe', 0x2222) },
-                    { path: 'C:\\App\\inner.exe', bytes: parent(true) },
+                        bytes: parent('C:\\App\\inner.exe', 0x2222) },
+                    { path: 'C:\\App\\inner.exe', bytes: parent() },
                 ] }) },
             });
             t.after(()=>app.dispose());
@@ -750,8 +748,8 @@ test('a child starts with the environment its parent handed CreateProcess, which
         // Wine's kernel32 test_Environment: lpEnvironment is the child's whole
         // environment. Each generation hands on a G of its own, so a child
         // given its parent's variables instead answers wrongly.
-        /** @param {string} command @param {number} letter @param {boolean} [waits] */
-        const parent = (command, letter, waits = true)=>buildExe({
+        /** @param {string} command @param {number} letter */
+        const parent = (command, letter)=>buildExe({
             imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
                 'GetExitCodeProcess', 'ExitProcess'] },
             data: {
@@ -767,13 +765,11 @@ test('a child starts with the environment its parent handed CreateProcess, which
                 0x6a, 0, 0x68, ...u32(at('environment')), 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
                 0x68, ...u32(at('command')), 0x6a, 0,
                 0xff, 0x15, ...u32(iat('CreateProcessA')),
-                ...waits ? [
-                    0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
-                    0xff, 0x15, ...u32(iat('WaitForSingleObject')),
-                    0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
-                    0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
-                    0xff, 0x35, ...u32(at('code')),
-                ] : [0x6a, 0],
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+                0xff, 0x35, ...u32(at('code')),
                 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
@@ -793,15 +789,14 @@ test('a child starts with the environment its parent handed CreateProcess, which
             { path: 'C:\\App\\middle.exe', bytes: parent('C:\\App\\inner.exe', 0x62) },
             { path: 'C:\\App\\inner.exe', bytes: parent('C:\\App\\child.exe', 0x63) },
         ];
-        for (const [name, concurrency, top, waits] of /** @type {const} */ ([
-            ['its parent waiting on it', 1, 'C:\\App\\child.exe', true],
-            ['in its parent\'s place', 1, 'C:\\App\\child.exe', false],
-            ['in a worker of its own', 2, 'C:\\App\\child.exe', true],
-            ['beside its parent in its parent\'s worker', 2, 'C:\\App\\middle.exe', true],
+        for (const [name, concurrency, top] of /** @type {const} */ ([
+            ['beside its parent on one thread', 1, 'C:\\App\\child.exe'],
+            ['in a worker of its own', 2, 'C:\\App\\child.exe'],
+            ['beside its parent in its parent\'s worker', 2, 'C:\\App\\middle.exe'],
         ]))
         {
             const app = await createApp({
-                executable: parent(top, 0x61, waits),
+                executable: parent(top, 0x61),
                 imagePath: 'C:\\App\\parent.exe',
                 engine: 'cork',
                 concurrency,
@@ -820,9 +815,8 @@ test('a child names the process that started it as its parent, whichever way it 
         // child's answer is its own id.
         /**
          * @param {string} command @param {boolean} [compares]  else passes the code on
-         * @param {boolean} [waits]  else exits, and the child takes its place
          */
-        const parent = (command, compares = true, waits = true)=>buildExe({
+        const parent = (command, compares = true)=>buildExe({
             imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
                 'GetExitCodeProcess', 'GetCurrentProcessId', 'ExitProcess'] },
             data: {
@@ -837,7 +831,6 @@ test('a child names the process that started it as its parent, whichever way it 
                 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
                 0x68, ...u32(at('command')), 0x6a, 0,
                 0xff, 0x15, ...u32(iat('CreateProcessA')),
-                ...waits ? [] : [0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))],
                 0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
                 0xff, 0x15, ...u32(iat('WaitForSingleObject')),
                 0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
@@ -867,7 +860,7 @@ test('a child names the process that started it as its parent, whichever way it 
             { path: 'C:\\App\\inner.exe', bytes: parent('C:\\App\\child.exe') },
         ];
         for (const [name, concurrency, top] of /** @type {const} */ ([
-            ['its parent waiting on it', 1, 'C:\\App\\child.exe'],
+            ['beside its parent on one thread', 1, 'C:\\App\\child.exe'],
             ['in a worker of its own', 2, 'C:\\App\\child.exe'],
             ['beside its parent in its parent\'s worker', 2, 'C:\\App\\middle.exe'],
         ]))
@@ -885,14 +878,75 @@ test('a child names the process that started it as its parent, whichever way it 
             app.on('process-resumed', (/** @type {any} */ event)=>codes.push(event.code >>> 0));
             assert.equal(await app.run({ timeoutMs: 60000 }), 1, `${name}: ${codes}`);
         }
-        // Gone before its child runs, the parent is still the one it names.
-        const app = await createApp({
-            executable: parent('C:\\App\\child.exe', true, false),
-            imagePath: 'C:\\App\\parent.exe',
-            processId: 0x4000,
-            engine: 'cork',
-            storage: { load: async()=>({ files }) },
+    });
+
+test('a parent writes into the child it made suspended, and the child runs only once resumed',
+    { timeout: 120000 }, async t=>{
+        // A launcher that hollows its child reads and writes the child's image
+        // while its first thread is suspended, then resumes it. Made in the
+        // child, where it runs: on this thread, or in a worker of its own.
+        /** @type {number} */
+        let value = 0;
+        const child = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            data: { value: u32(0x1111) },
+            code: ({ iat, at })=>{
+                value = at('value');
+                return [0xff, 0x35, ...u32(at('value')), 0xff, 0x15, ...u32(iat('ExitProcess'))];
+            },
         });
-        t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0x4000, 'in its parent\'s place');
+        const parent = buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'ReadProcessMemory', 'WriteProcessMemory',
+                'ResumeThread', 'WaitForSingleObject', 'GetExitCodeProcess', 'ExitProcess'] },
+            data: {
+                command: ascii('C:\\App\\child.exe'),
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+                read: u32(0),
+                patch: u32(0x2222),
+                code: u32(0),
+                resumed: u32(0),
+            },
+            codeSize: 0xc0,
+            code: ({ iat, at })=>[
+                // CreateProcessA(0, command, 0, 0, 0, CREATE_SUSPENDED, 0, 0, &startup, &info)
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 4, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                // ReadProcessMemory(info.hProcess, value, &read, 4, 0)
+                0x6a, 0, 0x6a, 4, 0x68, ...u32(at('read')), 0x68, ...u32(value),
+                0xff, 0x35, ...u32(at('info')), 0xff, 0x15, ...u32(iat('ReadProcessMemory')),
+                // WriteProcessMemory(info.hProcess, value, &patch, 4, 0)
+                0x6a, 0, 0x6a, 4, 0x68, ...u32(at('patch')), 0x68, ...u32(value),
+                0xff, 0x35, ...u32(at('info')), 0xff, 0x15, ...u32(iat('WriteProcessMemory')),
+                // resumed = ResumeThread(info.hThread)
+                0xff, 0x35, ...u32(at('info') + 4), 0xff, 0x15, ...u32(iat('ResumeThread')),
+                0xa3, ...u32(at('resumed')),
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+                // ExitProcess(code + (read << 16) + (resumed << 31))
+                0xa1, ...u32(at('read')), 0xc1, 0xe0, 0x10, 0x03, 0x05, ...u32(at('code')),
+                0x8b, 0x0d, ...u32(at('resumed')), 0xc1, 0xe1, 0x1f, 0x01, 0xc8,
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        for (const concurrency of /** @type {const} */ ([1, 2]))
+        {
+            const app = await createApp({
+                executable: parent,
+                imagePath: 'C:\\App\\parent.exe',
+                engine: 'cork',
+                concurrency,
+                storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe',
+                    bytes: child }] }) },
+            });
+            t.after(()=>app.dispose());
+            assert.equal((await app.run({ timeoutMs: 60000 })) >>> 0,
+                (0x2222 + (0x1111 << 16) + 2 ** 31) >>> 0,
+                `concurrency ${concurrency}: read the image as made, ran what was written,`
+                + ' resumed from a count of one');
+        }
     });

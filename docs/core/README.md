@@ -155,10 +155,10 @@ allow.
 The network works in every mode: the relay is a WebSocket to the page's own origin, which isolation
 does not affect.
 
-`createApp({ concurrency })` sets how many processes run at once. With `1` (the default) a child
-runs in its parent's place until it exits. With `2` or `4` every process, the program included,
-runs in its own worker, and a child runs beside its parent from `CreateProcess` on, so a launcher
-keeps running beside the program it starts. That needs shared memory: without it the
+`createApp({ concurrency })` sets how many processes run at once. A child runs beside its parent
+from `CreateProcess` on, so a launcher keeps running beside the program it starts. With `1` (the
+default) the two take turns on one thread; with `2` or `4` every process, the program included,
+runs in its own worker. That needs shared memory: without it the
 run starts `compatible` with one process at a time and sends a `fallback` event. The full rules are
 under `concurrency` in [api.md](api.md).
 

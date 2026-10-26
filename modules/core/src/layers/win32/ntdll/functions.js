@@ -124,6 +124,9 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {Record<string, Entry>} kernel32  The assembled KERNEL32.dll table.
  * @property {Record<string, Entry>} crt       The assembled msvcrt.dll table.
  * @property {() => number} teb  The running thread's block.
+ * @property {() => any} [currentThread]
+ * @property {(thread: any) => number} [lastErrorOf]  A thread's last error, which a call
+ *           answered by another process leaves after its thread stopped running.
  * @property {{ base: number, size: number }} arena  The memory the process has.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Without it the 64-bit helpers stay unexported: their answer does not
@@ -345,7 +348,8 @@ export function createNtdllFunctions(host){
 
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
             ? createMemoryFunctions({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, kernel32, allocate })
+                writeMemory: host.writeMemory, kernel32, allocate,
+                currentThread: host.currentThread, lastErrorOf: host.lastErrorOf })
             : {}),
 
         ...(kernel32.HeapValidate ? createUserInfoFunctions(kernel32, host.writeMemory) : {}),

@@ -481,36 +481,29 @@ test('a thread the kernel has no room for is a failed CreateThread, not a stoppe
     assert.deepEqual(kernel.state.threadIds, [], 'no id is written for a thread never made');
 });
 
-test('waiting on a child process is where the parent hands over', ()=>{
-    // Nothing in this process can signal a child: it runs once the parent has
-    // nothing else to do. So the thread blocks outside every wait queue, and is
-    // noted on the child with its answer, for the engine to wake when the
-    // child it runs beside this process exits. Left to the ordinary path,
-    // this would join a queue on an object with no signal and be reported as
-    // a deadlock.
+test('waiting on a child process is a wait on the event its exit sets', ()=>{
+    // The child runs beside its parent, so its exit is an ordinary signal:
+    // the parent joins that event's queue, and an exited child -- the event
+    // set, for good -- answers every later wait at once.
     const { kernel, fns, parked, current } = setup();
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\child.exe' };
-    const handle = kernel.handles.open('process', child);
+    const exited = { kind: 'event', manualReset: true, signalled: false };
+    const handle = kernel.handles.open('process', { imagePath: 'C:\\App\\child.exe', exited });
 
     assert.equal(fns.WaitForSingleObject.handler([handle, 0xffffffff]), PARKED);
     assert.deepEqual(parked, [current]);
-    assert.equal(kernel.state.blocked.length, 1);
-    assert.equal(kernel.state.blocked[0].thread, current);
-    assert.equal(kernel.state.waits.length, 0, 'and it never joined a wait queue');
-    assert.deepEqual(child.waiters.map((/** @type {any} */ waiter)=>
-        [waiter.thread, waiter.result, typeof waiter.live]), [[current, 0, 'function']],
-    'the child knows who waits on it, that the wait answers WAIT_OBJECT_0, and how to tell'
-        + ' it still waits');
+    assert.deepEqual(kernel.state.waits.map((/** @type {any} */ one)=>one.object), [exited]);
+
+    exited.signalled = true;
+    assert.equal(fns.WaitForSingleObject.handler([handle, 0xffffffff]), 0);
+    assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0, 'and stays signalled');
 });
 
 test('polling a child process says it is still running', ()=>{
     // A zero timeout is a question, not a wait. Parking on it would stop a
     // parent that was only checking whether its child had finished.
     const { kernel, fns, parked } = setup();
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\child.exe' };
-    const handle = kernel.handles.open('process', child);
+    const exited = { kind: 'event', manualReset: true, signalled: false };
+    const handle = kernel.handles.open('process', { imagePath: 'C:\\App\\child.exe', exited });
 
     assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0x102);
     assert.deepEqual(parked, []);

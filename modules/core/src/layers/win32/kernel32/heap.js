@@ -19,6 +19,7 @@
  * about.
  */
 
+import { askChild } from './cross-process.js';
 import {
     globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode,
 } from './guest-heap.js';
@@ -809,6 +810,11 @@ export function createHeapAllocator({ base, size }){
  *           a buffer holding the pattern would be allocated, zeroed and copied
  *           inside the program's own call, for bytes that can be filled once.
  * @property {(code: number) => void} setLastError
+ * @property {(handle: number) => any} [childOf]  The child process a handle names, or null.
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child where it runs; absent, no child is reached.
+ * @property {() => any} [currentThread]
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {(address: number) => { base: number, size: number, kind?: string } | null} [regionAt]
  *           The memory layer's region map, when the assembling caller wired one.
  *           A region of kind `image` is answered as MEM_IMAGE.
@@ -2538,9 +2544,30 @@ export function createHeapFunctions(host){
     };
 
     /**
-     * A virtual-memory call's Ex form: the plain one, on the running process.
-     * A child's address space does not exist until it runs, so there is no
-     * other process for these to reach.
+     * Each call's arguments as they cross to a child, and where in this
+     * process the bytes it writes go back: the old protection, the region's
+     * description. A NULL there stays NULL, for the child to refuse.
+     *
+     * @type {Record<string, (args: number[]) => { args: import('./cross-process.js').CrossArg[],
+     *     into: (number | null)[] }>}
+     */
+    const crossing = {
+        VirtualAlloc: args=>({ args, into: [] }),
+        VirtualFree: args=>({ args, into: [] }),
+        VirtualProtect: ([base, size, protect, old])=>({
+            args: [base, size, protect, (old >>> 0) === 0 ? 0 : { out: 4 }],
+            into: [null, null, null, old >>> 0],
+        }),
+        VirtualQuery: ([address, buffer, length])=>({
+            args: [address, (buffer >>> 0) === 0 ? 0
+                : { out: Math.min(length >>> 0, MEMORY_BASIC_INFORMATION.SIZE) }, length],
+            into: [null, buffer >>> 0, null],
+        }),
+    };
+
+    /**
+     * A virtual-memory call's Ex form: the plain one, on the running process,
+     * and on a child the same call made in the child (`cross-process.js`).
      *
      * @param {'VirtualAlloc' | 'VirtualFree' | 'VirtualProtect' | 'VirtualQuery'} name
      * @param {number} argBytes
@@ -2549,6 +2576,18 @@ export function createHeapFunctions(host){
         argBytes,
         /** @param {number[]} args */
         handler: ([process, ...rest])=>{
+            const child = (process >>> 0) === CURRENT_PROCESS ? null : host.childOf?.(process);
+            if (child && host.currentThread && host.setLastErrorFor)
+            {
+                const { args, into } = crossing[name](rest);
+                const asked = askChild({ askChild: host.askChild, writeMemory: host.writeMemory,
+                    currentThread: host.currentThread, setLastErrorFor: host.setLastErrorFor },
+                child, { call: name, args }, into);
+                if (asked)
+                {
+                    return asked;
+                }
+            }
             if ((process >>> 0) !== CURRENT_PROCESS)
             {
                 if ((process >>> 0) !== 0)

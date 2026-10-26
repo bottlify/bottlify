@@ -450,13 +450,13 @@ test('an image that is not there is refused rather than recorded', ()=>{
         ERROR_FILE_NOT_FOUND, 'WinExec answers below 32 with the error itself');
 });
 
-test('CREATE_SUSPENDED records the child without arming the replacement', ()=>{
+test('CREATE_SUSPENDED records the child for the run to start, its first thread held', ()=>{
     const host = fakeHost({ files: ['C:\\App\\child.exe'] });
     const fns = createSpawnFunctions(host);
 
     assert.equal(fns.CreateProcessA.handler(
         [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]), 1);
-    assert.equal(host.kernel.processes.pending(), null);
+    assert.equal(host.kernel.processes.pending(), host.kernel.processes.all()[0]);
     assert.equal(host.kernel.processes.all()[0].suspended, true);
 });
 
@@ -469,29 +469,65 @@ test('the wide spelling starts the same child as the narrow one', ()=>{
     assert.equal(pending(host).imagePath, 'C:\\App\\child.exe');
 });
 
-test('a write into a suspended child is deferred, not applied', ()=>{
-    // The child's image is not mapped, so there is nowhere to put these bytes
-    // yet. They are kept against the address they name and replayed once the PE
-    // is there -- which is process hollowing implemented as a queue.
+/**
+ * A host whose calls into a child are answered by `answer`, each one kept.
+ *
+ * @param {(call: any) => any} answer
+ */
+function askingHost(answer){
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    /** @type {any[]} */
+    const asked = [];
+    const caller = { name: 'caller' };
+    /** @type {[any, number][]} */
+    const errorsFor = [];
+    Object.assign(host, {
+        askChild: (/** @type {any} */ record, /** @type {any} */ call)=>{
+            asked.push({ record, call });
+            return Promise.resolve(answer(call));
+        },
+        currentThread: ()=>caller,
+        setLastErrorFor: (/** @type {any} */ thread, /** @type {number} */ code)=>
+            errorsFor.push([thread, code]),
+    });
+    return { host, asked, caller, errorsFor };
+}
+
+test('a write into a child is made in the child, and its answer comes back to the caller',
+    async()=>{
+        // A launcher hollowing its child: the bytes cross, the call is the
+        // child's own WriteProcessMemory on itself, through its protection.
+        const { host, asked, caller, errorsFor } = askingHost(()=>({ result: 1, error: 0,
+            outs: [null, null, null, null, new Uint8Array([3, 0, 0, 0])] }));
+        const fns = createSpawnFunctions(host);
+        fns.CreateProcessA.handler(
+            [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]);
+        const child = host.kernel.processes.all()[0];
+
+        host.bytes.set([0x90, 0xcc, 0x90], 0x400);
+        const written = fns.WriteProcessMemory.handler([child.handle, 0x401000, 0x400, 3, 0x500]);
+        // Copied when asked, not viewed: the caller may write its buffer again.
+        host.bytes[0x400] = 0xff;
+        assert.equal(await written, 1);
+        assert.equal(asked[0].record, child);
+        assert.deepEqual(asked[0].call.call, 'WriteProcessMemory');
+        const [process, base, data, size, out] = asked[0].call.args;
+        assert.deepEqual([process, base, [...data.in], size, out],
+            [CURRENT_PROCESS, 0x401000, [0x90, 0xcc, 0x90], 3, { out: 4 }]);
+        assert.equal(host.view.getUint32(0x500, true), 3, 'the count the child wrote');
+        assert.deepEqual(errorsFor, [[caller, 0]], 'the error set on the thread that asked');
+    });
+
+test('a child the run cannot reach is refused, and a handle that is none is invalid', ()=>{
     const host = fakeHost({ files: ['C:\\App\\child.exe'] });
     const fns = createSpawnFunctions(host);
     fns.CreateProcessA.handler(
         [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]);
-    const child = pending(host, { suspended: true });
-
-    host.bytes.set([0x90, 0xcc, 0x90], 0x400);
-    assert.equal(fns.WriteProcessMemory.handler(
-        [child.handle, 0x401000, 0x400, 3, 0x500]), 1);
-
-    assert.equal(child.patches.length, 1);
-    assert.equal(child.patches[0].address, 0x401000);
-    assert.deepEqual([...child.patches[0].bytes], [0x90, 0xcc, 0x90]);
-    assert.equal(host.view.getUint32(0x500, true), 3, 'and it reported all three written');
-
-    // Copied, not viewed: the machine these bytes came from is gone by the time
-    // they are replayed.
-    host.bytes[0x400] = 0xff;
-    assert.deepEqual([...child.patches[0].bytes], [0x90, 0xcc, 0x90]);
+    const child = host.kernel.processes.all()[0];
+    assert.equal(fns.WriteProcessMemory.handler([child.handle, 0x401000, 0x400, 3, 0]), 0);
+    assert.equal(host.errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(fns.ReadProcessMemory.handler([0x1234, 0x400, 0x800, 2, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
 });
 
 test('a write against this process writes memory, as it always did', ()=>{
@@ -666,8 +702,10 @@ test('an ordinary child is still held pending for the replacement', ()=>{
     assert.equal(host.kernel.processes.pending()?.imagePath, 'C:\\App\\game.exe');
 });
 
-test('ReadProcessMemory reads this process, and of a child only what was written into it', ()=>{
-    const host = fakeHost({ files: ['C:\\App\\child.exe'] });
+test('ReadProcessMemory reads this process, and a child\'s memory in the child', async()=>{
+    const { host, asked } = askingHost(call=>({ result: 1, error: 0, outs: [null, null,
+        new Uint8Array([0x22, 0x33]).subarray(0, call.args[2].out), null,
+        new Uint8Array([2, 0, 0, 0])] }));
     const fns = createSpawnFunctions(host);
     host.bytes.set([5, 6, 7, 8], 0x400);
     assert.equal(fns.ReadProcessMemory.handler([CURRENT_PROCESS, 0x400, 0x600, 4, 0x700]), 1);
@@ -676,19 +714,12 @@ test('ReadProcessMemory reads this process, and of a child only what was written
 
     fns.CreateProcessA.handler(
         [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]);
-    const child = pending(host, { suspended: true });
-    host.bytes.set([0x11, 0x22, 0x33, 0x44], 0x400);
-    fns.WriteProcessMemory.handler([child.handle, 0x401000, 0x400, 4, 0]);
-    assert.equal(fns.ReadProcessMemory.handler([child.handle, 0x401001, 0x800, 2, 0x700]), 1);
-    assert.deepEqual([...host.bytes.slice(0x800, 0x802)], [0x22, 0x33],
-        'the bytes it was handed, which is all of it there is yet');
-
-    host.errors.length = 0;
-    assert.equal(fns.ReadProcessMemory.handler([child.handle, 0x402000, 0x800, 2, 0x700]), 0);
-    assert.equal(host.view.getUint32(0x700, true), 0);
-    assert.deepEqual(host.errors, [299], 'ERROR_PARTIAL_COPY: nothing is mapped there yet');
-    assert.equal(fns.ReadProcessMemory.handler([0x1234, 0x400, 0x800, 2, 0]), 0);
-    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+    const child = host.kernel.processes.all()[0];
+    assert.equal(await fns.ReadProcessMemory.handler([child.handle, 0x401001, 0x800, 2, 0x700]),
+        1);
+    assert.deepEqual(asked[0].call.args, [CURRENT_PROCESS, 0x401001, { out: 2 }, 2, { out: 4 }]);
+    assert.deepEqual([...host.bytes.slice(0x800, 0x802)], [0x22, 0x33]);
+    assert.equal(host.view.getUint32(0x700, true), 2);
     assert.equal(fns.ReadProcessMemory.argBytes, 20);
 });
 

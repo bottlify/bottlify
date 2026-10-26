@@ -507,6 +507,15 @@ export function createKernelModule(){
                 },
                 currentThread: ()=>live() ? state.scheduler.current() : null,
                 /**
+                 * Runs `fn` between turns with no thread on the CPU (the
+                 * scheduler's `outside`).
+                 *
+                 * @template T
+                 * @param {() => T} fn
+                 * @returns {T}
+                 */
+                outside: fn=>state.scheduler.outside(fn),
+                /**
                  * Guest code no slice ends inside (see the scheduler's
                  * `atomicCode`): a routine of the host's that writes what other
                  * threads read, and never waits.
@@ -968,17 +977,30 @@ export function createKernelModule(){
 
                 /**
                  * Child processes, as records. Nothing here runs one: a request is
-                 * recorded, and whoever drives the machine decides when the parent
-                 * has nothing left to do and the child takes its place.
+                 * recorded, and whoever drives the machine starts it beside this
+                 * process and says when it has ended.
                  */
                 processes: {
                     /** The exit code a process still running reports. */
                     STILL_ACTIVE,
                     /**
+                     * A record with the event its exit sets, which a wait on the
+                     * process's handle waits on as on any object: signalled
+                     * already for one that is over before it starts.
+                     *
                      * @param {{ imagePath: string, commandLine: string,
                      *           suspended?: boolean, completed?: boolean }} options
                      */
-                    create: options=>live() ? state.processes.create(options) : null,
+                    create: options=>{
+                        if (!live())
+                        {
+                            return null;
+                        }
+                        const record = state.processes.create(options);
+                        record.exited = state.sync.createEvent({ manualReset: true,
+                            signalled: record.completed, name: `process ${record.id}` });
+                        return record;
+                    },
                     pending: ()=>live() ? state.processes.pending() : null,
                     all: ()=>live() ? state.processes.all() : [],
                     /** @param {any} record */
@@ -990,8 +1012,20 @@ export function createKernelModule(){
                      * @param {any} record
                      */
                     started: record=>live() ? state.processes.started(record) : undefined,
-                    /** @param {boolean} on */
-                    runBeside: on=>(live() ? state.processes.runBeside(on) : undefined),
+                    /**
+                     * The child has exited with this code: what GetExitCodeProcess
+                     * reads, and its event set, which wakes every wait on it.
+                     *
+                     * @param {any} record @param {number} code
+                     */
+                    finish: (record, code)=>{
+                        record.exitCode = code >>> 0;
+                        record.completed = true;
+                        if (live() && record.exited)
+                        {
+                            state.sync.setEvent(record.exited);
+                        }
+                    },
                 },
 
                 clock: state.clock,

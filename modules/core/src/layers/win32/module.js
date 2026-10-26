@@ -26,6 +26,7 @@ import {
     ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
+import { serveCall } from './kernel32/cross-process.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
 import { createActivationContexts } from './kernel32/actctx.js';
@@ -538,9 +539,9 @@ export function createWin32Module(){
                 holds: object=>kernel.handles.holds(object),
             };
 
-            const { setError, lastErrorOf, setErrorOn: setErrorOnBlock } = createThreadState(
-                ()=>kernel.currentThread(),
+            const threadState = createThreadState(()=>kernel.currentThread(),
                 { readU32: memory.readU32, writeU32: memory.writeU32 });
+            const { setError, lastErrorOf, setErrorOn: setErrorOnBlock } = threadState;
             // Absent unless a bundle is mounted, in which case a read of a block
             // that is not here yet becomes a wait rather than a fault.
             const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
@@ -731,6 +732,23 @@ export function createWin32Module(){
                 if (thread)
                 {
                     setErrorOnBlock(thread, code);
+                }
+            };
+
+            /**
+             * The child a process handle names, for a call made in it; null
+             * for this process's pseudo-handle and for anything not a child.
+             *
+             * @param {number} handle
+             */
+            const childProcessOf = handle=>{
+                try
+                {
+                    return kernel.handles.resolve(handle >>> 0, 'process');
+                }
+                catch (e){
+                    void e;
+                    return null;
                 }
             };
 
@@ -1744,6 +1762,11 @@ export function createWin32Module(){
                     ...createHeapFunctions({
                         arena, allocator, readMemory, writeMemory, fillMemory,
                         guestHeap,
+                        // A child's memory, reached where the child runs.
+                        childOf: childProcessOf,
+                        askChild: config?.askChild,
+                        currentThread: ()=>kernel.currentThread(),
+                        setLastErrorFor: setErrorOn,
                         /** @param {number} bytes */
                         allocateCode: bytes=>heap.allocateCode(bytes),
                         setLastError: setError,
@@ -1761,6 +1784,7 @@ export function createWin32Module(){
                         }),
                     }),
                     ...createProcessFunctions({
+                        threadState,
                         processors,
                         performanceFrequency: config?.performanceFrequency,
                         readMemory,
@@ -1853,6 +1877,9 @@ export function createWin32Module(){
                     ...createSyncFunctions({
                         kernel,
                         processors,
+                        // A child's first thread, reached where the child runs.
+                        askChild: config?.askChild,
+                        setLastErrorFor: setErrorOn,
                         // A change notification watches a directory on the
                         // same volume every file call writes through.
                         volume,
@@ -2014,6 +2041,8 @@ export function createWin32Module(){
                         // And ends one running beside this process where it runs.
                         terminateChild: (/** @type {any} */ child, /** @type {number} */ code)=>
                             config?.terminate?.(child, code) === true,
+                        finishChild: (/** @type {any} */ child, /** @type {number} */ code)=>
+                            kernel.processes.finish(child, code),
                         readMemory,
                         writeMemory,
                         setLastError: setError,
@@ -2056,6 +2085,9 @@ export function createWin32Module(){
                         patchMemory: (address, bytes)=>
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
                         startup: ()=>config?.startup ?? null,
+                        askChild: config?.askChild,
+                        currentThread: ()=>kernel.currentThread(),
+                        setLastErrorFor: setErrorOn,
                         // Asked when a child is made: the table is assembled by then.
                         environment: ()=>{
                             const kernel32 = /** @type {any} */ (libraries['KERNEL32.dll']);
@@ -3623,6 +3655,8 @@ export function createWin32Module(){
                 kernel32: libraries['KERNEL32.dll'],
                 crt: libraries['msvcrt.dll'],
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                currentThread: ()=>kernel.currentThread(),
+                lastErrorOf,
                 arena,
                 setRegisters,
                 windows,
@@ -3991,19 +4025,20 @@ export function createWin32Module(){
                 rawInput: report=>windowService.rawInput(report),
 
                 /**
-                 * Whether a child this process started runs beside it, the
-                 * parent going on once the child is done: whenever the parent
-                 * has not exited, as a process on Windows lives until it ends
-                 * itself however it waits for its child -- blocked on the
-                 * handle, polling its exit code between sleeps, or idle in its
-                 * message loop. Only a parent that has exited is replaced, and
-                 * one blocked on a wait for all of a set the child's exit alone
-                 * cannot answer, which the child is marked for.
+                 * A call its parent makes in this process (`cross-process.js`),
+                 * made with this process's own kernel32 between its turns.
                  *
-                 * @param {any} child  The child's process record.
+                 * @param {import('./kernel32/cross-process.js').CrossCall} call
                  */
-                childWaitedOn: (/** @type {any} */ child)=>exitCode === null
-                    && child?.handsOver !== true,
+                answerCall: (/** @type {any} */ call)=>kernel.outside(()=>serveCall(call, {
+                    table: /** @type {any} */ (libraries['KERNEL32.dll']),
+                    allocate: bytes=>allocator.allocate(bytes),
+                    free: address=>{
+                        allocator.free(address);
+                    },
+                    readMemory,
+                    writeMemory,
+                })),
 
                 /**
                  * Ends this process from outside, as TerminateProcess does: with
@@ -4030,8 +4065,7 @@ export function createWin32Module(){
                  * @param {any} child @param {number} code
                  */
                 childExited(child, code){
-                    child.exitCode = code >>> 0;
-                    child.completed = true;
+                    kernel.processes.finish(child, code);
                     // A thread whose timed wait ran out has gone on, to
                     // whatever it waits on now.
                     const waiters = (child.waiters ?? []).filter(

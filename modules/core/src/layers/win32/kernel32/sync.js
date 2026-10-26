@@ -11,9 +11,9 @@ import { createSListFunctions } from './slist.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
 import { createChangeNotifications } from './changes.js';
 import { SELECTORS } from './seh.js';
-import { childWaitMark } from './threading.js';
 import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
 import { createThreadInfoFunctions } from './thread-info.js';
+import { askChild } from './cross-process.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -142,6 +142,10 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {import('./processor.js').Processors} [processors]  The process's
  *           processors and its affinity, which every other interface that
  *           counts or sets them shares. Absent, the kernel's alone.
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child where it runs: what a child's thread handle
+ *           is suspended, resumed and read through. Absent, no child is reached.
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
  */
 
 /**
@@ -362,6 +366,33 @@ export function createSyncFunctions(host){
         write(kernelTime, 0n);
         write(userTime, BigInt(Math.round(userMs * 10000)));
         return 1;
+    };
+
+    /**
+     * The same call made on a child's first thread, where the child runs, when
+     * the handle is the one CreateProcess handed out for it; null otherwise.
+     *
+     * @param {number} handle @param {string} name
+     * @param {import('./cross-process.js').CrossArg[]} rest  after the thread
+     * @param {(number | null)[]} [into]  after the thread
+     * @returns {number | Promise<number> | null}
+     */
+    const onChildThread = (handle, name, rest, into = [])=>{
+        const child = (handle >>> 0) === CURRENT_THREAD ? null : object(handle, 'process-thread');
+        if (!child)
+        {
+            return null;
+        }
+        const asked = host.setLastErrorFor ? askChild({ askChild: host.askChild,
+            writeMemory: host.writeMemory, currentThread: host.currentThread,
+            setLastErrorFor: host.setLastErrorFor }, child,
+        { call: name, args: [{ thread: child.threadId >>> 0 }, ...rest] }, [null, ...into]) : null;
+        if (asked === null)
+        {
+            host.setLastError?.(ERROR_ACCESS_DENIED);
+            return name === 'SuspendThread' || name === 'ResumeThread' ? WAIT_FAILED : 0;
+        }
+        return asked;
     };
 
     /** @param {number} handle */
@@ -735,12 +766,6 @@ export function createSyncFunctions(host){
                 /** Where each of `objects` sits in the caller's handle array. */
                 /** @type {number[]} */
                 const indices = [];
-                /** @type {any} */
-                let child = null;
-                /** Where a finished process sits in the caller's handle array. */
-                let finishedAt = -1;
-                /** And where the child still to run does. */
-                let childAt = -1;
                 for (let at = 0; at < total; at++)
                 {
                     const handle = view.getUint32(at * 4, true);
@@ -752,93 +777,14 @@ export function createSyncFunctions(host){
                         host.setLastError?.(ERROR_INVALID_HANDLE);
                         return WAIT_FAILED;
                     }
-                    if (kernel.handles.typeOf?.(untagged(handle)) === 'process')
-                    {
-                        if (kernel.processes?.finished?.(target))
-                        {
-                            finishedAt = at;
-                        }
-                        child = target;
-                        childAt = at;
-                        continue;
-                    }
-                    objects.push(target);
+                    // A child process is in a set as the event its exit sets,
+                    // one already set for one the engine answered for.
+                    objects.push(kernel.handles.typeOf?.(untagged(handle)) === 'process'
+                        ? target.exited : target);
                     indices.push(at);
                 }
 
                 const thread = host.currentThread();
-
-                // A process the engine already answered for -- a redistributable
-                // installer it stands in for -- is finished, so the wait is
-                // satisfied at once. The answer names its position in the
-                // caller's own array, which is what the index means.
-                if (finishedAt >= 0 && (waitAll === 0 || objects.length === 0))
-                {
-                    return WAIT_OBJECT_0 + finishedAt;
-                }
-
-                // A child process is in the set. It has not run while its
-                // parent can look -- it runs once the parent has nothing else
-                // to do -- so a real wait on a set containing one is the parent
-                // handing over to it. A wait for any of the set is noted on
-                // the child and answered when it exits, the engine having run
-                // it beside this process. Nothing of the parent's runs
-                // meanwhile, but the child can signal the rest of the set: a
-                // named event the parent made and the child opened by name.
-                // One it signalled came before its exit, and is the answer --
-                // taken as a wait takes it -- where Windows would have woken
-                // the parent with it while the child ran on; otherwise the
-                // child's own index. A wait for all of a set with more in it
-                // than the child cannot be satisfied by the child alone, and
-                // stays the old handover: the parent is replaced.
-                if (child !== null && (timeout >>> 0) === 0 && !child.started
-                    && !kernel.processes?.finished?.(child))
-                {
-                    child.polled = true;
-                }
-                if (child !== null && (timeout >>> 0) !== 0)
-                {
-                    if (waitAll === 0 || objects.length === 0)
-                    {
-                        const settle = ()=>{
-                            if (!objects.some(target=>ready(target, thread)))
-                            {
-                                return WAIT_OBJECT_0 + childAt;
-                            }
-                            const any = /** @type {{ index: number, result: number }} */ (
-                                kernel.waitAny(objects, thread));
-                            const base = any.result === KERNEL_ABANDONED
-                                ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
-                            return base + indices[any.index];
-                        };
-                        const reason = `child process ${child.imagePath}`;
-                        (child.waiters ??= []).push({ thread, result: WAIT_OBJECT_0 + childAt,
-                            settle, live: childWaitMark(thread, reason) });
-                    }
-                    else
-                    {
-                        child.handsOver = true;
-                    }
-                    // Timed only for a child running beside this process: one
-                    // run in its place has the parent's time stand still. One
-                    // to run beside is timed before it has started too -- it
-                    // starts at the parent's next turn, and a wait made before
-                    // then waited for ever on a child that never ends.
-                    kernel.block(thread, `child process ${child.imagePath}`,
-                        (child.started || child.beside) && (timeout >>> 0) !== INFINITE
-                            ? { deadline: kernel.clock.virtualTime() + (timeout >>> 0),
-                                result: WAIT_TIMEOUT }
-                            : undefined);
-                    return host.park(thread);
-                }
-                // A poll is a question, not a wait, and the honest answer about
-                // a child is that it is still running. So a poll for all of a
-                // set containing one can never be satisfied, and neither can a
-                // poll for any of a set that holds nothing else.
-                if (child !== null && (waitAll !== 0 || objects.length === 0))
-                {
-                    return WAIT_TIMEOUT;
-                }
 
                 // Zero is a poll: it asks whether the set is ready now and
                 // never blocks, so a program checking is not stopped by the
@@ -1050,6 +996,13 @@ export function createSyncFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
+                // The flags it asks for travel in the structure, and the rest comes back.
+                const child = onChildThread(handle, 'GetThreadContext',
+                    [{ inout: host.readMemory(out >>> 0, CONTEXT_BYTES).slice() }], [out >>> 0]);
+                if (child !== null)
+                {
+                    return child;
+                }
                 const thread = threadOf(handle);
                 if (!thread)
                 {
@@ -1083,7 +1036,13 @@ export function createSyncFunctions(host){
         SetThreadContext: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>{
+            handler: ([handle, context])=>{
+                const child = onChildThread(handle, 'SetThreadContext',
+                    [{ in: host.readMemory(context >>> 0, CONTEXT_BYTES).slice() }]);
+                if (child !== null)
+                {
+                    return child;
+                }
                 const thread = threadOf(handle);
                 if (!thread)
                 {
@@ -1152,6 +1111,11 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
+                const child = onChildThread(handle, 'SuspendThread', []);
+                if (child !== null)
+                {
+                    return child;
+                }
                 const thread = threadOf(handle);
                 if (!thread)
                 {
@@ -1179,17 +1143,12 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                // A child created with CREATE_SUSPENDED has a thread handle but
-                // no thread: the launcher writes into the child and resumes it,
-                // and this is the point at which the child is ready to take
-                // this process's place. It answers a suspend count of one, the
-                // count a freshly suspended child really has.
-                const child = object(handle >>> 0, 'process-thread');
-                if (child)
+                // A child's first thread is resumed where the child runs: one
+                // made CREATE_SUSPENDED runs its first instruction now.
+                const child = onChildThread(handle, 'ResumeThread', []);
+                if (child !== null)
                 {
-                    const wasSuspended = child.suspended;
-                    child.suspended = false;
-                    return wasSuspended ? 1 : 0;
+                    return child;
                 }
                 const thread = threadOf(handle);
                 if (!thread)

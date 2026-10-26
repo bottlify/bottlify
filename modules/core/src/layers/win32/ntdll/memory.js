@@ -51,6 +51,10 @@ const ERROR_INVALID_ADDRESS = 487;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {Record<string, Entry>} kernel32
  * @property {(bytes: number) => number} allocate  scratch for a region's query
+ * @property {() => any} [currentThread]
+ * @property {(thread: any) => number} [lastErrorOf]  A thread's last error, for
+ *           a call into another process answered after its thread stopped
+ *           running.
  */
 
 /** The kernel32 entries these are built over. */
@@ -63,6 +67,27 @@ export const MEMORY_ENTRIES = Object.freeze(['VirtualAllocEx', 'VirtualFreeEx',
  */
 export function createMemoryFunctions(host){
     const { kernel32 } = host;
+
+    /**
+     * What a kernel32 call answered, now or -- made in another process --
+     * later, and the last error it left the calling thread, which by then
+     * need not be the one running.
+     *
+     * @template T
+     * @param {number | Promise<number>} result
+     * @param {(value: number, error: () => number) => T} then
+     * @returns {T | Promise<T>}
+     */
+    const settled = (result, then)=>{
+        if (typeof result === 'number')
+        {
+            return then(result, ()=>kernel32.GetLastError.handler([]) >>> 0);
+        }
+        const thread = host.currentThread?.();
+        const lastErrorOf = host.lastErrorOf;
+        return result.then(value=>then(value, ()=>(lastErrorOf && thread
+            ? lastErrorOf(thread) >>> 0 : kernel32.GetLastError.handler([]) >>> 0)));
+    };
 
     /** @param {number} address */
     const read32 = address=>new DataView(host.readMemory(address >>> 0, 4).buffer)
@@ -80,24 +105,28 @@ export function createMemoryFunctions(host){
      * reports it freed; one page when there is nothing to say.
      *
      * @param {number} process @param {number} base
+     * @returns {number | Promise<number>}
      */
     const regionSize = (process, base)=>{
         scratch ||= host.allocate(MEMORY_BASIC_INFORMATION_SIZE);
-        if (scratch === 0 || !kernel32.VirtualQueryEx.handler(
-            [process, base, scratch, MEMORY_BASIC_INFORMATION_SIZE]))
+        if (scratch === 0)
         {
             return PAGE;
         }
-        return read32(scratch + REGION_SIZE);
+        const at = scratch;
+        return settled(kernel32.VirtualQueryEx.handler(
+            [process, base, at, MEMORY_BASIC_INFORMATION_SIZE]),
+        wrote=>(wrote ? read32(at + REGION_SIZE) : PAGE));
     };
 
     /**
      * What kernel32's failure was, as a status.
      *
+     * @param {() => number} error  the last error the call left
      * @param {number} [invalidAddress]  what ERROR_INVALID_ADDRESS stands for here
      */
-    const failure = (invalidAddress = STATUS_MEMORY_NOT_ALLOCATED)=>{
-        const code = kernel32.GetLastError.handler([]) >>> 0;
+    const failure = (error, invalidAddress = STATUS_MEMORY_NOT_ALLOCATED)=>{
+        const code = error();
         return code === ERROR_INVALID_ADDRESS
             ? invalidAddress
             : FROM_LAST_ERROR.get(code) ?? STATUS.UNSUCCESSFUL;
@@ -130,14 +159,15 @@ export function createMemoryFunctions(host){
             handler: ([process, baseOut, , sizeOut, type, protect])=>{
                 const asked = read32(baseOut);
                 const size = read32(sizeOut);
-                const got = kernel32.VirtualAllocEx.handler([process, asked, size, type, protect])
-                    >>> 0;
-                if (got === 0)
-                {
-                    return failure(STATUS_CONFLICTING_ADDRESSES);
-                }
-                report(baseOut, sizeOut, got, (asked === 0 ? got : asked) + size);
-                return STATUS.SUCCESS;
+                return settled(kernel32.VirtualAllocEx.handler(
+                    [process, asked, size, type, protect]), (got, error)=>{
+                    if ((got >>> 0) === 0)
+                    {
+                        return failure(error, STATUS_CONFLICTING_ADDRESSES);
+                    }
+                    report(baseOut, sizeOut, got >>> 0, (asked === 0 ? got >>> 0 : asked) + size);
+                    return STATUS.SUCCESS;
+                });
             },
         },
 
@@ -153,13 +183,16 @@ export function createMemoryFunctions(host){
                 const size = read32(sizeOut);
                 // A size of zero is the whole region, which is what is reported
                 // back; it is known only before the region is gone.
-                const end = base + (size === 0 ? regionSize(process, base) : size);
-                if (!kernel32.VirtualFreeEx.handler([process, base, size, type]))
-                {
-                    return failure();
-                }
-                report(baseOut, sizeOut, base, end);
-                return STATUS.SUCCESS;
+                return settled(size === 0 ? regionSize(process, base) : size, extent=>
+                    settled(kernel32.VirtualFreeEx.handler([process, base, size, type]),
+                        (freed, error)=>{
+                            if (!freed)
+                            {
+                                return failure(error);
+                            }
+                            report(baseOut, sizeOut, base, base + extent);
+                            return STATUS.SUCCESS;
+                        }));
             },
         },
 
@@ -177,12 +210,15 @@ export function createMemoryFunctions(host){
             handler: ([process, baseOut, sizeOut, protect, old])=>{
                 const base = read32(baseOut);
                 const size = read32(sizeOut);
-                if (!kernel32.VirtualProtectEx.handler([process, base, size, protect, old]))
-                {
-                    return failure();
-                }
-                report(baseOut, sizeOut, base, base + size);
-                return STATUS.SUCCESS;
+                return settled(kernel32.VirtualProtectEx.handler(
+                    [process, base, size, protect, old]), (changed, error)=>{
+                    if (!changed)
+                    {
+                        return failure(error);
+                    }
+                    report(baseOut, sizeOut, base, base + size);
+                    return STATUS.SUCCESS;
+                });
             },
         },
 
@@ -204,17 +240,18 @@ export function createMemoryFunctions(host){
                 {
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
-                const wrote = kernel32.VirtualQueryEx.handler([process, base, buffer, length])
-                    >>> 0;
-                if (wrote === 0)
-                {
-                    return failure(STATUS.INVALID_PARAMETER);
-                }
-                if ((returned >>> 0) !== 0)
-                {
-                    write32(returned, wrote);
-                }
-                return STATUS.SUCCESS;
+                return settled(kernel32.VirtualQueryEx.handler([process, base, buffer, length]),
+                    (wrote, error)=>{
+                        if ((wrote >>> 0) === 0)
+                        {
+                            return failure(error, STATUS.INVALID_PARAMETER);
+                        }
+                        if ((returned >>> 0) !== 0)
+                        {
+                            write32(returned, wrote >>> 0);
+                        }
+                        return STATUS.SUCCESS;
+                    });
             },
         },
 
@@ -225,7 +262,8 @@ export function createMemoryFunctions(host){
         NtReadVirtualMemory: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>(kernel32.ReadProcessMemory.handler(args) ? STATUS.SUCCESS : failure()),
+            handler: args=>settled(kernel32.ReadProcessMemory.handler(args),
+                (read, error)=>(read ? STATUS.SUCCESS : failure(error))),
         },
 
         /**
@@ -235,7 +273,8 @@ export function createMemoryFunctions(host){
         NtWriteVirtualMemory: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>(kernel32.WriteProcessMemory.handler(args) ? STATUS.SUCCESS : failure()),
+            handler: args=>settled(kernel32.WriteProcessMemory.handler(args),
+                (wrote, error)=>(wrote ? STATUS.SUCCESS : failure(error))),
         },
     };
 }

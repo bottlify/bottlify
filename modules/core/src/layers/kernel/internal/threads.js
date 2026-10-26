@@ -2449,6 +2449,32 @@ export function createScheduler(options){
         current: ()=>current,
 
         /**
+         * Runs `fn` between turns with no thread on the CPU: the one there is
+         * switched away from as a turn's end would, its registers saved, and
+         * whichever runs next is put back from its own. A call another process
+         * makes in this one (`cross-process.js`) is no thread's call, and a
+         * thread it suspends or whose registers it reads or replaces is one
+         * that stopped where its saved state says.
+         *
+         * @template T
+         * @param {() => T} fn
+         * @returns {T}
+         */
+        outside(fn){
+            if (current)
+            {
+                current.context = cpu.captureContext(current.context);
+                if (current.state === ThreadState.RUNNING)
+                {
+                    current.state = ThreadState.READY;
+                    current.readySince = now();
+                }
+                current = null;
+            }
+            return fn();
+        },
+
+        /**
          * Code a slice is not to end inside: a routine of the host's that
          * other threads must never see half done, and that never waits.
          *

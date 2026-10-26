@@ -35,21 +35,6 @@ import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, eventStateCode, releaseMute
 /** Waits with this timeout never give up. */
 const INFINITE = 0xffffffff;
 
-/**
- * A thread's wait on a child process, marked so the child's exit wakes it
- * only while it is still that wait: one that timed out and went on to wait
- * on something else is not woken out of that by a child it stopped waiting
- * for.
- *
- * @param {any} thread @param {string} reason  what the thread is blocked on
- * @returns {() => boolean} whether the thread is still in this wait
- */
-export function childWaitMark(thread, reason){
-    const mark = {};
-    thread.childWait = mark;
-    return ()=>thread.childWait === mark && thread.waitingOn === reason;
-}
-
 /** What the guest gets back when a handle is not what it claims to be. */
 const WAIT_FAILED = 0xffffffff;
 /** The wait ran out of time; the object was never signalled. */
@@ -955,41 +940,17 @@ export function createThreadingFunctions(host){
                             });
                         return host.park(thread);
                     }
-                    // A child the engine already answered for -- a
-                    // redistributable installer it stands in for -- is
-                    // finished, and a wait on it returns at once with its exit
-                    // code, as on any already-signalled object.
-                    if (kernel.processes?.finished?.(target))
-                    {
-                        return WAIT_OBJECT_0;
-                    }
-                    // A child process that has not started runs once the
-                    // parent has nothing else to do. So a poll says the child
-                    // is still running, which is true, and a real wait is the
-                    // parent handing over to it. The waiter is noted on the
-                    // child: when it exits, this thread is woken with the
-                    // wait's answer, and the parent goes on after its child as
-                    // on Windows. A timeout is armed only for a child running
-                    // beside this process: one run in its place has the
-                    // parent's time stand still. A poll is noted too: a parent
-                    // that polls in a loop that never blocks waits all the
-                    // same.
+                    // A child's exit is an event of its own: set when it
+                    // ends, set already for one the engine answered for -- a
+                    // redistributable installer it stands in for -- and waited
+                    // on as any other object is, timed or not.
                     if (wait === 0)
                     {
-                        if (!target.started)
-                        {
-                            target.polled = true;
-                        }
-                        return WAIT_TIMEOUT;
+                        return kernel.poll(target.exited, thread) ?? WAIT_TIMEOUT;
                     }
-                    const reason = `child process ${target.imagePath}`;
-                    (target.waiters ??= []).push({ thread, result: WAIT_OBJECT_0,
-                        live: childWaitMark(thread, reason) });
-                    const timed = (target.started || target.beside) && wait !== INFINITE;
-                    kernel.block(thread, reason, timed
-                        ? { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }
-                        : undefined);
-                    return host.park(thread);
+                    return settle(kernel.wait(target.exited, thread, wait === INFINITE
+                        ? undefined
+                        : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
                 }
 
                 // A timer is ordinary here. Its signal is a property of the
