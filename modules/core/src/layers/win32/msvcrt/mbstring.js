@@ -25,7 +25,7 @@ import {
     CT_BLANK, CT_HEX, CT_LETTER, CT_ALPHA,
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
-import { wideStringAt } from './widetext.js';
+import { compareUnitsAt, wideStringAt } from './widetext.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
 import {
     SHIFT_JIS, jisToShiftJis, shiftJisToJis, toHiragana, toKatakana, isKatakana, toFullWidth,
@@ -104,6 +104,14 @@ export function createWideFunctions(host){
      * @param {number} pointer
      */
     const readWide = pointer=>wideStringAt(host.readMemory, pointer);
+
+    /**
+     * A wide string's first `count` units at most, read no further: an
+     * n-bounded call stops at its count whether or not a terminator came.
+     *
+     * @param {number} pointer @param {number} count
+     */
+    const readWideUpTo = (pointer, count)=>wideStringAt(host.readMemory, pointer, count);
 
     /** @param {number} pointer @param {string} text @param {boolean} terminate */
     const writeWide = (pointer, text, terminate = true)=>{
@@ -199,7 +207,7 @@ export function createWideFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const length = count >>> 0;
-                const text = readWide(source).slice(0, length);
+                const text = readWideUpTo(source, length);
                 // Padded to the full count and unterminated when it truncates,
                 // exactly as the narrow strncpy does.
                 writeWide(destination, text.padEnd(length, '\0'), false);
@@ -260,7 +268,7 @@ export function createWideFunctions(host){
             handler: ([destination, source, count])=>{
                 const existing = readWide(destination);
                 writeWide(destination + existing.length * 2,
-                    readWide(source).slice(0, count >>> 0));
+                    readWideUpTo(source, count >>> 0));
                 return destination;
             },
         },
@@ -273,9 +281,8 @@ export function createWideFunctions(host){
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([left, right, count])=>compare(
-                readWide(left).slice(0, count >>> 0),
-                readWide(right).slice(0, count >>> 0)),
+            handler: ([left, right, count])=>Math.sign(
+                compareUnitsAt(host.readMemory, left, right, 2, count >>> 0)),
         },
 
         /** int _wcsicmp(const wchar_t *, const wchar_t *) */
@@ -333,18 +340,8 @@ export function createWideFunctions(host){
                 {
                     return 0;
                 }
-                const a = readWide(left).slice(0, limit);
-                const b = readWide(right).slice(0, limit);
-                for (let at = 0; at < limit; at++)
-                {
-                    const x = folded(LOWER, a.charCodeAt(at) || 0);
-                    const y = folded(LOWER, b.charCodeAt(at) || 0);
-                    if (x !== y || x === 0)
-                    {
-                        return x - y;
-                    }
-                }
-                return 0;
+                return compareUnitsAt(host.readMemory, left, right, 2, limit,
+                    unit=>folded(LOWER, unit));
             },
         },
 
