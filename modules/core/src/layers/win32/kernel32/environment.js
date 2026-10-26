@@ -31,6 +31,13 @@ import {
 const ERROR_ENVVAR_NOT_FOUND = 203;
 const ERROR_INVALID_PARAMETER = 87;
 
+/**
+ * The key under which the table answers the variables as they are now, for
+ * the CreateProcess of this process: a child given no environment block of
+ * its own inherits its parent's, changes included.
+ */
+export const ENVIRONMENT_NOW = Symbol('environmentNow');
+
 /** Where Windows lives, as a program of this era expects to find it. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
 const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
@@ -265,6 +272,9 @@ export function createEnvironmentFunctions(host){
     };
 
     return {
+        /** @returns {Record<string, string>} */
+        [ENVIRONMENT_NOW]: ()=>Object.fromEntries(variables.entries()),
+
         /** LPSTR GetCommandLineA(VOID) */
         GetCommandLineA: {
             argBytes: 0,

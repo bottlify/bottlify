@@ -312,6 +312,33 @@ test('the child is handed the STARTUPINFO its parent gave, a NULL desktop the pa
     assert.equal(host.kernel.processes.all()[2].startup, null, 'no STARTUPINFO, nothing handed');
 });
 
+test('the child\'s environment is the block its parent handed, or the parent\'s own', ()=>{
+    // Wine's kernel32 test_Environment.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    host.environment = ()=>({ PATH: 'C:\\WINDOWS', FOO: 'set by the parent' });
+    const fns = createSpawnFunctions(host);
+    const block = '=C:=C:\\FOO\\BAR\0PATH=C:\\MY\\OWN\\DIR\0FOO=BAR\0EMPTY=\0\0';
+    putAnsi(host, 0x700, block.slice(0, -1));
+    const childOf = (/** @type {number} */ at)=>host.kernel.processes.all()[at].environment;
+
+    fns.CreateProcessA.handler([putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0x700, 0, 0, 0]);
+    assert.deepEqual(childOf(0), { '=C:': 'C:\\FOO\\BAR', PATH: 'C:\\MY\\OWN\\DIR', FOO: 'BAR',
+        EMPTY: '' }, 'the per-drive directory\'s name begins with its \'=\'');
+
+    // CreateProcessW reads an ANSI block unless told the block is wide.
+    fns.CreateProcessW.handler([putWide(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0x700, 0, 0, 0]);
+    assert.equal(childOf(1).FOO, 'BAR');
+    putWide(host, 0x900, 'FOO=wide');
+    host.bytes[0x900 + 18] = 0;
+    host.bytes[0x900 + 19] = 0;
+    fns.CreateProcessW.handler([putWide(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0x400, 0x900, 0, 0,
+        0]);
+    assert.deepEqual(childOf(2), { FOO: 'wide' }, 'CREATE_UNICODE_ENVIRONMENT');
+
+    fns.CreateProcessA.handler([putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.equal(childOf(3).FOO, 'set by the parent', 'no block: the parent\'s variables now');
+});
+
 test('a name with no extension gets .exe, as CreateProcess gives it', ()=>{
     const host = fakeHost({ files: ['C:\\App\\setup.exe'] });
     const fns = createSpawnFunctions(host);

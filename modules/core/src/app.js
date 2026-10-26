@@ -356,6 +356,9 @@ const hashText = (hash, text)=>{
  * @property {import('./layers/win32/kernel32/startup-info.js').StartupRecord | null} [startup]
  *           The STARTUPINFO a child's parent handed CreateProcess, which its
  *           GetStartupInfo answers.
+ * @property {Record<string, string>} [environment]
+ *           The variables a process starts with: a child's are the block its
+ *           parent handed CreateProcess, or the parent's own as they were then.
  * @property {{ memory: WebAssembly.Memory, guestEnd: number } | null} [reusedMemory]
  *           The memory of a process of the run that has gone, for this one to
  *           take: set by the run, not something a caller supplies.
@@ -4880,6 +4883,9 @@ async function buildApp(options){
             processId: options.processId,
             standardFiles: options.standardFiles,
             startup: options.startup,
+            // A child's variables, as its parent handed them on; absent, the
+            // machine's own.
+            environment: options.environment,
             // The run's table of class objects served out of process, and this
             // process's name in it: shared for the same reason.
             com: options.com,
@@ -10148,6 +10154,7 @@ export async function createApp(options){
             standardFiles: request.standardFiles,
             startDirectory: request.startDirectory,
             startup: request.startup ?? null,
+            ...request.environment ? { environment: request.environment } : {},
             audio: sound.options,
         });
         sound.announce(line.current);
@@ -10564,6 +10571,7 @@ export async function createApp(options){
                         commandLine: request.commandLine,
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
+                        ...request.environment ? { environment: request.environment } : {},
                         patches: request.patches,
                         processId: request.id,
                         mainThreadId: request.threadId,
@@ -10846,6 +10854,7 @@ export async function createApp(options){
                 commandLine: request.commandLine,
                 startDirectory: request.startDirectory,
                 startup: request.startup ?? null,
+                ...request.environment ? { environment: request.environment } : {},
                 patches: request.patches,
                 id: request.id,
                 threadId: request.threadId,
@@ -10903,6 +10912,7 @@ export async function createApp(options){
                         standardFiles: request.standardFiles,
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
+                        ...request.environment ? { environment: request.environment } : {},
                         audio: sound.options,
                     });
                     sound.announce(child);
@@ -11078,6 +11088,7 @@ export async function createApp(options){
                 commandLine: request.commandLine,
                 startDirectory: request.startDirectory,
                 startup: request.startup ?? null,
+                ...request.environment ? { environment: request.environment } : {},
                 patches: request.patches,
                 processId: request.id,
                 mainThreadId: request.threadId,

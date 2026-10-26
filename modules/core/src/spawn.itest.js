@@ -744,3 +744,71 @@ test('a child reads the STARTUPINFO its parent handed CreateProcess, whichever w
             assert.equal((await app.run({ timeoutMs: 60000 })) >>> 0, expected, name);
         }
     });
+
+test('a child starts with the environment its parent handed CreateProcess, whichever way it runs',
+    { timeout: 120000 }, async t=>{
+        // Wine's kernel32 test_Environment: lpEnvironment is the child's whole
+        // environment. Each generation hands on a G of its own, so a child
+        // given its parent's variables instead answers wrongly.
+        /** @param {string} command @param {number} letter @param {boolean} [waits] */
+        const parent = (command, letter, waits = true)=>buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
+                'GetExitCodeProcess', 'ExitProcess'] },
+            data: {
+                command: ascii(command),
+                environment: [0x47, 0x3d, letter, 0, 0],
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+                code: u32(0),
+            },
+            codeSize: 0x60,
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x68, ...u32(at('environment')), 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                ...waits ? [
+                    0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                    0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                    0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+                    0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+                    0xff, 0x35, ...u32(at('code')),
+                ] : [0x6a, 0],
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const child = buildExe({
+            imports: { 'KERNEL32.dll': ['GetEnvironmentVariableA', 'ExitProcess'] },
+            data: { name: ascii('G'), value: new Array(8).fill(0) },
+            code: ({ iat, at })=>[
+                // GetEnvironmentVariableA("G", value, 8); ExitProcess(value[0] + (eax << 8))
+                0x6a, 8, 0x68, ...u32(at('value')), 0x68, ...u32(at('name')),
+                0xff, 0x15, ...u32(iat('GetEnvironmentVariableA')),
+                0xc1, 0xe0, 0x08, 0x0f, 0xb6, 0x0d, ...u32(at('value')), 0x01, 0xc8,
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const files = [
+            { path: 'C:\\App\\child.exe', bytes: child },
+            { path: 'C:\\App\\middle.exe', bytes: parent('C:\\App\\inner.exe', 0x62) },
+            { path: 'C:\\App\\inner.exe', bytes: parent('C:\\App\\child.exe', 0x63) },
+        ];
+        for (const [name, concurrency, top, waits] of /** @type {const} */ ([
+            ['its parent waiting on it', 1, 'C:\\App\\child.exe', true],
+            ['in its parent\'s place', 1, 'C:\\App\\child.exe', false],
+            ['in a worker of its own', 2, 'C:\\App\\child.exe', true],
+            ['beside its parent in its parent\'s worker', 2, 'C:\\App\\middle.exe', true],
+        ]))
+        {
+            const app = await createApp({
+                executable: parent(top, 0x61, waits),
+                imagePath: 'C:\\App\\parent.exe',
+                engine: 'cork',
+                concurrency,
+                storage: { load: async()=>({ files }) },
+            });
+            t.after(()=>app.dispose());
+            const letter = top === 'C:\\App\\child.exe' ? 0x61 : 0x63;
+            assert.equal((await app.run({ timeoutMs: 60000 })) >>> 0, letter + (1 << 8), name);
+        }
+    });

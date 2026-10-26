@@ -34,7 +34,7 @@
  */
 
 import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
-import { encodeAnsi } from './locale.js';
+import { decodeAnsi, encodeAnsi } from './locale.js';
 import { STARTUPINFO, readStartupInfo } from './startup-info.js';
 
 /** Codes this surface reports. */
@@ -53,6 +53,10 @@ const ERROR_OBJECT_NAME_EXISTS = 5010;
 const ERROR_NOACCESS = 998;
 /** QueryFullProcessImageName's one flag: the path in the object manager's terms. */
 const PROCESS_NAME_NATIVE = 1;
+/** CreateProcess's flag saying the environment block is UTF-16. */
+const CREATE_UNICODE_ENVIRONMENT = 0x400;
+/** The most of an environment block read: a block runs to two NULs well before. */
+const ENVIRONMENT_LIMIT = 0x10000;
 
 /**
  * Writes into this process's memory as WriteProcessMemory writes into its
@@ -493,6 +497,9 @@ export function createSpawner(host){
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => import('./startup-info.js').StartupRecord | null} [startup]
  *           This process's own, whose desktop a child named none of inherits.
+ * @property {() => Record<string, string>} [environment]
+ *           This process's variables as they are now, which a child given no
+ *           block inherits.
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]
  *           Writes into this process through the pages' protection
  *           (`writeThroughProtection`); false when not all of it is mapped.
@@ -528,6 +535,44 @@ export function createSpawnFunctions(host){
     const readDword = address=>{
         const b = host.readMemory(address, 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
+    };
+
+    /**
+     * An environment block as variables: NAME=VALUE entries, each ended by a
+     * NUL and the block by another, ANSI unless CREATE_UNICODE_ENVIRONMENT
+     * says UTF-16 -- whichever CreateProcess was called. A name may begin
+     * with '=', as the per-drive directories' do; the value starts at the
+     * first '=' after it.
+     *
+     * @param {number} address @param {boolean} wide
+     * @returns {Record<string, string>}
+     */
+    const environmentBlock = (address, wide)=>{
+        const unit = wide ? 2 : 1;
+        /** @type {Record<string, string>} */
+        const variables = {};
+        let entry = '';
+        for (let at = address; at < address + ENVIRONMENT_LIMIT; at += unit)
+        {
+            const bytes = host.readMemory(at, unit);
+            const code = wide ? bytes[0] | bytes[1] << 8 : bytes[0];
+            if (code !== 0)
+            {
+                entry += wide ? String.fromCharCode(code) : decodeAnsi(bytes.subarray(0, 1));
+                continue;
+            }
+            if (entry === '')
+            {
+                break;
+            }
+            const cut = entry.indexOf('=', 1);
+            if (cut > 0)
+            {
+                variables[entry.slice(0, cut)] = entry.slice(cut + 1);
+            }
+            entry = '';
+        }
+        return variables;
     };
 
     /**
@@ -639,8 +684,11 @@ export function createSpawnFunctions(host){
      * @param {number} flags @param {number} information @param {number} [startup]
      * @param {string} [directory]
      * @param {boolean} [wide]  CreateProcessW's, whose STARTUPINFO's strings are wide.
+     * @param {number} [environment]  lpEnvironment.
      */
-    const create = (named, line, flags, information, startup = 0, directory = '', wide = false)=>{
+    const create = (named, line, flags, information, startup = 0, directory = '', wide = false,
+        environment = 0)=>
+    {
         // Cleared first: a call that fails leaves no handle or id in it.
         if ((information >>> 0) !== 0)
         {
@@ -666,6 +714,9 @@ export function createSpawnFunctions(host){
             address=>(wide ? host.readWideString(address, MAX_PATH * 2)
                 : host.readCString(address, MAX_PATH)),
             host.startup?.()?.desktop ?? null);
+        // The block asked for, or this process's variables as they are now.
+        made.environment = (environment >>> 0) === 0 ? host.environment?.() ?? null
+            : environmentBlock(environment >>> 0, (flags & CREATE_UNICODE_ENVIRONMENT) !== 0);
         if ((information >>> 0) !== 0)
         {
             writeDword((information >>> 0) + PI_PROCESS_HANDLE, made.handle);
@@ -695,7 +746,7 @@ export function createSpawnFunctions(host){
         CreateProcessA: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, , directory, startup,
+            handler: ([application, commandLine, , , , flags, environment, directory, startup,
                 information])=>create(
                 (application >>> 0) === 0 ? null : host.readCString(application >>> 0, MAX_PATH),
                 (commandLine >>> 0) === 0
@@ -703,14 +754,14 @@ export function createSpawnFunctions(host){
                     : host.readCString(commandLine >>> 0, MAX_COMMAND_LINE),
                 flags >>> 0, information, startup,
                 (directory >>> 0) === 0 ? '' : host.readCString(directory >>> 0, MAX_PATH),
-                false),
+                false, environment),
         },
 
         /** BOOL CreateProcessW(...) — the same call, read as wide strings. */
         CreateProcessW: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, , directory, startup,
+            handler: ([application, commandLine, , , , flags, environment, directory, startup,
                 information])=>create(
                 (application >>> 0) === 0 ? null
                     : host.readWideString(application >>> 0, MAX_PATH * 2),
@@ -719,7 +770,7 @@ export function createSpawnFunctions(host){
                     : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE * 2),
                 flags >>> 0, information, startup,
                 (directory >>> 0) === 0 ? '' : host.readWideString(directory >>> 0, MAX_PATH * 2),
-                true),
+                true, environment),
         },
 
         /**

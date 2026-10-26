@@ -6,8 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment }
-    from './environment.js';
+import {
+    ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
+} from './environment.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
@@ -226,6 +227,20 @@ test('setting a variable is visible to the next reader', ()=>{
     assert.equal(fns.SetEnvironmentVariableA.handler([0x100, 0x140]), 1);
     assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0x200, 64]), 5);
     assert.equal(host.readAnsi(0x200), 'value');
+});
+
+test('the variables as they are now, for a child made now, changes included', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    host.plant(0x100, 'NEW');
+    host.plant(0x140, 'value');
+    fns.SetEnvironmentVariableA.handler([0x100, 0x140]);
+    host.plant(0x180, 'TEMP');
+    fns.SetEnvironmentVariableA.handler([0x180, 0]);
+
+    const now = fns[ENVIRONMENT_NOW]();
+    assert.equal(now.NEW, 'value');
+    assert.equal('TEMP' in now, false, 'one removed is gone');
 });
 
 test('a null value removes the variable', ()=>{

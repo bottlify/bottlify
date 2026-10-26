@@ -22,8 +22,9 @@ import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions, encodeAnsi } from './kernel32/locale.js';
-import { createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment }
-    from './kernel32/environment.js';
+import {
+    ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
+} from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
@@ -1952,6 +1953,11 @@ export function createWin32Module(){
                         patchMemory: (address, bytes)=>
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
                         startup: ()=>config?.startup ?? null,
+                        // Asked when a child is made: the table is assembled by then.
+                        environment: ()=>{
+                            const kernel32 = /** @type {any} */ (libraries['KERNEL32.dll']);
+                            return kernel32[ENVIRONMENT_NOW]?.() ?? {};
+                        },
                     }),
                     ...seh.table,
                     ...createModuleFunctions({
