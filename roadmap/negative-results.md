@@ -1796,3 +1796,30 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   plan not recorded.
 - **Decision.** Not taken; packs of 32 stay. A later try would merge only packs that have lost
   no region for a while.
+
+### 2026-10-26: the 32-bit translator's store into code, its slow path cut or moved out
+
+- **Idea.** In long mode the granule test of a store's page (`codeHit` per granule) on the slow
+  path of every store cost x264 a fifth of its speed while never run, and a store leaving on a
+  flagged page, tested to the granule only after it kept leaving, won that back (35bbf05d). The
+  32-bit translator's stores carry the same slow path inline (`noteCodeStore`, the group
+  checks' `windowHit`/`spanHit`). Arms: the stores' slow path a plain leave before the
+  instruction (min), the same with the group checks' slow path a leave too (min2), and the slow
+  path whole but in one shared helper, a call, an `if` and the stale flag left inline (outl).
+- **Workload.** cork-bench, every 32-bit workload; Chromium (`browser.mjs --paired --runs 1
+  --rounds 40`, Chrome for Testing 153.0.8010.12, V8 15.3.76.4, headless), two runs; node 22.22
+  (`modules/cork/bench/run.mjs --reps 3`), three rounds an arm, alternated. Base a8bc8c90.
+  Checksums equal everywhere.
+- **Values.** min and min2 are invalid as a measure of the slow path's weight: a leave before
+  a block's first instruction makes the block no way in (`leaving`), so regions split (sort: 5
+  regions, 19 403 module bytes -> 44 regions, 159 618 bytes, 37 relinks) and sort and str ran
+  4.2-5.4 times slower with no leave taken. outl against base, Chromium, median ratio of two
+  runs: every workload within 0.95-1.05 and none past the noise in the same direction in both;
+  node geomean 1619 / 1607 / 1662 against 1677 / 1677 / 1625 MIPS (base spread 3.4 %). Module
+  bytes base against outl over the 22 images: within -2.9 to +1.3 %, regions the same.
+- **Why.** The 32-bit translator's stores fall mostly in group checks, whose slow path already
+  sits in a guard; the inline `noteCodeStore` paths are about 1 % of the module bytes, where the
+  long-mode ones were on every store of large regions.
+- **Machine.** A cloud container (Xeon 2.30 GHz, 4 vCPU), node 22.22; GPU, driver, power plan
+  and bundle hash not recorded.
+- **Decision.** Not taken; the long-mode scheme is not ported to the 32-bit translator.
