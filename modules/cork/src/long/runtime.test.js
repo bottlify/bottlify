@@ -80,7 +80,7 @@ function machine(transfers = true, checkReads = undefined, looseStacks = undefin
     }
     const pages = createPageTable(memory, layout);
     const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads,
-        looseStacks, leafCalls, volatileWindowMs,
+        looseStacks, leafCalls, volatileWindowMs, callTargets: true,
         ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }) });
     const state = blockState64({ memory, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
@@ -881,11 +881,12 @@ test('a store beside code on its page stays in the region; one into the code sti
         assert.deepEqual(failures, [], `budget ${budget}`);
         assert.equal(exits, cases.length);
         // Two stores a round on f's page: each left the region before the
-        // granules were looked at, 8000 times; now only the store into f.
-        assert.ok(stats.exits < 20, JSON.stringify(stats));
+        // granules were looked at, 8000 times; now each until it is tested
+        // to the granule (`GRANULAR_AFTER`), and the store into f.
+        assert.ok(stats.granular === 2 && stats.exits < 60, JSON.stringify(stats));
     }
-    // A watched page is marked written by the translated store itself.
-    // mov ecx, 1000; l: mov [rbx], rcx; dec ecx; jnz l
+    // A watched page leaves at its first store, which marks it written, and
+    // not at the next 999. mov ecx, 1000; l: mov [rbx], rcx; dec ecx; jnz l
     const m = machine();
     load(m, { ...CORPUS.cases[0], code: 'b9e803000048890bffc975f9' });
     const page = Number.parseInt(CORPUS.cases[0].regs[3], 16) >>> 12;
@@ -894,7 +895,7 @@ test('a store beside code on its page stays in the region; one into the code sti
     assert.throws(()=>m.runner.run(m.state, 1000000),
         (/** @type {{ eip?: number }} */ error)=>error.eip === EXIT);
     assert.equal(flags[page], PageFlag.WRITTEN);
-    assert.equal(m.runner.stats.exits, 0);
+    assert.equal(m.runner.stats.exits, 1);
 });
 
 test('a page whose code is written again and again is left to the interpreter', ()=>{

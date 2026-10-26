@@ -31,8 +31,8 @@ import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
 import { switchCases } from './switch.js';
 import { createX87Calls } from './x87.js';
-import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, storeHitModule,
-    translates } from './emit.js';
+import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, translates }
+    from './emit.js';
 
 /** Instructions a block holds at most. */
 const BLOCK_LIMIT = 64;
@@ -61,6 +61,24 @@ const PREDICT_AFTER = 48;
 const PREDICT_SHARE = 8;
 const PREDICT_CALLEES = 4;
 const REFORMS = 3;
+/**
+ * The share of the run's time the regions formed again for their calls'
+ * callees may take: a decision due past it waits for more samples. The
+ * 32-bit runtime forms them again on its translator's thread; here the
+ * forming is the run's own, and x264's 183 sites, each a large region formed
+ * again, took more of a 15 s run than the callees formed in gave back.
+ */
+const REFORM_SHARE = 0.05;
+
+/**
+ * The times a store leaves its region at one address before the region is
+ * formed again testing it to the granule (`granular`): a store to a page that
+ * holds code leaves for the interpreter, which drops what it wrote over; one
+ * that keeps leaving writes beside the code, data on the code's page, and is
+ * let through when it reaches no translated code. Only such stores carry the
+ * test: on every store, its code alone cost large regions a fifth of their speed.
+ */
+const GRANULAR_AFTER = 16;
 
 /**
  * A page whose code is written again and again -- a span drawer storing its
@@ -107,13 +125,16 @@ const VOLATILE_HOLD_MS = 2000;
  *     where float arithmetic puts an invalid operation's NaN right; `leafCalls`, unless
  *     false, a direct call's small callee is formed into its caller (`isLeaf`); false,
  *     every call is a wasm call, one into the region's own blocks too; `callTargets`,
- *     unless false, indirect calls are sampled and the small callees a call goes to
- *     formed into its region (`sampleCalls`); `volatileWindowMs`, the window a page's
+ *     true, indirect calls are sampled and the small callees a call goes to formed
+ *     into its region (`sampleCalls`) -- off by default: its regions formed again on the
+ *     run's own thread, then started again on the engine's first tier, cost x264 and
+ *     zstd more than the callees formed in gave back (roadmap/negative-results.md,
+ *     2026-10-26); `volatileWindowMs`, the window a page's
  *     code is written `VOLATILE_AFTER` times in before it is left to the interpreter
  */
 export function createLongRunner(settings){
     const { memory, layout, pages, hot = 2, below = 0x10000,
-        transfers = features().tailCalls, leafCalls = true, callTargets = true,
+        transfers = features().tailCalls, leafCalls = true, callTargets = false,
         defaultNaNNegative = features().defaultNaNNegative,
         volatileWindowMs = VOLATILE_WINDOW_MS } = settings;
     let readsChecked = settings.checkReads === true;
@@ -130,7 +151,11 @@ export function createLongRunner(settings){
     const limits = memoryLimits(memory);
     const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0,
         entered: 0, readSwitches: 0, stackSwitches: 0, switches: 0, leaves: 0, predicted: 0,
-        quiet: 0, volatilePages: 0 };
+        quiet: 0, deferred: 0, volatilePages: 0, granular: 0 };
+    /** By address, the times a region left before the instruction there. @type {Map<number, number>} */
+    const exitsAt = new Map();
+    /** The stores tested to the granule (`GRANULAR_AFTER`). @type {Set<number>} */
+    const granular = new Set();
     /**
      * By page, the writes that dropped its regions: how many since `since`, the
      * window's start, and how many times it was left to the interpreter.
@@ -199,6 +224,10 @@ export function createLongRunner(settings){
     const predictions = new Map();
     /** By call site, how often its regions were formed again for it. @type {Map<number, number>} */
     const reformsOf = new Map();
+    /** The regions dropped to be formed again with their calls' callees, and what forming them cost. */
+    const reforming = new Set();
+    let reformMs = 0;
+    const born = performance.now();
     /**
      * The instructions run on the interpreter one at a time -- the one a block
      * stopped before, or a start no block holds -- by mnemonic, counted each
@@ -217,8 +246,6 @@ export function createLongRunner(settings){
     // address has no region.
     const table = new WebAssembly.Table({ element: 'anyfunc', initial: 256 });
     const miss = new WebAssembly.Instance(new WebAssembly.Module(missFunction())).exports.miss;
-    const { storeHit } = new WebAssembly.Instance(new WebAssembly.Module(
-        storeHitModule(layout, limits)), { env: { memory } }).exports;
     // The record a run of regions leaves in the state block, folded into the
     // flags word before anything but translated code looks at it.
     const fold = /** @type {() => void} */ (new WebAssembly.Instance(
@@ -401,6 +428,18 @@ export function createLongRunner(settings){
      * @param {number} entry
      */
     const form = entry=>{
+        if (!reforming.delete(entry))
+        {
+            return formRegion(entry);
+        }
+        const start = performance.now();
+        const record = formRegion(entry);
+        reformMs += performance.now() - start;
+        return record;
+    };
+
+    /** `form`'s work. @param {number} entry @returns {LongEntry} */
+    const formRegion = entry=>{
         /** @type {import('./emit.js').LongBlock[]} */
         const blocks = [];
         /** By start. @type {Map<number, import('./emit.js').LongBlock>} */
@@ -528,11 +567,11 @@ export function createLongRunner(settings){
             record.wrapped = !readsChecked;
             const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
                 slotOf, { transfers, checkReads: readsChecked, looseStacks: loose,
-                    defaultNaNNegative, x87Id: run=>x87.add(run),
+                    defaultNaNNegative, x87Id: run=>x87.add(run), granular,
                     formCalls: leafCalls, profileCalls: profileAt >= 0 }));
             const instance = new WebAssembly.Instance(module,
                 { env: { memory, table, budget: budgetGlobal, depth, label, expect,
-                    x87: x87.call, storeHit } });
+                    x87: x87.call } });
             const run = /** @type {() => number} */ (instance.exports.r0);
             record.run = run;
             const slot = slotOf(entry);
@@ -644,12 +683,52 @@ export function createLongRunner(settings){
     };
 
     /**
+     * A region left before the instruction at `at`: the `GRANULAR_AFTER`th
+     * time, an instruction with a memory operand is tested to the granule
+     * from then on, its regions dropped to be formed so.
+     *
+     * @param {number} at
+     */
+    const noteExit = at=>{
+        const times = (exitsAt.get(at) ?? 0) + 1;
+        exitsAt.set(at, times);
+        if (times !== GRANULAR_AFTER)
+        {
+            return;
+        }
+        let instruction;
+        try
+        {
+            instruction = decode(fetch, at, MODE_64);
+        }
+        catch {
+            // Not there to read: the interpreter faults it.
+            return;
+        }
+        if ('refused' in instruction || !instruction.operands.some(operand=>operand.kind === 'mem'))
+        {
+            return;
+        }
+        granular.add(at);
+        stats.granular++;
+        for (const entry of [...byPage.get(at >>> 12) ?? []])
+        {
+            if (entries.get(entry)?.ranges.some(([from, to])=>at >= from && at < to))
+            {
+                drop(entry);
+            }
+        }
+    };
+
+    /**
      * Decides an indirect call sampled `PREDICT_AFTER` times, as the 32-bit
      * runtime's `reformStep` does: the callees that took a share of its
      * samples, small leaves to form in (`isLeaf`), and its regions dropped to
      * be formed again with them. A call with none to form in, or formed again
-     * `REFORMS` times, is quiet: its regions form it as an indirect call
-     * that no longer samples.
+     * `REFORMS` times, is quiet: its regions, when they are formed again for
+     * another reason, form it as an indirect call that no longer samples. A
+     * decision that would take the forming past `REFORM_SHARE` of the run
+     * waits for the next samples.
      *
      * @param {number} site
      */
@@ -657,6 +736,12 @@ export function createLongRunner(settings){
         const seen = /** @type {{ total: number, targets: Map<number, number> }} */ (
             callSamples.get(site));
         callSamples.delete(site);
+        if (reformMs > REFORM_SHARE * (performance.now() - born))
+        {
+            // Sampled again, and decided when the run has time for it.
+            stats.deferred++;
+            return;
+        }
         const reforms = (reformsOf.get(site) ?? 0) + 1;
         reformsOf.set(site, reforms);
         const formed = reforms > REFORMS ? [] : [...seen.targets]
@@ -666,11 +751,19 @@ export function createLongRunner(settings){
         predictions.set(site, formed);
         stats.predicted += formed.length;
         stats.quiet += formed.length === 0 ? 1 : 0;
+        if (formed.length === 0)
+        {
+            // Quiet: its regions stay as they are, sampling it still while the
+            // profile is up; its samples are passed over. Formed again only
+            // for that, x264's regions took as long as the callees formed in.
+            return;
+        }
         for (const entry of [...byPage.get(site >>> 12) ?? []])
         {
             if (entries.get(entry)?.ranges.some(([from, to])=>site >= from && site < to))
             {
                 drop(entry);
+                reforming.add(entry);
             }
         }
     };
@@ -838,6 +931,7 @@ export function createLongRunner(settings){
                         continue;
                     }
                     stats.exits++;
+                    noteExit(Number(view.getBigUint64(layout.eip, true)));
                     // One instruction, the one the block stopped before.
                     step(1);
                     continue;

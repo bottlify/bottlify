@@ -1749,3 +1749,27 @@ The long-mode translator's regions take up to 256 blocks and 16 KiB of code (`RE
 
 Larger regions helped Stockfish (+7 % at 512) and cost 7-Zip (-2.6 % at 512, -5 % at 1024);
 smaller ones cost Stockfish 10 %. No size won both; 256 kept.
+
+### 2026-10-26: long-mode indirect-call prediction on real programs
+
+- **Idea.** The long-mode runner's `callTargets` (an indirect call sampled, its small callees
+  formed into its regions, those regions formed again), as the 32-bit runtime's; on cork-bench
+  in Chromium (paired, 40 rounds, after 100 warm iterations) it gave vcall-x64 0.650,
+  calls8-scatter 0.713, game-x64 0.874 of the time without it.
+- **Workload.** x264 r3222 win64 (`--threads 1`, 200 frames of a 320x240 clip, fps) and zstd
+  1.5.7 win64 (`-b3 -i5 -T1 --zstd=wlog=18`, MB/s) under the engine in node 22.22, one executor.
+  Arms (snapshots of the tree at 9e38bce3 plus this change's store test): prediction off; on,
+  only regions of at most 32 blocks formed again; on, every region holding the call formed
+  again, a quiet decision dropping none and the forming held to 5 % of the run's time. Three
+  rounds, arms alternated within each.
+- **Values.** x264 fps, off 12.65 13.05 12.32 (median 12.65); small regions 12.66 12.96 12.63
+  (12.66); every region 11.16 12.05 11.12 (11.16). zstd MB/s, off 67.0 63.8 66.8 (66.8); small
+  regions 53.2 59.9 59.3 (59.3); every region 59.2 63.7 61.6 (61.6). Before the quiet decisions
+  and the time share, every decision dropping its regions: x264 6.38-7.40 against 12.88-13.92
+  off (single runs, 173 053 blocks formed against 27 778).
+- **Why.** The forming is the run's own thread here (the 32-bit runtime forms on its translator
+  worker), and a region formed again starts over on V8's first tier; x264's 183 sampled calls sit
+  in regions of 40-260 blocks. Left to the sampling alone (small regions), zstd still lost: the
+  profile is written on every indirect call in one run of two.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, node 22.22.
+- **Decision.** Off by default (`callTargets: false`); the long tests run with it on.

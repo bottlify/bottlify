@@ -47,12 +47,12 @@
  */
 
 import { Body, EMPTY, ModuleBuilder, ValType } from '../wasm/encoder.js';
-import { CALL_STRIDE, Tables, hashSlotsOf, pageFlagsAt } from '../runtime/layout.js';
+import { CALL_STRIDE, Tables, codeRangesAt, hashSlotsOf, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
 import { XMM, emitSimd, translatesSimd } from './simd.js';
 import { regionX87, x87Stores } from './x87.js';
-import { addCodeHitHelper, addSpanHitHelper, wrapIntoRam } from '../emit/memory.js';
+import { wrapIntoRam } from '../emit/memory.js';
 import { deadFlagPass, liveFlagsOut } from '../emit/region.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
@@ -340,11 +340,13 @@ export const endsBlock = op=>op === 'jmp' || op === 'call' || op === 'ret' || op
 class BlockEmitter {
     /**
      * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
-     * @param {{ flags: number, shift: number, storeHit: number, transfer: number | null,
+     * @param {{ flags: number, shift: number, transfer: number | null,
      *     x87: number | null,
-     *     x87Id: ((run: import('../decode/decoder.js').Instruction[]) => number) | null }}
+     *     x87Id: ((run: import('../decode/decoder.js').Instruction[]) => number) | null,
+     *     granular: Set<number> }}
      *     helpers  function indices, `transfer` none without transfers, `x87` none where the
-     *     regions leave x87 to the interpreter; `x87Id` numbers a run of instructions for it
+     *     regions leave x87 to the interpreter; `x87Id` numbers a run of instructions for it;
+     *     `granular`, the stores tested to the granule (`storeCheck`)
      * @param {boolean} checkReads  reads test their pages, rather than wrap into RAM
      * @param {boolean} looseStacks  a store through rsp alone tests no page
      */
@@ -391,6 +393,7 @@ class BlockEmitter {
          */
         this.branches = [];
         this.flagTable = pageFlagsAt(layout);
+        this.rangeTable = codeRangesAt(layout);
         /** The flags something may read after the instruction being emitted. */
         this.live = ARITH;
         /**
@@ -604,9 +607,13 @@ class BlockEmitter {
     checkPage(store, index, address, size){
         const { b } = this;
         const flags = PageFlag.INACCESSIBLE | (store ? PageFlag.HAS_CODE | PageFlag.WATCH : 0);
-        /** Leaves if a page is closed; a store, if it reaches translated code too. */
+        /**
+         * Leaves if a page is flagged; a store the runner found storing beside
+         * code (`granular`), only if the page is closed or watched or the store
+         * reaches translated code.
+         */
         const check = ()=>{
-            if (store)
+            if (store && this.helpers.granular.has(address))
             {
                 this.guard();
                 this.storeCheck(index, address, size);
@@ -635,24 +642,79 @@ class BlockEmitter {
 
     /**
      * A store to a page flagged closed, holding code or watched: it leaves if
-     * a page is closed or a byte lands in translated code, to the granule, as
-     * the 32-bit translator's store does (`codeHit`, which marks a watched page
-     * written). Data beside code on a page -- a JIT's buffer, a program's own
-     * variables after its functions -- and a watched page are stored to in
-     * the region; without the granules every store to them left it. The test
-     * is the module's `storeHit`, one call here.
+     * either page is closed or watched -- the interpreter faults it, or marks
+     * the page written, after which its stores no longer come here -- or a
+     * byte lands in translated code, to the granule, as the 32-bit
+     * translator's `codeHit` tests it: data beside code on a page -- a JIT's
+     * buffer, variables after their functions -- is stored to in the region.
+     * Only for the stores the runner saw leave again and again (`granular`):
+     * on every store, the test's code alone, never run, cost x264's large
+     * regions a fifth of their speed.
      *
      * @param {number} index @param {number} address @param {number} size
      */
     storeCheck(index, address, size){
         const { b } = this;
-        b.localGet(A).localGet(A);
+        /** The flags of the page the byte `at` past A lies on. @param {number} at */
+        const flagsAt = at=>b.localGet(A).i32const(at).op(Op.i32add).i32const(12)
+            .op(Op.i32shru).load('i32_8u', { offset: this.flagTable });
+        flagsAt(0);
+        flagsAt(size - 1).op(Op.i32or)
+            .i32const(PageFlag.INACCESSIBLE | PageFlag.WATCH).op(Op.i32and);
+        this.exitIf(index, address);
+        // A byte of every granule the store reaches: its first, its last, and
+        // one in each between for a state save (`fxsave`).
+        const granule = 1 << Tables.CODE_GRANULE_SHIFT;
+        const at = [0];
+        for (let more = granule; more < size - 1; more += granule)
+        {
+            at.push(more);
+        }
         if (size > 1)
         {
-            b.i32const(size - 1).op(Op.i32add);
+            at.push(size - 1);
         }
-        b.call(this.helpers.storeHit);
+        at.forEach((offset, k)=>{
+            this.codeHit(offset);
+            if (k > 0)
+            {
+                b.op(Op.i32or);
+            }
+        });
         this.exitIf(index, address);
+    }
+
+    /**
+     * Leaves 1 on the stack when the byte `at` past A lies in translated code:
+     * its page flagged and its granule within the page's code range.
+     *
+     * @param {number} at
+     */
+    codeHit(at){
+        const { b } = this;
+        /** The byte's address. */
+        const byte = ()=>(at === 0 ? b.localGet(A) : b.localGet(A).i32const(at).op(Op.i32add));
+        /** The byte's page's code range, its low granule (0) or one past its high (1). @param {number} end */
+        const range = end=>{
+            byte();
+            b.i32const(12).op(Op.i32shru).i32const(1).op(Op.i32shl)
+                .load('i32_8u', { offset: this.rangeTable + end });
+        };
+        /** The byte's granule. */
+        const granuleOf = ()=>{
+            byte();
+            b.i32const(Tables.CODE_GRANULE_SHIFT).op(Op.i32shru)
+                .i32const(0xfff >>> Tables.CODE_GRANULE_SHIFT).op(Op.i32and);
+        };
+        byte();
+        b.i32const(12).op(Op.i32shru).load('i32_8u', { offset: this.flagTable })
+            .i32const(PageFlag.HAS_CODE).op(Op.i32and).op(Op.i32eqz).op(Op.i32eqz);
+        granuleOf();
+        range(0);
+        b.op(Op.i32geu).op(Op.i32and);
+        granuleOf();
+        range(1);
+        b.op(Op.i32ltu).op(Op.i32and);
     }
 
     /** Loads `size` bytes at A, zero-extended to an i64. @param {number} size */
@@ -2424,7 +2486,8 @@ function shiftHelper(){
  *     which holds `missFunction` until there is one
  * @param {{ transfers?: boolean, checkReads?: boolean, looseStacks?: boolean,
  *     defaultNaNNegative?: boolean, formCalls?: boolean, profileCalls?: boolean,
- *     x87Id?: ((run: import('../decode/decoder.js').Instruction[]) => number) | null }}
+ *     x87Id?: ((run: import('../decode/decoder.js').Instruction[]) => number) | null,
+ *     granular?: Set<number> }}
  *     [options]  `defaultNaNNegative`, the host's
  *     (`features`): false puts an invalid operation's NaN right (`simd.js`); `x87Id`
  *     numbers a run of x87 instructions for the model the regions import as `env.x87`
@@ -2436,12 +2499,14 @@ function shiftHelper(){
  *     direct call whose callee the region holds is a push and a jump into it, and that
  *     callee's rets jump back past the call (`formedReturns`); `profileCalls`: an
  *     indirect call not `quiet` notes its target in the layout's call profile
- *     (`profileCall`)
+ *     (`profileCall`); `granular`, the instructions whose stores to a flagged page are
+ *     tested to the granule rather than left (`storeCheck`)
  * @returns {Uint8Array<ArrayBuffer>}
  */
 export function emitRegions(layout, memoryLimits, regions, slotOf, options = {}){
     const { transfers = false, checkReads = false, looseStacks = false,
-        defaultNaNNegative = true, x87Id = null, formCalls = true, profileCalls = false } = options;
+        defaultNaNNegative = true, x87Id = null, formCalls = true, profileCalls = false,
+        granular = new Set() } = options;
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
@@ -2457,10 +2522,6 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     const x87 = x87Id === null ? null : m.importFunction('env', 'x87', m.type({
         params: [ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32],
         results: [ValType.i32] }));
-    // The store test past a flagged page, one module's for every region (`storeHitModule`):
-    // made in each, it was compiled again in each, on its first store into code.
-    const storeHit = m.importFunction('env', 'storeHit',
-        m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] }));
     const flags = flagsHelper();
     const shift = shiftHelper();
     const flagsType = m.type({ params: flags.params, results: flags.results });
@@ -2469,11 +2530,11 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     const helpers = {
         flags: m.function(flagsType, flags.locals, flags.body.toBytes()),
         shift: m.function(shiftType, shift.locals, shift.body.toBytes()),
-        storeHit,
         /** @type {number | null} */
         transfer: null,
         x87,
         x87Id,
+        granular,
     };
     // Named as the 32-bit translator names its functions, so a CPU profile
     // says which region, or which helper, the time went to.
@@ -2493,36 +2554,6 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
             { exportAs: `r${index}`, hints: body.hints });
         m.nameFunction(at, `r${region.blocks[0].entry.toString(16).padStart(8, '0')}`);
     });
-    return m.toBytes();
-}
-
-/**
- * The store test past a page flagged closed, holding code or watched
- * (`storeCheck`), as a module of its own exporting `storeHit(first, last) ->
- * 0|1`: 1 when the page of the store's first byte or of its last is closed,
- * or a byte between lands in translated code (`spanHit`, the 32-bit
- * translator's, over its `codeHit`, which marks a watched page written). The
- * regions import it as `env.storeHit`.
- *
- * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ min: number, max?: number, shared?: boolean }} memoryLimits  the memory's, in pages
- * @returns {Uint8Array<ArrayBuffer>}
- */
-export function storeHitModule(layout, memoryLimits){
-    const m = new ModuleBuilder();
-    m.importMemory('env', 'memory', memoryLimits);
-    const spanHit = addSpanHitHelper(m, addCodeHitHelper(m, layout, memoryLimits.shared === true));
-    const b = new Body();
-    const flags = pageFlagsAt(layout);
-    b.localGet(0).i32const(12).op(Op.i32shru).load('i32_8u', { offset: flags })
-        .localGet(1).i32const(12).op(Op.i32shru).load('i32_8u', { offset: flags })
-        .op(Op.i32or).i32const(PageFlag.INACCESSIBLE).op(Op.i32and);
-    b.if(EMPTY);
-    b.i32const(1).op(0x0f); // return
-    b.end();
-    b.localGet(0).localGet(1).call(spanHit);
-    m.function(m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] }), [],
-        b.toBytes(), { exportAs: 'storeHit' });
     return m.toBytes();
 }
 
