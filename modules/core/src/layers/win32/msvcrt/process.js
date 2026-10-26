@@ -22,7 +22,7 @@
 
 import { createRefusals } from '../common/refusal.js';
 import { VARIADIC_SLOTS } from './scan.js';
-import { EINVAL, ENOENT } from './globals.js';
+import { EBADF, EINVAL, ENOENT } from './globals.js';
 
 /** The signals msvcrt.dll keeps a handler for; any other number is EINVAL. */
 const SIGNALS = new Set([
@@ -96,6 +96,23 @@ export function createProcessFunctions(host){
         answer: 0xffffffff,
         lastError: ENOENT,
         why: 'there is no command interpreter to run a command with',
+    });
+
+    /**
+     * `_popen`'s refusal, cdecl as the runtime's calls are: the caller takes
+     * its arguments off the stack.
+     *
+     * @param {string} name
+     */
+    const noPipeTo = name=>({
+        convention: /** @type {'cdecl'} */ ('cdecl'),
+        argBytes: 8,
+        handler: refuse(name, {
+            argBytes: 8,
+            answer: 0,
+            lastError: ENOENT,
+            why: 'there is no command interpreter to run a command with',
+        }).handler,
     });
 
     const noWait = refuse('_spawnl', {
@@ -296,6 +313,30 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([command])=>((command >>> 0) === 0 ? 0 : noInterpreter.handler()),
+        },
+
+        /**
+         * FILE *_popen(const char *command, const char *mode), and _wpopen
+         *
+         * Null with ENOENT, as `system` answers: the command interpreter
+         * that would run the command and be piped to is not there.
+         */
+        _popen: noPipeTo('_popen'),
+        _wpopen: noPipeTo('_wpopen'),
+
+        /**
+         * int _pclose(FILE *stream)
+         *
+         * -1 with EBADF for a stream `_popen` did not open, which, with no
+         * stream ever opened by it, is every one.
+         */
+        _pclose: {
+            convention: 'cdecl',
+            argBytes: 4,
+            handler: ()=>{
+                host.errno?.(EBADF);
+                return 0xffffffff;
+            },
         },
 
         /**

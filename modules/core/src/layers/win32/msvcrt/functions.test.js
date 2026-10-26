@@ -1154,3 +1154,21 @@ test('__crtGetStringTypeW is the system\'s GetStringTypeW behind an argument of 
         write: ()=>{}, callGuest: async()=>0 }));
     assert.equal(without.__crtGetStringTypeW, undefined, 'unexported without the system\'s');
 });
+
+test('every function the runtime exports is cdecl, a C++ member\'s thiscall aside', ()=>{
+    // A stdcall entry pops its arguments a cdecl caller pops again: _popen
+    // made from a stdcall refusal unbalanced every caller's stack. Code the
+    // guest runs as it is (`_EH_prolog`, `_chkesp`) has no convention.
+    const fns = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
+        ...fakeMemory(), write: ()=>{}, callGuest: async()=>0,
+        currentThread: ()=>({ id: 1 }), setRegisters: ()=>{},
+        threads: { start: ()=>0, exit: ()=>0, sleep: ()=>0 },
+        commandLine: ()=>'game.exe', imagePath: ()=>'C:\\game.exe', stringTypes: ()=>0,
+        launch: ()=>0, exitProcess: ()=>0, exit: ()=>{}, closeHandle: ()=>{},
+    }));
+    const wrong = Object.entries(fns).filter(([name, entry])=>!('data' in entry)
+        && !(name.startsWith('?') && entry.convention === 'thiscall')
+        && !(entry.convention === undefined && 'code' in entry && !('handler' in entry))
+        && entry.convention !== 'cdecl').map(([name])=>name);
+    assert.deepEqual(wrong, []);
+});

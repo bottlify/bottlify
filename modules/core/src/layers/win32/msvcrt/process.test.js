@@ -232,3 +232,16 @@ test('__pxcptinfoptrs: a thread\'s cell, null while an exception signal\'s handl
     }
     assert.deepEqual(seen, [0, 0xdeadbeef]);
 });
+
+test('_popen is refused as system is, and _pclose knows no stream of its', ()=>{
+    // Wine's msvcrt test__popen: _pclose of a stream _popen did not open is
+    // -1 with EBADF.
+    const { fns, errno, said } = build();
+    const EBADF = 9;
+    assert.equal(fns._popen.handler([0x1000, 0x2000]), 0);
+    assert.equal(fns._wpopen.handler([0x1000, 0x2000]), 0);
+    assert.deepEqual(errno, [ENOENT, ENOENT]);
+    assert.deepEqual(said, ['_popen', '_wpopen'], 'each refusal reported');
+    assert.equal(fns._pclose.handler([0xdeadbeef]) | 0, -1);
+    assert.equal(errno.at(-1), EBADF);
+});
