@@ -33,6 +33,11 @@ function setup(){
     /** @type {number[][]} */
     const seen = [];
     const window = { proc: WND_PROC_1, unicode: false, alive: true };
+    /** The window's properties, by name. @type {Map<string, number>} */
+    const properties = new Map();
+    let heap = 0x1000;
+    /** @param {number} at */
+    const readName = at=>String.fromCharCode(...memory.subarray(at, memory.indexOf(0, at)));
     /** @type {Map<number, (args: number[]) => any>} */
     const procedures = new Map();
     let orig3 = 0;
@@ -54,7 +59,18 @@ function setup(){
             return previous;
         },
         CallWindowProcW: ([proc, ...message])=>run(proc, message),
+        CallWindowProcA: ([proc, ...message])=>run(proc, message),
         DefWindowProcW: ()=>0,
+        DefWindowProcA: ()=>0,
+        SetPropA: ([hwnd, name, value])=>{
+            properties.set(readName(name), value);
+            return hwnd === HWND ? 1 : 0;
+        },
+        RemovePropA: ([, name])=>{
+            const had = properties.get(readName(name)) ?? 0;
+            properties.delete(readName(name));
+            return had;
+        },
         SendMessage: message=>run(window.proc, message),
     };
     const fns = createSubclassFunctions({
@@ -62,6 +78,8 @@ function setup(){
         user32: name=>(user32[name] ? { handler: user32[name] } : undefined),
         call: (entry, args)=>run(entry, args),
         callerThread: ()=>null,
+        allocate: ()=>(heap += 0x40) - 0x40,
+        release: ()=>{},
         procedure: (_name, handler)=>{
             const at = 0x7f000000 + procedures.size * 0x10;
             procedures.set(at, handler);
@@ -127,7 +145,7 @@ function setup(){
     };
     /** @param {number} message */
     const deliver = message=>run(window.proc, [HWND, message, 0, 0]);
-    return { fns, window, send, subclass, take, overlay, memory, deliver };
+    return { fns, window, send, subclass, take, overlay, memory, deliver, properties };
 }
 
 test('SetWindowSubclass and its family are exported by ordinals 410 to 413', ()=>{
@@ -141,14 +159,25 @@ test('SetWindowSubclass and its family are exported by ordinals 410 to 413', ()=
 });
 
 test('a subclass runs before the window\'s procedure, which it reaches through DefSubclassProc, '
-    + 'and the window reads wide while subclassed', ()=>{
+    + 'and the window reads what its own procedure reads', ()=>{
     const { window, send, subclass, take } = setup();
     assert.equal(subclass(2, 0), 1);
-    assert.equal(window.unicode, true);
+    assert.equal(window.unicode, false, 'ANSI as wnd_proc_1 was set: see subclass.js');
     assert.notEqual(window.proc, WND_PROC_1);
     send(1, 0);
     send(2, 0);
     assert.deepEqual(take(), [[2, 1], [1, 1], [2, 2], [1, 2]], 'Sub_BasicTest');
+});
+
+test('a subclassed window carries CC32SubclassInfo, and loses it with its last subclass', ()=>{
+    const { fns, subclass, properties } = setup();
+    subclass(2, 0);
+    assert.ok(properties.get('CC32SubclassInfo'));
+    subclass(3, 0);
+    fns.RemoveWindowSubclass.handler([HWND, SUB_PROC, 2]);
+    assert.ok(properties.get('CC32SubclassInfo'), 'one is left');
+    fns.RemoveWindowSubclass.handler([HWND, SUB_PROC, 3]);
+    assert.equal(properties.has('CC32SubclassInfo'), false);
 });
 
 test('a subclass that takes itself off finishes the message, and the window has its own '
