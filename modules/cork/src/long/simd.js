@@ -9,10 +9,12 @@
  * locals, each instruction what `ir-simd.js` (through `ir64.js`) computes.
  *
  * Integer forms are one or a few wasm SIMD operations. Float arithmetic is
- * wasm's, which rounds as the model does (to nearest, denormals kept); where
- * a lane comes out NaN the processor's choice is put back -- the destination
- * operand's NaN quietened, else the source's, else the default NaN -- since
- * wasm leaves which NaN to the host. `min` and `max` are a compare and a
+ * wasm's, which rounds as the model does (to nearest, denormals kept). A NaN
+ * operand propagates as the engine propagates it, which on an x86 host is the
+ * processor's own choice (the destination's NaN quietened, else the
+ * source's); an invalid operation's NaN is made the processor's default one
+ * on a host whose own is positive, as the 32-bit translator does it
+ * (`defaultNaN`). `min` and `max` are a compare and a
  * select, the source winning ties and NaNs. What depends on MXCSR's rounding
  * control rounds to nearest and leaves for the interpreter under any other
  * mode; a conversion between float widths leaves it a NaN, whose payload the
@@ -258,7 +260,7 @@ export function emitSimd(e, instruction, index, at){
         b.localTee(V0);
         vector(src);
         b.localTee(V1).simd(ARITH[/** @type {keyof typeof ARITH} */ (arith[1])][double ? 1 : 0]);
-        processorNaN(e, double, 2);
+        defaultNaN(e, double, 2);
         if (scalar)
         {
             mergeLow(double);
@@ -275,7 +277,7 @@ export function emitSimd(e, instruction, index, at){
         const double = unary[1].endsWith('d');
         vector(src);
         b.localTee(V0).simd(double ? S.f64x2Sqrt : S.f32x4Sqrt);
-        processorNaN(e, double, 1);
+        defaultNaN(e, double, 1);
         if (unary[1].startsWith('s'))
         {
             mergeLow(double);
@@ -683,26 +685,31 @@ function shift(e, op, dst, src, vector, put){
 }
 
 /**
- * The processor's NaN where the operation on the stack (operands in V0 and,
- * for two, V1) came out NaN: V0's quietened, else V1's, else the default NaN.
- * Each step a bitselect on the lanes that are NaN, the last one winning.
+ * The result on the stack (its operands in V0 and, for two, V1), each lane
+ * that is a NaN while no operand's lane was -- an invalid operation: 0/0,
+ * inf - inf, the root of a negative -- made the processor's default NaN, sign
+ * set, as the 32-bit translator's `defaultNaN` does; nothing on a host whose
+ * own default NaN is x86's. A NaN operand propagates as the engine
+ * propagates it, its own bits quietened, as on the processor.
  *
  * @param {any} e @param {boolean} double @param {1 | 2} operands
  */
-function processorNaN(e, double, operands){
+function defaultNaN(e, double, operands){
+    if (e.defaultNaNNegative)
+    {
+        return;
+    }
     const { b } = e;
-    const ne = double ? S.f64x2Ne : S.f32x4Ne;
-    const quiet = double ? [0, 0, 0, 0, 0, 0, 0x08, 0, 0, 0, 0, 0, 0, 0, 0x08, 0]
-        : [0, 0, 0x40, 0, 0, 0, 0x40, 0, 0, 0, 0x40, 0, 0, 0, 0x40, 0];
+    const [eq, ne] = double ? [S.f64x2Eq, S.f64x2Ne] : [S.f32x4Eq, S.f32x4Ne];
     const indefinite = double ? [0, 0, 0, 0, 0, 0, 0xf8, 0xff, 0, 0, 0, 0, 0, 0, 0xf8, 0xff]
         : [0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff];
     b.localSet(V2).v128const(indefinite).localGet(V2).localGet(V2).localGet(V2).simd(ne)
-        .simd(S.bitselect);
-    for (const local of operands === 2 ? [V1, V0] : [V0])
+        .localGet(V0).localGet(V0).simd(eq).simd(S.and);
+    if (operands === 2)
     {
-        b.localSet(V2).localGet(local).v128const(quiet).simd(S.or).localGet(V2).localGet(local)
-            .localGet(local).simd(ne).simd(S.bitselect);
+        b.localGet(V1).localGet(V1).simd(eq).simd(S.and);
     }
+    b.simd(S.bitselect);
 }
 
 /**

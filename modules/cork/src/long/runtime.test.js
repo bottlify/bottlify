@@ -59,8 +59,12 @@ function fill(seed, size){
  * @param {boolean} [transfers]  regions go on into each other without the host
  * @param {boolean} [checkReads]  translated reads test their pages from the start
  * @param {boolean} [looseStacks]  false: stores through rsp test their pages too
+ * @param {boolean} [defaultNaNNegative]  false: float code as for a host whose default NaN is
+ *     positive, an arm64 one (the host's own unless given)
  */
-function machine(transfers = true, checkReads = undefined, looseStacks = undefined){
+function machine(transfers = true, checkReads = undefined, looseStacks = undefined,
+    defaultNaNNegative = undefined)
+{
     const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
@@ -72,7 +76,7 @@ function machine(transfers = true, checkReads = undefined, looseStacks = undefin
     }
     const pages = createPageTable(memory, layout);
     const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads,
-        looseStacks });
+        looseStacks, ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }) });
     const state = blockState64({ memory, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
     return { layout, memory, state, runner, view: new DataView(memory.buffer) };
@@ -323,9 +327,12 @@ function run(m, translated, budget = 7){
  * @param {boolean} [transfers]  the translated machine's regions go on into each
  *     other without the host: both ways must be the interpreter's
  * @param {boolean} [checkReads]  its reads test their pages, as the interpreter's do
+ * @param {boolean} [defaultNaNNegative]  its float code as for that host (`machine`)
  */
-function compare(cases, budget = 7, transfers = true, checkReads = undefined){
-    const translatedMachine = machine(transfers, checkReads);
+function compare(cases, budget = 7, transfers = true, checkReads = undefined,
+    defaultNaNNegative = undefined)
+{
+    const translatedMachine = machine(transfers, checkReads, undefined, defaultNaNNegative);
     const interpretedMachine = machine();
     /** @type {string[]} */
     const failures = [];
@@ -791,7 +798,13 @@ test('SSE on NaNs, infinities, zeros, denormals and the edges of conversion', ()
             cases.push({ ...base, text: `${text} #${k}`, code, regs, xmm, mxcsr });
         }
     }
-    const { failures, stats } = compare(cases);
-    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
-    assert.ok(stats.translated > cases.length / 2, JSON.stringify(stats));
+    // Both ways a host may be: an x86 one leaves a NaN as its instruction does, which is
+    // the processor's; one whose default NaN is positive has an invalid operation's put
+    // right, which on this host must change nothing either.
+    for (const defaultNaNNegative of [undefined, false])
+    {
+        const { failures, stats } = compare(cases, 7, true, undefined, defaultNaNNegative);
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.ok(stats.translated > cases.length / 2, JSON.stringify(stats));
+    }
 });

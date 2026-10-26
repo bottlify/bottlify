@@ -776,6 +776,15 @@ translator, since a divide error's handler usually goes on elsewhere. Keeping ev
 up to every access that may fault would undo most of what the analysis saves. The long-mode gate
 compares the arithmetic flags at a divide error only. *2026-10-26.*
 
+**An SSE operation on a NaN gives the NaN the host's engine gives.** Both translators compute
+float lanes in wasm and do not put the processor's choice of NaN back by hand: on an x86 host the
+engine's instruction is the processor's, which keeps the destination's NaN quietened, else the
+source's; only an invalid operation's NaN (0/0, inf - inf, the root of a negative) is made the
+processor's default one, sign set, and only on a host whose own default NaN is positive, an arm64
+one. There a NaN operand's payload may come out as that host's rule chooses it. Modelling the
+processor's choice after every float operation cost the long-mode translator three vector
+operations an operand: a float loop ran 2.3 times slower. *2026-10-26.*
+
 ## C. Process model and porting
 
 **Process replacement, not two processes in one address space or two machines.** `CreateProcess`

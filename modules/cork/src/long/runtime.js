@@ -62,7 +62,7 @@ const REGION_BYTES = 16384;
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
  *     pages: import('../runtime/pages.js').PageTable,
  *     hot?: number, below?: number, transfers?: boolean, checkReads?: boolean,
- *     looseStacks?: boolean }} settings
+ *     looseStacks?: boolean, defaultNaNNegative?: boolean }} settings
  *     `below`: no block starts under it (the host's null range, whose fetch faults on
  *     the interpreter); `transfers`: regions go on into each other through the entry
  *     hash with tail calls, where the host has them (off where a tail call into another
@@ -71,11 +71,13 @@ const REGION_BYTES = 16384;
  *     the program faults on a page it cannot reach (`readsFaulted`), as the 32-bit
  *     runtime's do; `looseStacks`, unless false, a store through rsp alone tests no page
  *     until code is translated on a page of a thread's stack (`noteStack`), as the
- *     32-bit runtime's do
+ *     32-bit runtime's do; `defaultNaNNegative`, the host's own (`features`), false
+ *     where float arithmetic puts an invalid operation's NaN right
  */
 export function createLongRunner(settings){
     const { memory, layout, pages, hot = 2, below = 0x10000,
-        transfers = features().tailCalls } = settings;
+        transfers = features().tailCalls,
+        defaultNaNNegative = features().defaultNaNNegative } = settings;
     let readsChecked = settings.checkReads === true;
     /** Whether regions are made loose: until code is translated on a stack. */
     let loose = settings.looseStacks !== false;
@@ -328,7 +330,8 @@ export function createLongRunner(settings){
         {
             record.wrapped = !readsChecked;
             const module = new WebAssembly.Module(emitRegions(layout, limits, [{ blocks }],
-                slotOf, { transfers, checkReads: readsChecked, looseStacks: loose }));
+                slotOf, { transfers, checkReads: readsChecked, looseStacks: loose,
+                    defaultNaNNegative }));
             const instance = new WebAssembly.Instance(module,
                 { env: { memory, table, budget: budgetGlobal, depth, label, expect } });
             const run = /** @type {() => number} */ (instance.exports.r0);

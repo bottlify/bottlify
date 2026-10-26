@@ -287,6 +287,11 @@ class BlockEmitter {
         this.helpers = helpers;
         this.checkReads = checkReads;
         this.looseStacks = looseStacks;
+        /**
+         * Whether the host's default NaN is x86's, sign set (`features`): float
+         * arithmetic then needs no NaN put right (`simd.js`'s `defaultNaN`).
+         */
+        this.defaultNaNNegative = true;
         this.b = new Body(1024);
         /** Ifs opened inside the block being emitted. */
         this.nest = 0;
@@ -2125,7 +2130,9 @@ function shiftHelper(){
  * @param {LongRegion[]} regions
  * @param {(address: number) => number} slotOf  the table slot of the region at an address,
  *     which holds `missFunction` until there is one
- * @param {{ transfers?: boolean, checkReads?: boolean, looseStacks?: boolean }} [options]
+ * @param {{ transfers?: boolean, checkReads?: boolean, looseStacks?: boolean,
+ *     defaultNaNNegative?: boolean }} [options]  `defaultNaNNegative`, the host's
+ *     (`features`): false puts an invalid operation's NaN right (`simd.js`)
  *     `checkReads`: reads test their pages, rather than wrap into RAM; `looseStacks`: a
  *     store through rsp alone tests no page either (the 32-bit translator's
  *     `looseStacks`), its address wrapped into RAM: no translated code lies on a
@@ -2133,7 +2140,8 @@ function shiftHelper(){
  * @returns {Uint8Array<ArrayBuffer>}
  */
 export function emitRegions(layout, memoryLimits, regions, slotOf, options = {}){
-    const { transfers = false, checkReads = false, looseStacks = false } = options;
+    const { transfers = false, checkReads = false, looseStacks = false,
+        defaultNaNNegative = true } = options;
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
@@ -2168,7 +2176,7 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     }
     regions.forEach((region, index)=>{
         const body = emitRegion(layout, helpers, region,
-            { slotOf, regionType, checkReads, looseStacks });
+            { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative });
         const at = m.function(regionType, LOCALS, body.toBytes(), { exportAs: `r${index}` });
         m.nameFunction(at, `r${region.blocks[0].entry.toString(16).padStart(8, '0')}`);
     });
@@ -2386,10 +2394,13 @@ export function missFunction(){
  * @param {{ flags: number, shift: number, transfer: number | null }} helpers
  * @param {LongRegion} region
  * @param {{ slotOf: (address: number) => number, regionType: number, checkReads: boolean,
- *     looseStacks: boolean }} link
+ *     looseStacks: boolean, defaultNaNNegative: boolean }} link
  */
-function emitRegion(layout, helpers, region, { slotOf, regionType, checkReads, looseStacks }){
+function emitRegion(layout, helpers, region,
+    { slotOf, regionType, checkReads, looseStacks, defaultNaNNegative })
+{
     const e = new BlockEmitter(layout, helpers, checkReads, looseStacks);
+    e.defaultNaNNegative = defaultNaNNegative;
     const { b } = e;
     // In address order: a jump forward, most of them, is a branch out to the
     // target's label, or no branch at all.
