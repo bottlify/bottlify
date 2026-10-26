@@ -87,13 +87,16 @@ const Shift = Object.freeze({ shl: 0, sal: 0, shr: 1, sar: 2, rol: 3, ror: 4 });
 // Locals: the sixteen registers first, by number.
 const RIP = 16;
 const FL = 17;
+/**
+ * The record's kind, width, carry in and the flags it writes, packed in one
+ * i32 (`Packed`), as the 32-bit translator folds the width into the kind:
+ * the record's locals live across the whole dispatch loop, and each one more
+ * is a register fewer for the program's sixteen.
+ */
 const PK = 18;
-const PS = 19;
 const PA = 20;
 const PB = 21;
 const PR = 22;
-const PC = 23;
-const PW = 24;
 const T0 = 25;
 const T1 = 26;
 const T2 = 27;
@@ -107,6 +110,38 @@ const IDX = 32;
 const U = 33;
 const T4 = 34;
 const T5 = 35;
+/** Where each part of the record sits in PK: `at`, the shift, and `mask`. */
+const Packed = Object.freeze({
+    KIND: { at: 0, mask: 0xf },
+    SIZE: { at: 4, mask: 0xf },
+    CARRY: { at: 8, mask: 1 },
+    WRITTEN: { at: 16, mask: 0xfff },
+});
+
+/** @param {number} kind @param {number} size @param {number} written */
+const packed = (kind, size, written)=>{
+    if (kind > Packed.KIND.mask || size > Packed.SIZE.mask || written > Packed.WRITTEN.mask)
+    {
+        throw new Error(`emit: record ${kind}/${size}/${written} does not pack`);
+    }
+    return kind << Packed.KIND.at | size << Packed.SIZE.at | written << Packed.WRITTEN.at;
+};
+
+/**
+ * One part of the record out of PK, on the stack.
+ * @param {Body} b @param {{ at: number, mask: number }} part
+ */
+function unpack(b, { at, mask }){
+    b.localGet(PK);
+    if (at !== 0)
+    {
+        b.i32const(at).op(Op.i32shru);
+    }
+    b.i32const(mask).op(Op.i32and);
+}
+
+// Locals 19, 23 and 24, the record's parts before they were packed in PK,
+// are unused, kept so the ones after them keep their numbers.
 const LOCALS = [
     ...new Array(16).fill(ValType.i64), ValType.i64, ValType.i32,
     ValType.i32, ValType.i32, ValType.i64, ValType.i64, ValType.i64, ValType.i32, ValType.i32,
@@ -547,8 +582,12 @@ class BlockEmitter {
         }
         b.localGet(PK);
         this.open();
-        b.localGet(PK).localGet(PS).localGet(PA).localGet(PB).localGet(PR).localGet(PC)
-            .localGet(PW).localGet(FL).call(this.helpers.flags).localSet(FL)
+        unpack(b, Packed.KIND);
+        unpack(b, Packed.SIZE);
+        b.localGet(PA).localGet(PB).localGet(PR);
+        unpack(b, Packed.CARRY);
+        unpack(b, Packed.WRITTEN);
+        b.localGet(FL).call(this.helpers.flags).localSet(FL)
             .i32const(0).localSet(PK);
         this.close();
         this.pending = null;
@@ -685,16 +724,13 @@ class BlockEmitter {
             // folded where something still reads them.
             this.keep(written);
         }
-        b.i32const(kind).localSet(PK).i32const(size).localSet(PS).localGet(T0).localSet(PA)
-            .localGet(T1).localSet(PB).localGet(T2).localSet(PR).i32const(written).localSet(PW);
+        b.i32const(packed(kind, size, written));
         if (carried)
         {
-            b.localGet(U).localSet(PC);
+            b.localGet(U).i32const(Packed.CARRY.at).op(Op.i32shl).op(Op.i32or);
         }
-        else
-        {
-            b.i32const(0).localSet(PC);
-        }
+        b.localSet(PK).localGet(T0).localSet(PA).localGet(T1).localSet(PB).localGet(T2)
+            .localSet(PR);
         this.pending = { kind, size };
     }
 
@@ -2223,35 +2259,56 @@ function flagLiveness(blocks, indexOf){
 const Record = Object.freeze({ KIND: 0, SIZE: 4, A: 8, B: 16, R: 24, C: 32, W: 36 });
 
 /**
- * Stores PK..PW and FL into the state block as they stand.
+ * Stores the record, unpacked, and FL into the state block as they stand.
  *
  * @param {Body} b
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  */
 function storeRecord(b, layout){
     const at = /** @type {number} */ (layout.longFlagRecord);
-    for (const [local, field, type] of /** @type {const} */ ([[PK, Record.KIND, 'i32'],
-        [PS, Record.SIZE, 'i32'], [PA, Record.A, 'i64'], [PB, Record.B, 'i64'],
-        [PR, Record.R, 'i64'], [PC, Record.C, 'i32'], [PW, Record.W, 'i32']]))
+    for (const [part, field] of /** @type {const} */ ([[Packed.KIND, Record.KIND],
+        [Packed.SIZE, Record.SIZE], [Packed.CARRY, Record.C], [Packed.WRITTEN, Record.W]]))
     {
-        b.i32const(0).localGet(local).store(type, { offset: at + field });
+        b.i32const(0);
+        unpack(b, part);
+        b.store('i32', { offset: at + field });
+    }
+    for (const [local, field] of /** @type {const} */ ([[PA, Record.A], [PB, Record.B],
+        [PR, Record.R]]))
+    {
+        b.i32const(0).localGet(local).store('i64', { offset: at + field });
     }
     b.i32const(0).localGet(FL).store('i32', { offset: layout.eflags });
 }
 
 /**
- * Loads PK..PW and FL from the state block.
+ * Loads the record, packed, and FL from the state block.
  *
  * @param {Body} b
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  */
 function loadRecord(b, layout){
     const at = /** @type {number} */ (layout.longFlagRecord);
-    for (const [local, field, type] of /** @type {const} */ ([[PK, Record.KIND, 'i32'],
-        [PS, Record.SIZE, 'i32'], [PA, Record.A, 'i64'], [PB, Record.B, 'i64'],
-        [PR, Record.R, 'i64'], [PC, Record.C, 'i32'], [PW, Record.W, 'i32']]))
+    // No kind, nothing pending: PK 0 whatever the other fields hold.
+    for (const [part, field] of /** @type {const} */ ([[Packed.KIND, Record.KIND],
+        [Packed.SIZE, Record.SIZE], [Packed.CARRY, Record.C], [Packed.WRITTEN, Record.W]]))
     {
-        b.i32const(0).load(type, { offset: at + field }).localSet(local);
+        b.i32const(0).load('i32', { offset: at + field });
+        if (part.at !== 0)
+        {
+            b.i32const(part.at).op(Op.i32shl);
+        }
+        if (part !== Packed.KIND)
+        {
+            b.op(Op.i32or);
+        }
+    }
+    b.i32const(0).i32const(0).load('i32', { offset: at + Record.KIND }).op(Op.select)
+        .localSet(PK);
+    for (const [local, field] of /** @type {const} */ ([[PA, Record.A], [PB, Record.B],
+        [PR, Record.R]]))
+    {
+        b.i32const(0).load('i64', { offset: at + field }).localSet(local);
     }
     b.i32const(0).load('i32', { offset: layout.eflags }).localSet(FL);
 }
