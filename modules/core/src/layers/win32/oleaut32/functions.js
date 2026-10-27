@@ -35,6 +35,9 @@ import { createRecordInfoObjects } from './recordinfo.js';
 import { TKIND_DISPATCH, TKIND_INTERFACE, TKIND_RECORD } from './typelib.js';
 import { parseTypeLibrary } from './sltg.js';
 import { STDOLE2, isStdole } from './stdole.js';
+import {
+    dayName, formatFixed, formatNamedDate, formatValue, monthName,
+} from './varformat.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { compareStrings, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
@@ -136,6 +139,29 @@ const DISP_E_PARAMNOTFOUND = 0x80020004 | 0;
 const DISP_E_BADINDEX = 0x8002000b | 0;
 const E_UNEXPECTED = 0x8000ffff | 0;
 const DISPID_VALUE = 0;
+/**
+ * The month names a language writes in a date where they differ from the
+ * names on their own, by the primary language: Arabic's transliterations of
+ * the Gregorian months, and the Russian and Polish genitives.
+ */
+const ALTERNATE_MONTHS = new Map([
+    [0x01, ['\u064a\u0646\u0627\u064a\u0631', '\u0641\u0628\u0631\u0627\u064a\u0631',
+        '\u0645\u0627\u0631\u0633', '\u0623\u0628\u0631\u064a\u0644',
+        '\u0645\u0627\u064a\u0648', '\u064a\u0648\u0646\u064a\u0648',
+        '\u064a\u0648\u0644\u064a\u0648', '\u0623\u063a\u0633\u0637\u0633',
+        '\u0633\u0628\u062a\u0645\u0628\u0631', '\u0623\u0643\u062a\u0648\u0628\u0631',
+        '\u0646\u0648\u0641\u0645\u0628\u0631', '\u062f\u064a\u0633\u0645\u0628\u0631']],
+    [0x19, ['\u044f\u043d\u0432\u0430\u0440\u044f', '\u0444\u0435\u0432\u0440\u0430\u043b\u044f',
+        '\u043c\u0430\u0440\u0442\u0430', '\u0430\u043f\u0440\u0435\u043b\u044f',
+        '\u043c\u0430\u044f', '\u0438\u044e\u043d\u044f', '\u0438\u044e\u043b\u044f',
+        '\u0430\u0432\u0433\u0443\u0441\u0442\u0430',
+        '\u0441\u0435\u043d\u0442\u044f\u0431\u0440\u044f',
+        '\u043e\u043a\u0442\u044f\u0431\u0440\u044f', '\u043d\u043e\u044f\u0431\u0440\u044f',
+        '\u0434\u0435\u043a\u0430\u0431\u0440\u044f']],
+    [0x15, ['stycznia', 'lutego', 'marca', 'kwietnia', 'maja', 'czerwca', 'lipca', 'sierpnia',
+        'wrze\u015bnia', 'pa\u017adziernika', 'listopada', 'grudnia']],
+]);
+
 /** IRecordInfo::RecordClear's place in the vtable. */
 const RECORDINFO_RECORDCLEAR = 4;
 /** IRecordInfo::GetSize's place in the vtable. */
@@ -3060,6 +3086,290 @@ export function createAutomationFunctions(host){
         },
     });
 
+
+    /**
+     * A variant as VarFormat reads it: a reference followed, a string as
+     * text, a date as a date, and every other number as a double.
+     *
+     * @param {number} pvar
+     * @returns {import('./varformat.js').Formattable | number} or the HRESULT
+     */
+    const formattable = pvar=>{
+        const value = readOperand(pvar);
+        if (typeof value === 'number')
+        {
+            return value;
+        }
+        switch (value.type)
+        {
+            case VT_EMPTY: return { kind: 'empty' };
+            case VT_NULL: return { kind: 'null' };
+            case VT_BSTR: return { kind: 'string', value: String(value.text) };
+            case VT_DATE: return { kind: 'date', value: Number(value.real) };
+            default: {
+                const real = coerce(value, VT_R8);
+                return typeof real === 'number' ? real
+                    : { kind: 'number', value: Number(real.real) };
+            }
+        }
+    };
+
+    /**
+     * A variant as a double for VarFormatNumber and its kin, a string read
+     * as a number.
+     *
+     * @param {number} pvar
+     * @returns {number | { real: number }} the HRESULT, or the number
+     */
+    const formatNumberOf = pvar=>{
+        const value = readOperand(pvar);
+        if (typeof value === 'number')
+        {
+            return value;
+        }
+        const real = coerce(value, VT_R8);
+        return typeof real === 'number' ? real : { real: Number(real.real) };
+    };
+
+    /** @param {number} out @param {string | null} text */
+    const answerText = (out, text)=>{
+        if (text === null)
+        {
+            writeU32(out, 0);
+            return S_OK;
+        }
+        const bstr = allocateBstr(encode(text));
+        writeU32(out, bstr);
+        return bstr === 0 ? E_OUTOFMEMORY : S_OK;
+    };
+
+    /**
+     * VarFormatNumber, VarFormatPercent and VarFormatCurrency.
+     *
+     * @param {string} api @param {(real: number, args: number[]) => string} spell
+     */
+    const fixedFormat = (api, spell)=>({
+        argBytes: 28,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ args)=>{
+            const out = args[6] >>> 0;
+            if ((args[0] >>> 0) === 0 || out === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const number = formatNumberOf(args[0] >>> 0);
+            if (typeof number === 'number')
+            {
+                return number;
+            }
+            english(api, 0);
+            return answerText(out, spell(number.real, args));
+        },
+    });
+
+    /** @type {Map<number, number>} the month-name table handed out for each language */
+    const alternateTables = new Map();
+
+    /** The bytes VarTokenizeFormatString writes before the format it keeps. */
+    const TOKEN_HEADER = 4;
+
+    Object.assign(conversions, {
+        /**
+         * HRESULT VarFormat(LPVARIANT pVarIn, LPOLESTR lpszFormat, int nFirstDay,
+         *                   int nFirstWeek, ULONG dwFlags, BSTR *pbstrOut)
+         */
+        VarFormat: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([pin, format, firstDay, firstWeek, , out])=>{
+                if ((pin >>> 0) === 0 || (out >>> 0) === 0 || (firstDay | 0) < 0
+                    || (firstDay | 0) > 7 || (firstWeek | 0) < 0 || (firstWeek | 0) > 3)
+                {
+                    return E_INVALIDARG;
+                }
+                const value = formattable(pin >>> 0);
+                if (typeof value === 'number')
+                {
+                    return value;
+                }
+                const text = (format >>> 0) === 0 ? '' : wideAt(format >>> 0);
+                return answerText(out >>> 0, formatValue(value, text, firstDay | 0,
+                    real=>textOfReal(real, 15)));
+            },
+        },
+        VarFormatNumber: fixedFormat('VarFormatNumber', (real, args)=>formatFixed(real,
+            args[1] | 0, args[2] | 0, args[3] | 0, args[4] | 0)),
+        VarFormatPercent: fixedFormat('VarFormatPercent', (real, args)=>formatFixed(real * 100,
+            args[1] | 0, args[2] | 0, args[3] | 0, args[4] | 0, { suffix: '%' })),
+        VarFormatCurrency: fixedFormat('VarFormatCurrency', (real, args)=>formatFixed(real,
+            args[1] | 0, args[2] | 0, args[3] | 0, args[4] | 0,
+            { prefix: '$', parensByDefault: true })),
+
+        /**
+         * HRESULT VarFormatDateTime(LPVARIANT pVarIn, int iNamedFormat, ULONG dwFlags,
+         *                           BSTR *pbstrOut)
+         */
+        VarFormatDateTime: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([pin, named, , out])=>{
+                if ((pin >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const value = readOperand(pin >>> 0);
+                if (typeof value === 'number')
+                {
+                    return value;
+                }
+                // Null formats as no string at all.
+                if (value.type === VT_NULL)
+                {
+                    return answerText(out >>> 0, null);
+                }
+                const date = value.type === VT_BSTR ? dateOutcome(String(value.text))
+                    : coerce(value, VT_DATE);
+                if (typeof date === 'number')
+                {
+                    return date;
+                }
+                const text = formatNamedDate(Number(date.real), named | 0);
+                return text === null ? E_INVALIDARG : answerText(out >>> 0, text);
+            },
+        },
+
+        /**
+         * HRESULT VarWeekdayName(int iWeekday, int fAbbrev, int iFirstDay,
+         *                        ULONG dwFlags, BSTR *pbstrOut)
+         *
+         * The day iWeekday counts to from iFirstDay, 1 for Sunday, 0 for the
+         * locale's first day -- Sunday in English.
+         */
+        VarWeekdayName: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([weekday, abbreviated, firstDay, , out])=>{
+                if ((out >>> 0) === 0 || (weekday | 0) < 1 || (weekday | 0) > 7
+                    || (firstDay | 0) < 0 || (firstDay | 0) > 7)
+                {
+                    return E_INVALIDARG;
+                }
+                const first = (firstDay | 0) === 0 ? 1 : firstDay | 0;
+                return answerText(out >>> 0,
+                    dayName(((weekday | 0) - 1 + first - 1) % 7, (abbreviated | 0) !== 0));
+            },
+        },
+
+        /** HRESULT VarMonthName(int iMonth, int fAbbrev, ULONG dwFlags, BSTR *pbstrOut) */
+        VarMonthName: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([month, abbreviated, , out])=>((out >>> 0) === 0 || (month | 0) < 1
+                || (month | 0) > 12 ? E_INVALIDARG
+                : answerText(out >>> 0, monthName((month | 0) - 1, (abbreviated | 0) !== 0))),
+        },
+
+        /**
+         * HRESULT GetAltMonthNames(LCID lcid, LPOLESTR **str)
+         *
+         * The genitive month names a language writes a date with, where it
+         * has them -- Russian and Polish -- and Arabic's transliterated
+         * ones; English has none, and gets NULL, as Windows answers for it.
+         */
+        GetAltMonthNames: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([lcid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const names = ALTERNATE_MONTHS.get(lcid & 0x3ff);
+                if (!names)
+                {
+                    writeU32(out >>> 0, 0);
+                    return S_OK;
+                }
+                // One table per language for the life of the process, as
+                // Windows hands out the same pointer every time.
+                let table = alternateTables.get(lcid & 0x3ff);
+                if (table === undefined)
+                {
+                    const strings = [...names, ''].map(name=>{
+                        const at = host.heap.allocate(name.length * 2 + 2);
+                        host.writeMemory(at, encode(`${name}\0`));
+                        return at;
+                    });
+                    table = host.heap.allocate(strings.length * 4);
+                    strings.forEach((at, index)=>writeU32(/** @type {number} */ (table)
+                        + index * 4, at));
+                    alternateTables.set(lcid & 0x3ff, table);
+                }
+                writeU32(out >>> 0, table);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT VarTokenizeFormatString(LPOLESTR lpszFormat, LPBYTE rgbTok, int cbTok,
+         *     int iFirstDay, int iFirstWeek, LCID lcid, int *pcbActual)
+         *
+         * The tokens are VarFormatFromTokens' own to read: the format kept
+         * whole, behind its length and the first day it was given.
+         */
+        VarTokenizeFormatString: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([format, tokens, room, firstDay, , , actual])=>{
+                if ((tokens >>> 0) === 0 || (room | 0) < TOKEN_HEADER)
+                {
+                    return E_INVALIDARG;
+                }
+                const text = (format >>> 0) === 0 ? '' : wideAt(format >>> 0);
+                const bytes = new Uint8Array(TOKEN_HEADER + text.length * 2);
+                const view = new DataView(bytes.buffer);
+                view.setUint16(0, text.length, true);
+                view.setUint16(2, firstDay & 0xffff, true);
+                bytes.set(encode(text), TOKEN_HEADER);
+                if (bytes.length > (room | 0))
+                {
+                    return 0x80020013 | 0;
+                }
+                host.writeMemory(tokens >>> 0, bytes);
+                if ((actual >>> 0) !== 0)
+                {
+                    writeU32(actual >>> 0, bytes.length);
+                }
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT VarFormatFromTokens(LPVARIANT pVarIn, LPOLESTR lpszFormat,
+         *     LPBYTE pbTokCur, ULONG dwFlags, BSTR *pbstrOut, LCID lcid)
+         */
+        VarFormatFromTokens: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([pin, , tokens, , out, lcid])=>{
+                if ((pin >>> 0) === 0 || (tokens >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                english('VarFormatFromTokens', lcid);
+                const view = peek(tokens >>> 0, TOKEN_HEADER);
+                const length = view.getUint16(0, true);
+                const firstDay = view.getInt16(2, true);
+                const units = peek((tokens >>> 0) + TOKEN_HEADER, length * 2);
+                const text = String.fromCharCode(...Array.from({ length },
+                    (_, index)=>units.getUint16(index * 2, true)));
+                const value = formattable(pin >>> 0);
+                return typeof value === 'number' ? value : answerText(out >>> 0,
+                    formatValue(value, text, firstDay, real=>textOfReal(real, 15)));
+            },
+        },
+    });
+
     const table = {
         ...conversions,
 
@@ -5142,8 +5452,18 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     27: 'SafeArrayCopy',
     28: 'DispGetParam',
     29: 'DispGetIDsOfNames',
+    32: 'CreateStdDispatch',
     35: 'GetActiveObject',
+    36: 'SafeArrayAllocDescriptor',
+    37: 'SafeArrayAllocData',
+    38: 'SafeArrayDestroyDescriptor',
+    39: 'SafeArrayDestroyData',
     40: 'SafeArrayRedim',
+    41: 'SafeArrayAllocDescriptorEx',
+    42: 'SafeArrayCreateEx',
+    43: 'SafeArrayCreateVectorEx',
+    44: 'SafeArraySetRecordInfo',
+    45: 'SafeArrayGetRecordInfo',
     46: 'VarParseNumFromStr',
     47: 'VarNumFromParseNum',
     48: 'VarI2FromUI1',
@@ -5153,7 +5473,9 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     52: 'VarI2FromCy',
     53: 'VarI2FromDate',
     54: 'VarI2FromStr',
+    55: 'VarI2FromDisp',
     56: 'VarI2FromBool',
+    57: 'SafeArraySetIID',
     58: 'VarI4FromUI1',
     59: 'VarI4FromI2',
     60: 'VarI4FromR4',
@@ -5161,7 +5483,9 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     62: 'VarI4FromCy',
     63: 'VarI4FromDate',
     64: 'VarI4FromStr',
+    65: 'VarI4FromDisp',
     66: 'VarI4FromBool',
+    67: 'SafeArrayGetIID',
     68: 'VarR4FromUI1',
     69: 'VarR4FromI2',
     70: 'VarR4FromI4',
@@ -5169,7 +5493,9 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     72: 'VarR4FromCy',
     73: 'VarR4FromDate',
     74: 'VarR4FromStr',
+    75: 'VarR4FromDisp',
     76: 'VarR4FromBool',
+    77: 'SafeArrayGetVartype',
     78: 'VarR8FromUI1',
     79: 'VarR8FromI2',
     80: 'VarR8FromI4',
@@ -5177,7 +5503,9 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     82: 'VarR8FromCy',
     83: 'VarR8FromDate',
     84: 'VarR8FromStr',
+    85: 'VarR8FromDisp',
     86: 'VarR8FromBool',
+    87: 'VarFormat',
     88: 'VarDateFromUI1',
     89: 'VarDateFromI2',
     90: 'VarDateFromI4',
@@ -5185,7 +5513,9 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     92: 'VarDateFromR8',
     93: 'VarDateFromCy',
     94: 'VarDateFromStr',
+    95: 'VarDateFromDisp',
     96: 'VarDateFromBool',
+    97: 'VarFormatDateTime',
     98: 'VarCyFromUI1',
     99: 'VarCyFromI2',
     100: 'VarCyFromI4',
@@ -5193,10 +5523,18 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     102: 'VarCyFromR8',
     103: 'VarCyFromDate',
     104: 'VarCyFromStr',
+    105: 'VarCyFromDisp',
     106: 'VarCyFromBool',
+    107: 'VarFormatNumber',
+    108: 'VarBstrFromUI1',
+    109: 'VarBstrFromI2',
+    110: 'VarBstrFromI4',
+    111: 'VarBstrFromR4',
+    112: 'VarBstrFromR8',
     113: 'VarBstrFromCy',
     114: 'VarBstrFromDate',
     116: 'VarBstrFromBool',
+    117: 'VarFormatPercent',
     118: 'VarBoolFromUI1',
     119: 'VarBoolFromI2',
     120: 'VarBoolFromI4',
@@ -5205,6 +5543,10 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     123: 'VarBoolFromDate',
     124: 'VarBoolFromCy',
     125: 'VarBoolFromStr',
+    126: 'VarBoolFromDisp',
+    127: 'VarFormatCurrency',
+    128: 'VarWeekdayName',
+    129: 'VarMonthName',
     130: 'VarUI1FromI2',
     131: 'VarUI1FromI4',
     132: 'VarUI1FromR4',
@@ -5212,7 +5554,10 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     134: 'VarUI1FromCy',
     135: 'VarUI1FromDate',
     136: 'VarUI1FromStr',
+    137: 'VarUI1FromDisp',
     138: 'VarUI1FromBool',
+    139: 'VarFormatFromTokens',
+    140: 'VarTokenizeFormatString',
     141: 'VarAdd',
     142: 'VarAnd',
     143: 'VarDiv',
@@ -5230,14 +5575,23 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     162: 'LoadRegTypeLib',
     163: 'RegisterTypeLib',
     167: 'VarXor',
+    171: 'ClearCustData',
     173: 'VarNeg',
     174: 'VarNot',
     175: 'VarRound',
     176: 'VarCmp',
+    177: 'VarDecAdd',
+    178: 'VarDecDiv',
+    179: 'VarDecMul',
+    181: 'VarDecSub',
+    182: 'VarDecAbs',
     183: 'LoadTypeLibEx',
     184: 'SystemTimeToVariantTime',
     185: 'VariantTimeToSystemTime',
     186: 'UnRegisterTypeLib',
+    187: 'VarDecFix',
+    188: 'VarDecInt',
+    189: 'VarDecNeg',
     190: 'VarDecFromUI1',
     191: 'VarDecFromI2',
     192: 'VarDecFromI4',
@@ -5246,10 +5600,13 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     195: 'VarDecFromDate',
     196: 'VarDecFromCy',
     197: 'VarDecFromStr',
+    198: 'VarDecFromDisp',
     199: 'VarDecFromBool',
     200: 'GetErrorInfo',
     201: 'SetErrorInfo',
     202: 'CreateErrorInfo',
+    203: 'VarDecRound',
+    204: 'VarDecCmp',
     205: 'VarI2FromI1',
     206: 'VarI2FromUI2',
     207: 'VarI2FromUI4',
@@ -5274,6 +5631,10 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     226: 'VarCyFromUI2',
     227: 'VarCyFromUI4',
     228: 'VarCyFromDec',
+    229: 'VarBstrFromI1',
+    230: 'VarBstrFromUI2',
+    231: 'VarBstrFromUI4',
+    232: 'VarBstrFromDec',
     233: 'VarBoolFromI1',
     234: 'VarBoolFromUI2',
     235: 'VarBoolFromUI4',
@@ -5293,6 +5654,7 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     249: 'VarI1FromDate',
     250: 'VarI1FromCy',
     251: 'VarI1FromStr',
+    252: 'VarI1FromDisp',
     253: 'VarI1FromBool',
     254: 'VarI1FromUI2',
     255: 'VarI1FromUI4',
@@ -5305,6 +5667,7 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     262: 'VarUI2FromDate',
     263: 'VarUI2FromCy',
     264: 'VarUI2FromStr',
+    265: 'VarUI2FromDisp',
     266: 'VarUI2FromBool',
     267: 'VarUI2FromI1',
     268: 'VarUI2FromUI4',
@@ -5317,6 +5680,7 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     275: 'VarUI4FromDate',
     276: 'VarUI4FromCy',
     277: 'VarUI4FromStr',
+    278: 'VarUI4FromDisp',
     279: 'VarUI4FromBool',
     280: 'VarUI4FromI1',
     281: 'VarUI4FromUI2',
@@ -5333,11 +5697,83 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     292: 'LPSAFEARRAY_UserMarshal',
     293: 'LPSAFEARRAY_UserUnmarshal',
     294: 'LPSAFEARRAY_UserFree',
+    298: 'VarDecCmpR8',
+    299: 'VarCyAdd',
+    303: 'VarCyMul',
+    304: 'VarCyMulI4',
+    305: 'VarCySub',
+    306: 'VarCyAbs',
+    307: 'VarCyFix',
+    308: 'VarCyInt',
+    309: 'VarCyNeg',
+    310: 'VarCyRound',
+    311: 'VarCyCmp',
+    312: 'VarCyCmpR8',
     313: 'VarBstrCat',
     314: 'VarBstrCmp',
+    317: 'VarR8Round',
     318: 'VarCat',
+    323: 'GetRecordInfoFromTypeInfo',
+    329: 'VarCyMulI8',
     330: 'VarDateFromUdate',
     331: 'VarUdateFromDate',
+    332: 'GetAltMonthNames',
+    333: 'VarI8FromUI1',
+    334: 'VarI8FromI2',
+    335: 'VarI8FromR4',
+    336: 'VarI8FromR8',
+    337: 'VarI8FromCy',
+    338: 'VarI8FromDate',
+    339: 'VarI8FromStr',
+    340: 'VarI8FromDisp',
+    341: 'VarI8FromBool',
+    342: 'VarI8FromI1',
+    343: 'VarI8FromUI2',
+    344: 'VarI8FromUI4',
+    345: 'VarI8FromDec',
+    346: 'VarI2FromI8',
+    347: 'VarI2FromUI8',
+    348: 'VarI4FromI8',
+    349: 'VarI4FromUI8',
+    360: 'VarR4FromI8',
+    361: 'VarR4FromUI8',
+    362: 'VarR8FromI8',
+    363: 'VarR8FromUI8',
+    364: 'VarDateFromI8',
+    365: 'VarDateFromUI8',
+    366: 'VarCyFromI8',
+    367: 'VarCyFromUI8',
+    368: 'VarBstrFromI8',
+    369: 'VarBstrFromUI8',
+    370: 'VarBoolFromI8',
+    371: 'VarBoolFromUI8',
+    372: 'VarUI1FromI8',
+    373: 'VarUI1FromUI8',
+    374: 'VarDecFromI8',
+    375: 'VarDecFromUI8',
+    376: 'VarI1FromI8',
+    377: 'VarI1FromUI8',
+    378: 'VarUI2FromI8',
+    379: 'VarUI2FromUI8',
+    411: 'SafeArrayCreateVector',
+    412: 'SafeArrayCopyData',
     417: 'OleCreatePropertyFrame',
     420: 'OleCreateFontIndirect',
+    425: 'VarUI4FromI8',
+    426: 'VarUI4FromUI8',
+    427: 'VarI8FromUI8',
+    428: 'VarUI8FromI8',
+    429: 'VarUI8FromUI1',
+    430: 'VarUI8FromI2',
+    431: 'VarUI8FromR4',
+    432: 'VarUI8FromR8',
+    433: 'VarUI8FromCy',
+    434: 'VarUI8FromDate',
+    435: 'VarUI8FromStr',
+    436: 'VarUI8FromDisp',
+    437: 'VarUI8FromBool',
+    438: 'VarUI8FromI1',
+    439: 'VarUI8FromUI2',
+    440: 'VarUI8FromUI4',
+    441: 'VarUI8FromDec',
 });
