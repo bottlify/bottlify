@@ -30,6 +30,7 @@ export const SHLWAPI_NAMED_ORDINALS = Object.freeze([
     [11, 'SHMapHandle'], [12, 'SHCreateMemStream'], [14, 'GetAcceptLanguagesA'],
     [15, 'GetAcceptLanguagesW'],
     [345, 'SHAnsiToAnsi'], [346, 'SHUnicodeToUnicode'], [399, 'StrCpyNXA'], [400, 'StrCpyNXW'],
+    [455, 'PathIsValidCharA'], [456, 'PathIsValidCharW'],
     [165, 'SHSetWindowBits'], [167, 'SHSetParentHwnd'], [198, 'SHSearchMapInt'],
     [208, 'FDSA_Initialize'], [209, 'FDSA_Destroy'], [210, 'FDSA_InsertItem'],
     [211, 'FDSA_DeleteItem'], [257, 'SHCreateWorkerWindowA'], [269, 'GUIDFromStringA'],

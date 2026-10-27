@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shlwapiMachine } from './memory.fixture.js';
-import { compactPath } from './path.js';
+import { charClass, compactPath } from './path.js';
 
 const E_POINTER = 0x80004003;
 const E_INVALIDARG = 0x80070057;
@@ -506,4 +506,44 @@ test('PathMakePretty, PathUnquoteSpaces, PathUndecorate, PathGetDriveNumber, Pat
         assert.equal(m.fns[`PathBuildRoot${suffix}`].handler([left, 26]), left);
         assert.equal(m.read(left, wide), 'aaaaaaaaa');
     }
+});
+
+test('PathIsValidChar answers a character\'s classes, past ASCII other valid', ()=>{
+    const m = shlwapiMachine();
+    // Wine's SHELL_charclass, against Windows.
+    for (const [c, classes] of /** @type {[string, number][]} */ ([[' ', 0x80], ['"', 0x200],
+        ['*', 0x2], [',', 0x40], ['.', 0x4], ['/', 0], [':', 0x10], [';', 0x20], ['<', 0],
+        ['?', 0x1], ['\\', 0x8], ['|', 0], ['a', 0xffffffff], ['0', 0x100], ['~', 0x100]]))
+    {
+        assert.equal(charClass(c.charCodeAt(0)), classes, c);
+    }
+    assert.equal(charClass(0x1f), 0);
+    assert.equal(charClass(0x7f), 0x100);
+    assert.equal(m.fns.PathIsValidCharA.handler([0x2a, 0x2]), 1);
+    assert.equal(m.fns.PathIsValidCharA.handler([0x2a, 0x4]), 0);
+    assert.equal(m.fns.PathIsValidCharW.handler([0x3042, 0x100]), 1);
+});
+
+test('PathUnExpandEnvStrings puts the longest variable back, or leaves the buffer', ()=>{
+    /** @type {any} */
+    let kernel32 = null;
+    const m = shlwapiMachine({ library: name=>(name === 'KERNEL32.dll' ? kernel32 : undefined) });
+    const block = m.put(['SystemRoot=C:\\WINDOWS', 'SystemDrive=C:', 'COMPUTERNAME=C:\\WINDOWS\\X',
+        ''].join('\u0000'), true);
+    kernel32 = { GetEnvironmentStringsW: { handler: ()=>block },
+        FreeEnvironmentStringsW: { handler: ()=>1 } };
+    const out = m.put('xx', false, 0x80);
+    assert.equal(m.fns.PathUnExpandEnvStringsA.handler(
+        [m.put('C:\\WINDOWS\\system32', false), out, 0x80]), 1);
+    assert.equal(m.read(out, false), '%SystemRoot%\\system32');
+    assert.equal(m.fns.PathUnExpandEnvStringsA.handler([m.put('C:C:', false), out, 0x80]), 1);
+    assert.equal(m.read(out, false), '%SystemDrive%C:');
+    const kept = m.put('xx', false, 0x80);
+    assert.equal(m.fns.PathUnExpandEnvStringsA.handler(
+        [m.put('C:\\WINDOWS\\system32', false), kept, 13]), 0, 'no room');
+    assert.equal(m.read(kept, false), 'xx', 'and the buffer as it was');
+    assert.equal(m.fns.PathUnExpandEnvStringsW.handler([m.put('path', true), out, 0x40]), 0);
+    assert.equal(m.fns.PathUnExpandEnvStringsA.handler(
+        [m.put('C:\\WINDOWSX', false), out, 0x80]), 1, 'not at a separator: the drive');
+    assert.equal(m.read(out, false), '%SystemDrive%\\WINDOWSX');
 });
