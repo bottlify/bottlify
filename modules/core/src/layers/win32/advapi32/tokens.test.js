@@ -405,9 +405,38 @@ test('a denied ACE ahead of an allowed one keeps its rights from the account', (
 
     assert.equal(fns.AddAccessDeniedAce.handler([ACL_AT, 2, 1, SID]), 0);
     assert.equal(errors.at(-1), 1344, 'ERROR_ALLOTTED_SPACE_EXCEEDED');
-    assert.equal(fns.SetSecurityInfo.handler(), 0);
     assert.equal(fns.SetSecurityInfo.argBytes, 28);
-    assert.equal(fns.SetKernelObjectSecurity.handler(), 1);
+    assert.equal(fns.SetKernelObjectSecurity.handler([0x7777, 4, 0]), 0, 'no such object');
+    assert.equal(errors.at(-1), 6);
+});
+
+test('a kernel object keeps the DACL and the label set on it, for every handle onto it', ()=>{
+    const { bytes, fns, dword, table } = setup();
+    const object = {};
+    table.set(0x40, { type: 'event', object });
+    table.set(0x44, { type: 'event', object });
+    // An absolute descriptor at BUFFER: a present DACL of one ACE, and a SACL
+    // with a label (0x11) and an allowed ACE, of revision 3.
+    const sd = BUFFER;
+    bytes.fill(0, sd, sd + 20);
+    bytes[sd] = 1;
+    bytes.set([0x14, 0], sd + 2);
+    const dacl = 0x300;
+    const sacl = 0x380;
+    bytes.set([2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0, 1, 0, 0, 0,
+        1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], dacl);
+    bytes.set([3, 0, 48, 0, 2, 0, 0, 0, 0x11, 0, 20, 0, 1, 0, 0, 0,
+        1, 1, 0, 0, 0, 0, 0, 16, 0, 0x10, 0, 0,
+        0, 0, 20, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], sacl);
+    new DataView(bytes.buffer).setUint32(sd + 12, sacl, true);
+    new DataView(bytes.buffer).setUint32(sd + 16, dacl, true);
+    assert.equal(fns.SetKernelObjectSecurity.handler([0x40, 0x4 | 0x10, sd]), 1);
+    assert.equal(fns.GetKernelObjectSecurity.handler([0x44, 0x10, 0x500, 0x200, NEEDED]), 1);
+    const at = 0x500 + dword(0x500 + 12);
+    assert.deepEqual([bytes[at], bytes[at + 4]], [3, 1], 'the label alone, in its revision');
+    assert.equal(bytes[at + 8], 0x11);
+    assert.equal(fns.GetKernelObjectSecurity.handler([0x44, 0x4, 0x500, 0x200, NEEDED]), 1);
+    assert.equal(bytes[0x500 + dword(0x500 + 16) + 4], 1, 'the DACL set: one ACE');
 });
 
 test('GetKernelObjectSecurity sizes, then writes a self-relative descriptor of the parts asked '

@@ -26,6 +26,7 @@
  */
 
 import { COMPUTER_NAME } from '../kernel32/drives.js';
+import { createDescriptorCodec } from './descriptors.js';
 
 /**
  * Who the program is running as. There is one account and no way to become
@@ -292,6 +293,10 @@ export const WELL_KNOWN_SIDS = Object.freeze({
 const OWNER_SECURITY_INFORMATION = 0x1;
 const GROUP_SECURITY_INFORMATION = 0x2;
 const DACL_SECURITY_INFORMATION = 0x4;
+const SACL_SECURITY_INFORMATION = 0x8;
+const LABEL_SECURITY_INFORMATION = 0x10;
+/** SE_OBJECT_TYPE of a service, whose security is the service manager's. */
+const SE_SERVICE = 2;
 /** Every standard and specific right: what GENERIC_ALL comes to on any object. */
 const ALL_RIGHTS = 0x001fffff;
 
@@ -792,6 +797,9 @@ export const accountNamed = written=>{
  *              resolve: (handle: number, type?: string) => any }} handles
  *           The one handle table: a token is closed with CloseHandle like
  *           everything else.
+ * @property {(handle: number, wanted: number) => Uint8Array | null} [serviceSecurity]
+ *           A service handle's descriptor, self-relative with the parts asked
+ *           for, or null for a handle that is not one.
  * @property {() => any} [currentThread]
  *           The calling thread, whose impersonation token SetThreadToken and
  *           ImpersonateSelf set. Absent, every caller is one thread.
@@ -1749,6 +1757,106 @@ export function createTokenFunctions(host){
         return ERROR_SUCCESS;
     };
 
+    const codec = createDescriptorCodec(host.readMemory);
+
+    /** The pseudo-handles a process has for itself and its thread, as objects of their own. */
+    const PSEUDO_OBJECTS = new Map([[0xffffffff, { pseudo: 'process' }],
+        [0xfffffffe, { pseudo: 'thread' }], [0xfffffffd, { pseudo: 'token' }]]);
+
+    /** @param {number} handle @returns {object | null} the kernel object a handle names */
+    const kernelObject = handle=>{
+        const pseudo = PSEUDO_OBJECTS.get(handle >>> 0);
+        if (pseudo)
+        {
+            return pseudo;
+        }
+        try
+        {
+            const object = host.handles.resolve(handle >>> 0);
+            return object !== null && typeof object === 'object' ? object : null;
+        }
+        catch (e){
+            void e;
+            return null;
+        }
+    };
+
+    /**
+     * Each kernel object's descriptor once a program has set one, by the
+     * object: every handle onto it sees the same.
+     *
+     * @type {WeakMap<object, import('./descriptors.js').DescriptorParts>}
+     */
+    const objectSecurity = new WeakMap();
+
+    /** @returns {import('./descriptors.js').DescriptorParts} what an object starts with */
+    const defaultParts = ()=>({
+        control: SE_DACL_PRESENT,
+        owner: sidBytes(DEFAULT_OWNER),
+        group: sidBytes(PRIMARY_GROUP),
+        dacl: aclBytes([GROUP_SIDS[2], SYSTEM_SID].map(sid=>
+            aceBytes(ACCESS_ALLOWED_ACE_TYPE, 0, ALL_RIGHTS, sidBytes(sid)))),
+    });
+
+    /**
+     * The parts a SECURITY_INFORMATION names, put over the object's.
+     *
+     * @param {object} object @param {import('./descriptors.js').DescriptorParts} parts
+     * @param {number} wanted
+     */
+    const storeParts = (object, parts, wanted)=>{
+        const held = { ...objectSecurity.get(object) ?? defaultParts() };
+        if ((wanted & OWNER_SECURITY_INFORMATION) !== 0 && parts.owner)
+        {
+            held.owner = parts.owner;
+        }
+        if ((wanted & GROUP_SECURITY_INFORMATION) !== 0 && parts.group)
+        {
+            held.group = parts.group;
+        }
+        if ((wanted & DACL_SECURITY_INFORMATION) !== 0)
+        {
+            held.dacl = parts.dacl ?? null;
+            held.control |= SE_DACL_PRESENT;
+        }
+        if ((wanted & SACL_SECURITY_INFORMATION) !== 0)
+        {
+            held.sacl = (parts.control & SE_SACL_PRESENT) !== 0 ? parts.sacl ?? null
+                : aclBytes([]);
+            held.control |= SE_SACL_PRESENT;
+        }
+        else if ((wanted & LABEL_SECURITY_INFORMATION) !== 0)
+        {
+            // A label is the SACL's mandatory-label ACEs alone: setting it
+            // keeps those of the SACL given, in its revision, and none
+            // given leaves an empty SACL behind.
+            const given = (parts.control & SE_SACL_PRESENT) !== 0 ? parts.sacl ?? null : null;
+            const aces = given === null ? [] : codec.acesIn(given) ?? [];
+            held.sacl = aclBytes(aces.filter(ace=>ace.type === SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                .map(ace=>ace.bytes), given?.[0] ?? ACL_REVISION);
+            held.control |= SE_SACL_PRESENT;
+        }
+        objectSecurity.set(object, held);
+    };
+
+    /**
+     * A kernel object's descriptor, self-relative, with the parts asked for;
+     * null for a handle that names none. A label asked for alone is the
+     * SACL's mandatory labels, an empty SACL when there are none set.
+     *
+     * @param {number} handle @param {number} wanted @returns {Uint8Array | null}
+     */
+    const kernelDescriptor = (handle, wanted)=>{
+        const object = kernelObject(handle);
+        if (object === null)
+        {
+            return null;
+        }
+        const parts = objectSecurity.get(object) ?? defaultParts();
+        const asked = codec.partsAskedFor(parts, wanted);
+        return codec.selfRelative(asked);
+    };
+
     /** @param {number} code @returns {number} the status a native call answers it with */
     const statusOf = code=>(code === ERROR_SUCCESS ? STATUS_SUCCESS
         : code === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE : STATUS_ACCESS_VIOLATION);
@@ -2114,15 +2222,82 @@ export function createTokenFunctions(host){
         SetEntriesInAclW: setEntriesInAcl(true),
 
         /**
-         * DWORD SetSecurityInfo(HANDLE, SE_OBJECT_TYPE, SECURITY_INFORMATION, PSID owner,
-         *   PSID group, PACL dacl, PACL sacl)
+         * DWORD GetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
+         *   SECURITY_INFORMATION SecurityInfo, PSID *ppsidOwner, PSID *ppsidGroup,
+         *   PACL *ppDacl, PACL *ppSacl, PSECURITY_DESCRIPTOR *ppSecurityDescriptor)
          *
-         * Taken and kept nowhere: the one account is the only one there is, so
-         * a DACL on an object has nobody else to let in or keep out.
+         * The object's descriptor with the parts asked for, self-relative in a
+         * LocalAlloc block, the part pointers into it. With nowhere to put any
+         * of it the call is refused, the last error left alone. A service's
+         * descriptor is the service manager's; any other handle is a kernel
+         * object's.
+         */
+        GetSecurityInfo: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, type, wanted, owner, group, dacl, sacl,
+                descriptor])=>{
+                const outs = [owner, group, dacl, sacl, descriptor];
+                if (outs.every(out=>(out >>> 0) === 0))
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const bytes = (type >>> 0) === SE_SERVICE
+                    ? host.serviceSecurity?.(handle >>> 0, wanted >>> 0) ?? null
+                    : kernelDescriptor(handle, wanted >>> 0);
+                if (bytes === null)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                const block = host.allocate(bytes.length);
+                host.writeMemory(block, bytes);
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+                [[owner, SD.OWNER], [group, SD.GROUP], [sacl, SD.SACL], [dacl, SD.DACL]]
+                    .forEach(([out, slot])=>{
+                        if ((out >>> 0) !== 0)
+                        {
+                            const offset = view.getUint32(slot, true);
+                            writeDword(out >>> 0, offset === 0 ? 0 : block + offset);
+                        }
+                    });
+                if ((descriptor >>> 0) !== 0)
+                {
+                    writeDword(descriptor >>> 0, block);
+                }
+                return ERROR_SUCCESS;
+            },
+        },
+
+        /**
+         * DWORD SetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
+         *   SECURITY_INFORMATION SecurityInfo, PSID psidOwner, PSID psidGroup,
+         *   PACL pDacl, PACL pSacl)
+         *
+         * The parts given become the kernel object's; a service's are taken
+         * and kept nowhere, as the service manager here keeps none.
          */
         SetSecurityInfo: {
             argBytes: 28,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, type, wanted, owner, group, dacl, sacl])=>{
+                if ((type >>> 0) === SE_SERVICE)
+                {
+                    return ERROR_SUCCESS;
+                }
+                const object = kernelObject(handle);
+                if (object === null)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                /** @param {number} acl */
+                const aclOf = acl=>(acl === 0 ? null
+                    : host.readMemory(acl, aclLength(acl)).slice());
+                const parts = { control: SE_DACL_PRESENT | SE_SACL_PRESENT,
+                    owner: sidAt(owner) ?? undefined, group: sidAt(group) ?? undefined,
+                    dacl: aclOf(dacl >>> 0), sacl: aclOf(sacl >>> 0) };
+                storeParts(object, parts, wanted >>> 0);
+                return ERROR_SUCCESS;
+            },
         },
 
         /**
@@ -2130,41 +2305,23 @@ export function createTokenFunctions(host){
          *   RequestedInformation, PSECURITY_DESCRIPTOR pSecurityDescriptor,
          *   DWORD nLength, LPDWORD lpnLengthNeeded)
          *
-         * The object's descriptor, self-relative, with the parts asked for:
-         * an object the one account made is owned by BUILTIN\Administrators,
-         * as an elevated administrator's objects are, its group the account's
-         * primary one, and its DACL the token's default -- everything to the
-         * administrators and to the system. Too small a buffer is the
-         * documented ERROR_INSUFFICIENT_BUFFER with the size needed, which is
-         * how a caller learns it.
+         * The object's descriptor, self-relative, with the parts asked for.
+         * Until a program sets one, an object the one account made is owned by
+         * BUILTIN\Administrators, as an elevated administrator's objects are,
+         * its group the account's primary one, and its DACL the token's
+         * default -- everything to the administrators and to the system. Too
+         * small a buffer is the documented ERROR_INSUFFICIENT_BUFFER with the
+         * size needed, which is how a caller learns it.
          */
         GetKernelObjectSecurity: {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, requested, descriptor, length, needed])=>{
-                const PSEUDO_HANDLES = new Set([0xffffffff, 0xfffffffe, 0xfffffffd]);
-                let known = PSEUDO_HANDLES.has(handle >>> 0);
-                try
-                {
-                    known = known || host.handles.resolve(handle >>> 0) != null;
-                }
-                catch (e){
-                    void e;
-                }
-                if (!known)
+                const bytes = kernelDescriptor(handle, requested >>> 0);
+                if (bytes === null)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const { bytes } = selfRelativeDescriptor({
-                    ...(requested & OWNER_SECURITY_INFORMATION) !== 0
-                        ? { owner: sidBytes(DEFAULT_OWNER) } : {},
-                    ...(requested & GROUP_SECURITY_INFORMATION) !== 0
-                        ? { group: sidBytes(PRIMARY_GROUP) } : {},
-                    ...(requested & DACL_SECURITY_INFORMATION) !== 0
-                        ? { dacl: aclBytes([GROUP_SIDS[2], SYSTEM_SID].map(sid=>
-                            aceBytes(ACCESS_ALLOWED_ACE_TYPE, 0, ALL_RIGHTS, sidBytes(sid)))) }
-                        : {},
-                });
                 if ((needed >>> 0) !== 0)
                 {
                     writeDword(needed >>> 0, bytes.length);
@@ -2181,11 +2338,26 @@ export function createTokenFunctions(host){
         /**
          * BOOL SetKernelObjectSecurity(HANDLE, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR)
          *
-         * As SetSecurityInfo: accepted, with nobody else for it to matter to.
+         * The parts the information names, taken from the descriptor, become
+         * the object's: what the next GetKernelObjectSecurity answers.
          */
         SetKernelObjectSecurity: {
             argBytes: 12,
-            handler: ()=>1,
+            /** @param {number[]} args */
+            handler: ([handle, wanted, descriptor])=>{
+                const object = kernelObject(handle);
+                if (object === null)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const parts = codec.partsOf(descriptor);
+                if (parts === null)
+                {
+                    return fail(ERROR_INVALID_SECURITY_DESCR);
+                }
+                storeParts(object, parts, wanted >>> 0);
+                return 1;
+            },
         },
 
         /**

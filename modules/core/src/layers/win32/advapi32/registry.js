@@ -393,6 +393,53 @@ const pick = (table, names)=>Object.fromEntries(names.map(name=>[name, table[nam
 /** Where the kernel describes the processors, a key for each. */
 const PROCESSORS_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor';
 
+/**
+ * Services Windows XP's setup installs, among them the ones a program is
+ * found asking for -- the print spooler, the event log, the task scheduler,
+ * WMI -- with the values the service control manager keeps: sharing a
+ * process (0x20) or with one of their own (0x10), started automatically
+ * (2), errors logged (1), running as the system, in the host XP runs them in.
+ */
+const BUILT_IN_SERVICES = Object.freeze([
+    { name: 'AudioSrv', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Windows Audio', ObjectName: 'LocalSystem', Group: 'AudioGroup' } },
+    { name: 'Dhcp', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'DHCP Client', ObjectName: 'LocalSystem', Group: 'TDI' } },
+    { name: 'Dnscache', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k NetworkService',
+        DisplayName: 'DNS Client', ObjectName: 'LocalSystem', Group: 'TDI' } },
+    { name: 'Eventlog', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\services.exe',
+        DisplayName: 'Event Log', ObjectName: 'LocalSystem', Group: 'Event log' } },
+    { name: 'LanmanWorkstation', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Workstation', ObjectName: 'LocalSystem', Group: 'NetworkProvider' } },
+    { name: 'PlugPlay', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\services.exe',
+        DisplayName: 'Plug and Play', ObjectName: 'LocalSystem', Group: 'PlugPlay' } },
+    { name: 'RpcSs', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k rpcss',
+        DisplayName: 'Remote Procedure Call (RPC)', ObjectName: 'LocalSystem',
+        Group: 'COM Infrastructure' } },
+    { name: 'Schedule', values: { Type: 0x120, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Task Scheduler', ObjectName: 'LocalSystem', Group: 'SchedulerGroup' } },
+    { name: 'Spooler', values: { Type: 0x110, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\spoolsv.exe',
+        DisplayName: 'Print Spooler', ObjectName: 'LocalSystem', Group: 'SpoolerGroup' } },
+    { name: 'Themes', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Themes', ObjectName: 'LocalSystem', Group: 'UIGroup' } },
+    { name: 'W32Time', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Windows Time', ObjectName: 'LocalSystem' } },
+    { name: 'winmgmt', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Windows Management Instrumentation', ObjectName: 'LocalSystem' } },
+]);
+
 /** The in-process COM classes the system libraries serve, by CLSID. */
 const IN_PROCESS_CLASSES = Object.freeze([
     { clsid: '{47D4D946-62E8-11CF-93BC-444553540000}', library: 'dsound.dll' }, // DirectSound
@@ -495,6 +542,16 @@ const machineKeys = (windows, directx, processors)=>{
             },
             owned: VERSION_VALUES },
         { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
+        // The services every Windows XP machine has installed, as its setup
+        // registers them: the service control manager lists them, a program
+        // asks for one by name -- the spooler, to learn whether it may print --
+        // and the event log's logs are its subkeys, each source a key under
+        // its log.
+        ...BUILT_IN_SERVICES.map(({ name, values })=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SYSTEM\\CurrentControlSet\\Services\\${name}`, values })),
+        ...['Application', 'System', 'Security'].map(log=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SYSTEM\\CurrentControlSet\\Services\\Eventlog\\${log}`,
+            values: { File: `%SystemRoot%\\system32\\config\\${log.slice(0, 6)}.Evt` } })),
         // What the kernel wrote about each processor it found, alike: the
         // identifier is the emulated CPUID's family, model and stepping, the
         // speed the emulated counter's rate (`createHive`'s `processorMhz`),

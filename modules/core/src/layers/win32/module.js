@@ -62,7 +62,7 @@ import { KEY_OF_HANDLE, createRegistryFunctions } from './advapi32/functions.js'
 import {
     ADMINISTRATORS_SID, USER_SID_TEXT, createTokenFunctions, isTokenMember,
 } from './advapi32/tokens.js';
-import { createServiceFunctions } from './advapi32/services.js';
+import { SERVICE_SECURITY, createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
     DIRECTX_RELEASES, createHive, shellFolderDirectories, shellFolders,
@@ -3379,11 +3379,23 @@ export function createWin32Module(){
                         readWideString,
                         setLastError: setError,
                         handles,
+                        readMemory,
+                        writeMemory,
+                        // The logs and their sources are named in the registry,
+                        // and a backup is a file of the volume.
+                        hive,
+                        files: volume,
+                        now: ()=>Math.floor(kernel.clock.wallClock() / 1000),
+                        computerName: COMPUTER_NAME,
                     }),
                     ...createTokenFunctions({
                         readMemory,
                         // Impersonation is the thread's, not the process's.
                         currentThread: ()=>kernel.currentThread(),
+                        // A service's descriptor is the service manager's.
+                        /** @param {number} handle @param {number} wanted */
+                        serviceSecurity: (handle, wanted)=>/** @type {any} */ (
+                            libraries['ADVAPI32.dll'])[SERVICE_SECURITY]?.(handle, wanted) ?? null,
                         writeMemory,
                         readCString,
                         setLastError: setError,
@@ -3397,6 +3409,18 @@ export function createWin32Module(){
                         hive,
                         setLastError: setError,
                         divergence: config?.divergence,
+                        // Credentials and performance instances are blocks the
+                        // program frees through the library that gave them.
+                        allocate: bytes=>heap.allocate(bytes),
+                        release: address=>{
+                            heap.free(address);
+                        },
+                        // A performance query's header is stamped with the
+                        // clocks the program reads itself.
+                        /** @param {string} library @param {string} name @param {number[]} args */
+                        system: (library, name, args)=>libraries[library]?.[name]?.handler(args),
+                        fileExists: path=>volume.stat(path)?.exists === true,
+                        computerName: COMPUTER_NAME,
                     }),
                     ...createCryptoFunctions({
                         readMemory,
