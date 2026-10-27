@@ -481,9 +481,17 @@ test('VarParseNumFromStr pulls a decimal string into NUMPARSE and its digits', (
     assert.equal(parse('abc').result, DISP_E_TYPEMISMATCH >>> 0);
     assert.equal(call('VarParseNumFromStr', [TEXT, 0x409, 0, 0, DIGITS]), E_INVALIDARG);
 
-    host.said.length = 0;
-    parse('&H10', 0x0040);
-    assert.ok(host.said.some(line=>line.includes('hex')), 'an unparsed form is reported');
+    const hex = parse('&HF800', 0x0040);
+    assert.deepEqual([hex.result, hex.used, hex.digits], [S_OK, 6, [15, 8, 0, 0]],
+        'hexadecimal digits are all kept, trailing zeros too');
+    const money = parse('($1,234.5)', 0x780);
+    assert.deepEqual([money.result, money.count, money.outFlags, money.used, money.pwr10],
+        [S_OK, 5, 0x10780, 10, -1], 'currency, thousands and parentheses, negative');
+    assert.deepEqual(parse('$&ha', 0x440).result, DISP_E_TYPEMISMATCH >>> 0,
+        'never a hexadecimal currency');
+    const trailing = parse('7-', 0x20);
+    assert.deepEqual([trailing.outFlags, trailing.used], [0x10020, 2]);
+    assert.equal(parse('\u00a07', 0x1).used, 2, 'a no-break space is white space');
 });
 
 test('VarNumFromParseNum picks the smallest type the caller allows', ()=>{
@@ -2178,4 +2186,82 @@ test('CreateStdDispatch wants an object, its type information and an out pointer
     host.putU32(SLOT, 0xdeadbeef);
     assert.equal(call('CreateStdDispatch', [0, 0x4000, 0, SLOT]), E_INVALIDARG);
     assert.equal(host.u32(SLOT), 0);
+});
+
+test('VarCmp: text beside a number is greater unless VT_RESERVED sits on one side', ()=>{
+    setUp();
+    const VT_RESERVED = 0x8000;
+    host.putWide(TEXT, '7');
+    const seven = call('SysAllocString', [TEXT]);
+    /** @param {number} leftType @param {number} rightType */
+    const compare = (leftType, rightType)=>{
+        host.putVariant(VARIANT_A, leftType, seven);
+        host.putVariant(VARIANT_B, rightType, 42);
+        return call('VarCmp', [VARIANT_A, VARIANT_B, 0x409, 0]);
+    };
+    assert.equal(compare(VT_BSTR, VT_I4), 2, 'text is greater');
+    assert.equal(compare(VT_BSTR | VT_RESERVED, VT_I4), 2, '"7" against "42" as text');
+    assert.equal(compare(VT_BSTR, VT_I4 | VT_RESERVED), 0, '7 against 42 as numbers');
+    host.putVariant(VARIANT_A, VT_R8, 0);
+    host.bytes.set(new Uint8Array(new Float32Array([1]).buffer), VARIANT_A + 8);
+    host.putU16(VARIANT_A, 4);
+    host.putVariant(VARIANT_B, VT_R8, 0);
+    new DataView(host.bytes.buffer).setFloat64(VARIANT_B + 8, 1 + 1e-8, true);
+    assert.equal(call('VarCmp', [VARIANT_A, VARIANT_B, 0x409, 0]), 1,
+        'a double is a float beside a float');
+    host.putVariant(VARIANT_A, 16, 1);
+    assert.equal(call('VarCmp', [VARIANT_A, VARIANT_B, 0x409, 0]), DISP_E_TYPEMISMATCH,
+        'VT_I1 is not compared');
+});
+
+test('VarCat joins an object\'s default value and answers Invoke\'s failure', async()=>{
+    setUp();
+    const OBJECT = 0x4000;
+    host.putU32(OBJECT, 0x4010);
+    host.putU32(0x4010 + 6 * 4, 0x5000);
+    let fail = 0;
+    Object.assign(host, {
+        /** @param {number} entry @param {number[]} args */
+        call: (entry, args)=>{
+            if (entry === 0x5000 && fail === 0)
+            {
+                host.putVariant(args[6], VT_UI1, 34);
+            }
+            return Promise.resolve(entry === 0x5000 ? fail : 0);
+        },
+    });
+    fx = createAutomationFunctions(host);
+    host.putWide(TEXT, '12');
+    host.putVariant(VARIANT_A, VT_BSTR, call('SysAllocString', [TEXT]));
+    host.putVariant(VARIANT_B, 9, OBJECT);
+    const OUT = 0x2040;
+    assert.equal(await fx.VarCat.handler([VARIANT_A, VARIANT_B, OUT]), S_OK);
+    const bstr = host.u32(OUT + 8);
+    assert.equal(String.fromCharCode(...new Uint16Array(host.bytes.slice(bstr, bstr + 8).buffer)),
+        '1234');
+    fail = 0x8007000e;
+    assert.equal((await fx.VarCat.handler([VARIANT_A, VARIANT_B, OUT])) >>> 0, 0x8007000e);
+});
+
+test('VarNumFromParseNum: hex digits are bits for the first type wide enough', ()=>{
+    setUp();
+    const NUMPARSE = 0x3000;
+    const DIGITS = 0x3100;
+    /** @param {number[]} digits @param {number} shift @param {number} bits */
+    const make = (digits, shift, bits)=>{
+        host.putU32(NUMPARSE, digits.length);
+        host.putU32(NUMPARSE + 8, 0);
+        host.putU32(NUMPARSE + 16, shift);
+        host.putU32(NUMPARSE + 20, 0);
+        host.bytes.set(digits, DIGITS);
+        return call('VarNumFromParseNum', [NUMPARSE, DIGITS, bits, VARIANT_A]);
+    };
+    assert.equal(make([8, 2], 4, 0x3f0004), S_OK);
+    assert.deepEqual([host.u16(VARIANT_A), host.bytes[VARIANT_A + 8]], [16, 0x82], 'VT_I1 -126');
+    assert.equal(make([7, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15], 4,
+        1 << 20), S_OK);
+    assert.equal(host.u16(VARIANT_A), 20, 'VT_I8 read exactly');
+    assert.equal(host.u32(VARIANT_A + 12), 0x7fffffff);
+    assert.equal(make([5], 0, 1 << 14), S_OK);
+    assert.equal(host.u16(VARIANT_A), 14, 'a DECIMAL when that is all that is asked for');
 });

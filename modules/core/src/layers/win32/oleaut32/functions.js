@@ -195,10 +195,6 @@ const NUMPRS_USE_ALL = 0x1000;
 const NUMPRS_NEG = 0x10000;
 const NUMPRS_INEXACT = 0x20000;
 
-/** The forms a string can take that this parser does not pull apart. */
-const NUMPRS_UNPARSED = NUMPRS_TRAILING_PLUS | NUMPRS_TRAILING_MINUS | NUMPRS_HEX_OCT
-    | NUMPRS_PARENS | NUMPRS_CURRENCY;
-
 /** VarCmp's and VarBstrCmp's answers: less, equal, greater -- and null. */
 const VARCMP_LT = 0;
 const VARCMP_EQ = 1;
@@ -1144,6 +1140,78 @@ export function createAutomationFunctions(host){
             return compareStrings(a, b, flags) - 1;
         }
         return orderOf(a, b);
+    };
+
+    /**
+     * VariantCopy of a record: a new record of the size its IRecordInfo
+     * gives, filled by its RecordCopy, and the IRecordInfo shared with a
+     * reference of the copy's own.
+     *
+     * @param {number} dest @param {number} src @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const copyRecord = (dest, src, thread)=>{
+        const record = readU32(src + VARIANT_VALUE);
+        const info = readU32(src + VARIANT_VALUE + 4);
+        const call = host.call;
+        if (!call)
+        {
+            return E_INVALIDARG;
+        }
+        const owed = nothingOwed();
+        clear(dest, owed);
+        return Promise.resolve(settle(owed, thread, S_OK))
+            .then(()=>recordSize(info))
+            .then(size=>{
+                const copy = host.heap.allocate(Math.max(size ?? 0, 1));
+                if (copy === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                host.fillMemory(copy, 0, Math.max(size ?? 0, 1));
+                writeU16(dest, VT_RECORD);
+                writeU32(dest + VARIANT_VALUE, copy);
+                writeU32(dest + VARIANT_VALUE + 4, info);
+                return call(readU32(readU32(info) + (RECORDINFO_RECORDCLEAR + 1) * 4),
+                    [info, record, copy], thread)
+                    .then(hr=>addRefOf(info).then(()=>hr));
+            });
+    };
+
+    /**
+     * The interface a VT_DISPATCH variant holds, by value or by reference.
+     *
+     * @param {number} pvar
+     */
+    const objectIn = pvar=>{
+        const at = readU32(pvar + VARIANT_VALUE);
+        return (readU16(pvar) & VT_BYREF) !== 0 ? readU32(at) : at;
+    };
+
+    /**
+     * VarCat of two values read: both spelled, null and empty as nothing,
+     * a boolean as True or False; null only when both are.
+     *
+     * @param {import('./arithmetic.js').Value} left
+     * @param {import('./arithmetic.js').Value} right
+     * @returns {import('./arithmetic.js').Outcome}
+     */
+    const concatenation = (left, right)=>{
+        const refusal = catRefusal(left, right);
+        if (refusal !== S_OK)
+        {
+            return refusal;
+        }
+        if (left.type === VT_NULL && right.type === VT_NULL)
+        {
+            return variantValue(VT_NULL);
+        }
+        /** @param {import('./arithmetic.js').Value} value */
+        const text = value=>(value.type === VT_NULL ? '' : spelled(value, VARIANT_ALPHABOOL));
+        const a = text(left);
+        const b = text(right);
+        return typeof a === 'number' ? a : typeof b === 'number' ? b
+            : variantValue(VT_BSTR, { text: a + b });
     };
 
     /** The types VarCat spells and joins. */
@@ -2421,6 +2489,21 @@ export function createAutomationFunctions(host){
      * @returns {number | Promise<number>}
      */
     const defaultValue = (dispatch, lcid, thread, then)=>{
+        const fetched = fetchDefault(dispatch, lcid, thread);
+        return typeof fetched === 'number' ? DISP_E_TYPEMISMATCH
+            : fetched.then(value=>(typeof value === 'number' ? DISP_E_TYPEMISMATCH
+                : then(value)));
+    };
+
+    /**
+     * An object's default property, read out of the variant Invoke filled
+     * and that variant emptied again; the HRESULT Invoke failed with, or a
+     * mismatch for no object at all.
+     *
+     * @param {number} dispatch @param {number} lcid @param {unknown} thread
+     * @returns {number | Promise<import('./arithmetic.js').Value | number>}
+     */
+    const fetchDefault = (dispatch, lcid, thread)=>{
         const call = host.call;
         if (dispatch === 0 || !call)
         {
@@ -2436,11 +2519,10 @@ export function createAutomationFunctions(host){
         const invoke = readU32(readU32(dispatch) + 6 * 4);
         return call(invoke, [dispatch, DISPID_VALUE, block + 32, lcid >>> 0,
             DISPATCH_PROPERTYGET, block + 16, block, 0, 0], thread).then(hr=>{
-            const value = (hr | 0) < 0 ? DISP_E_TYPEMISMATCH : readOperand(block);
-            const answer = typeof value === 'number' ? value : then(value);
+            const value = (hr | 0) < 0 ? hr | 0 : readOperand(block);
             const owed = nothingOwed();
             clear(block, owed);
-            return settle(owed, thread, answer);
+            return Promise.resolve(settle(owed, thread, S_OK)).then(()=>value);
         }).finally(()=>host.heap.free(block));
     };
 
@@ -3770,7 +3852,15 @@ export function createAutomationFunctions(host){
             handler: ([pvargDest, pvargSrc])=>{
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                return settle(owed, thread, copyVariant(pvargDest >>> 0, pvargSrc >>> 0, owed));
+                const dest = pvargDest >>> 0;
+                const src = pvargSrc >>> 0;
+                // A record with no IRecordInfo to copy it by is copied as it is.
+                if (dest !== 0 && src !== 0 && dest !== src && readU16(src) === VT_RECORD
+                    && readU32(src + VARIANT_VALUE + 4) !== 0 && isVariantType(readU16(dest)))
+                {
+                    return copyRecord(dest, src, thread);
+                }
+                return settle(owed, thread, copyVariant(dest, src, owed));
             },
         },
 
@@ -4050,22 +4140,21 @@ export function createAutomationFunctions(host){
                     return writeOutcome(pout >>> 0, typeof left === 'number' ? left
                         : /** @type {number} */ (right));
                 }
-                const refusal = catRefusal(left, right);
-                if (refusal !== S_OK)
+                if (left.type !== VT_DISPATCH && right.type !== VT_DISPATCH)
                 {
-                    return writeOutcome(pout >>> 0, refusal);
+                    return writeOutcome(pout >>> 0, concatenation(left, right));
                 }
-                if (left.type === VT_NULL && right.type === VT_NULL)
-                {
-                    return writeOutcome(pout >>> 0, variantValue(VT_NULL));
-                }
-                /** @param {import('./arithmetic.js').Value} value */
-                const text = value=>(value.type === VT_NULL ? ''
-                    : spelled(value, VARIANT_ALPHABOOL));
-                const a = text(left);
-                const b = text(right);
-                return writeOutcome(pout >>> 0, typeof a === 'number' ? a
-                    : typeof b === 'number' ? b : variantValue(VT_BSTR, { text: a + b }));
+                // An object joins as its default value; Invoke's failure is
+                // the call's.
+                const thread = host.callerThread?.();
+                const sides = [[left, pleft], [right, pright]].map(([side, pvar])=>{
+                    const value = /** @type {import('./arithmetic.js').Value} */ (side);
+                    return value.type === VT_DISPATCH && value.flags === 0
+                        ? fetchDefault(objectIn(/** @type {number} */ (pvar) >>> 0), 0, thread)
+                        : value;
+                });
+                return Promise.all(sides).then(([a, b])=>writeOutcome(pout >>> 0,
+                    typeof a === 'number' ? a : typeof b === 'number' ? b : concatenation(a, b)));
             },
         },
 
@@ -4243,26 +4332,26 @@ export function createAutomationFunctions(host){
                 const allowed = fields.getUint32(NUMPARSE_IN_FLAGS, true);
                 const text = wideAt(strIn >>> 0);
                 const parsed = parseNumberText(text, allowed, capacity);
-                const rest = parsed === null ? text : text.slice(parsed.used);
-                if ((allowed & NUMPRS_UNPARSED) !== 0 && /^\s*[&()$+-]/.test(rest))
-                {
-                    report('VarParseNumFromStr',
-                        'hex/octal, currency, parenthesised and trailing-sign forms are not read');
-                }
-                if (parsed === null
-                    || ((allowed & NUMPRS_USE_ALL) !== 0 && parsed.used < text.length))
+                if (parsed === null)
                 {
                     return DISP_E_TYPEMISMATCH;
                 }
+                // What was read is in the caller's buffer even when the rest
+                // of the string makes USE_ALL refuse it.
+                if ((allowed & NUMPRS_USE_ALL) !== 0 && parsed.used < text.length)
+                {
+                    host.writeMemory(rgbDig >>> 0, Uint8Array.from(parsed.written));
+                    return DISP_E_TYPEMISMATCH;
+                }
                 const out = new DataView(new ArrayBuffer(24));
-                out.setInt32(NUMPARSE_C_DIG, parsed.digits.length, true);
+                out.setInt32(NUMPARSE_C_DIG, parsed.count, true);
                 out.setUint32(NUMPARSE_IN_FLAGS, allowed, true);
                 out.setUint32(NUMPARSE_OUT_FLAGS, parsed.flags, true);
                 out.setInt32(NUMPARSE_CCH_USED, parsed.used, true);
-                out.setInt32(NUMPARSE_BASE_SHIFT, 0, true);
+                out.setInt32(NUMPARSE_BASE_SHIFT, parsed.baseShift, true);
                 out.setInt32(NUMPARSE_PWR10, parsed.pwr10, true);
                 host.writeMemory(numprs, new Uint8Array(out.buffer));
-                host.writeMemory(rgbDig >>> 0, Uint8Array.from(parsed.digits));
+                host.writeMemory(rgbDig >>> 0, Uint8Array.from(parsed.written));
                 return S_OK;
             },
         },
@@ -5200,116 +5289,220 @@ export function createAutomationFunctions(host){
 
 /** @param {string} char */
 const isWhite = char=>char === ' ' || char === '\t' || char === '\n' || char === '\r'
-    || char === '\v' || char === '\f';
+    || char === '\v' || char === '\f' || char === ' ';
 
 /**
  * A number string pulled apart the way VarParseNumFromStr does, in the
- * invariant spelling: sign, digits, thousands commas, a '.' and an exponent,
- * each only where `allowed` lets it in. The digits come back without leading
- * or trailing zeros (those move into the power of ten), at most `capacity` of
- * them, INEXACT set when a dropped one was not zero.
+ * English spelling, each part only where `allowed` lets it in: white space,
+ * a sign, '$' and an opening parenthesis in front in any order; then &H or
+ * &O and digits of that base, or decimal digits with ',' after the first
+ * as thousands, a '.' and an exponent; then white space, a sign, '$' and the
+ * closing parenthesis behind.
+ *
+ * Leading zeros are dropped and trailing ones moved into the power of ten;
+ * `count` is what is left, at most `capacity` of it, INEXACT set when a
+ * dropped digit was not zero. What `written` holds is the digits as read,
+ * trailing zeros of the whole part included -- Windows writes those into
+ * the caller's buffer though it does not count them -- but not a fraction
+ * of zeros alone. A hexadecimal or octal number keeps all its digits.
  *
  * @param {string} text @param {number} allowed @param {number} capacity
- * @returns {{ digits: number[], flags: number, used: number, pwr10: number } | null}
- *   null when the string holds no number at all.
+ * @returns {{ written: number[], count: number, flags: number, used: number, pwr10: number,
+ *     baseShift: number } | null}  null when the string holds no number.
  */
 export function parseNumberText(text, allowed, capacity){
     let at = 0;
     let flags = 0;
-    if ((allowed & NUMPRS_LEADING_WHITE) !== 0)
-    {
-        while (at < text.length && isWhite(text[at]))
-        {
-            at++;
-            flags |= NUMPRS_LEADING_WHITE;
-        }
-    }
-    if (text[at] === '+' && (allowed & NUMPRS_LEADING_PLUS) !== 0)
-    {
-        at++;
-        flags |= NUMPRS_LEADING_PLUS;
-    }
-    else if (text[at] === '-' && (allowed & NUMPRS_LEADING_MINUS) !== 0)
-    {
-        at++;
-        flags |= NUMPRS_LEADING_MINUS | NUMPRS_NEG;
-    }
-    let whole = '';
-    let fraction = '';
-    let inFraction = false;
-    for (; at < text.length; at++)
+    const has = (/** @type {number} */ flag)=>(allowed & flag) !== 0;
+    for (;;)
     {
         const char = text[at];
-        if (char >= '0' && char <= '9')
+        if (has(NUMPRS_LEADING_WHITE) && isWhite(char))
         {
-            if (inFraction)
-            {
-                fraction += char;
-            }
-            else
-            {
-                whole += char;
-            }
+            flags |= NUMPRS_LEADING_WHITE;
+            at++;
         }
-        else if (char === '.' && !inFraction && (allowed & NUMPRS_DECIMAL) !== 0)
+        else if (char === '+' && has(NUMPRS_LEADING_PLUS)
+            && (flags & (NUMPRS_LEADING_PLUS | NUMPRS_LEADING_MINUS)) === 0)
         {
-            inFraction = true;
-            flags |= NUMPRS_DECIMAL;
+            flags |= NUMPRS_LEADING_PLUS;
+            at++;
         }
-        else if (char === ',' && !inFraction && (allowed & NUMPRS_THOUSANDS) !== 0)
+        else if (char === '-' && has(NUMPRS_LEADING_MINUS)
+            && (flags & (NUMPRS_LEADING_PLUS | NUMPRS_LEADING_MINUS)) === 0)
         {
-            flags |= NUMPRS_THOUSANDS;
+            flags |= NUMPRS_LEADING_MINUS | NUMPRS_NEG;
+            at++;
+        }
+        else if (char === '$' && has(NUMPRS_CURRENCY) && (flags & NUMPRS_CURRENCY) === 0)
+        {
+            flags |= NUMPRS_CURRENCY;
+            at++;
+        }
+        else if (char === '(' && has(NUMPRS_PARENS) && (flags & NUMPRS_PARENS) === 0)
+        {
+            flags |= NUMPRS_PARENS | NUMPRS_NEG;
+            at++;
         }
         else
         {
             break;
         }
     }
-    if (whole === '' && fraction === '')
-    {
-        return null;
-    }
-    let exponent = 0;
-    if ((text[at] === 'e' || text[at] === 'E') && (allowed & NUMPRS_EXPONENT) !== 0)
-    {
-        // An 'e' with no digits after it is not an exponent, and is left unread.
-        const match = /^[eE]([+-]?)(\d+)/.exec(text.slice(at));
-        if (match)
-        {
-            exponent = Number(match[2]) * (match[1] === '-' ? -1 : 1);
-            at += match[0].length;
-            flags |= NUMPRS_EXPONENT;
-        }
-    }
-    if ((allowed & NUMPRS_TRAILING_WHITE) !== 0)
-    {
-        while (at < text.length && isWhite(text[at]))
-        {
-            at++;
-            flags |= NUMPRS_TRAILING_WHITE;
-        }
-    }
 
-    let all = (whole + fraction).replace(/^0+/, '');
-    let pwr10 = exponent - fraction.length;
-    const significant = all.replace(/0+$/, '');
-    pwr10 += all.length - significant.length;
-    all = significant;
-    if (all === '')
+    /** @type {number[]} */
+    let written;
+    let count;
+    let pwr10 = 0;
+    let baseShift = 0;
+    const prefix = /^&([hHoO])/.exec(text.slice(at));
+    // A currency amount is never hexadecimal or octal.
+    if (prefix && has(NUMPRS_HEX_OCT) && (flags & NUMPRS_CURRENCY) === 0)
     {
-        return { digits: [0], flags, used: at, pwr10: 0 };
-    }
-    const kept = Math.max(capacity, 0);
-    if (all.length > kept)
-    {
-        if (/[1-9]/.test(all.slice(kept)))
+        const hex = prefix[1].toLowerCase() === 'h';
+        baseShift = hex ? 4 : 3;
+        at += 2;
+        /** @type {number[]} */
+        const digits = [];
+        let seen = false;
+        for (; at < text.length; at++)
+        {
+            const value = parseInt(text[at], hex ? 16 : 8);
+            if (Number.isNaN(value) || (!hex && value > 7))
+            {
+                break;
+            }
+            seen = true;
+            if (value !== 0 || digits.length > 0)
+            {
+                digits.push(value);
+            }
+        }
+        if (!seen)
+        {
+            return null;
+        }
+        flags |= NUMPRS_HEX_OCT;
+        written = digits.length === 0 ? [0] : digits.slice(0, Math.max(capacity, 0));
+        count = written.length;
+        if (digits.length > count && digits.slice(count).some(digit=>digit !== 0))
         {
             flags |= NUMPRS_INEXACT;
         }
-        pwr10 += all.length - kept;
-        all = all.slice(0, kept);
     }
-    return { digits: [...all].map(Number), flags, used: at, pwr10 };
+    else
+    {
+        let whole = '';
+        let fraction = '';
+        for (; at < text.length; at++)
+        {
+            const char = text[at];
+            if (char >= '0' && char <= '9')
+            {
+                whole += char;
+            }
+            else if (char === ',' && has(NUMPRS_THOUSANDS) && whole !== '')
+            {
+                flags |= NUMPRS_THOUSANDS;
+            }
+            else
+            {
+                break;
+            }
+        }
+        if (text[at] === '.' && has(NUMPRS_DECIMAL))
+        {
+            let end = at + 1;
+            while (end < text.length && text[end] >= '0' && text[end] <= '9')
+            {
+                end++;
+            }
+            if (whole !== '' || end > at + 1)
+            {
+                fraction = text.slice(at + 1, end);
+                flags |= NUMPRS_DECIMAL;
+                at = end;
+            }
+        }
+        if (whole === '' && fraction === '')
+        {
+            return null;
+        }
+        let exponent = 0;
+        const power = has(NUMPRS_EXPONENT) ? /^[eE]([+-]?)(\d+)/.exec(text.slice(at)) : null;
+        if (power)
+        {
+            exponent = Number(power[2]) * (power[1] === '-' ? -1 : 1);
+            at += power[0].length;
+            flags |= NUMPRS_EXPONENT;
+        }
+        const all = whole + fraction;
+        const significant = all.replace(/^0+/, '');
+        pwr10 = exponent - fraction.length;
+        if (significant === '')
+        {
+            written = [0];
+            count = 1;
+        }
+        else
+        {
+            const trimmed = significant.replace(/0+$/, '');
+            const kept = Math.max(capacity, 0);
+            const shown = /^0*$/.test(fraction) ? significant.slice(0,
+                significant.length - fraction.length) || trimmed : significant;
+            written = [...shown.slice(0, kept)].map(Number);
+            count = Math.min(trimmed.length, kept);
+            pwr10 += significant.length - count;
+            if (/[1-9]/.test(trimmed.slice(kept)))
+            {
+                flags |= NUMPRS_INEXACT;
+            }
+        }
+    }
+
+    let closed = false;
+    for (;;)
+    {
+        const char = text[at];
+        if (has(NUMPRS_TRAILING_WHITE) && isWhite(char))
+        {
+            flags |= NUMPRS_TRAILING_WHITE;
+            at++;
+        }
+        else if (char === '+' && has(NUMPRS_TRAILING_PLUS)
+            && (flags & (NUMPRS_LEADING_PLUS | NUMPRS_LEADING_MINUS | NUMPRS_TRAILING_PLUS
+                | NUMPRS_TRAILING_MINUS)) === 0)
+        {
+            flags |= NUMPRS_TRAILING_PLUS;
+            at++;
+        }
+        else if (char === '-' && has(NUMPRS_TRAILING_MINUS)
+            && (flags & (NUMPRS_LEADING_PLUS | NUMPRS_LEADING_MINUS | NUMPRS_TRAILING_PLUS
+                | NUMPRS_TRAILING_MINUS)) === 0)
+        {
+            flags |= NUMPRS_TRAILING_MINUS | NUMPRS_NEG;
+            at++;
+        }
+        else if (char === '$' && has(NUMPRS_CURRENCY) && baseShift === 0)
+        {
+            flags |= NUMPRS_CURRENCY;
+            at++;
+        }
+        else if (char === ')' && (flags & NUMPRS_PARENS) !== 0 && !closed)
+        {
+            closed = true;
+            at++;
+        }
+        else
+        {
+            break;
+        }
+    }
+    if ((flags & NUMPRS_PARENS) !== 0 && !closed)
+    {
+        return null;
+    }
+    return { written, count, flags, used: at, pwr10, baseShift };
 }
 
 /**
