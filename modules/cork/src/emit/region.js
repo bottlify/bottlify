@@ -48,7 +48,7 @@
 import { CF, DF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import {
-    ARITH, CARRY_IN_WORD, I32, Kind, eagerFlagsOf, emitCondition, emitFlag, kindOf,
+    ARITH, CARRY_IN_WORD, I32, I64, Kind, eagerFlagsOf, emitCondition, emitFlag, kindOf,
     recordOffsets, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
@@ -3301,24 +3301,38 @@ export class RegionEmitter {
             this.pushCondition(instruction.cc);
             return;
         }
-        // loop / loope / loopne / jecxz on ecx (cx under an address-size prefix)
+        // loop / loope / loopne / jecxz on ecx (cx under an address-size prefix);
+        // in long mode on rcx (ecx under the prefix: jrcxz is jecxz there)
         const wide = !instruction.prefixes.address;
+        const long = this.width.bits === 64;
         const pushCount = ()=>{
-            b.localGet(Local.reg + 1);
-            if (!wide)
+            b.localGet(this.width.regLocal[1]);
+            if (long && !wide)
+            {
+                b.op(I64.wrap);
+            }
+            else if (!wide)
             {
                 b.i32const(0xffff).op(I32.and);
             }
         };
+        const quad = long && wide;
         if (op === 'jecxz')
         {
             pushCount();
-            b.op(I32.eqz);
+            b.op(quad ? I64.eqz : I32.eqz);
             return;
         }
         // The decrement happened in the instruction's own emission.
         pushCount();
-        b.i32const(0).op(I32.ne);
+        if (quad)
+        {
+            b.op(I64.eqz).op(I32.eqz);
+        }
+        else
+        {
+            b.i32const(0).op(I32.ne);
+        }
         if (op === 'loope' || op === 'loopne')
         {
             this.pushFlag(0x40);

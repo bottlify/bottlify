@@ -1215,7 +1215,19 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         }
         case 'loop': case 'loope': case 'loopne':
-            if (instruction.prefixes.address)
+            if (isLong(e) && !instruction.prefixes.address)
+            {
+                b.localGet(registerLocal(e, 1)).i64const(1n).op(I64.sub)
+                    .localSet(registerLocal(e, 1));
+            }
+            else if (isLong(e))
+            {
+                // ecx under the address-size prefix, rcx's high half cleared.
+                getReg32(e, 1);
+                b.i32const(1).op(I32.sub);
+                writeReg(e, 1, 4, false);
+            }
+            else if (instruction.prefixes.address)
             {
                 b.localGet(registerLocal(e, 1)).i32const(1).op(I32.sub).i32const(0xffff)
                     .op(I32.and);
@@ -1380,6 +1392,8 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'cmpxchg8b':
             return cmpxchg8b(e, instruction, flagsLive);
+        case 'cmpxchg16b':
+            return cmpxchg16b(e, instruction, flagsLive);
         case 'arpl':
         {
             // If the destination selector's RPL is below the source's, it is
@@ -2675,9 +2689,12 @@ function shiftDouble(e, instruction, flagsLive){
     prepare(e, dst);
     if (!rotationCount(e, count, size))
     {
+        unrotated(e, dst);
         return true;
     }
     const dynamic = count.kind !== 'imm';
+    // The value shifted, kept for the flags: a quadword's in an i64.
+    const kept = size === 8 ? LONG_WIDE : Local.t2;
     if (dynamic)
     {
         // As in `shift`: whole word before the branch, record unknown after it,
@@ -2690,7 +2707,18 @@ function shiftDouble(e, instruction, flagsLive){
         e.openIf('shifting', EMPTY);
     }
     writeOp(e, dst, ()=>{
-        if (size === 4)
+        if (size === 8)
+        {
+            readOp(e, dst);
+            b.localSet(kept);
+            b.localGet(kept).localGet(Local.count).op(I64.extendU)
+                .op(left ? I64.shl : I64.shrU);
+            readOp(e, src);
+            b.i64const(64n).localGet(Local.count).op(I64.extendU).op(I64.sub)
+                .op(left ? I64.shrU : I64.shl);
+            b.op(I64.or);
+        }
+        else if (size === 4)
         {
             readOp(e, dst);
             b.localSet(Local.t2);
@@ -2721,7 +2749,20 @@ function shiftDouble(e, instruction, flagsLive){
     if (flagsLive)
     {
         b.localGet(Local.flags).i32const(~(CF | OF)).op(I32.and).localSet(Local.flags);
-        if (left)
+        if (size === 8)
+        {
+            b.localGet(kept);
+            if (left)
+            {
+                b.i64const(64n).localGet(Local.count).op(I64.extendU).op(I64.sub);
+            }
+            else
+            {
+                b.localGet(Local.count).i32const(1).op(I32.sub).op(I64.extendU);
+            }
+            b.op(I64.shrU).op(I64.wrap);
+        }
+        else if (left)
         {
             b.localGet(Local.t2).i32const(32).localGet(Local.count).op(I32.sub).op(I32.shrU);
         }
@@ -2732,17 +2773,32 @@ function shiftDouble(e, instruction, flagsLive){
         b.i32const(1).op(I32.and);
         e.orFlag(CF);
         // OF: the sign changed.
-        b.localGet(Local.t2);
-        if (size === 2 && left)
+        if (size === 8)
         {
-            b.i32const(16).op(I32.shrU);
+            b.localGet(kept).i64const(0n).op(I64.ltS);
         }
-        b.i32const(sign).op(I32.and).i32const(0).op(I32.ne);
-        b.localGet(Local.res).i32const(sign).op(I32.and).i32const(0).op(I32.ne).op(I32.xor);
+        else
+        {
+            b.localGet(Local.t2);
+            if (size === 2 && left)
+            {
+                b.i32const(16).op(I32.shrU);
+            }
+            b.i32const(sign).op(I32.and).i32const(0).op(I32.ne);
+        }
+        msbOf(e, Local.res, size);
+        b.op(I32.xor);
         e.orFlag(OF);
     }
     if (dynamic)
     {
+        if (isLong(e) && size === 4 && dst.kind === 'reg')
+        {
+            // A count of nothing writes long mode's dword register all the
+            // same, its high half cleared.
+            b.op(0x05);
+            unrotated(e, dst);
+        }
         e.close();
         if (flagsLive)
         {
@@ -3425,6 +3481,48 @@ function cmpxchg8b(e, instruction, flagsLive){
     writeReg(e, 0, 4, false);
     b.localGet(Local.t2);
     writeReg(e, 2, 4, false);
+    e.close();
+    return true;
+}
+
+/**
+ * cmpxchg16b m128 (long mode): rdx:rax compared with the oword; equal, rcx:rbx
+ * is stored and ZF set; otherwise the oword is loaded into rdx:rax and ZF
+ * cleared. An oword not on a 16-byte boundary is #GP.
+ *
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
+ */
+function cmpxchg16b(e, instruction, flagsLive){
+    const { b } = e;
+    const [dst] = instruction.operands;
+    const low = LONG_WIDE;
+    const high = LONG_WIDE + 1;
+    prepare(e, dst);
+    b.localGet(Local.addr).i32const(15).op(I32.and);
+    e.openGuard('misaligned', EMPTY);
+    e.exitBefore(e.current.eip, Exit.FAULT, 13);
+    e.close();
+    b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase }).localSet(low);
+    b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase + 8 }).localSet(high);
+    if (flagsLive)
+    {
+        e.eagerWrite(ZF);
+    }
+    b.localGet(low).localGet(registerLocal(e, 0)).op(I64.eq);
+    b.localGet(high).localGet(registerLocal(e, 2)).op(I64.eq);
+    b.op(I32.and);
+    e.openIf('equal', EMPTY);
+    noteStore(e, 16);
+    b.localGet(Local.addr).localGet(registerLocal(e, 3)).store('i64', { offset: e.layout.ramBase });
+    b.localGet(Local.addr).localGet(registerLocal(e, 1))
+        .store('i64', { offset: e.layout.ramBase + 8 });
+    if (flagsLive)
+    {
+        b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+    }
+    b.op(0x05); // else
+    b.localGet(low).localSet(registerLocal(e, 0));
+    b.localGet(high).localSet(registerLocal(e, 2));
     e.close();
     return true;
 }

@@ -125,6 +125,18 @@ test('width edges of moves, scans, swaps and widenings run in the shared emitter
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
 
+test('lea under the address-size prefix keeps the address\'s low 32 bits in the shared'
+    + ' emitter\'s regions, as interpreted', ()=>{
+    const cases = edges([
+        '67488d0408', '67488d40f0', '678d0408', '674c8d0410', '67488d8401ffffff7f', // lea r, [e..]
+        '67668d0408', '488d0408', // lea ax, [eax + ecx]; lea rax, [rax + rcx]
+    ], [0, 1, 0x7fffffff, 0xffffffff, 0x100000000, -1]);
+    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
+        shared);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
+
 test('leave and indirect jumps and calls run in the shared emitter\'s regions as interpreted', ()=>{
     const cases = edges([
         'c9', '66c9', // leave, its word form

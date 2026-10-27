@@ -22,7 +22,7 @@ const LONG_OPS = new Set([
     'prefetchnta', 'prefetcht0', 'prefetcht1', 'prefetcht2', 'lfence', 'mfence', 'sfence', 'pause',
     'emms', 'ldmxcsr', 'stmxcsr', 'bt', 'bts', 'btr', 'btc',
     'clc', 'stc', 'cmc', 'cld', 'std', 'lahf', 'sahf', 'pushf', 'popf', 'xadd', 'cmpxchg',
-    'cmpxchg8b', 'movnti',
+    'cmpxchg8b', 'cmpxchg16b', 'movnti', 'shld', 'shrd', 'loop', 'loope', 'loopne', 'jecxz',
 ]);
 
 /** The string instructions, `rep` and DF either way. */
@@ -33,6 +33,7 @@ const STRING_OPS = new Set(['movs', 'stos', 'lods', 'cmps', 'scas']);
  * executor, so a locked instruction is its plain form.
  */
 const LOCKABLE = new Set(['add', 'adc', 'and', 'btc', 'btr', 'bts', 'cmpxchg', 'cmpxchg8b',
+    'cmpxchg16b',
     'dec', 'inc', 'neg', 'not', 'or', 'sbb', 'sub', 'xor', 'xadd', 'xchg']);
 
 /**
@@ -92,5 +93,5 @@ export function translatesLong(instruction){
     return operands.every(operand=>(operand.kind === 'reg' && operand.size > 0)
         || operand.kind === 'xmm' || operand.kind === 'mm'
         || operand.kind === 'imm' || operand.kind === 'rel'
-        || (operand.kind === 'mem' && operand.addressSize === 64));
+        || (operand.kind === 'mem' && (operand.addressSize === 64 || op === 'lea')));
 }
