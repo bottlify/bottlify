@@ -27,9 +27,8 @@ const VT_DISPATCH = 9;
  * @param {Record<string, Record<string, (args: number[]) => any>>} [libraries]
  */
 function machine(libraries = {}){
-    /** @type {Map<number, (args: number[]) => number>} */
+    /** @type {Map<number, (args: any[]) => number>} */
     const guest = new Map();
-    /** @type {any} */
     const m = shlwapiMachine({
         library: name=>(libraries[name] ? Object.fromEntries(Object.entries(libraries[name])
             .map(([key, handler])=>[key, { handler }])) : undefined),
@@ -48,7 +47,7 @@ function machine(libraries = {}){
     /**
      * A guest object: a vtable of the methods given, in slot order.
      *
-     * @param {((args: number[]) => number)[]} methods
+     * @param {((args: any[]) => number)[]} methods
      */
     const object = methods=>{
         const at = m.base.allocate(16);
@@ -150,7 +149,7 @@ test('SHPackDispParams puts the pairs in the variants last first', ()=>{
     m.memory.fill(0xc0, params, params + 16);
     m.memory.fill(0xc0, vars, vars + 160);
     const call = m.fns.SHPackDispParams;
-    assert.equal(call.convention, 'cdecl');
+    assert.equal(/** @type {{ convention?: string }} */ (call).convention, 'cdecl');
     assert.equal(call.handler([params, vars, 4, VT_BSTR, 0xdeadbeef, 0, 10, VT_I4, 100,
         VT_DISPATCH, 0xdeadbeef]), S_OK);
     assert.deepEqual([m.dwordAt(params), m.dwordAt(params + 4), m.dwordAt(params + 8),
@@ -253,7 +252,7 @@ test('GetAcceptLanguages reads the user\'s value, else the locale\'s language', 
 
 test('SHFormatDateTime prints the local date, a space, then the time the flags ask for', async()=>{
     // Wine's test_SHFormatDateTimeA: GetDateFormat's text, then GetTimeFormat's.
-    /** @type {number[][]} */
+    /** @type {(string | number)[][]} */
     const asked = [];
     /** @type {any} */
     let m = null;
@@ -300,7 +299,13 @@ test('the COM helpers call the program\'s objects in the order Windows does', ()
     const m = machine();
     /** @type {string[]} */
     const trace = [];
-    const unknown = (/** @type {string} */ name, /** @type {(args: number[]) => number} */ query)=>
+    /**
+     * IUnknown's three, Release traced.
+     *
+     * @param {string} name @param {(args: any[]) => number} query
+     * @returns {((args: any[]) => number)[]}
+     */
+    const unknown = (name, query)=>
         [query, ()=>1, ()=>{
             trace.push(`${name}.Release`);
             return 0;

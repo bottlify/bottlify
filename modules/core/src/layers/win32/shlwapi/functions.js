@@ -22,6 +22,7 @@ import { MAX_PATH, canonical, compactPath, createPathFunctions, extensionIndex, 
     from './path.js';
 import { createOrdinalFunctions } from './ordinals.js';
 import { createRegistryHelpers } from './registry.js';
+import { createStreams } from './stream.js';
 import { createStringFunctions } from './strings.js';
 import { createWidths } from './text.js';
 import { createUrlFunctions } from './url.js';
@@ -164,6 +165,12 @@ const SHLWAPI_VERSION = /** @type {[number, number, number, number]} */ ([6, 0, 
  * @property {(code: number) => void} [setLastError]
  *           For the calls that set one: PathCanonicalize refusing a missing
  *           argument. Absent, the last error is left as it was.
+ * @property {(steps: Generator<{ entry: number, args: number[] }, any, number>) => any} [drive]
+ *           Runs a handler's calls into the guest: the COM helpers call
+ *           methods of the program's own objects. Absent, they answer E_NOTIMPL.
+ * @property {(object: any, iid: string) => number} [publish]
+ *           Hands the program an object of shlwapi's own, as a pointer: the
+ *           streams of SHCreateStreamOnFile and SHCreateMemStream.
  */
 
 /**
@@ -628,6 +635,7 @@ export function createShlwapiFunctions(host){
         ...createUrlFunctions(host, widths),
         ...createRegistryHelpers(host),
         ...createOrdinalFunctions(host),
+        ...createStreams(host),
 
         /**
          * HRESULT SHAutoComplete(HWND hwndEdit, DWORD dwFlags)

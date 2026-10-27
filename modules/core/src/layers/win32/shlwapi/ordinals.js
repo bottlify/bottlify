@@ -26,7 +26,8 @@ import { dword, u32 } from './text.js';
  */
 export const SHLWAPI_NAMED_ORDINALS = Object.freeze([
     [7, 'SHAllocShared'], [8, 'SHLockShared'], [9, 'SHUnlockShared'], [10, 'SHFreeShared'],
-    [11, 'SHMapHandle'], [14, 'GetAcceptLanguagesA'], [15, 'GetAcceptLanguagesW'],
+    [11, 'SHMapHandle'], [12, 'SHCreateMemStream'], [14, 'GetAcceptLanguagesA'],
+    [15, 'GetAcceptLanguagesW'],
     [165, 'SHSetWindowBits'], [167, 'SHSetParentHwnd'], [198, 'SHSearchMapInt'],
     [208, 'FDSA_Initialize'], [209, 'FDSA_Destroy'], [210, 'FDSA_InsertItem'],
     [211, 'FDSA_DeleteItem'], [257, 'SHCreateWorkerWindowA'], [269, 'GUIDFromStringA'],
