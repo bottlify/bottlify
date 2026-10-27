@@ -101,6 +101,10 @@ const DEVPROP_OF_REG = new Map([[1, DEVPROP_TYPE.STRING], [2, DEVPROP_TYPE.STRIN
 const ERROR_NOT_FOUND = 1168;
 const ERROR_WRONG_INF_STYLE = 0xe0000100;
 const ERROR_DEVICE_INTERFACE_REMOVED = 0xe000021c;
+
+/** SP_DEVINSTALL_PARAMS: cbSize and the eight DWORDs after it, before the path. */
+const INSTALL_PARAMS_WORDS = 8;
+const INSTALL_PARAMS_FIELDS = 4 + INSTALL_PARAMS_WORDS * 4;
 /** CONFIGRET codes, cfgmgr32.h. */
 const CR_SUCCESS = 0x00;
 const CR_INVALID_POINTER = 0x03;
@@ -1625,6 +1629,52 @@ export function createSetupapiFunctions(host){
         });
         const key = interfaceHiveKey(held, false);
         return key ? [...innate, ...storedKeys(host.registry, key)] : innate;
+    };
+
+    /**
+     * SP_DEVINSTALL_PARAMS's size in a call's width: nine DWORDs, then
+     * MAX_PATH characters of driver path.
+     *
+     * @param {boolean} wide
+     */
+    const installParamsSize = wide=>INSTALL_PARAMS_FIELDS + MAX_PATH * (wide ? 2 : 1);
+
+    /**
+     * The install parameters of each device, and of each set for the calls
+     * that name no device: the eight DWORDs after cbSize, and the path.
+     *
+     * @type {WeakMap<object, { words: number[], driverPath: string }>}
+     */
+    const installParams = new WeakMap();
+
+    /**
+     * The install parameters a call names, or its error.
+     *
+     * @param {number} handle @param {number} data @param {number} params @param {boolean} wide
+     * @returns {{ held: { words: number[], driverPath: string } } | { error: number }}
+     */
+    const installParamsOf = (handle, data, params, wide)=>{
+        const set = deviceSet(handle);
+        if (!set)
+        {
+            return { error: ERROR_INVALID_HANDLE };
+        }
+        const owner = (data >>> 0) === 0 ? set : deviceIn(set, data);
+        if (!owner)
+        {
+            return { error: ERROR_INVALID_PARAMETER };
+        }
+        if ((params >>> 0) === 0 || readU32(params) !== installParamsSize(wide))
+        {
+            return { error: ERROR_INVALID_USER_BUFFER };
+        }
+        let held = installParams.get(owner);
+        if (!held)
+        {
+            held = { words: new Array(INSTALL_PARAMS_WORDS).fill(0), driverPath: '' };
+            installParams.set(owner, held);
+        }
+        return { held };
     };
 
     /** An instance's Device Parameters key. @param {string} id */
@@ -5489,6 +5539,54 @@ export function createSetupapiFunctions(host){
                 return fail(ERROR_SUCCESS, 1);
             },
         },
+
+        /**
+         * BOOL SetupDiGetDeviceInstallParamsA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, PSP_DEVINSTALL_PARAMS_A DeviceInstallParams),
+         *     the W form, and SetupDiSetDeviceInstallParams in both
+         *
+         * A device's install parameters, or with no device the set's: the
+         * flags, the window, the callback and its context, the queue, the
+         * class installer's word and the driver path -- all zero to begin
+         * with. The structure's size must be its own, 296 bytes for the A
+         * form and 556 for the W, else ERROR_INVALID_USER_BUFFER.
+         */
+        ...bothWidths('SetupDiGetDeviceInstallParams', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, params])=>{
+                const found = installParamsOf(handle, data, params, wide);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const { held } = found;
+                const fields = new DataView(new ArrayBuffer(INSTALL_PARAMS_FIELDS));
+                held.words.forEach((word, index)=>fields.setUint32(4 + index * 4, word, true));
+                fields.setUint32(0, installParamsSize(wide), true);
+                host.writeMemory(params >>> 0, new Uint8Array(fields.buffer));
+                const path = encodeIn(held.driverPath, wide);
+                host.writeMemory((params >>> 0) + INSTALL_PARAMS_FIELDS, path);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+        ...bothWidths('SetupDiSetDeviceInstallParams', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, params])=>{
+                const found = installParamsOf(handle, data, params, wide);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const fields = new DataView(host.readMemory(params >>> 0, INSTALL_PARAMS_FIELDS)
+                    .slice().buffer);
+                found.held.words = Array.from({ length: INSTALL_PARAMS_WORDS },
+                    (_, index)=>fields.getUint32(4 + index * 4, true));
+                found.held.driverPath = textOf((params >>> 0) + INSTALL_PARAMS_FIELDS, wide) ?? '';
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
 
         /**
          * HKEY SetupDiCreateDevRegKeyA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,

@@ -2184,3 +2184,38 @@ test('device nodes, ID lists, interface keys and interface properties', async()=
         0);
     assert.equal(m.u32(count), 3, 'enabled, class and instance id');
 });
+
+test('install parameters are a device\'s or its set\'s, zero to begin with, sized exactly',
+    async()=>{
+        // Wine's setupapi test_device_install_params.
+        const m = await machine();
+        const guid = m.buffer(16);
+        const set = m.fns.SetupDiCreateDeviceInfoList.handler([guid, 0]);
+        const device = m.buffer(28);
+        m.view.setUint32(device, 28, true);
+        m.fns.SetupDiCreateDeviceInfoA.handler([set, m.str('Root\\LEGACY_BOGUS\\0000'), guid, 0, 0,
+            0, device]);
+        const params = m.buffer(600);
+        for (const size of [295, 297])
+        {
+            m.view.setUint32(params, size, true);
+            assert.equal(m.fns.SetupDiGetDeviceInstallParamsA.handler([set, device, params]), 0);
+            assert.equal(m.lastError(), ERROR_INVALID_USER_BUFFER, `${size}`);
+        }
+        m.view.setUint32(params, 296, true);
+        m.view.setUint32(params + 4, 0xcccccccc, true);
+        assert.equal(m.fns.SetupDiGetDeviceInstallParamsA.handler([set, device, params]), 1);
+        assert.equal(m.u32(params + 4), 0);
+        m.view.setUint32(params + 4, 0x40000, true);
+        m.view.setUint32(params + 8, 0x800, true);
+        [...'C:\\windows\0'].forEach((c, index)=>m.view.setUint8(params + 36 + index,
+            c.charCodeAt(0)));
+        assert.equal(m.fns.SetupDiSetDeviceInstallParamsA.handler([set, device, params]), 1);
+        const wide = m.buffer(600);
+        m.view.setUint32(wide, 556, true);
+        assert.equal(m.fns.SetupDiGetDeviceInstallParamsW.handler([set, device, wide]), 1);
+        assert.deepEqual([m.u32(wide + 4), m.u32(wide + 8)], [0x40000, 0x800]);
+        assert.equal(m.readWideString(wide + 36, 520), 'C:\\windows');
+        assert.equal(m.fns.SetupDiGetDeviceInstallParamsW.handler([set, 0, wide]), 1);
+        assert.equal(m.u32(wide + 4), 0, 'the set\'s own');
+    });
