@@ -168,7 +168,11 @@ export function createProfileFunctions(host){
         /** @param {Uint8Array} bytes */
         const parse = bytes=>{
             files.close(node);
-            const whole = decodeAnsi(bytes);
+            // The text ends at a NUL: a file written with its C string's
+            // terminator holds one, and a rewrite leaves it behind
+            // (Wine's shlwapi ordinal.c write_inifile).
+            const end = bytes.indexOf(0);
+            const whole = decodeAnsi(end < 0 ? bytes : bytes.subarray(0, end));
             const lines = whole.split(/\r?\n/);
             // A trailing newline is the end of the last line, not an empty one.
             if (lines.length > 0 && lines[lines.length - 1] === '')
