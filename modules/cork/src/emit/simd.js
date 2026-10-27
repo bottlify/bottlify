@@ -28,8 +28,8 @@ import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
-import { Local, MMX_HELD, MMX_TOP } from './region.js';
-import { emitAddress, readOp, writeOp, writeReg } from './integer.js';
+import { Exit, Local, MMX_HELD, MMX_TOP } from './region.js';
+import { prepare, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
 import { atState } from './bases.js';
@@ -954,19 +954,28 @@ function emitForm(e, instruction, flagsLive){
 
 // --- operand access ---
 
+/** The SSE instructions whose 16-byte memory operand need not be aligned. */
+const UNALIGNED = new Set(['movups', 'movupd', 'movdqu', 'lddqu']);
+
 /**
- * Computes a memory operand's address into `addr`; nothing for a register.
+ * Computes a memory operand's address into `addr` (`prepare`, long mode's
+ * window included); nothing for a register.
  * `store` when the operand is only written and `noteStore` follows at once:
  * the page test then covers code too, one test rather than two.
  *
  * @param {E} e @param {Operand} operand @param {boolean} [store]
  */
 function prepareAddress(e, operand, store = false){
-    if (operand.kind === 'mem')
+    prepare(e, operand, { store });
+    if (operand.kind === 'mem' && operand.size === 16 && e.width.bits === 64
+        && !UNALIGNED.has(e.current.op))
     {
-        emitAddress(e, operand, true);
-        e.b.localSet(Local.addr);
-        checkAccess(e, operand.size, { store });
+        // Long mode's reference is the processor's: a legacy SSE instruction's
+        // 16-byte operand misaligned is #GP (the 32-bit emitter lets it through).
+        e.b.localGet(Local.addr).i32const(15).op(I32.and);
+        e.openGuard('misaligned', EMPTY);
+        e.exitBefore(e.current.eip, Exit.FAULT, 13);
+        e.close();
     }
 }
 

@@ -131,8 +131,20 @@ const LONG_OPS = new Set([
     'nop', 'mov', 'movzx', 'movsx', 'movsxd', 'lea', 'add', 'adc', 'sub', 'sbb', 'cmp', 'and',
     'or', 'xor', 'test', 'inc', 'dec', 'neg', 'not', 'push', 'pop', 'jmp', 'call', 'ret', 'hlt',
     'shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'imul', 'mul', 'div', 'idiv',
-    'xchg', 'popcnt', 'cwde', 'cdq', 'leave', 'bsf', 'bsr', 'bswap',
+    'xchg', 'popcnt', 'cwde', 'cdq', 'leave', 'bsf', 'bsr', 'bswap', 'prefetch', 'prefetchw',
+    'prefetchnta', 'prefetcht0', 'prefetcht1', 'prefetcht2', 'lfence', 'mfence', 'sfence', 'pause',
+    'emms', 'ldmxcsr', 'stmxcsr',
 ]);
+
+/**
+ * The SIMD operations the long-mode emitter leaves to the interpreter: those
+ * that address memory through a register of their own (edi).
+ */
+const LONG_SIMD_LEFT = new Set(['maskmovq', 'maskmovdqu']);
+
+/** The SIMD operations whose general operand, register or memory, is an integer's. */
+const LONG_SIMD_INTEGER = new Set(['movd', 'cvtsi2ss', 'cvtsi2sd', 'cvttss2si', 'cvtss2si',
+    'cvttsd2si', 'cvtsd2si']);
 
 /**
  * Whether the emitter translates a long-mode instruction: its operation one
@@ -149,12 +161,23 @@ export function translatesLong(instruction){
     {
         return false;
     }
-    if (!LONG_OPS.has(op) && !(cc !== undefined && (op.startsWith('j') && op !== 'jecxz'
+    const simd = operands.some(operand=>operand.kind === 'xmm' || operand.kind === 'mm');
+    if (simd)
+    {
+        // A general register a SIMD operation reads or writes as a dword only, so far.
+        if (LONG_SIMD_LEFT.has(op) || operands.some(operand=>operand.kind === 'reg'
+            && operand.size === 8 || LONG_SIMD_INTEGER.has(op) && operand.size === 8))
+        {
+            return false;
+        }
+    }
+    else if (!LONG_OPS.has(op) && !(cc !== undefined && (op.startsWith('j') && op !== 'jecxz'
         || op.startsWith('cmov') || op.startsWith('set'))))
     {
         return false;
     }
     return operands.every(operand=>(operand.kind === 'reg' && operand.size > 0)
+        || operand.kind === 'xmm' || operand.kind === 'mm'
         || operand.kind === 'imm' || operand.kind === 'rel'
         || (operand.kind === 'mem' && operand.addressSize === 64));
 }

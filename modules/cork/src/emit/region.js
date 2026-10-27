@@ -2775,8 +2775,9 @@ export class RegionEmitter {
         {
             relaxedFlagReads(block, this.relaxedReads);
         }
+        // Hoisted stream windows address in dwords: the 32-bit width's, so far.
         const streams = this.selfLoop && !x.active && this.layout.codePages < 0
-            ? planLoop(block.instructions) : null;
+            && this.width.bits === 32 ? planLoop(block.instructions) : null;
         if (streams !== null)
         {
             this.emitHoistedLoop(block, index, live, streams);
