@@ -11,6 +11,8 @@
  * former takes it on every thread a region is formed on, a worker's included.
  */
 
+import { isX87Opcode } from '../decode/decoder.js';
+
 /** @typedef {import('../decode/decoder.js').Instruction} Instruction */
 
 /** The long-mode instructions this emitter translates so far, by mnemonic. */
@@ -24,6 +26,15 @@ const LONG_OPS = new Set([
     'clc', 'stc', 'cmc', 'cld', 'std', 'lahf', 'sahf', 'pushf', 'popf', 'xadd', 'cmpxchg',
     'cmpxchg8b', 'cmpxchg16b', 'movnti', 'shld', 'shrd', 'loop', 'loope', 'loopne', 'jecxz',
 ]);
+
+/**
+ * The x87 instructions long mode leaves to the interpreter: the emitter's own
+ * (`x87.js`'s `LEFT_OUT`), and the environment's and the whole state's images,
+ * whose tag word the emitter derives from a register's double where the
+ * interpreter keeps the class of what was loaded.
+ */
+const X87_LEFT = new Set(['fxsave', 'fxrstor', 'fbld', 'fbstp', 'fnstenv', 'fstenv', 'fldenv',
+    'fnsave', 'fsave', 'frstor']);
 
 /** The string instructions, `rep` and DF either way. */
 const STRING_OPS = new Set(['movs', 'stos', 'lods', 'cmps', 'scas']);
@@ -62,6 +73,13 @@ export function translatesLong(instruction){
         && operands[0].size !== 8)
     {
         return false;
+    }
+    if (isX87Opcode(instruction.opcode))
+    {
+        // The x87 emitter's (`x87.js`), which leaves the whole state's images
+        // and packed BCD to the interpreter.
+        return !X87_LEFT.has(op) && operands.every(operand=>operand.kind !== 'mem'
+            || operand.addressSize === 64 && operand.segment !== 4 && operand.segment !== 5);
     }
     const simd = operands.some(operand=>operand.kind === 'xmm' || operand.kind === 'mm')
         || LONG_SIMD_QUAD.has(op);

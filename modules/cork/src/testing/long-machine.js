@@ -284,13 +284,17 @@ export function load(m, one){
     view.setUint32(layout.mxcsr, one.mxcsr ?? 0x1f80, true);
     bytes.set(one.xmm ?? fill(one.seed ^ CORPUS.xmmSeed, 256), layout.xmm);
     // The x87 unit as `fninit` leaves it, its registers (the MMX ones) seeded,
-    // and some marked as holding a `fild`'s quadword, which an MMX write ends.
-    bytes.set(fill(one.seed ^ 0x87, 128), layout.x87);
+    // and some marked as holding a `fild`'s quadword, which an MMX write ends;
+    // `fresh`, as a processor's first: its registers zeros and none marked (what
+    // an empty register held before is the interpreter's to keep, not
+    // translated code's, which writes an indefinite into one and reads no sign
+    // from one -- as at 32 bits, whose judge starts from this unit).
+    bytes.set(one.fresh === true ? new Uint8Array(128) : fill(one.seed ^ 0x87, 128), layout.x87);
     bytes[layout.x87Top] = 0;
     bytes[layout.x87Empty] = 0xff;
     view.setUint16(layout.x87Control, 0x37f, true);
     view.setUint16(layout.x87Status, 0, true);
-    bytes[/** @type {number} */ (layout.x87Exact)] = one.seed & 0xff;
+    bytes[/** @type {number} */ (layout.x87Exact)] = one.fresh === true ? 0 : one.seed & 0xff;
     m.state.syncIn();
     m.state.halted = false;
     m.state.trapped.length = 0;
@@ -346,9 +350,17 @@ export function run(m, translated, budget = 7){
         retired: String(state.retired),
         flags: view.getUint32(layout.eflags, true).toString(16),
         xmm: Buffer.from(bytes.subarray(layout.xmm, layout.xmm + 256)).toString('hex'),
-        x87: Buffer.from(bytes.subarray(layout.x87, layout.x87 + 128)).toString('hex')
+        // The held registers' doubles: an empty register is never read. Not
+        // the quadwords past them nor the marks of which hold a quadword
+        // `fild`'s integer exactly (`x87Exact`): the interpreter marks every
+        // such load, translated code only in a region that also stores a
+        // quadword, as at 32 bits (`tracksExact` in `x87.js`). What a store
+        // makes of them is the data's.
+        x87: Buffer.from(bytes.subarray(layout.x87, layout.x87 + 128)
+            .map((byte, at)=>((at & 8) === 0 && (bytes[layout.x87Empty] >>> (at >>> 4) & 1) === 0
+                ? byte : 0))).toString('hex')
             + [layout.x87Top, layout.x87Empty, layout.x87Control, layout.x87Control + 1,
-                layout.x87Status, layout.x87Status + 1, /** @type {number} */ (layout.x87Exact)]
+                layout.x87Status, layout.x87Status + 1]
                 .map(at=>bytes[at].toString(16)).join(','),
         data: Buffer.from(bytes.subarray(CORPUS.dataAt, CORPUS.dataAt + CORPUS.dataSize))
             .toString('base64'),

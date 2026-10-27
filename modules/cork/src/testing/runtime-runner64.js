@@ -62,7 +62,7 @@ export function createRuntimeRunner64({ memory, layout, config = {}, tier = null
     const rewritten = [];
     const rip = ()=>view().getBigUint64(layout.eip, true);
 
-    /** The addresses asked of the translator since the code last changed. */
+    /** The starts, with their tops, asked of the translator since the code last changed. */
     const asked = new Set();
 
     /**
@@ -76,13 +76,16 @@ export function createRuntimeRunner64({ memory, layout, config = {}, tier = null
             return -1;
         }
         const address = Number(at);
-        let entry = runtime.entryOf(address, 0);
-        if (entry < 0 && !asked.has(address))
+        // Regions are compiled for the x87 stack's top they are entered with.
+        const top = view().getUint8(layout.x87Top);
+        const key = `${address}@${top}`;
+        let entry = runtime.entryOf(address, top);
+        if (entry < 0 && !asked.has(key))
         {
-            asked.add(address);
-            runtime.noteHot(address, 0, 1);
+            asked.add(key);
+            runtime.noteHot(address, top, 1);
             void runtime.translatePending();
-            entry = runtime.entryOf(address, 0);
+            entry = runtime.entryOf(address, top);
         }
         return entry;
     };
