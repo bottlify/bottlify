@@ -1877,7 +1877,11 @@ export function createDirectDraw(options = {}){
             mipMapCount: (request.flags & DDSD_MIPMAPCOUNT) !== 0 ? request.mipMapCount ?? 0 : null,
             version,
         });
-        if (levels === null)
+        // A DXTn surface is made of whole 4x4 blocks, a texture in any memory
+        // and an overlay alike (Wine's test_block_formats_creation); only the
+        // levels below a texture's top may be any size, and those are made here.
+        if (levels === null
+            || (blockRowBytes(pixelFormat, width) !== null && ((width | height) & 3) !== 0))
         {
             return { hr: DDERR_INVALIDPARAMS, surface: null };
         }

@@ -17,6 +17,7 @@ import {
     DDERR_INVALIDCAPS,
     DDERR_INVALIDMODE,
     DDERR_INVALIDPARAMS,
+    DDPF_FOURCC,
     DDERR_NOCLIPPERATTACHED,
     DDERR_NOCOLORKEY,
     DDERR_NOCOOPERATIVELEVELSET,
@@ -1028,6 +1029,35 @@ test('a complex mip-mapped texture is a chain of halving levels, as long as aske
 
     assert.equal(ddraw.surfaceCount, 0);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('a DXTn surface off the 4x4 block grid is refused; its lower levels are not', ()=>{
+    // Wine's test_block_formats_creation, every size from 1x1 to 8x8.
+    const ddraw = withLevel();
+    const DXT1 = { size: 0x20, flags: DDPF_FOURCC, fourCC: 0x31545844, bitCount: 0,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 };
+    /** @param {number} width @param {number} height @param {number} [count] */
+    const make = (width, height, count)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | (count === undefined ? 0 : DDSD_MIPMAPCOUNT),
+        caps: count === undefined ? DDSCAPS_TEXTURE : MIPPED,
+        width, height, mipMapCount: count ?? 0, pixelFormat: DXT1,
+    }, { version: 4 });
+    for (const [width, height] of [[1, 1], [2, 4], [4, 6], [8, 3]])
+    {
+        assert.deepEqual(make(width, height), { hr: DDERR_INVALIDPARAMS, surface: null },
+            `${width}x${height}`);
+    }
+    for (const [width, height] of [[4, 4], [8, 4]])
+    {
+        const made = make(width, height);
+        assert.equal(made.hr, DD_OK, `${width}x${height}`);
+        assert.equal(made.surface?.release(), 0);
+    }
+    const chain = make(8, 8, 4);
+    assert.equal(chain.hr, DD_OK, 'levels of 2x2 and 1x1 below a whole top');
+    assert.equal(levelsOf(chain.surface).length, 4);
+    assert.equal(chain.surface?.release(), 0);
+    assert.equal(ddraw.surfaceCount, 0);
 });
 
 test('a cube map is its six faces, the others attached to the first, each with its levels', ()=>{
