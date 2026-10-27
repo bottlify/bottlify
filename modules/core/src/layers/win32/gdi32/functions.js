@@ -1651,6 +1651,16 @@ export function createGdiFunctions(host){
 
     /** @param {any} dc @returns {import('./structs.js').LogFontFields} */
     const currentFont = dc=>objects.get(dc.font)?.attributes ?? logFont({});
+    /** The instance id of the font a DC draws with: its handle, which is never zero. */
+    const realizationOf = (/** @type {number} */ handle)=>{
+        const dc = dcOf(handle);
+        return dc && dc.font ? dc.font >>> 0 : 0;
+    };
+    const isRealization = (/** @type {number} */ instance)=>
+        (instance >>> 0) !== 0 && objects.get(instance >>> 0)?.type === 'font';
+    const u32Bytes = (/** @type {number[]} */ values)=>
+        new Uint8Array(Uint32Array.from(values, value=>value >>> 0).buffer);
+
 
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
     const currentMetrics = dc=>metricsOf(currentFont(dc));
@@ -4870,6 +4880,101 @@ export function createGdiFunctions(host){
                 }
                 host.writeMemory(out >>> 0, bytes);
                 return kept.length + 1;
+            },
+        },
+
+        /**
+         * BOOL GdiRealizationInfo(HDC hdc, DWORD *info)
+         * BOOL GetFontRealizationInfo(HDC hdc, struct font_realization_info *info)
+         *
+         * The font the DC draws with as realized: flags, a cache number and
+         * an instance id, which GetFontFileInfo and GetFontFileData take. The
+         * newer call reads its structure's size first and answers its 16- or
+         * 24-byte form, any other size refused. Flags 1 is a face that is no
+         * outline font, as GetOutlineTextMetrics answers for every face here;
+         * no style is simulated, the browser draws the weight and slant asked.
+         */
+        GdiRealizationInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const realized = realizationOf(handle);
+                if (!realized || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                host.writeMemory(out >>> 0, u32Bytes([1, 1, realized]));
+                return 1;
+            },
+        },
+        GetFontRealizationInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const realized = realizationOf(handle);
+                if (!realized || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const size = readU32(host, out >>> 0);
+                if (size !== 16 && size !== 24)
+                {
+                    return 0;
+                }
+                // size, flags, cache_num, instance_id; then unique, face_index
+                // and simulations as two words.
+                host.writeMemory(out >>> 0,
+                    u32Bytes([size, 1, 1, realized, 0, 0].slice(0, size / 4)));
+                return 1;
+            },
+        },
+        /**
+         * BOOL GetFontFileInfo(DWORD instance_id, DWORD file_index,
+         *                      struct font_fileinfo *info, SIZE_T size, SIZE_T *needed)
+         * BOOL GetFontFileData(DWORD instance_id, DWORD file_index, UINT64 offset,
+         *                      void *buff, SIZE_T size)
+         *
+         * The file a realized font came from. Faces here are drawn through the
+         * browser and come from no file, so the answer is an empty one: no
+         * time, no size, an empty path -- what Windows answers for a font
+         * added from memory -- and no byte of data to read. The size needed is
+         * told even when the buffer is short, as Windows tells it.
+         */
+        GetFontFileInfo: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, index, out, size, needed])=>{
+                if (!isRealization(instance) || (index >>> 0) !== 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                // FILETIME, LARGE_INTEGER, then the path's terminator alone.
+                const bytes = new Uint8Array(18);
+                if ((needed >>> 0) !== 0)
+                {
+                    host.writeMemory(needed >>> 0, u32Bytes([bytes.length]));
+                }
+                if ((out >>> 0) === 0 || (size >>> 0) < bytes.length)
+                {
+                    host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                host.writeMemory(out >>> 0, bytes);
+                return 1;
+            },
+        },
+        GetFontFileData: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([instance, index, offsetLow, offsetHigh, , size])=>{
+                if (!isRealization(instance) || (index >>> 0) !== 0
+                    || (offsetLow | offsetHigh | size) !== 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
             },
         },
 
