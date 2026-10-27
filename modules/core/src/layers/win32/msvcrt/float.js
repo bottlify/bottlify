@@ -30,6 +30,8 @@
  * @property {(word: number) => void} [setControlWord]
  * @property {() => number} [statusWord]          The x87 status word, without the top.
  * @property {() => void} [clearExceptions]       The exception flags cleared, as `fnclex`.
+ * @property {() => number} [mxcsr]                SSE's control and status register.
+ * @property {(word: number) => void} [setMxcsr]   MXCSR loaded, as `ldmxcsr`.
  */
 
 /**
