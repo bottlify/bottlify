@@ -2737,3 +2737,12 @@ test('CreateFile hands on its sharing terms; their refusal is a sharing violatio
     fns.CreateFileA.handler([NAME, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]);
     assert.equal(error.code, ERROR_ACCESS_DENIED, 'any other refusal of a file that is there');
 });
+
+test('MoveFile to a name with a wildcard is refused as an invalid name', ()=>{
+    const { files, error, fns, at } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    assert.equal(fns.MoveFileA.handler([at(NAME, 'C:\\GAME\\SAVE.DAT'),
+        at(NAME2, 'C:\\GAME\\wild?.*')]), 0);
+    assert.equal(error.code, 123, 'ERROR_INVALID_NAME');
+    assert.equal(files.stat('C:\\GAME\\SAVE.DAT')?.exists, true);
+});

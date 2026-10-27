@@ -931,6 +931,26 @@ export function createFilesystemModule(){
                     {
                         throw fsError(ErrorCode.NOT_FOUND, `${from} does not exist`);
                     }
+                    const leavingName = locate(from);
+                    const arrivingName = locate(to);
+                    if (leavingName.key === arrivingName.key
+                        && leavingName.tree === arrivingName.tree)
+                    {
+                        // The same name: nothing to do, or only its spelling
+                        // to change, which goes by way of another name.
+                        if (entry.name === arrivingName.components.at(-1))
+                        {
+                            return;
+                        }
+                        let step = 0;
+                        while (this.stat(`${to}.~${step}`))
+                        {
+                            step++;
+                        }
+                        this.rename(from, `${to}.~${step}`);
+                        this.rename(`${to}.~${step}`, to);
+                        return;
+                    }
                     if (this.stat(to))
                     {
                         throw fsError(ErrorCode.ALREADY_EXISTS, `${to} already exists`);

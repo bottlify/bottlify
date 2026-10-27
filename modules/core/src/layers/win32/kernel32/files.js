@@ -1130,6 +1130,17 @@ export function createFileFunctions(host){
         {
             return fail(missing(source));
         }
+        // A name cannot hold a wildcard.
+        if (/[*?]/.test(destination.slice(destination.lastIndexOf('\\') + 1)))
+        {
+            return fail(ERROR_INVALID_NAME);
+        }
+        // Its own name, in any case: nothing is replaced, and only the
+        // spelling may change.
+        if (source.toLowerCase() === destination.toLowerCase())
+        {
+            return files.rename(source, destination) ? 1 : fail(denied(source));
+        }
         const present = files.stat(destination);
         if (present?.exists && !replace)
         {

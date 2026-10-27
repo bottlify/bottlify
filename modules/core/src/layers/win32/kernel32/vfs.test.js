@@ -360,3 +360,22 @@ test('a section holds its file on its own terms once the file\'s handle is close
     assert.equal(opens({ read: true, write: true, shareWrite: true }), 'SHARING_VIOLATION');
     vol.close(section);
 });
+
+test('a name renamed to itself in other letters is respelled, its contents kept', async()=>{
+    const { volume: vol } = await volume();
+    const made = vol.open('C:\\Remove Me', { read: true, write: true, create: true });
+    vol.write(made, 0, Uint8Array.of(7));
+    vol.close(made);
+    assert.equal(vol.rename('C:\\Remove Me', 'C:\\Remove Me'), true, 'its own name: nothing to do');
+    assert.equal(vol.rename('C:\\Remove Me', 'C:\\remove me'), true);
+    assert.deepEqual(vol.list('C:\\', '*').map((/** @type {any} */ entry)=>entry.name),
+        ['remove me']);
+    assert.equal(vol.stat('C:\\REMOVE ME')?.size, 1);
+
+    assert.equal(vol.mkdir('C:\\Dir'), true);
+    const inside = vol.open('C:\\Dir\\F', { write: true, create: true });
+    vol.close(inside);
+    assert.equal(vol.rename('C:\\Dir', 'C:\\DIR'), true);
+    assert.deepEqual(vol.list('C:\\', 'd*').map((/** @type {any} */ entry)=>entry.name), ['DIR']);
+    assert.equal(vol.stat('C:\\dir\\f')?.exists, true, 'what was in it, still in it');
+});
