@@ -68,8 +68,7 @@ async function bundleOf(files, emptyDirectories = [], options = {}){
 
 test('a block is compressed only when that is worth doing', ()=>{
     const packed = packBlock(compressible(1 << 16));
-    assert.ok(packed.codec === Codec.DEFLATE_RAW || packed.codec === Codec.ZSTD,
-        'both are tried and the smaller is kept');
+    assert.equal(packed.codec, Codec.DEFLATE_RAW, 'deflate is the one codec written');
     assert.ok(packed.bytes.length < 1000, 'a run of one byte should collapse');
 
     // Random data cannot be compressed, and deflate makes it very slightly

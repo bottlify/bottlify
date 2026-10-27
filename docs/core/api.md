@@ -58,7 +58,6 @@ The options reach the engine's worker by `postMessage`, so every value must be d
 | `unattended` | boolean | `false` | Nobody is at the screen: every modal dialog and message box gets its default button, and each answer is reported as a `divergence` event. |
 | `cork` | `{ moduleUrl?, config? }` | the package's | Where cork is loaded from, and its settings ([configuration.md](configuration.md#cpu)). |
 | `v86` | `{ moduleUrl, wasmBytes }` | none | The caller's own v86 build, for `engine: 'emulator'`; the package carries none. |
-| `zstd` | `{ wasmUrl?, wasmBytes? }` | the package's | The bundle decoder's wasm build; without it a JavaScript decoder is used. |
 | `media` | `{ wasmBytes }` | none | The video decoder (FFmpeg in wasm). Without it the program is told no clip can be played. |
 
 ### Display, input and sound

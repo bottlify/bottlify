@@ -112,17 +112,8 @@ const deflate = (/** @type {Buffer} */ bytes, /** @type {number} */ level)=>
     zlib.deflateRawSync(bytes, { level });
 const inflate = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.inflateRawSync(bytes);
 
-/**
- * zstd at its slowest and densest setting.
- *
- * Affordable because a bundle is packed once, offline, and because the probe
- * below means only the blocks that will actually compress are ever handed to
- * it -- three per cent of a large game.
- */
-const ZSTD_LEVEL = 19;
-const zstdPack = (/** @type {Buffer} */ bytes)=>zlib.zstdCompressSync(bytes, {
-    params: { [zlib.constants.ZSTD_c_compressionLevel]: ZSTD_LEVEL },
-});
+// Bundles packed before deflate became the only codec carry zstd blocks, so
+// they are still read; nothing writes them.
 const zstdUnpack = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.zstdDecompressSync(bytes);
 
 /**
@@ -141,16 +132,9 @@ export function packBlock(block, level = 9){
         return { codec: Codec.STORED, bytes: block };
     }
 
-    // Both, and keep the smaller. Packing twice costs build time, which is
-    // spent once and by us; a byte saved is paid for by every download.
-    const candidates = [
-        { codec: Codec.DEFLATE_RAW, bytes: deflate(block, level) },
-        { codec: Codec.ZSTD, bytes: zstdPack(block) },
-    ].sort((a, b)=>a.bytes.length - b.bytes.length);
-
-    const best = candidates[0];
-    return best.bytes.length <= block.length * (1 - MIN_SAVING)
-        ? best
+    const packed = deflate(block, level);
+    return packed.length <= block.length * (1 - MIN_SAVING)
+        ? { codec: Codec.DEFLATE_RAW, bytes: packed }
         : { codec: Codec.STORED, bytes: block };
 }
 
@@ -275,6 +259,8 @@ async function writeTranslations(handle, seed, blocks, cursor, { blockSize, leve
  * @param {number} [options.blockSize]
  * @param {number} [options.level]
  * @param {boolean} [options.store]     Store everything; skip compression entirely.
+ * @param {(block: Buffer, level: number) => { codec: number, bytes: Buffer }} [options.pack]
+ *     How a block is stored (`packBlock`); a test writes the codecs older bundles carry.
  * @param {Uint8Array} [options.translations]  A translation seed to carry.
  * @param {(progress: any) => void} [options.onProgress]
  * @returns {Promise<any>} what the manifest needs to know about the bundle
@@ -282,7 +268,7 @@ async function writeTranslations(handle, seed, blocks, cursor, { blockSize, leve
 export async function writeBundle(options){
     const {
         root, output, blockSize = DEFAULT_BLOCK_SIZE, level = 9, store = false, onProgress,
-        translations,
+        translations, pack = packBlock,
     } = options;
     const { files, directories } = await scanTree(root);
     const handle = await open(output, 'w');
@@ -320,7 +306,7 @@ export async function writeBundle(options){
             fileDigest.update(block);
             const { codec, bytes } = store
                 ? { codec: Codec.STORED, bytes: block }
-                : packBlock(block, level);
+                : pack(block, level);
             await handle.write(bytes, 0, bytes.length, cursor);
             digest.update(bytes);
             // Over the stored bytes, not the block's contents: this is checked

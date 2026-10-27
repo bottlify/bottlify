@@ -50,7 +50,6 @@ import { blockCacheName, createBlockCache, resolveBlockStore, storedLength }
     from './layers/filesystem/internal/bundle/cache.js';
 import { decompressZstd } from './zstd.js';
 import { mountDiscs } from './discs.js';
-import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
 import { comHandlers, remoteClassTable } from './com-link.js';
 import { createCallRepeats } from './call-repeats.js';
@@ -127,11 +126,6 @@ const hashText = (hash, text)=>{
  * @property {Partial<import('./host/pool/driver.js').DriverSettings>} [cork.poolDriver]  The
  *     driver's thresholds (`joinAt`, `leaveBelow`, `leaveAfterMs`, `idleBelow`, `trialWindows`,
  *     `trialLimit`, `restMs`, `yieldShare`).
- * @property {Object} [zstd]              The bundle decoder's wasm build, when the package's
- *           own is not wanted: `vendor/zstd.wasm` beside this module by default; absent
- *           there, the JavaScript decoder (or the emulator's, while it is loaded) decodes.
- * @property {string} [zstd.wasmUrl]      Where its binary is fetched from.
- * @property {ArrayBuffer} [zstd.wasmBytes]  Or the binary itself.
  * @property {Object} [media]             Video decoding, when this build has it.
  * @property {ArrayBuffer} [media.wasmBytes]
  *           The decoder binary. Absent, the media layer comes up and reports
@@ -1636,18 +1630,6 @@ export function clockCredit(source, clock, cap){
 }
 
 /**
- * Where the package's own binaries are, relative to this module: the bundle
- * decoder's wasm build.
- *
- * A built package carries them beside itself and the build says where; the
- * source tree keeps them in its prebuilt directory. One expression rather
- * than two entry points, so a caller that imports either finds them without
- * being told.
- */
-const VENDOR = /** @type {{ env?: { BOTTLIFY_VENDOR?: string } }} */ (import.meta).env?.BOTTLIFY_VENDOR
-    ?? '../vendor/prebuilt/';
-
-/**
  * Where the translator is, relative to this module: built beside a package,
  * the workspace's own source otherwise.
  */
@@ -2841,44 +2823,14 @@ function expectIndex(expected){
  *
  * @param {string} engine
  * @param {{ decompressZstd: (packed: Uint8Array, expectedLength: number) => Uint8Array }} cpu
- * @param {import('./zstd-wasm.js').ZstdWasm | null} [wasm]  The wasm build, when carried.
  * @returns {(packed: Uint8Array, expectedLength: number) => Uint8Array}
  */
-export function chooseZstdDecoder(engine, cpu, wasm = null){
-    // The wasm build of the project's own decoder, when this build carries it,
-    // decodes for every engine at the emulator decoder's speed and with no
-    // emulator loaded.
-    if (wasm)
-    {
-        return wasm.decompress;
-    }
+export function chooseZstdDecoder(engine, cpu){
     if (engine !== 'cork')
     {
         return (packed, expectedLength)=>cpu.decompressZstd(packed, expectedLength);
     }
     return decompressZstd;
-}
-
-/**
- * The wasm decoder from the app's options or the package's vendor directory;
- * null when the build carries none (the artifact is optional: a fetch that
- * fails or a file that is absent is the JavaScript decoder's turn, not an
- * error), so a package built without it still mounts every bundle.
- *
- * @param {AppOptions} options
- * @param {string} [here]
- * @returns {Promise<import('./zstd-wasm.js').ZstdWasm | null>}
- */
-export async function zstdWasmFor(options, here = import.meta.url){
-    try
-    {
-        const bytes = options.zstd?.wasmBytes
-            ?? await bytesAt(options.zstd?.wasmUrl ?? new URL(`${VENDOR}zstd.wasm`, here).href);
-        return await loadZstdWasm(bytes);
-    }
-    catch {
-        return null;
-    }
 }
 
 /**
@@ -2940,8 +2892,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
     };
     const roundTrip = ()=>(recentMs.length === 0 ? 0 : Math.min(...recentMs));
 
-    const zstdForEngine = chooseZstdDecoder(options.engine ?? DEFAULT_ENGINE, cpu,
-        await zstdWasmFor(options));
+    const zstdForEngine = chooseZstdDecoder(options.engine ?? DEFAULT_ENGINE, cpu);
     /**
      * A block, turned back into bytes, without awaiting anything.
      *

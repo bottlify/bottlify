@@ -45,8 +45,8 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 ## Code
 
 - **Vanilla ES modules + JSDoc**, checked by `tsc --checkJs --noEmit`; a `.d.ts` only where JSDoc
-  cannot say it. WASM only where it is already required (cork's output, the prebuilt FFmpeg and
-  zstd decoders) or where a profile proves a hot path needs it.
+  cannot say it. WASM only where it is already required (cork's output, the prebuilt FFmpeg
+  decoder) or where a profile proves a hot path needs it.
 - **A hot call stays in the guest.** Every crossing into the host costs microseconds; a function
   or COM method a program calls thousands of times a frame runs as guest code. Write it once in
   JS marked `@guestCode` (`modules/core/scripts/guest-code/`, its README: the subset of JS that

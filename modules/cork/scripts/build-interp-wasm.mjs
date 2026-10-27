@@ -14,8 +14,8 @@
  *
  *   node modules/cork/scripts/build-interp-wasm.mjs [--clang PATH | --docker]
  *
- * `--docker` compiles in the zstd builder's image (core's `Dockerfile.zstd`,
- * Debian's clang-16 and lld-16), for a machine whose clang has no wasm32 target
+ * `--docker` compiles in `Dockerfile.clang`'s image (Debian's clang-16 and
+ * lld-16), for a machine whose clang has no wasm32 target
  * or which has none: the source is copied into the container and the module
  * copied out, so nothing depends on a volume shared with the host.
  *
@@ -38,12 +38,12 @@ import { WASM_INTERPRETER_STACK, WASM_INTERPRETER_STATICS } from '../src/interp-
 const args = process.argv.slice(2);
 const docker = args.includes('--docker');
 const clang = args.includes('--clang') ? args[args.indexOf('--clang') + 1] : 'clang';
-/** The zstd builder's image and where its Dockerfile is. */
-const IMAGE = 'bottlify-zstd-builder:0.1';
-const CORE_SCRIPTS = fileURLToPath(new URL('../../core/scripts/', import.meta.url));
+/** The compiler's image and where its Dockerfile is. */
+const IMAGE = 'bottlify-clang:0.1';
+const SCRIPTS = fileURLToPath(new URL('./', import.meta.url));
 
 /**
- * Runs clang in the zstd builder's image over the source, copied in, and
+ * Runs clang in the compiler's image over the source, copied in, and
  * copies the module out to `out`.
  *
  * @param {string[]} flags @param {string} out
@@ -51,7 +51,7 @@ const CORE_SCRIPTS = fileURLToPath(new URL('../../core/scripts/', import.meta.ur
  */
 function compileInDocker(flags, out){
     const built = spawnSync('docker', ['build', '-t', IMAGE, '-f',
-        join(CORE_SCRIPTS, 'Dockerfile.zstd'), CORE_SCRIPTS], { stdio: 'inherit' });
+        join(SCRIPTS, 'Dockerfile.clang'), SCRIPTS], { stdio: 'inherit' });
     if (built.status !== 0)
     {
         throw new Error('failed to build the builder image');

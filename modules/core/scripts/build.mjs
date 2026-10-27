@@ -30,9 +30,8 @@ const VENDOR_OUT = join(DIST, 'vendor');
  */
 
 /**
- * The binaries the published package carries when the build has them. Both
- * are optional: the media layer says it decodes nothing without the decoder,
- * and the JavaScript zstd decoder stands in for the wasm one.
+ * The binaries the published package carries when the build has them. It is
+ * optional: the media layer says it decodes nothing without the decoder.
  * @type {readonly VendorArtifact[]}
  */
 const VENDOR_ARTIFACTS = [
@@ -41,7 +40,6 @@ const VENDOR_ARTIFACTS = [
         lock: 'video-decoder-lock.json',
         fetch: 'npm run fetch:video-decoder',
     },
-    { name: 'zstd.wasm', lock: 'zstd-lock.json', fetch: 'npm run fetch:zstd' },
 ];
 
 /** Files that must travel with the package, copied from the repository root. */
@@ -181,12 +179,10 @@ const ENGINE_BUILD = {
     // it, and the package is the built thing.
     minify: !readable,
     sourcemap: false,
-    // The built module's own directory holds the prebuilt binaries (see
-    // copyVendor) and the translator (below), so the engine finds both without
-    // being told.
+    // The built module's own directory holds the translator (below), so the
+    // engine finds it without being told.
     define: {
         ...DIAGNOSTICS_OFF,
-        'import.meta.env.BOTTLIFY_VENDOR': '"./vendor/"',
         'import.meta.env.BOTTLIFY_CORK': '"./cork/index.js"',
     },
     outdir: DIST,

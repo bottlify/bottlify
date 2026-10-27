@@ -30,7 +30,6 @@ const BINARY_MIN_BYTES = 256 * 1024;
  * floor only when present. */
 export const OPTIONAL_VENDOR = new Set([
     'dist/vendor/video-decoder.wasm',
-    'dist/vendor/zstd.wasm',
 ]);
 
 /**

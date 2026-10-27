@@ -16,7 +16,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import zlib from 'node:zlib';
-import { writeBundle } from '../../../../bundle-node.js';
+import { packBlock, writeBundle } from '../../../../bundle-node.js';
 import { openBundle, withManifest, Codec, HEADER_SIZE, MAGIC } from './format.js';
 import { createBundleSource, BLOCK_MISS } from './source.js';
 import { blockCacheName, cachedBundle, storedLength } from './cache.js';
@@ -46,6 +46,24 @@ const CONTENT = {
  * @param {number} [blockSize]
  * @returns {Promise<Uint8Array>} the bundle, as bytes
  */
+/**
+ * The packer bundles were written with before deflate became the only codec:
+ * the smaller of deflate and zstd. Published bundles carry zstd blocks, so the
+ * fixture does too, and every codec a reader meets is read here.
+ *
+ * @param {Buffer} block @param {number} level
+ */
+function packAsPublished(block, level){
+    const packed = packBlock(block, level);
+    if (packed.codec !== Codec.DEFLATE_RAW)
+    {
+        return packed;
+    }
+    const zstd = zlib.zstdCompressSync(block,
+        { params: { [zlib.constants.ZSTD_c_compressionLevel]: 19 } });
+    return zstd.length < packed.bytes.length ? { codec: Codec.ZSTD, bytes: zstd } : packed;
+}
+
 async function buildBundle(blockSize = BLOCK_SIZE){
     const directory = await mkdtemp(join(tmpdir(), 'bottlify-btl-'));
     const root = join(directory, 'tree');
@@ -59,7 +77,7 @@ async function buildBundle(blockSize = BLOCK_SIZE){
             await writeFile(join(root, path.replace(/\\/g, '/')), bytes);
         }
         const output = join(directory, 'bundle.btl');
-        await writeBundle({ root, output, blockSize });
+        await writeBundle({ root, output, blockSize, pack: packAsPublished });
         return new Uint8Array(await readFile(output));
     }
     finally

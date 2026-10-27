@@ -5,25 +5,21 @@
  */
 
 /**
- * This project's decoder against libzstd, Node's own, on the bundle's actual
- * blocks: every zstd block of a written bundle must decode byte for byte to
- * what libzstd gives, and the per-megabyte cost of each is printed. A guest
- * file read is not a hot path.
+ * This project's decoder against libzstd, Node's own, on bundle blocks: every
+ * zstd block must decode byte for byte to what libzstd gives, and the
+ * per-megabyte cost of each is printed. A guest file read is not a hot path.
+ * The packer no longer writes zstd, but published bundles carry it (blocks
+ * packed at level 19), so the fixture's blocks are packed the same way here.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import zlib from 'node:zlib';
-import { writeBundle } from './bundle-node.js';
 import { openBundle, Codec } from './layers/filesystem/internal/bundle/format.js';
 import { decompressZstd } from './zstd.js';
-import { loadZstdWasm } from './zstd-wasm.js';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const BLOCK_SIZE = 64 * 1024;
 
 /** Deterministic noise no compressor can help with. @param {number} length */
@@ -38,51 +34,61 @@ function noise(length){
     return out;
 }
 
-/** The content a bundle carries here: text, a ramp and noise, all three codecs. @returns {Promise<Uint8Array>} */
-async function buildBundle(){
-    const directory = await mkdtemp(join(tmpdir(), 'btl-zstd-'));
-    const root = join(directory, 'tree');
-    try
-    {
-        await mkdir(join(root, 'Data'), { recursive: true });
-        await writeFile(join(root, 'Data', 'Notes.txt'),
-            'the quick brown fox jumps over the lazy dog. '.repeat(600));
-        await writeFile(join(root, 'Data', 'Ramp.dat'),
-            Buffer.from(Array.from({ length: 200_000 }, (_, at)=>at & 0xff)));
-        await writeFile(join(root, 'Data', 'Random.bin'), randomBytes(200_000));
+/**
+ * Text, a ramp, random bytes and sparse noise, in blocks packed by libzstd at
+ * the level bundles were packed at.
+ *
+ * @returns {{ packed: Uint8Array, length: number }[]}
+ */
+function fixtureBlocks(){
+    const content = Buffer.concat([
+        Buffer.from('the quick brown fox jumps over the lazy dog. '.repeat(600)),
+        Buffer.from(Array.from({ length: 200_000 }, (_, at)=>at & 0xff)),
+        randomBytes(200_000),
         // Huffman literals and FSE sequences: the decoder's heavier path.
-        await writeFile(join(root, 'Data', 'Mixed.bin'),
-            Buffer.from(noise(1 << 20).map((byte, at)=>at % 7 === 0 ? 0 : byte)));
-        const output = join(directory, 'bundle.btl');
-        await writeBundle({ root, output, blockSize: BLOCK_SIZE });
-        return new Uint8Array(await readFile(output));
-    }
-    finally
+        Buffer.from(noise(1 << 20).map((byte, at)=>at % 7 === 0 ? 0 : byte)),
+    ]);
+    const blocks = [];
+    for (let at = 0; at < content.length; at += BLOCK_SIZE)
     {
-        await rm(directory, { recursive: true, force: true });
+        const block = content.subarray(at, at + BLOCK_SIZE);
+        blocks.push({ packed: new Uint8Array(zlib.zstdCompressSync(block,
+            { params: { [zlib.constants.ZSTD_c_compressionLevel]: 19 } })), length: block.length });
     }
+    return blocks;
+}
+
+/**
+ * Every zstd block of a bundle on disk.
+ *
+ * @param {string} path
+ * @returns {Promise<{ packed: Uint8Array, length: number }[]>}
+ */
+async function bundleBlocks(path){
+    const bytes = new Uint8Array(await readFile(path));
+    const bundle = await openBundle(
+        async(at, count)=>bytes.subarray(at, at + count),
+        (codec, block)=>codec === Codec.DEFLATE_RAW
+            ? new Uint8Array(zlib.inflateRawSync(block))
+            : codec === Codec.ZSTD ? decompressZstd(block, 0) : block);
+    const blocks = [];
+    for (let at = 0; at < bundle.blockCount; at++)
+    {
+        const block = bundle.block(at);
+        if (block.codec === Codec.ZSTD)
+        {
+            blocks.push({ packed: bytes.subarray(block.offset, block.offset + block.packed),
+                length: block.length });
+        }
+    }
+    return blocks;
 }
 
 test('every zstd block of a bundle matches libzstd', async()=>{
     // The largest bundle's blocks when one is named (the owner's own), the
     // fixture below otherwise: `BOTTLIFY_ZSTD_BUNDLE=/path/to/bundle.btl`.
     const named = process.env.BOTTLIFY_ZSTD_BUNDLE;
-    const bytes = named ? new Uint8Array(await readFile(named)) : await buildBundle();
-    const bundle = await openBundle(
-        async(at, count)=>bytes.subarray(at, at + count),
-        (codec, block)=>codec === Codec.DEFLATE_RAW
-            ? new Uint8Array(zlib.inflateRawSync(block))
-            : codec === Codec.ZSTD ? decompressZstd(block, 0) : block);
-    const zstdBlocks = [];
-    for (let at = 0; at < bundle.blockCount; at++)
-    {
-        const block = bundle.block(at);
-        if (block.codec === Codec.ZSTD)
-        {
-            zstdBlocks.push({ packed: bytes.subarray(block.offset, block.offset + block.packed),
-                length: block.length });
-        }
-    }
+    const zstdBlocks = named ? await bundleBlocks(named) : fixtureBlocks();
     assert.ok(zstdBlocks.length >= 1, 'the fixture carries zstd blocks');
 
     /** @param {Uint8Array} packed */
@@ -128,44 +134,4 @@ test('every zstd block of a bundle matches libzstd', async()=>{
         + `libzstd ${(mb / (theirsMs / 1000)).toFixed(1)} MiB/s`
         + ` (${(theirsMs / 1000).toFixed(2)} s)`);
     assert.ok(mb > 0.1, `enough to time: ${mb} MiB`);
-
-    // The wasm build of the same decoder, when this checkout carries it: byte
-    // for byte libzstd's answer, and not slower than the JavaScript decoder.
-    let wasmBytes = null;
-    try
-    {
-        wasmBytes = await readFile(new URL('zstd.wasm', PREBUILT));
-    }
-    catch {
-        console.log('zstd.wasm absent from vendor/prebuilt (npm run fetch:zstd or build:zstd):'
-            + ' the wasm build is not judged');
-    }
-    if (wasmBytes)
-    {
-        const ours = await loadZstdWasm(wasmBytes);
-        for (const block of zstdBlocks)
-        {
-            assert.deepEqual([...ours.decompress(block.packed, block.length)],
-                [...libzstd(block.packed)],
-                `wasm build, block of ${block.packed.length} bytes`);
-        }
-        for (let round = 0; round < 3; round++)
-        {
-            for (const block of zstdBlocks)
-            {
-                ours.decompress(block.packed, block.length);
-            }
-        }
-        const wasmAt = performance.now();
-        for (const block of zstdBlocks)
-        {
-            ours.decompress(block.packed, block.length);
-        }
-        const wasmMs = performance.now() - wasmAt;
-        console.log(`zstd wasm build: ${(mb / (wasmMs / 1000)).toFixed(1)} MiB/s`
-            + ` (${(wasmMs / 1000).toFixed(2)} s)`);
-        assert.ok(wasmMs <= mineMs * 1.25,
-            `the wasm build (${wasmMs.toFixed(0)} ms) is not slower than the JavaScript decoder`
-            + ` (${mineMs.toFixed(0)} ms) beyond timing noise`);
-    }
 });
