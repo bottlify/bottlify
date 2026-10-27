@@ -30,8 +30,10 @@ import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { readGuid, writeGuid } from '../ole32/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
+import { createStdDispatchObjects } from './stddispatch.js';
 import { TKIND_DISPATCH, TKIND_INTERFACE } from './typelib.js';
 import { parseTypeLibrary } from './sltg.js';
+import { STDOLE2, isStdole } from './stdole.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { compareStrings, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
@@ -1272,6 +1274,16 @@ export function createAutomationFunctions(host){
         divergence: report,
     }) : null;
 
+    const stdDispatches = host.vtables && host.call ? createStdDispatchObjects({
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
+        call: (entry, args)=>(host.call
+            ? host.call(entry, args, host.callerThread?.())
+            : Promise.reject(new Error('no way to call guest code'))),
+        adapt: (state, interfaces, destroy)=>createAdapter(state, interfaces, destroy),
+    }) : null;
+
     const errorInfos = host.vtables ? createErrorInfoObjects({
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
@@ -1366,6 +1378,13 @@ export function createAutomationFunctions(host){
         const path = indexed && fileBytes(named) === null ? indexed[1] : named;
         const index = indexed && path !== named ? Number(indexed[2]) : 1;
         const bytes = fileBytes(path);
+        // The system's own stdole2.tlb is there whether or not its file is.
+        if (bytes === null && typeLibraries && isStdole(path))
+        {
+            const pointer = typeLibraries.open(STDOLE2, path);
+            writeU32(out, pointer);
+            return pointer === 0 ? E_OUTOFMEMORY : S_OK;
+        }
         if (bytes === null || !typeLibraries)
         {
             report('LoadTypeLib', typeLibraries
@@ -4568,7 +4587,7 @@ export function createAutomationFunctions(host){
             /** @param {number[]} args */
             handler: ([pdispparams, position, vtTarg, pvarResult, puArgErr])=>{
                 const params = pdispparams >>> 0;
-                if (params === 0 || (pvarResult >>> 0) === 0)
+                if (params === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -4580,14 +4599,25 @@ export function createAutomationFunctions(host){
                 {
                     return DISP_E_PARAMNOTFOUND;
                 }
-                const source = args + (count - 1 - (position >>> 0)) * VARIANT_BYTES;
+                // What a failure names is the argument's place in rgvarg,
+                // where the positional ones sit last and in reverse.
+                const slot = count - 1 - (position >>> 0);
+                if ((pvarResult >>> 0) === 0)
+                {
+                    if ((puArgErr >>> 0) !== 0)
+                    {
+                        writeU32(puArgErr >>> 0, slot);
+                    }
+                    return E_INVALIDARG;
+                }
+                const source = args + slot * VARIANT_BYTES;
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
                 return whenAnswered(changeType(pvarResult >>> 0, source, 0, vtTarg & 0xffff,
                     owed, 0, thread), result=>{
                     if (result !== S_OK && (puArgErr >>> 0) !== 0)
                     {
-                        writeU32(puArgErr >>> 0, position >>> 0);
+                        writeU32(puArgErr >>> 0, slot);
                     }
                     return settle(owed, thread, result);
                 });
@@ -4718,6 +4748,37 @@ export function createAutomationFunctions(host){
          *
          * A fresh, empty error object with one reference, the caller's.
          */
+        /**
+         * HRESULT CreateStdDispatch(IUnknown *punkOuter, void *pvThis,
+         *     ITypeInfo *ptinfo, IUnknown **ppunkStdDisp)
+         *
+         * The object, its type information and the out pointer are required.
+         */
+        CreateStdDispatch: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([outer, self, typeInfo, out])=>{
+                if ((out >>> 0) === 0 || (self >>> 0) === 0 || (typeInfo >>> 0) === 0)
+                {
+                    if ((out >>> 0) !== 0)
+                    {
+                        writeU32(out >>> 0, 0);
+                    }
+                    return E_INVALIDARG;
+                }
+                if (!stdDispatches)
+                {
+                    report('CreateStdDispatch', 'no guest calls to make, so no object');
+                    return E_NOTIMPL;
+                }
+                return stdDispatches.create(outer >>> 0, self >>> 0, typeInfo >>> 0)
+                    .then(pointer=>{
+                        writeU32(out >>> 0, pointer);
+                        return pointer === 0 ? E_OUTOFMEMORY : S_OK;
+                    });
+            },
+        },
+
         /**
          * void ClearCustData(CUSTDATA *pCustData)
          *

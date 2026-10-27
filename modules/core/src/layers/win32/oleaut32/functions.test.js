@@ -2150,3 +2150,32 @@ test('VariantChangeType turns an array of bytes into a string of them and back',
     assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, 0x2000 | 16]),
         DISP_E_TYPEMISMATCH, 'not into an array of another type');
 });
+
+test('DispGetParam names a failing argument by its place in rgvarg, not its position', ()=>{
+    setUp();
+    const PARAMS = 0x3000;
+    const ARGS = 0x3100;
+    for (let index = 0; index < 3; index++)
+    {
+        host.putVariant(ARGS + index * 16, VT_I2, index);
+    }
+    host.putU32(PARAMS, ARGS);
+    host.putU32(PARAMS + 4, 0);
+    host.putU32(PARAMS + 8, 3);
+    host.putU32(PARAMS + 12, 0);
+    host.putU32(SLOT, 0xdeadbeef);
+    assert.equal(call('DispGetParam', [PARAMS, 2, VT_I2, 0, SLOT]), E_INVALIDARG);
+    assert.equal(host.u32(SLOT), 0, 'position 2 is rgvarg[0]');
+    host.putU32(SLOT, 0xdeadbeef);
+    assert.equal(call('DispGetParam', [PARAMS, 3, VT_I2, 0, SLOT]), 0x80020004,
+        'DISP_E_PARAMNOTFOUND before the missing result is looked at');
+    assert.equal(host.u32(SLOT), 0xdeadbeef);
+});
+
+test('CreateStdDispatch wants an object, its type information and an out pointer', ()=>{
+    setUp();
+    assert.equal(call('CreateStdDispatch', [0, 0, 0, 0]), E_INVALIDARG);
+    host.putU32(SLOT, 0xdeadbeef);
+    assert.equal(call('CreateStdDispatch', [0, 0x4000, 0, SLOT]), E_INVALIDARG);
+    assert.equal(host.u32(SLOT), 0);
+});
