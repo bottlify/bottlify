@@ -115,10 +115,10 @@ async function run(code, bits, cork){
 }
 
 // Outside `precise` the sticky IE, ZE and UE (and the summary they raise) are
-// the translator's and the interpreter tier's to leave unraised, as a program
-// that reads them runs precise: which of the two runs an instruction is the
-// schedule's, not the width's.
-const RELAXED = 0x1 | 0x4 | 0x10 | 0x80;
+// the translator's and the interpreter tier's to leave unraised, and C1 a push
+// that did not overflow to leave as it was, as a program that reads them runs
+// precise: which of the two runs an instruction is the schedule's, not the width's.
+const RELAXED = 0x1 | 0x4 | 0x10 | 0x80 | 0x200;
 
 for (const [name, cork] of /** @type {const} */ ([
     ['stack shapes tested at the entry', {}],
