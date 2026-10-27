@@ -117,6 +117,7 @@ const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
 const LONG_OPS = new Set([
     'nop', 'mov', 'movzx', 'movsx', 'movsxd', 'lea', 'add', 'adc', 'sub', 'sbb', 'cmp', 'and',
     'or', 'xor', 'test', 'inc', 'dec', 'neg', 'not', 'push', 'pop', 'jmp', 'call', 'ret', 'hlt',
+    'shl', 'sal', 'shr', 'sar',
 ]);
 
 /**
@@ -1954,14 +1955,24 @@ function shift(e, instruction, flagsLive){
     const { op, operands, size } = instruction;
     const [dst, count] = operands;
     const bits = size * 8;
-    const sign = SIGN_BITS[widthCode(size)];
-    const staticCount = count.kind === 'imm' ? (/** @type {number} */ (count.value) & 31) : -1;
+    // A quadword's count is taken mod 64, the others' mod 32.
+    const countMask = size === 8 ? 63 : 31;
+    const staticCount = count.kind === 'imm' ? (/** @type {number} */ (count.value) & countMask)
+        : -1;
+    // Long mode's dword register is written by a shift of nothing too: its
+    // high half cleared, as every dword write clears it.
+    const writesAnyway = isLong(e) && size === 4 && dst.kind === 'reg';
     if (staticCount === 0)
     {
+        if (writesAnyway)
+        {
+            writeOp(e, dst, ()=>readOp(e, dst), true);
+        }
         return true;
     }
     prepare(e, dst);
     const arith = op === 'sar';
+    const ops = opsOf(size);
     if (staticCount < 0 && flagsLive)
     {
         // A count of zero at run time leaves the pending record to be folded
@@ -1970,18 +1981,35 @@ function shift(e, instruction, flagsLive){
         // apart from it.
         e.materialise();
     }
-    const value = flagsLive ? Local.op1 : Local.t1;
-    // The value, sign-extended for sar.
+    const value = flagsLive ? Local.op1 : size === 8 ? Local.t64b : Local.t1;
+    /** The value as read, sign-extended for sar. */
+    const pushValue = ()=>{
+        if (value === Local.op1)
+        {
+            getOperand(e, value, size);
+        }
+        else
+        {
+            b.localGet(value);
+        }
+    };
     readOp(e, dst);
     if (arith && size < 4)
     {
         b.op(size === 1 ? I32_EXTRA.extend8s : I32_EXTRA.extend16s);
     }
-    b.localSet(value);
+    if (value === Local.op1)
+    {
+        setOperand(e, value, size);
+    }
+    else
+    {
+        b.localSet(value);
+    }
     if (staticCount < 0)
     {
         readOp(e, count);
-        b.i32const(31).op(I32.and).localSet(Local.count);
+        b.i32const(countMask).op(I32.and).localSet(Local.count);
         b.localGet(Local.count).i32const(0).op(I32.ne);
         e.openIf('shifting', EMPTY);
     }
@@ -1989,20 +2017,26 @@ function shift(e, instruction, flagsLive){
     {
         b.i32const(staticCount).localSet(Local.count);
     }
-    const pushCount = ()=>b.localGet(Local.count);
+    const pushCount = ()=>{
+        b.localGet(Local.count);
+        if (size === 8)
+        {
+            b.op(I64.extendU);
+        }
+    };
     writeOp(e, dst, ()=>{
-        b.localGet(value);
+        pushValue();
         pushCount();
         if (op === 'shl' || op === 'sal')
         {
-            b.op(I32.shl);
+            b.op(ops.shl);
             // A count of the width or more leaves zero (i32.shl wraps the count).
             if (size < 4)
             {
                 // select(val1, val2, cond): the mask is 0 when the count reaches the width.
                 b.i32const(0);
                 b.i32const(-1);
-                pushCount();
+                b.localGet(Local.count);
                 b.i32const(bits).op(I32.geU);
                 b.op(0x1b);
                 b.op(I32.and);
@@ -2010,7 +2044,7 @@ function shift(e, instruction, flagsLive){
         }
         else
         {
-            b.op(arith ? I32.shrS : I32.shrU);
+            b.op(arith ? ops.shrS : ops.shrU);
         }
         mask(e, size);
         if (flagsLive)
@@ -2023,14 +2057,30 @@ function shift(e, instruction, flagsLive){
         // CF: the last bit shifted out. OF: shl -> msb(result) ^ CF; shr -> msb(original);
         // sar -> 0.
         b.localGet(Local.flags).i32const(~(CF | OF)).op(I32.and).localSet(Local.flags);
-        if (op === 'shl' || op === 'sal')
+        if (size === 8)
         {
-            b.localGet(Local.op1).i32const(bits).localGet(Local.count).op(I32.sub).op(I32.shrU)
+            if (op === 'shl' || op === 'sal')
+            {
+                b.localGet(Local.op1).i64const(64n).localGet(Local.count).op(I64.extendU)
+                    .op(I64.sub).op(I64.shrU);
+            }
+            else
+            {
+                b.localGet(Local.op1).localGet(Local.count).i32const(1).op(I32.sub)
+                    .op(I64.extendU).op(arith ? I64.shrS : I64.shrU);
+            }
+            b.op(I64.wrap).i32const(1).op(I32.and);
+        }
+        else if (op === 'shl' || op === 'sal')
+        {
+            getOperand(e, Local.op1, size);
+            b.i32const(bits).localGet(Local.count).op(I32.sub).op(I32.shrU)
                 .i32const(1).op(I32.and);
         }
         else
         {
-            b.localGet(Local.op1).localGet(Local.count).i32const(1).op(I32.sub)
+            getOperand(e, Local.op1, size);
+            b.localGet(Local.count).i32const(1).op(I32.sub)
                 .op(arith ? I32.shrS : I32.shrU).i32const(1).op(I32.and);
         }
         b.localSet(Local.t1);
@@ -2038,18 +2088,23 @@ function shift(e, instruction, flagsLive){
         e.orFlag(CF);
         if (op === 'shl' || op === 'sal')
         {
-            b.localGet(Local.res).i32const(sign).op(I32.and).i32const(0).op(I32.ne)
-                .localGet(Local.t1).op(I32.xor);
+            msbOf(e, Local.res, size);
+            b.localGet(Local.t1).op(I32.xor);
             e.orFlag(OF);
         }
         else if (op === 'shr')
         {
-            b.localGet(Local.op1).i32const(sign).op(I32.and).i32const(0).op(I32.ne);
+            msbOf(e, Local.op1, size);
             e.orFlag(OF);
         }
     }
     if (staticCount < 0)
     {
+        if (writesAnyway)
+        {
+            b.else();
+            writeOp(e, dst, ()=>pushValue(), true);
+        }
         e.close();
         if (flagsLive)
         {
@@ -2058,6 +2113,22 @@ function shift(e, instruction, flagsLive){
         }
     }
     return true;
+}
+
+/**
+ * Pushes 0/1, the top bit of a record operand of `size` bytes.
+ *
+ * @param {E} e @param {number} local @param {number} size
+ */
+function msbOf(e, local, size){
+    const { b } = e;
+    if (size === 8)
+    {
+        b.localGet(local).i64const(0n).op(I64.ltS);
+        return;
+    }
+    getOperand(e, local, size);
+    b.i32const(SIGN_BITS[widthCode(size)]).op(I32.and).i32const(0).op(I32.ne);
 }
 
 /**

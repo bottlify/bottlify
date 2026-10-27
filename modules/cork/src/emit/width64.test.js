@@ -31,6 +31,41 @@ test('long-mode regions of the shared emitter do what the interpreter does on th
     }
 });
 
+/**
+ * Width edges the corpus meets by chance only: each operation over registers
+ * whose high halves are set, every count that changes the answer (zero, the
+ * width and past it), with its flags read at the exit and with them
+ * overwritten after it.
+ *
+ * @param {string[]} codes  each operation's bytes, in hex
+ * @param {number[]} counts  rcx's values
+ */
+function edges(codes, counts){
+    const one = CORPUS.cases[0];
+    const regs = [...one.regs];
+    regs[0] = 'fedcba9876543210';
+    regs[2] = '8000000180000001';
+    regs[8] = '7fffffff80000000';
+    regs[9] = 'ffffffffffffffff';
+    return codes.flatMap(code=>counts.flatMap(count=>['', '31d2'].map(after=>({ ...one,
+        text: `${code} rcx ${count} ${after}`, code: code + after,
+        regs: regs.map((value, i)=>(i === 1 ? count.toString(16) : value)) }))));
+}
+
+test('width edges of shifts run in the shared emitter\'s regions as interpreted', ()=>{
+    const cases = edges([
+        'd3e0', 'd3e8', 'd3f8', 'c1e000', 'c1e81f', 'c1f801', // shl/shr/sar eax
+        '48d3e0', '48d3e8', '48d3f8', '48c1e03f', '48c1f83f', '48d1e0', // rax
+        '41d3e0', '49d3e8', '66d3e0', '66d3f8', // r8d, r8, ax
+        'd2e0', 'd2fc', '41d2e1', // al, ah, r9b
+        '40d2e6', // sil
+    ], [0, 1, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65]);
+    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
+        shared);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
+
 test('seeded long programs run in the shared emitter\'s regions as interpreted', ()=>{
     const instructions = pool();
     const straight = Array.from({ length: 600 },
