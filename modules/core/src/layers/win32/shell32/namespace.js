@@ -35,6 +35,14 @@ const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 export const MY_COMPUTER = '::{20D04FE0-3AEA-1069-A2D8-08002B30309D}';
 const MY_COMPUTER_NAME = 'My Computer';
 
+/**
+ * The Control Panel, a folder of the desktop's with nothing of the volume
+ * in it: its applets are no files here, so it lists none.
+ */
+export const CONTROL_PANEL = '::{21EC2020-3AEA-1069-A2DD-08002B30309D}';
+const CONTROL_PANEL_NAME = 'Control Panel';
+const SFGAO_CANLINK = 0x4;
+
 const S_OK = 0;
 const S_FALSE = 1;
 const E_NOINTERFACE = 0x80004002 | 0;
@@ -172,7 +180,7 @@ export function lastItemOf(memory, list){
  * @returns {string | null | undefined}  null is the desktop
  */
 export function parentOf(text){
-    if (text === MY_COMPUTER)
+    if (text === MY_COMPUTER || text === CONTROL_PANEL)
     {
         return null;
     }
@@ -255,6 +263,12 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
         attributes: (SFGAO_FOLDER | SFGAO_FILESYSANCESTOR | SFGAO_HASSUBFOLDER) >>> 0,
     };
 
+    /** The Control Panel, which Windows reaches by its parsing name. */
+    const controlPanelItem = {
+        text: CONTROL_PANEL, name: CONTROL_PANEL_NAME,
+        attributes: (SFGAO_CANLINK | SFGAO_FOLDER | SFGAO_HASSUBFOLDER) >>> 0,
+    };
+
     /**
      * What a list's last item names, wherever it is in the namespace: a
      * program hands back the lists it was given, and what they carry is
@@ -267,6 +281,10 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
         if (text === MY_COMPUTER)
         {
             return computerItem;
+        }
+        if (text === CONTROL_PANEL)
+        {
+            return controlPanelItem;
         }
         const entry = volume.stat(text);
         if (!entry)
@@ -287,9 +305,9 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
      */
     const parsingName = text=>{
         const upper = text.toUpperCase();
-        if (upper === MY_COMPUTER)
+        if (upper === MY_COMPUTER || upper === CONTROL_PANEL)
         {
-            return MY_COMPUTER;
+            return upper;
         }
         if (upper === MY_DOCUMENTS)
         {
@@ -309,6 +327,10 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
         if (folder === null)
         {
             return (flags & SHCONTF_FOLDERS) !== 0 ? [computerItem] : [];
+        }
+        if (folder === CONTROL_PANEL)
+        {
+            return [];
         }
         if (folder === MY_COMPUTER)
         {

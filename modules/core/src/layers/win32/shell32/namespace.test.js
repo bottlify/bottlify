@@ -104,7 +104,7 @@ function machine(){
     const lists = { readMemory: host.readMemory, writeMemory: host.writeMemory };
     /** @param {number} list */
     const texts = list=>itemsOf(lists, list);
-    return { memory, shell, call, u32, put, string, wide, texts, published };
+    return { memory, view, shell, call, u32, put, string, wide, texts, published };
 }
 
 /**
@@ -420,4 +420,17 @@ test('the desktop parses its own items by CLSID, in any case: My Documents is it
     assert.equal(m.call(desktop, FOLDER.ParseDisplayName, [0, 0,
         m.wide('::{20d04fe0-3aea-1069-a2d8-08002b30309d}'), 0, 0x10c, 0]), S_OK,
     'My Computer too');
+});
+
+test('the Control Panel is a folder of the desktop\'s, with nothing of the volume in it', ()=>{
+    // Wine's test_BindToObject: its parsing name binds, as a folder that lists nothing.
+    const m = machine();
+    assert.equal(m.shell.SHGetDesktopFolder.handler([0x104]), S_OK);
+    const desktop = m.u32(0x104);
+    m.view.setUint32(0x110, 0xffffffff, true);
+    assert.equal(m.call(desktop, FOLDER.ParseDisplayName, [0, 0,
+        m.wide('::{21EC2020-3AEA-1069-A2DD-08002B30309D}'), 0, 0x108, 0x110]), S_OK);
+    assert.equal(m.u32(0x110), (0x4 | 0x20000000 | 0x80000000) >>> 0,
+        'SFGAO_CANLINK, SFGAO_FOLDER and SFGAO_HASSUBFOLDER');
+    assert.equal(m.shell.SHGetPathFromIDListA.handler([m.u32(0x108), 0x200]), 0, 'no path');
 });
