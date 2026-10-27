@@ -130,7 +130,7 @@ test('EnumTimeFormatsA hands each format to the callback until it stops', async(
     assert.equal(fns.EnumTimeFormatsW.argBytes, 12);
 });
 
-test('EnumSystemLocales hands the callback the one locale, as eight hex digits', async()=>{
+test('EnumSystemLocales hands out every locale, as eight hex digits, sorts apart', async()=>{
     // A launcher picks its language from what this hands out; the old
     // failure, with nothing handed out, sent one looking for ever.
     const host = fakeHost();
@@ -162,10 +162,13 @@ test('EnumSystemLocales hands the callback the one locale, as eight hex digits',
     const LCID_INSTALLED = 1;
     const LCID_ALTERNATE_SORTS = 4;
     assert.equal(await fns.EnumSystemLocalesA.handler([0x1234, LCID_INSTALLED]), 1);
-    assert.deepEqual(seen, ['00000409']);
-    assert.equal(await fns.EnumSystemLocalesA.handler([0x1234, LCID_ALTERNATE_SORTS]), 1,
-        'en-US has no other sort: nothing handed out, and done');
-    assert.deepEqual(seen, ['00000409']);
+    assert.ok(seen.includes('00000409') && seen.includes('00000411'));
+    assert.ok(seen.every(lcid=>/^0000[0-9A-F]{4}$/.test(lcid)), 'specific locales, default sorts');
+    assert.ok(!seen.includes('00000009'), 'no neutral one');
+    seen.length = 0;
+    assert.equal(await fns.EnumSystemLocalesA.handler([0x1234, LCID_ALTERNATE_SORTS]), 1);
+    assert.ok(seen.includes('00010407'), 'German phone-book order');
+    assert.ok(seen.every(lcid=>!lcid.startsWith('0000')), 'the alternate sorts alone');
     assert.equal(fns.EnumSystemLocalesW.argBytes, 8);
 });
 
@@ -739,9 +742,8 @@ test('a type the locale lacks, or a flag the call cannot take, is ERROR_INVALID_
     assert.equal(host.readWide(0x100, 7), 'January');
 
     host.errors.length = 0;
-    assert.equal(fns.GetLocaleInfoA.handler([0x419, SDECIMAL, 0x100, 64]), 0);
-    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER],
-        'a locale we do not carry is still that');
+    assert.equal(fns.GetLocaleInfoA.handler([0x1234, SDECIMAL, 0x100, 64]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER], 'an LCID no locale has');
 });
 
 test('the abbreviated names, the digit grouping and the currency are answered', ()=>{
@@ -1311,4 +1313,73 @@ test('an LCID is named by its language and region, and a name finds its LCID', (
     assert.equal(fns.LocaleNameToLCID.handler([0x200, 0]), 0x007f);
     host.plantWide(0x200, 'xx-YY');
     assert.equal(fns.LocaleNameToLCID.handler([0x200, 0]), 0);
+});
+
+test('every locale answers by its LCID: neutral ones as their default, the invariant one too', ()=>{
+    // Wine's locale.c test_GetLocaleInfoW, test_invariant and codepage.c test_threadcp.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const RETURN_NUMBER = 0x20000000;
+    /** @param {number} lcid @param {number} type */
+    const text = (lcid, type)=>{
+        const length = fns.GetLocaleInfoW.handler([lcid, type, 0x200, 64]);
+        return length === 0 ? null : host.readWide(0x200, length - 1);
+    };
+    /** @param {number} lcid @param {number} type */
+    const number = (lcid, type)=>(fns.GetLocaleInfoW.handler([lcid, type | RETURN_NUMBER, 0x200, 2])
+        ? new DataView(host.bytes.buffer).getUint32(0x200, true) : null);
+    const SNAME = 0x5c;
+    const IDEFAULTANSICODEPAGE = 0x1004;
+    assert.equal(text(0x0009, SNAME), 'en-US');
+    assert.equal(text(0x000a, SNAME), 'es-ES');
+    assert.equal(text(0x001a, SNAME), 'hr-HR');
+    assert.equal(number(0x0004, 0x01), 0x0804, 'ILANGUAGE of the neutral Chinese');
+    assert.equal(number(0x0419, IDEFAULTANSICODEPAGE), 1251);
+    assert.equal(number(0x0439, IDEFAULTANSICODEPAGE), 0);
+    assert.equal(text(0x007f, 0x02), 'Invariant Language (Invariant Country)');
+    assert.equal(text(0x007f, 0x1f), 'MM/dd/yyyy');
+    assert.equal(text(0x0419, 0x0e), ',', 'Russian\'s decimal separator');
+    const january = text(0x0419, 0x38);
+    const genitive = text(0x0419, 0x38 | 0x10000000);
+    assert.ok(january !== null && genitive !== null && january !== genitive,
+        'a Russian month as a date names it differs from its name');
+});
+
+test('LocaleNameToLCID, LCIDToLocaleName and ConvertDefaultLocale agree on neutral names', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const LOCALE_ALLOW_NEUTRAL_NAMES = 0x08000000;
+    host.plantWide(0x100, 'en');
+    assert.equal(fns.LocaleNameToLCID.handler([0x100, 0]), 0x0409);
+    assert.equal(fns.LocaleNameToLCID.handler([0x100, LOCALE_ALLOW_NEUTRAL_NAMES]), 0x0009);
+    host.plantWide(0x100, 'de-DE_phoneb');
+    assert.equal(fns.LocaleNameToLCID.handler([0x100, 0]), 0x10407);
+    assert.equal(fns.LCIDToLocaleName.handler([0x10407, 0x200, 64, 0]), 13);
+    assert.equal(host.readWide(0x200, 12), 'de-DE_phoneb');
+    assert.equal(fns.LCIDToLocaleName.handler([0x7c04, 0x200, 64, 0]), 6);
+    assert.equal(host.readWide(0x200, 5), 'zh-HK');
+    assert.equal(fns.ConvertDefaultLocale.handler([0x000a]), 0x0c0a);
+    assert.equal(fns.ConvertDefaultLocale.handler([0x7c1a]), 0x241a);
+    assert.equal(fns.ConvertDefaultLocale.handler([0x10011]), 0x10011, 'a sort keeps it neutral');
+    assert.equal(fns.ConvertDefaultLocale.handler([0x0809]), 0x0809);
+});
+
+test('the thread\'s locale picks CP_THREAD_ACP; SetLocaleInfo takes only the user\'s formats', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions({ ...host, callerThread: ()=>'thread' });
+    const CP_THREAD_ACP = 3;
+    assert.equal(fns.SetThreadLocale.handler([0x0411]), 1);
+    assert.equal(fns.IsDBCSLeadByteEx.handler([CP_THREAD_ACP, 0x81]), 1);
+    assert.equal(fns.SetThreadLocale.handler([0x0439]), 1);
+    assert.equal(fns.GetCPInfoExW.handler([CP_THREAD_ACP, 0, 0x300]), 1);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(0x300 + 20, true), 1252,
+        'a locale with no ANSI page leaves the machine\'s');
+    assert.equal(fns.SetThreadLocale.handler([0x1234]), 0);
+
+    host.plantWide(0x100, '5');
+    assert.equal(fns.SetLocaleInfoW.handler([0x0400, 0x11, 0x100]), 1, 'IDIGITS');
+    assert.equal(fns.GetLocaleInfoW.handler([0x0400, 0x11, 0x200, 8]), 2);
+    assert.equal(host.readWide(0x200, 1), '5');
+    assert.equal(fns.SetLocaleInfoW.handler([0x0400, 0x5c, 0x100]), 0, 'SNAME is the locale\'s');
+    assert.equal(host.errors.at(-1), 1004);
 });
