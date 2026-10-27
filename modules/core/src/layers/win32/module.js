@@ -2616,6 +2616,10 @@ export function createWin32Module(){
 
                 'SHLWAPI.dll': createShlwapiFunctions({
                     readCString, readWideString, readMemory, writeMemory,
+                    // The COM helpers call methods of the program's own objects.
+                    drive: steps=>bridge.drive(steps),
+                    // SHCreateStreamOnFile's streams are objects of shlwapi's own.
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
                     setLastError: setError,
                     files: volume,
                     /** @param {string} path */
