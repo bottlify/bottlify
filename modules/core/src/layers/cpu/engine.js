@@ -371,6 +371,8 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [yieldChunk]  Instructions translated code runs at a time while a slice may
  *     end early. Default 10000.
  * @property {number} [interpretChunk]  Instructions the interpreter runs at a time. Default 8192.
+ * @property {'long' | 'shared'} [long]  Long mode's translator: the long runner (`long`, the
+ *     default) or the shared runtime and emitter the 32-bit code runs on (`shared`).
  * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
  * @property {number} [tscDriftMs]  How far `rdtsc` runs ahead of the guest's clock. Default 16.
  * @property {number} [spinMs]  With several executors, how long a side of their channel, and the

@@ -28,7 +28,7 @@ import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
 
 import {
-    CORPUS, EXIT, compare, load, machine, nested, pool, program, run,
+    CORPUS, EXIT, HOISTED_SWITCHES, SWITCHES, compare, load, machine, nested, pool, program, run,
 } from '../testing/long-machine.js';
 
 test('seeded long programs run translated as they run interpreted', ()=>{
@@ -157,16 +157,7 @@ test('the cases of a switch join its region, its jump going among them as interp
     //                                        (read at forming before or after the fill), and
     //                                        an entry rewritten once its region has run
     // Each case changes a word of [rbx] differently, a default the indices past the bound.
-    const code = '488d05d40000004889042540000010488d05cc0000004889042548000010488d05c4000000488904'
-        + '25500000104531c931f683fe05772889f0ff24c52001002048830301eb204883030aeb1a48830364'
-        + '48830303eb10486b0b0348890beb07488103e803000083fe0477294863c6488d158bffffff8b8c82'
-        + '500100004801d1ffe14883430807eb1148836b0805eb0a48837308554883430802897318837b1803'
-        + '77268b4318488d15b8000000486304824801d0ffe0488343100beb1148d16310eb0b48f75310eb05'
-        + '488343100d83fe02771d89f0ff24c5400000104883432011eb1248c1432003eb0b48f75b20eb0548'
-        + '83432013ffc683fe080f8233ffffff4585c9757041ffc1488d05dbffffff488904254800001031f6'
-        + 'e915ffffff0f1f00400000200000000046000020000000004c000020000000005000002000000000'
-        + '56000020000000005f0000200000000081000000880000008f0000008f0000008100000051ffffff'
-        + '58ffffff5effffff51ffffff';
+    const code = SWITCHES;
     const cases = CORPUS.cases.slice(0, 6).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `switch ${i}`, code }));
     for (const [budget, transfers] of /** @type {const} */ ([[7, true], [100000, true], [50, false]]))
@@ -194,13 +185,7 @@ test('a switch whose table base is set before its block joins its region all the
     //         movsxd rcx, [r13 + rcx*4 - 16]; add rcx, r13; jmp rcx   by the table's read
     // e0..e3: add [rbx + 16], 3 / [rbx + 16] *= 5 / xor rsi / ror 7; next3: as next; jmp done
     // table3, table, table2: the cases' offsets from table (table3's) or their own table
-    const code = '4c8d2ddd00000031f6488d0502000000ffe089f083e0034883f803772349634c85004c01e9ffe148'
-        + '830301eb134883030aeb0d486b1303488913eb0448832b07ffc681fec800000072c84c8d25a30000'
-        + '0031f6eb0089f083e0034883f803772149630c844c01e1ffe148317308eb124883430805eb0b48c1'
-        + '430803eb0448f75308ffc681fec800000072ca31f6488d0502000000ffe089f183e1034883f90377'
-        + '2749634c8df04c01e9ffe14883431003eb16486b53100548895310eb0b48317310eb0548c14b1007'
-        + 'ffc681fec800000072c4eb30c7ffffffceffffffd9ffffffdfffffff43ffffff49ffffff4fffffff'
-        + '58ffffff75ffffff7bffffff82ffffff89ffffff';
+    const code = HOISTED_SWITCHES;
     const cases = CORPUS.cases.slice(0, 3).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `hoisted switch ${i}`, code }));
     for (const [budget, transfers] of /** @type {const} */ ([[7, true], [100000, true], [100000, false]]))

@@ -226,6 +226,8 @@ export function createCorkHost(config){
     // Long mode: the 64-bit block and the long-mode interpreter, which is all
     // the engine runs 64-bit code on so far.
     const long = bits === 64;
+    // Long mode on the shared runtime and emitter rather than the long runner.
+    const sharedLong = long && corkConfig?.long === 'shared';
     if (long && (executors !== 1 || typeof engine?.interpret64 !== 'function'))
     {
         throw new Error('cpu: a 64-bit process runs on one executor of an engine with'
@@ -709,12 +711,11 @@ export function createCorkHost(config){
         // translated twice, never once per executor.
         ...(executors > 1 && executor !== 0 && typeof engine.sharedLayout === 'function'
             ? { sharedLayout: engine.sharedLayout(own) } : {}),
-        // In long mode this runtime is only the page table's owner: it forms
-        // and runs nothing, the long runner does. Fed the samples every slice
-        // credits, it decoded 64-bit code as 32-bit, published it in the hash
-        // the long runner shares, and ran it over the 64-bit block.
+        // In long mode this runtime is only the page table's owner, the long
+        // runner forming and running -- unless the shared translator is asked
+        // for (`long: 'shared'`), which forms long mode's regions itself.
         config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
-            ...long ? { translate: false } : {},
+            ...long && !sharedLong ? { translate: false } : {},
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
@@ -755,7 +756,7 @@ export function createCorkHost(config){
     // Long mode's translator: blocks over the 64-bit block, the interpreter
     // taking what they leave (`createLongRunner`); `translate: false` keeps it
     // off, as it keeps the 32-bit one off.
-    const longRunner = long && corkConfig?.translate !== false
+    const longRunner = long && !sharedLong && corkConfig?.translate !== false
         && typeof engine.createLongRunner === 'function' && runtime.pages
         ? engine.createLongRunner({ memory, layout, pages: runtime.pages,
             hot: corkConfig?.hotThreshold ?? 2,
@@ -1053,11 +1054,13 @@ export function createCorkHost(config){
             return 0;
         }
         // Long mode's runner takes the tier itself, between its regions.
-        if (wasmTier === null || force || long)
+        if (wasmTier === null || force || long && !sharedLong)
         {
             return interpretJs(address, budget, force, jumpedIn, false);
         }
-        if (!wasmDue)
+        // Long mode's own interpreter is no faster start than the tier: none
+        // runs before it.
+        if (!wasmDue && !long)
         {
             const account = wasmTier.stretch;
             const left = wasmAfter - account.work;
@@ -1206,7 +1209,7 @@ export function createCorkHost(config){
     const interpretJs = (address, budget, force, jumpedIn, once)=>{
         if (long)
         {
-            return interpretLong(address, budget, force);
+            return interpretLong(address, budget, force || once, once);
         }
         interpreter ??= blockState({
             memory,
@@ -1263,10 +1266,13 @@ export function createCorkHost(config){
      * one: no translator to stop for and no hotness to count, nothing below
      * `runsFrom` fetched, a trap answered once the run ends.
      *
+     * With `once`, one run of it, as the wasm tier hands one back.
+     *
      * @param {number} address @param {number} budget @param {boolean} force
+     * @param {boolean} [once]
      * @returns {number}
      */
-    const interpretLong = (address, budget, force)=>{
+    const interpretLong = (address, budget, force, once = false)=>{
         interpreter ??= engine.blockState64({
             memory,
             layout,
@@ -1287,7 +1293,7 @@ export function createCorkHost(config){
         let thrown = null;
         try
         {
-            const onStep = (/** @type {number} */ at)=>{
+            const onStep = (/** @type {number} */ at, /** @type {boolean} */ jumped)=>{
                 lastStart = at;
                 if (at < runsFrom)
                 {
@@ -1298,6 +1304,10 @@ export function createCorkHost(config){
                 {
                     noteStart(at);
                 }
+                if (sharedLong && jumped)
+                {
+                    countHot(at);
+                }
             };
             if (longRunner !== null)
             {
@@ -1305,8 +1315,14 @@ export function createCorkHost(config){
             }
             else
             {
-                engine.interpret64(state, budget,
-                    { force, shouldStop: ()=>state.trapped.length > 0, onStep });
+                // On the shared runtime a run stops, as the 32-bit one does
+                // (`hooks`), where translated code begins or a hot start waits
+                // to be formed.
+                const shouldStop = once ? ()=>true : sharedLong
+                    ? ()=>state.trapped.length > 0 || feedDue || translateDue
+                        || runtime.entryOf(Number(state.rip), x87Top()) >= 0
+                    : ()=>state.trapped.length > 0;
+                engine.interpret64(state, budget, { force, shouldStop, onStep });
             }
         }
         catch (e){

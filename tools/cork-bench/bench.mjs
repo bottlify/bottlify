@@ -178,7 +178,7 @@ for (const name of names)
         {
             await run(host);
         }
-        const longBefore = bits === 64 ? host.corkDiagnostics().long : null;
+        const longBefore = bits === 64 ? host.corkDiagnostics().long ?? null : null;
         const before = host.cork().counters();
         const exits = /** @type {Record<string, number>} */ ({ ...before.exits });
         const startedAt = performance.now();
@@ -196,11 +196,12 @@ for (const name of names)
                 { select: (/** @type {any} */ records)=>seedRecords(records, stores.fileNameOf) }));
         }
         const after = host.cork().counters();
-        // A long-mode run's regions and translated instructions are the long runner's.
-        const long = bits === 64 ? host.corkDiagnostics().long : null;
+        // A long-mode run's regions and translated instructions are the long runner's, when
+        // it runs one (the shared runtime counts its own).
+        const long = bits === 64 ? host.corkDiagnostics().long ?? null : null;
         summary = {
             instructions: retired / iters,
-            share: long === null ? (after.retired - before.retired) / retired
+            share: long === null || longBefore === null ? (after.retired - before.retired) / retired
                 : (long.translated - longBefore.translated) / retired,
             regions: long === null ? after.regions : long.regions,
             exits: Object.fromEntries(Object.entries(after.exits)

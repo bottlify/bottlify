@@ -3971,6 +3971,12 @@ function switchCases(e){
         e.open(`case${k}`, EMPTY);
     }
     b.localGet(registerLocal(e, table.index));
+    if (isLong(e))
+    {
+        // An index past the low half is past the table: the default.
+        b.op(I64.wrap).i32const(table.entries.length).localGet(registerLocal(e, table.index))
+            .i64const(32n).op(I64.shrU).op(I64.eqz).select();
+    }
     b.brTable(table.entries.map(target=>{
         const k = cases.indexOf(target);
         return k < 0 ? e.depthOf('switchOut') : e.depthOf(`case${k}`);

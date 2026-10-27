@@ -14,7 +14,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CORPUS, compare, nested, pool, program } from '../testing/long-machine.js';
+import {
+    CORPUS, HOISTED_SWITCHES, SWITCHES, compare, nested, pool, program,
+} from '../testing/long-machine.js';
 import { createSharedRunner64 } from '../testing/shared-runner64.js';
 
 /** @param {WebAssembly.Memory} memory @param {any} layout */
@@ -167,6 +169,20 @@ test('bit tests run in the shared emitter\'s regions as interpreted', ()=>{
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
     // Every bit string lies in the data around rsp: none leaves for the interpreter.
     assert.equal(stats.exits, 0, JSON.stringify(stats));
+});
+
+test('switches run in the shared emitter\'s regions as interpreted, their index a quadword', ()=>{
+    const cases = [SWITCHES, HOISTED_SWITCHES].flatMap(code=>CORPUS.cases.slice(0, 4)
+        .map((/** @type {any} */ one, /** @type {number} */ i)=>({ ...one, text: `switch ${i}`,
+            code })));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits, stats } = compare(cases, budget, true, undefined, undefined,
+            true, 0, false, shared);
+        assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+        assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+    }
 });
 
 test('seeded long programs run in the shared emitter\'s regions as interpreted', ()=>{
