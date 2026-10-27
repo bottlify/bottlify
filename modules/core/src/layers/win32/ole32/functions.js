@@ -148,6 +148,12 @@ const CLSID_CALL_CONTEXT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0002}';
 
 /** An apartment's context, and what it answers as. */
 const CLSID_OBJECT_CONTEXT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0007}';
+/**
+ * The thread that runs the multithreaded apartment's incoming calls: an
+ * object of ours whose one method is that thread's procedure.
+ */
+const CLSID_APARTMENT_WORKER = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0036}';
+const IID_APARTMENT_WORKER = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0037}';
 const IID_ICONTEXT = '{000001C0-0000-0000-C000-000000000046}';
 const IID_IOBJCONTEXT = '{000001C6-0000-0000-C000-000000000046}';
 const IID_ICOMTHREADINGINFO = '{000001CE-0000-0000-C000-000000000046}';
@@ -722,6 +728,48 @@ export function createOleFunctions(host){
     /** The classes of this layer's own objects, registered once each. @type {Set<string>} */
     const madeClasses = new Set();
     /**
+     * A thread of this process running `body`. A thread procedure is a
+     * stdcall routine of one argument, which is what a method of an object
+     * of ours is with its object as that argument: CreateThread is given the
+     * method and the object, and the thread is the method's caller.
+     *
+     * @param {(thread: unknown) => Promise<void>} body
+     * @returns {boolean}
+     */
+    const startWorkerThread = body=>{
+        if (!host.vtables || !host.system)
+        {
+            return false;
+        }
+        const worker = makeHostObject(CLSID_APARTMENT_WORKER, {
+            owned: true,
+            interfaces: [{ id: IID_APARTMENT_WORKER, methods: [
+                { name: 'ThreadProc', argBytes: 4,
+                    invoke: ()=>body(host.callerThread?.()).then(()=>0) },
+            ] }],
+        });
+        const pointer = worker ? host.vtables.publish(worker, IID_APARTMENT_WORKER) >>> 0 : 0;
+        if (pointer === 0)
+        {
+            return false;
+        }
+        const procedure = readU32(readU32(pointer) + 3 * 4);
+        const made = host.system('KERNEL32.dll', 'CreateThread', [0, 0, procedure, pointer, 0, 0]);
+        if (made === null)
+        {
+            return false;
+        }
+        andThen(made, (/** @type {number} */ handle)=>{
+            if ((handle >>> 0) !== 0)
+            {
+                host.system?.('KERNEL32.dll', 'CloseHandle', [handle]);
+            }
+            return handle;
+        });
+        return true;
+    };
+
+    /**
      * One of this layer's own objects, its one count the caller's.
      *
      * @param {string} clsid @param {import('./objects.js').ComClassDefinition} definition
@@ -794,6 +842,7 @@ export function createOleFunctions(host){
             guardedCall: host.guardedCall,
             callerThread,
             vtables: host.vtables,
+            worker: startWorkerThread,
             bstr: {
                 allocate: bytes=>host.strings?.allocate?.(bytes) ?? 0,
                 free: pointer=>bstr.free(pointer),
