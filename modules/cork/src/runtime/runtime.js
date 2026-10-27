@@ -28,7 +28,7 @@
 
 import { emptyCode, formRegion, formShared, hashRegion } from '../region.js';
 import { CallStack, TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
-import { decode } from '../decode/decoder.js';
+import { MODE_64, decode } from '../decode/decoder.js';
 import { NanRecord, RANGE, SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { HELD, PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
@@ -562,7 +562,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
         helpers: settings.runtimeHelpers !== false, leafBlocks: settings.leafBlocks,
         leafBytes: settings.leafBytes, switchEntries: settings.switchEntries,
-        formDepth: settings.formDepth };
+        formDepth: settings.formDepth,
+        // Long mode's code formed as long mode's, the shared emitter's own cuts in it.
+        ...layout.bits === 64 ? { mode: MODE_64 } : {} };
     /** The same on this thread, with the host's copy of a span at once where it has one; a
      * worker is sent `formOptions`, which a function cannot cross in. */
     const formHere = readBytes === undefined ? formOptions
@@ -4946,7 +4948,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             const entryBlock = region.blocks.find(block=>block.start === eip);
             if (entryBlock === undefined || entryBlock.instructions.length === 0)
             {
+                // Barren, and not in flight: nothing will publish it, and the
+                // address may be asked for again once its page is written.
                 barrenAdd(eip, entryTop);
+                inFlight.delete(key);
                 continue;
             }
             formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,

@@ -21,6 +21,7 @@
 import { RUNTIME_HELPERS, helperAt, helperInstructions } from './helpers.js';
 import { decode } from './decode/decoder.js';
 import { switchTable64 } from './region-switch64.js';
+import { translatesLong } from './emit/long-ops.js';
 
 /**
  * @typedef {'fallthrough' | 'jump' | 'jcc' | 'loop' | 'ret' | 'indirect' | 'call' | 'trap'
@@ -574,7 +575,8 @@ export function formShared(){
  *     mode: the decoder's (`MODE_64` for long-mode code: no address past the 4 GiB
  *     window is translatable, and no runtime helper is formed); translates: whether the
  *     emitter has a case for an instruction -- one it has none for ends its block,
- *     which exits there (`cut`), and keeps a callee from being a leaf; baseOf: a long-mode
+ *     which exits there (`cut`), and keeps a callee from being a leaf (in long mode the
+ *     shared emitter's, `translatesLong`, unless named); baseOf: a long-mode
  *     register's value as the region is formed, for a switch table whose base was set
  *     outside the region (`region-switch64.js`) -- only where the region is formed where
  *     it runs, never on a worker forming it again from copies of its pages
@@ -591,6 +593,7 @@ export function formRegion(read, entry,
     if (wide)
     {
         helpers = false;
+        translates ??= translatesLong;
     }
     // Every page forming reads decides what it forms -- an import slot a call is predicted
     // through, a callee looked at for a leaf or a runtime helper -- so a worker forms the

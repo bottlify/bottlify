@@ -91,8 +91,11 @@ test('an instruction the emitter has no case for ends its block, and is no leaf\
     code.splice(0, 6, 0xe8, 0x0b, 0, 0, 0, 0xc3);
     code.splice(0x10, 3, 0x0f, 0xa2, 0xc3);
     const read = over(code, at);
-    const all = formRegion(read, at, { mode: MODE_64 });
+    const all = formRegion(read, at, { mode: MODE_64, translates: ()=>true });
     assert.ok(all.entries.includes(0x401010));
+    // Long mode's default is the shared emitter's own (`translatesLong`), which
+    // has no case for cpuid.
+    assert.ok(!formRegion(read, at, { mode: MODE_64 }).entries.includes(0x401010));
     const some = formRegion(read, at, { mode: MODE_64,
         translates: instruction=>instruction.op !== 'cpuid' });
     assert.ok(!some.entries.includes(0x401010));

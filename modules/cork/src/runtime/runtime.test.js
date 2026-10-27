@@ -3785,3 +3785,20 @@ test('a rep stos that stored into code and runs out of budget on a later page in
     assert.equal(m.reg(1), 0, 'the copy finished');
     assert.equal(m.runtime.entryOf(0x10100), -1, 'the loop it overwrote is dropped');
 });
+
+test('an address that formed nothing is asked for again once its code is written', async()=>{
+    // lddqu with a register operand: a start the decoder refuses, so nothing is
+    // formed there. The page is written with code that forms: noted hot again,
+    // the address is translated.
+    const m = machine();
+    m.write(CODE, [0xf2, 0x0f, 0xf0, 0xf4, 0xf4]);
+    m.runtime.noteHot(CODE, 0, 1);
+    await m.runtime.translatePending();
+    assert.equal(m.runtime.entryOf(CODE, 0), -1);
+    assert.equal(m.runtime.diagnostics().barren, 1);
+    m.write(CODE, COUNTDOWN);
+    m.runtime.codeWritten(CODE, COUNTDOWN.length);
+    m.runtime.noteHot(CODE, 0, 1);
+    await m.runtime.translatePending();
+    assert.ok(m.runtime.entryOf(CODE, 0) >= 0, 'translated once its code is written');
+});
