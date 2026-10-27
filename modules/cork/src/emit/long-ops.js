@@ -21,7 +21,19 @@ const LONG_OPS = new Set([
     'xchg', 'popcnt', 'cwde', 'cdq', 'leave', 'bsf', 'bsr', 'bswap', 'prefetch', 'prefetchw',
     'prefetchnta', 'prefetcht0', 'prefetcht1', 'prefetcht2', 'lfence', 'mfence', 'sfence', 'pause',
     'emms', 'ldmxcsr', 'stmxcsr', 'bt', 'bts', 'btr', 'btc',
+    'clc', 'stc', 'cmc', 'cld', 'std', 'lahf', 'sahf', 'pushf', 'popf', 'xadd', 'cmpxchg',
+    'cmpxchg8b', 'movnti',
 ]);
+
+/** The string instructions, `rep` and DF either way. */
+const STRING_OPS = new Set(['movs', 'stos', 'lods', 'cmps', 'scas']);
+
+/**
+ * What a `lock` prefix may stand on. A process in long mode runs on one
+ * executor, so a locked instruction is its plain form.
+ */
+const LOCKABLE = new Set(['add', 'adc', 'and', 'btc', 'btr', 'bts', 'cmpxchg', 'cmpxchg8b',
+    'dec', 'inc', 'neg', 'not', 'or', 'sbb', 'sub', 'xor', 'xadd', 'xchg']);
 
 /**
  * The SIMD operations the long-mode emitter leaves to the interpreter: those
@@ -44,7 +56,8 @@ const LONG_SIMD_QUAD = new Set(['movd', 'cvtsi2ss', 'cvtsi2sd', 'cvttss2si', 'cv
  */
 export function translatesLong(instruction){
     const { op, operands, prefixes, cc } = instruction;
-    if (prefixes.lock || (op === 'jmp' || op === 'call') && operands[0].kind !== 'rel'
+    if (prefixes.lock && (!LOCKABLE.has(op) || instruction.memory !== true)
+        || (op === 'jmp' || op === 'call') && operands[0].kind !== 'rel'
         && operands[0].size !== 8)
     {
         return false;
@@ -59,6 +72,17 @@ export function translatesLong(instruction){
         {
             return false;
         }
+    }
+    else if (STRING_OPS.has(op))
+    {
+        // rsi, rdi and rcx as quadwords, and a source of a segment with no base.
+        return operands.every(operand=>operand.kind !== 'mem'
+            || operand.addressSize === 64 && operand.segment !== 4 && operand.segment !== 5);
+    }
+    else if (op === 'out')
+    {
+        // `out dx, eax`, the host's call channel where dx names the trap port.
+        return operands[0].kind === 'reg' && operands[1].size === 4;
     }
     else if (!LONG_OPS.has(op) && !(cc !== undefined && (op.startsWith('j') && op !== 'jecxz'
         || op.startsWith('cmov') || op.startsWith('set'))))

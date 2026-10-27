@@ -222,6 +222,31 @@ test('long mode on the shared runtime steps a self-patching routine an instructi
         assert.ok(script < 3000, `${script} instructions interpreted by the script`);
     });
 
+test('long mode\'s writes to the trap port run translated on the shared runtime', async()=>{
+    const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
+        entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
+        cork: { long: 'shared' } });
+    // For ebx in 0..1999: mov edx, port; mov eax, ebx; out dx, eax; add r12, rax; hlt.
+    load(h, 0x11000, hex('31dbba3412000089d8ef4901c4ffc381fbd007000075ebf4'));
+    let calls = 0;
+    // The handler answers in rax, as a host call's does.
+    h.onTrap((/** @type {number} */ value)=>{
+        calls++;
+        h.writeReg64('rax', BigInt(value) * 3n);
+    });
+    // A slice of a few hundred instructions, the region formed before the next.
+    h.runSlice(300);
+    while (!h.halted())
+    {
+        await h.cork().translatePending();
+        h.runSlice(300);
+    }
+    assert.equal(calls, 2000);
+    assert.equal(h.readReg64('r12'), 3n * 1999000n);
+    const { interpreted } = h.corkDiagnostics();
+    assert.ok(interpreted < 1000, `${interpreted} instructions interpreted`);
+});
+
 /** @param {string} text */
 function hex(text){
     return (text.match(/../g) ?? []).map(byte=>parseInt(byte, 16));

@@ -2071,14 +2071,23 @@ export function stackAccess(e, size){
  * no page maps there.
  *
  * @param {E} e @param {() => void} pushAddress @param {number} size
+ * @param {boolean} [counted]  false: the instruction is not counted at the fault, as a
+ *     `rep` iteration's is not (`checkAccess`)
  */
-export function windowAddress(e, pushAddress, size){
+export function windowAddress(e, pushAddress, size, counted = true){
     const { b } = e;
     pushAddress();
     b.localTee(Local.t64).localGet(Local.t64).i64const(BigInt(size - 1)).op(I64.add).op(I64.or)
         .i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
     e.openGuard('window', EMPTY);
-    e.exitBefore(e.current.eip, Exit.FAULT, 13);
+    if (counted)
+    {
+        e.exitBefore(e.current.eip, Exit.FAULT, 13);
+    }
+    else
+    {
+        e.exitAt(e.current.eip, Exit.FAULT, 13);
+    }
     e.close();
     b.localGet(Local.t64).op(I64.wrap).localSet(Local.addr);
 }

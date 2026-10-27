@@ -1693,6 +1693,8 @@ export function createCorkHost(config){
             ...wasmTier === null ? {} : { interpretedRelaxedReads: wasmTier.relaxedReads() },
             // What the JavaScript interpreter retired, a hundred times slower than the tier.
             interpretedByScript: interpreter?.retired ?? 0,
+            // And by either interpreter, the tier in wasm's runs from translated code included.
+            interpreted: interpretedSoFar(),
             ...untiered.length === 0 ? {} : { untiered: [...untiered] },
             ...longRunner === null ? {} : { long: longRunner.diagnostics() },
         }),
