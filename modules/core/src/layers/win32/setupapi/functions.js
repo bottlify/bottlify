@@ -144,9 +144,10 @@ const INFINFO_INF_NAME_IS_ABSOLUTE = 2;
 const INFINFO_REVERSE_DEFAULT_SEARCH = 4;
 const INFINFO_INF_PATH_LIST_SEARCH = 5;
 
-/** FILE_IN_CABINET_INFO_A: the target name buffer, and the whole. */
+/** FILE_IN_CABINET_INFO_A and _W: the target name buffer, and the whole. */
 const CABINET_TARGET_OFFSET = 18;
 const FILE_IN_CABINET_INFO_SIZE = 280;
+const FILE_IN_CABINET_INFO_W_SIZE = 540;
 
 /** Where each notification's structures are laid out: FILEPATHS_A, SOURCE_MEDIA_A. */
 const FILEPATHS_SIZE = 16;
@@ -505,14 +506,14 @@ export function createSetupapiFunctions(host){
                 blocks.push(at);
                 return at;
             },
-            /** @param {string | null} value */
-            string(value){
+            /** @param {string | null} value @param {boolean} [wide] */
+            string(value, wide = false){
                 if (value === null)
                 {
                     return 0;
                 }
-                const bytes = ansi(value);
-                const at = this.block(Math.max(bytes.length, MAX_PATH));
+                const bytes = encodeIn(value, wide);
+                const at = this.block(Math.max(bytes.length, MAX_PATH * (wide ? 2 : 1)));
                 host.writeMemory(at, bytes);
                 return at;
             },
@@ -526,10 +527,14 @@ export function createSetupapiFunctions(host){
      * SetupIterateCabinet's walk over one cabinet: CABINETINFO, then for
      * each file FILEINCABINET, and FILEEXTRACTED for each one extracted.
      *
+     * The notifications' structures are the W ones for the W call: strings
+     * in UTF-16, and the target name a buffer of WCHARs.
+     *
      * @param {Uint8Array} bytes @param {string} full @param {number} pathArgument
      * @param {number} callback @param {number} context @param {any} thread
+     * @param {boolean} wide
      */
-    const iterateCabinet = async(bytes, full, pathArgument, callback, context, thread)=>{
+    const iterateCabinet = async(bytes, full, pathArgument, callback, context, thread, wide)=>{
         let cabinet;
         try
         {
@@ -550,9 +555,9 @@ export function createSetupapiFunctions(host){
         {
             const info = memory.block(16);
             const infoView = new DataView(new ArrayBuffer(16));
-            infoView.setUint32(0, memory.string(directoryOf(full)), true);
-            infoView.setUint32(4, memory.string(cabinet.next ?? ''), true);
-            infoView.setUint32(8, memory.string(''), true);
+            infoView.setUint32(0, memory.string(directoryOf(full), wide), true);
+            infoView.setUint32(4, memory.string(cabinet.next ?? '', wide), true);
+            infoView.setUint32(8, memory.string('', wide), true);
             infoView.setUint16(12, cabinet.setId, true);
             infoView.setUint16(14, cabinet.index, true);
             host.writeMemory(info, new Uint8Array(infoView.buffer));
@@ -564,11 +569,12 @@ export function createSetupapiFunctions(host){
 
             /** @type {Map<number, Uint8Array>} */
             const streams = new Map();
-            const record = memory.block(FILE_IN_CABINET_INFO_SIZE);
+            const recordSize = wide ? FILE_IN_CABINET_INFO_W_SIZE : FILE_IN_CABINET_INFO_SIZE;
+            const record = memory.block(recordSize);
             const paths = memory.block(FILEPATHS_SIZE);
             for (const file of cabinet.files)
             {
-                const name = memory.string(file.name);
+                const name = memory.string(file.name, wide);
                 const fields = new DataView(new ArrayBuffer(CABINET_TARGET_OFFSET));
                 fields.setUint32(0, name, true);
                 fields.setUint32(4, file.size, true);
@@ -577,7 +583,8 @@ export function createSetupapiFunctions(host){
                 fields.setUint16(14, file.time, true);
                 fields.setUint16(16, file.attributes, true);
                 host.writeMemory(record, new Uint8Array(fields.buffer));
-                host.writeMemory(record + CABINET_TARGET_OFFSET, new Uint8Array(MAX_PATH));
+                host.writeMemory(record + CABINET_TARGET_OFFSET,
+                    new Uint8Array(recordSize - CABINET_TARGET_OFFSET));
                 const operation = await notify(SPFILENOTIFY.FILEINCABINET, record, pathArgument);
                 if (operation === FILEOP.ABORT)
                 {
@@ -587,7 +594,7 @@ export function createSetupapiFunctions(host){
                 {
                     continue;
                 }
-                const target = host.readCString(record + CABINET_TARGET_OFFSET, MAX_PATH);
+                const target = textOf(record + CABINET_TARGET_OFFSET, wide) ?? '';
                 let error = ERROR_SUCCESS;
                 const folder = folderOf(cabinet, file);
                 if (!folder)
@@ -604,7 +611,7 @@ export function createSetupapiFunctions(host){
                             stream = decodeFolder(cabinet, file.folder);
                             streams.set(file.folder, stream);
                         }
-                        error = writeWhole(host.fullPath(target),
+                        error = writeWhole(pathOf(target),
                             stream.subarray(file.offset, file.offset + file.size));
                     }
                     catch {
@@ -612,7 +619,7 @@ export function createSetupapiFunctions(host){
                     }
                 }
                 const pathsView = new DataView(new ArrayBuffer(FILEPATHS_SIZE));
-                pathsView.setUint32(0, memory.string(target), true);
+                pathsView.setUint32(0, memory.string(target, wide), true);
                 pathsView.setUint32(4, pathArgument >>> 0, true);
                 pathsView.setUint32(8, error, true);
                 host.writeMemory(paths, new Uint8Array(pathsView.buffer));
@@ -2239,7 +2246,8 @@ export function createSetupapiFunctions(host){
 
         /**
          * BOOL SetupIterateCabinetA(PCSTR CabinetFile, DWORD Reserved,
-         *                           PSP_FILE_CALLBACK_A MsgHandler, PVOID Context)
+         *                           PSP_FILE_CALLBACK_A MsgHandler, PVOID Context),
+         *     and the W form, whose callback is handed the W structures
          *
          * Wine's setupapi cabinet tests: NULL is ERROR_INVALID_PARAMETER, an
          * empty name ERROR_NOT_ENOUGH_MEMORY, a missing file
@@ -2248,11 +2256,11 @@ export function createSetupapiFunctions(host){
          * callback that aborts, or answers an extraction with an error,
          * ends the walk with that error.
          */
-        SetupIterateCabinetA: {
+        ...bothWidths('SetupIterateCabinet', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([cabinetPointer, , callback, context])=>{
-                const name = text(cabinetPointer);
+            handler: (/** @type {number[]} */ [cabinetPointer, , callback, context])=>{
+                const name = textOf(cabinetPointer, wide);
                 if (name === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -2261,22 +2269,22 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_NOT_ENOUGH_MEMORY);
                 }
-                const full = host.fullPath(name);
+                const full = pathOf(name);
                 const bytes = readWhole(full);
-                if (bytes === null)
+                if (full === null || bytes === null)
                 {
                     return fail(ERROR_FILE_NOT_FOUND);
                 }
                 const thread = host.callerThread();
                 return Promise.resolve(bytes)
-                    .then(data=>
-                        iterateCabinet(data, full, cabinetPointer, callback, context, thread))
+                    .then(data=>iterateCabinet(data, full, cabinetPointer, callback, context,
+                        thread, wide))
                     .then(code=>{
                         host.setLastErrorFor(thread, code);
                         return code === ERROR_SUCCESS ? 1 : 0;
                     });
             },
-        },
+        })),
 
         /** HSPFILEQ SetupOpenFileQueue(VOID) */
         SetupOpenFileQueue: {

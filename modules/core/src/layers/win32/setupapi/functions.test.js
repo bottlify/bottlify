@@ -1328,3 +1328,32 @@ test('a class installs from an INF and describes itself, and an install section 
             64, needed, extension]), 1);
         assert.equal(m.u32(extension), 0, 'none, no extension');
     });
+
+test('SetupIterateCabinetW hands its callback the W structures: wide names, a WCHAR target',
+    async()=>{
+        // Wine's setupapi setupcab test of the W form.
+        const m = await machine();
+        m.file('C:\\src\\test.cab', storedCabinet([['tristram', 'tristram\n']]));
+        const path = m.wstr('C:\\src\\test.cab');
+        /** @type {string[]} */
+        const seen = [];
+        const handler = m.callback(([, message, param1])=>{
+            if (message === SPFILENOTIFY.CABINETINFO)
+            {
+                seen.push(`info ${m.readWideString(m.u32(param1), 520)}`);
+                return 0;
+            }
+            if (message === SPFILENOTIFY.FILEINCABINET)
+            {
+                seen.push(`file ${m.readWideString(m.u32(param1), 520)}`);
+                [...'C:\\dst\\wide.out', '\0'].forEach((c, i)=>
+                    m.view.setUint16(param1 + 18 + i * 2, c.charCodeAt(0), true));
+                return FILEOP.DOIT;
+            }
+            seen.push(`done ${m.readWideString(m.u32(param1), 520)}`);
+            return 0;
+        });
+        assert.equal(await m.fns.SetupIterateCabinetW.handler([path, 0, handler, 0]), 1);
+        assert.deepEqual(seen, ['info C:\\src\\', 'file tristram', 'done C:\\dst\\wide.out']);
+        assert.equal(m.contents('C:\\dst\\wide.out'), 'tristram\n');
+    });
