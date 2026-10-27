@@ -1030,6 +1030,41 @@ test('a complex mip-mapped texture is a chain of halving levels, as long as aske
     assert.equal(ddraw.release('IDirectDraw7'), 0);
 });
 
+test('a cube map is its six faces, the others attached to the first, each with its levels', ()=>{
+    // Wine's ddraw7 test_surface_desc_size and lock tests: the faces of a
+    // DDSCAPS2_CUBEMAP_ALLFACES texture are found from the one handed back by
+    // DDSCAPS2_CUBEMAP and their own face bit, and are let go with it.
+    const CUBEMAP = 0x200;
+    const POSITIVEX = 0x400;
+    const ALLFACES = 0xfc00;
+    const ddraw = withLevel();
+    const made = ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT,
+        caps: MIPPED, caps2: CUBEMAP | ALLFACES,
+        width: 16, height: 16, mipMapCount: 2, pixelFormat: RGB32,
+    }, { version: 7 });
+    assert.equal(made.hr, DD_OK);
+    const root = /** @type {any} */ (made.surface);
+    assert.equal(root.caps2 & (CUBEMAP | ALLFACES), CUBEMAP | POSITIVEX, 'the first face alone');
+    const faces = [root];
+    for (let face = 1; face < 6; face++)
+    {
+        const found = root.getAttachedSurface(0, CUBEMAP | (POSITIVEX << face));
+        assert.equal(found.hr, DD_OK, `face ${face}`);
+        assert.equal(found.surface.caps2 & ALLFACES, POSITIVEX << face);
+        assert.equal(found.surface.width, 16);
+        found.surface.release();
+        faces.push(found.surface);
+    }
+    assert.ok(faces.every(face=>levelsOf(face).length === 2), 'two levels on every face');
+    assert.equal(new Set(faces.map(face=>face.buffer)).size, 6, 'six faces, six buffers');
+    assert.equal(root.enumAttachedSurfaces().length, 6, 'its level, then the five faces');
+    assert.equal(ddraw.surfaceCount, 12);
+    assert.equal(root.release(), 0);
+    assert.equal(ddraw.surfaceCount, 0, 'the faces and their levels go with the first');
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
 test('before IDirectDraw7 a full mip chain ends when the shorter side reaches one', ()=>{
     // Wine's ddraw1, ddraw2 and ddraw4 test_mipmap expect six levels of
     // 128x32 and of 32x64, where ddraw7 expects eight and seven.

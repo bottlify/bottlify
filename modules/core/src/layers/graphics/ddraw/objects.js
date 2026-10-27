@@ -84,6 +84,9 @@ import {
     DDPF_ZBUFFER,
     DDSCAPS2_D3DTEXTUREMANAGE,
     DDSCAPS2_MIPMAPSUBLEVEL,
+    DDSCAPS2_CUBEMAP,
+    DDSCAPS2_CUBEMAP_ALLFACES,
+    DDSCAPS2_CUBEMAP_POSITIVEX,
     DDSCAPS2_TEXTUREMANAGE,
     DDSCAPS_FLIP,
     DDSCAPS_PRIMARYSURFACE,
@@ -265,6 +268,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {number} mipMapCount     Levels from this one down; zero off a mip chain.
  * @property {Surface | null} mipNext The next smaller level.
  * @property {(next: Surface | null) => void} setMipNext
+ * @property {(faces: Surface[]) => void} setFaces  A cube map's other faces, on its first.
  * @property {number} buffer          The pixels this surface currently shows.
  * @property {boolean} implicit       Created as part of a complex surface.
  * @property {Palette | null} palette
@@ -948,6 +952,8 @@ export function createDirectDraw(options = {}){
         let depth = null;
         /** @type {Surface | null} */
         let mipNext = null;
+        /** @type {Surface[]} */
+        let faces = [];
         // A level below the top is the texture's storage and nothing more:
         // its palette and colour keys are the top level's.
         const sublevel = (spec.caps2 & DDSCAPS2_MIPMAPSUBLEVEL) !== 0;
@@ -1012,6 +1018,11 @@ export function createDirectDraw(options = {}){
                 mipNext.release();
                 mipNext = null;
             }
+            for (const face of faces)
+            {
+                face.release();
+            }
+            faces = [];
             if (spec.owner)
             {
                 release(spec.owner);
@@ -1069,6 +1080,10 @@ export function createDirectDraw(options = {}){
             /** @param {Surface | null} next */
             setMipNext(next){
                 mipNext = next;
+            },
+            /** @param {Surface[]} list */
+            setFaces(list){
+                faces = list;
             },
             get buffer(){
                 return buffer;
@@ -1546,7 +1561,7 @@ export function createDirectDraw(options = {}){
                     return { hr: DDERR_SURFACELOST, surface: null };
                 }
                 const next = flipNext ?? (flipPrev ? chainHead() : null);
-                const found = [mipNext, next, depth].find(candidate=>candidate !== null
+                const found = [mipNext, next, depth, ...faces].find(candidate=>candidate !== null
                     && candidate !== surface
                     && (candidate.caps & wanted) === wanted >>> 0
                     && (candidate.caps2 & wanted2) === wanted2 >>> 0);
@@ -1574,6 +1589,7 @@ export function createDirectDraw(options = {}){
                 {
                     found.push(depth);
                 }
+                found.push(...faces);
                 return found;
             },
 
@@ -1877,9 +1893,39 @@ export function createDirectDraw(options = {}){
             ? { mode: { width: displayMode.width, height: displayMode.height,
                 bitCount: displayMode.bitCount } }
             : {};
+        // A cube map is its faces, the first of those asked for the one handed
+        // back and the others attached to it, each with a mip chain of its own
+        // and its own face's bit alone among DDSCAPS2_CUBEMAP_ALLFACES.
+        const faceBits = (caps2 & DDSCAPS2_CUBEMAP) === 0 ? [0]
+            : [0, 1, 2, 3, 4, 5].map(face=>DDSCAPS2_CUBEMAP_POSITIVEX << face)
+                .filter(bit=>(caps2 & bit) !== 0);
+        const capsOf = (/** @type {number} */ face)=>(faceBits[face] === 0 ? caps2
+            : (caps2 & ~DDSCAPS2_CUBEMAP_ALLFACES) | faceBits[face]);
+        /** @param {Surface} top @param {number} faceCaps2 */
+        const attachLevels = (top, faceCaps2)=>{
+            // Each level holds the one below it, so the chain goes with its top.
+            let above = top;
+            for (let index = 1; index < levels; index++)
+            {
+                const level = makeSurface({
+                    caps: validity.caps,
+                    caps2: faceCaps2 | DDSCAPS2_MIPMAPSUBLEVEL,
+                    width: Math.max(1, width >>> index),
+                    height: Math.max(1, height >>> index),
+                    backBufferCount: 0,
+                    pixelFormat,
+                    owner: null,
+                    implicit: true,
+                    mipMapCount: levels - index,
+                    version,
+                });
+                above.setMipNext(level);
+                above = level;
+            }
+        };
         const front = makeSurface({
             caps: validity.caps,
-            caps2,
+            caps2: capsOf(0),
             width,
             height,
             backBufferCount: validity.flipChain ? backBufferCount : 0,
@@ -1890,25 +1936,23 @@ export function createDirectDraw(options = {}){
             ...primaryMode,
         });
 
-        // Each level holds the one below it, so the chain goes with its top.
-        let above = front;
-        for (let index = 1; index < levels; index++)
-        {
-            const level = makeSurface({
+        attachLevels(front, capsOf(0));
+        front.setFaces(faceBits.slice(1).map((_, index)=>{
+            const face = makeSurface({
                 caps: validity.caps,
-                caps2: caps2 | DDSCAPS2_MIPMAPSUBLEVEL,
-                width: Math.max(1, width >>> index),
-                height: Math.max(1, height >>> index),
+                caps2: capsOf(index + 1),
+                width,
+                height,
                 backBufferCount: 0,
                 pixelFormat,
                 owner: null,
                 implicit: true,
-                mipMapCount: levels - index,
+                mipMapCount: levels,
                 version,
             });
-            above.setMipNext(level);
-            above = level;
-        }
+            attachLevels(face, capsOf(index + 1));
+            return face;
+        }));
 
         if (validity.flipChain)
         {
