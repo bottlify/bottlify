@@ -314,6 +314,8 @@ const HCBT_MINMAX = 1;
 const HCBT_CREATEWND = 3;
 const HCBT_DESTROYWND = 4;
 const HCBT_ACTIVATE = 5;
+/** Hook calls one thread may be inside at once; a deeper one is passed over, as Wine passes it. */
+const HOOK_DEPTH = 25;
 const HCBT_SYSCOMMAND = 8;
 const HCBT_SETFOCUS = 9;
 
@@ -3234,6 +3236,10 @@ export function createWindowFunctions(host){
         return next(0);
     };
 
+    /** How deep each thread is in hook calls, by thread identifier. */
+    /** @type {Map<number, number>} */
+    const hookDepth = new Map();
+
     /**
      * Whether a hook hears what a thread does. A caller the bridge names
      * without an identifier is a build with no scheduler, and its one
@@ -3268,7 +3274,41 @@ export function createWindowFunctions(host){
         // A hook not in this thread's chain has nothing after it here.
         const next = after === null ? chain[0] : chain.findIndex(hook=>hook.handle === after) < 0
             ? undefined : chain[chain.findIndex(hook=>hook.handle === after) + 1];
-        return next && host.call ? host.call(next.proc, args, thread) : 0;
+        if (!next || !host.call)
+        {
+            return 0;
+        }
+        // A hook whose own work sets off what it hooks -- a CBT hook clicking
+        // a button, whose focus activates the window the hook is hearing
+        // about -- would call itself without end; past a depth the thread's
+        // hooks are passed over and what they hook goes on (Wine's
+        // dialog.c msgbox_hook_proc).
+        const id = threadIdOf(thread ?? host.callerThread?.()) ?? 0;
+        const depth = hookDepth.get(id) ?? 0;
+        if (depth >= HOOK_DEPTH)
+        {
+            return 0;
+        }
+        hookDepth.set(id, depth + 1);
+        /** @param {any} answer */
+        const out = answer=>{
+            hookDepth.set(id, (hookDepth.get(id) ?? 1) - 1);
+            return answer;
+        };
+        /** @type {any} */
+        let answer;
+        try
+        {
+            answer = host.call(next.proc, args, thread);
+        }
+        catch (e){
+            out(0);
+            throw e;
+        }
+        return typeof answer?.then === 'function' ? answer.then(out, (/** @type {unknown} */ e)=>{
+            out(0);
+            throw e;
+        }) : out(answer);
     };
 
     /**

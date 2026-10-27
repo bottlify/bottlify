@@ -4471,6 +4471,40 @@ test('a mouse hook is shown every mouse message taken, with where it is, and can
         assert.equal(shown.length, before, 'a key is not the mouse hook\'s');
     });
 
+test('a hook that sets off what it hooks is passed over past a depth, and that goes on', ()=>{
+    // Wine's dialog.c msgbox_hook_proc clicks a button from HCBT_ACTIVATE, and
+    // the button's focus activates the window again: without a floor the
+    // thread recurses until its stack is gone.
+    /** @type {any} */
+    let fns = null;
+    /** @type {any} */
+    let memory = null;
+    let entered = 0;
+    /** @type {number[]} */
+    const made = [];
+    const built = setup({ heap: true, hookReply: (/** @type {number} */ _entry, /** @type {number[]} */ args)=>{
+        if (args[0] === HCBT_CREATEWND && entered < 100)
+        {
+            entered++;
+            made.push(createWindow(fns, memory));
+        }
+        return 0;
+    } });
+    ({ fns, memory } = built);
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 1]);
+
+    assert.notEqual(createWindow(fns, memory), 0, 'the window is made');
+    assert.equal(entered, 25, 'the hook ran 25 deep and no deeper');
+    assert.ok(made.every(hwnd=>hwnd !== 0), 'every window it set off was made');
+
+    entered = 0;
+    made.length = 0;
+    createWindow(fns, memory);
+    assert.equal(entered, 25, 'and the depth is given back once the calls return');
+});
+
 test('a CBT hook answering non-zero refuses the window before WM_CREATE', ()=>{
     const { memory, fns, dispatched } = setup({ heap: true, hookReply: ()=>1 });
     putClass(memory);
