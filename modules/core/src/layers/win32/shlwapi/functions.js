@@ -20,6 +20,7 @@ import { createForwards } from './forwards.js';
 import { MAX_PATH, canonical, compactPath, createPathFunctions, extensionIndex, isSeparator,
     rootOf, statPath }
     from './path.js';
+import { createDataBlockFunctions } from './datablocks.js';
 import { createOrdinalFunctions } from './ordinals.js';
 import { createRegistryHelpers } from './registry.js';
 import { createStreams } from './stream.js';
@@ -636,6 +637,7 @@ export function createShlwapiFunctions(host){
         ...createRegistryHelpers(host),
         ...createOrdinalFunctions(host),
         ...createStreams(host),
+        ...createDataBlockFunctions(host),
 
         /**
          * HRESULT SHAutoComplete(HWND hwndEdit, DWORD dwFlags)

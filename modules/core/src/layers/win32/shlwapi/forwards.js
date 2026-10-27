@@ -5,6 +5,7 @@
  */
 
 import { SHLWAPI_NAMED_ORDINALS } from './ordinals.js';
+import { DATABLOCK_ORDINALS } from './datablocks.js';
 
 /**
  * The exports of shlwapi that are nothing but another library's function under
@@ -205,6 +206,7 @@ export const SHLWAPI_FORWARDS = Object.freeze([
 export const SHLWAPI_ORDINALS = Object.freeze(Object.fromEntries([
     ...SHLWAPI_FORWARDS.map(([ordinal, name])=>[ordinal, name]),
     ...SHLWAPI_NAMED_ORDINALS,
+    ...DATABLOCK_ORDINALS,
 ]));
 
 /**
