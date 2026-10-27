@@ -532,12 +532,34 @@ test('a shell file operation is refused as not implemented and marked aborted', 
         .map(fn=>fn.argBytes), [4, 16, 20]);
 });
 
-test('a notification icon is refused, with both arguments popped', ()=>{
-    const fns = createShellFunctions({ writeMemory: ()=>{} });
-    assert.equal(fns.Shell_NotifyIconA.argBytes, 8);
-    assert.equal(fns.Shell_NotifyIconA.handler(), 0);
-    assert.equal(fns.Shell_NotifyIconW.argBytes, 8);
-    assert.equal(fns.Shell_NotifyIconW.handler(), 0);
+test('a notification icon is kept by its window and id until it is deleted', ()=>{
+    const memory = new Uint8Array(0x100);
+    const view = new DataView(memory.buffer);
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createShellFunctions({ writeMemory: (at, bytes)=>memory.set(bytes, at),
+        readMemory: (at, length)=>memory.slice(at, at + length),
+        setLastError: code=>errors.push(code) });
+    const [NIM_ADD, NIM_MODIFY, NIM_DELETE] = [0, 1, 2];
+    /** @param {number} size @param {number} id */
+    const icon = (size, id)=>{
+        view.setUint32(0x40, size, true);
+        view.setUint32(0x44, 0x10, true);
+        view.setUint32(0x48, id, true);
+        return 0x40;
+    };
+    assert.equal(fns.Shell_NotifyIconW.handler([NIM_MODIFY, icon(152, 1)]), 0, 'not there yet');
+    assert.equal(fns.Shell_NotifyIconW.handler([NIM_ADD, icon(152, 1)]), 1);
+    assert.deepEqual(errors, [0]);
+    assert.equal(fns.Shell_NotifyIconA.handler([NIM_ADD, icon(88, 1)]), 0, 'once');
+    assert.equal(fns.Shell_NotifyIconA.handler([NIM_ADD, icon(88, 2)]), 1, 'another id');
+    assert.equal(fns.Shell_NotifyIconA.handler([NIM_MODIFY, icon(88, 2)]), 1);
+    assert.equal(fns.Shell_NotifyIconW.handler([NIM_DELETE, icon(3, 1)]), 1,
+        'a wrong size still names the icon');
+    assert.equal(fns.Shell_NotifyIconW.handler([NIM_DELETE, icon(152, 1)]), 0);
+    assert.equal(errors.at(-1), 0x80004005, 'E_FAIL');
+    assert.equal(fns.Shell_NotifyIconA.handler([NIM_ADD, 0]), 0);
+    assert.deepEqual([fns.Shell_NotifyIconA.argBytes, fns.Shell_NotifyIconW.argBytes], [8, 8]);
 });
 
 /**

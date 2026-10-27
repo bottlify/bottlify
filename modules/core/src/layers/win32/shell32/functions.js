@@ -154,6 +154,11 @@ const SHELLEXECUTEINFO_PROCESS = 56;
 const SEE_MASK_IDLIST = 0x00000004;
 const SEE_MASK_NOCLOSEPROCESS = 0x00000040;
 const SEE_MASK_CLASSNAME = 0x00000001;
+const NIM_ADD = 0;
+const NIM_MODIFY = 1;
+const NIM_DELETE = 2;
+const NIM_SETFOCUS = 3;
+const NIM_SETVERSION = 4;
 const SEE_MASK_DOENVSUBST = 0x00000200;
 
 /**
@@ -622,6 +627,46 @@ export function createShellFunctions(host){
         }
         const bytes = host.readMemory((record + offset) >>> 0, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+
+    /** @type {Set<string>} The notification area's icons, by window and id. */
+    const trayIcons = new Set();
+    const notifyIcon = {
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [message, data])=>{
+            if ((data >>> 0) === 0)
+            {
+                return 0;
+            }
+            const icon = `${dwordAt(data >>> 0, 4)}:${dwordAt(data >>> 0, 8)}`;
+            const known = trayIcons.has(icon);
+            switch (message >>> 0)
+            {
+                case NIM_ADD:
+                    if (known)
+                    {
+                        return 0;
+                    }
+                    trayIcons.add(icon);
+                    host.setLastError?.(0);
+                    return 1;
+                case NIM_DELETE:
+                    if (!known)
+                    {
+                        host.setLastError?.(E_FAIL >>> 0);
+                        return 0;
+                    }
+                    trayIcons.delete(icon);
+                    return 1;
+                case NIM_MODIFY:
+                case NIM_SETFOCUS:
+                case NIM_SETVERSION:
+                    return known ? 1 : 0;
+                default:
+                    return 0;
+            }
+        },
     };
 
     /**
@@ -1784,20 +1829,15 @@ export function createShellFunctions(host){
          * BOOL Shell_NotifyIconA(DWORD dwMessage, NOTIFYICONDATAA *lpData)
          * BOOL Shell_NotifyIconW(DWORD dwMessage, NOTIFYICONDATAW *lpData)
          *
-         * A notification icon lives on the taskbar, and there is no taskbar.
-         * FALSE is what the real call answers when the shell's tray window is
-         * not there to receive the icon, and a program treats that the way it
-         * treats a machine without an Explorer: it carries on without the icon.
+         * The notification area's icons, each named by its window and id,
+         * which both spellings of the record keep after its size -- a size
+         * that is wrong still names the icon (Wine's test_cbsize). An icon is
+         * added once and modified or deleted while it is there; deleting one
+         * that is not fails with E_FAIL as the last error. Nothing draws them:
+         * there is no taskbar to show them on.
          */
-        Shell_NotifyIconA: {
-            argBytes: 8,
-            handler: ()=>0,
-        },
-
-        Shell_NotifyIconW: {
-            argBytes: 8,
-            handler: ()=>0,
-        },
+        Shell_NotifyIconA: notifyIcon,
+        Shell_NotifyIconW: notifyIcon,
 
         /**
          * DWORD_PTR SHGetFileInfoA(LPCSTR pszPath, DWORD dwFileAttributes,
