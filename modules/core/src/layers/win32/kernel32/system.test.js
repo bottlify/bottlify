@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { MULDIV_CODE, createSystemFunctions, mulDiv } from './system.js';
 import { createActivationContexts } from './actctx.js';
 import { createProcessors } from './processor.js';
+import { childThread } from './cross-process.js';
 import { KEPT, random, runCode } from '../../../../scripts/guest-code/equivalence.mjs';
 
 const ERROR_INVALID_HANDLE = 6;
@@ -65,8 +66,10 @@ function fakeHost(size = 0x1000){
         /** @param {number} handle @param {string} [type] */
         resolveHandle(handle, type){
             const held = handles.get(handle);
-            // A child's thread is the one kind told apart by its type here.
-            if (!held || (type === 'process-thread') !== (held.handleType === 'process-thread'))
+            // A child's thread is the one kind told apart by its type here; with
+            // no type asked, any object is named, as the kernel's table does.
+            if (!held || (type !== undefined
+                && (type === 'process-thread') !== (held.handleType === 'process-thread')))
             {
                 throw new Error(`bad handle ${handle}`);
             }
@@ -598,8 +601,8 @@ test('a child\'s thread reports the exit code the child gives, until its end is 
         const fns = createSystemFunctions(host);
         const child = { exitCode: STILL_ACTIVE };
         /** @type {any} */
-        const remote = { handleType: 'process-thread', process: child, threadId: 0x30,
-            handle: 0x84, exitCode: null, exited: null };
+        const remote = Object.assign(childThread(child, 0x30, 0x84),
+            { handleType: 'process-thread' });
         host.handles.set(0x44, remote);
 
         assert.equal(await fns.GetExitCodeThread.handler([0x44, 0x200]), 1);

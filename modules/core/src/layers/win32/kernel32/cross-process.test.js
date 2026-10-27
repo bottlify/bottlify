@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { serveCall, takeAnswer, askChild, after, childThread, threadArg, threadEnd }
+import { serveCall, takeAnswer, askChild, after, childThread, isChildThread, threadArg,
+    threadEnd }
     from './cross-process.js';
 
 /**
@@ -210,4 +211,12 @@ test('a wait on a child\'s thread ends once the child says it has, with its code
         refused);
     await new Promise(resolve=>setImmediate(resolve));
     assert.equal(refused.exitCode, 0);
+});
+
+test('a child\'s thread is told from what any other handle names without a throw', ()=>{
+    assert.equal(isChildThread(childThread({}, 0x2c)), true);
+    assert.equal(isChildThread({ process: {}, threadId: 0x2c, handle: 0, exitCode: null,
+        exited: null }), false, 'the shape alone is not a child\'s thread');
+    assert.equal(isChildThread(null), false);
+    assert.equal(isChildThread(undefined), false);
 });

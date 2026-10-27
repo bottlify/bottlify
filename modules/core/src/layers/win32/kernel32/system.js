@@ -25,7 +25,7 @@
 import { lstrcpyCode, lstrlenCode } from './lstr.js';
 import { assemble } from '../msvcrt/guest-code.js';
 import { createWin9xFunctions } from './win9x.js';
-import { askChild, threadArg } from './cross-process.js';
+import { askChild, isChildThread, threadArg } from './cross-process.js';
 import { TEB } from './teb.js';
 import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
 import {
@@ -1391,9 +1391,8 @@ export function createSystemFunctions(host){
             handler: ([handle, code])=>{
                 // A child's thread is asked where the child runs, until its
                 // end is known here.
-                /** @type {import('./cross-process.js').ChildThread | null} */
-                const remote = (handle >>> 0) === CURRENT_THREAD ? null
-                    : object(handle, 'process-thread');
+                const named = (handle >>> 0) === CURRENT_THREAD ? null : object(handle);
+                const remote = isChildThread(named) ? named : null;
                 if (remote && remote.exitCode === null && host.setLastErrorFor)
                 {
                     const asked = askChild({ askChild: host.askChild,

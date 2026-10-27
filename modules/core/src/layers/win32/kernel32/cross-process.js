@@ -269,9 +269,24 @@ export function childThread(record, threadId, handle = 0){
         thread = { process: record, threadId: threadId >>> 0, handle: handle >>> 0,
             exitCode: null, exited: null };
         threads.set(thread.threadId, thread);
+        CHILD_THREADS.add(thread);
     }
     return thread;
 }
+
+/** @type {WeakSet<ChildThread>} */
+const CHILD_THREADS = new WeakSet();
+
+/**
+ * Whether what a handle names is a child's thread. A call made thousands of
+ * times on its own threads' handles (a program polling GetExitCodeThread)
+ * asks this instead of resolving the handle as 'process-thread', which throws
+ * for every other kind.
+ *
+ * @param {any} value @returns {value is ChildThread}
+ */
+export const isChildThread = value=>value !== null && typeof value === 'object'
+    && CHILD_THREADS.has(value);
 
 /**
  * How a call names a child's thread: by the child's own handle to it, or by
