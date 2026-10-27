@@ -377,6 +377,13 @@ export function prepareModule(m, layout, features, memory = {},
         checkReads = false, expansion = null, markBlocks = false, crossTailCalls = true,
         callDepth = CallStack.LIMIT } = {})
 {
+    // A 64-bit state block has no flag record or interrupt word where this
+    // emitter reads them: it would translate long-mode code as 32-bit code
+    // with the record's paths quietly off.
+    if (layout.bits === 64)
+    {
+        throw new Error('the 32-bit emitter serves no 64-bit layout');
+    }
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
         shared: memory.shared ?? false,

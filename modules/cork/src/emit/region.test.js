@@ -1009,3 +1009,9 @@ test('a call made as a wasm call has its rare ways out hinted unlikely', ()=>{
     };
     assert.ok(hinted(true) >= hinted(false) + 2, `${hinted(true)} hints, ${hinted(false)} without`);
 });
+
+test('the 32-bit emitter refuses a 64-bit state block rather than translate as if it fit', ()=>{
+    const host = { simd: true, tailCalls: true, defaultNaNNegative: false };
+    const layout = ownLayout({ ramSize: 1 << 24, bits: 64 });
+    assert.throws(()=>prepareModule(new ModuleBuilder(), layout, host, {}), /no 64-bit layout/);
+});
