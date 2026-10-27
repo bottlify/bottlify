@@ -200,6 +200,9 @@ export function createAdapter(state, interfaces, destroy){
             return methods ? { id: asked, methods } : null;
         },
         addRef: ()=>++references,
+        get refCount(){
+            return references;
+        },
         release(){
             references--;
             if (references === 0)
@@ -384,6 +387,9 @@ function writeElemDesc(block, at, type, flags){
  * @property {(id: string) => { id: string, methods: readonly any[] } | null} interfaceFor
  * @property {() => number} addRef
  * @property {() => number} release
+ * @property {number} refCount  The references held: the bridge's Release reads it.
+ * @property {(() => Promise<unknown>) | undefined} [lastRelease]
+ *     Made and waited for inside the last Release, as `ole32/objects.js` has it.
  * @property {boolean} destroyed  Whether the last reference has gone.
  */
 

@@ -22,9 +22,12 @@ import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { readGuid, GUID_NULL } from '../ole32/guid.js';
 
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
+const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
+const E_NOINTERFACE = 0x80004002 | 0;
+const E_POINTER = 0x80004003 | 0;
 const DISP_E_BADINDEX = 0x8002000b | 0;
 const DISP_E_UNKNOWNINTERFACE = 0x80020001 | 0;
 
@@ -128,6 +131,40 @@ export function createStdDispatchObjects(host){
             invoke: ({ state })=>callMethod(state.outer, 2, []) },
     ]);
 
+    // An aggregate's inner IUnknown counts the inner object, but the IDispatch
+    // it hands out is released through the outer one: the count that goes
+    // with that pointer has to be the outer's too, or every QueryInterface
+    // and Release pair takes one from the object that aggregates this.
+    const INNER_UNKNOWN = Object.freeze([
+        { name: 'QueryInterface', argBytes: 12,
+            /** @param {any} adapter @param {number[]} args */
+            invoke: (adapter, [riid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const asked = (riid >>> 0) === 0 ? null : readGuid(host, riid >>> 0);
+                if (asked === IID_IUNKNOWN)
+                {
+                    adapter.addRef();
+                    writeU32(out >>> 0, host.publish(adapter, IID_IUNKNOWN));
+                    return S_OK;
+                }
+                if (asked !== IID_IDISPATCH)
+                {
+                    writeU32(out >>> 0, 0);
+                    return E_NOINTERFACE;
+                }
+                const pointer = host.publish(adapter, IID_IDISPATCH);
+                return callMethod(adapter.state.outer, 1, []).then(()=>{
+                    writeU32(out >>> 0, pointer);
+                    return S_OK;
+                });
+            } },
+        IUNKNOWN_METHODS[1],
+        IUNKNOWN_METHODS[2],
+    ]);
+
     const STANDALONE = Object.freeze({
         [IID_IDISPATCH]: Object.freeze([...IUNKNOWN_METHODS, ...DISPATCH_TAIL]),
     });
@@ -146,10 +183,18 @@ export function createStdDispatchObjects(host){
         create(outer, self, typeInfo){
             /** @type {StdDispatchState} */
             const state = { outer, self, typeInfo };
-            const adapter = host.adapt(state, outer !== 0 ? AGGREGATED : STANDALONE,
-                ()=>void callMethod(typeInfo, TYPEINFO_RELEASE, []));
+            const adapter = host.adapt(state, outer !== 0 ? AGGREGATED : STANDALONE);
+            // The type information is let go of inside the last Release, which
+            // the program waits on, rather than after it with nobody waiting.
+            adapter.lastRelease = ()=>callMethod(typeInfo, TYPEINFO_RELEASE, []);
+            if (outer !== 0)
+            {
+                const interfaceFor = adapter.interfaceFor.bind(adapter);
+                adapter.interfaceFor = (/** @type {string} */ asked)=>(asked === IID_IUNKNOWN
+                    ? { id: asked, methods: INNER_UNKNOWN } : interfaceFor(asked));
+            }
             return callMethod(typeInfo, TYPEINFO_ADDREF, [])
-                .then(()=>host.publish(adapter, '{00000000-0000-0000-C000-000000000046}') >>> 0);
+                .then(()=>host.publish(adapter, IID_IUNKNOWN) >>> 0);
         },
     };
 }

@@ -70,6 +70,9 @@ test('the object holds its type information and answers IDispatch from it', asyn
     bytes[0x700] = 1;
     assert.equal(methodOf(adapter, 'GetIDsOfNames').invoke(adapter, [0x700, 0, 1, 0, 0x900]),
         0x80020001 | 0, 'DISP_E_UNKNOWNINTERFACE for an IID other than IID_NULL');
+    // The bridge runs lastRelease inside the last Release and waits for it.
+    assert.equal(adapter.refCount, 1);
+    await adapter.lastRelease();
     adapter.release();
     assert.deepEqual(calls.shift(), [0x9002, [TYPEINFO]], 'Release on the last reference');
 });
@@ -82,4 +85,37 @@ test('an aggregate\'s IDispatch asks the outer object what it is', async()=>{
     const queryInterface = adapter.interfaceFor(IID_IDISPATCH).methods[0];
     assert.equal(await queryInterface.invoke(adapter, [0x700, 0x600]), 0x80010003);
     assert.deepEqual(calls, [[0x9100, [OUTER, 0x700, 0x600]]]);
+});
+
+test('an aggregate\'s inner IUnknown hands out IDispatch counted on the outer object', async()=>{
+    // tmarshal.c's Widget aggregates a standard dispatch and asks its inner
+    // IUnknown for IDispatch on every GetTypeInfoCount, releasing what it got:
+    // that Release goes to the outer object, so the QueryInterface has to
+    // AddRef the outer one, and the inner keeps its own count.
+    const { bytes, view, calls, objects, published, TYPEINFO, OUTER } = fixture();
+    await objects.create(OUTER, 0x500, TYPEINFO);
+    calls.length = 0;
+    const adapter = published[0][0];
+    const unknown = adapter.interfaceFor('{00000000-0000-0000-C000-000000000046}').methods;
+    // IID_IDispatch, {00020400-0000-0000-C000-000000000046}, as it lies in memory.
+    bytes.set(Uint8Array.of(0x00, 0x04, 0x02, 0x00, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46),
+        0x700);
+    assert.equal(await unknown[0].invoke(adapter, [0x700, 0x600]), 0);
+    assert.deepEqual(published.at(-1), [adapter, IID_IDISPATCH]);
+    assert.equal(view.getUint32(0x600, true), 0x7000 + published.length);
+    assert.deepEqual(calls, [[0x9101, [OUTER]]], 'AddRef on the outer object');
+    assert.equal(adapter.refCount, 1, 'the inner object\'s own count is left alone');
+    calls.length = 0;
+    bytes.set(new Uint8Array(16), 0x700);
+    bytes[0x70f] = 0x46;
+    bytes[0x708] = 0xc0;
+    assert.equal(await unknown[0].invoke(adapter, [0x700, 0x600]), 0, 'IUnknown is itself');
+    assert.equal(adapter.refCount, 2);
+    assert.deepEqual(published.at(-1), [adapter, '{00000000-0000-0000-C000-000000000046}']);
+    assert.equal(view.getUint32(0x600, true), 0x7000 + published.length);
+    assert.deepEqual(calls, []);
+    bytes[0x700] = 9;
+    assert.equal(await unknown[0].invoke(adapter, [0x700, 0x600]), 0x80004002 | 0);
+    assert.equal(view.getUint32(0x600, true), 0);
+    assert.equal(unknown[0].invoke(adapter, [0x700, 0]), 0x80004003 | 0);
 });
