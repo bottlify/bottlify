@@ -167,7 +167,9 @@ function machineCode(wasm, index){
         // Compiled at once, in this thread: an asynchronous compile may still be
         // running on a background thread when a newer node's script ends.
         const script = 'new WebAssembly.Module(require("node:fs").readFileSync(process.argv[1]));';
-        const [command, ...prefix] = (value('--runner') ?? process.execPath).split(/\s+/);
+        // This node's own path is one word even when it has spaces in it (Program Files).
+        const runner = value('--runner');
+        const [command, ...prefix] = runner ? runner.split(/\s+/) : [process.execPath];
         const out = execFileSync(command, [...prefix, '--print-wasm-code', '--no-liftoff',
             '--no-wasm-lazy-compilation', '--input-type=commonjs', '-e', script,
             join(dir, 'm.wasm')],
@@ -179,7 +181,10 @@ function machineCode(wasm, index){
             throw new Error(`V8 printed no code for function ${index}`);
         }
         const body = part.slice(part.indexOf('Instructions'));
-        const lines = body.split('\n').slice(1);
+        // A Windows node prints CRLF and its addresses bare and upper case
+        // (`000001EE52DC17E0`); the rest of this file reads the Linux form (`0x...`).
+        const lines = body.split(/\r?\n/).slice(1)
+            .map(line=>line.replace(/^(?:0x)?([0-9A-Fa-f]{8,})(?=\s)/, (all, at)=>`0x${at.toLowerCase()}`));
         const end = lines.findIndex(line=>line.trim() === '');
         return lines.slice(0, end < 0 ? undefined : end).filter(line=>/^0x[0-9a-f]+\s/.test(line));
     }
