@@ -14,7 +14,7 @@ import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
 import { TEB } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
-import { createFileFunctions } from './kernel32/files.js';
+import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
 import { createRichedLibraries } from './riched/libraries.js';
 import { createSyncFunctions } from './kernel32/sync.js';
@@ -1701,6 +1701,14 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
+            // The libraries this build implements, standing in the system
+            // folder for a setup that looks before it loads -- kernel32's
+            // file calls and setupapi's alike. Every layer's, not only this
+            // one's: DDRAW.dll stands there as much as KERNEL32.dll does, and
+            // VERSION already answers for both.
+            const systemLibraryNames = ()=>(/** @type {string[]} */ (
+                modules.systemLibraries?.() ?? Object.keys(libraries)))
+                .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name));
             libraries = {
                 'KERNEL32.dll': {
                     ...createConsoleFunctions({
@@ -2209,14 +2217,7 @@ export function createWin32Module(){
                         files: volume,
                         drives: ()=>filesystem.drives(),
                         volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
-                        // The libraries this build implements, standing in the
-                        // system folder for a setup that looks before it loads.
-                        // Every layer's, not only this one's: DDRAW.dll stands
-                        // there as much as KERNEL32.dll does, and VERSION
-                        // already answers for both.
-                        systemLibraries: ()=>(/** @type {string[]} */ (
-                            modules.systemLibraries?.() ?? Object.keys(libraries)))
-                            .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name)),
+                        systemLibraries: systemLibraryNames,
                         directories: shellFolderDirectories(windows),
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,
@@ -2795,7 +2796,7 @@ export function createWin32Module(){
                     readWideString,
                     setLastError: setError,
                     setLastErrorFor: setErrorOn,
-                    files: volume,
+                    files: withSystemLibraries(volume, systemLibraryNames),
                     /** @param {string} path */
                     fullPath: path=>filesystem.resolve(path).path,
                     /** @param {number} bytes */

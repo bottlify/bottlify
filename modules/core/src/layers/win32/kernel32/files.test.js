@@ -503,8 +503,8 @@ test('a write to a standard handle goes to the console, not to the filesystem', 
     assert.equal(result, 1);
     assert.deepEqual(console, [{ handle: HANDLE_STDOUT, text: 'hello' }]);
     assert.equal(memory.dword(OUT_COUNT), 5);
-    // The volume holds what it held plus the machine's own five directories.
-    assert.equal(files.nodes.size, 9, 'nothing was created for it');
+    // The volume holds what it held plus the machine's own directories.
+    assert.equal(files.nodes.size, 10, 'nothing was created for it');
 });
 
 test('a write to a file lands at the position and moves it on', ()=>{
@@ -1845,6 +1845,8 @@ test('the directories the machine promises exist before a program asks', ()=>{
     const promised = [
         'C:\\WINDOWS\\system32', 'C:\\Program Files', 'C:\\Program Files\\Common Files',
         'C:\\WINDOWS\\system32\\drivers', 'C:\\WINDOWS\\system32\\drivers\\etc',
+        // GetWindowsDirectory and "inf": where a driver's setup puts its INF.
+        'C:\\WINDOWS\\inf',
     ];
     for (const path of promised)
     {

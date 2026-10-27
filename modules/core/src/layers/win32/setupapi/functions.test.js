@@ -2492,3 +2492,17 @@ test('the machine\'s display adapter: its driver\'s properties, its interface op
         assert.equal(m.fns.SetupDiEnumDeviceInterfaces.handler([empty, 0, adapter, 0, face]), 1,
             'now in the set');
     });
+
+test('the system folder has the libraries this build implements, as kernel32 shows it', async()=>{
+    // Wine's setupapi dialog test: kernel32.dll is in the system directory.
+    const { withSystemLibraries } = await import('../kernel32/files.js');
+    const m = await machine({ files: withSystemLibraries(
+        /** @type {any} */ ((await machine()).volume), ()=>['KERNEL32.dll']) });
+    const IDF_CHECKFIRST = 0x100;
+    const buffer = m.buffer(64);
+    const length = m.buffer(4);
+    assert.equal(m.fns.SetupPromptForDiskA.handler([0, m.str('Test'), m.str('Testdisk'),
+        m.str('C:\\WINDOWS\\system32'), m.str('kernel32.dll'), 0, IDF_CHECKFIRST, buffer, 64,
+        length]), 0, 'DPROMPT_SUCCESS');
+    assert.equal(m.readCString(buffer, 64), 'C:\\WINDOWS\\system32');
+});
