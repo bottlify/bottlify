@@ -14,8 +14,8 @@ import { formatGuid, parseGuid } from './guid.js';
 import { createComRegistry } from './objects.js';
 import {
     CLSID_ANTI_MONIKER, CLSID_CLASS_MONIKER, CLSID_COMPOSITE_MONIKER, CLSID_FILE_MONIKER,
-    CLSID_ITEM_MONIKER, CLSID_POINTER_MONIKER, IID_IBINDCTX, IID_IMONIKER, IID_IROTDATA,
-    IID_IUNKNOWN, MKSYS, createMonikerFunctions,
+    CLSID_ITEM_MONIKER, CLSID_OBJREF_MONIKER, CLSID_POINTER_MONIKER, IID_IBINDCTX, IID_IMONIKER,
+    IID_IROTDATA, IID_IUNKNOWN, MKSYS, createMonikerFunctions,
 } from './monikers.js';
 
 const S_OK = 0;
@@ -67,6 +67,8 @@ const STGM_READWRITE = 2;
 const STGM_SHARE_DENY_WRITE = 0x20;
 
 /** IMoniker's slots, by name. */
+const IID_IMARSHAL = '{00000003-0000-0000-C000-000000000046}';
+
 const M = Object.freeze({
     QueryInterface: 0, AddRef: 1, Release: 2, GetClassID: 3, IsDirty: 4, Load: 5, Save: 6,
     GetSizeMax: 7, BindToObject: 8, BindToStorage: 9, Reduce: 10, ComposeWith: 11, Enum: 12,
@@ -256,6 +258,12 @@ function setup(){
             }
             if (method.builtin === 'release')
             {
+                // As the bridge does: what the object owes is made, and
+                // waited for, inside the last Release.
+                if (record.object.refCount === 1 && record.object.lastRelease)
+                {
+                    await record.object.lastRelease();
+                }
                 return record.object.release();
             }
             return method.invoke(record.object, args);
@@ -787,7 +795,8 @@ test('the exports take the stack Windows gives them', ()=>{
         [name, entry.argBytes]));
     assert.deepEqual(sizes, {
         CreateBindCtx: 8, CreateItemMoniker: 12, CreateFileMoniker: 8, CreateClassMoniker: 8,
-        CreatePointerMoniker: 8, CreateAntiMoniker: 4, CreateGenericComposite: 12,
+        CreatePointerMoniker: 8, CreateObjrefMoniker: 8, CreateAntiMoniker: 4,
+        CreateGenericComposite: 12,
         MkParseDisplayName: 16, BindMoniker: 16, MonikerCommonPrefixWith: 12,
         MonikerRelativePathTo: 16, GetClassFile: 8, CoGetInstanceFromFile: 32,
     });
@@ -1655,6 +1664,35 @@ test('a generic composite enumerates its components either way', async()=>{
     }
 });
 
+test('an objref moniker is a pointer moniker that marshals its object', async()=>{
+    // moniker.c test_objref_moniker: its own class and MKSYS, answers as a
+    // pointer moniker too, and its IMarshal names its class to unmarshal.
+    const t = setup();
+    const factory = t.guestObject([IID_IUNKNOWN, IID_ICLASSFACTORY], {});
+    assert.equal(await t.fn('CreateObjrefMoniker', factory.pointer, 0), E_INVALIDARG);
+    const moniker = await t.made('CreateObjrefMoniker', factory.pointer);
+    assert.equal(factory.refs, 2);
+    assert.equal(await t.supports(moniker, CLSID_OBJREF_MONIKER), true);
+    assert.equal(await t.supports(moniker, CLSID_POINTER_MONIKER), true);
+    assert.equal(await t.supports(moniker, IID_IROTDATA), false);
+    assert.equal(await t.mksys(moniker), MKSYS.OBJREFMONIKER);
+    assert.equal(await t.hash(moniker), factory.pointer);
+    const clsid = t.out();
+    assert.equal(await t.m(moniker, 'GetClassID', clsid), S_OK);
+    assert.equal(formatGuid(t.bytes.slice(clsid, clsid + 16)), CLSID_OBJREF_MONIKER);
+
+    const marshal = t.out();
+    assert.equal(await t.callMethod(moniker, 0, [t.guid(IID_IMARSHAL), marshal]), S_OK);
+    const unmarshalClass = t.out();
+    assert.equal(await t.callMethod(t.u32(marshal), 3, [0, 0, 0, 0, 0, unmarshalClass]), S_OK);
+    assert.equal(formatGuid(t.bytes.slice(unmarshalClass, unmarshalClass + 16)),
+        CLSID_OBJREF_MONIKER);
+    await t.callMethod(t.u32(marshal), 2, []);
+
+    await t.m(moniker, 'Release');
+    assert.equal(factory.refs, 1, 'its object let go inside its last Release');
+});
+
 test('pointer monikers stand for the object they hold', async()=>{
     const t = setup();
     const factory = t.guestObject([IID_IUNKNOWN, IID_ICLASSFACTORY], {});
@@ -1689,8 +1727,7 @@ test('pointer monikers stand for the object they hold', async()=>{
     assert.equal(await t.m(moniker, 'BindToStorage', context, 0, unknown, object), S_OK);
     factory.refs -= 2;
     await t.m(moniker, 'Release');
-    await t.settle();
-    assert.equal(factory.refs, 1, 'the moniker let its object go');
+    assert.equal(factory.refs, 1, 'the moniker let its object go inside its last Release');
 
     const empty = await t.made('CreatePointerMoniker', 0);
     assert.equal(await t.m(empty, 'BindToObject', context, 0, unknown, object), E_UNEXPECTED);

@@ -22,7 +22,7 @@
  */
 
 import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from './guid.js';
-import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
+import { HKEY_CLASSES_ROOT, REG_SZ } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 import { publishEnumerator } from './enumerator.js';
@@ -35,6 +35,12 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const REGDB_E_KEYMISSING = 0x80040152 | 0;
 const REGDB_E_CLASSNOTREG = 0x80040154 | 0;
+const REGDB_E_WRITEREGDB = 0x80040151 | 0;
+const GMEM_MOVEABLE = 0x0002;
+const MM_ANISOTROPIC = 8;
+const SM_CXICON = 11;
+const SM_CYICON = 12;
+const HIMETRIC_PER_INCH = 2540;
 const CO_E_CLASSSTRING = 0x800401f3 | 0;
 const CO_E_NOTINITIALIZED = 0x800401f0 | 0;
 const OLE_S_STATIC = 0x00040001;
@@ -1050,6 +1056,92 @@ export function createOle2Functions(env){
                 const found = autoConvertOf(guidAt(old));
                 writeGuid(out, found.guid);
                 return found.hr;
+            },
+        },
+
+        /**
+         * HRESULT OleSetAutoConvert(REFCLSID clsidOld, REFCLSID clsidNew)
+         *
+         * The old class's AutoConvertTo value names the new one, which
+         * OleGetAutoConvert and OleDoAutoConvert read; a class with no key
+         * of its own is not registered.
+         */
+        OleSetAutoConvert: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([old, replacement])=>{
+                if ((old >>> 0) === 0 || (replacement >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const key = classesKey(`CLSID\\${guidAt(old)}`);
+                if (!key)
+                {
+                    return REGDB_E_CLASSNOTREG;
+                }
+                if (!env.hive?.create || !env.hive.setValue)
+                {
+                    return REGDB_E_WRITEREGDB;
+                }
+                const made = env.hive.create(key, 'AutoConvertTo').key;
+                env.hive.setValue(made, '', REG_SZ, encodeAnsi(`${guidAt(replacement)}\0`));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HGLOBAL OleMetafilePictFromIconAndLabel(HICON hIcon, LPOLESTR lpszLabel,
+         *     LPOLESTR lpszSourceFile, UINT iIconIndex)
+         *
+         * A METAFILEPICT in movable global memory, anisotropic, over a
+         * metafile of the icon. NULL for no icon. The metafile is gdi32's,
+         * and the extent is the icon's own size in HIMETRIC at 96 DPI: the
+         * label is neither drawn nor measured here, which is said once.
+         */
+        OleMetafilePictFromIconAndLabel: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: async([icon])=>{
+                if ((icon >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const thread = env.callerThread();
+                /** @param {string} library @param {string} name @param {number[]} args */
+                const system = async(library, name, args)=>
+                    (await util.system(library, name, args, thread)) ?? 0;
+                const dc = await system('GDI32.dll', 'CreateMetaFileW', [0]);
+                if (!dc)
+                {
+                    return 0;
+                }
+                await system('USER32.dll', 'DrawIcon', [dc, 0, 0, icon >>> 0]);
+                const metafile = await system('GDI32.dll', 'CloseMetaFile', [dc]);
+                const block = metafile
+                    ? await system('KERNEL32.dll', 'GlobalAlloc', [GMEM_MOVEABLE, 16]) : 0;
+                const at = block ? await system('KERNEL32.dll', 'GlobalLock', [block]) : 0;
+                if (!at)
+                {
+                    if (metafile)
+                    {
+                        await system('GDI32.dll', 'DeleteMetaFile', [metafile]);
+                    }
+                    if (block)
+                    {
+                        await system('KERNEL32.dll', 'GlobalFree', [block]);
+                    }
+                    return 0;
+                }
+                const cx = (await system('USER32.dll', 'GetSystemMetrics', [SM_CXICON])) || 32;
+                const cy = (await system('USER32.dll', 'GetSystemMetrics', [SM_CYICON])) || 32;
+                writeU32(at, MM_ANISOTROPIC);
+                writeU32(at + 4, Math.round(cx * HIMETRIC_PER_INCH / 96));
+                writeU32(at + 8, Math.round(cy * HIMETRIC_PER_INCH / 96));
+                writeU32(at + 12, metafile >>> 0);
+                await system('KERNEL32.dll', 'GlobalUnlock', [block]);
+                util.sayOnce('OleMetafilePictFromIconAndLabel',
+                    'the label is not drawn, and the extent is the icon\'s alone');
+                return block >>> 0;
             },
         },
 

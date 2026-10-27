@@ -961,6 +961,16 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoGetMalloc: 8,
         StringFromGUID2: 12,
         CoTreatAsClass: 8,
+        CoGetTreatAsClass: 8,
+        CoRegisterInitializeSpy: 8,
+        CoRevokeInitializeSpy: 8,
+        CoRegisterMallocSpy: 4,
+        CoRevokeMallocSpy: 0,
+        CreateObjrefMoniker: 8,
+        FmtIdToPropStgName: 8,
+        PropStgNameToFmtId: 8,
+        OleMetafilePictFromIconAndLabel: 16,
+        OleSetAutoConvert: 8,
         ProgIDFromCLSID: 8,
         StgCreateDocfile: 16,
         StgOpenStorage: 24,
@@ -1717,4 +1727,118 @@ test('ReleaseStgMedium deletes a GDI object through gdi32 when ole32 can call it
     await fns.ReleaseStgMedium.handler([MEDIUM]);
     assert.equal(called[0], `GDI32.dll!DeleteObject(${0x6000})`);
     assert.match(called[1], /^KERNEL32\.dll!DeleteFileW\(/);
+});
+
+test('CoGetTreatAsClass answers the class itself until one emulates it', ()=>{
+    // compobj.c test_TreatAsClass: S_FALSE and the same class with no
+    // emulation, the emulator's class once CoTreatAsClass names one, and
+    // taking away an emulation that is not there fails as a write.
+    const { host } = setup();
+    host.hive = createHive();
+    const fns = createOleFunctions(host);
+    const OUT = 0x1040;
+    const NEW_ARG = 0x1060;
+    const replacement = '{66666666-7777-8888-9999-AAAAAAAAAAAA}';
+    host.bytes.set(/** @type {Uint8Array} */ (parseGuid(replacement)), NEW_ARG);
+    const read = ()=>formatGuid(host.bytes.slice(OUT, OUT + GUID_SIZE));
+
+    assert.equal(fns.CoGetTreatAsClass.handler([CLSID_ARG, OUT]), S_FALSE);
+    assert.equal(read(), CLSID_TEST);
+    assert.equal(fns.CoGetTreatAsClass.handler([0, OUT]) >>> 0, 0x80070057);
+    assert.equal(fns.CoGetTreatAsClass.handler([CLSID_ARG, 0]) >>> 0, 0x80070057);
+    assert.equal(fns.CoTreatAsClass.handler([CLSID_ARG, CLSID_ARG]) >>> 0, 0x80040151,
+        'REGDB_E_WRITEREGDB: there is no emulation to take away');
+
+    assert.equal(fns.CoTreatAsClass.handler([CLSID_ARG, NEW_ARG]), S_OK);
+    assert.equal(fns.CoGetTreatAsClass.handler([CLSID_ARG, OUT]), S_OK);
+    assert.equal(read(), replacement);
+    host.bytes.set(/** @type {Uint8Array} */ (parseGuid(GUID_NULL)), NEW_ARG);
+    assert.equal(fns.CoTreatAsClass.handler([CLSID_ARG, NEW_ARG]), S_OK);
+    assert.equal(fns.CoGetTreatAsClass.handler([CLSID_ARG, OUT]), S_FALSE);
+    assert.equal(read(), CLSID_TEST);
+});
+
+/**
+ * A program's spy at GUEST_OBJECT: QueryInterface answers itself, and every
+ * call is recorded by its slot.
+ */
+function withSpy(){
+    const context = setup();
+    const { host } = context;
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(GUEST_OBJECT, GUEST_VTABLE, true);
+    for (let slot = 0; slot < 7; slot++)
+    {
+        view.setUint32(GUEST_VTABLE + slot * 4, METHOD_BASE + slot * 0x10, true);
+    }
+    /** @type {{ slot: number, args: number[] }[]} */
+    const calls = [];
+    /** @param {number} entry @param {number[]} args */
+    const answer = async(entry, args)=>{
+        const slot = (entry - METHOD_BASE) / 0x10;
+        calls.push({ slot, args });
+        if (slot === 0)
+        {
+            view.setUint32(args[2], args[0], true);
+        }
+        // PostInitialize answers the HRESULT it was given.
+        return slot === 4 ? args[1] : 0;
+    };
+    /** @type {any} */ (host).call = answer;
+    const TEB = 0x7000;
+    view.setUint32(TEB + 0x24, 0x1234, true);
+    host.threads.first.tebAddress = TEB;
+    const fns = createOleFunctions(/** @type {any} */ (host));
+    return { ...context, fns, calls, view };
+}
+
+test('an initialize spy is told of each CoInitializeEx and CoUninitialize on its thread', async()=>{
+    // compobj.c test_IInitializeSpy: the cookie is the spy's slot and the
+    // thread's id; Pre and Post run around each call, PostInitialize's
+    // answer is the call's, and a revoked spy's slot is the next one given.
+    const { fns, calls, view, host } = withSpy();
+    const COOKIE = 0x1200;
+    assert.equal((await fns.CoRegisterInitializeSpy.handler([0, COOKIE])) >>> 0, 0x80070057);
+    assert.equal((await fns.CoRegisterInitializeSpy.handler([GUEST_OBJECT, 0])) >>> 0, 0x80070057);
+    assert.equal(await fns.CoRegisterInitializeSpy.handler([GUEST_OBJECT, COOKIE]), S_OK);
+    assert.deepEqual([view.getUint32(COOKIE, true), view.getUint32(COOKIE + 4, true)], [0, 0x1234]);
+    assert.equal(await fns.CoRegisterInitializeSpy.handler([GUEST_OBJECT, COOKIE + 8]), S_OK);
+    assert.equal(view.getUint32(COOKIE + 8, true), 1);
+
+    calls.length = 0;
+    assert.equal(await fns.CoInitializeEx.handler([0, COINIT_APARTMENTTHREADED]), S_OK);
+    assert.deepEqual(calls.map(call=>call.slot), [3, 3, 4, 4]);
+    assert.deepEqual(calls[0].args, [GUEST_OBJECT, COINIT_APARTMENTTHREADED, 0]);
+    assert.deepEqual(calls[2].args, [GUEST_OBJECT, S_OK, COINIT_APARTMENTTHREADED, 1]);
+
+    calls.length = 0;
+    assert.equal(await fns.CoRevokeInitializeSpy.handler([0, 0x1234]), S_OK);
+    assert.equal(await fns.CoRevokeInitializeSpy.handler([0, 0x1234]) >>> 0, 0x80070057,
+        'once');
+    assert.equal(await fns.CoRevokeInitializeSpy.handler([1, 0x9999]) >>> 0, 0x80070057,
+        'and only from its own thread');
+    await fns.CoUninitialize.handler();
+    assert.deepEqual(calls.map(call=>call.slot), [2, 5, 6], 'the release, then the one left');
+    assert.deepEqual(calls[1].args, [GUEST_OBJECT, 1]);
+    assert.deepEqual(calls[2].args, [GUEST_OBJECT, 0]);
+    assert.equal(host.threads.first.ole32, null);
+
+    assert.equal(await fns.CoRegisterInitializeSpy.handler([GUEST_OBJECT, COOKIE]), S_OK);
+    assert.equal(view.getUint32(COOKIE, true), 0, 'the empty slot is taken again');
+});
+
+test('a malloc spy is one for the process, registered once and revoked once', async()=>{
+    // compobj.c test_IMallocSpy.
+    const { fns, calls } = withSpy();
+    assert.equal((await fns.CoRegisterMallocSpy.handler([0])) >>> 0, 0x80070057);
+    assert.equal((await fns.CoRevokeMallocSpy.handler()) >>> 0, 0x800401fb, 'CO_E_OBJNOTREG');
+    assert.equal(await fns.CoRegisterMallocSpy.handler([GUEST_OBJECT]), S_OK);
+    assert.equal(calls[0].slot, 0, 'held by its IMallocSpy');
+    assert.equal((await fns.CoRegisterMallocSpy.handler([0])) >>> 0, 0x80070057);
+    assert.equal((await fns.CoRegisterMallocSpy.handler([GUEST_OBJECT])) >>> 0, 0x800401fc,
+        'CO_E_OBJISREG');
+    calls.length = 0;
+    assert.equal(await fns.CoRevokeMallocSpy.handler(), S_OK);
+    assert.deepEqual(calls.map(call=>call.slot), [2]);
+    assert.equal((await fns.CoRevokeMallocSpy.handler()) >>> 0, 0x800401fb);
 });

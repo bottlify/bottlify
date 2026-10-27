@@ -466,7 +466,10 @@ test('OleGetAutoConvert and OleDoAutoConvert convert a storage as ole2.c records
     p.setKey(`CLSID\\${CLSID_OLD}`, 'Old');
     assert.equal(await run('OleDoAutoConvert', [storage, out]), REGDB_E_KEYMISSING);
     assert.equal(await run('OleGetAutoConvert', [old, out]), REGDB_E_KEYMISSING);
-    p.setKey(`CLSID\\${CLSID_OLD}\\AutoConvertTo`, CLSID_NEW);
+    // ole2.c: OleSetAutoConvert writes what OleGetAutoConvert reads.
+    assert.equal(await run('OleSetAutoConvert', [p.guid(CLSID_NEW), old]), REGDB_E_CLASSNOTREG,
+        'a class with no key of its own');
+    assert.equal(await run('OleSetAutoConvert', [old, p.guid(CLSID_NEW)]), S_OK);
     p.setKey(`CLSID\\${CLSID_NEW}`, 'New Thing');
     assert.equal(await run('OleGetAutoConvert', [old, out]), S_OK);
     assert.equal(p.guidAt(out), CLSID_NEW);

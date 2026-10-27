@@ -35,6 +35,7 @@ import { HKEY_CLASSES_ROOT, REG_EXPAND_SZ } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createUserMarshalFunctions } from './usrmarshal.js';
 import { createPropVariantFunctions } from './propvariant.js';
+import { createPropertySetFunctions } from './propset.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createClassTable, createRemoting } from './remote.js';
 import { createProxyStubs } from './proxy-stubs.js';
@@ -80,6 +81,7 @@ const RPC_S_CALLPENDING = 0x80010115 | 0;
 const CO_E_CANCEL_DISABLED = 0x80010140 | 0;
 const CO_E_CLASSSTRING = 0x800401f3;
 const CO_E_OBJNOTREG = 0x800401fb;
+const CO_E_OBJISREG = 0x800401fc;
 const CO_E_DLLNOTFOUND = 0x800401f8;
 const CO_E_ERRORINDLL = 0x800401f9;
 const DRAGDROP_E_NOTREGISTERED = 0x80040100;
@@ -423,6 +425,10 @@ function reallocate(heap, memory, pointer, size){
 
 /** IID_IMalloc, and the private class the task allocator is registered under. */
 const IID_IMALLOC = '{00000002-0000-0000-C000-000000000046}';
+const IID_IMALLOCSPY = '{0000001D-0000-0000-C000-000000000046}';
+const IID_IINITIALIZESPY = '{00000034-0000-0000-C000-000000000046}';
+/** Where a TEB keeps its thread's id: CLIENT_ID.UniqueThread. */
+const TEB_CLIENT_ID_THREAD = 0x24;
 const CLSID_TASK_ALLOCATOR = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0001}';
 
 /** The one memory context CoGetMalloc accepts. */
@@ -1275,8 +1281,7 @@ export function createOleFunctions(host){
      * @param {number} mode
      * @returns {number} an HRESULT
      */
-    const enterApartment = mode=>{
-        const thread = host.currentThread();
+    const enterApartment = (mode, thread = host.currentThread())=>{
         const model = (mode & COINIT_APARTMENTTHREADED) !== 0 ? COINIT_APARTMENTTHREADED : 0;
         const apartment = thread.ole32;
         if (!apartment)
@@ -1307,8 +1312,7 @@ export function createOleFunctions(host){
         return S_FALSE;
     };
 
-    const leaveApartment = ()=>{
-        const thread = host.currentThread();
+    const leaveApartment = (thread = host.currentThread())=>{
         const apartment = thread.ole32;
         // Unbalanced on the other side: documented as something a
         // program must not do, and there is nothing to report it with.
@@ -1345,6 +1349,95 @@ export function createOleFunctions(host){
             : andThen(revoke(mine[index], caller), ()=>next(index + 1)));
         return next(0);
     };
+
+    /** IInitializeSpy's methods after IUnknown's. */
+    const SPY_PRE_INITIALIZE = 3;
+    const SPY_POST_INITIALIZE = 4;
+    const SPY_PRE_UNINITIALIZE = 5;
+    const SPY_POST_UNINITIALIZE = 6;
+
+    /**
+     * The thread's initialize spies, by the low half of their cookies: a
+     * revoked one leaves its slot empty, and the next registration takes the
+     * lowest empty slot (compobj.c test_IInitializeSpy).
+     *
+     * @param {any} thread @returns {number[]}
+     */
+    const spiesOf = thread=>(thread.ole32Spies ??= []);
+
+    /** @param {any} thread */
+    const depthOf = thread=>thread.ole32?.depth ?? 0;
+
+    /**
+     * Each spy's method, one after another; a spy revoked by an earlier
+     * one's call is not called.
+     *
+     * @param {any} thread @param {number} slot @param {(spy: number) => number[]} args
+     * @param {(answer: number) => void} [answered]
+     */
+    const callSpies = async(thread, slot, args, answered)=>{
+        const caller = host.callerThread?.();
+        const spies = spiesOf(thread);
+        for (let index = 0; index < spies.length; index++)
+        {
+            const spy = spies[index];
+            if (spy)
+            {
+                const answer = (await callMethod(spy, slot, args(spy), caller)) | 0;
+                answered?.(answer);
+            }
+        }
+    };
+
+    /**
+     * CoInitializeEx as every entry into an apartment makes it: the thread's
+     * spies told before and after, and what PostInitialize answers is the
+     * answer. Without spies, the answer is at once.
+     *
+     * @param {number} mode
+     * @returns {number | Promise<number>}
+     */
+    const spiedEnter = mode=>{
+        const thread = host.currentThread();
+        if (!spiesOf(thread).some(Boolean))
+        {
+            return enterApartment(mode, thread);
+        }
+        return callSpies(thread, SPY_PRE_INITIALIZE, ()=>[mode, depthOf(thread)]).then(async()=>{
+            let hr = enterApartment(mode, thread);
+            await callSpies(thread, SPY_POST_INITIALIZE, ()=>[hr, mode, depthOf(thread)],
+                answer=>{
+                    hr = answer;
+                });
+            return hr;
+        });
+    };
+
+    /**
+     * CoUninitialize, the thread's spies told before and after.
+     *
+     * @param {any} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const spiedLeave = (thread = host.currentThread())=>{
+        if (!spiesOf(thread).some(Boolean))
+        {
+            return leaveApartment(thread);
+        }
+        return callSpies(thread, SPY_PRE_UNINITIALIZE, ()=>[depthOf(thread)])
+            .then(()=>leaveApartment(thread))
+            .then(()=>callSpies(thread, SPY_POST_UNINITIALIZE, ()=>[depthOf(thread)]))
+            .then(()=>0);
+    };
+
+    /** The thread's id, where its TEB keeps it: an initialize spy's cookie names it. @param {any} thread */
+    const threadIdOf = thread=>{
+        const teb = thread?.tebAddress >>> 0;
+        return teb ? readU32(teb + TEB_CLIENT_ID_THREAD) : 0;
+    };
+
+    /** The process's malloc spy, or 0. */
+    let mallocSpy = 0;
 
     /**
      * @param {number} guidPointer  Where a REFCLSID or REFIID argument points.
@@ -2124,13 +2217,21 @@ export function createOleFunctions(host){
                                 await callMethod(moniker, SLOT_ADD_REF, [], host.callerThread?.());
                             }
                             return publishHostObject(CLSID_MONIKER_ENUMERATOR,
-                                monikerEnumerator(monikers, next), IID_IENUMMONIKER, out >>> 0);
+                                monikerEnumerator([...monikers], next), IID_IENUMMONIKER,
+                                out >>> 0);
                         } },
                 ],
             }],
+            async lastRelease(){
+                const thread = host.callerThread?.();
+                for (const moniker of monikers.splice(0))
+                {
+                    await callMethod(moniker, SLOT_RELEASE, [], thread);
+                }
+            },
             destroy(){
                 const thread = host.callerThread?.();
-                for (const moniker of monikers)
+                for (const moniker of monikers.splice(0))
                 {
                     void callMethod(moniker, SLOT_RELEASE, [], thread);
                 }
@@ -2628,6 +2729,17 @@ export function createOleFunctions(host){
             [clsid, iid], ([classId, interfaceId])=>[classId, context, 0, interfaceId, out]),
         runningObjectTable: async out=>
             (await functions.GetRunningObjectTable.handler([0, out])) | 0,
+        marshaling: {
+            sizeMax: (out, iid, unknown, context, destination, flags)=>callWithGuids(
+                'CoGetMarshalSizeMax', [iid],
+                ([at])=>[out, at, unknown, context, destination, flags]),
+            marshal: (stream, iid, unknown, context, destination, flags)=>callWithGuids(
+                'CoMarshalInterface', [iid],
+                ([at])=>[stream, at, unknown, context, destination, flags]),
+            unmarshal: (stream, iid, out)=>callWithGuids('CoUnmarshalInterface', [iid],
+                ([at])=>[stream, at, out]),
+            releaseData: async stream=>(await functions.CoReleaseMarshalData.handler([stream])) | 0,
+        },
         storageClassOf: async path=>{
             const bytes = await wholeFile(path);
             const root = bytes ? parseCompoundFile(bytes) : null;
@@ -2740,14 +2852,14 @@ export function createOleFunctions(host){
             argBytes: 4,
             // Documented as equivalent to CoInitializeEx with
             // COINIT_APARTMENTTHREADED, which is what makes the two nest together.
-            handler: ()=>enterApartment(COINIT_APARTMENTTHREADED),
+            handler: ()=>spiedEnter(COINIT_APARTMENTTHREADED),
         },
 
         /** HRESULT CoInitializeEx(LPVOID pvReserved, DWORD dwCoInit) */
         CoInitializeEx: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, mode])=>enterApartment(mode >>> 0),
+            handler: ([, mode])=>spiedEnter(mode >>> 0),
         },
 
         /**
@@ -3004,7 +3116,105 @@ export function createOleFunctions(host){
 
         CoUninitialize: {
             argBytes: 0,
-            handler: leaveApartment,
+            handler: ()=>spiedLeave(),
+        },
+
+        /**
+         * HRESULT CoRegisterInitializeSpy(IInitializeSpy *pSpy, ULARGE_INTEGER *puliCookie)
+         *
+         * A spy on the calling thread's CoInitializeEx and CoUninitialize,
+         * held by its IInitializeSpy; the cookie is the spy's slot and the
+         * thread's id.
+         */
+        CoRegisterInitializeSpy: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: async([spy, cookie])=>{
+                if ((spy >>> 0) === 0 || (cookie >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.currentThread();
+                const held = await queryPointer(spy >>> 0, IID_IINITIALIZESPY,
+                    host.callerThread?.());
+                if (held === 0)
+                {
+                    return E_NOINTERFACE;
+                }
+                const spies = spiesOf(thread);
+                let slot = spies.findIndex(entry=>!entry);
+                slot = slot < 0 ? spies.length : slot;
+                spies[slot] = held;
+                writeU32(cookie >>> 0, slot);
+                writeU32((cookie >>> 0) + 4, threadIdOf(thread));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoRevokeInitializeSpy(ULARGE_INTEGER uliCookie)
+         *
+         * Only on the thread that registered it, and once.
+         */
+        CoRevokeInitializeSpy: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([slot, owner])=>{
+                const thread = host.currentThread();
+                const spies = spiesOf(thread);
+                const spy = (owner >>> 0) === threadIdOf(thread) ? spies[slot >>> 0] : 0;
+                if (!spy)
+                {
+                    return E_INVALIDARG;
+                }
+                spies[slot >>> 0] = 0;
+                return andThen(callMethod(spy, SLOT_RELEASE, [], host.callerThread?.()), ()=>S_OK);
+            },
+        },
+
+        /**
+         * HRESULT CoRegisterMallocSpy(LPMALLOCSPY pMallocSpy)
+         * HRESULT CoRevokeMallocSpy(void)
+         *
+         * One spy for the process, held by its IMallocSpy until revoked.
+         * The task allocator's blocks do not pass through it: the allocator
+         * is ours and keeps no header a spy could grow, which is said once.
+         */
+        CoRegisterMallocSpy: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([spy])=>{
+                if ((spy >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if (mallocSpy !== 0)
+                {
+                    return CO_E_OBJISREG;
+                }
+                const held = await queryPointer(spy >>> 0, IID_IMALLOCSPY, host.callerThread?.());
+                if (held === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                mallocSpy = held;
+                host.divergence?.('CoRegisterMallocSpy',
+                    'the spy is held, and the task allocator\'s calls do not go through it');
+                return S_OK;
+            },
+        },
+
+        CoRevokeMallocSpy: {
+            argBytes: 0,
+            handler: ()=>{
+                const spy = mallocSpy;
+                if (spy === 0)
+                {
+                    return CO_E_OBJNOTREG;
+                }
+                mallocSpy = 0;
+                return andThen(callMethod(spy, SLOT_RELEASE, [], host.callerThread?.()), ()=>S_OK);
+            },
         },
 
         /**
@@ -3019,16 +3229,18 @@ export function createOleFunctions(host){
         OleInitialize: {
             argBytes: 4,
             handler: ()=>{
-                const answer = enterApartment(COINIT_APARTMENTTHREADED);
-                oleStarted ||= answer === S_OK || answer === S_FALSE;
-                if (answer === S_OK || answer === S_FALSE)
-                {
-                    // Counted apart from the apartment: the clipboard and a
-                    // drag need OleInitialize, not only CoInitialize.
-                    const apartment = host.currentThread().ole32;
-                    apartment.oleDepth = (apartment.oleDepth ?? 0) + 1;
-                }
-                return answer;
+                const thread = host.currentThread();
+                return andThen(spiedEnter(COINIT_APARTMENTTHREADED), (/** @type {number} */ answer)=>{
+                    oleStarted ||= answer === S_OK || answer === S_FALSE;
+                    if (answer === S_OK || answer === S_FALSE)
+                    {
+                        // Counted apart from the apartment: the clipboard and a
+                        // drag need OleInitialize, not only CoInitialize.
+                        const apartment = thread.ole32;
+                        apartment.oleDepth = (apartment.oleDepth ?? 0) + 1;
+                    }
+                    return answer;
+                });
             },
         },
 
@@ -3114,10 +3326,10 @@ export function createOleFunctions(host){
                     apartment.oleDepth--;
                     if (apartment.oleDepth === 0)
                     {
-                        return andThen(clipboard.uninitialize(thread), leaveApartment);
+                        return andThen(clipboard.uninitialize(thread), ()=>spiedLeave(thread));
                     }
                 }
-                return leaveApartment();
+                return spiedLeave();
             },
         },
 
@@ -3977,6 +4189,7 @@ export function createOleFunctions(host){
 
         // The property value, whose copy owns what it points at in task memory.
         ...createPropVariantFunctions(host),
+        ...createPropertySetFunctions(host),
 
         // What a MIDL proxy or stub calls to carry a handle, a block of
         // memory, a storage medium or an interface pointer to another process.
@@ -3992,17 +4205,12 @@ export function createOleFunctions(host){
             }) }),
 
         /**
-         * HRESULT ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *lplpszProgID)
-         *
-         * The class's ProgID key in the registry, as a string in task
-         * memory; a class with no key is not registered.
-         */
-        /**
          * HRESULT CoTreatAsClass(REFCLSID clsidOld, REFCLSID clsidNew)
          *
          * Writes the emulation into the registry, as the call does: the old
          * class's TreatAs key names the new one, and a new class of GUID_NULL
-         * or the old class itself takes the emulation away.
+         * or the old class itself takes the emulation away -- which fails as
+         * a write when there is none to take (compobj.c test_TreatAsClass).
          */
         CoTreatAsClass: {
             argBytes: 8,
@@ -4023,11 +4231,52 @@ export function createOleFunctions(host){
                     || replacement === GUID_NULL;
                 if (nothing)
                 {
-                    host.hive.remove(root, `CLSID\\${old}\\TreatAs`);
-                    return S_OK;
+                    return host.hive.remove(root, `CLSID\\${old}\\TreatAs`) === 'deleted'
+                        ? S_OK : REGDB_E_WRITEREGDB;
                 }
                 const key = host.hive.create(root, `CLSID\\${old}\\TreatAs`).key;
                 host.hive.setValue(key, '', REG_SZ, encodeAnsi(`${replacement}\0`));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *lplpszProgID)
+         *
+         * The class's ProgID key in the registry, as a string in task
+         * memory; a class with no key is not registered.
+         */
+        /**
+         * HRESULT CoGetTreatAsClass(REFCLSID clsidOld, LPCLSID pClsidNew)
+         *
+         * The class the registry says emulates this one, or the class itself
+         * and S_FALSE when none does.
+         */
+        CoGetTreatAsClass: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([oldClass, out])=>{
+                const old = (oldClass >>> 0) === 0 ? null : guidAt(oldClass);
+                if (old === null || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeGuid(host, out >>> 0, old);
+                const root = host.hive?.root(HKEY_CLASSES_ROOT);
+                const key = root ? host.hive?.open(root, `CLSID\\${old}\\TreatAs`) : null;
+                const value = key ? host.hive?.getValue(key, '') : null;
+                if (!value)
+                {
+                    return S_FALSE;
+                }
+                const end = value.data.indexOf(0);
+                const named = canonicalGuid(decodeAnsi(
+                    value.data.subarray(0, end < 0 ? value.data.length : end)).trim());
+                if (named === null)
+                {
+                    return S_FALSE;
+                }
+                writeGuid(host, out >>> 0, named);
                 return S_OK;
             },
         },
