@@ -41,6 +41,7 @@ import { createDesktopFunctions } from './desktop.js';
 import { IDLIST_ORDINALS, createIdListFunctions } from './idlist.js';
 import { createDropFunctions } from './drop.js';
 import { createShellExtras } from './extras.js';
+import { argify, createAssociations, namesFile } from './associations.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
@@ -642,6 +643,14 @@ export function createShellFunctions(host){
             return { answer: SE_ERR_ACCESSDENIED, record: null };
         }
         const wanted = (verb ?? 'open').trim().toLowerCase();
+        if (!RUNNABLE_VERBS.has(wanted) || !SELF_EXECUTABLE.has(extensionOf(name)))
+        {
+            const associated = openAssociated(name, verb, parameters);
+            if (associated)
+            {
+                return associated;
+            }
+        }
         if (RUNNABLE_VERBS.has(wanted) && !SELF_EXECUTABLE.has(extensionOf(name)))
         {
             const document = openDocument(name, parameters);
@@ -681,11 +690,137 @@ export function createShellFunctions(host){
                 `the child starts in its own image's directory, not in ${asked}`);
         }
         const tail = (parameters ?? '').trim();
-        const record = host.launcher.launch(
-            image, tail === '' ? `"${image}"` : `"${image}" ${tail}`, 0);
+        const record = launch(image, tail === '' ? `"${image}"` : `"${image}" ${tail}`);
         return record
             ? { answer: LAUNCH_SUCCESS, record }
             : { answer: SE_ERR_FNF, record: null };
+    };
+
+    /**
+     * The calling process's variables, as kernel32 has them now: what a child
+     * the shell starts inherits, as one CreateProcess starts does. Null
+     * without kernel32 to ask, and the child is then given the spawner's own.
+     *
+     * @returns {Record<string, string> | null}
+     */
+    const environment = ()=>{
+        const kernel32 = host.library?.('KERNEL32.dll');
+        const read = host.readMemory;
+        const block = kernel32 && read
+            ? /** @type {number} */ (kernel32.GetEnvironmentStringsW?.handler([])) >>> 0 : 0;
+        if (!block || !read || !kernel32)
+        {
+            return null;
+        }
+        /** @type {Record<string, string>} */
+        const variables = {};
+        let at = block;
+        for (let count = 0; count < 0x8000; count++)
+        {
+            let entry = '';
+            for (let pair = read(at, 2); (pair[0] | pair[1]) !== 0; pair = read(at, 2))
+            {
+                entry += String.fromCharCode(pair[0] | pair[1] << 8);
+                at += 2;
+            }
+            at += 2;
+            if (entry === '')
+            {
+                break;
+            }
+            // A drive's current directory is "=C:=C:\dir": its name starts with the equals.
+            const split = entry.indexOf('=', 1);
+            if (split > 0)
+            {
+                variables[entry.slice(0, split)] = entry.slice(split + 1);
+            }
+        }
+        kernel32.FreeEnvironmentStringsW?.handler([block]);
+        return variables;
+    };
+
+    /**
+     * A child started as the shell starts one: the caller's variables its own.
+     *
+     * @param {string} image @param {string} line
+     */
+    const launch = (image, line)=>{
+        const variables = environment();
+        return host.launcher?.launch(image, line, 0, '',
+            variables ? { environment: variables } : {}) ?? null;
+    };
+
+    const associations = host.library && host.readMemory && host.allocate
+        ? createAssociations({ readMemory: host.readMemory, writeMemory: host.writeMemory,
+            allocate: host.allocate, free: host.free, library: host.library })
+        : null;
+
+    /**
+     * The program a command line starts: its first word in quotes, or else
+     * the shortest run of its words that names a file, as CreateProcess
+     * reads an unquoted one.
+     *
+     * @param {string} line
+     */
+    const imageOfCommand = line=>{
+        if (!host.launcher)
+        {
+            return null;
+        }
+        const launcher = host.launcher;
+        if (line.startsWith('"'))
+        {
+            const end = line.indexOf('"', 1);
+            return launcher.imageOf(end < 0 ? line.slice(1) : line.slice(1, end));
+        }
+        const words = line.split(' ');
+        for (let count = 1; count <= words.length; count++)
+        {
+            const image = launcher.imageOf(words.slice(0, count).join(' '));
+            if (image !== null)
+            {
+                return image;
+            }
+        }
+        return null;
+    };
+
+    /**
+     * A file opened with what its type is registered to: the verb's command
+     * under its class, filled in with the file and the parameters
+     * (`argify`); a command that does not name the file has it after it.
+     * Null when the type, or the verb, has no command.
+     *
+     * @param {string} name @param {string | null} verb @param {string | null} parameters
+     * @returns {{ answer: number, record: any } | null}
+     */
+    const openAssociated = (name, verb, parameters)=>{
+        const protocol = /^([A-Za-z][A-Za-z0-9+.-]+):/.exec(name)?.[1] ?? null;
+        const extension = extensionOf(name);
+        const named = protocol
+            ?? (extension === '' ? null : associations?.classOf(`.${extension}`));
+        const command = named ? associations?.commandOf(named, verb) : null;
+        if (!command)
+        {
+            return null;
+        }
+        const volume = readableVolume();
+        const found = protocol || !volume ? name : locate(volume, name);
+        if (found === null)
+        {
+            return { answer: SE_ERR_FNF, record: null };
+        }
+        const file = protocol ? name : host.resolve?.(found) ?? found;
+        const template = command.value;
+        const line = argify(template, file, parameters ?? '')
+            + (namesFile(template) ? '' : ` "${file}"`);
+        const image = imageOfCommand(line.trim());
+        if (image === null || !host.launcher)
+        {
+            return { answer: SE_ERR_FNF, record: null };
+        }
+        const record = launch(image, line);
+        return record ? { answer: LAUNCH_SUCCESS, record } : { answer: SE_ERR_FNF, record: null };
     };
 
     /**
@@ -756,7 +891,7 @@ export function createShellFunctions(host){
             return { answer: SE_ERR_FNF, record: null };
         }
         void parameters;
-        const record = host.launcher.launch(notepad, `${notepad} ${file}`, 0);
+        const record = launch(notepad, `${notepad} ${file}`);
         return record ? { answer: LAUNCH_SUCCESS, record } : { answer: SE_ERR_FNF, record: null };
     };
 
