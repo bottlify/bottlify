@@ -142,6 +142,16 @@ const RAISE = 2;
 const PANE_INSET = 4;
 
 /**
+ * What gdi32's drawing gives a control drawing an item through its parent:
+ * the DC moved to the item and clipped to it, and back.
+ *
+ * @typedef {Object} ItemContexts
+ * @property {(hdc: number, corner: { x: number, y: number },
+ *     size: { cx: number, cy: number }) => number} [enterItem]
+ * @property {(hdc: number, saved: number) => void} [leaveItem]
+ */
+
+/**
  * @typedef {import('../user32/controls.js').ControlHost} ControlHost
  * @typedef {import('../user32/controls.js').ControlMessage} ControlMessage
  * @typedef {import('../user32/controls.js').Rect} Rect
@@ -644,15 +654,26 @@ export function createTabProcedure(host, tk, images){
         }
         const word = new Uint8Array(4);
         word.set(extra.subarray(0, 4));
+        // The parent draws the item from (0,0): the DC is moved to the item's
+        // corner and clipped to it for the message, and given back after, so
+        // whatever the parent paints stays inside the tab (comctl32's tab
+        // test, rcItem from the origin and the tab's border untouched).
+        const corner = { x: rect.left + 2, y: rect.top + 2 };
+        const size = { cx: rect.right - 2 - corner.x, cy: rect.bottom - corner.y };
+        const items = /** @type {ItemContexts | null} */ (host.draw);
+        const saved = items?.enterItem?.(hdc, corner, size) ?? 0;
         const at = host.allocate(DRAWITEMSTRUCT_SIZE);
         const bytes = new Uint8Array(DRAWITEMSTRUCT_SIZE);
         const view = new DataView(bytes.buffer);
+        const item = saved !== 0 ? [0, 0, size.cx, size.cy]
+            : [corner.x, corner.y, corner.x + size.cx, corner.y + size.cy];
         [ODT_TAB, record.id, index, ODA_DRAWENTIRE, index === held.selected ? ODS_SELECTED : 0,
-            record.hwnd, hdc, rect.left + 2, rect.top + 2, rect.right - 2, rect.bottom,
+            record.hwnd, hdc, ...item,
             data !== 0 ? data : new DataView(word.buffer).getUint32(0, true)]
             .forEach((value, field)=>view.setUint32(field * 4, value >>> 0, true));
         host.writeMemory(at, bytes);
         return after(host.send(target, WM_DRAWITEM, record.id, at, thread), ()=>{
+            items?.leaveItem?.(hdc, saved);
             host.release?.(at);
             if (data !== 0)
             {

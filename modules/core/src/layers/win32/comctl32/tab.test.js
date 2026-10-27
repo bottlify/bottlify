@@ -41,6 +41,8 @@ const MSG_BUFFER = 0x13000;
 const TEXT = 0x13100;
 const OUT = 0x13200;
 const ITEM = 0x13400;
+/** Where the parent's WM_DRAWITEM reads the DC's origin and clip box. */
+const PROBE = 0x13380;
 const HEAP = 0x18000;
 const HINSTANCE = 0x400000;
 const PARENTPROC = 0x401000;
@@ -210,9 +212,17 @@ function setup(){
                 // DRAWITEMSTRUCT: type, id, item, action, state, hwnd, hdc,
                 // rcItem, itemData.
                 const at = message.lParam;
+                // And the DC as the parent finds it: its origin and clip box.
+                const hdc = memory.u32(at + 24);
+                gdi32.GetViewportOrgEx.handler([hdc, PROBE]);
+                const clip = gdi32.GetClipBox.handler([hdc, PROBE + 8]);
                 drawn.push({ type: memory.u32(at), item: memory.u32(at + 8),
                     state: memory.u32(at + 16), left: memory.i32(at + 28),
-                    top: memory.i32(at + 32), data: memory.u32(at + 44) });
+                    top: memory.i32(at + 32), right: memory.i32(at + 36),
+                    bottom: memory.i32(at + 40), data: memory.u32(at + 44),
+                    origin: [memory.i32(PROBE), memory.i32(PROBE + 4)],
+                    clip: clip === 0 ? null
+                        : [0, 4, 8, 12].map(field=>memory.i32(PROBE + 8 + field)) });
                 return 1;
             }
             return table.DefWindowProcA.handler(
@@ -576,6 +586,24 @@ test('an owner-drawn tab control hands each tab to its parent, the selected one 
     assert.equal(context.drawn[3].data, 0xdededede);
     assert.equal(context.drawn[3].state, 1, 'ODS_SELECTED');
     assert.ok(context.drawn.every(item=>item.type === WM_DRAWITEM_ODT_TAB));
+    // comctl32's test_TCS_OWNERDRAWFIXED: rcItem starts at (0,0), the DC is
+    // moved to the item's corner and clipped to its size for the message, and
+    // the control has its DC back as it was once the parent is done.
+    for (const item of context.drawn)
+    {
+        assert.deepEqual([item.left, item.top], [0, 0]);
+        assert.ok(item.right > 0 && item.bottom > 0);
+        assert.ok(item.origin[0] > 0 && item.origin[1] > 0, 'the viewport at the item\'s corner');
+        assert.ok(item.clip === null || (item.clip[2] <= item.right && item.clip[3] <= item.bottom),
+            'clipped to the item');
+    }
+    assert.deepEqual(context.drawn[0].clip, [0, 0, context.drawn[0].right, context.drawn[0].bottom],
+        'a tab wholly inside the window: its clip is the item');
+    assert.notDeepEqual(context.drawn[0].origin, context.drawn[1].origin, 'each at its own tab');
+    const later = context.fns.GetDC.handler([hwnd]);
+    context.gdi32.GetViewportOrgEx.handler([later, PROBE]);
+    assert.deepEqual([context.memory.i32(PROBE), context.memory.i32(PROBE + 4)], [0, 0]);
+    context.fns.ReleaseDC.handler([hwnd, later]);
 
     context.memory.putString(TEXT, TAB_CLASS);
     const wide = await context.fns.CreateWindowExA.handler([0, TEXT, 0,

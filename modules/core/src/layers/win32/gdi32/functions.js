@@ -5167,6 +5167,34 @@ export function createGdiFunctions(host){
             solidBrush,
 
             /**
+             * A DC moved to an item's corner and clipped to it, as a control
+             * hands one to its parent's WM_DRAWITEM: SaveDC, the viewport
+             * moved by the corner, the clip cut to the item's size from (0,0).
+             * The level answered goes to `leaveItem`; zero is no context, and
+             * the DC is then as it was.
+             *
+             * @param {number} hdc @param {{ x: number, y: number }} corner
+             * @param {{ cx: number, cy: number }} size
+             * @returns {number}
+             */
+            enterItem: (hdc, corner, size)=>{
+                const saved = aliased.SaveDC.handler([hdc]);
+                if (saved !== 0)
+                {
+                    aliased.OffsetViewportOrgEx.handler([hdc, corner.x, corner.y, 0]);
+                    aliased.IntersectClipRect.handler([hdc, 0, 0, size.cx, size.cy]);
+                }
+                return saved;
+            },
+            /** @param {number} hdc @param {number} saved  What `enterItem` answered. */
+            leaveItem: (hdc, saved)=>{
+                if (saved !== 0)
+                {
+                    aliased.RestoreDC.handler([hdc, saved]);
+                }
+            },
+
+            /**
              * @param {number} hdc
              * @param {{ left: number, top: number, right: number, bottom: number }} rect
              * @param {number} color  A COLORREF.
