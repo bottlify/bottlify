@@ -23,11 +23,19 @@
 
 import { hasScheme } from './path.js';
 import { dword, u32 } from './text.js';
+import { applyScheme, escapeUrl, hashData, parseUrl, urlPart, URL_ESCAPE_AS_UTF8 }
+    from './url-parts.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
 const E_POINTER = 0x80004003;
 const E_INVALIDARG = 0x80070057;
+const E_FAIL = 0x80004005 | 0;
+const E_NOTIMPL = 0x80004001 | 0;
+const URL_E_INVALID_SYNTAX = 0x80041001 | 0;
+/** PARSEDURL: its size, the protocol and its length, the suffix and its length, the scheme. */
+const PARSEDURL_SIZE = 24;
 
 const URL_ESCAPE_PERCENT = 0x00001000;
 const URL_UNESCAPE_INPLACE = 0x00100000;
@@ -465,6 +473,39 @@ export function createUrlFunctions(host, { A, W }){
         return E_POINTER;
     };
 
+    /** Said once: HashData's table is not Windows'. */
+    let ownTable = false;
+    /** @param {Uint8Array} input @param {number} size */
+    const hash = (input, size)=>{
+        if (!ownTable)
+        {
+            ownTable = true;
+            host.divergence?.('HashData', 'a permutation of our own: the hash differs from '
+                + 'Windows\'');
+        }
+        return hashData(input, size);
+    };
+
+    /**
+     * An answer UrlGetPart and UrlApplyScheme count without the terminator
+     * on success and with it when the room is short; the buffer is left
+     * alone then.
+     *
+     * @param {import('./text.js').Width} width @param {string} text @param {number} buffer
+     * @param {number} count @param {number} success
+     */
+    const counted = (width, text, buffer, count, success)=>{
+        const room = /** @type {number} */ (countAt(count));
+        if (text.length >= room)
+        {
+            host.writeMemory(count >>> 0, dword(text.length + 1));
+            return E_POINTER;
+        }
+        host.writeMemory(buffer >>> 0, width.sz(text));
+        host.writeMemory(count >>> 0, dword(text.length));
+        return success;
+    };
+
     /** Said once, the first time a URL is asked a question not answered here. */
     let unanswered = false;
 
@@ -563,6 +604,148 @@ export function createUrlFunctions(host, { A, W }){
             const url = width.read(pointer);
             const at = url === null ? null : locationIndex(url);
             return at === null ? 0 : (pointer >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * HRESULT UrlApplySchemeA(LPCSTR pszIn, LPSTR pszOut, LPDWORD pcchOut, DWORD dwFlags)
+         *
+         * `applyScheme`'s URL; S_FALSE, all left as it was, when no scheme
+         * applies (Wine's test_UrlApplyScheme).
+         */
+        ...both('UrlApplyScheme', 16, (width, [input, buffer, count, flags])=>{
+            const url = width.read(input);
+            if (url === null || (buffer >>> 0) === 0 || countAt(count) === null)
+            {
+                return E_INVALIDARG;
+            }
+            const applied = applyScheme(url, flags >>> 0);
+            return applied === null ? S_FALSE : counted(width, applied, buffer, count, S_OK);
+        }),
+
+        /**
+         * HRESULT UrlEscapeA(LPCSTR pszUrl, LPSTR pszEscaped, LPDWORD pcchEscaped, DWORD dwFlags)
+         *
+         * `escapeUrl`'s text, the source read before the answer is written so
+         * the two may be one buffer. URL_ESCAPE_AS_UTF8 is the wide
+         * spelling's alone: E_NOTIMPL in the ANSI one (Wine's test_UrlEscapeA).
+         */
+        ...both('UrlEscape', 16, (width, [input, buffer, count, flags])=>{
+            const url = width.read(input);
+            const room = countAt(count);
+            if (url === null || (buffer >>> 0) === 0 || room === null || room === 0)
+            {
+                return E_INVALIDARG;
+            }
+            if (!width.wide && ((flags >>> 0) & URL_ESCAPE_AS_UTF8) !== 0)
+            {
+                return E_NOTIMPL;
+            }
+            return answer(width, escapeUrl(url, flags >>> 0), buffer, count, room);
+        }),
+
+        /**
+         * HRESULT UrlGetPartA(LPCSTR pszIn, LPSTR pszOut, LPDWORD pcchOut, DWORD dwPart,
+         *                     DWORD dwFlags)
+         *
+         * `urlPart`'s part. A part that is empty or absent where it could be
+         * is S_FALSE and an empty string in the ANSI spelling, S_OK in the
+         * wide one; a part the URL cannot have leaves all as it was (Wine's
+         * test_UrlGetPart).
+         */
+        ...both('UrlGetPart', 20, (width, [input, buffer, count, part, flags])=>{
+            const url = width.read(input);
+            const room = countAt(count);
+            if (url === null || (buffer >>> 0) === 0 || room === null || room === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const { kind, text } = urlPart(url, part >>> 0, flags >>> 0);
+            if (kind === 'none')
+            {
+                return E_FAIL;
+            }
+            if (kind === 'invalid')
+            {
+                return E_INVALIDARG;
+            }
+            if (kind === 'empty')
+            {
+                host.writeMemory(buffer >>> 0, width.sz(''));
+                host.writeMemory(count >>> 0, dword(0));
+                return width.wide ? S_OK : S_FALSE;
+            }
+            return counted(width, text, buffer, count, S_OK);
+        }),
+
+        /**
+         * HRESULT UrlHashA(LPCSTR pszUrl, LPBYTE pbHash, DWORD cbHash)
+         *
+         * HashData over the URL's ANSI bytes, the wide spelling's narrowed
+         * first, so both hash a URL alike (Wine's test_UrlHash).
+         */
+        ...both('UrlHash', 12, (width, [input, out, size])=>{
+            const url = width.read(input);
+            if (url === null || (out >>> 0) === 0 || (size >>> 0) === 0 || (size >>> 0) > 256)
+            {
+                return E_INVALIDARG;
+            }
+            host.writeMemory(out >>> 0, hash(encodeAnsi(url), size >>> 0));
+            return S_OK;
+        }),
+
+        /**
+         * HRESULT HashData(const BYTE *pbData, DWORD cbData, LPBYTE pbHash, DWORD cbHash)
+         *
+         * Neither pointer is looked at for nothing to hash, but either
+         * missing is E_INVALIDARG (Wine's test_HashData).
+         */
+        HashData: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([input, length, out, size])=>{
+                if ((input >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if ((length >>> 0) === 0 || (size >>> 0) === 0 || !host.readMemory)
+                {
+                    return S_OK;
+                }
+                host.writeMemory(out >>> 0, hash(host.readMemory(input >>> 0, length >>> 0),
+                    size >>> 0));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT ParseURLA(LPCSTR pcszURL, PARSEDURLA *ppu)
+         *
+         * The protocol and what follows its colon, as places in the caller's
+         * string, and the scheme's number; a string with no scheme is
+         * URL_E_INVALID_SYNTAX with the protocol cleared and the number left
+         * (Wine's test_ParseURL).
+         */
+        ...both('ParseURL', 8, (width, [input, parsed])=>{
+            const url = width.read(input);
+            if (url === null || (parsed >>> 0) === 0 || countAt(parsed) !== PARSEDURL_SIZE)
+            {
+                return E_INVALIDARG;
+            }
+            const result = parseUrl(url);
+            if (result === null)
+            {
+                host.writeMemory((parsed >>> 0) + 4, dword(0));
+                return URL_E_INVALID_SYNTAX;
+            }
+            const suffix = result.protocolLength + 1;
+            const fields = new Uint8Array(20);
+            fields.set(dword(input), 0);
+            fields.set(dword(result.protocolLength), 4);
+            fields.set(dword((input >>> 0) + suffix * width.unit), 8);
+            fields.set(dword(url.length - suffix), 12);
+            fields.set(dword(result.number), 16);
+            host.writeMemory((parsed >>> 0) + 4, fields);
+            return S_OK;
         }),
 
         /**

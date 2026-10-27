@@ -25,7 +25,8 @@ import { dword, u32 } from './text.js';
  * @type {readonly (readonly [number, string])[]}
  */
 export const SHLWAPI_NAMED_ORDINALS = Object.freeze([
-    [7, 'SHAllocShared'], [8, 'SHLockShared'], [9, 'SHUnlockShared'], [10, 'SHFreeShared'],
+    [1, 'ParseURLA'], [2, 'ParseURLW'], [7, 'SHAllocShared'], [8, 'SHLockShared'],
+    [9, 'SHUnlockShared'], [10, 'SHFreeShared'],
     [11, 'SHMapHandle'], [12, 'SHCreateMemStream'], [14, 'GetAcceptLanguagesA'],
     [15, 'GetAcceptLanguagesW'],
     [165, 'SHSetWindowBits'], [167, 'SHSetParentHwnd'], [198, 'SHSearchMapInt'],
