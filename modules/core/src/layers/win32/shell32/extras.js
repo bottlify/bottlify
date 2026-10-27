@@ -142,16 +142,17 @@ export function createShellExtras(host, parts){
         : host.readCString(address >>> 0, 0x8000));
 
     /**
-     * A block of guest memory for the length of `body`.
+     * A block of guest memory for the length of `body`; `failed` when there
+     * is none to be had, which is the call's own out-of-memory answer.
      *
      * @template T
-     * @param {number} size @param {(address: number) => Promise<T>} body
+     * @param {number} size @param {(address: number) => Promise<T>} body @param {T} failed
      */
-    const scratch = async(size, body)=>{
+    const scratch = async(size, body, failed)=>{
         const at = host.allocate?.(size) ?? 0;
         if (!at)
         {
-            throw new Error('shell32: no memory for a call\'s scratch');
+            return failed;
         }
         try
         {
@@ -192,7 +193,7 @@ export function createShellExtras(host, parts){
                 }
                 host.writeMemory(buffer >>> 0, host.readMemory(at, needed * unit).slice());
                 return ((1 << 16) | (needed & 0xffff)) >>> 0;
-            });
+            }, room & 0xffff);
         },
     });
 
@@ -229,7 +230,7 @@ export function createShellExtras(host, parts){
                 await scratch(utf16z(full).length, async at=>{
                     host.writeMemory(at, utf16z(full));
                     await parts.table.SHCreateDirectoryExW.handler([0, at, 0]);
-                });
+                }, undefined);
             }
             else if ((csidl & CSIDL_FLAG_DONT_VERIFY) === 0 && !exists(full))
             {
