@@ -132,6 +132,17 @@ test('the file index is stable, so two handles on one file compare equal', ()=>{
     assert.equal(dword(bytes, 0x400 + BY_HANDLE_FILE_INFORMATION.nNumberOfLinks), 1);
 });
 
+test('a time is set only through a handle that may write attributes', ()=>{
+    const { fns, errors, file, stamped } = setup();
+    const held = /** @type {any} */ (file);
+    held.writeAttributes = false;
+    assert.equal(fns.SetFileTime.handler([8, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED, even setting nothing');
+    held.writeAttributes = true;
+    assert.equal(fns.SetFileTime.handler([8, 0, 0, 0]), 1);
+    assert.deepEqual(stamped, []);
+});
+
 test('a handle that is not a file is refused everywhere', ()=>{
     const { fns } = setup();
     assert.equal(fns.GetFileTime.handler([99, 0x100, 0, 0]), 0);

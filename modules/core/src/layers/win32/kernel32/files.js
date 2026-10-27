@@ -113,6 +113,7 @@ const DELETE = 0x00010000;
 const GENERIC_ALL = 0x10000000;
 const GENERIC_EXECUTE = 0x20000000;
 const FILE_EXECUTE = 0x20;
+const FILE_WRITE_ATTRIBUTES = 0x100;
 const GENERIC_WRITE = 0x40000000;
 const GENERIC_READ = 0x80000000;
 
@@ -1843,8 +1844,11 @@ export function createFileFunctions(host){
         // own that a read or write moves: each says where in its OVERLAPPED.
         const overlapped = ((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0;
         const sequential = ((flags >>> 0) & FILE_FLAG_SEQUENTIAL_SCAN) !== 0;
+        const writeAttributes = (rights
+            & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_ATTRIBUTES)) !== 0;
         const handle = host.handles.open('file', {
-            path, node, read, write, position: 0, ...deleteOnClose ? { deleteOnClose } : {},
+            path, node, read, write, writeAttributes, position: 0,
+            ...deleteOnClose ? { deleteOnClose } : {},
             ...overlapped ? { overlapped } : {}, ...sequential ? { sequential } : {},
         });
         return { handle, existed: exists };

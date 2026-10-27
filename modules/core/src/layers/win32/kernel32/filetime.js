@@ -25,6 +25,7 @@
  */
 
 /** Codes this surface reports. */
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BAD_LENGTH = 24;
@@ -641,6 +642,12 @@ export function createFileTimeFunctions(host){
                 if (!file)
                 {
                     return fail(ERROR_INVALID_HANDLE);
+                }
+                // Setting a time is writing an attribute, which the handle
+                // has to have been opened for, whatever is set.
+                if (!(file.writeAttributes ?? file.write ?? true))
+                {
+                    return fail(ERROR_ACCESS_DENIED);
                 }
                 if ((written >>> 0) !== 0)
                 {
