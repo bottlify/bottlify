@@ -887,7 +887,7 @@ test('an ANSI name longer than MAX_PATH is refused by a call that takes one name
     assert.equal(tooLong.length, 261);
     assert.equal(fits.length, 260);
 
-    /** @type {[keyof typeof fns, number[], number][]} */
+    /** @type {[string, number[], number][]} */
     const calls = [
         ['GetFileAttributesA', [LONG], 0xffffffff],
         ['CreateFileA', [LONG, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0], INVALID_HANDLE_VALUE],
@@ -901,7 +901,7 @@ test('an ANSI name longer than MAX_PATH is refused by a call that takes one name
     {
         at(LONG, tooLong);
         error.code = ERROR_SUCCESS;
-        assert.equal(fns[name].handler(args), failed, name);
+        assert.equal(/** @type {any} */ (fns)[name].handler(args), failed, name);
         assert.equal(error.code, ERROR_FILENAME_EXCED_RANGE, name);
     }
     assert.equal(files.stat(tooLong)?.exists ?? false, false, 'nothing made under the name');
@@ -2561,6 +2561,19 @@ test('the serial calls refuse a file as its file system does, anything else as n
         assert.equal(error.code, ERROR_INVALID_HANDLE, `${name}: nor is nothing`);
     }
     assert.equal(said.length, Object.keys(calls).length, 'each call said once');
+});
+
+test('a port asked for by name is not found: there is none', ()=>{
+    const { error, fns, at } = setup();
+    for (const name of ['GetDefaultCommConfigA', 'SetDefaultCommConfigA', 'CommConfigDialogA',
+        'GetDefaultCommConfigW', 'SetDefaultCommConfigW', 'CommConfigDialogW'])
+    {
+        const call = /** @type {any} */ (fns)[name];
+        assert.equal(call.argBytes, 12, `${name} pops its arguments`);
+        error.code = ERROR_SUCCESS;
+        assert.equal(call.handler([at(NAME, 'COM1'), 0x200, 0x300]), 0, name);
+        assert.equal(error.code, ERROR_FILE_NOT_FOUND, name);
+    }
 });
 
 test('a library this build implements stands in the system folder as a file', ()=>{

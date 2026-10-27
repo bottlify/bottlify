@@ -16,11 +16,19 @@
  * that is not a file object -- a stale handle, an event, a console -- is
  * ERROR_INVALID_HANDLE. Every call fails, FALSE, through the shared refusals,
  * so a run says once which serial calls a program made.
+ *
+ * BuildCommDCB needs no port: it reads a control string into a DCB
+ * (`comm-dcb.js`).
  */
 
 import { createRefusals } from '../common/refusal.js';
+import { applyCommSettings, DCB_SIZE, parseCommString, TIMEOUTS_SIZE } from './comm-dcb.js';
 
 const ERROR_INVALID_FUNCTION = 1;
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_INVALID_PARAMETER = 87;
+/** How far a control string is read: whole. */
+const WHOLE_STRING = 32767;
 const ERROR_INVALID_HANDLE = 6;
 
 /** The handle kinds that are file objects, which a driver below them refuses. */
@@ -52,17 +60,35 @@ export const SERIAL_CALLS = Object.freeze({
 });
 
 /**
+ * The calls that name a port rather than hold a handle to one, with their
+ * arguments' bytes: no port by any name is here, so each fails as for a
+ * port that does not exist, ERROR_FILE_NOT_FOUND as CreateFile gives for one.
+ */
+export const PORT_CALLS = Object.freeze({
+    GetDefaultCommConfigA: 12,
+    GetDefaultCommConfigW: 12,
+    SetDefaultCommConfigA: 12,
+    SetDefaultCommConfigW: 12,
+    CommConfigDialogA: 12,
+    CommConfigDialogW: 12,
+});
+
+/**
  * @typedef {Object} CommHost
  * @property {{ typeOf?: (handle: number) => string | undefined | null }} handles
  * @property {(code: number) => void} setLastError
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} readWideString  limit in bytes
  */
 
 /**
  * @param {CommHost} host
  */
 export function createCommFunctions(host){
-    const refuse = createRefusals({ divergence: host.divergence });
+    const refuse = createRefusals({ setLastError: host.setLastError, divergence: host.divergence });
 
     /** @param {number} handle */
     const kindOf = handle=>{
@@ -76,7 +102,53 @@ export function createCommFunctions(host){
         }
     };
 
-    return Object.fromEntries(Object.entries(SERIAL_CALLS).map(([name, argBytes])=>{
+    const byName = Object.entries(PORT_CALLS).map(([name, argBytes])=>[name,
+        refuse(name, { argBytes, lastError: ERROR_FILE_NOT_FOUND,
+            why: 'there is no serial port on this machine' })]);
+
+    /**
+     * BuildCommDCB and BuildCommDCBAndTimeouts in either width: a string
+     * Windows refuses changes nothing and is ERROR_INVALID_PARAMETER; one it
+     * takes leaves the last error alone.
+     *
+     * @param {(address: number) => string} readText @param {boolean} withTimeouts
+     */
+    const buildDcb = (readText, withTimeouts)=>({
+        argBytes: withTimeouts ? 12 : 8,
+        /** @param {number[]} args */
+        handler: ([text, dcb, timeouts])=>{
+            const settings = (text >>> 0) === 0 ? null : parseCommString(readText(text >>> 0));
+            if (settings === null)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const block = host.readMemory(dcb >>> 0, DCB_SIZE).slice();
+            const times = withTimeouts && (timeouts >>> 0) !== 0
+                ? host.readMemory(timeouts >>> 0, TIMEOUTS_SIZE).slice() : null;
+            applyCommSettings(settings, block, times);
+            host.writeMemory(dcb >>> 0, block);
+            if (times)
+            {
+                host.writeMemory(timeouts >>> 0, times);
+            }
+            return 1;
+        },
+    });
+    const ansi = (/** @type {number} */ address)=>host.readCString(address, WHOLE_STRING);
+    const wide = (/** @type {number} */ address)=>host.readWideString(address, WHOLE_STRING * 2);
+    const builders = [
+        /** BOOL BuildCommDCBA(LPCSTR lpDef, LPDCB lpDCB) */
+        ['BuildCommDCBA', buildDcb(ansi, false)],
+        /** BOOL BuildCommDCBW(LPCWSTR lpDef, LPDCB lpDCB) */
+        ['BuildCommDCBW', buildDcb(wide, false)],
+        /** BOOL BuildCommDCBAndTimeoutsA(LPCSTR, LPDCB, LPCOMMTIMEOUTS) */
+        ['BuildCommDCBAndTimeoutsA', buildDcb(ansi, true)],
+        /** BOOL BuildCommDCBAndTimeoutsW(LPCWSTR, LPDCB, LPCOMMTIMEOUTS) */
+        ['BuildCommDCBAndTimeoutsW', buildDcb(wide, true)],
+    ];
+
+    const handled = Object.entries(SERIAL_CALLS).map(([name, argBytes])=>{
         const refusal = refuse(name, { argBytes, why: 'there is no serial port on this machine' });
         return [name, {
             argBytes,
@@ -88,5 +160,7 @@ export function createCommFunctions(host){
                 return refusal.handler();
             },
         }];
-    }));
+    });
+
+    return Object.fromEntries([...builders, ...byName, ...handled]);
 }
