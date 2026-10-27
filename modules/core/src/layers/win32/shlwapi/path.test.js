@@ -284,6 +284,24 @@ test('PathFileExists asks the volume against the current directory', ()=>{
     assert.equal(shlwapiMachine().fns.PathFileExistsW.handler([0x10000]), 0, 'no volume');
 });
 
+test('PathFileExists and PathIsDirectory answer FALSE for a path the volume refuses', ()=>{
+    const refuse = ()=>{
+        throw Object.assign(new Error('a tab is not a path'), { code: 'INVALID_PATH' });
+    };
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine({ files: { stat: refuse }, fullPath: path=>path });
+        for (const name of ['PathFileExists', 'PathIsDirectory'])
+        {
+            assert.equal(m.fns[`${name}${suffix}`].handler([m.put('\t', wide)]), 0, name);
+        }
+    }
+    const broken = shlwapiMachine({ files: { stat: ()=>{ throw new TypeError('a bug'); } },
+        fullPath: path=>path });
+    assert.throws(()=>broken.fns.PathFileExistsA.handler([broken.put('x', false)]), TypeError,
+        'a host bug still surfaces');
+});
+
 test('PathSearchAndQualify is kernel32\'s search, then its full path', ()=>{
     /** @type {string[]} */
     const calls = [];

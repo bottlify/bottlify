@@ -74,10 +74,6 @@ export const KNOWN = new Map([
     ['d3dx9_24.dll!D3DXFresnelTerm', 'guest code: answers on the x87 stack'],
     // Gaps of their libraries' own, outside the host-crash package that
     // made this list.
-    ['SHLWAPI.dll!PathFileExistsA', 'shlwapi: a path the filesystem refuses (INVALID_PATH)'],
-    ['SHLWAPI.dll!PathFileExistsW', 'shlwapi: a path the filesystem refuses (INVALID_PATH)'],
-    ['SHLWAPI.dll!PathIsDirectoryA', 'shlwapi: a path the filesystem refuses (INVALID_PATH)'],
-    ['SHLWAPI.dll!PathIsDirectoryW', 'shlwapi: a path the filesystem refuses (INVALID_PATH)'],
     ['WINTRUST.dll!CryptCATOpen', 'wintrust: an empty path, or one refused (INVALID_PATH)'],
 ]);
 

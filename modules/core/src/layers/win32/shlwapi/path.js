@@ -330,6 +330,34 @@ const strippedRoot = path=>{
  */
 
 /**
+ * The volume's answer for a path, against the current directory, or null for
+ * nothing there. A path the volume refuses -- a wildcard, a tab, a drive that
+ * is not a letter -- is nothing there too: Windows' GetFileAttributes fails
+ * on it and PathFileExists and PathIsDirectory answer FALSE.
+ *
+ * @param {{ files?: { stat(path: string): { exists?: boolean, isDirectory?: boolean } | null },
+ *     fullPath?: (path: string) => string }} host
+ * @param {string | null} path
+ */
+export function statPath(host, path){
+    if (!path || !host.files || !host.fullPath)
+    {
+        return null;
+    }
+    try
+    {
+        return host.files.stat(host.fullPath(path));
+    }
+    catch (e){
+        if (e && typeof e === 'object' && 'code' in e)
+        {
+            return null;
+        }
+        throw e;
+    }
+}
+
+/**
  * PathCompactPath's answer: the path as it is when it fits in `limit`
  * pixels; otherwise the directories before its file name cut back and an
  * ellipsis put in their place, as much of the path's start kept as fits --
@@ -426,8 +454,7 @@ export function createPathFunctions(host, { A, W }){
      *
      * @param {string | null} path
      */
-    const stat = path=>(path && host.files && host.fullPath
-        ? host.files.stat(host.fullPath(path)) : null);
+    const stat = path=>statPath(host, path);
 
     /**
      * One of kernel32's file functions, called with the caller's own

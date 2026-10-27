@@ -18,7 +18,7 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createForwards } from './forwards.js';
 import { MAX_PATH, canonical, compactPath, createPathFunctions, extensionIndex, isSeparator,
-    rootOf }
+    rootOf, statPath }
     from './path.js';
 import { createRegistryHelpers } from './registry.js';
 import { createStringFunctions } from './strings.js';
@@ -489,12 +489,7 @@ export function createShlwapiFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([pointer])=>{
-            const path = read(pointer);
-            if (!path || !host.files || !host.fullPath)
-            {
-                return 0;
-            }
-            const entry = host.files.stat(host.fullPath(path));
+            const entry = statPath(host, read(pointer));
             return entry?.exists && entry.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0;
         },
     });
