@@ -610,6 +610,49 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
             }
             return { hr: handOut(folderObject(folder), IID_ISHELLFOLDER, out), last };
         },
+        /**
+         * What the desktop's ParseDisplayName finds for a name: the item's
+         * text and attributes, or null for a name this namespace has not.
+         *
+         * @param {string} name
+         */
+        parse: name=>{
+            try
+            {
+                const item = itemFor(parsingName(name));
+                return item ? { text: item.text, attributes: item.attributes } : null;
+            }
+            catch (e){
+                // A name the volume refuses outright -- a wildcard, a tab -- names nothing.
+                if (e && typeof e === 'object' && 'code' in e)
+                {
+                    return null;
+                }
+                throw e;
+            }
+        },
+        /**
+         * The folder a list names, into guest memory: the desktop's
+         * BindToObject, and the desktop itself for an empty list.
+         *
+         * @param {number} list @param {number} riid @param {number} out
+         */
+        bind: (list, riid, out)=>{
+            const iid = readGuid(memory, riid >>> 0);
+            const text = itemsOf(memory, list >>> 0).at(-1);
+            const item = text === undefined ? null : itemFor(text);
+            if (text !== undefined && (!item || (item.attributes & SFGAO_FOLDER) === 0))
+            {
+                memory.writeMemory(out >>> 0, dword(0));
+                return E_INVALIDARG;
+            }
+            if (iid !== IID_ISHELLFOLDER && iid !== IID_IUNKNOWN)
+            {
+                memory.writeMemory(out >>> 0, dword(0));
+                return E_NOINTERFACE;
+            }
+            return handOut(folderObject(item ? item.text : null), IID_ISHELLFOLDER, out >>> 0);
+        },
         /** @param {string} text @returns {number} */
         listFor,
         /** @param {number} list */

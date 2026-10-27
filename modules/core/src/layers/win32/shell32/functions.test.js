@@ -453,11 +453,11 @@ test('a document still reports no association, and clears the buffer', ()=>{
     assert.equal(m.memory[0x200], 0);
 });
 
-test('a window may accept drops, and no files are ever dropped on it', ()=>{
+test('a window may accept drops, and a handle that is no drop holds no files', async()=>{
     const m = machine();
     assert.equal(m.shell.DragAcceptFiles.handler([0x40, 1]), 0);
     assert.equal(m.shell.DragAcceptFiles.handler([0x40, 0]), 0);
-    assert.equal(m.shell.DragQueryFileA.handler([0, 0xffffffff, 0, 0]), 0,
+    assert.equal(await m.shell.DragQueryFileA.handler([0, 0xffffffff, 0, 0]), 0,
         'the count a caller loops over is zero, which runs no times');
 });
 
@@ -513,12 +513,6 @@ test('a notification icon is refused, with both arguments popped', ()=>{
     assert.equal(fns.Shell_NotifyIconA.handler(), 0);
     assert.equal(fns.Shell_NotifyIconW.argBytes, 8);
     assert.equal(fns.Shell_NotifyIconW.handler(), 0);
-});
-
-test('DragFinish pops the drop it is handed', ()=>{
-    const fns = createShellFunctions({ writeMemory: ()=>{} });
-    assert.equal(fns.DragFinish.argBytes, 4);
-    assert.equal(fns.DragFinish.handler(), 0);
 });
 
 /**
@@ -873,7 +867,7 @@ test('SHPathPrepareForWrite with no volume finds no path', ()=>{
     assert.equal(m.shell.SHPathPrepareForWriteA.handler([0, 0, 0x100, 1]) | 0, 0x80070003 | 0);
 });
 
-test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no drop', ()=>{
+test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no drop', async()=>{
     const m = machineWithPaths('C:\\App');
     /** @param {string} text @param {number} at */
     const wide = (text, at)=>{
@@ -899,7 +893,7 @@ test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no d
     assert.equal(read(0x200), '', 'cleared');
     assert.equal(m.shell.FindExecutableW.argBytes, 12);
 
-    assert.equal(m.shell.DragQueryFileW.handler([0, 0xffffffff, 0, 0]), 0);
+    assert.equal(await m.shell.DragQueryFileW.handler([0, 0xffffffff, 0, 0]), 0);
     assert.equal(m.shell.DragQueryFileW.argBytes, 16);
     assert.equal(m.shell.DragQueryFile, m.shell.DragQueryFileA, 'the bare name is the ANSI one');
     assert.equal(m.shell.ShellExecuteEx, m.shell.ShellExecuteExA);

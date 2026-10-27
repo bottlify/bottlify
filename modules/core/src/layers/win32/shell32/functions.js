@@ -38,6 +38,9 @@ import { createDirectoryPath, runFileOperation } from './fileop.js';
 import { readFileIcons } from './icons.js';
 import { splitCommandLine } from './commandline.js';
 import { createDesktopFunctions } from './desktop.js';
+import { IDLIST_ORDINALS, createIdListFunctions } from './idlist.js';
+import { createDropFunctions } from './drop.js';
+import { createShellExtras } from './extras.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
@@ -54,7 +57,16 @@ const WHOLE_NAME = 32767;
  * The exports a program imports from shell32 by number alone, by their XP
  * ordinals.
  */
-export const SHELL32_ORDINALS = Object.freeze({ 165: 'SHCreateDirectory' });
+export const SHELL32_ORDINALS = Object.freeze(Object.fromEntries([
+    [2, 'SHChangeNotifyRegister'], [3, 'SHDefExtractIconA'], [4, 'SHChangeNotifyDeregister'],
+    [6, 'SHDefExtractIconW'], [28, 'SHILCreateFromPath'], [67, 'Shell_MergeMenus'],
+    [256, 'SHCreateShellFolderView'], [654, 'ReadCabinetState'], [727, 'SHGetImageList'],
+    [747, 'SHLimitInputEdit'], [179, 'SHGetNewLinkInfoA'], [180, 'SHGetNewLinkInfoW'],
+    [71, 'Shell_GetImageLists'], [157, 'ILCreateFromPathW'], [162, 'SHSimpleIDListFromPath'],
+    [165, 'SHCreateDirectory'], [189, 'ILCreateFromPathA'], [190, 'ILCreateFromPathW'],
+    [644, 'SHChangeNotification_Lock'], [645, 'SHChangeNotification_Unlock'],
+    ...IDLIST_ORDINALS,
+]));
 
 /** ShellExecute reports failure as a value of 32 or less, not as zero. */
 const SE_ERR_FNF = 2;
@@ -92,6 +104,7 @@ const ADDRESS = /^(https?|ftp|mailto):/i;
 const E_NOTIMPL = 0x80004001 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const S_OK = 0;
+const S_FALSE = 1;
 
 /** What SHFileOperation answers when it will not operate. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
@@ -202,6 +215,17 @@ const CSIDL_FOLDERS = Object.freeze({
 /**
  * @typedef {Object} ShellHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {(address: number) => void} [free]
+ *           Gives back what `allocate` gave: ILFree and SHFree.
+ * @property {(steps: Generator<{ entry: number, args: number[] }, any, number>) => any} [drive]
+ *           Runs a handler's calls into the guest: SHBindToObject on a folder
+ *           of the program's own.
+ * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
+ *     | undefined} [library]
+ *           Another library's exports, read when a call is made: what the
+ *           calls built on kernel32's -- a drop's block, environment strings
+ *           -- reach it through.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call whose answer differs from Windows says so, rather than
  *           failing silently -- the name and the detail, as the assembling
@@ -1253,29 +1277,6 @@ export function createShellFunctions(host){
         },
 
         /**
-         * UINT DragQueryFileA(HDROP hDrop, UINT iFile, LPSTR lpszFile, UINT cch)
-         *
-         * An index of 0xFFFFFFFF asks how many files were dropped. No drop ever
-         * happens here, so that is zero -- and a caller's loop over the count
-         * runs no times, which is the correct amount.
-         */
-        DragQueryFileA: {
-            argBytes: 16,
-            handler: ()=>0,
-        },
-        /** UINT DragQueryFileW(HDROP hDrop, UINT iFile, LPWSTR lpszFile, UINT cch) */
-        DragQueryFileW: {
-            argBytes: 16,
-            handler: ()=>0,
-        },
-
-        /** void DragFinish(HDROP hDrop) -- there was never a drop to release. */
-        DragFinish: {
-            argBytes: 4,
-            handler: ()=>0,
-        },
-
-        /**
          * PIDLIST_ABSOLUTE SHBrowseForFolderA(LPBROWSEINFOA lpbi)
          * PIDLIST_ABSOLUTE SHBrowseForFolderW(LPBROWSEINFOW lpbi)
          *
@@ -1624,6 +1625,92 @@ export function createShellFunctions(host){
         ExtractAssociatedIconExW: extractAssociatedIconEx(true),
 
         /**
+         * HICON ExtractAssociatedIconA(HINSTANCE hInst, LPSTR pszIconPath, LPWORD piIcon)
+         *
+         * ExtractAssociatedIconEx without the resource id.
+         */
+        ExtractAssociatedIconA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([instance, path, index])=>
+                extractAssociatedIconEx(false).handler([instance, path, index, 0]),
+        },
+        ExtractAssociatedIconW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([instance, path, index])=>
+                extractAssociatedIconEx(true).handler([instance, path, index, 0]),
+        },
+
+        /**
+         * HRESULT SHDefExtractIconA(LPCSTR pszIconFile, int iIndex, UINT uFlags,
+         *     HICON *phiconLarge, HICON *phiconSmall, UINT nIconSize)
+         *
+         * ExtractIconEx's icon at the index: S_OK when there is one, S_FALSE
+         * when the file has none there; nowhere to put one asks for nothing.
+         */
+        SHDefExtractIconA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([file, index, , large, small])=>{
+                if ((large >>> 0) === 0 && (small >>> 0) === 0)
+                {
+                    return S_OK;
+                }
+                return after(extractIconEx(false).handler([file, index, large, small, 1]),
+                    (/** @type {number} */ count)=>((count | 0) > 0 ? S_OK : S_FALSE));
+            },
+        },
+        SHDefExtractIconW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([file, index, , large, small])=>{
+                if ((large >>> 0) === 0 && (small >>> 0) === 0)
+                {
+                    return S_OK;
+                }
+                return after(extractIconEx(true).handler([file, index, large, small, 1]),
+                    (/** @type {number} */ count)=>((count | 0) > 0 ? S_OK : S_FALSE));
+            },
+        },
+
+        /**
+         * HRESULT SHBindToObject(IShellFolder *psf, PCUIDLIST_RELATIVE pidl, IBindCtx *pbc,
+         *                        REFIID riid, void **ppv)
+         *
+         * The object the list names under the folder, the desktop for none:
+         * the folder's own BindToObject.
+         */
+        SHBindToObject: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([folder, list, , riid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if ((folder >>> 0) === 0)
+                {
+                    return namespace ? namespace.bind(list, riid, out) : E_FAIL;
+                }
+                const read = host.readMemory;
+                if (!host.drive || !read)
+                {
+                    host.writeMemory(out >>> 0, dword(0));
+                    return E_NOTIMPL;
+                }
+                /** @param {number} at */
+                const u32 = at=>new DataView(read(at >>> 0, 4).slice().buffer).getUint32(0, true);
+                // IShellFolder::BindToObject is its fifth method after IUnknown's three.
+                const entry = u32(u32(folder) + 5 * 4);
+                return host.drive((function* (){
+                    return yield { entry,
+                        args: [folder >>> 0, list >>> 0, 0, riid >>> 0, out >>> 0] };
+                })());
+            },
+        },
+
+        /**
          * HRESULT SHBindToParent(PCIDLIST_ABSOLUTE pidl, REFIID riid, void **ppv,
          *                        PCUITEMID_CHILD *ppidlLast)
          *
@@ -1702,6 +1789,29 @@ export function createShellFunctions(host){
         },
 
         ...createDesktopFunctions(host),
+
+        ...(host.readMemory ? createIdListFunctions({ readMemory: host.readMemory,
+            writeMemory: host.writeMemory, allocate: host.allocate, free: host.free }) : {}),
+        // Without guest memory to read, every drop holds nothing: kernel32's
+        // lock is not reached, and the zeros read are never asked for.
+        ...createDropFunctions({
+            readMemory: host.readMemory ?? ((_, length)=>new Uint8Array(length)),
+            writeMemory: host.writeMemory, library: host.library }, decodeAnsi,
+        text=>encodeAnsi(text)),
+        ...(host.readMemory && host.readCString ? createShellExtras({
+            readMemory: host.readMemory, writeMemory: host.writeMemory,
+            readCString: host.readCString, readWideString: host.readWideString,
+            allocate: host.allocate, free: host.free, library: host.library,
+            publish: host.publish, divergence: host.divergence,
+        }, {
+            /** @returns {Record<string, { handler: (args: number[]) => any }>} */
+            get table(){
+                return /** @type {any} */ (table);
+            },
+            listFor,
+            exists: path=>namespace?.parse(path) !== null && namespace !== null,
+            parse: name=>namespace?.parse(name) ?? null,
+        }) : {}),
     };
     // The real library exports the ANSI form of several calls under their
     // bare names as well, and a program that looks one up by hand may ask

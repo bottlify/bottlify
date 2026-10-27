@@ -2507,7 +2507,14 @@ export function createWin32Module(){
                 }),
 
                 'SHELL32.dll': createShellFunctions({
-                    writeMemory, readMemory, readCString,
+                    writeMemory, readMemory, readCString, readWideString,
+                    /** @param {number} address */
+                    free: address=>heap.free(address),
+                    // Read when called: the table is still being built here.
+                    /** @param {string} name */
+                    library: name=>libraries[name],
+                    // SHBindToObject calls a folder of the program's own.
+                    drive: steps=>bridge.drive(steps),
                     // ExtractIcon hands out an icon of pixels read from another
                     // file: the object user32's CreateIcon makes.
                     icon: picture=>handles.open('icon', {
