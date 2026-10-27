@@ -3996,9 +3996,10 @@ function switchCases(e){
     b.localGet(registerLocal(e, table.index));
     if (isLong(e))
     {
-        // An index past the low half is past the table: the default.
-        b.op(I64.wrap).i32const(table.entries.length).localGet(registerLocal(e, table.index))
-            .i64const(32n).op(I64.shrU).op(I64.eqz).select();
+        // The low half alone: the index only picks which case's address the
+        // target is matched with, and a case is taken only on a match, so an
+        // index past the low half picks a case the target does not name.
+        b.op(I64.wrap);
     }
     b.brTable(table.entries.map(target=>{
         const k = cases.indexOf(target);
