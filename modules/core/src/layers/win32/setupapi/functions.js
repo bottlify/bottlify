@@ -11,6 +11,7 @@ import {
     commitQueue, lookup, queueInstallSection, targetDirectory as listTarget,
 } from './queue.js';
 import { standardDirids } from './dirids.js';
+import { createStringTableFunctions } from './stringtable.js';
 import {
     CLASS_KEY, DEVICE_CLASSES_KEY, GUID_NULL, SPINT, createDeviceStore, interfacePath,
 } from './devices.js';
@@ -1165,6 +1166,14 @@ export function createSetupapiFunctions(host){
         /** @type {unknown} */ ({ [`${name}A`]: make(false), [`${name}W`]: make(true) }));
 
     return {
+        ...host.readWideString ? createStringTableFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readWideString: host.readWideString,
+            allocate: host.allocate,
+            free: host.free,
+        }) : {},
+
         /**
          * HINF SetupOpenInfFileA(PCSTR FileName, PCSTR InfClass, DWORD InfStyle,
          *                        PUINT ErrorLine)
