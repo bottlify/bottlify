@@ -1053,10 +1053,13 @@ export function createCorkHost(config){
             takeFault(PAGE_FAULT);
             return 0;
         }
-        // Long mode's runner takes the tier itself, between its regions.
+        // Long mode's runner takes the tier itself, between its regions. On the shared
+        // runtime a forced step is one instruction, as the 32-bit one's is: long mode's
+        // JavaScript interpreter, a hundred times slower than the tier, run on to the next
+        // entry ran a self-patching routine's whole caller in it.
         if (wasmTier === null || force || long && !sharedLong)
         {
-            return interpretJs(address, budget, force, jumpedIn, false);
+            return interpretJs(address, budget, force, jumpedIn, force && sharedLong);
         }
         // Long mode's own interpreter is no faster start than the tier: none
         // runs before it.
@@ -1688,6 +1691,8 @@ export function createCorkHost(config){
         corkDiagnostics: ()=>({
             ...runtime.diagnostics(),
             ...wasmTier === null ? {} : { interpretedRelaxedReads: wasmTier.relaxedReads() },
+            // What the JavaScript interpreter retired, a hundred times slower than the tier.
+            interpretedByScript: interpreter?.retired ?? 0,
             ...untiered.length === 0 ? {} : { untiered: [...untiered] },
             ...longRunner === null ? {} : { long: longRunner.diagnostics() },
         }),

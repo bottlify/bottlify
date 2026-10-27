@@ -191,3 +191,38 @@ test('eight bytes copied through the x87 arrive whole however the slices cut the
             `slices of ${slice}`);
     }
 });
+
+test('long mode on the shared runtime steps a self-patching routine an instruction at a time',
+    ()=>{
+        const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
+            entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
+            cork: { long: 'shared' } });
+        // At 0x11000: for ebx in 0..2999, r12d += scale(edi = ebx, esi = ebx & 3); hlt.
+        // At 0x12000, scale: cmp [add's imm], esi; je; mov [add's imm], esi;
+        // imul eax, edi, 0x12345678; add eax, imm; ret -- a store into its own page
+        // three calls in four, so its region is dropped and each patch is a forced step.
+        load(h, 0x11000, hex('31db4531e489de83e60389dfe8ef0f00004101c4ffc381fbb80b000075e7f4'));
+        h.writePhysical(0x12000,
+            Uint8Array.from(hex('39350f000000740689350700000069c7785634120545230100c3')));
+        h.runSlice(100_000);
+        while (!h.halted())
+        {
+            h.cork().translatePending().catch(()=>{});
+            h.runSlice(100_000);
+        }
+        let sum = 0;
+        for (let i = 0; i < 3000; i++)
+        {
+            sum = (sum + Math.imul(i, 0x12345678) + (i & 3)) >>> 0;
+        }
+        assert.equal(Number(h.readReg64('r12') & 0xffffffffn), sum);
+        // A forced step that ran on to the next entry interpreted the caller's loop
+        // whole after each patch, tens of instructions a call.
+        const script = h.corkDiagnostics().interpretedByScript;
+        assert.ok(script < 3000, `${script} instructions interpreted by the script`);
+    });
+
+/** @param {string} text */
+function hex(text){
+    return (text.match(/../g) ?? []).map(byte=>parseInt(byte, 16));
+}
