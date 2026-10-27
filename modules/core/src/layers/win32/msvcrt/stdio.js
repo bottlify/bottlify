@@ -135,7 +135,7 @@ const CCS = new Map([['unicode', O_WTEXT], ['utf-8', O_U8TEXT], ['utf-16le', O_U
  * @param {string} mode
  * @returns {{ read: boolean, write: boolean, create: boolean, truncate: boolean,
  *            append: boolean, flags: number, text: boolean | null,
- *            temporary: boolean, unicode: number } | null}
+ *            temporary: boolean, sequential: boolean, unicode: number } | null}
  */
 function parseMode(mode){
     const comma = mode.indexOf(',');
@@ -149,17 +149,19 @@ function parseMode(mode){
     const plus = rest.includes('+');
     const text = /[bt]/.test(rest) ? rest.lastIndexOf('t') > rest.lastIndexOf('b') : null;
     const temporary = rest.includes('D');
+    // 'S' asks for sequential access and 'R' for random; the first said wins.
+    const sequential = /[SR]/.exec(rest)?.[0] === 'S';
     const unicode = text === false ? 0 : ccs;
     switch (mode[0]){
         case 'r':
             return { read: true, write: plus, create: false, truncate: false, append: false,
-                flags: plus ? IORW : IOREAD, text, temporary, unicode };
+                flags: plus ? IORW : IOREAD, text, temporary, sequential, unicode };
         case 'w':
             return { read: plus, write: true, create: true, truncate: true, append: false,
-                flags: plus ? IORW : IOWRT, text, temporary, unicode };
+                flags: plus ? IORW : IOWRT, text, temporary, sequential, unicode };
         case 'a':
             return { read: plus, write: true, create: true, truncate: false, append: true,
-                flags: plus ? IORW : IOWRT, text, temporary, unicode };
+                flags: plus ? IORW : IOWRT, text, temporary, sequential, unicode };
         default:
             return null;
     }

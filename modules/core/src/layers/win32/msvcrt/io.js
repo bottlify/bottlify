@@ -42,6 +42,7 @@ const O_WRONLY = 0x0001;
 const O_RDWR = 0x0002;
 const O_ACCMODE = 0x0003;
 const O_APPEND = 0x0008;
+const O_SEQUENTIAL = 0x0020;
 const O_TEMPORARY = 0x0040;
 const O_CREAT = 0x0100;
 const O_TRUNC = 0x0200;
@@ -296,6 +297,8 @@ const onConsole = (handle, settings)=>{
  * @property {boolean} [append]
  * @property {boolean | null} [text]  Null: whatever `_fmode` says.
  * @property {boolean} [temporary]  Remove the file when the descriptor closes.
+ * @property {boolean} [sequential]  Read front to back: the cache hint
+ *           FILE_FLAG_SEQUENTIAL_SCAN gives, which the file's handle reports.
  * @property {number} [unicode]  A Unicode translation to open it in.
  */
 
@@ -542,7 +545,8 @@ export function createDescriptors(host){
                 fail(!there ? ENOENT : (request.exclusive ? EEXIST : EACCES));
                 return -1;
             }
-            const file = { node, path, position: 0, read: request.read, write: request.write };
+            const file = { node, path, position: 0, read: request.read, write: request.write,
+                ...request.sequential ? { sequential: true } : {} };
             const descriptor = over(file, {
                 append: request.append,
                 text: request.text ?? ((host.fmode?.() ?? 0) & O_BINARY) === 0,
@@ -1007,6 +1011,8 @@ export function createIoFunctions(host, descriptors){
             append: (flags & O_APPEND) !== 0,
             text: (flags & O_BINARY) !== 0 ? false : ((flags & O_TEXT) !== 0 ? true : null),
             temporary: (flags & O_TEMPORARY) !== 0,
+            // _O_SEQUENTIAL wins over _O_RANDOM, said together.
+            sequential: (flags & O_SEQUENTIAL) !== 0,
             unicode: (flags & O_BINARY) !== 0 ? 0 : unicodeOf(flags),
         });
     };

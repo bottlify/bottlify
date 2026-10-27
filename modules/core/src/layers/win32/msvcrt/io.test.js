@@ -964,3 +964,41 @@ test('a read or write the descriptor is not open for leaves ERROR_ACCESS_DENIED 
     assert.equal(fns._read.handler([77, scratch, 1]), -1);
     assert.deepEqual(reasons, [5, 5], 'a number not open leaves it alone');
 });
+
+test('_O_SEQUENTIAL and fopen\'s S give the handle the sequential hint; R before S does not',
+    async()=>{
+        // Wine's msvcrt test_open_hints and test_fopen_hints: the handle's
+        // FileModeInformation says FILE_SEQUENTIAL_ONLY.
+        const { createStdioFunctions } = await import('./stdio.js');
+        const O_RANDOM = 0x0010;
+        const O_SEQUENTIAL = 0x0020;
+        const { memory, handles, fns, open, files } = withHandles({
+            'C:\\game\\hint.tst': new Uint8Array(0),
+        });
+        /** @param {number} fd */
+        const hinted = fd=>Boolean(handles.file(fns._get_osfhandle.handler([fd]))?.sequential);
+        for (const [flags, expected] of /** @type {[number, boolean][]} */ ([
+            [O_BINARY, false], [O_BINARY | O_SEQUENTIAL, true], [O_BINARY | O_RANDOM, false],
+            [O_BINARY | O_RANDOM | O_SEQUENTIAL, true]]))
+        {
+            const fd = open('C:\\game\\hint.tst', flags);
+            assert.equal(hinted(fd), expected, `_open ${flags.toString(16)}`);
+            fns._close.handler([fd]);
+        }
+        const descriptors = createDescriptors({ files, handles, errno: ()=>0, write: ()=>0 });
+        const io = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files,
+            errno: ()=>0 }, descriptors));
+        const stdio = /** @type {Record<string, any>} */ (createStdioFunctions(/** @type {any} */ ({
+            ...memory, files, errno: ()=>0, iob: ()=>memory.allocate(32 * 20), descriptors,
+            free: ()=>true })));
+        for (const [mode, expected] of /** @type {[string, boolean][]} */ ([['rb', false],
+            ['rbS', true], ['rbR', false], ['rbSR', true], ['rbRS', false]]))
+        {
+            const stream = stdio.fopen.handler([memory.put('C:\\game\\hint.tst'),
+                memory.put(mode)]);
+            const fd = stdio._fileno.handler([stream]);
+            assert.equal(Boolean(handles.file(io._get_osfhandle.handler([fd]))?.sequential),
+                expected, mode);
+            stdio.fclose.handler([stream]);
+        }
+    });
