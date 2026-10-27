@@ -74,7 +74,6 @@ export const KNOWN = new Map([
     ['d3dx9_24.dll!D3DXFresnelTerm', 'guest code: answers on the x87 stack'],
     // Gaps of their libraries' own, outside the host-crash package that
     // made this list.
-    ['ole32.dll!FreePropVariantArray', 'ole32: a count read as a VARIANT recurses for ever'],
     ['SHLWAPI.dll!PathFileExistsA', 'shlwapi: a path the filesystem refuses (INVALID_PATH)'],
     ['SHLWAPI.dll!PathFileExistsW', 'shlwapi: a path the filesystem refuses (INVALID_PATH)'],
     ['SHLWAPI.dll!PathIsDirectoryA', 'shlwapi: a path the filesystem refuses (INVALID_PATH)'],

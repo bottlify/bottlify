@@ -522,3 +522,11 @@ test('FreePropVariantArray clears each record in turn, and refuses only a NULL a
     assert.equal(await m.fns.FreePropVariantArray.handler([0, SOURCE]), S_OK);
     assert.equal(m.fns.FreePropVariantArray.handler([3, 0]), E_INVALIDARG);
 });
+
+test('FreePropVariantArray walks a long array without a stack frame per record', ()=>{
+    // A count is the caller's, as large as it likes: twelve thousand empty
+    // records answer at once, as Windows clears them in one loop.
+    const m = build();
+    const count = 0x3000;
+    assert.equal(m.fns.FreePropVariantArray.handler([count, 0x10000]), S_OK);
+});
