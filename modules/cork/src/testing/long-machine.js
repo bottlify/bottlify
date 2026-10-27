@@ -454,6 +454,23 @@ export const HOISTED_SWITCHES = ''
     + '58ffffff75ffffff7bffffff82ffffff89ffffff';
 
 /**
+ * Two switches whose index the block masks itself, no bound test before it,
+ * forty rounds, each case changing a word of [rbx] its own way:
+ *
+ *     1: mov eax, esi; and eax, 3; jmp [rax*8 + tableA]          absolute quadwords
+ *        a0..a3: add [rbx], 1 / 10; [rbx] *= 3; sub [rbx], 7
+ *     2: lea rdx, [rip + tableB]; mov ecx, esi; and rcx, 7       offsets from the table,
+ *        movsxd rcx, [rdx + rcx*4]; add rcx, rdx; jmp rcx         a quadword mask
+ *        b0..b3: add [rbx + 8], 3; xor [rbx + 8], rsi; rol [rbx + 8], 5; not [rbx + 8]
+ *     3: inc esi; cmp esi, 40; jb 1b
+ */
+export const MASKED_SWITCHES = ''
+    + '31f689f083e003ff24c56000002048830301eb134883030aeb0d486b0b0348890beb0448832b07488d'
+    + '155200000089f14883e10748630c8a4801d1ffe14883430803eb1148317308eb0b48c1430805eb0448'
+    + 'f75308ffc683fe2872a6eb4266900e0000200000000014000020000000001a00002000000000230000'
+    + '2000000000bdffffffc4ffffffcaffffffd1ffffffd1ffffffcaffffffc4ffffffbdffffff';
+
+/**
  * Programs of calls and returns (`long/runtime.test.js` gives each one's source):
  * recursion past the wasm call depth, a callee that returns elsewhere, calls whose
  * callees are formed in, indirect calls predicted and not, a callee that jumps out

@@ -15,8 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CALLS, CORPUS, HOISTED_SWITCHES, SWITCHES, compare, flagsLeftUndefined, load, loopCases,
-    machine, nested, pool, program, run,
+    CALLS, CORPUS, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, flagsLeftUndefined, load,
+    loopCases, machine, nested, pool, program, run,
 } from '../testing/long-machine.js';
 import { createRuntimeRunner64 } from '../testing/runtime-runner64.js';
 
@@ -75,8 +75,8 @@ test('seeded long programs run in the shared runtime as interpreted', LONG, ()=>
 
 test('calls and returns, switches among them, run in the shared runtime as interpreted', ()=>{
     const cases = [...Object.entries(CALLS), ['switches', SWITCHES],
-        ['hoisted', HOISTED_SWITCHES]].flatMap(([name, code])=>CORPUS.cases.slice(0, 4)
-        .map((/** @type {any} */ one, /** @type {number} */ i)=>{
+        ['hoisted', HOISTED_SWITCHES], ['masked', MASKED_SWITCHES]].flatMap(([name, code])=>CORPUS
+        .cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>{
             const regs = [...one.regs];
             regs[10] = i % 2 === 0 ? '0' : '1';
             return { ...one, text: `${name} ${i}`, code, regs };

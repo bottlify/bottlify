@@ -28,8 +28,8 @@ import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
 
 import {
-    CALLS, CORPUS, EXIT, HOISTED_SWITCHES, SWITCHES, compare, load, machine, nested, pool, program,
-    run,
+    CALLS, CORPUS, EXIT, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, load, machine,
+    nested, pool, program, run,
 } from '../testing/long-machine.js';
 
 test('seeded long programs run translated as they run interpreted', ()=>{
@@ -168,6 +168,19 @@ test('the cases of a switch join its region, its jump going among them as interp
         assert.equal(exits, cases.length);
         // GCC's, MSVC's and MinGW's tables in the code are read wherever they are formed.
         assert.ok(stats.switches >= 3, JSON.stringify(stats));
+    }
+});
+
+test('a switch whose index its block masks joins its region, no bound test before it', ()=>{
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `masked switch ${i}`, code: MASKED_SWITCHES }));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits, stats } = compare(cases, budget);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+        // Both tables read in every case.
+        assert.ok(stats.switches >= 2 * cases.length, JSON.stringify(stats));
     }
 });
 

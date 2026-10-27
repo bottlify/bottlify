@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CORPUS, HOISTED_SWITCHES, SWITCHES, compare, loopCases, nested, pool, program,
+    CORPUS, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, loopCases, nested, pool, program,
 } from '../testing/long-machine.js';
 import { createSharedRunner64 } from '../testing/shared-runner64.js';
 
@@ -172,8 +172,8 @@ test('bit tests run in the shared emitter\'s regions as interpreted', ()=>{
 });
 
 test('switches run in the shared emitter\'s regions as interpreted, their index a quadword', ()=>{
-    const cases = [SWITCHES, HOISTED_SWITCHES].flatMap(code=>CORPUS.cases.slice(0, 4)
-        .map((/** @type {any} */ one, /** @type {number} */ i)=>({ ...one, text: `switch ${i}`,
+    const cases = [SWITCHES, HOISTED_SWITCHES, MASKED_SWITCHES].flatMap(code=>CORPUS.cases
+        .slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>({ ...one, text: `switch ${i}`,
             code })));
     for (const budget of [7, 100000])
     {

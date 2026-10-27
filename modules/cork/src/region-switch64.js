@@ -24,7 +24,9 @@
  * The table's length is the bound the compiler tests the index against on
  * the way into the block: `cmp x, n` then `ja`/`jae` falling through to it,
  * or `jbe`/`jb` taken to it, x the index register or the register it was
- * widened from (`movsxd`, `mov`) at the block's start.
+ * widened from (`movsxd`, `mov`) at the block's start -- or the mask the
+ * block itself takes the index's low bits with (`x & 7`), every case in the
+ * table.
  */
 
 /** What may stand between the bound test and the table read: a write to another register. */
@@ -135,6 +137,34 @@ function testedOf(instructions, index, upTo){
 }
 
 /**
+ * The entries a switch's index masked in its own block allows: `and i, m` --
+ * a dword one zero-extends the register -- with only writes to other
+ * registers after it up to the table's read, m + 1 entries; 0 where there is
+ * no such mask or it allows more than `most`.
+ *
+ * @param {Instruction[]} instructions @param {number} index @param {number} upTo
+ * @param {number} most
+ */
+function maskedCount(instructions, index, upTo, most){
+    for (let at = upTo - 1; at >= 0; at--)
+    {
+        const one = instructions[at];
+        const [into, by] = one.operands;
+        if (one.op === 'and' && into?.kind === 'reg' && into.reg === index && into.size >= 4
+            && by?.kind === 'imm')
+        {
+            const mask = Number(by.value);
+            return mask >= 0 && mask < most ? mask + 1 : 0;
+        }
+        if (!leaves(one, index))
+        {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/**
  * A long-mode block's switch table, or null where its jump goes through none
  * this reads.
  *
@@ -171,7 +201,8 @@ export function switchTable64(read, block, blocks, most, baseOf){
         }
         const index = /** @type {number} */ (operand.index);
         const tested = testedOf(instructions, index, instructions.length - 1);
-        const count = tested === null ? 0 : boundOf(block, all, tested, most);
+        const count = maskedCount(instructions, index, instructions.length - 1, most)
+            || (tested === null ? 0 : boundOf(block, all, tested, most));
         const address = /** @type {number} */ (operand.disp);
         const entries = [];
         for (let i = 0; i < count; i++)
@@ -275,7 +306,8 @@ function relativeTable(block, blocks, dword, most, baseOf){
         return null;
     }
     const tested = testedOf(instructions, index, at);
-    const count = tested === null ? 0 : boundOf(block, blocks, tested, most);
+    const count = maskedCount(instructions, index, at, most)
+        || (tested === null ? 0 : boundOf(block, blocks, tested, most));
     const address = baseValue + (from.disp ?? 0);
     if (count === 0 || address < 0 || address + count * 4 > 2 ** 32)
     {
