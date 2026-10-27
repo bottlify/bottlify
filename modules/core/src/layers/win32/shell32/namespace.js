@@ -59,6 +59,7 @@ const SFGAO_FILESYSTEM = 0x40000000;
 const SFGAO_HASSUBFOLDER = 0x80000000;
 
 const SHGDN_FORPARSING = 0x8000;
+const SHGDN_FORADDRESSBAR = 0x4000;
 
 /** STRRET: the type word, then the text in place. */
 const STRRET_CSTR = 2;
@@ -309,6 +310,11 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
         {
             return upper;
         }
+        // The Control Panel is in the computer, and is named through it too.
+        if (upper === `${MY_COMPUTER}\\${CONTROL_PANEL}`)
+        {
+            return CONTROL_PANEL;
+        }
         if (upper === MY_DOCUMENTS)
         {
             return documents?.() ?? text;
@@ -447,18 +453,19 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                     }
                     return E_INVALIDARG;
                 }
-                const item = itemFor(parsingName(readWide(name >>> 0)));
+                const text = readWide(name >>> 0);
                 memory.writeMemory(out >>> 0, dword(0));
+                // A path in the `\\?\` form is no display name.
+                const item = text.startsWith('\\\\?\\') ? null : itemFor(parsingName(text));
                 if (!item)
                 {
                     return E_INVALIDARG;
                 }
                 const list = listFor(item.text);
                 memory.writeMemory(out >>> 0, dword(list));
-                if ((eaten >>> 0) !== 0)
-                {
-                    memory.writeMemory(eaten >>> 0, dword(item.text.length));
-                }
+                // Windows leaves the count it was given as it was
+                // (Wine's shfldr_special, against Windows).
+                void eaten;
                 if ((attributes >>> 0) !== 0)
                 {
                     const asked = memory.readMemory(attributes >>> 0, 4);
@@ -558,7 +565,10 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                 {
                     return E_INVALIDARG;
                 }
-                const text = ((flags >>> 0) & SHGDN_FORPARSING) !== 0 ? item.text : item.name;
+                // For the address bar a virtual item is named as it is shown.
+                const parsing = ((flags >>> 0) & SHGDN_FORPARSING) !== 0
+                    && !(((flags >>> 0) & SHGDN_FORADDRESSBAR) !== 0 && item.text.startsWith('::'));
+                const text = parsing ? item.text : item.name;
                 memory.writeMemory(out >>> 0, dword(STRRET_CSTR));
                 memory.writeMemory((out >>> 0) + STRRET_TEXT,
                     sz(text.slice(0, STRRET_CAPACITY - 1)));

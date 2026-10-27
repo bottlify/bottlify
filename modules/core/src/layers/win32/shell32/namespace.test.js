@@ -195,6 +195,9 @@ test('attributes, names and a combined list say what a browser needs of an item'
     assert.equal(m.string(0x144), MY_COMPUTER, 'the :: prefix tells a program it is no path');
     assert.equal(m.call(desktop, FOLDER.GetDisplayNameOf, [computer, 0, 0x140]), S_OK);
     assert.equal(m.string(0x144), 'My Computer');
+    assert.equal(m.call(desktop, FOLDER.GetDisplayNameOf,
+        [computer, SHGDN_FORPARSING | 0x4001, 0x140]), S_OK);
+    assert.equal(m.string(0x144), 'My Computer', 'for the address bar, as it is shown');
 
     // A program combines the lists it was given into one, walking `cb`
     // fields and copying bytes; the result still names the place.
@@ -213,11 +216,17 @@ test('attributes, names and a combined list say what a browser needs of an item'
 
     // A path parses to its item, with the attributes asked for.
     m.put(0x150, SFGAO_FOLDER | SFGAO_FILESYSTEM);
+    m.put(0x14c, 0xdeadbeef);
     assert.equal(m.call(root, FOLDER.ParseDisplayName,
         [0, 0, m.wide('C:\\Program Files\\Common'), 0x14c, 0x148, 0x150]), S_OK);
     assert.deepEqual(m.texts(m.u32(0x148)), ['C:\\Program Files\\Common']);
     assert.equal(m.u32(0x150), SFGAO_FOLDER | SFGAO_FILESYSTEM, 'Common has no subfolder');
-    assert.equal(m.u32(0x14c), 'C:\\Program Files\\Common'.length);
+    assert.equal(m.u32(0x14c), 0xdeadbeef,
+        'the count eaten is left as it was (Wine\'s shfldr_special, against Windows)');
+    assert.equal(m.call(root, FOLDER.ParseDisplayName,
+        [0, 0, m.wide('\\\\?\\C:\\Program Files'), 0, 0x148, 0]) >>> 0, 0x80070057,
+    'no \\\\?\\ path');
+    assert.equal(m.u32(0x148), 0);
     // Wine's shlfolder test: no name is E_INVALIDARG, read from nowhere.
     m.put(0x148, 0xdeadbeef);
     assert.equal(m.call(root, FOLDER.ParseDisplayName, [0, 0, 0, 0, 0x148, 0]) >>> 0,
