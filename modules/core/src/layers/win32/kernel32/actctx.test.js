@@ -23,8 +23,11 @@ const TESTDEP3 = `${HEAD}<assemblyIdentity type="win32" name="testdep" version="
 const TEB = 0x7000;
 const SCRATCH = 0x100;
 
-/** @param {Record<string, string>} [volume]  path -> file text */
-function setup(volume = {}){
+/**
+ * @param {Record<string, string>} [volume]  path -> file text
+ * @param {Record<string, any>} [extra]  more of the host: resources, modules
+ */
+function setup(volume = {}, extra = {}){
     const bytes = new Uint8Array(0x40000);
     const view = new DataView(bytes.buffer);
     let next = 0x10000;
@@ -36,6 +39,7 @@ function setup(volume = {}){
         new TextEncoder().encode(text)]));
     const spelled = Object.keys(volume);
     const { functions, loaderApi } = createActivationContexts({
+        ...extra,
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         readCString: address=>{
@@ -517,4 +521,53 @@ test('a runtime the bottle keeps outside the store is seen at its store director
     const none = setup({ 'C:\\app\\test.exe.manifest': app });
     assert.match(String(await none.loaderApi.processDefaultFrom(null, 'C:\\app\\test.exe')),
         /Microsoft\.VC90\.CRT/, 'a runtime the bottle has nowhere is no assembly');
+});
+
+test('an image\'s manifest is resource 1 unless named; a module\'s names its file', async()=>{
+    const DEP = `${HEAD}<assemblyIdentity type="win32" name="sxs_dll" version="1.0.0.0" `
+        + 'processorArchitecture="x86" language="fr-FR"/><file name="sxs_dll.dll"/></assembly>';
+    const EXE = `${HEAD}<dependency><dependentAssembly><assemblyIdentity type="win32" `
+        + 'name="sxs_dll" version="1.0.0.0" processorArchitecture="x86" language="fr-FR"/>'
+        + '</dependentAssembly></dependency></assembly>';
+    const encoder = new TextEncoder();
+    const t = setup({ 'C:\\app\\lib.dll': 'MZ', 'C:\\app\\exe.manifest': EXE,
+        'C:\\app\\sxs_dll.manifest': DEP, 'C:\\lang\\exe.manifest': EXE,
+        'C:\\lang\\fr-FR\\sxs_dll.manifest': DEP }, {
+        moduleResource: (/** @type {number} */ base, /** @type {number} */ type,
+            /** @type {number} */ id)=>(base === 0x400000 && type === 24 && id === 124
+            ? encoder.encode(MANIFEST1) : null),
+        modulePath: ()=>'C:\\app\\test.exe',
+        fileResource: (/** @type {string} */ path, /** @type {number} */ type,
+            /** @type {number | null} */ id)=>(type === 24 && id === 124
+            ? encoder.encode(MANIFEST1) : null),
+    });
+    /** @param {Record<number, number>} fields */
+    const request = fields=>{
+        t.bytes.fill(0, SCRATCH, SCRATCH + 32);
+        t.view.setUint32(SCRATCH, 32, true);
+        for (const [at, value] of Object.entries(fields))
+        {
+            t.view.setUint32(SCRATCH + Number(at), value, true);
+        }
+        return t.functions.CreateActCtxW.handler([SCRATCH]);
+    };
+    // HMODULE_VALID with no name is resource 1: there is none here.
+    assert.equal(await request({ 4: 0x80, 28: 0x400000 }), 0xffffffff);
+    assert.equal(t.errors.at(-1), 1813, 'ERROR_RESOURCE_TYPE_NOT_FOUND');
+    // RESOURCE_NAME_VALID with no name is no request at all.
+    assert.equal(await request({ 4: 0x88, 28: 0x400000 }), 0xffffffff);
+    assert.equal(t.errors.at(-1), 87);
+    assert.equal(await request({ 4: 0x88, 20: 124, 28: 0x400000 }) !== 0xffffffff, true);
+    const handle = /** @type {number} */ (await request({ 4: 0x88, 20: 124, 28: 0x400000 }));
+    assert.equal(t.functions.QueryActCtxW.handler([0, handle, 0, 2, 0x400, 0x200, 0x310]), 1);
+    assert.deepEqual([t.dword(0x400 + 12), t.dword(0x400 + 16)],
+        [2, 'C:\\app\\test.exe'.length], 'the module\'s file is the root manifest');
+    // An image as the source: the same rule.
+    assert.equal(await request({ 8: t.putWide(0x200, 'C:\\app\\lib.dll') }), 0xffffffff);
+    assert.equal(t.errors.at(-1), 1813);
+    assert.notEqual(await request({ 4: 0x8, 8: 0x200, 20: 124 }), 0xffffffff);
+
+    // A dependency of a language is looked for in that language's folder only.
+    assert.equal(await t.create('C:\\app\\exe.manifest'), 0xffffffff, 'not beside the program');
+    assert.notEqual(await t.create('C:\\lang\\exe.manifest'), 0xffffffff, 'in fr-FR\\');
 });

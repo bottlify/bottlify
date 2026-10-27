@@ -39,6 +39,7 @@ const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
 const ERROR_RESOURCE_NAME_NOT_FOUND = 1814;
 const ERROR_SXS_CANT_GEN_ACTCTX = 14001;
 const ERROR_SXS_SECTION_NOT_FOUND = 14000;
@@ -757,13 +758,17 @@ export function createActivationContexts(host){
     /**
      * A private assembly beside the application, at exactly the version
      * asked for: `<name>.dll` (its manifest resource 1), `<name>.manifest`,
-     * then the two of them in a `<name>\` folder.
+     * then the two of them in a `<name>\` folder. One of a language is
+     * looked for in that language's folder, `<culture>\` and
+     * `<culture>\<name>\`, and nowhere else.
      *
      * @param {Identity} wanted @param {string} directory
      * @returns {Promise<StoreAssembly | null>}
      */
     const fromApplication = async(wanted, directory)=>{
-        for (const folder of [directory, `${directory}${wanted.name}\\`])
+        const culture = wanted.language && wanted.language !== '*'
+            && wanted.language.toLowerCase() !== 'neutral' ? `${wanted.language}\\` : '';
+        for (const folder of [`${directory}${culture}`, `${directory}${culture}${wanted.name}\\`])
         {
             for (const kind of ['dll', 'manifest'])
             {
@@ -1624,8 +1629,12 @@ export function createActivationContexts(host){
         }
         const pointer = (/** @type {number} */ field)=>readDword(actctx + field);
         const source = pointer(ACTCTX.lpSource);
-        const resource = (flags & ACTCTX_FLAG_RESOURCE_NAME_VALID) !== 0
-            ? pointer(ACTCTX.lpResourceName) : 0;
+        const named = (flags & ACTCTX_FLAG_RESOURCE_NAME_VALID) !== 0;
+        const resource = named ? pointer(ACTCTX.lpResourceName) : 0;
+        if (named && resource === 0)
+        {
+            return { error: ERROR_INVALID_PARAMETER };
+        }
         return {
             flags,
             source: source === 0 ? null : readText(source),
@@ -1652,20 +1661,27 @@ export function createActivationContexts(host){
     const create = async request=>{
         /** @type {Uint8Array | null} */
         let bytes;
-        /** @type {string | null} */
-        let manifestPath = null;
+        /** @type {string} */
+        let manifestPath;
         /** @type {string} */
         let appDirectory;
         const assemblyDirectory = request.directory === null ? null
             : `${host.fullPath(request.directory).replace(/\\+$/, '')}\\`;
-        if (request.resource !== null && request.module !== 0)
+        // A manifest in an image is the resource named, or else number 1:
+        // missing, the one named is not found, and with none named there is
+        // no manifest of that kind at all.
+        const missing = request.resource === null
+            ? ERROR_RESOURCE_TYPE_NOT_FOUND : ERROR_RESOURCE_NAME_NOT_FOUND;
+        const resource = request.resource ?? CREATEPROCESS_MANIFEST_RESOURCE_ID;
+        if (request.module !== 0)
         {
-            bytes = host.moduleResource?.(request.module, RT_MANIFEST, request.resource) ?? null;
+            bytes = host.moduleResource?.(request.module, RT_MANIFEST, resource) ?? null;
             if (bytes === null)
             {
-                return { error: ERROR_RESOURCE_NAME_NOT_FOUND };
+                return { error: missing };
             }
             const path = host.modulePath?.(request.module) ?? host.imagePath();
+            manifestPath = path;
             appDirectory = assemblyDirectory ?? directoryOf(path);
         }
         else
@@ -1684,21 +1700,17 @@ export function createActivationContexts(host){
                 return { error: parent?.exists ? ERROR_FILE_NOT_FOUND : ERROR_PATH_NOT_FOUND };
             }
             bytes = await host.readFile(path);
-            // An image named as the source holds its manifest as a resource:
-            // the one named, or else its lowest numbered.
+            // An image named as the source holds its manifest as a resource.
             const image = bytes !== null && bytes[0] === 0x4d && bytes[1] === 0x5a;
             if (request.resource !== null || image)
             {
-                bytes = await host.fileResource?.(path, RT_MANIFEST, request.resource) ?? null;
+                bytes = await host.fileResource?.(path, RT_MANIFEST, resource) ?? null;
                 if (bytes === null)
                 {
-                    return { error: ERROR_RESOURCE_NAME_NOT_FOUND };
+                    return { error: missing };
                 }
             }
-            else
-            {
-                manifestPath = path;
-            }
+            manifestPath = path;
             appDirectory = assemblyDirectory ?? directoryOf(path);
         }
         const read = parseManifest(/** @type {Uint8Array} */ (bytes));

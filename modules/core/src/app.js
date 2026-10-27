@@ -2501,17 +2501,16 @@ export function resourceOfImage(file, type, id){
     try
     {
         const image = parsePe(file, { wide: true });
-        if (id === null)
+        // No id: the lowest numbered one, whatever languages it has; its
+        // language then chosen as FindResource chooses one, neutral first.
+        const name = id ?? listResources(file, image)
+            .filter(entry=>entry.type === type && typeof entry.name === 'number')
+            .map(entry=>Number(entry.name)).sort((a, b)=>a - b)[0];
+        if (name === undefined)
         {
-            const lowest = listResources(file, image)
-                .filter(entry=>entry.type === type && typeof entry.name === 'number')
-                .sort((a, b)=>Number(a.name) - Number(b.name))[0];
-            return lowest
-                ? file.slice(rvaToFileOffset(image, lowest.rva),
-                    rvaToFileOffset(image, lowest.rva) + lowest.size)
-                : null;
+            return null;
         }
-        const found = findResource(file, image, type, id);
+        const found = findResource(file, image, type, name);
         if (!found)
         {
             return null;
