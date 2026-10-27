@@ -8,7 +8,7 @@ import { createRegistryService } from './registry-service.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    KEY_OF_HANDLE, REGISTRY_NATIVES, USER_NAME, createRegistryFunctions,
+    KEY_OF_HANDLE, REGISTRY_NATIVES, UNLOAD_KEY, USER_NAME, createRegistryFunctions,
 } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
@@ -752,25 +752,23 @@ test('a build with nowhere to put a SID says it ran out of memory rather than fa
         [0x100, 1, 18, 0, 0, 0, 0, 0, 0, 0, OUT_HANDLE]), 0);
 });
 
-test('the wide file security calls are refused like the narrow ones, popping what they took', ()=>{
+test('GetFileSecurity and SetFileSecurity are the file-security calls, stdcall-sized', ()=>{
     const memory = fakeMemory();
-    /** @type {number[]} */
-    const errors = [];
     const fns = createRegistryFunctions({
         readMemory: memory.readMemory, writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        hive: createRegistryService(createHive()), setLastError: code=>errors.push(code),
+        hive: createRegistryService(createHive()), setLastError: ()=>{},
     });
-
-    assert.equal(fns.SetFileSecurityW.handler(), 0);
-    assert.deepEqual(errors, [120], 'ERROR_CALL_NOT_IMPLEMENTED');
     assert.equal(fns.SetFileSecurityW.argBytes, 12);
-    assert.equal(fns.GetFileSecurityW.handler(), 0);
-    assert.deepEqual(errors, [120, 120], 'and asking for a descriptor is not implemented either');
     assert.equal(fns.GetFileSecurityW.argBytes, 20);
+    assert.equal(fns.GetFileSecurityA.argBytes, 20);
 });
 
-test('the file security calls refuse plainly', ()=>{
+test('the file security calls are named-security\'s, wired into the table', ()=>{
+    // GetFileSecurity and SetFileSecurity are advapi32's file-security calls:
+    // named-security.js owns them (it keeps the run's descriptors), and the
+    // module spreads them into this table. Here they stand with the right
+    // widths, and a call with no name fails plainly rather than faulting.
     const memory = fakeMemory();
     /** @type {number[]} */
     const errors = [];
@@ -781,16 +779,17 @@ test('the file security calls refuse plainly', ()=>{
         hive: createRegistryService(createHive()),
         setLastError: code=>errors.push(code),
     });
-    const ERROR_CALL_NOT_IMPLEMENTED = 120;
-    const expected = { GetFileSecurityA: 20, SetFileSecurityA: 12 };
+    const expected = { GetFileSecurityA: 20, GetFileSecurityW: 20,
+        SetFileSecurityA: 12, SetFileSecurityW: 12 };
     const table = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (fns));
     for (const [name, argBytes] of Object.entries(expected))
     {
         assert.equal(table[name].argBytes, argBytes, name);
-        assert.equal(table[name].handler([]), 0, name);
+        assert.equal(table[name].handler([]), 0, `${name} with no name fails`);
     }
-    assert.deepEqual(errors, Object.keys(expected).map(()=>ERROR_CALL_NOT_IMPLEMENTED));
+    assert.ok(errors.length > 0 && errors.every(code=>code !== 0),
+        'a real error stands behind each refusal');
 });
 
 test('a restart is not implemented, as the consumer line answered, and says so', ()=>{
@@ -1147,7 +1146,7 @@ test('an object\'s security by name is read through the volume and the hive this
         memory.putString(NAME, 'C:\\setup.ini');
         assert.equal(fns.GetNamedSecurityInfoA.handler([NAME, SE_FILE_OBJECT, DACL, 0, 0,
             OUT_HANDLE, 0, OUT_TYPE]), ERROR_SUCCESS);
-        assert.equal(memory.dword(OUT_HANDLE), 0, 'the null DACL of a volume that keeps none');
+        assert.notEqual(memory.dword(OUT_HANDLE), 0, 'the file keeps a DACL, as NTFS does');
         memory.putString(NAME, 'C:\\gone.ini');
         assert.equal(fns.SetNamedSecurityInfoA.handler([NAME, SE_FILE_OBJECT, DACL, 0, 0, 0, 0]),
             ERROR_FILE_NOT_FOUND);
@@ -1175,7 +1174,7 @@ test('a key saved to a file loads under a root, writes its changes back as it un
     const STATUS_ACCESS_DENIED = 0xc0000022;
     const HKEY_USERS = 0x80000003;
     const FILE = 0x800;
-    const unload = fns[Object.getOwnPropertySymbols(fns)[0]];
+    const unload = fns[UNLOAD_KEY];
 
     memory.putString(SUBKEY, 'Software\\Saved\\Inner');
     fns.RegCreateKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, 0, 0, 0, OUT_HANDLE, 0]);

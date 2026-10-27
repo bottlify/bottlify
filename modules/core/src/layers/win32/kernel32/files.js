@@ -408,6 +408,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *           `maxLength` in bytes, as the memory layer counts it: a wide path of
  *           MAX_PATH characters is twice that.
  * @property {FileSystem} files
+ * @property {(path: string, sd: number) => void} [recordFileSecurity]
+ *           Keeps the SECURITY_ATTRIBUTES' descriptor CreateFile or CreateDirectory
+ *           was given as the new object's security. A no-op when absent.
  * @property {(code: number) => void} setLastError
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(record: { path: string, error: number, access: number, share: number,
@@ -1584,7 +1587,21 @@ export function createFileFunctions(host){
     };
     const searchPath = bothForms(24, searchPathBody);
 
-    const createDirectory = oneName(8, ([name], text)=>{
+    /**
+     * The security descriptor a SECURITY_ATTRIBUTES points at, or 0: its
+     * lpSecurityDescriptor, the second of its three fields.
+     *
+     * @param {number} attributes
+     */
+    const securityDescriptorOf = attributes=>{
+        if ((attributes >>> 0) === 0)
+        {
+            return 0;
+        }
+        const field = host.readMemory((attributes >>> 0) + 4, 4);
+        return (field[0] | field[1] << 8 | field[2] << 16 | field[3] << 24) >>> 0;
+    };
+    const createDirectory = oneName(8, ([name, attributes], text)=>{
         const path = text.path(name);
         if (files.stat(path)?.exists)
         {
@@ -1592,8 +1609,12 @@ export function createFileFunctions(host){
         }
         // Only one level at a time, as Windows does: a missing parent is a
         // failure, not something to create on the way past.
-        return files.mkdir(path)
-            ? 1 : fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_PATH_NOT_FOUND);
+        if (!files.mkdir(path))
+        {
+            return fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_PATH_NOT_FOUND);
+        }
+        host.recordFileSecurity?.(path, securityDescriptorOf(attributes));
+        return 1;
     });
 
     const removeDirectory = oneName(4, ([name], text)=>{
@@ -2014,7 +2035,7 @@ export function createFileFunctions(host){
      * open agreed to share with gets in; reading is always shared, so an open
      * Windows would refuse for want of FILE_SHARE_READ still succeeds here.
      */
-    const createFile = oneName(28, ([name, access, share, , disposition, flags], text)=>{
+    const createFile = oneName(28, ([name, access, share, attributes, disposition, flags], text)=>{
         // The one device opened by name: the mount manager, whatever was asked of it.
         if (name !== 0 && text.raw(name).toLowerCase() === MOUNT_MANAGER.toLowerCase())
         {
@@ -2057,6 +2078,12 @@ export function createFileFunctions(host){
         // otherwise is what makes that test mean anything.
         const either = disposition === CREATE_ALWAYS || disposition === OPEN_ALWAYS;
         host.setLastError(opened.existed && either ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
+        // A file created now keeps the descriptor it was given; one opened
+        // does not take one.
+        if (!opened.existed)
+        {
+            host.recordFileSecurity?.(text.path(name), securityDescriptorOf(attributes));
+        }
         return opened.handle;
     }, INVALID_HANDLE_VALUE);
 

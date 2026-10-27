@@ -39,10 +39,19 @@ export const USER_NAME = 'User';
 /** The native calls' table, published by ntdll beside its own. */
 export const TOKEN_NATIVES = Symbol('tokenNatives');
 
+/**
+ * The hook a kernel-object creator (CreateEvent, CreateMutex, …) calls to
+ * keep the SECURITY_ATTRIBUTES' descriptor it was given, so that
+ * GetKernelObjectSecurity hands it back -- a mandatory label among it.
+ */
+export const RECORD_OBJECT_SECURITY = Symbol('recordObjectSecurity');
+
 /** Statuses the native calls answer. */
 const STATUS_SUCCESS = 0;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_BUFFER_TOO_SMALL = 0xc0000023;
+const STATUS_ACCESS_DENIED = 0xc0000022;
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -97,6 +106,8 @@ const ACCESS_DENIED_OBJECT_ACE_TYPE = 6;
 const SYSTEM_MANDATORY_LABEL_ACE_TYPE = 0x11;
 /** SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, NO_READ_UP and NO_EXECUTE_UP. */
 const MANDATORY_POLICIES = 0x7;
+/** The one of those a process token's own integrity label carries. */
+const MANDATORY_LABEL_NO_WRITE_UP = 0x1;
 /** An ACE's flags: how it is inherited, and whether it was. */
 const INHERITANCE_FLAGS = 0x0f;
 const INHERITED_ACE = 0x10;
@@ -1799,6 +1810,22 @@ export function createTokenFunctions(host){
     });
 
     /**
+     * What a token starts with: an object's default parts and, besides, the
+     * token's own integrity label as a SACL -- one mandatory-label ACE at the
+     * level the token runs at, which GetKernelObjectSecurity(LABEL) hands
+     * back. A program reads it to learn its own integrity before it tries
+     * something a lower one may not.
+     *
+     * @returns {import('./descriptors.js').DescriptorParts}
+     */
+    const tokenDefaultParts = ()=>({
+        ...defaultParts(),
+        control: SE_DACL_PRESENT | SE_SACL_PRESENT,
+        sacl: aclBytes([aceBytes(SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0,
+            MANDATORY_LABEL_NO_WRITE_UP, sidBytes(HIGH_INTEGRITY))]),
+    });
+
+    /**
      * The parts a SECURITY_INFORMATION names, put over the object's.
      *
      * @param {object} object @param {import('./descriptors.js').DescriptorParts} parts
@@ -1852,7 +1879,8 @@ export function createTokenFunctions(host){
         {
             return null;
         }
-        const parts = objectSecurity.get(object) ?? defaultParts();
+        const parts = objectSecurity.get(object)
+            ?? (isToken(handle) ? tokenDefaultParts() : defaultParts());
         const asked = codec.partsAskedFor(parts, wanted);
         return codec.selfRelative(asked);
     };
@@ -1860,6 +1888,123 @@ export function createTokenFunctions(host){
     /** @param {number} code @returns {number} the status a native call answers it with */
     const statusOf = code=>(code === ERROR_SUCCESS ? STATUS_SUCCESS
         : code === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE : STATUS_ACCESS_VIOLATION);
+
+    /**
+     * The access an object's DACL grants a token, as both AccessCheck (a
+     * BOOL and win32 error) and NtAccessCheck (an NTSTATUS) need it: the two
+     * differ only in how they write the verdict out, so the walk lives once.
+     *
+     * `code` is ERROR_SUCCESS when the check ran -- `ok` then says whether
+     * access was granted and `granted` is the mask -- or the win32 error that
+     * stopped it. The PRIVILEGE_SET buffer and its length are out-parameters
+     * either form writes, so they are written here. The granted/status
+     * pointers are not read: each caller validates and writes its own.
+     *
+     * @param {number} descriptor @param {number} token @param {number} desired
+     * @param {number} mapping @param {number} privileges @param {number} privilegesLength
+     * @returns {{ code: number, ok?: boolean, granted?: number }}
+     */
+    const evaluateAccess = (descriptor, token, desired, mapping, privileges, privilegesLength)=>{
+        if (!isToken(token))
+        {
+            return { code: ERROR_INVALID_HANDLE };
+        }
+        // Either form: what GetKernelObjectSecurity hands back is
+        // self-relative, and is checked as it comes.
+        const held = anyDescriptor(descriptor);
+        if (held === null)
+        {
+            return { code: ERROR_INVALID_SECURITY_DESCR };
+        }
+        if ((mapping >>> 0) === 0 || (privilegesLength >>> 0) === 0)
+        {
+            return { code: ERROR_INVALID_PARAMETER };
+        }
+        if (readDword(privilegesLength) < PRIVILEGE_SET_EMPTY)
+        {
+            writeDword(privilegesLength >>> 0, PRIVILEGE_SET_EMPTY);
+            return { code: ERROR_INSUFFICIENT_BUFFER };
+        }
+        if ((privileges >>> 0) !== 0)
+        {
+            host.writeMemory(privileges >>> 0, new Uint8Array(PRIVILEGE_SET_EMPTY));
+        }
+        const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
+        const wanted = mapGeneric(desired >>> 0, map);
+        const control = held.control;
+        const dacl = held.part(SD.DACL);
+        let allowed = 0;
+        let denied = 0;
+        if ((control & SE_DACL_PRESENT) === 0 || dacl === 0)
+        {
+            // Everything the object's rights come to, and anything asked for
+            // by name besides.
+            allowed = (map[3] | wanted & ~MAXIMUM_ALLOWED) >>> 0;
+        }
+        else
+        {
+            const aces = acesOf(dacl);
+            if (aces === null)
+            {
+                return { code: ERROR_INVALID_ACL };
+            }
+            for (const ace of aces)
+            {
+                // An audit or alarm ACE says what to record, not who is let in.
+                if (ace.type > ACCESS_DENIED_ACE_TYPE || ace.sid === null
+                    || !isTokenMember(ace.sid))
+                {
+                    continue;
+                }
+                // What an ACE already allowed stays allowed, as the DACL is
+                // read in order and the first word on a right decides it.
+                const rights = mapGeneric(ace.mask, map);
+                if (ace.type === ACCESS_ALLOWED_ACE_TYPE)
+                {
+                    allowed |= rights & ~denied;
+                }
+                else
+                {
+                    denied |= rights & ~allowed;
+                }
+            }
+        }
+        const asked = (wanted & MAXIMUM_ALLOWED) !== 0 ? (wanted & ~MAXIMUM_ALLOWED) : wanted;
+        const ok = (asked & ~allowed) === 0 && (wanted === MAXIMUM_ALLOWED ? allowed !== 0 : true);
+        const answer = (wanted & MAXIMUM_ALLOWED) !== 0 ? allowed >>> 0 : asked;
+        return { code: ERROR_SUCCESS, ok, granted: ok ? answer : 0 };
+    };
+
+    /**
+     * AccessCheck's body: the verdict written as a BOOL *AccessStatus and the
+     * granted mask, 1 returned unless a parameter is wrong. A denied check is
+     * still a successful call (1), with the last error set.
+     *
+     * @param {number} descriptor @param {number} token @param {number} desired
+     * @param {number} mapping @param {number} privileges @param {number} privilegesLength
+     * @param {number} granted @param {number} status
+     */
+    const accessCheck = (descriptor, token, desired, mapping, privileges, privilegesLength,
+        granted, status)=>
+    {
+        if ((granted >>> 0) === 0 || (status >>> 0) === 0)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const verdict = evaluateAccess(descriptor, token, desired, mapping, privileges,
+            privilegesLength);
+        if (verdict.code !== ERROR_SUCCESS)
+        {
+            return fail(verdict.code);
+        }
+        writeDword(granted >>> 0, verdict.granted ?? 0);
+        writeDword(status >>> 0, verdict.ok ? 1 : 0);
+        if (!verdict.ok)
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
+        }
+        return 1;
+    };
 
     return {
         /**
@@ -1875,6 +2020,27 @@ export function createTokenFunctions(host){
          *   PTOKEN_PRIVILEGES NewState, ULONG BufferLength,
          *   PTOKEN_PRIVILEGES PreviousState, PULONG ReturnLength)
          */
+        /**
+         * A freshly created kernel object keeps the descriptor its
+         * SECURITY_ATTRIBUTES carried: owner, group, DACL and SACL as the
+         * descriptor marks each present. Absent or null, the object keeps
+         * nothing and GetKernelObjectSecurity synthesises a default.
+         *
+         * @param {object} object @param {number} descriptor
+         */
+        [RECORD_OBJECT_SECURITY]: (object, descriptor)=>{
+            const parts = codec.partsOf(descriptor);
+            if (parts === null)
+            {
+                return;
+            }
+            const wanted = (parts.owner ? OWNER_SECURITY_INFORMATION : 0)
+                | (parts.group ? GROUP_SECURITY_INFORMATION : 0)
+                | ((parts.control & SE_DACL_PRESENT) !== 0 ? DACL_SECURITY_INFORMATION : 0)
+                | ((parts.control & SE_SACL_PRESENT) !== 0 ? SACL_SECURITY_INFORMATION : 0);
+            storeParts(object, parts, wanted);
+        },
+
         [TOKEN_NATIVES]: {
             NtOpenProcessToken: {
                 argBytes: 12,
@@ -1891,6 +2057,131 @@ export function createTokenFunctions(host){
                 /** @param {number[]} args */
                 handler: ([token, , newState, , previous, returnLength])=>
                     statusOf(adjustPrivileges(token, newState, previous, returnLength)),
+            },
+
+            /**
+             * NTSTATUS NtSetSecurityObject(HANDLE, SECURITY_INFORMATION,
+             *   PSECURITY_DESCRIPTOR) -- the handle's security kept, as
+             *   SetKernelObjectSecurity keeps it.
+             */
+            NtSetSecurityObject: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([handle, wanted, descriptor])=>{
+                    const object = kernelObject(handle);
+                    const parts = codec.partsOf(descriptor);
+                    if (object === null)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
+                    if (parts === null)
+                    {
+                        return STATUS_ACCESS_VIOLATION;
+                    }
+                    storeParts(object, parts, wanted >>> 0);
+                    return STATUS_SUCCESS;
+                },
+            },
+
+            /**
+             * NTSTATUS NtQuerySecurityObject(HANDLE, SECURITY_INFORMATION,
+             *   PSECURITY_DESCRIPTOR, ULONG Length, PULONG LengthNeeded)
+             */
+            NtQuerySecurityObject: {
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([handle, wanted, descriptor, length, needed])=>{
+                    const bytes = kernelDescriptor(handle, wanted >>> 0);
+                    if (bytes === null)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
+                    if ((needed >>> 0) !== 0)
+                    {
+                        writeDword(needed >>> 0, bytes.length);
+                    }
+                    if ((length >>> 0) < bytes.length)
+                    {
+                        return STATUS_BUFFER_TOO_SMALL;
+                    }
+                    host.writeMemory(descriptor >>> 0, bytes);
+                    return STATUS_SUCCESS;
+                },
+            },
+
+            /**
+             * NTSTATUS NtAccessCheck(PSECURITY_DESCRIPTOR, HANDLE ClientToken,
+             *   ACCESS_MASK DesiredAccess, PGENERIC_MAPPING, PPRIVILEGE_SET,
+             *   PULONG ReturnLength, PACCESS_MASK GrantedAccess, PNTSTATUS AccessStatus)
+             *
+             * The same walk as AccessCheck, but the verdict is an NTSTATUS:
+             * the call returns STATUS_SUCCESS when the check ran and writes
+             * *AccessStatus as STATUS_SUCCESS or STATUS_ACCESS_DENIED, rather
+             * than a BOOL with the last error set.
+             */
+            NtAccessCheck: {
+                argBytes: 32,
+                /** @param {number[]} args */
+                handler: ([descriptor, token, desired, mapping, privileges, privilegesLength,
+                    granted, status])=>{
+                    if ((granted >>> 0) === 0 || (status >>> 0) === 0)
+                    {
+                        return STATUS_ACCESS_VIOLATION;
+                    }
+                    const verdict = evaluateAccess(descriptor, token, desired, mapping, privileges,
+                        privilegesLength);
+                    if (verdict.code !== ERROR_SUCCESS)
+                    {
+                        return verdict.code === ERROR_INSUFFICIENT_BUFFER
+                            ? STATUS_BUFFER_TOO_SMALL : statusOf(verdict.code);
+                    }
+                    writeDword(granted >>> 0, verdict.granted ?? 0);
+                    writeDword(status >>> 0, verdict.ok ? STATUS_SUCCESS : STATUS_ACCESS_DENIED);
+                    return STATUS_SUCCESS;
+                },
+            },
+
+            /**
+             * NTSTATUS NtDuplicateToken(HANDLE ExistingToken, ACCESS_MASK,
+             *   POBJECT_ATTRIBUTES, BOOLEAN EffectiveOnly, TOKEN_TYPE, PHANDLE)
+             *
+             * DuplicateTokenEx answered as a status. The impersonation level
+             * is the one the OBJECT_ATTRIBUTES' SecurityQualityOfService names,
+             * SecurityAnonymous when it carries none, and it rides a new
+             * impersonation token (a primary one carries none, telling the two
+             * apart as GetTokenInformation does).
+             */
+            NtDuplicateToken: {
+                argBytes: 24,
+                /** @param {number[]} args */
+                handler: ([existing, , attributes, , type, out])=>{
+                    const token = tokenNamed(existing);
+                    if (!token)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
+                    if ((out >>> 0) === 0)
+                    {
+                        return STATUS_ACCESS_VIOLATION;
+                    }
+                    // OBJECT_ATTRIBUTES.SecurityQualityOfService is its last
+                    // field (+20); the level is that structure's second (+4).
+                    let level = 0;
+                    if ((attributes >>> 0) !== 0)
+                    {
+                        const qos = readDword((attributes >>> 0) + 20);
+                        if (qos !== 0)
+                        {
+                            level = readDword(qos + 4);
+                        }
+                    }
+                    writeDword(out >>> 0, host.handles.open('token', {
+                        ...token,
+                        impersonationLevel: (type >>> 0) === TOKEN_IMPERSONATION ? level >>> 0
+                            : undefined,
+                    }));
+                    return STATUS_SUCCESS;
+                },
             },
         },
 
@@ -2389,92 +2680,15 @@ export function createTokenFunctions(host){
          * impersonation token here; the one account's primary token is taken
          * as well, since there is nothing it could be told apart from.
          */
+
         AccessCheck: {
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([descriptor, token, desired, mapping, privileges, privilegesLength,
-                granted, status])=>{
-                if (!isToken(token))
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                // Either form: what GetKernelObjectSecurity hands back is
-                // self-relative, and is checked as it comes.
-                const held = anyDescriptor(descriptor);
-                if (held === null)
-                {
-                    return fail(ERROR_INVALID_SECURITY_DESCR);
-                }
-                if ((mapping >>> 0) === 0 || (granted >>> 0) === 0 || (status >>> 0) === 0
-                    || (privilegesLength >>> 0) === 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                if (readDword(privilegesLength) < PRIVILEGE_SET_EMPTY)
-                {
-                    writeDword(privilegesLength >>> 0, PRIVILEGE_SET_EMPTY);
-                    return fail(ERROR_INSUFFICIENT_BUFFER);
-                }
-                if ((privileges >>> 0) !== 0)
-                {
-                    host.writeMemory(privileges >>> 0, new Uint8Array(PRIVILEGE_SET_EMPTY));
-                }
-                const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
-                const wanted = mapGeneric(desired >>> 0, map);
-                const control = held.control;
-                const dacl = held.part(SD.DACL);
-                let allowed = 0;
-                let denied = 0;
-                if ((control & SE_DACL_PRESENT) === 0 || dacl === 0)
-                {
-                    // Everything the object's rights come to, and anything
-                    // asked for by name besides.
-                    allowed = (map[3] | wanted & ~MAXIMUM_ALLOWED) >>> 0;
-                }
-                else
-                {
-                    const aces = acesOf(dacl);
-                    if (aces === null)
-                    {
-                        return fail(ERROR_INVALID_ACL);
-                    }
-                    for (const ace of aces)
-                    {
-                        // An audit or alarm ACE says what to record, not who
-                        // is let in.
-                        if (ace.type > ACCESS_DENIED_ACE_TYPE || ace.sid === null
-                            || !isTokenMember(ace.sid))
-                        {
-                            continue;
-                        }
-                        // What an ACE already allowed stays allowed, as the
-                        // DACL is read in order and the first word on a right
-                        // decides it.
-                        const rights = mapGeneric(ace.mask, map);
-                        if (ace.type === ACCESS_ALLOWED_ACE_TYPE)
-                        {
-                            allowed |= rights & ~denied;
-                        }
-                        else
-                        {
-                            denied |= rights & ~allowed;
-                        }
-                    }
-                }
-                const asked = (wanted & MAXIMUM_ALLOWED) !== 0
-                    ? (wanted & ~MAXIMUM_ALLOWED) : wanted;
-                const ok = (asked & ~allowed) === 0 && (wanted === MAXIMUM_ALLOWED
-                    ? allowed !== 0 : true);
-                const answer = (wanted & MAXIMUM_ALLOWED) !== 0 ? allowed >>> 0 : asked;
-                writeDword(granted >>> 0, ok ? answer : 0);
-                writeDword(status >>> 0, ok ? 1 : 0);
-                if (!ok)
-                {
-                    host.setLastError(ERROR_ACCESS_DENIED);
-                }
-                return 1;
-            },
+                granted, status])=>accessCheck(descriptor, token, desired, mapping, privileges,
+                privilegesLength, granted, status),
         },
+
 
         /**
          * BOOL OpenThreadToken(HANDLE hThread, DWORD DesiredAccess,

@@ -121,6 +121,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           routine. Zero, or absent, and it begins in its start routine.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
+ * @property {(object: object, sd: number) => void} [recordObjectSecurity]
+ *           Keeps the SECURITY_ATTRIBUTES' descriptor a freshly created sync
+ *           object was given, so GetKernelObjectSecurity hands it back.
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
  *           The one table every named sync object and file mapping shares --
  *           constructed once outside this process so a name a parent gave an
@@ -614,7 +617,29 @@ export function createThreadingFunctions(host){
     const openWaitableTimer = bothNamedForms(12, ([access, , namePointer], wide)=>
         namedOpen('timer', nameOf(namePointer, wide), access));
 
-    const createMutex = bothNamedForms(12, ([, initialOwner, namePointer], wide)=>{
+    /**
+     * The security descriptor a SECURITY_ATTRIBUTES points at, or 0: its
+     * lpSecurityDescriptor, the second of its three fields. Recorded as a
+     * fresh object's security, so a label set at creation is handed back;
+     * an object opened by an existing name keeps the security it was made
+     * with, as Windows ignores the attributes on an open.
+     *
+     * @param {number} attributes @param {object} made @param {any} found
+     */
+    const keepSecurity = (attributes, made, found)=>{
+        if (found !== null || (attributes >>> 0) === 0)
+        {
+            return;
+        }
+        const field = host.readMemory((attributes >>> 0) + 4, 4);
+        const sd = (field[0] | field[1] << 8 | field[2] << 16 | field[3] << 24) >>> 0;
+        if (sd !== 0)
+        {
+            host.recordObjectSecurity?.(made, sd);
+        }
+    };
+
+    const createMutex = bothNamedForms(12, ([security, initialOwner, namePointer], wide)=>{
         const name = nameOf(namePointer, wide);
         const found = existing(name, 'mutex');
         if (found === TAKEN)
@@ -627,6 +652,7 @@ export function createThreadingFunctions(host){
         {
             kernel.wait(mutex, host.currentThread());
         }
+        keepSecurity(security, mutex, found);
         remember(name, 'mutex', mutex, found !== null);
         const handle = kernel.handles.open('mutex', mutex);
         if (name === null)
@@ -636,7 +662,7 @@ export function createThreadingFunctions(host){
         return handle;
     });
 
-    const createEvent = bothNamedForms(16, ([, manualReset, initialState, namePointer], wide)=>{
+    const createEvent = bothNamedForms(16, ([security, manual, initial, namePointer], wide)=>{
         const name = nameOf(namePointer, wide);
         const found = existing(name, 'event');
         if (found === TAKEN)
@@ -645,10 +671,11 @@ export function createThreadingFunctions(host){
             return 0;
         }
         const event = found ?? kernel.createEvent({
-            manualReset: Boolean(manualReset),
-            signalled: Boolean(initialState),
+            manualReset: Boolean(manual),
+            signalled: Boolean(initial),
             name: name ?? 'event',
         });
+        keepSecurity(security, event, found);
         remember(name, 'event', event, found !== null);
         const handle = kernel.handles.open('event', event);
         // An unnamed object is most of them, and "event" tells a reader
@@ -670,7 +697,7 @@ export function createThreadingFunctions(host){
      * they are ignored, like a mutex's initial owner, when the name already
      * names one.
      */
-    const createSemaphore = bothNamedForms(16, ([, initial, maximum, namePointer], wide)=>{
+    const createSemaphore = bothNamedForms(16, ([security, initial, maximum, namePointer], wide)=>{
         const name = nameOf(namePointer, wide);
         const found = existing(name, 'semaphore');
         if (found === TAKEN)
@@ -691,6 +718,7 @@ export function createThreadingFunctions(host){
         const semaphore = found ?? kernel.createSemaphore({
             initial: initial | 0, maximum: maximum | 0, name: name ?? 'semaphore',
         });
+        keepSecurity(security, semaphore, found);
         remember(name, 'semaphore', semaphore, found !== null);
         const handle = kernel.handles.open('semaphore', semaphore);
         if (name === null)

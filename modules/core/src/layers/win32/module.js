@@ -59,8 +59,9 @@ import { createWindowFunctions } from './user32/windows.js';
 import { createWindowDirectory } from './user32/directory.js';
 import { createMessageQueue } from './user32/messages.js';
 import { KEY_OF_HANDLE, createRegistryFunctions } from './advapi32/functions.js';
+import { RECORD_SECURITY } from './advapi32/named-security.js';
 import {
-    ADMINISTRATORS_SID, USER_SID_TEXT, createTokenFunctions, isTokenMember,
+    ADMINISTRATORS_SID, USER_SID_TEXT, RECORD_OBJECT_SECURITY, createTokenFunctions, isTokenMember,
 } from './advapi32/tokens.js';
 import { SERVICE_SECURITY, createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
@@ -355,7 +356,7 @@ export function createWin32Module(){
             // its own. The one namespace a mutex, event, semaphore, timer and
             // file mapping all share is part of it.
             /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
-             *     objects?: any } | null} */
+             *     objects?: any, fileSecurity?: Map<string, any> } | null} */
             const system = config?.system ?? null;
             // Across a link the run's namespace is asked there, and the
             // objects here are stand-ins for the run's (`system-objects.js`).
@@ -592,6 +593,11 @@ export function createWin32Module(){
             {
                 system.registry = hive;
             }
+            // The descriptors programs set on files are the run's, not a
+            // process's: a setup that writes one and a service that reads it
+            // run in different processes of the one run. Kept beside the
+            // hive, in the system half when there is one.
+            const fileSecurity = system ? (system.fileSecurity ??= new Map()) : new Map();
             // A window handle is the run's, and a window of another process is
             // found and posted to through it (`user32/directory.js`).
             const windowDirectory = system?.windows ?? createWindowDirectory();
@@ -1758,6 +1764,12 @@ export function createWin32Module(){
                         allocate: bytes=>heap.allocate(bytes),
                         /** @param {number} bytes */
                         allocateCode: bytes=>heap.allocateCode(bytes),
+                        // A sync object created with a SECURITY_ATTRIBUTES keeps
+                        // that descriptor as its security (advapi32's store),
+                        // so GetKernelObjectSecurity hands back a label set on it.
+                        /** @param {object} object @param {number} sd */
+                        recordObjectSecurity: (object, sd)=>/** @type {any} */ (
+                            libraries['ADVAPI32.dll'])?.[RECORD_OBJECT_SECURITY]?.(object, sd),
                     }),
                     ...createFiberFunctions({
                         readU32: address=>memory.readU32(address),
@@ -2215,6 +2227,12 @@ export function createWin32Module(){
                         readCString,
                         readWideString,
                         files: volume,
+                        // What CreateFile and CreateDirectory were given is
+                        // kept as the file's security (advapi32's store).
+                        /** @param {string} path @param {number} sd */
+                        recordFileSecurity: (path, sd)=>/** @type {any} */ (
+                            libraries['ADVAPI32.dll'])?.[RECORD_SECURITY]?.(
+                            filesystem.resolve(path).path, sd),
                         drives: ()=>filesystem.drives(),
                         volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
                         systemLibraries: systemLibraryNames,
@@ -3361,6 +3379,11 @@ export function createWin32Module(){
                         setLastError: setError,
                         // Where RegSaveKey writes a hive and RegLoadKey reads one.
                         files: volume,
+                        // The run's file-security store, and how a path is made
+                        // absolute to key it by.
+                        security: fileSecurity,
+                        /** @param {string} path */
+                        resolvePath: path=>filesystem.resolve(path).path,
                         divergence: config?.divergence,
                         // The events a change notification signals: kernel32's own.
                         events: {

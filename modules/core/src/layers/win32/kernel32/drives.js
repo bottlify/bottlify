@@ -132,7 +132,10 @@ const MAX_COMPONENT_LENGTH = 255;
  */
 const FS_CASE_IS_PRESERVED = 0x00000002;
 const FS_UNICODE_STORED_ON_DISK = 0x00000004;
-const FILE_SYSTEM_FLAGS = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK;
+// NTFS keeps ACLs, and so does this volume: a program that reads a file's
+// descriptor gets a real one and can set it (advapi32's file security).
+const FS_PERSISTENT_ACLS = 0x00000008;
+const FILE_SYSTEM_FLAGS = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK | FS_PERSISTENT_ACLS;
 
 /**
  * A disc, as the CD-ROM file system describes one: 2048-byte sectors, one to

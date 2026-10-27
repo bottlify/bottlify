@@ -199,7 +199,98 @@ test('the native token calls open and adjust the same tokens, with statuses', ()
     assert.deepEqual(errors, [], 'the last error is left alone');
     assert.deepEqual(Object.fromEntries(Object.entries(natives)
         .map(([name, entry])=>[name, entry.argBytes])),
-    { NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24 });
+    { NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24,
+        NtSetSecurityObject: 12, NtQuerySecurityObject: 20, NtAccessCheck: 32,
+        NtDuplicateToken: 24 });
+});
+
+test('NtDuplicateToken clones a token, its level from the SecurityQualityOfService', ()=>{
+    const { fns, dword, bytes, table } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 0);
+    const token = dword(OUT);
+
+    // No OBJECT_ATTRIBUTES: an impersonation token at SecurityAnonymous (0).
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, 0, 0, 2, OUT]), 0, 'STATUS_SUCCESS');
+    const anonymous = dword(OUT);
+    assert.notEqual(anonymous, token, 'a handle of its own');
+    assert.equal(table.get(anonymous)?.object?.impersonationLevel, 0);
+
+    // A SECURITY_QUALITY_OF_SERVICE at QOS naming SecurityIdentification (2),
+    // pointed at by the OBJECT_ATTRIBUTES at ATTR (its field at +20).
+    const ATTR = 0x700;
+    const QOS = 0x740;
+    bytes.fill(0, ATTR, ATTR + 24);
+    new DataView(bytes.buffer).setUint32(ATTR + 20, QOS, true);
+    new DataView(bytes.buffer).setUint32(QOS + 4, 2, true);
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, ATTR, 0, 2, OUT]), 0);
+    assert.equal(table.get(dword(OUT))?.object?.impersonationLevel, 2, 'SecurityIdentification');
+
+    // A primary token (type 1) carries no impersonation level at all.
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, ATTR, 0, 1, OUT]), 0);
+    assert.equal(table.get(dword(OUT))?.object?.impersonationLevel, undefined);
+
+    assert.equal(natives.NtDuplicateToken.handler([0x1234, 0, 0, 0, 2, OUT]), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, 0, 0, 2, 0]), 0xc0000005,
+        'nowhere to put it: STATUS_ACCESS_VIOLATION');
+});
+
+test('the native security calls set, query and check a kernel object, as NTSTATUS', ()=>{
+    // ntdll's NtSetSecurityObject/NtQuerySecurityObject keep and hand back
+    // the same descriptor the win32 pair do, and NtAccessCheck answers the
+    // walk as a status with an NTSTATUS *AccessStatus, not a BOOL.
+    const { bytes, fns, dword, table } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    const object = {};
+    table.set(0x40, { type: 'event', object });
+    table.set(0x44, { type: 'event', object });
+    // A self-relative descriptor with a present DACL of one ACE allowing
+    // BUILTIN\Administrators 0x1 (as the win32 kernel-object test builds).
+    const sd = BUFFER;
+    bytes.fill(0, sd, sd + 40);
+    bytes[sd] = 1;
+    bytes.set([0x14, 0x80], sd + 2);
+    const dacl = sd + 20;
+    new DataView(bytes.buffer).setUint32(sd + 16, dacl - sd, true);
+    bytes.set([2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0, 1, 0, 0, 0,
+        1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0], dacl);
+
+    assert.equal(natives.NtSetSecurityObject.handler([0x9999, 0x4, sd]), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(natives.NtSetSecurityObject.handler([0x40, 0x4, 0]), 0xc0000005,
+        'no descriptor: STATUS_ACCESS_VIOLATION');
+    assert.equal(natives.NtSetSecurityObject.handler([0x40, 0x4, sd]), 0, 'STATUS_SUCCESS');
+
+    // Query it back on the other handle: sized first, then written.
+    const OUT_SIZE = 0x600;
+    assert.equal(natives.NtQuerySecurityObject.handler([0x44, 0x4, 0x800, 0, OUT_SIZE]),
+        0xc0000023, 'STATUS_BUFFER_TOO_SMALL');
+    const size = dword(OUT_SIZE);
+    assert.ok(size > 20);
+    assert.equal(natives.NtQuerySecurityObject.handler([0x44, 0x4, 0x800, size, OUT_SIZE]), 0);
+    const control = bytes[0x800 + 2] | bytes[0x800 + 3] << 8;
+    assert.equal(control & 0x8004, 0x8004, 'self-relative, with a DACL');
+    assert.equal(natives.NtQuerySecurityObject.handler([0x9999, 0x4, 0x800, size, OUT_SIZE]),
+        0xc0000008, 'STATUS_INVALID_HANDLE');
+
+    // Check the token the setup grants against that descriptor. The mapping
+    // is identity; the granted mask and the NTSTATUS verdict are written out.
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 0);
+    const token = dword(OUT);
+    const MAPPING = 0x900;
+    bytes.set([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x1f], MAPPING);
+    const GRANTED = 0xa00;
+    const STATUS = 0xa10;
+    const PRIV = 0xa20;
+    const PRIVLEN = 0xa80;
+    new DataView(bytes.buffer).setUint32(PRIVLEN, 0x40, true);
+    assert.equal(natives.NtAccessCheck.handler([sd, token, 0x1, MAPPING, PRIV, PRIVLEN,
+        GRANTED, STATUS]), 0, 'STATUS_SUCCESS: the check ran');
+    assert.equal(dword(STATUS), 0, 'STATUS_SUCCESS: access granted');
+    assert.equal(dword(GRANTED), 0x1);
+    assert.equal(natives.NtAccessCheck.handler([sd, token, 0x1, MAPPING, PRIV, PRIVLEN,
+        GRANTED, 0]), 0xc0000005, 'nowhere for the status: STATUS_ACCESS_VIOLATION');
 });
 
 test('CopySid copies a SID that fits and refuses one that does not', ()=>{

@@ -169,6 +169,8 @@ export { USER_NAME };
  *           The volume a hive is saved to and loaded from. Without it a
  *           save is refused and a load finds no file.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {Map<string, any>} [security]  The run's file-security store (named-security.js).
+ * @property {(path: string) => string} [resolvePath]  A path made absolute, to key the store by.
  * @property {{ set: (handle: number) => boolean, reset: (handle: number) => boolean }} [events]
  *           The kernel's events, which a change notification signals. Without
  *           them an asynchronous RegNotifyChangeKeyValue finds no event.
@@ -1812,21 +1814,8 @@ export function createRegistryFunctions(host){
             },
         },
 
-        /**
-         * BOOL GetFileSecurityA(LPCSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-         *                      DWORD nLength, LPDWORD lpnLengthNeeded)
-         * BOOL SetFileSecurityA(LPCSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR)
-         * BOOL GetFileSecurityW(LPCWSTR, ...), the same with a wide name
-         *
-         * This machine's volume carries no security descriptors, and the
-         * honest answer is the one the consumer line of Windows gave: the
-         * call is not implemented. A program of the era asks before it
-         * copies a file and carries on when told so; told nothing -- a zero
-         * with a stale error behind it -- it takes the copy for failed.
-         */
-        GetFileSecurityA: { argBytes: 20, handler: notImplemented },
-        SetFileSecurityA: { argBytes: 12, handler: notImplemented },
-        GetFileSecurityW: { argBytes: 20, handler: notImplemented },
+        // GetFileSecurity and SetFileSecurity are advapi32's file-security
+        // calls, beside the named ones (named-security.js).
 
         /**
          * BOOL IsTextUnicode(const VOID *lpv, int iSize, LPINT lpiResult)
@@ -1875,14 +1864,6 @@ export function createRegistryFunctions(host){
                     return notImplemented();
                 },
             }])),
-
-        SetFileSecurityW: {
-            argBytes: 12,
-            handler: ()=>{
-                host.setLastError?.(ERROR_CALL_NOT_IMPLEMENTED);
-                return 0;
-            },
-        },
 
         /**
          * BOOL AllocateAndInitializeSid(PSID_IDENTIFIER_AUTHORITY pIdentifierAuthority,

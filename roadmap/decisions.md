@@ -270,6 +270,19 @@ next read answers the same. A setup that reads a folder's DACL, merges an entry 
 `SetEntriesInAcl` and writes it back goes through and changes nothing it could see. Not measured
 against XP; revisit if a program is found that checks the DACL it wrote. *2026-10-07.*
 
+*Reconsidered 2026-10-27:* the volume is NTFS and keeps security descriptors, reporting
+`FILE_PERSISTENT_ACLS`, rather than a FAT32 volume that keeps none. `GetNamedSecurityInfo` and
+`GetFileSecurity` answer a file the way NTFS answers one that inherited nothing and had none set
+-- full control to the administrators, the system and the owner, the DACL present and not null --
+and what a program sets with `SetNamedSecurityInfo`, `SetFileSecurity` or a `SECURITY_ATTRIBUTES`
+at `CreateFile`/`CreateDirectory` is kept and answered back. A null DACL read back as full access
+was the old call's weakness: a program that read a DACL, merged an entry and wrote it back could
+not see its change take, and one that checked the DACL it wrote found the made-up one instead. The
+descriptors are the run's, not a process's -- a setup writes one and a service reads it in another
+process of the one run -- so they live in a store beside the hive for the run's lifetime; nothing
+is written to the volume, so a later run starts fresh. The registry side of A34 (a key answered in
+Windows' own shape, set accepted and kept nowhere) stands. *2026-10-27.*
+
 **A35. kernel32 exports the Windows 95 family's own calls, and each fails as it does when what it
 reaches for is absent.** XP's kernel32 is believed (not checked against an XP export table) not to
 export the flat-thunk helpers (`ThunkConnect32`, `FT_Thunk`, `FT_Exit*`, `MapLS`, `MapSL`,
