@@ -154,6 +154,8 @@ const SHELLEXECUTEINFO_PROCESS = 56;
 const SEE_MASK_IDLIST = 0x00000004;
 const SEE_MASK_NOCLOSEPROCESS = 0x00000040;
 const SEE_MASK_CLASSNAME = 0x00000001;
+const GWL_EXSTYLE = -20;
+const WS_EX_ACCEPTFILES = 0x10;
 const NIM_ADD = 0;
 const NIM_MODIFY = 1;
 const NIM_DELETE = 2;
@@ -333,8 +335,6 @@ const SHDID_COMPUTER_FIXED = 8;
  * @param {ShellHost} host
  */
 export function createShellFunctions(host){
-    /** Which windows said they would take a drop. Nothing ever drops on them. */
-    const accepting = new Set();
     /** Memory to scan, where the host gives it: asked only once `host.readMemory` is seen. */
     const scanned = /** @type {import('../common/scan-windows.js').ScannedMemory} */ (host);
 
@@ -1601,20 +1601,24 @@ export function createShellFunctions(host){
         /**
          * void DragAcceptFiles(HWND hWnd, BOOL fAccept)
          *
-         * Accepted and remembered. A window that accepts drops and never
-         * receives one is an ordinary window on an ordinary desktop.
+         * The window's WS_EX_ACCEPTFILES, set or cleared, which is all the
+         * call is (Wine's test_DragQueryFile reads it back); user32 keeps it.
          */
         DragAcceptFiles: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([window, accept])=>{
-                if ((accept | 0) !== 0)
+                const user32 = host.library?.('USER32.dll');
+                const style = user32?.GetWindowLongA?.handler([window, GWL_EXSTYLE]);
+                if (typeof style !== 'number')
                 {
-                    accepting.add(window >>> 0);
+                    return 0;
                 }
-                else
+                const wanted = (accept | 0) !== 0 ? style | WS_EX_ACCEPTFILES
+                    : style & ~WS_EX_ACCEPTFILES;
+                if (wanted !== style)
                 {
-                    accepting.delete(window >>> 0);
+                    user32?.SetWindowLongA?.handler([window, GWL_EXSTYLE, wanted]);
                 }
                 return 0;
             },

@@ -959,3 +959,26 @@ test('a name without an extension is looked for as a program', ()=>{
     assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x180, 0, 0, 1]), 2,
         'and a name with no program by it is a file not found');
 });
+
+test('DragAcceptFiles sets and clears the window\'s WS_EX_ACCEPTFILES', ()=>{
+    let style = 0x100;
+    /** @type {number[][]} */
+    const set = [];
+    const shell = /** @type {any} */ (createShellFunctions({ writeMemory: ()=>{},
+        library: name=>(name === 'USER32.dll' ? {
+            GetWindowLongA: { handler: ([window, index])=>(window === 0x40 && index === -20
+                ? style : 0) },
+            SetWindowLongA: { handler: ([window, index, value])=>{
+                set.push([window, index, value]);
+                style = value;
+                return 0;
+            } },
+        } : undefined) }));
+    assert.equal(shell.DragAcceptFiles.handler([0x40, 1]), 0);
+    assert.equal(style, 0x110);
+    shell.DragAcceptFiles.handler([0x40, 1]);
+    assert.equal(set.length, 1, 'set once');
+    shell.DragAcceptFiles.handler([0x40, 0]);
+    assert.equal(style, 0x100);
+    assert.deepEqual(set.at(-1), [0x40, -20, 0x100]);
+});

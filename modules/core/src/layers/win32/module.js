@@ -82,6 +82,7 @@ import { createCommonControls } from './comctl32/controls.js';
 import { createImageLists } from './comctl32/imagelist.js';
 import { SHELL32_ORDINALS, createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
+import { registerDragDropHelperClass } from './shell32/dragdrop.js';
 import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
@@ -1422,6 +1423,7 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             };
             registerShellLinkClasses(com, shortcutHost);
+            registerDragDropHelperClass(com);
             // The `.url` beside it: a setup's link to its publisher's site.
             registerInternetShortcutClass(com, /** @type {any} */ (shortcutHost));
 
