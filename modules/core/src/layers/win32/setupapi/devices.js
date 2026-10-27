@@ -44,6 +44,26 @@ export const GUID_NULL = '{00000000-0000-0000-0000-000000000000}';
 /** SP_DEVICE_INTERFACE_DATA's flags. */
 export const SPINT = Object.freeze({ ACTIVE: 1, DEFAULT: 2, REMOVED: 4 });
 
+/**
+ * The setup classes every Windows installation has, by GUID: installed
+ * whether or not a device of theirs is present, as Windows installs them.
+ */
+const STANDARD_CLASSES = Object.freeze([
+    ['{4d36e965-e325-11ce-bfc1-08002be10318}', 'CDROM'],
+    ['{4d36e967-e325-11ce-bfc1-08002be10318}', 'DiskDrive'],
+    ['{4d36e968-e325-11ce-bfc1-08002be10318}', 'Display'],
+    ['{4d36e96b-e325-11ce-bfc1-08002be10318}', 'Keyboard'],
+    ['{4d36e96c-e325-11ce-bfc1-08002be10318}', 'MEDIA'],
+    ['{4d36e96e-e325-11ce-bfc1-08002be10318}', 'Monitor'],
+    ['{4d36e96f-e325-11ce-bfc1-08002be10318}', 'Mouse'],
+    ['{4d36e972-e325-11ce-bfc1-08002be10318}', 'Net'],
+    ['{4d36e978-e325-11ce-bfc1-08002be10318}', 'Ports'],
+    ['{4d36e979-e325-11ce-bfc1-08002be10318}', 'Printer'],
+    ['{4d36e97d-e325-11ce-bfc1-08002be10318}', 'System'],
+    ['{36fc9e60-c465-11cf-8056-444553540000}', 'USB'],
+    ['{745a17a0-74d3-11d0-b6fe-00a0c90f57da}', 'HIDClass'],
+]);
+
 /** The hardware every machine here has, present from the start. */
 const MACHINE_DEVICES = Object.freeze([
     {
@@ -469,16 +489,16 @@ export function createDeviceStore(hive){
 
         /** The machine's own hardware, there unless the registry already has it. */
         seedMachine(){
-            for (const device of MACHINE_DEVICES)
+            for (const [guid, name] of STANDARD_CLASSES)
             {
-                // Its class installed, named, as the classes of a machine's
-                // own hardware are.
-                const { key: installed } = hive.create(machine(),
-                    `${CLASS_KEY}\\${device.classGuid}`);
+                const { key: installed } = hive.create(machine(), `${CLASS_KEY}\\${guid}`);
                 if (!hive.getValue(installed, 'Class'))
                 {
-                    hive.setValue(installed, 'Class', REG_SZ, sz(device.className));
+                    hive.setValue(installed, 'Class', REG_SZ, sz(name));
                 }
+            }
+            for (const device of MACHINE_DEVICES)
+            {
                 if (store.exists(device.id))
                 {
                     continue;

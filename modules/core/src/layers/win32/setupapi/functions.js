@@ -95,6 +95,7 @@ const DEVPROP_OF_REG = new Map([[1, DEVPROP_TYPE.STRING], [2, DEVPROP_TYPE.STRIN
     [7, DEVPROP_TYPE.STRING_LIST], [4, DEVPROP_TYPE.UINT32], [3, DEVPROP_TYPE_BINARY]]);
 
 const ERROR_NOT_FOUND = 1168;
+const ERROR_WRONG_INF_STYLE = 0xe0000100;
 
 const ERROR_PARTIAL_COPY = 299;
 const ERROR_DEVINFO_NOT_REGISTERED = 0xe0000208;
@@ -1269,6 +1270,27 @@ export function createSetupapiFunctions(host){
         }
         const key = devices?.instanceKey(device.id) ?? null;
         return key ? [...keys, ...storedKeys(host.registry, key)] : keys;
+    };
+
+    /**
+     * The installer classes the machine has: each class key's GUID and its
+     * Class name.
+     *
+     * @returns {{ guid: string, name: string }[]}
+     */
+    const installedClasses = ()=>{
+        const hive = host.registry;
+        const root = hive?.open(hive.root(HKEY_LOCAL_MACHINE), CLASS_KEY) ?? null;
+        if (!hive || !root)
+        {
+            return [];
+        }
+        return hive.subkeys(root).map((/** @type {string} */ guid)=>{
+            const key = hive.open(root, guid);
+            const value = key ? hive.getValue(key, 'Class') : null;
+            return { guid: guid.toLowerCase(),
+                name: value ? decodeAnsi(value.data).replace(/\0[\s\S]*$/, '') : '' };
+        });
     };
 
     /** An instance's Device Parameters key. @param {string} id */
@@ -3943,6 +3965,87 @@ export function createSetupapiFunctions(host){
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [, namePointer, flags, queue])=>
                 installClass(textOf(namePointer, wide), flags >>> 0, queue >>> 0),
+        })),
+
+        /**
+         * BOOL SetupDiGetINFClassA(PCSTR InfName, LPGUID ClassGuid, PSTR ClassName,
+         *     DWORD ClassNameSize, PDWORD RequiredSize), and the W form
+         *
+         * The class an INF installs, from its [Version] Class and ClassGUID,
+         * strings substituted; the one it does not give is the installed
+         * class's of that name or GUID, GUID_NULL or an empty name when there
+         * is none. An INF that is not there is ERROR_FILE_NOT_FOUND before
+         * any argument is looked at; one that is not INF_STYLE_WIN4, or names
+         * neither, fails; a ClassGUID that is not one is
+         * ERROR_INVALID_PARAMETER, as Windows 7 and later answer it.
+         */
+        ...bothWidths('SetupDiGetINFClass', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [namePointer, guidOut, buffer, size, required])=>{
+                const name = textOf(namePointer, wide);
+                if (name === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const path = pathOf(name);
+                if (!exists(path))
+                {
+                    return fail(ERROR_FILE_NOT_FOUND);
+                }
+                if ((guidOut >>> 0) === 0 || (buffer >>> 0) === 0 || (size >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const thread = host.callerThread();
+                /** @param {{ open: OpenInf } | { error: number, line: number }} result */
+                const answer = result=>{
+                    if ('error' in result || result.open.inf.style !== INF_STYLE_WIN4)
+                    {
+                        host.setLastErrorFor(thread, 'error' in result ? result.error
+                            : ERROR_WRONG_INF_STYLE);
+                        return 0;
+                    }
+                    const { inf } = result.open;
+                    const className = inf.value('Version', 'Class');
+                    const guidValue = inf.value('Version', 'ClassGUID');
+                    if (className === null && guidValue === null)
+                    {
+                        host.setLastErrorFor(thread, ERROR_NO_ASSOCIATED_CLASS);
+                        return 0;
+                    }
+                    let guid = GUID_NULL;
+                    if (guidValue !== null)
+                    {
+                        if (!/^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$/i
+                            .test(guidValue))
+                        {
+                            host.setLastErrorFor(thread, ERROR_INVALID_PARAMETER);
+                            return 0;
+                        }
+                        guid = guidValue.toLowerCase();
+                    }
+                    const installed = installedClasses();
+                    const found = guidValue === null
+                        ? installed.find(entry=>entry.name.toLowerCase()
+                            === /** @type {string} */ (className).toLowerCase())
+                        : installed.find(entry=>entry.guid === guid);
+                    if (guidValue === null && found)
+                    {
+                        guid = found.guid;
+                    }
+                    writeGuid(guidOut, guid);
+                    if (!answerText(className ?? found?.name ?? '', buffer, size, required, wide))
+                    {
+                        host.setLastErrorFor(thread, ERROR_INSUFFICIENT_BUFFER);
+                        return 0;
+                    }
+                    host.setLastErrorFor(thread, ERROR_SUCCESS);
+                    return 1;
+                };
+                const loaded = loadInf(path ?? undefined);
+                return 'then' in loaded ? loaded.then(answer) : answer(loaded);
+            },
         })),
 
         /**

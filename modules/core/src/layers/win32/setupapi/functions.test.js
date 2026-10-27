@@ -1990,9 +1990,9 @@ test('device properties by DEVPROPKEY: stored, the registry\'s, and the system\'
     const instance = propKey('{78c34fc8-104a-4aca-9ea4-524d52996e57}', 256);
     const own = propKey('{12345678-0000-0000-0000-000000000000}', 2);
     const value = m.wstr('deadbeef');
-    /** @param {number} key @param {number} type @param {number} data @param {number} size @param {number} [flags] */
-    const put = (key, type, data, size, flags = 0)=>m.fns.SetupDiSetDevicePropertyW.handler([set,
-        device, key, type, data, size, flags]);
+    /** @param {...number} args  The key, the type, the data, its size, the flags. */
+    const put = (...args)=>m.fns.SetupDiSetDevicePropertyW.handler([set, device, ...args, 0]
+        .slice(0, 7));
     const type = m.buffer(4);
     const out = m.buffer(256);
     const size = m.buffer(4);
@@ -2057,4 +2057,41 @@ test('device properties by DEVPROPKEY: stored, the registry\'s, and the system\'
     {
         assert.ok(pids.includes(pid), `${pid} among ${pids}`);
     }
+});
+
+test('SetupDiGetINFClass reads an INF\'s class, the installed classes filling the gap', async()=>{
+    // Wine's setupapi test_get_inf_class.
+    const m = await machine();
+    const guid = m.buffer(16);
+    const name = m.buffer(64);
+    const count = m.buffer(4);
+    /** @param {string} path @param {number} [size] */
+    const ask = (path, size = 64)=>m.fns.SetupDiGetINFClassA.handler([m.str(path), guid, name,
+        size, count]);
+    assert.equal(await ask('C:\\src\\none.inf'), 0);
+    assert.equal(m.lastError(), ERROR_FILE_NOT_FOUND, 'before any argument');
+    m.file('C:\\src\\c.inf', '[Version]\r\nSignature="$CHICAGO$"\r\nClass=WINE\r\n');
+    assert.equal(await ask('C:\\src\\c.inf'), 1);
+    assert.equal(m.u32(count), 5);
+    assert.equal(m.readCString(name, 64), 'WINE');
+    assert.equal(m.u32(guid), 0, 'no such class installed: GUID_NULL');
+    assert.equal(await ask('C:\\src\\c.inf', 4), 0);
+    assert.equal(m.lastError(), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(await m.fns.SetupDiGetINFClassA.handler([m.str('C:\\src\\c.inf'), 0, name, 64,
+        count]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
+    m.file('C:\\src\\g.inf', '[Version]\r\nSignature="$Windows NT$"\r\n'
+        + 'ClassGUID={4d36e972-e325-11ce-bfc1-08002be10318}\r\n');
+    assert.equal(await ask('C:\\src\\g.inf'), 1);
+    assert.equal(m.readCString(name, 64), 'Net', 'the installed class\'s name');
+    m.file('C:\\src\\s.inf', '[Version]\r\nSignature="$CHICAGO$"\r\nClass=%Name%\r\n'
+        + 'ClassGUID=%Guid%\r\n');
+    assert.equal(await ask('C:\\src\\s.inf'), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'a GUID that is not one');
+    m.file('C:\\src\\s.inf', '[Version]\r\nSignature="$CHICAGO$"\r\nClass=%Name%\r\n'
+        + 'ClassGUID=%Guid%\r\n[Strings]\r\nName=DeadBeef\r\n'
+        + 'Guid={deadbeef-dead-beef-dead-beefdeadbeef}\r\n');
+    assert.equal(await ask('C:\\src\\s.inf'), 1);
+    assert.equal(m.readCString(name, 64), 'DeadBeef');
+    assert.equal(m.u32(guid), 0xdeadbeef);
 });
