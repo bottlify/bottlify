@@ -69,6 +69,7 @@
     "src/layers/win32/common/refusal.js",
     "src/layers/win32/dsetup/functions.js",
     "src/layers/win32/kernel32/codepages.js",
+    "src/layers/win32/kernel32/datetime-format.js",
     "src/layers/win32/kernel32/languages.js",
     "src/layers/win32/kernel32/locale-data.js",
     "src/layers/win32/kernel32/locale.js",

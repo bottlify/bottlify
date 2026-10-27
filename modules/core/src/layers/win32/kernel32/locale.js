@@ -11,6 +11,7 @@ import { STATUS } from '../ntdll/status.js';
 import { decodeUtf7, encodeUtf7 } from './utf7.js';
 import { bestFit, codePage } from './codepages.js';
 import { ALTERNATE_SORTS, LOCALES, lcidOfName, localeByLcid, localeByName } from './locales.js';
+import { renderDate, renderTime } from './datetime-format.js';
 import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
     from './locale-data.js';
 
@@ -171,14 +172,11 @@ const CSTR_GREATER_THAN = 3;
 /** The one CompareString flag honoured. */
 const NORM_IGNORECASE = 0x00000001;
 
-/** Which picture GetDateFormat and GetTimeFormat use when given none. */
+/** Which picture GetDateFormat uses when given none. */
 const DATE_LONGDATE = 0x00000002;
-const TIME_NOSECONDS = 0x00000002;
 
 const SHORT_DATE = 'M/d/yyyy';
 const LONG_DATE = 'dddd, MMMM dd, yyyy';
-const LONG_TIME = 'h:mm:ss tt';
-const SHORT_TIME = 'h:mm tt';
 
 /** The time formats EnumTimeFormats enumerates, the locale's own first. */
 const TIME_FORMATS = ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss', 'HH:mm:ss',
@@ -194,6 +192,12 @@ const YEAR_MONTH_FORMATS = [YEAR_MONTH];
 /** EnumDateFormats' kinds besides DATE_LONGDATE: DATE_SHORTDATE, DATE_YEARMONTH. */
 const DATE_SHORTDATE = 0x00000001;
 const DATE_YEARMONTH = 0x00000008;
+const DATE_MONTHDAY = 0x00000080;
+/** DATE_USE_ALT_CALENDAR, DATE_LTRREADING, DATE_RTLREADING, DATE_AUTOLAYOUT besides the kinds. */
+const DATE_FLAGS = 0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80
+    | 0x80000000 | 0x40000000;
+/** TIME_NOMINUTESORSECONDS to TIME_FORCE24HOURFORMAT, and the two locale flags. */
+const TIME_FLAGS = 0x0f | 0x80000000 | 0x40000000;
 
 /** sizeof(SYSTEMTIME), which the date and time formats are given one of. */
 const SYSTEMTIME_SIZE = 16;
@@ -1324,72 +1328,6 @@ export function createLocaleFunctions(host){
         };
     };
 
-    /**
-     * A date or time picture, rendered.
-     *
-     * The tokens are matched longest first, which is the whole of the
-     * difference between a correct renderer and one that turns "yyyy" into four
-     * copies of the year. Anything not a token is copied through, so a picture
-     * carrying separators or literal text comes out with them.
-     *
-     * @param {string} picture
-     * @param {{ year: number, month: number, day: number, weekday: number,
-     *           hour: number, minute: number, second: number }} when
-     */
-    const render = (picture, when)=>{
-        const pad = (/** @type {number} */ value, /** @type {number} */ width)=>
-            String(value).padStart(width, '0');
-        const hour12 = when.hour % 12 === 0 ? 12 : when.hour % 12;
-        /** @type {[string, string][]} */
-        const tokens = [
-            ['yyyy', pad(when.year, 4)],
-            ['yy', pad(when.year % 100, 2)],
-            ['MMMM', MONTHS[when.month - 1] ?? ''],
-            ['MMM', (MONTHS[when.month - 1] ?? '').slice(0, 3)],
-            ['MM', pad(when.month, 2)],
-            ['M', String(when.month)],
-            ['dddd', DAYS[when.weekday] ?? ''],
-            ['ddd', (DAYS[when.weekday] ?? '').slice(0, 3)],
-            ['dd', pad(when.day, 2)],
-            ['d', String(when.day)],
-            ['HH', pad(when.hour, 2)],
-            ['H', String(when.hour)],
-            ['hh', pad(hour12, 2)],
-            ['h', String(hour12)],
-            ['mm', pad(when.minute, 2)],
-            ['m', String(when.minute)],
-            ['ss', pad(when.second, 2)],
-            ['s', String(when.second)],
-            ['tt', when.hour < 12 ? 'AM' : 'PM'],
-            ['t', when.hour < 12 ? 'A' : 'P'],
-        ];
-
-        let out = '';
-        let at = 0;
-        while (at < picture.length)
-        {
-            // Text in single quotes is written as it stands, and two quotes
-            // together, in or out of them, are one.
-            if (picture[at] === '\'')
-            {
-                const quoted = /^'((?:[^']|'')*)'?/.exec(picture.slice(at)) ?? ['\'', ''];
-                out += quoted[0] === '\'\'' ? '\'' : quoted[1].replace(/''/g, '\'');
-                at += quoted[0].length;
-                continue;
-            }
-            const found = tokens.find(([token])=>picture.startsWith(token, at));
-            if (found)
-            {
-                out += found[1];
-                at += found[0].length;
-                continue;
-            }
-            out += picture[at];
-            at++;
-        }
-        return out;
-    };
-
     /** @param {number} address */
     const readLong = address=>
         new DataView(host.readMemory(address, 4).slice().buffer).getUint32(0, true);
@@ -1846,28 +1784,94 @@ export function createLocaleFunctions(host){
     const whenFormat = (wide, date)=>({
         argBytes: 24,
         /** @param {number[]} args */
-        handler: (/** @type {number[]} */ [, flags, time, format, buffer, count])=>{
-            const asked = flags >>> 0;
-            if ((buffer >>> 0) === 0 && (count | 0) !== 0)
-            {
-                return refuse(ERROR_INVALID_PARAMETER);
-            }
-            if ((format >>> 0) !== 0 && (date ? asked : asked & LOCALE_NOUSEROVERRIDE) !== 0)
-            {
-                return refuse(ERROR_INVALID_FLAGS);
-            }
-            const when = timeOf(time >>> 0);
-            if (!when || !(date ? isDate(when) : isTimeOfDay(when)))
-            {
-                return refuse(ERROR_INVALID_PARAMETER);
-            }
-            const picture = (format >>> 0) !== 0
-                ? (wide ? readWideSpan : readAnsiSpan)(format >>> 0, -1)
-                : date ? ((asked & DATE_LONGDATE) !== 0 ? LONG_DATE : SHORT_DATE)
-                    : ((asked & TIME_NOSECONDS) !== 0 ? SHORT_TIME : LONG_TIME);
-            return writeAnswer(render(picture, when), buffer >>> 0, count | 0, wide);
+        handler: (/** @type {number[]} */ [locale, flags, time, format, buffer, count])=>{
+            const record = localeOf(locale >>> 0);
+            return record === null ? refuse(ERROR_INVALID_PARAMETER)
+                : formatWhen(record, flags >>> 0, time >>> 0, format >>> 0, buffer >>> 0,
+                    count | 0, wide, date);
         },
     });
+
+    /**
+     * The ANSI text at an address in a code page: what an A call is handed
+     * in its locale's page.
+     *
+     * @param {number} address @param {number} page
+     */
+    const readTextIn = (address, page)=>{
+        const bytes = host.readMemory(address, host.stringLength(address, 1));
+        return codePage(page)?.decode(bytes, false) ?? decodeSingleByte(bytes, page);
+    };
+
+    /**
+     * The names a locale's dates and times are written with.
+     *
+     * @param {import('./locales.js').Locale} record
+     * @returns {import('./datetime-format.js').CalendarNames}
+     */
+    const calendarNamesOf = record=>{
+        const text = (/** @type {number} */ type)=>String(valueOf(record, type) ?? '');
+        /** Sunday first, from LCTYPEs that start on Monday. */
+        const week = (/** @type {number} */ first)=>[6, 0, 1, 2, 3, 4, 5].map(day=>text(first + day));
+        const months = Array.from({ length: 12 }, (_, at)=>text(LOCALE_SMONTHNAME1 + at));
+        const genitive = months.map((month, at)=>text(LOCALE_SMONTHNAME1 + at
+            | LOCALE_RETURN_GENITIVE_NAMES));
+        return {
+            days: week(LCTYPE.SDAYNAME1),
+            shortDays: week(LCTYPE.SABBREVDAYNAME1),
+            months,
+            shortMonths: Array.from({ length: 12 }, (_, at)=>text(LCTYPE.SABBREVMONTHNAME1 + at)),
+            genitive: genitive.some((name, at)=>name !== months[at]) ? genitive : null,
+            am: text(LCTYPE.S1159),
+            pm: text(LCTYPE.S2359),
+            era: CALENDAR_INFO[4],
+        };
+    };
+
+    /**
+     * GetDateFormat's or GetTimeFormat's answer for a locale found.
+     *
+     * A date's flags pick its picture -- short, long, year and month, month
+     * and day, one at most -- and come with no picture of the caller's; a
+     * time's take fields out and may come with one, LOCALE_NOUSEROVERRIDE
+     * apart. A date's time of day is not looked at, nor a time's date. An A
+     * call's text is in the locale's own ANSI page unless LOCALE_USE_CP_ACP.
+     *
+     * @param {import('./locales.js').Locale} record @param {number} flags
+     * @param {number} time @param {number} format @param {number} buffer
+     * @param {number} count @param {boolean} wide @param {boolean} date
+     */
+    const formatWhen = (record, flags, time, format, buffer, count, wide, date)=>{
+        if (buffer === 0 && count !== 0)
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        const kinds = flags & (DATE_SHORTDATE | DATE_LONGDATE | DATE_YEARMONTH | DATE_MONTHDAY);
+        const allowed = date ? DATE_FLAGS : TIME_FLAGS;
+        if ((flags & ~allowed) !== 0 || (date && (kinds & (kinds - 1)) !== 0)
+            || (format !== 0 && (flags & (date ? allowed & ~LOCALE_USE_CP_ACP
+                : LOCALE_NOUSEROVERRIDE)) !== 0))
+        {
+            return refuse(ERROR_INVALID_FLAGS);
+        }
+        const page = (flags & LOCALE_USE_CP_ACP) !== 0 ? ANSI_CODE_PAGE
+            : record.ansi || ANSI_CODE_PAGE;
+        const when = timeOf(time);
+        if (!when || !(date ? isDate(when) : isTimeOfDay(when)))
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        const own = (flags & LOCALE_NOUSEROVERRIDE) !== 0 ? LOCALE_NOUSEROVERRIDE : 0;
+        const picture = format !== 0 ? (wide ? readWideSpan(format, -1) : readTextIn(format, page))
+            : String(valueOf(record, own | (!date ? LCTYPE.STIMEFORMAT
+                : kinds === DATE_LONGDATE ? LCTYPE.SLONGDATE
+                    : kinds === DATE_YEARMONTH ? LCTYPE.SYEARMONTH
+                        : kinds === DATE_MONTHDAY ? LCTYPE.SMONTHDAY : LCTYPE.SSHORTDATE)) ?? '');
+        const names = calendarNamesOf(record);
+        const text = date ? renderDate(picture, when, names)
+            : renderTime(picture, when, names, flags);
+        return writeAnswer(text, buffer, count, wide, page);
+    };
 
     /**
      * GetNumberFormat or GetCurrencyFormat, at either width:
