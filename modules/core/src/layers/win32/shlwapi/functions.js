@@ -20,6 +20,7 @@ import { createForwards } from './forwards.js';
 import { MAX_PATH, canonical, compactPath, createPathFunctions, extensionIndex, isSeparator,
     rootOf, statPath }
     from './path.js';
+import { createOrdinalFunctions } from './ordinals.js';
 import { createRegistryHelpers } from './registry.js';
 import { createStringFunctions } from './strings.js';
 import { createWidths } from './text.js';
@@ -626,6 +627,7 @@ export function createShlwapiFunctions(host){
         ...createStringFunctions(host, widths),
         ...createUrlFunctions(host, widths),
         ...createRegistryHelpers(host),
+        ...createOrdinalFunctions(host),
 
         /**
          * HRESULT SHAutoComplete(HWND hwndEdit, DWORD dwFlags)
