@@ -628,14 +628,15 @@ export const LOOPS = Object.freeze({
 /**
  * Every loop of `LOOPS` from starts that keep its turns in the data area, run off
  * its end or below its start into a closed page, start past the 4 GiB window
- * (whose low half is the data area: wrapped, the stores would land there), and
+ * (whose low half is the data area: wrapped, the stores would land there) or just
+ * below its end (a turn's dword then straddles it), and
  * -- with `code` -- store into the code area's page, down over the loop itself.
  *
  * @param {boolean} [intoCode]  for a runner that notes stores into code
  */
 export function loopCases(intoCode = true){
     const starts = [CORPUS.dataAt + 0x100, CORPUS.dataAt + 0x1800, CORPUS.dataAt + 0x1f00,
-        CORPUS.dataAt + 0x200, 2 ** 32 + CORPUS.dataAt + 0x100, 2 ** 63,
+        CORPUS.dataAt + 0x200, 2 ** 32 + CORPUS.dataAt + 0x100, 2 ** 32 - 6, 2 ** 63,
         ...intoCode ? [CORPUS.codeAt + 0x300] : []];
     return Object.entries(LOOPS).flatMap(([name, code])=>starts.map(start=>{
         const one = CORPUS.cases[0];

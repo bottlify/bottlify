@@ -324,6 +324,12 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 function longLayout(state, ramBase, ramSize, hashSlots){
+    // The last page of the 4 GiB window is never RAM: translated code finds a
+    // store window that crosses 4 GiB by that page's INACCESSIBLE flag alone.
+    if (ramSize > 2 ** 32 - 4096)
+    {
+        throw new RangeError('cork: long mode\'s RAM leaves the last page of 4 GiB');
+    }
     const fields = {
         bits: /** @type {64} */ (64),
         ramBase,

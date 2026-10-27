@@ -1591,7 +1591,10 @@ export function emitGroupChecks(e, checks, at = -1){
         if (e.width.bits === 64)
         {
             // Long mode's quadword registers: a window past the 4 GiB one is
-            // not clean (the interpreter faults its access).
+            // not clean (the interpreter faults its access). Its high half is
+            // tested with the page flags, at one branch: a window that starts
+            // inside 4 GiB and ends past it starts on the last page, which no
+            // RAM reaches (`longLayout`), so it is flagged INACCESSIBLE.
             if (group.base >= 0)
             {
                 b.localGet(registerLocal(e, group.base));
@@ -1605,11 +1608,9 @@ export function emitGroupChecks(e, checks, at = -1){
                 b.localGet(registerLocal(e, group.index)).i64const(BigInt(group.scale))
                     .op(I64.mul).op(I64.add);
             }
-            b.i64const(BigInt(start)).op(I64.add).localTee(Local.t64)
-                .localGet(Local.t64).i64const(BigInt(group.width - 1)).op(I64.add)
-                .op(I64.or).i64const(32n).op(I64.shrU).op(I64.wrap);
-            leaveIf('beyond');
-            b.localGet(Local.t64).op(I64.wrap).localSet(Local.addr);
+            b.i64const(BigInt(start)).op(I64.add).localTee(Local.t64).op(I64.wrap)
+                .localSet(Local.addr);
+            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);
         }
         else
         {
@@ -1637,9 +1638,18 @@ export function emitGroupChecks(e, checks, at = -1){
         const bits = PageFlag.INACCESSIBLE | (stores ? STORE_FLAGS : 0);
         b.localGet(Local.addr).i32const(12).op(I32.shrU);
         loadFlags(b, table, 'i32_16u').i32const(bits * 0x01010101).op(I32.and);
+        if (e.width.bits === 64)
+        {
+            b.op(I32.or);
+        }
         // Out of line: a window seldom finds a flag up, and its test inline
         // was most of the bytes of a region's stack accesses.
         e.openGuard('window', EMPTY);
+        if (e.width.bits === 64)
+        {
+            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);
+            leaveIf('beyond');
+        }
         const [first = [1, 0], ...more] = storeSpans(group.list, group.lo);
         b.localGet(Local.addr).i32const(group.width - 1).i32const(first[0]).i32const(first[1])
             .call(e.context.windowHit);
