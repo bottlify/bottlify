@@ -284,7 +284,7 @@ export function createCorkHost(config){
     const profileSize = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
         ? Tables.BLOCK_PROFILE_SIZE : 0;
     const wasmWanted = typeof engine.createWasmInterpreter === 'function'
-        && corkConfig?.wasmInterpreter !== false && !long;
+        && corkConfig?.wasmInterpreter !== false;
     const past = tables + profileSize + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0);
     const firstPages = pagesFor(own, past);
     // Every other executor's: its state page, its tables and what lies past them.
@@ -760,6 +760,7 @@ export function createCorkHost(config){
         ? engine.createLongRunner({ memory, layout, pages: runtime.pages,
             hot: corkConfig?.hotThreshold ?? 2,
             below: runsFrom,
+            tier: wasmTier,
             ...trapPort === undefined ? {} : { trapPort },
             // Every long region is a module of its own: where a tail call into
             // another instance faults, the host goes between them.
@@ -1051,7 +1052,8 @@ export function createCorkHost(config){
             takeFault(PAGE_FAULT);
             return 0;
         }
-        if (wasmTier === null || force)
+        // Long mode's runner takes the tier itself, between its regions.
+        if (wasmTier === null || force || long)
         {
             return interpretJs(address, budget, force, jumpedIn, false);
         }

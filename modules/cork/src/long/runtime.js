@@ -29,6 +29,7 @@ import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { features } from '../wasm/features.js';
 import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
+import { WasmExit } from '../interp-wasm.js';
 import { formRegion as formShape } from '../region.js';
 import { createX87Calls } from './x87.js';
 import { LongExit, emitRegions, foldFunction, missFunction, translates } from './emit.js';
@@ -105,7 +106,8 @@ const VOLATILE_HOLD_MS = 2000;
  *     hot?: number, below?: number, transfers?: boolean, checkReads?: boolean,
  *     looseStacks?: boolean, defaultNaNNegative?: boolean, leafCalls?: boolean,
  *     callTargets?: boolean, volatileWindowMs?: number, packRegions?: number,
- *     trapPort?: number }} settings
+ *     trapPort?: number, tier?: import('../../../core/src/layers/cpu/engine.js').WasmInterpreter
+ *         | null }} settings
  *     `below`: no block starts under it (the host's null range, whose fetch faults on
  *     the interpreter); `transfers`: regions go on into each other through the entry
  *     hash with tail calls, where the host has them (off where a tail call into another
@@ -127,14 +129,17 @@ const VOLATILE_HOLD_MS = 2000;
  *     `packRegions`, the regions formed before they are gathered into one module;
  *     `trapPort`, the port whose `out dx, eax` is the host's call channel: a region
  *     leaves past it with the value in the state's `trapped`, as the interpreter's
- *     write records it (unset, the interpreter runs every `out`)
+ *     write records it (unset, the interpreter runs every `out`); `tier`, the
+ *     interpreter tier in wasm over the same block (`createWasmInterpreter`, long
+ *     mode's build): what no region holds runs there, `interp64.js` taking only the
+ *     instructions it hands back and its faults
  */
 export function createLongRunner(settings){
     const { memory, layout, pages, hot = 2, below = 0x10000,
         transfers = features().tailCalls, leafCalls = true, callTargets = false,
         defaultNaNNegative = features().defaultNaNNegative,
-        volatileWindowMs = VOLATILE_WINDOW_MS, packRegions = PACK_REGIONS, trapPort = -1 }
-        = settings;
+        volatileWindowMs = VOLATILE_WINDOW_MS, packRegions = PACK_REGIONS, trapPort = -1,
+        tier = null } = settings;
     let readsChecked = settings.checkReads === true;
     /** Whether regions are made loose: until code is translated on a stack. */
     let loose = settings.looseStacks !== false;
@@ -718,7 +723,7 @@ export function createLongRunner(settings){
         }
     };
 
-    return {
+    const runner = {
         stats,
 
         /** The counts, and the twenty instructions most often stepped one at a time. */
@@ -780,6 +785,58 @@ export function createLongRunner(settings){
                     { force: true, shouldStop: ()=>true, onStep: options.onStep });
                 state.syncOut();
             };
+            /**
+             * Up to `count` instructions on the tier, over the block: it stops at a
+             * start with a region, a hot one (formed here), a trap, a halt; an
+             * instruction it hands back, or faults on before its effect, runs on
+             * `interp64.js`, which raises the fault with its address.
+             * @param {number} count
+             */
+            const tiered = count=>{
+                const code = /** @type {NonNullable<typeof tier>} */ (tier).run(count);
+                const ran = /** @type {NonNullable<typeof tier>} */ (tier).retired();
+                state.retired += ran;
+                stats.interpreted += ran;
+                const at = Number(view.getBigUint64(layout.eip, true));
+                switch (code)
+                {
+                    case WasmExit.CODE_WRITE:
+                        runner.invalidate(/** @type {NonNullable<typeof tier>} */ (tier)
+                            .exitValue(), /** @type {NonNullable<typeof tier>} */ (tier).exitSize());
+                        return;
+                    case WasmExit.HOT:
+                        if (hashed.entryOf(at) < 0 && !entries.has(at))
+                        {
+                            visits.delete(at);
+                            form(at);
+                        }
+                        return;
+                    case WasmExit.TRAP:
+                        state.trapped.push(/** @type {NonNullable<typeof tier>} */ (tier)
+                            .exitValue());
+                        return;
+                    case WasmExit.HALT:
+                        state.halted = true;
+                        return;
+                    case WasmExit.UNSUPPORTED: case WasmExit.FAULT:
+                        step(1);
+                        return;
+                    default: // BUDGET, ENTRY
+                }
+            };
+            /** What no region holds: on the tier where there is one, else one run on the
+             * interpreter, to the next jump. */
+            const cold = ()=>{
+                if (tier !== null)
+                {
+                    tiered(Math.min(budget - (state.retired - before),
+                        limit - (stats.interpreted - interpretedBefore)));
+                }
+                else
+                {
+                    step(budget - (state.retired - before));
+                }
+            };
             state.syncOut();
             while (state.retired - before < budget && !state.halted && state.trapped.length === 0
                 && stats.interpreted - interpretedBefore < limit)
@@ -804,7 +861,7 @@ export function createLongRunner(settings){
                         if (block === undefined && volatileUntil.size > 0 && volatile(at >>> 12))
                         {
                             // Left to the interpreter: to the next jump, nothing formed.
-                            step(budget - (state.retired - before));
+                            cold();
                             continue;
                         }
                         if (block === undefined)
@@ -856,8 +913,7 @@ export function createLongRunner(settings){
                     step(1);
                     continue;
                 }
-                // Cold: one run on the interpreter, to the next jump.
-                step(budget - (state.retired - before));
+                cold();
             }
             // RIP and the flags as the last block left them, for a caller that
             // writes the state back.
@@ -948,6 +1004,7 @@ export function createLongRunner(settings){
             }
         },
     };
+    return runner;
 }
 
 /**
