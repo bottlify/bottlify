@@ -2295,3 +2295,127 @@ test('a compatible driver list: the models matching the device\'s IDs, ranked, i
         assert.equal(m.readCString(selected + 12, 256), 'desc1',
             'the device\'s first hardware ID on the driver\'s');
     });
+
+test('SetupDiCallClassInstaller: co-installers, the class installer, then the default handler',
+    async()=>{
+        // Wine's setupapi test_call_class_installer, test_class_installer and
+        // test_class_coinstaller.
+        const ERROR_DI_DO_DEFAULT = 0xe000020e;
+        const [DIF_REMOVE, DIF_DESTROYPRIVATEDATA, DIF_ALLOW_INSTALL, DIF_REGISTERDEVICE] =
+            [0x05, 0x0c, 0x18, 0x19];
+        /** @type {string[]} */
+        const heard = [];
+        /** @type {Map<string, number>} */
+        const entries = new Map();
+        let answer = 0;
+        let m = /** @type {Awaited<ReturnType<typeof machine>>} */ (/** @type {unknown} */ (null));
+        m = await machine({ libraries: {
+            loadAnsi: ()=>0x10000,
+            procAddress: (/** @type {number} */ _, /** @type {number} */ name)=>
+                entries.get(m.readCString(name, 64)) ?? 0,
+            free: ()=>0,
+        } });
+        for (const name of ['ClassInstall', 'CoDeviceInstall'])
+        {
+            entries.set(name, m.callback(args=>{
+                heard.push(`${name} ${args[0].toString(16)}`);
+                return answer;
+            }));
+        }
+        const guid = m.buffer(16);
+        m.view.setUint32(guid, 0x6a55b5a4, true);
+        const machineRoot = /** @type {any} */ (m.hive.root(0x80000002));
+        const classPath = 'SYSTEM\\CurrentControlSet\\Control\\Class\\'
+            + '{6a55b5a4-0000-0000-0000-000000000000}';
+        /**
+         * @param {(probe: { call: (request: number) => number | Promise<number>,
+         *     registered: () => boolean }) => Promise<void>} body
+         */
+        const withSet = async body=>{
+            const set = m.fns.SetupDiCreateDeviceInfoList.handler([guid, 0]);
+            const device = m.buffer(28);
+            m.view.setUint32(device, 28, true);
+            m.fns.SetupDiCreateDeviceInfoA.handler([set, m.str('Root\\LEGACY_BOGUS\\0000'), guid,
+                0, 0, 0, device]);
+            /** @param {number} request */
+            const call = request=>m.fns.SetupDiCallClassInstaller.handler([request, set, device]);
+            const registered = ()=>m.hive.getValue(/** @type {any} */ (m.hive.open(machineRoot,
+                'SYSTEM\\CurrentControlSet\\Enum\\ROOT\\LEGACY_BOGUS\\0000')), 'Phantom') === null;
+            await body({ call, registered });
+            await m.fns.SetupDiDestroyDeviceInfoList.handler([set]);
+            return { call, registered };
+        };
+        await withSet(async probe=>{
+            assert.equal(await probe.call(DIF_REGISTERDEVICE), 1, 'no installer: the default');
+            assert.ok(probe.registered());
+            assert.equal(await probe.call(DIF_ALLOW_INSTALL), 0);
+            assert.equal(m.lastError(), ERROR_DI_DO_DEFAULT, 'no default handler');
+            assert.equal(await probe.call(DIF_REMOVE), 1);
+        });
+        assert.deepEqual(heard.splice(0), []);
+
+        const { key } = m.hive.create(machineRoot, classPath);
+        m.hive.setValue(key, 'Installer32', 1, Uint8Array.from([...'coinst.dll\0'], c=>
+            c.charCodeAt(0)));
+        await withSet(async probe=>{
+            assert.equal(await probe.call(DIF_REGISTERDEVICE), 1);
+            assert.ok(!probe.registered(), 'the class installer did it, so no default');
+        });
+        assert.deepEqual(heard.splice(0), ['ClassInstall 19', 'ClassInstall c'],
+            'DIF_DESTROYPRIVATEDATA with the set');
+        answer = 0xdeadc0de;
+        await withSet(async probe=>{
+            assert.equal(await probe.call(DIF_ALLOW_INSTALL), 0);
+            assert.equal(m.lastError(), 0xdeadc0de);
+        });
+        m.hive.remove(machineRoot, classPath);
+
+        answer = 0;
+        const { key: co } = m.hive.create(machineRoot,
+            'SYSTEM\\CurrentControlSet\\Control\\CoDeviceInstallers');
+        m.hive.setValue(co, '{6a55b5a4-0000-0000-0000-000000000000}', 7,
+            Uint8Array.from([...'coinst.dll\0\0'], c=>c.charCodeAt(0)));
+        heard.splice(0);
+        await withSet(async probe=>{
+            assert.equal(await probe.call(DIF_REGISTERDEVICE), 1);
+            assert.ok(probe.registered(), 'a co-installer leaves the default to run');
+        });
+        assert.deepEqual(heard.splice(0), [`CoDeviceInstall ${DIF_REGISTERDEVICE.toString(16)}`,
+            `CoDeviceInstall ${DIF_DESTROYPRIVATEDATA.toString(16)}`]);
+    });
+
+test('a class\'s devices list in the order they were made, an enumerator\'s in its keys\' order',
+    async()=>{
+        // Wine's setupapi test_get_class_devs and test_class_device_order.
+        const m = await machine();
+        const guid = m.buffer(16);
+        m.view.setUint32(guid, 0x6a55b5a4, true);
+        const set = m.fns.SetupDiCreateDeviceInfoList.handler([guid, 0]);
+        const device = m.buffer(28);
+        m.view.setUint32(device, 28, true);
+        for (const name of ['foo', 'qux', 'bar'])
+        {
+            m.fns.SetupDiCreateDeviceInfoA.handler([set, m.str(`Root\\LEGACY_BOGUS\\${name}`), guid,
+                0, 0, 0, device]);
+            m.fns.SetupDiRegisterDeviceInfo.handler([set, device, 0, 0, 0, 0]);
+        }
+        /** @param {number} found */
+        const ids = found=>{
+            const names = [];
+            const id = m.buffer(64);
+            for (let index = 0; m.fns.SetupDiEnumDeviceInfo.handler([found, index, device]);
+                index++)
+            {
+                m.fns.SetupDiGetDeviceInstanceIdA.handler([found, device, id, 64, 0]);
+                names.push(m.readCString(id, 64).split('\\')[2]);
+            }
+            return names;
+        };
+        assert.deepEqual(ids(m.fns.SetupDiGetClassDevsA.handler([guid, 0, 0, 0])),
+            ['foo', 'qux', 'bar']);
+        assert.deepEqual(ids(m.fns.SetupDiGetClassDevsA.handler([0, m.str('ROOT\\LEGACY_BOGUS'),
+            0, 4])), ['bar', 'foo', 'qux']);
+        assert.equal(m.fns.SetupDiGetClassDevsA.handler([0, m.str('ROOT\\LEGACY_BOGUS'), 0,
+            0x14]), INVALID_HANDLE_VALUE, 'interfaces: a whole instance id or none');
+        assert.equal(m.lastError(), ERROR_INVALID_DATA);
+    });

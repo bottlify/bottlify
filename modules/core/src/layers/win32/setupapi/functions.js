@@ -118,6 +118,17 @@ const LINE_LEN = 256;
 const DETAIL = Object.freeze({ INF_DATE: 4, COMPAT_OFFSET: 12, COMPAT_LENGTH: 16, SECTION: 24 });
 const ERROR_NO_DRIVER_SELECTED = 0xe0000203;
 const ERROR_NO_COMPAT_DRIVERS = 0xe0000228;
+
+/** The class installer requests that have a default handler, and how it answers. */
+const DIF_REMOVE = 0x05;
+const DIF_DESTROYPRIVATEDATA = 0x0c;
+const DIF_SELECTBESTCOMPATDRV = 0x17;
+const DIF_REGISTERDEVICE = 0x19;
+const ERROR_DI_DO_DEFAULT = 0xe000020e;
+const ERROR_DI_POSTPROCESSING_REQUIRED = 0xe0000222;
+/** COINSTALLER_CONTEXT_DATA: PostProcessing, InstallResult, PrivateData. */
+const COINSTALLER_CONTEXT_SIZE = 12;
+const CO_INSTALLERS_KEY = 'SYSTEM\\CurrentControlSet\\Control\\CoDeviceInstallers';
 /** CONFIGRET codes, cfgmgr32.h. */
 const CR_SUCCESS = 0x00;
 const CR_INVALID_POINTER = 0x03;
@@ -191,9 +202,12 @@ const DI_NOVCP = 0x8;
 const IDF_CHECKFIRST = 0x100;
 const DPROMPT = Object.freeze({ SUCCESS: 0, CANCEL: 1, SKIPFILE: 2, BUFFERTOOSMALL: 3 });
 
-/** SP_DEVINFO_LIST_DETAIL_DATA's sizes: a GUID, a handle and 263 characters. */
-const LIST_DETAIL_A_SIZE = 288;
-const LIST_DETAIL_W_SIZE = 552;
+/**
+ * SP_DEVINFO_LIST_DETAIL_DATA's sizes: cbSize, a GUID, a handle and 263
+ * characters, packed to a byte as setupapi.h packs its structures on x86.
+ */
+const LIST_DETAIL_A_SIZE = 287;
+const LIST_DETAIL_W_SIZE = 550;
 
 /** SP_DEVICE_INTERFACE_DETAIL_DATA's cbSize: a DWORD and the first character of the path. */
 const DETAIL_A_SIZE = 5;
@@ -1354,7 +1368,8 @@ export function createSetupapiFunctions(host){
      * @returns {{ text: string } | { error: number }}
      */
     const deviceIdList = (filter, flags)=>{
-        const ids = devices?.allInstances() ?? [];
+        const ids = devices?.allInstances(flags === CM_GETIDLIST_FILTER_CLASS ? 'tree'
+            : 'registry') ?? [];
         /** @param {(id: string) => boolean} keep */
         const listed = keep=>({ text: ids.filter(keep).map(id=>`${id}\0`).join('') });
         if (flags === CM_GETIDLIST_FILTER_NONE)
@@ -1393,7 +1408,7 @@ export function createSetupapiFunctions(host){
         const guid = guidAt(classGuid);
         const all = (flags & CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES) !== 0;
         const wanted = deviceId === null || deviceId === '' ? null : deviceId.toUpperCase();
-        const links = (devices?.allInstances() ?? [])
+        const links = (devices?.allInstances('tree') ?? [])
             .filter(id=>(wanted === null || id.toUpperCase() === wanted)
                 && (all || devices?.registered(id)))
             .flatMap(id=>(devices?.storedInterfaces(id) ?? [])
@@ -1853,6 +1868,190 @@ export function createSetupapiFunctions(host){
      */
     const detailFixed = wide=>DETAIL.SECTION + (LINE_LEN * 2 + MAX_PATH) * (wide ? 2 : 1);
 
+    /**
+     * A device of a set registered: no longer a phantom, nor the set's to
+     * take away with it.
+     *
+     * @param {import('./devices.js').DeviceSet} set @param {import('./devices.js').Device} device
+     */
+    const registerDevice = (set, device)=>{
+        devices?.register(device.id);
+        set.made.delete(device.id.toUpperCase());
+    };
+
+    /**
+     * A device out of the registry: the set keeps it, which no longer has
+     * an instance id, and its interfaces, marked removed.
+     *
+     * @param {import('./devices.js').DeviceSet} set @param {import('./devices.js').Device} device
+     */
+    const removeDevice = (set, device)=>{
+        devices?.removeInstance(device.id);
+        set.made.delete(device.id.toUpperCase());
+        device.removed = true;
+        device.interfaces.forEach(face=>{
+            face.flags |= SPINT.REMOVED;
+        });
+    };
+
+    /**
+     * A class's installers as the registry names them: its co-installers
+     * and its class installer, each a DLL and an entry.
+     *
+     * @param {string | null} classGuid
+     * @returns {{ co: { dll: string, entry: string }[],
+     *     installer: { dll: string, entry: string } | null }}
+     */
+    const installersOf = classGuid=>{
+        const hive = host.registry;
+        const machine = hive?.root(HKEY_LOCAL_MACHINE);
+        if (!hive || !machine || classGuid === null)
+        {
+            return { co: [], installer: null };
+        }
+        /** @param {string} value @param {string} entry */
+        const split = (value, entry)=>{
+            const [dll = '', given = ''] = value.split(',').map(part=>part.trim());
+            return { dll, entry: given || entry };
+        };
+        const coKey = hive.open(machine, CO_INSTALLERS_KEY);
+        const co = multiSzOf(coKey, classGuid).map(value=>split(value, 'CoDeviceInstall'))
+            .filter(entry=>entry.dll !== '');
+        const installed = hive.open(machine, `${CLASS_KEY}\\${classGuid}`);
+        const value = installed ? hive.getValue(installed, 'Installer32') : null;
+        const named = value ? decodeAnsi(value.data).replace(/\0[\s\S]*$/, '') : '';
+        return { co, installer: named === '' ? null : split(named, 'ClassInstall') };
+    };
+
+    /** Whether a class has any installer of its own. @param {string | null} classGuid */
+    const hasInstallers = classGuid=>{
+        const { co, installer } = installersOf(classGuid);
+        return co.length > 0 || installer !== null;
+    };
+
+    /**
+     * An installer's entry, loaded: its address, 0 when it is not there.
+     *
+     * @param {{ dll: string, entry: string }} installer
+     */
+    const installerEntry = async installer=>{
+        const libraries = host.libraries;
+        if (!libraries)
+        {
+            return 0;
+        }
+        const memory = scratch();
+        try
+        {
+            const module = (await libraries.loadAnsi(memory.string(installer.dll))) >>> 0;
+            return module === 0 ? 0
+                : (await libraries.procAddress(module, memory.string(installer.entry))) >>> 0;
+        }
+        finally
+        {
+            memory.release();
+        }
+    };
+
+    /**
+     * SetupDiCallClassInstaller's sequence for a request; the error, 0 for
+     * none.
+     *
+     * @param {number} request @param {number} handle @param {import('./devices.js').DeviceSet} set
+     * @param {import('./devices.js').Device | null} device @param {number} data
+     * @param {any} thread
+     */
+    const callInstallers = async(request, handle, set, device, data, thread)=>{
+        const { co, installer } = installersOf(device ? devices?.classOf(device.id) ?? null
+            : set.classGuid);
+        const memory = scratch();
+        try
+        {
+            /** @type {{ entry: number, context: number }[]} */
+            const after = [];
+            for (const one of co)
+            {
+                const entry = await installerEntry(one);
+                if (entry === 0)
+                {
+                    continue;
+                }
+                const context = memory.block(COINSTALLER_CONTEXT_SIZE);
+                const code = (await host.call(entry, [request, handle, data, context], thread))
+                    >>> 0;
+                if (code === ERROR_DI_POSTPROCESSING_REQUIRED)
+                {
+                    after.push({ entry, context });
+                }
+                else if (code !== ERROR_SUCCESS)
+                {
+                    return code;
+                }
+            }
+            let result = ERROR_DI_DO_DEFAULT;
+            const entry = installer ? await installerEntry(installer) : 0;
+            if (entry !== 0)
+            {
+                result = (await host.call(entry, [request, handle, data], thread)) >>> 0;
+            }
+            if (result === ERROR_DI_DO_DEFAULT)
+            {
+                result = defaultInstall(request, set, device);
+            }
+            for (const { entry: post, context } of after)
+            {
+                writeU32(context, 1);
+                writeU32(context + 4, result);
+                result = (await host.call(post, [request, handle, data, context], thread)) >>> 0;
+            }
+            return result;
+        }
+        finally
+        {
+            memory.release();
+        }
+    };
+
+    /**
+     * What a request does when no class installer did it; ERROR_DI_DO_DEFAULT
+     * for one that has nothing to do by default.
+     *
+     * @param {number} request @param {import('./devices.js').DeviceSet} set
+     * @param {import('./devices.js').Device | null} device
+     */
+    const defaultInstall = (request, set, device)=>{
+        if (request === DIF_DESTROYPRIVATEDATA)
+        {
+            return ERROR_SUCCESS;
+        }
+        if (!device)
+        {
+            return ERROR_DI_DO_DEFAULT;
+        }
+        if (request === DIF_REGISTERDEVICE)
+        {
+            registerDevice(set, device);
+            return ERROR_SUCCESS;
+        }
+        if (request === DIF_REMOVE)
+        {
+            removeDevice(set, device);
+            return ERROR_SUCCESS;
+        }
+        if (request === DIF_SELECTBESTCOMPATDRV)
+        {
+            const held = driverLists.get(device);
+            const best = bestDriver(held?.lists.get(SPDIT_COMPATDRIVER) ?? []);
+            if (!held || best < 0)
+            {
+                return ERROR_NO_COMPAT_DRIVERS;
+            }
+            held.selected = { type: SPDIT_COMPATDRIVER, index: best };
+            return ERROR_SUCCESS;
+        }
+        return ERROR_DI_DO_DEFAULT;
+    };
+
     /** An instance's Device Parameters key. @param {string} id */
     const parametersPath = id=>`${ENUM_KEY}\\${id}\\Device Parameters`;
 
@@ -1986,9 +2185,11 @@ export function createSetupapiFunctions(host){
         {
             return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
         }
+        // An enumerator names an enumerator or a device of one; for
+        // interfaces, a whole instance.
         const parts = enumerator?.split('\\') ?? [];
         if (enumerator !== null && (enumerator === '' || parts.includes('')
-            || (parts.length >= 3 && !byInterface)))
+            || (byInterface ? parts.length !== 3 : parts.length >= 3)))
         {
             return fail(ERROR_INVALID_DATA, INVALID_HANDLE_VALUE);
         }
@@ -2001,7 +2202,10 @@ export function createSetupapiFunctions(host){
             : newSet(allClasses || byInterface ? null : classGuid);
         const set = /** @type {import('./devices.js').DeviceSet} */ (deviceSet(handle));
         const prefix = parts.map(part=>part.toUpperCase());
-        for (const id of devices?.allInstances() ?? [])
+        // A class's devices come in the order they were made; an
+        // enumerator's alone in its keys' order.
+        const order = classGuid !== null && !allClasses ? 'tree' : 'registry';
+        for (const id of devices?.allInstances(order) ?? [])
         {
             const idParts = id.toUpperCase().split('\\');
             if (!devices?.registered(id) || prefix.some((part, at)=>idParts[at] !== part)
@@ -5091,8 +5295,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                devices.register(device.id);
-                set.made.delete(device.id.toUpperCase());
+                registerDevice(set, device);
                 return fail(ERROR_SUCCESS, 1);
             },
         },
@@ -5147,12 +5350,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                devices.removeInstance(device.id);
-                set.made.delete(device.id.toUpperCase());
-                device.removed = true;
-                device.interfaces.forEach(face=>{
-                    face.flags |= SPINT.REMOVED;
-                });
+                removeDevice(set, device);
                 return fail(ERROR_SUCCESS, 1);
             },
         },
@@ -5479,15 +5677,29 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                for (const device of set.devices)
-                {
-                    if (set.made.has(device.id.toUpperCase()))
+                const destroy = ()=>{
+                    for (const device of set.devices)
                     {
-                        devices?.removeInstance(device.id);
+                        if (set.made.has(device.id.toUpperCase()))
+                        {
+                            devices?.removeInstance(device.id);
+                        }
                     }
+                    host.handles.close(handle >>> 0);
+                    return 1;
+                };
+                // The class's installers are told first, to let go of what
+                // they kept for the set.
+                if (!hasInstallers(set.classGuid))
+                {
+                    return fail(ERROR_SUCCESS, destroy());
                 }
-                host.handles.close(handle >>> 0);
-                return fail(ERROR_SUCCESS, 1);
+                const thread = host.callerThread();
+                return callInstallers(DIF_DESTROYPRIVATEDATA, handle >>> 0, set, null, 0, thread)
+                    .then(()=>{
+                        host.setLastErrorFor(thread, ERROR_SUCCESS);
+                        return destroy();
+                    });
             },
         },
 
@@ -6003,6 +6215,44 @@ export function createSetupapiFunctions(host){
                     held.selected = null;
                 }
                 return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiCallClassInstaller(DI_FUNCTION InstallFunction,
+         *     HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData)
+         *
+         * The class's co-installers -- CoDeviceInstallers' value for the
+         * class, each `dll[,entry]`, CoDeviceInstall by default -- then its
+         * class installer, Installer32 in its class key, ClassInstall by
+         * default; then, unless the class installer did the work, the
+         * request's default handler: DIF_REGISTERDEVICE registers the device,
+         * DIF_REMOVE removes it, DIF_SELECTBESTCOMPATDRV selects its best
+         * driver, DIF_DESTROYPRIVATEDATA does nothing. A request with no
+         * default handler is ERROR_DI_DO_DEFAULT. Co-installers that asked
+         * are called again after, with the result. An error ends it and is
+         * the call's.
+         */
+        SetupDiCallClassInstaller: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([request, handle, data])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = (data >>> 0) === 0 ? null : deviceIn(set, data);
+                if ((data >>> 0) !== 0 && !device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const thread = host.callerThread();
+                return callInstallers(request >>> 0, handle >>> 0, set, device, data >>> 0, thread)
+                    .then(code=>{
+                        host.setLastErrorFor(thread, code);
+                        return code === ERROR_SUCCESS ? 1 : 0;
+                    });
             },
         },
 

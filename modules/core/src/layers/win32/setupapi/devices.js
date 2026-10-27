@@ -249,13 +249,16 @@ export function createDeviceStore(hive){
     };
 
     /**
-     * Every instance under Enum, three levels down, in the device tree's
-     * order: the order they were made in, as Windows enumerates them -- an
-     * instance this run has not met yet after them, sorted, case aside.
+     * Every instance under Enum, three levels down: in the registry's
+     * order, sorted case aside, as a walk of an enumerator's keys finds
+     * them; or in the device tree's, the order they were made in -- an
+     * instance this run has not met yet after them, sorted -- as Windows
+     * lists a class's.
      *
+     * @param {'registry' | 'tree'} [order]
      * @returns {string[]}
      */
-    const allInstances = ()=>{
+    const allInstances = (order = 'registry')=>{
         const root = open(ENUM_KEY);
         if (!root)
         {
@@ -279,7 +282,7 @@ export function createDeviceStore(hive){
             }
         }
         found.forEach(devnodeOf);
-        return found.sort((a, b)=>devnodeOf(a) - devnodeOf(b));
+        return order === 'registry' ? found : found.sort((a, b)=>devnodeOf(a) - devnodeOf(b));
     };
 
     const store = {
