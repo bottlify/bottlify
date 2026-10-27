@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { argify, namesFile, splitParameters } from './associations.js';
+import { argify, namesFile, pathOfFileUrl, splitParameters } from './associations.js';
 
 test('the shell splits parameters at spaces alone, halving runs of quotes', ()=>{
     // Wine's test_argify, as its comments set the rules out.
@@ -42,4 +42,17 @@ test('a command template is filled in with the file and the parameters', ()=>{
     assert.equal(namesFile('notepad.exe'), false);
     assert.equal(namesFile('notepad.exe "%1"'), true);
     assert.equal(namesFile('x %*'), true);
+});
+
+test('a file: URL names its path when it has up to four slashes, or localhost', ()=>{
+    // Wine's fileurl_tests.
+    for (const [url, path] of /** @type {[string, string | null][]} */ ([
+        ['file:C|/a/b%20c', 'C:\\a\\b c'], ['file:/C:/a', 'C:\\a'], ['File:///C:/a', 'C:\\a'],
+        ['file:////C:/a', 'C:\\a'], ['file://///C:/a', null], ['file://localhost/C:/a', 'C:\\a'],
+        ['file://LocalHost/C:/a', 'C:\\a'], ['file://127.0.0.1/C:/a', null],
+        ['file://notahost/C:/a', null], ['C:\\plain', 'C:\\plain'], ['shlproto://x', 'shlproto://x'],
+    ]))
+    {
+        assert.equal(pathOfFileUrl(url), path, url);
+    }
 });

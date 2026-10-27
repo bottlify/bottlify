@@ -41,7 +41,8 @@ import { createDesktopFunctions } from './desktop.js';
 import { IDLIST_ORDINALS, createIdListFunctions } from './idlist.js';
 import { createDropFunctions } from './drop.js';
 import { createShellExtras } from './extras.js';
-import { argify, createAssociations, namesFile } from './associations.js';
+import { argify, createAssociations, pathOfFileUrl } from './associations.js';
+import { decodeShellLink } from '../common/shell-link.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
@@ -136,6 +137,7 @@ const SEI_VERB = 12;
 const SEI_FILE = 16;
 const SEI_PARAMETERS = 20;
 const SEI_DIRECTORY = 24;
+const SEI_CLASS = 40;
 const SHELLEXECUTEINFO_HINSTAPP = 32;
 const SHELLEXECUTEINFO_PROCESS = 56;
 
@@ -621,10 +623,29 @@ export function createShellFunctions(host){
      * @param {string | null} file       The file to open.
      * @param {string | null} parameters The arguments the child is given.
      * @param {string | null} directory  The directory the child is to start in.
+     * @param {string | null} [given]  The class SEE_MASK_CLASSNAME names.
      * @returns {{ answer: number, record: any }}
      */
-    const start = (verb, file, parameters, directory)=>{
-        const typed = unquote((file ?? '').trim());
+    const start = (verb, file, parameters, directory, given = null)=>{
+        const typed = pathOfFileUrl(unquote((file ?? '').trim()));
+        if (typed === null)
+        {
+            return { answer: SE_ERR_FNF, record: null };
+        }
+        if (given !== null)
+        {
+            return openAssociated(typed, verb, parameters, given)
+                ?? { answer: SE_ERR_NOASSOC, record: null };
+        }
+        const runnable = RUNNABLE_VERBS.has((verb ?? 'open').trim().toLowerCase());
+        const link = extensionOf(typed) === 'lnk' && runnable ? targetOfLink(typed) : null;
+        if (link !== null)
+        {
+            // A shortcut is opened as its target, with its own arguments
+            // unless the caller gave some.
+            return start(verb, link.target, (parameters ?? '').trim() !== '' ? parameters
+                : link.arguments, directory ?? link.workingDirectory);
+        }
         // An address is not a file name, whatever its last dot is followed by:
         // `http://example.com` is not a .com program.
         if (ADDRESS.test(typed) && RUNNABLE_VERBS.has((verb ?? 'open').trim().toLowerCase()))
@@ -750,6 +771,26 @@ export function createShellFunctions(host){
             variables ? { environment: variables } : {}) ?? null;
     };
 
+    /**
+     * What a shortcut on the volume points at, or null when it is no
+     * shortcut, or names no target.
+     *
+     * @param {string} name
+     * @returns {{ target: string, arguments: string, workingDirectory: string | null } | null}
+     */
+    const targetOfLink = name=>{
+        const volume = readableVolume();
+        const found = volume ? locate(volume, name) : null;
+        const bytes = found && volume ? readNow(volume, found) : null;
+        const link = bytes ? decodeShellLink(bytes) : null;
+        if (!link || !link.target)
+        {
+            return null;
+        }
+        return { target: link.target, arguments: link.arguments,
+            workingDirectory: link.workingDirectory || null };
+    };
+
     const associations = host.library && host.readMemory && host.allocate
         ? createAssociations({ readMemory: host.readMemory, writeMemory: host.writeMemory,
             allocate: host.allocate, free: host.free, library: host.library })
@@ -788,16 +829,18 @@ export function createShellFunctions(host){
     /**
      * A file opened with what its type is registered to: the verb's command
      * under its class, filled in with the file and the parameters
-     * (`argify`); a command that does not name the file has it after it.
-     * Null when the type, or the verb, has no command.
+     * (`argify`); a command that does not name the file is run without it,
+     * as Windows runs it. Null when the type, or the verb, has no command.
      *
      * @param {string} name @param {string | null} verb @param {string | null} parameters
+     * @param {string | null} [given]  The class SEE_MASK_CLASSNAME names, over the file's.
      * @returns {{ answer: number, record: any } | null}
      */
-    const openAssociated = (name, verb, parameters)=>{
-        const protocol = /^([A-Za-z][A-Za-z0-9+.-]+):/.exec(name)?.[1] ?? null;
+    const openAssociated = (name, verb, parameters, given = null)=>{
+        const protocol = given === null
+            ? /^([A-Za-z][A-Za-z0-9+.-]+):/.exec(name)?.[1] ?? null : null;
         const extension = extensionOf(name);
-        const named = protocol
+        const named = given ?? protocol
             ?? (extension === '' ? null : associations?.classOf(`.${extension}`));
         const command = named ? associations?.commandOf(named, verb) : null;
         if (!command)
@@ -812,8 +855,7 @@ export function createShellFunctions(host){
         }
         const file = protocol ? name : host.resolve?.(found) ?? found;
         const template = command.value;
-        const line = argify(template, file, parameters ?? '')
-            + (namesFile(template) ? '' : ` "${file}"`);
+        const line = argify(template, file, parameters ?? '');
         const image = imageOfCommand(line.trim());
         if (image === null || !host.launcher)
         {
@@ -926,10 +968,13 @@ export function createShellFunctions(host){
             const mask = dwordAt(at, SEI_MASK);
             /** @param {number} offset */
             const field = offset=>textOf(dwordAt(at, offset), wide);
-            const started = (mask & (SEE_MASK_IDLIST | SEE_MASK_CLASSNAME)) !== 0
+            // A class asked for and not named is no class to open with.
+            const given = (mask & SEE_MASK_CLASSNAME) !== 0 ? field(SEI_CLASS) : null;
+            const started = (mask & SEE_MASK_IDLIST) !== 0
+                || ((mask & SEE_MASK_CLASSNAME) !== 0 && !given)
                 ? { answer: SE_ERR_NOASSOC, record: null }
                 : start(field(SEI_VERB), field(SEI_FILE), field(SEI_PARAMETERS),
-                    field(SEI_DIRECTORY));
+                    field(SEI_DIRECTORY), given);
             host.writeMemory(at + SHELLEXECUTEINFO_HINSTAPP, dword(started.answer));
             if ((mask & SEE_MASK_NOCLOSEPROCESS) !== 0)
             {
@@ -1166,6 +1211,28 @@ export function createShellFunctions(host){
                 }
                 write(result >>> 0, NOTEPAD);
                 return LAUNCH_SUCCESS;
+            }
+            if (name !== null && host.resolve && !SELF_EXECUTABLE.has(extensionOf(name)))
+            {
+                const folder = textOf(directory, wide) ?? '';
+                const volume = readableVolume();
+                const qualified = folder !== '' && !isQualified(name)
+                    ? `${folder.replace(/[\\/]+$/, '')}\\${name}` : name;
+                const extension = extensionOf(name);
+                const named = extension === '' ? null : associations?.classOf(`.${extension}`);
+                const command = named ? associations?.commandOf(named, null) : null;
+                if (command && volume)
+                {
+                    if (!volume.stat(qualified)?.exists)
+                    {
+                        write(result >>> 0, '');
+                        return SE_ERR_FNF;
+                    }
+                    const image = imageOfCommand(argify(command.value,
+                        host.resolve(qualified), '').trim());
+                    write(result >>> 0, image ?? '');
+                    return image === null ? SE_ERR_NOASSOC : LAUNCH_SUCCESS;
+                }
             }
             if (name === null || !host.resolve || !SELF_EXECUTABLE.has(extensionOf(name)))
             {

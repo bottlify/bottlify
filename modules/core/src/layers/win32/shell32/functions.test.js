@@ -358,7 +358,7 @@ test('the extended launch starts the program whatever the flags that change noth
         }
     });
 
-test('the extended launch refuses a record that names a list or a class rather than a file',
+test('the extended launch refuses a record that names a list, or asks for a class it does not name',
     ()=>{
         for (const mask of [0x4, 0x1])
         {

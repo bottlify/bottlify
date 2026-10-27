@@ -150,6 +150,33 @@ export function argify(template, file, raw){
  */
 export const namesFile = template=>/%[1lL*~2-9]/.test(template);
 
+/**
+ * The path a `file:` URL names -- its slashes backslashes, a `|` after a
+ * drive its colon, its escapes undone -- and anything else as it is.
+ * Up to four slashes may lead the drive, or `//localhost/`; five, or
+ * another host, name nothing here: null (Wine's test_fileurls).
+ *
+ * @param {string} text
+ * @returns {string | null}
+ */
+export const pathOfFileUrl = text=>{
+    const url = /^file:(\/*)(.*)$/i.exec(text);
+    if (!url)
+    {
+        return text;
+    }
+    const local = url[1].length === 2 && /^localhost\//i.test(url[2]);
+    const rest = local ? url[2].slice('localhost/'.length) : url[2];
+    const drive = /^([A-Za-z])[:|]([\\/].*)?$/.exec(rest);
+    if (url[1].length > 4 || !drive)
+    {
+        return null;
+    }
+    const path = (drive[2] ?? '\\').replace(/\//g, '\\')
+        .replace(/%([0-9A-Fa-f]{2})/g, (_, hex)=>String.fromCharCode(parseInt(hex, 16)));
+    return `${drive[1]}:${path}`;
+};
+
 const HKEY_CLASSES_ROOT = 0x80000000;
 const KEY_READ = 0x20019;
 const ERROR_SUCCESS = 0;
