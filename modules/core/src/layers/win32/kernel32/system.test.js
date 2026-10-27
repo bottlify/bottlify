@@ -747,7 +747,7 @@ test('a priority on a handle that is not a thread is a reported failure', ()=>{
     assert.deepEqual(host.errors, [6, 6], 'ERROR_INVALID_HANDLE each time');
 });
 
-test('lstrcmpW compares wide strings by sign, folded or not', ()=>{
+test('lstrcmpW compares wide strings in the word sort, by sign, folded or not', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
     /** @param {number} at @param {string} text */
@@ -762,9 +762,15 @@ test('lstrcmpW compares wide strings by sign, folded or not', ()=>{
     };
     wide(0x200, 'abc');
     wide(0x300, 'ABD');
-    assert.equal(fns.lstrcmpW.handler([0x200, 0x300]), 1, '"a" sorts after "A"');
+    assert.equal(fns.lstrcmpW.handler([0x200, 0x300]), -1, 'the letters first, case after');
     assert.equal(fns.lstrcmpiW.handler([0x200, 0x300]), -1, 'folded, "abc" is before "abd"');
+    wide(0x300, 'ABC');
+    assert.equal(fns.lstrcmpW.handler([0x200, 0x300]), -1, '"a" before "A" when all else is equal');
+    assert.equal(fns.lstrcmpiW.handler([0x200, 0x300]), 0);
     assert.equal(fns.lstrcmpW.handler([0x200, 0x200]), 0);
+    assert.equal(fns.lstrcmpW.handler([0, 0x200]), -1, 'NULL first');
+    assert.equal(fns.lstrcmpW.handler([0x200, 0]), 1);
+    assert.equal(fns.lstrcmpW.handler([0, 0]), 0);
     assert.equal(fns.lstrcmpW.argBytes, 8);
 });
 

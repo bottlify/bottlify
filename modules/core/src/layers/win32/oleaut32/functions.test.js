@@ -258,7 +258,8 @@ test('VarBstrCmp orders as bytes without a locale and as text with one', ()=>{
     assert.equal(call('VarBstrCmp', [0, empty, 0, 0]), 1, 'NULL and empty are equal');
     assert.equal(call('VarBstrCmp', [0, abc, 0, 0]), 0);
     assert.equal(call('VarBstrCmp', [abc, empty, 0, 0]), 2);
-    assert.equal(call('VarBstrCmp', [upper, abc, 0x409, 0]), 0, 'with a locale, case counts');
+    assert.equal(call('VarBstrCmp', [upper, abc, 0x409, 0]), 2,
+        'with a locale, a small letter sorts first');
     assert.equal(call('VarBstrCmp', [upper, abc, 0x409, 1]), 1, 'unless NORM_IGNORECASE');
 });
 

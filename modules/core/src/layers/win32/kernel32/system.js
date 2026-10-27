@@ -30,7 +30,7 @@ import { TEB } from './teb.js';
 import { systemTimeToMs } from './filetime.js';
 import { formatMessageText } from './format-message.js';
 import { systemMessage } from './system-messages.js';
-import { decodeAnsi, encodeAnsi } from './locale.js';
+import { compareStrings, decodeAnsi, encodeAnsi } from './locale.js';
 import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
 import {
     PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION, createProcessors,
@@ -191,6 +191,8 @@ const FORMAT_MESSAGE_MAX_WIDTH_MASK = 0x000000ff;
 /** FormatMessageA writes no message this long or longer. */
 const ANSI_MESSAGE_LIMIT = 32767;
 const ERROR_NO_WORK_DONE = 235;
+/** lstrcmpi's CompareString flag. */
+const NORM_IGNORECASE = 0x00000001;
 const ERROR_MR_MID_NOT_FOUND = 317;
 const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
 
@@ -220,15 +222,6 @@ const ES_USER_PRESENT = 0x00000004;
 const ES_CONTINUOUS = 0x80000000;
 const EXECUTION_STATES = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRESENT
     | ES_CONTINUOUS;
-
-/**
- * The sign of a comparison, which is all lstrcmp promises. A caller may test
- * it against zero and nothing else, so returning a difference of bytes would
- * be inventing a guarantee.
- *
- * @param {string} left @param {string} right
- */
-const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
 
 /**
  * @typedef {Object} SystemHost
@@ -442,6 +435,26 @@ export function createSystemFunctions(host){
         host.writeMemory(buffer, new Uint8Array(needed));
         return 1;
     };
+
+    /**
+     * lstrcmp in one form: the sign of CompareString's answer.
+     *
+     * @param {boolean} wide @param {number} flags
+     */
+    const lstrcmpOf = (wide, flags)=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: survivesFault(([first, second])=>{
+            if ((first >>> 0) === 0 || (second >>> 0) === 0)
+            {
+                return Math.sign((first >>> 0 === 0 ? 0 : 1) - (second >>> 0 === 0 ? 0 : 1));
+            }
+            const read = wide ? readWide : (/** @type {number} */ address)=>decodeAnsi(
+                Uint8Array.from(readAnsi(address, MAX_STRING), character=>character.charCodeAt(0)));
+            return compareStrings(read(first >>> 0, MAX_STRING), read(second >>> 0, MAX_STRING),
+                flags) - 2;
+        }),
+    });
 
     /**
      * What SetThreadExecutionState holds for each thread, by its record; a
@@ -1859,41 +1872,14 @@ export function createSystemFunctions(host){
         /**
          * int lstrcmpA(LPCSTR, LPCSTR) and int lstrcmpiA(LPCSTR, LPCSTR)
          *
-         * Both answer the sign of a comparison rather than a difference of
-         * bytes, which is all a caller may rely on. The insensitive form folds
-         * case the way the C library does here: without a code page there is
-         * nothing better to fold by, and above ASCII the two disagree only for
-         * text this build cannot decode anyway.
+         * CompareString's word sort with its answer less two, the insensitive
+         * form under NORM_IGNORECASE; a NULL string is less than any other,
+         * the empty one among them.
          */
-        lstrcmpA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: survivesFault(([first, second])=>compare(
-                readAnsi(first >>> 0, MAX_STRING), readAnsi(second >>> 0, MAX_STRING))),
-        },
-
-        lstrcmpiA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: survivesFault(([first, second])=>compare(
-                readAnsi(first >>> 0, MAX_STRING).toLowerCase(),
-                readAnsi(second >>> 0, MAX_STRING).toLowerCase())),
-        },
-
-        lstrcmpW: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: survivesFault(([first, second])=>compare(
-                readWide(first >>> 0, MAX_STRING), readWide(second >>> 0, MAX_STRING))),
-        },
-
-        lstrcmpiW: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: survivesFault(([first, second])=>compare(
-                readWide(first >>> 0, MAX_STRING).toLowerCase(),
-                readWide(second >>> 0, MAX_STRING).toLowerCase())),
-        },
+        lstrcmpA: lstrcmpOf(false, 0),
+        lstrcmpiA: lstrcmpOf(false, NORM_IGNORECASE),
+        lstrcmpW: lstrcmpOf(true, 0),
+        lstrcmpiW: lstrcmpOf(true, NORM_IGNORECASE),
     };
 
     // The undecorated names are kernel32's own exports beside the ANSI ones

@@ -12,6 +12,9 @@ import { decodeUtf7, encodeUtf7 } from './utf7.js';
 import { bestFit, codePage } from './codepages.js';
 import { ALTERNATE_SORTS, LOCALES, lcidOfName, localeByLcid, localeByName } from './locales.js';
 import { renderDate, renderTime } from './datetime-format.js';
+import { compareText, isSymbol, sortKey } from './collation.js';
+import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, validMapFlags }
+    from './lcmap.js';
 import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
     from './locale-data.js';
 
@@ -95,10 +98,6 @@ const C1_BLANK = 0x0040;
 const C1_XDIGIT = 0x0080;
 const C1_ALPHA = 0x0100;
 
-/** LCMapString's two cases. Everything else is a copy. */
-const LCMAP_LOWERCASE = 0x00000100;
-const LCMAP_UPPERCASE = 0x00000200;
-
 /**
  * The sixteen positions where Windows-1252 is not Latin-1.
  *
@@ -166,11 +165,22 @@ const LOCALE_SMONTHNAME13 = 0x100E;
 
 /** CompareString's answers. Note that none of them is zero: zero is failure. */
 const CSTR_LESS_THAN = 1;
-const CSTR_EQUAL = 2;
 const CSTR_GREATER_THAN = 3;
 
-/** The one CompareString flag honoured. */
-const NORM_IGNORECASE = 0x00000001;
+/**
+ * A UTF-16 unit in upper case, as Windows' one-to-one table has it.
+ *
+ * @param {number} unit
+ */
+const upcaseUnit = unit=>{
+    const upper = String.fromCharCode(unit).toUpperCase();
+    return upper.length === 1 ? upper.charCodeAt(0) : unit;
+};
+
+/** CompareString's flags: the NORM_, LINGUISTIC_ and SORT_ ones, and LOCALE_USE_CP_ACP. */
+const SORT_DIGITSASNUMBERS = 0x00000008;
+const COMPARE_FLAGS = 0x01 | 0x02 | 0x04 | SORT_DIGITSASNUMBERS | 0x10 | 0x20 | 0x1000
+    | 0x10000 | 0x20000 | 0x08000000 | 0x40000000;
 
 /** Which picture GetDateFormat uses when given none. */
 const DATE_LONGDATE = 0x00000002;
@@ -765,20 +775,13 @@ const characterType = code=>{
 
 /**
  * CompareString's three-valued answer -- CSTR_LESS_THAN, CSTR_EQUAL or
- * CSTR_GREATER_THAN, 1 to 3 -- for an ordinal comparison, case-insensitive
- * under NORM_IGNORECASE: the order every comparison of text in this build
- * agrees on (see CompareStringA).
+ * CSTR_GREATER_THAN, 1 to 3 -- in Windows' word sort (`collation.js`),
+ * under the NORM_ and SORT_ flags given.
  *
  * @param {string} first @param {string} second @param {number} flags
  */
 export function compareStrings(first, second, flags){
-    const left = (flags & NORM_IGNORECASE) !== 0 ? first.toLowerCase() : first;
-    const right = (flags & NORM_IGNORECASE) !== 0 ? second.toLowerCase() : second;
-    if (left < right)
-    {
-        return CSTR_LESS_THAN;
-    }
-    return left > right ? CSTR_GREATER_THAN : CSTR_EQUAL;
+    return compareText(first, second, flags) + 2;
 }
 
 /**
@@ -867,7 +870,148 @@ export function createLocaleFunctions(host){
         return readWide(address, wanted);
     };
 
-    const compare = compareStrings;
+    /**
+     * A wide string of a count, or to its terminator for a negative one, as
+     * far as memory lets it be read: the comparisons stop at the first
+     * difference, so a string running into memory it cannot read compares
+     * as far as it goes, as Windows' does.
+     *
+     * @param {number} address @param {number} count
+     */
+    const readWideCounted = (address, count)=>{
+        const wanted = count < 0 ? host.stringLength(address, 2) : count;
+        let text = '';
+        for (let at = 0; at < wanted; at += 512)
+        {
+            try
+            {
+                text += readWide(address + at * 2, Math.min(512, wanted - at));
+            }
+            catch (e){
+                void e;
+                for (let unit = at; unit < Math.min(at + 512, wanted); unit++)
+                {
+                    try
+                    {
+                        text += readWide(address + unit * 2, 1);
+                    }
+                    catch (_e){
+                        void _e;
+                        return text;
+                    }
+                }
+            }
+        }
+        return text;
+    };
+
+    /**
+     * An ANSI string of a count, or to its terminator for a negative one, in a
+     * code page.
+     *
+     * @param {number} address @param {number} count @param {number} page
+     */
+    const readAnsiIn = (address, count, page)=>{
+        const bytes = host.readMemory(address, count < 0 ? host.stringLength(address, 1) : count);
+        return codePage(page)?.decode(bytes, false) ?? decodeSingleByte(bytes, page);
+    };
+
+    /**
+     * LCMapString's body for a locale found: a sort key (`collation.js`) or
+     * the text mapped (`lcmap.js`). A sort key's room is in bytes at either
+     * width, and one too small is filled with the whole levels it holds; a
+     * text's is in characters, and one too small is refused. Only a change
+     * of case may map a buffer onto itself.
+     *
+     * @param {import('./locales.js').Locale} record @param {number} flags
+     * @param {number} source @param {number} sourceChars
+     * @param {number} destination @param {number} room @param {boolean} wide
+     */
+    const mapString = (record, flags, source, sourceChars, destination, room, wide)=>{
+        if (source === 0 || sourceChars === 0 || room < 0 || (destination === 0 && room !== 0))
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        // The A form has no title case: both cases at once are two.
+        if (!validMapFlags(flags) || (!wide && (flags & LCMAP_TITLECASE) === LCMAP_TITLECASE))
+        {
+            return refuse(ERROR_INVALID_FLAGS);
+        }
+        if (source === destination && (flags & ~(LCMAP_TITLECASE | LOCALE_USE_CP_ACP
+            | LCMAP_LINGUISTIC_CASING)) !== 0)
+        {
+            return refuse(ERROR_INVALID_FLAGS);
+        }
+        const page = (flags & LOCALE_USE_CP_ACP) !== 0 ? ANSI_CODE_PAGE
+            : record.ansi || ANSI_CODE_PAGE;
+        const span = sourceSpan(source, anyNegative(sourceChars), wide ? 2 : 1);
+        const text = wide ? readWide(source, span.length)
+            : readAnsiIn(source, span.length, page);
+        if ((flags & LCMAP_SORTKEY) !== 0)
+        {
+            const key = sortKey(text, flags);
+            if (room === 0)
+            {
+                return key.length;
+            }
+            if (key.length > room)
+            {
+                let fits = 0;
+                key.forEach((byte, at)=>{
+                    if (byte === 1 && at < room)
+                    {
+                        fits = at + 1;
+                    }
+                });
+                host.writeMemory(destination, key.subarray(0, fits));
+                return refuse(ERROR_INSUFFICIENT_BUFFER);
+            }
+            host.writeMemory(destination, key);
+            return key.length;
+        }
+        const turkish = /^(tr|az)(-|$)/.test(record.name);
+        const mapped = mapText(text, flags, isSymbol, turkish);
+        const bytes = wide ? null : encodeIn(page, mapped, 0, 0).bytes;
+        const length = bytes === null ? mapped.length : bytes.length;
+        if (room === 0)
+        {
+            return length;
+        }
+        if (length > room)
+        {
+            return refuse(ERROR_INSUFFICIENT_BUFFER);
+        }
+        if (bytes === null)
+        {
+            writeWide(destination, mapped);
+        }
+        else
+        {
+            host.writeMemory(destination, bytes);
+        }
+        return length;
+    };
+
+    /**
+     * CompareString's body: the flags checked against those the form takes,
+     * both strings read, and compared.
+     *
+     * @param {number} flags @param {number} allowed
+     * @param {number} first @param {number} firstLength
+     * @param {number} second @param {number} secondLength
+     * @param {(address: number, count: number) => string} read
+     */
+    const compareSpans = (flags, allowed, first, firstLength, second, secondLength, read)=>{
+        if (first === 0 || second === 0)
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        if ((flags & ~allowed) !== 0)
+        {
+            return refuse(ERROR_INVALID_FLAGS);
+        }
+        return compareStrings(read(first, firstLength), read(second, secondLength), flags);
+    };
 
     /**
      * A conversion's source length: every negative one, not only -1, means
@@ -2272,33 +2416,101 @@ export function createLocaleFunctions(host){
         /**
          * int CompareStringA(LCID, DWORD dwCmpFlags, LPCSTR, int, LPCSTR, int)
          *
-         * An ordinal comparison, optionally case-insensitive. It is not the
-         * locale-aware collation Windows performs: this build has no collation
-         * table, and one invented here would sort a list into an order no other
-         * part of the system agrees with. For the alphabet these code pages
-         * cover the two orders differ only in where accented letters fall.
-         *
-         * The return values are 1, 2 and 3 rather than the -1, 0 and 1 every
-         * other comparison in the world uses -- a caller subtracts 2 to get the
-         * familiar sign, and a function returning 0 here means it failed.
+         * Windows' word sort (`collation.js`), the text read in the locale's
+         * ANSI page. The answers are 1, 2 and 3 rather than the -1, 0 and 1
+         * every other comparison in the world uses -- a caller subtracts 2 to
+         * get the familiar sign, and 0 here means the call failed.
          */
         CompareStringA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, flags, first, firstLength, second, secondLength])=>compare(
-                readAnsiSpan(first >>> 0, firstLength),
-                readAnsiSpan(second >>> 0, secondLength),
-                flags >>> 0),
+            handler: ([locale, flags, first, firstLength, second, secondLength])=>{
+                const record = localeOf(locale >>> 0);
+                if (record === null)
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                const page = ((flags >>> 0) & LOCALE_USE_CP_ACP) !== 0 ? ANSI_CODE_PAGE
+                    : record.ansi || ANSI_CODE_PAGE;
+                return compareSpans(flags >>> 0, COMPARE_FLAGS & ~SORT_DIGITSASNUMBERS,
+                    first >>> 0, firstLength | 0, second >>> 0, secondLength | 0,
+                    (address, length)=>readAnsiIn(address, length, page));
+            },
         },
 
         /** int CompareStringW(LCID, DWORD, LPCWSTR, int, LPCWSTR, int) */
         CompareStringW: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, flags, first, firstLength, second, secondLength])=>compare(
-                readWideSpan(first >>> 0, firstLength),
-                readWideSpan(second >>> 0, secondLength),
-                flags >>> 0),
+            handler: ([locale, flags, first, firstLength, second, secondLength])=>(
+                localeOf(locale >>> 0) === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : compareSpans(flags >>> 0, COMPARE_FLAGS, first >>> 0, firstLength | 0,
+                        second >>> 0, secondLength | 0, readWideCounted)),
+        },
+
+        /**
+         * int CompareStringEx(LPCWSTR lpLocaleName, DWORD dwCmpFlags, LPCWCH, int,
+         *     LPCWCH, int, LPNLSVERSIONINFO, LPVOID lpReserved, LPARAM lParam)
+         */
+        CompareStringEx: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([name, flags, first, firstLength, second, secondLength])=>(
+                localeOfName(name >>> 0) === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : compareSpans(flags >>> 0, COMPARE_FLAGS, first >>> 0, firstLength | 0,
+                        second >>> 0, secondLength | 0, readWideCounted)),
+        },
+
+        /**
+         * int CompareStringOrdinal(LPCWCH lpString1, int cchCount1, LPCWCH lpString2,
+         *     int cchCount2, BOOL bIgnoreCase)
+         *
+         * Code unit by code unit, NUL included; ignoring case upper-cases
+         * both first, as Windows' ordinal comparisons do.
+         */
+        CompareStringOrdinal: {
+            argBytes: 20,
+            natives: {
+                /**
+                 * WCHAR RtlUpcaseUnicodeChar(WCHAR Source) and its downcase
+                 * twin: the one-to-one case table, a character whose other
+                 * case is longer than one unit left as it is.
+                 */
+                RtlUpcaseUnicodeChar: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([unit])=>upcaseUnit(unit & 0xffff),
+                },
+                RtlDowncaseUnicodeChar: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([unit])=>{
+                        const lower = String.fromCharCode(unit & 0xffff).toLowerCase();
+                        return lower.length === 1 ? lower.charCodeAt(0) : unit & 0xffff;
+                    },
+                },
+            },
+            /** @param {number[]} args */
+            handler: ([first, firstLength, second, secondLength, ignoreCase])=>{
+                if ((first >>> 0) === 0 || (second >>> 0) === 0 || (ignoreCase >>> 0) > 1)
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                const upper = (/** @type {string} */ text)=>((ignoreCase >>> 0) === 0 ? text
+                    : String.fromCharCode(...Array.from(text,
+                        unit=>upcaseUnit(unit.charCodeAt(0)))));
+                const left = upper(readWideCounted(first >>> 0, firstLength | 0));
+                const right = upper(readWideCounted(second >>> 0, secondLength | 0));
+                for (let at = 0; at < Math.min(left.length, right.length); at++)
+                {
+                    if (left.charCodeAt(at) !== right.charCodeAt(at))
+                    {
+                        return left.charCodeAt(at) < right.charCodeAt(at)
+                            ? CSTR_LESS_THAN : CSTR_GREATER_THAN;
+                    }
+                }
+                return Math.sign(left.length - right.length) + 2;
+            },
         },
 
         /** int GetLocaleInfoA(LCID Locale, LCTYPE LCType, LPSTR lpLCData, int cchData) */
@@ -2645,31 +2857,17 @@ export function createLocaleFunctions(host){
         /**
          * int LCMapStringA(LCID Locale, DWORD dwMapFlags, LPCSTR lpSrcStr, int cchSrc,
          *                  LPSTR lpDestStr, int cchDest)
+         *
+         * LCMapStringW's answer over the text in the locale's ANSI page.
          */
         LCMapStringA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([locale, mapFlags, source, sourceChars, destination, destinationChars])=>{
-                void locale;
-                const span = sourceSpan(source >>> 0, sourceChars, 1);
-                const raw = host.readMemory(source >>> 0, span.length);
-                const text = decodeSingleByte(raw, ANSI_CODE_PAGE);
-                const mapped = (mapFlags >>> 0) & LCMAP_UPPERCASE
-                    ? text.toUpperCase()
-                    : (mapFlags >>> 0) & LCMAP_LOWERCASE ? text.toLowerCase() : text;
-                const { bytes } = encodeSingleByte(mapped, ANSI_CODE_PAGE);
-
-                if ((destinationChars | 0) === 0)
-                {
-                    return bytes.length;
-                }
-                if (bytes.length > (destinationChars | 0))
-                {
-                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
-                    return 0;
-                }
-                host.writeMemory(destination >>> 0, bytes);
-                return bytes.length;
+            handler: ([locale, flags, source, sourceChars, destination, destinationChars])=>{
+                const record = localeOf(locale >>> 0);
+                return record === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : mapString(record, flags >>> 0, source >>> 0, sourceChars | 0,
+                        destination >>> 0, destinationChars | 0, false);
             },
         },
 
@@ -2680,25 +2878,30 @@ export function createLocaleFunctions(host){
         LCMapStringW: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([locale, mapFlags, source, sourceChars, destination, destinationChars])=>{
-                void locale;
-                const span = sourceSpan(source >>> 0, sourceChars, 2);
-                const text = readWide(source >>> 0, span.length);
-                const mapped = (mapFlags >>> 0) & LCMAP_UPPERCASE
-                    ? text.toUpperCase()
-                    : (mapFlags >>> 0) & LCMAP_LOWERCASE ? text.toLowerCase() : text;
+            handler: ([locale, flags, source, sourceChars, destination, destinationChars])=>{
+                const record = localeOf(locale >>> 0);
+                return record === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : mapString(record, flags >>> 0, source >>> 0, sourceChars | 0,
+                        destination >>> 0, destinationChars | 0, true);
+            },
+        },
 
-                if ((destinationChars | 0) === 0)
-                {
-                    return mapped.length;
-                }
-                if (mapped.length > (destinationChars | 0))
-                {
-                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
-                    return 0;
-                }
-                writeWide(destination >>> 0, mapped);
-                return mapped.length;
+        /**
+         * int LCMapStringEx(LPCWSTR lpLocaleName, DWORD dwMapFlags, LPCWSTR lpSrcStr,
+         *     int cchSrc, LPWSTR lpDestStr, int cchDest, LPNLSVERSIONINFO,
+         *     LPVOID lpReserved, LPARAM sortHandle)
+         */
+        LCMapStringEx: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([name, flags, source, sourceChars, destination, destinationChars])=>{
+                // Only case and sort keys are a locale's; kana and widths are
+                // mapped whatever the name.
+                const record = localeOfName(name >>> 0)
+                    ?? ((flags & (LCMAP_TITLECASE | LCMAP_SORTKEY)) === 0 ? MACHINE_LOCALE : null);
+                return record === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : mapString(record, flags >>> 0, source >>> 0, sourceChars | 0,
+                        destination >>> 0, destinationChars | 0, true);
             },
         },
 
