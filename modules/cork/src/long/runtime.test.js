@@ -28,7 +28,8 @@ import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
 
 import {
-    CORPUS, EXIT, HOISTED_SWITCHES, SWITCHES, compare, load, machine, nested, pool, program, run,
+    CALLS, CORPUS, EXIT, HOISTED_SWITCHES, SWITCHES, compare, load, machine, nested, pool, program,
+    run,
 } from '../testing/long-machine.js';
 
 test('seeded long programs run translated as they run interpreted', ()=>{
@@ -406,10 +407,7 @@ test('calls from region to region return where they were made, and leave where t
     // skip:   add qword [rsp], 8; ret
     // cold:   pxor xmm0, xmm0; mov eax, 7; ret
     // done:
-    const code = 'b90c000000e831000000488903b950000000e84300000048894308e84c00000048c7431001'
-        + '00000048c7431802000000e83d00000048894320eb4183f902721751ffc9e8f3ffffff595083e902e8'
-        + 'e9ffffff5a4801d0c389c8c385c9740bffc9e8f5ffffff48ffc0c331c0c34883042408c3660fefc0b8'
-        + '07000000c3';
+    const code = CALLS.calls;
     const cases = CORPUS.cases.slice(0, 8).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `calls ${i}`, code }));
     /** @type {Record<string, number>} */
@@ -452,8 +450,7 @@ test('a call loads back only what the code after it touches, and no store undoes
     //         add r13, rax; add r13, rdx; ret
     // start:  mov r12d, 4
     // again:  call body; dec r12d; jnz again           the later rounds' calls in wasm
-    const code = 'eb3983c307660f6edbc3488d4364660f7eda83c303660ffedbc34d85d2740bbb01000000660f6edb'
-        + 'eb05e8d3ffffffe8d6ffffff4901c54901d5c341bc04000000e8d4ffffff41ffcc75f6';
+    const code = CALLS.fresh;
     const cases = CORPUS.cases.slice(0, 8).map((/** @type {any} */ one, /** @type {number} */ i)=>{
         const regs = [...one.regs];
         regs[10] = i % 2 === 0 ? '0' : '1';
@@ -480,8 +477,7 @@ test('a callee formed in reads what a wasm call before it left in the state bloc
     // h:      ret
     // leaf:   mov [rbx], rax; add rbx, 8; ret reads what g wrote, nothing after it does
     // done:
-    const code = 'b903000000e80b000000e812000000ffc975f2eb140534120000e801000000c3c3'
-        + '4889034883c308c3';
+    const code = CALLS.formedAfter;
     const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `formed after a call ${i}`, code }));
     for (const budget of [7, 100000])
@@ -504,9 +500,7 @@ test('an indirect call\'s sampled callees are formed in and run as interpreted',
     // g:      add rbx, r10; call h; ret                          no leaf: a wasm call
     // h:      ret
     // done:
-    const code = 'b9204e000089c831d241b90300000041f7f1488d0517000000c1e2034801d04c8d5107ffd0'
-        + 'e81e000000ffc975d7eb224883c301c39090904883c302c39090904883c304c3909090'
-        + '4c01d3e801000000c3c3';
+    const code = CALLS.predicted;
     const cases = CORPUS.cases.slice(0, 2).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `predicted ${i}`, code }));
     for (const budget of [7, 1000])
@@ -617,9 +611,7 @@ test('indirect calls are wasm calls that return where they were made', ()=>{
     //         pop rcx; push rax; sub ecx, 2; call fib; pop rdx; add rax, rdx; ret
     // small:  mov eax, ecx; ret
     // done:
-    const code = 'be03000000488d1527000000b90a000000ffd2480103488d053600000048894340b9070000'
-        + '00ff534048014308ffce75d4eb2383f902721b51ffc9488d15f1ffffffffd2595083e902e8e5ff'
-        + 'ffff5a4801d0c389c8c3';
+    const code = CALLS.indirect;
     const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `indirect ${i}`, code }));
     /** @type {Record<string, number>} */
@@ -646,8 +638,7 @@ test('a function called indirectly that jumps out past its caller does not retur
     // done:
     // g leaves both frames by a jump to `after`, where the call to f waits:
     // the wasm call to g waits at f's `mov`, and must not take it for its own.
-    const code = 'be0200000031c0e809000000480103ffce75f2eb21488d1508000000ffd2b8e8030000c3b8'
-        + '070000004883c410488d15d8ffffffffe2';
+    const code = CALLS.jumpedOut;
     const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `jumped out ${i}`, code }));
     for (const budget of [7, 100000])
@@ -675,8 +666,7 @@ test('a region left by a jump goes on expecting the return its caller waits for'
     // The second pass calls f as a wasm call waiting at `add`; far, entered by a
     // transfer, leaves for L, the address f's own call to g waited at: only the
     // return `add` expects may end the wasm call, not that one.
-    const code = 'be02000000b90300000031c0e809000000480103ffce75edeb22e810000000ffc0ffc97409'
-        + '488d1504000000ffe2c3c383c064488d15e5ffffffffe2';
+    const code = CALLS.expect;
     const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `expect ${i}`, code }));
     for (const budget of [7, 100000])

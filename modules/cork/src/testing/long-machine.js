@@ -441,3 +441,37 @@ export const HOISTED_SWITCHES = ''
     + '2749634c8df04c01e9ffe14883431003eb16486b53100548895310eb0b48317310eb0548c14b1007'
     + 'ffc681fec800000072c4eb30c7ffffffceffffffd9ffffffdfffffff43ffffff49ffffff4fffffff'
     + '58ffffff75ffffff7bffffff82ffffff89ffffff';
+
+/**
+ * Programs of calls and returns (`long/runtime.test.js` gives each one's source):
+ * recursion past the wasm call depth, a callee that returns elsewhere, calls whose
+ * callees are formed in, indirect calls predicted and not, a callee that jumps out
+ * past its caller and a region left by a jump while a call waits.
+ */
+export const CALLS = Object.freeze({
+    calls: ''
+    + 'b90c000000e831000000488903b950000000e84300000048894308e84c00000048c7431001'
+        + '00000048c7431802000000e83d00000048894320eb4183f902721751ffc9e8f3ffffff595083e902e8'
+        + 'e9ffffff5a4801d0c389c8c385c9740bffc9e8f5ffffff48ffc0c331c0c34883042408c3660fefc0b8'
+        + '07000000c3',
+    fresh: ''
+    + 'eb3983c307660f6edbc3488d4364660f7eda83c303660ffedbc34d85d2740bbb01000000660f6edb'
+        + 'eb05e8d3ffffffe8d6ffffff4901c54901d5c341bc04000000e8d4ffffff41ffcc75f6',
+    formedAfter: ''
+    + 'b903000000e80b000000e812000000ffc975f2eb140534120000e801000000c3c3'
+        + '4889034883c308c3',
+    predicted: ''
+    + 'b9204e000089c831d241b90300000041f7f1488d0517000000c1e2034801d04c8d5107ffd0'
+        + 'e81e000000ffc975d7eb224883c301c39090904883c302c39090904883c304c3909090'
+        + '4c01d3e801000000c3c3',
+    indirect: ''
+    + 'be03000000488d1527000000b90a000000ffd2480103488d053600000048894340b9070000'
+        + '00ff534048014308ffce75d4eb2383f902721b51ffc9488d15f1ffffffffd2595083e902e8e5ff'
+        + 'ffff5a4801d0c389c8c3',
+    jumpedOut: ''
+    + 'be0200000031c0e809000000480103ffce75f2eb21488d1508000000ffd2b8e8030000c3b8'
+        + '070000004883c410488d15d8ffffffffe2',
+    expect: ''
+    + 'be02000000b90300000031c0e809000000480103ffce75edeb22e810000000ffc0ffc97409'
+        + '488d1504000000ffe2c3c383c064488d15e5ffffffffe2',
+});

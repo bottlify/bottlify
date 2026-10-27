@@ -477,9 +477,7 @@ export function prepareModule(m, layout, features, memory = {},
         context.undo = addUndoHelper(m, layout);
     }
     // A production bundle emits no diagnostic count, whatever it is asked.
-    // Long mode's calls and returns are a push and a jump through the exits
-    // until its call stack is (`callAndReturn`).
-    if (callReturn && hashed && !undoLog && (layout.flagRecord ?? -1) >= 0 && width.bits === 32)
+    if (callReturn && hashed && !undoLog && (layout.flagRecord ?? -1) >= 0)
     {
         context.callReturn = true;
         context.callDepth = Math.max(1, Math.min(CallStack.LIMIT, Math.trunc(callDepth)));
@@ -740,7 +738,9 @@ export function finishModule(context, functions){
             b.end();
         }
     }
-    if (carried && context.callReturn === true)
+    // Long mode's empty functions are entered as any other: their `ret` pops a
+    // quadword, which `emptyReturn` does not read.
+    if (carried && context.callReturn === true && context.width.bits === 32)
     {
         emptyReturn(context, b, slotAt, key);
     }
@@ -1058,6 +1058,8 @@ export class RegionEmitter {
             && !regionHasMmx(region, context.leaveOut ?? new Set());
         /** Whether the block's call returned here and went on. */
         this.returned = false;
+        /** Whether a `ret` returns to a waiting call through `returnedEpilogue`. */
+        this.returnsToCall = false;
         /** The emitting order and its loops, in a structured region (`planStructure`). */
         this.structure = planned !== null ? planned.structure
             : context.flat === true ? null
@@ -1390,6 +1392,17 @@ export class RegionEmitter {
             this.emitCopies(flagsOut, memoryPlan);
         }
         this.prologue();
+        // A `ret` back to the call waiting for it leaves through an epilogue of
+        // its own after the one every other exit shares (`returnToCaller`): its
+        // stores written once there, not in the loop's body at every `ret`, where
+        // they cost a hot loop of a function that ends in one its registers
+        // (long mode's: vm 2.2x slower with them inline; 32-bit code keeps them).
+        this.returnsToCall = this.context.callReturn === true && this.width.bits === 64
+            && blocks.some(block=>block.instructions.at(-1)?.op === 'ret');
+        if (this.returnsToCall)
+        {
+            this.open('returned', EMPTY);
+        }
         this.open('out', EMPTY);
         if (this.x87.active)
         {
@@ -1412,6 +1425,12 @@ export class RegionEmitter {
             this.markBlock(BLOCK_MARK_END);
         }
         this.epilogue();
+        if (this.returnsToCall)
+        {
+            b.return();
+            this.close(); // returned
+            this.returnedEpilogue();
+        }
         this.fillDeferred();
         const functionIndex = this.context.m.function(
             this.context.regionType, this.localTypes, b.toBytes(), { hints: b.hints });
@@ -1737,7 +1756,6 @@ export class RegionEmitter {
      * returning `RETURNED`.
      */
     returnToCaller(){
-        const { b, layout } = this;
         this.charge();
         if (this.x87.active)
         {
@@ -1745,6 +1763,17 @@ export class RegionEmitter {
             // top and the mask the plain forms keep in locals written.
             x87Normalise(this);
         }
+        if (this.returnsToCall)
+        {
+            this.b.br(this.depthOf('returned'));
+            return;
+        }
+        this.returnedEpilogue();
+    }
+
+    /** What `returnToCaller` leaves through, here or after the shared epilogue. */
+    returnedEpilogue(){
+        const { b, layout } = this;
         this.storeMemoryState();
         this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
         this.storeRecord(b);
