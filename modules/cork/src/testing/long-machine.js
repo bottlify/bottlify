@@ -578,6 +578,11 @@ export function flagsLeftUndefined(state, read){
  *             mov rsp, r8
  *     index:  xor ecx, ecx; 1: mov [rdx + rcx*4 + 16], ecx; add [rdx + rcx*4 + 0x400], ecx
  *             inc rcx; cmp rcx, 250; jne 1b
+ *     groups: mov rdi, rdx; mov ecx, 50; 1: mov [rdi], rcx; mov [rdi + 8], rax
+ *             test ecx, 1; jz 2f; mov [rdi + 16], ecx; 2: mov [rdi + 20], cx
+ *             add [rdi + 4], ecx; lea rdi, [rdi + 32]; dec ecx; jnz 1b
+ *             -- a loop of three blocks, each turn's stores one window the block
+ *             after the first takes from it, rather than streams
  */
 export const LOOPS = Object.freeze({
     fill: '4889d7b92c01000048890f8947084883c70cffc975f2',
@@ -585,6 +590,7 @@ export const LOOPS = Object.freeze({
     down: '4889d7b92c01000066890f4883ef06ffc975f5',
     pushes: '4989e04889d4b958020000516a07ffc975f94c89c4',
     index: '31c9894c8a10018c8a0004000048ffc14881f9fa00000075e9',
+    groups: '4889d7b93200000048890f48894708f7c1010000007403894f1066894f14014f04488d7f20ffc975df',
 });
 
 /**

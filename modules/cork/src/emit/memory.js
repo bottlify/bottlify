@@ -718,19 +718,22 @@ function placeOf({ operand, size, store, stack }){
  *
  * @param {import('../region.js').Block[]} blocks  in address order
  * @param {{ entry?: number, backward?: boolean, heads?: Set<number>,
- *     returns?: Map<number, number[]>, reach?: boolean, masked?: boolean }} [options]  entry:
+ *     returns?: Map<number, number[]>, reach?: boolean, masked?: boolean,
+ *     long?: boolean }} [options]  entry:
  *     the region's entry; backward: a jump back can carry windows (the dispatch
  *     takes an inner label for it); heads: blocks that take none (a
  *     structured region's loop heads); returns: by ret block, the return
  *     addresses it jumps to (`inlineReturns`); reach: false keeps every group
  *     within its block; masked: a read is wrapped into RAM rather than tested
  *     (`checkAccess`): a group that only reads is no window, and a store is
- *     one on its own
+ *     one on its own; long: long mode's sixteen registers and quadword stack slots
  * @returns {RegionPlan}
  */
 export function planRegion(blocks, options = {}){
     const { entry = blocks[0]?.start ?? 0, backward = false, heads = new Set(),
-        returns = new Map(), reach = true, masked = false } = options;
+        returns = new Map(), reach = true, masked = false, long = false } = options;
+    const word = long ? 8 : 4;
+    const regs = long ? 16 : 8;
     const inherit = reach ? inheritance(blocks, entry, backward, heads, returns)
         : blocks.map(()=>-1);
     // Most blocks take nothing and give nothing: what each keeps is made
@@ -767,7 +770,7 @@ export function planRegion(blocks, options = {}){
     /** @param {Values} values @param {number} depth */
     const split = (values, depth)=>{
         const { sym, delta } = values;
-        for (let r = 1; r < 8; r++)
+        for (let r = 1; r < regs; r++)
         {
             for (let q = 0; q < r; q++)
             {
@@ -797,7 +800,7 @@ export function planRegion(blocks, options = {}){
         for (let i = 0; i < instructions.length; i++)
         {
             const ins = instructions[i];
-            const places = groupAccessesOf(ins);
+            const places = groupAccessesOf(ins, word);
             blockPlaces.push(places);
             for (let k = 0; k < places.length; k++)
             {
@@ -850,7 +853,7 @@ export function planRegion(blocks, options = {}){
                     row.push({ group, access });
                 }
             }
-            effect(ins, values);
+            effect(ins, values, false, word);
         }
         // The last child goes on with the values and groups themselves:
         // nothing after it needs them.
@@ -865,7 +868,7 @@ export function planRegion(blocks, options = {}){
     inherit.forEach((p, s)=>{
         if (p < 0)
         {
-            walk(s, freshValues(next), new Map(), 0);
+            walk(s, freshValues(next, regs), new Map(), 0);
         }
     });
     // A window's test costs what one access's does, where its exit is the
@@ -894,7 +897,7 @@ export function planRegion(blocks, options = {}){
     const entries = blocks.map((_, s)=>{
         const covered = reached[s];
         return covered === undefined ? NO_TESTS
-            : entryTests({ blocks, children, joined, placesOf, next }, s, covered, dropped);
+            : entryTests({ blocks, children, joined, placesOf, next, word }, s, covered, dropped);
     });
     /** @type {(Map<number, Planned> | undefined)[]} */
     const plans = [];
@@ -1143,17 +1146,18 @@ function loopsOnto(block){
  *
  * @param {{ blocks: import('../region.js').Block[], children: (number[] | undefined)[],
  *     joined: (Joined | undefined)[], placesOf: (Place[][] | undefined)[],
- *     next: { n: number } }} walked
+ *     next: { n: number }, word: 4 | 8 }} walked
  *     the region's blocks, which take from which, the group of each access, and each
- *     instruction's accesses
+ *     instruction's accesses, and the stack's slot (`planRegion`'s `long`)
  * @param {number} s @param {Set<Access>} reached @param {Set<Access>} dropped
  * @returns {Group[]}
  */
-function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dropped){
-    const values = freshValues(next);
+function entryTests({ blocks, children, joined, placesOf, next, word }, s, reached, dropped){
+    const regs = word === 8 ? 16 : 8;
+    const values = freshValues(next, regs);
     const first = values.sym[0];
     /** The register a value was in at the start, or -1. @param {number} sym */
-    const held = sym=>(sym >= first && sym < first + 8 ? sym - first : -1);
+    const held = sym=>(sym >= first && sym < first + regs ? sym - first : -1);
     /** One window per group and register: each within its group's 4096 bytes, by
      * `(base + 1, index + 1, scale)`. */
     /** @type {Map<Growing, Map<number, Group & { hi: number }>>} */
@@ -1184,7 +1188,7 @@ function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dr
         for (let i = 0; i < instructions.length; i++)
         {
             const ins = instructions[i];
-            const places = placesOf[t]?.[i] ?? groupAccessesOf(ins);
+            const places = placesOf[t]?.[i] ?? groupAccessesOf(ins, word);
             for (let k = 0; k < places.length; k++)
             {
                 const { base, index, scale, disp, size, store } = places[k];
@@ -1206,7 +1210,7 @@ function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dr
                     + (index < 0 ? 0 : at.delta[index] * scale);
                 const own = windows.get(group) ?? new Map();
                 windows.set(group, own);
-                const key = ((from + 1) * 16 + by + 1) * 16 + scale;
+                const key = ((from + 1) * 32 + by + 1) * 16 + scale;
                 const window = own.get(key) ?? { base: from, index: by, scale, db: 0, di: 0,
                     first: 0, list: [], lo: off, hi: off + size, width: 0 };
                 own.set(key, window);
@@ -1215,7 +1219,7 @@ function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dr
                 window.hi = Math.max(window.hi, off + size);
                 window.width = window.hi - window.lo;
             }
-            effect(ins, at);
+            effect(ins, at, false, word);
         }
         for (const child of (children[t] ?? []).filter(needed))
         {
@@ -1490,20 +1494,47 @@ export function emitGroupChecks(e, checks, at = -1){
     {
         // The window's first byte: the registers now are their version's
         // value moved by what the block did to them since.
-        if (group.base >= 0)
+        const start = group.lo - group.db - group.di * group.scale;
+        if (e.width.bits === 64)
         {
-            b.localGet(registerLocal(e, group.base));
+            // Long mode's quadword registers: a window past the 4 GiB one is
+            // not clean (the interpreter faults its access).
+            if (group.base >= 0)
+            {
+                b.localGet(registerLocal(e, group.base));
+            }
+            else
+            {
+                b.i64const(0n);
+            }
+            if (group.index >= 0)
+            {
+                b.localGet(registerLocal(e, group.index)).i64const(BigInt(group.scale))
+                    .op(I64.mul).op(I64.add);
+            }
+            b.i64const(BigInt(start)).op(I64.add).localTee(Local.t64)
+                .localGet(Local.t64).i64const(BigInt(group.width - 1)).op(I64.add)
+                .op(I64.or).i64const(32n).op(I64.shrU).op(I64.wrap);
+            leaveIf('beyond');
+            b.localGet(Local.t64).op(I64.wrap).localSet(Local.addr);
         }
         else
         {
-            b.i32const(0);
+            if (group.base >= 0)
+            {
+                b.localGet(registerLocal(e, group.base));
+            }
+            else
+            {
+                b.i32const(0);
+            }
+            if (group.index >= 0)
+            {
+                b.localGet(registerLocal(e, group.index)).i32const(group.scale).op(I32.mul)
+                    .op(I32.add);
+            }
+            b.i32const(start | 0).op(I32.add).localSet(Local.addr);
         }
-        if (group.index >= 0)
-        {
-            b.localGet(registerLocal(e, group.index)).i32const(group.scale).op(I32.mul).op(I32.add);
-        }
-        b.i32const((group.lo - group.db - group.di * group.scale) | 0).op(I32.add)
-            .localSet(Local.addr);
         // The common case is one test, as for a single access: the flags of
         // the window's page and the next, read as a halfword (the window lies
         // in the two), against INACCESSIBLE -- and against HAS_CODE and WATCH

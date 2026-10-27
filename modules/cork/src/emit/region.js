@@ -1384,12 +1384,11 @@ export class RegionEmitter {
         // jump back carries windows only through the flat dispatch; a block
         // the x87 plan cuts runs nothing to take them for.
         const memoryPlan = planned !== null ? planned.memoryPlan
-            // Long mode's accesses are tested one by one until the planner
-            // knows its sixteen registers and the window.
-            : this.layout.codePages < 0 && this.width.bits === 32
+            : this.layout.codePages < 0
                 ? planRegion(blocks, { entry: this.region.entry, backward: flat,
                     heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
-                    returns: this.returns, masked: readsWrapped(this.context) })
+                    returns: this.returns, masked: readsWrapped(this.context),
+                    long: this.width.bits === 64 })
                 : null;
         if (this.copies.length > 0 && !this.copyFunction)
         {
