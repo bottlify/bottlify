@@ -1816,6 +1816,32 @@ test('the installer file family declares the stack it pops', ()=>{
     assert.equal(fns.MoveFileExA.argBytes, 12);
 });
 
+test('the long and short forms keep the name as given; an 8.3 component takes the volume\'s case',
+    ()=>{
+        // Wine's kernel32 path tests: relative stays relative, a trailing
+        // '\\' stays, a long component keeps the caller's case.
+        const { files, fns, at, memory } = setup();
+        files.mkdir('C:\\WINDOWS\\TEMP\\shortdir');
+        files.put('C:\\WINDOWS\\TEMP\\shortdir\\pathtest.pth', 'x');
+        files.put('C:\\WINDOWS\\TEMP\\Long Directory\\Long File test.path', 'x');
+        // The volume matches names without regard to case; this fake does not.
+        const stat = files.stat.bind(files);
+        files.stat = path=>stat(['C:\\WINDOWS\\TEMP\\shortdir\\pathtest.pth',
+            'C:\\WINDOWS\\TEMP\\Long Directory\\Long File test.path']
+            .find(known=>known.toLowerCase() === path.toLowerCase()) ?? path);
+        assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'C:\\WINDOWS\\TEMP')]), 1);
+        /** @param {string} api @param {string} name */
+        const form = (api, name)=>(fns[api].handler([at(NAME, name), OUT_PATH, 260])
+            ? memory.readCString(OUT_PATH, 260) : null);
+        assert.equal(form('GetShortPathNameA', 'C:\\WINDOWS\\TEMP\\'), 'C:\\WINDOWS\\TEMP\\');
+        assert.equal(form('GetLongPathNameA', 'C:'), 'C:');
+        assert.equal(form('GetShortPathNameA', 'shortdir\\pathtest.pth'), 'shortdir\\pathtest.pth');
+        assert.equal(form('GetLongPathNameA', 'SHORTDIR\\Pathtest.pth'), 'shortdir\\pathtest.pth');
+        assert.equal(form('GetLongPathNameA', '.\\long directory\\long File test.path'),
+            '.\\long directory\\long File test.path');
+        assert.equal(form('GetLongPathNameA', 'shortdir\\absent.txt'), null);
+    });
+
 test('the short form of a path is the path: this volume keeps no 8.3 aliases', ()=>{
     const { files, fns, at, memory } = setup();
     files.put('C:\\Program Files\\Title\\title.exe', 'MZ');

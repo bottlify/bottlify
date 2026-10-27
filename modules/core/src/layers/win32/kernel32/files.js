@@ -1707,20 +1707,63 @@ export function createFileFunctions(host){
     });
 
     /**
-     * GetLongPathName, which has nothing to lengthen.
+     * The name as given, but for a component in 8.3 shape -- which might be
+     * a short name -- in the case the volume keeps it in: what
+     * GetLongPathName answers. A component already long stays as given,
+     * case and all (Wine's kernel32 path test; a program reopens what it
+     * passed), as do drives, dots and anything the volume does not list.
      *
-     * Short 8.3 names are a FAT artefact and nothing here produces them, so
-     * every path is already its long form. Windows still requires the path to
-     * exist, and a caller uses the failure to test exactly that.
+     * @param {string} given
      */
-    const getLongPathName = oneName(12, ([name, buffer, size], text)=>{
+    const longCase = given=>{
+        const parts = given.split(/([\\/]+)/);
+        let prefix = '';
+        /** @param {string} part @param {number} index */
+        const resolve = (part, index)=>{
+            const separator = index % 2 === 1;
+            if (separator || !/^[^.\s"*/:<>?\\|]{1,8}(\.[^.\s"*/:<>?\\|]{0,3})?$/.test(part)
+                || /^[A-Za-z]:$/.test(part) || (given.startsWith('\\\\') && index <= 4))
+            {
+                return part;
+            }
+            try
+            {
+                const found = files.list(fullPath(prefix === '' ? '.' : prefix), part)
+                    .find(entry=>entry.name.toLowerCase() === part.toLowerCase());
+                return found ? found.name : part;
+            }
+            catch {
+                return part;
+            }
+        };
+        return parts.map((part, index)=>{
+            const resolved = resolve(part, index);
+            prefix += resolved;
+            return resolved;
+        }).join('');
+    };
+
+    /**
+     * GetLongPathName and GetShortPathName: the name as the caller gave it --
+     * relative or absolute, its separators and a trailing one kept, as
+     * Windows keeps them (Wine's kernel32 path tests). Short 8.3 names are a
+     * FAT artefact this volume keeps none of, so a component's short form is
+     * the component; the long form has the case the volume keeps it in. The
+     * path must exist: a caller uses the failure to test exactly that.
+     *
+     * @param {boolean} long
+     */
+    const pathForm = long=>oneName(12, ([name, buffer, size], text)=>{
         const path = text.path(name);
         if (!files.stat(path)?.exists)
         {
             return fail(missing(path));
         }
-        return text.write(buffer >>> 0, size, path);
+        const given = text.raw(name);
+        return text.write(buffer >>> 0, size, long ? longCase(given) : given);
     });
+    const getLongPathName = pathForm(true);
+    const getShortPathName = pathForm(false);
 
     const findFirstFile = oneName(8, ([name, data], text)=>{
         const path = text.path(name);
@@ -3694,8 +3737,8 @@ export function createFileFunctions(host){
          * it, and only one that counts on the dotted-eight shape sees a
          * difference.
          */
-        GetShortPathNameA: getLongPathName.ansi,
-        GetShortPathNameW: getLongPathName.wide,
+        GetShortPathNameA: getShortPathName.ansi,
+        GetShortPathNameW: getShortPathName.wide,
 
         /**
          * HFILE OpenFile(LPCSTR lpFileName, LPOFSTRUCT lpReOpenBuff, UINT uStyle)
