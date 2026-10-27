@@ -735,6 +735,32 @@ export function createFilesystemModule(){
                 isOpen: path=>live() && state.files.isOpen(locate(path).key),
 
                 /**
+                 * How a section of this process maps the file, or null.
+                 *
+                 * @param {string} path
+                 * @returns {'readonly' | 'readwrite' | 'image' | null}
+                 */
+                mappedAs: path=>(live() ? state.files.mappedAs(locate(path).key) : null),
+
+                /**
+                 * A section's own hold on the file an open handle has: the same
+                 * file, read (and written, for a read-write section) through
+                 * it, held on the section's terms once the handle is closed.
+                 *
+                 * @param {any} handle @param {'readonly' | 'readwrite' | 'image'} kind
+                 */
+                reopenSection(handle, kind){
+                    if (!live())
+                    {
+                        return null;
+                    }
+                    return state.files.open({ tree: handle.tree, key: handle.key,
+                        components: handle.components,
+                        access: { read: true, write: kind === 'readwrite' },
+                        disposition: Disposition.OPEN_EXISTING, section: kind });
+                },
+
+                /**
                  * Gives the file at `existing` the further name `name`, a hard
                  * link: one file under both, a write through either seen
                  * through the other, its bytes gone with its last name. Both

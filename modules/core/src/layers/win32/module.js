@@ -2021,6 +2021,8 @@ export function createWin32Module(){
                             retain: node=>volume.retain(node),
                             /** @param {any} node */
                             close: node=>volume.close(node),
+                            /** @param {any} node @param {any} kind */
+                            section: (node, kind)=>volume.section(node, kind),
                         },
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,

@@ -319,3 +319,44 @@ test('a file is renamed or deleted only while every open with access shares dele
     assert.equal(vol.rename('C:\\F.DAT', 'C:\\G.DAT'), true);
     assert.equal(vol.isOpen('C:\\G.DAT'), false);
 });
+
+test('a section holds its file on its own terms once the file\'s handle is closed', async()=>{
+    const { volume: vol } = await volume();
+    const made = vol.open('C:\\M.DAT', { read: true, write: true, create: true });
+    vol.write(made, 0, Uint8Array.of(0x4d, 0x5a, 0, 0));
+    vol.close(made);
+    /** @param {'readonly' | 'readwrite' | 'image'} kind */
+    const mapped = kind=>{
+        const file = vol.open('C:\\M.DAT', { read: true, write: true, shareRead: false });
+        const own = vol.section(file, kind);
+        vol.close(file);
+        return own;
+    };
+    /** @param {any} mode */
+    const opens = mode=>{
+        const node = vol.open('C:\\M.DAT', mode);
+        if (node)
+        {
+            vol.close(node);
+        }
+        return node !== null || vol.openRefusal();
+    };
+
+    let section = mapped('readonly');
+    assert.equal(vol.mappedAs('C:\\M.DAT'), 'readonly');
+    assert.equal(opens({ read: true, write: true, shareRead: false }), true,
+        'a read-only section refuses nobody, the handle it came from gone');
+    assert.deepEqual([...(/** @type {Uint8Array} */ (vol.read(section, 0, 2)))], [0x4d, 0x5a]);
+    vol.close(section);
+    assert.equal(vol.mappedAs('C:\\M.DAT'), null);
+
+    section = mapped('readwrite');
+    assert.equal(opens({ read: true }), 'SHARING_VIOLATION', 'it writes: others share writing');
+    assert.equal(opens({ read: true, shareWrite: true }), true);
+    vol.close(section);
+
+    section = mapped('image');
+    assert.equal(opens({ read: true, shareRead: false }), true, 'an image refuses only writers');
+    assert.equal(opens({ read: true, write: true, shareWrite: true }), 'SHARING_VIOLATION');
+    vol.close(section);
+});

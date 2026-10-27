@@ -71,6 +71,7 @@ const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_SHARING_VIOLATION = 32;
+const ERROR_USER_MAPPED_FILE = 1224;
 const ERROR_LOCK_VIOLATION = 33;
 const ERROR_NOT_LOCKED = 158;
 const ERROR_INVALID_NAME = 123;
@@ -348,6 +349,7 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *           Why the file may not be renamed or deleted as its opens stand, or null.
  * @property {(path: string) => boolean} [isOpen]  whether any process holds the file open
  * @property {() => string | null} [openRefusal]  why the last `open` answered null
+ * @property {(path: string) => string | null} [mappedAs]  how a section maps the file
  * @property {(path: string, existing: string) => string | null} [link]
  *           Gives a file one more name: null, or the volume's code for why not.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
@@ -1791,6 +1793,13 @@ export function createFileFunctions(host){
                 || disposition === TRUNCATE_EXISTING))
         {
             return { error: missing(path) };
+        }
+        // A file a section maps cannot be emptied under it; an image
+        // section's refusal of writers is the sharing's, below.
+        if (exists && (disposition === CREATE_ALWAYS || disposition === TRUNCATE_EXISTING)
+            && files.mappedAs?.(path) && files.mappedAs?.(path) !== 'image')
+        {
+            return { error: ERROR_USER_MAPPED_FILE };
         }
         if (readOnlyFile(existing))
         {

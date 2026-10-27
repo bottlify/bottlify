@@ -61,7 +61,8 @@ for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
             {
                 const key = pick(KEYS);
                 const terms = { key, path: key,
-                    access: { read: next() < 0.7, write: next() < 0.4, delete: next() < 0.25 },
+                    access: { read: next() < 0.7, write: next() < 0.4, delete: next() < 0.25,
+                        image: next() < 0.1 },
                     share: { read: next() < 0.7, write: next() < 0.4, delete: next() < 0.5 },
                     inherited: next() < 0.05 };
                 const one = outcome(()=>kept.admit(terms));

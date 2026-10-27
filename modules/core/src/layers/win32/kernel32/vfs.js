@@ -584,6 +584,22 @@ export function createVolume(fs, fetchBlocks = null){
         /** @param {string} path @returns {boolean} whether any process holds the file open */
         isOpen: path=>attempt(()=>fs.isOpen?.(path) ?? false, false),
 
+        /**
+         * How a section maps the file, or null.
+         *
+         * @param {string} path @returns {'readonly' | 'readwrite' | 'image' | null}
+         */
+        mappedAs: path=>attempt(()=>fs.mappedAs?.(path) ?? null, null),
+
+        /**
+         * A section's own hold on the file `node` has open, on the section's
+         * terms: what the section keeps once the file's handle is closed.
+         * Null where the volume cannot give one.
+         *
+         * @param {any} node @param {'readonly' | 'readwrite' | 'image'} kind
+         */
+        section: (node, kind)=>attempt(()=>fs.reopenSection?.(node, kind) ?? null, null),
+
         /** @param {string} path @returns {boolean} */
         mkdir: path=>{
             const made = attempt(()=>fs.createDirectory(path), false);

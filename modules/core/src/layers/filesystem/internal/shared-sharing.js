@@ -50,8 +50,10 @@ const SHARE_READ = 4;
 const SHARE_WRITE = 8;
 const DELETE = 16;
 const SHARE_DELETE = 32;
+/** An image section's hold, which refuses writers and holds no access of its own. */
+const IMAGE = 64;
 /** The bits that are access, as against sharing: an open with none refuses nothing. */
-const ACCESS = READ | WRITE | DELETE;
+const ACCESS = READ | WRITE | DELETE | IMAGE;
 
 /** The memory of a run's sharing, handed to every thread that opens files. */
 export function createSharingMemory(){
@@ -70,7 +72,8 @@ const hashOf = (key, seed)=>{
 
 /** @param {import('./handles.js').OpenTerms} terms */
 const bitsOf = terms=>(terms.access.read ? READ : 0) | (terms.access.write ? WRITE : 0)
-    | (terms.access.delete ? DELETE : 0) | (terms.share.read ? SHARE_READ : 0)
+    | (terms.access.delete ? DELETE : 0) | (terms.access.image ? IMAGE : 0)
+    | (terms.share.read ? SHARE_READ : 0)
     | (terms.share.write ? SHARE_WRITE : 0) | (terms.share.delete ? SHARE_DELETE : 0);
 
 /**
