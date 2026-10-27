@@ -117,7 +117,7 @@ const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
 const LONG_OPS = new Set([
     'nop', 'mov', 'movzx', 'movsx', 'movsxd', 'lea', 'add', 'adc', 'sub', 'sbb', 'cmp', 'and',
     'or', 'xor', 'test', 'inc', 'dec', 'neg', 'not', 'push', 'pop', 'jmp', 'call', 'ret', 'hlt',
-    'shl', 'sal', 'shr', 'sar',
+    'shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr',
 ]);
 
 /**
@@ -2141,16 +2141,53 @@ function rotate(e, instruction, flagsLive){
     const { op, operands, size } = instruction;
     const [dst, count] = operands;
     const bits = size * 8;
-    const sign = SIGN_BITS[widthCode(size)];
     prepare(e, dst);
-    if (!rotationCount(e, count))
+    if (!rotationCount(e, count, size))
     {
+        unrotated(e, dst);
         return true;
     }
     if (flagsLive)
     {
         e.materialise();
     }
+    if (size === 8)
+    {
+        // A quadword's: the result kept in an i64 local, its flags read from it.
+        writeOp(e, dst, ()=>{
+            readOp(e, dst);
+            b.localGet(Local.count).op(I64.extendU).op(op === 'rol' ? I64.rotl : I64.rotr)
+                .localTee(Local.t64b);
+        });
+        if (flagsLive)
+        {
+            b.localGet(Local.count).i32const(0).op(I32.ne);
+            e.openIf('rotated', EMPTY);
+            b.localGet(Local.flags).i32const(~(CF | OF)).op(I32.and).localSet(Local.flags);
+            // CF: rol's bit 0, ror's bit 63; OF: rol's msb ^ CF, ror's two top bits'.
+            b.localGet(Local.t64b);
+            if (op === 'ror')
+            {
+                b.i64const(63n).op(I64.shrU);
+            }
+            b.op(I64.wrap).i32const(1).op(I32.and);
+            e.orFlag(CF);
+            b.localGet(Local.t64b);
+            if (op === 'rol')
+            {
+                b.localGet(Local.t64b).i64const(63n).op(I64.shl);
+            }
+            else
+            {
+                b.localGet(Local.t64b).i64const(1n).op(I64.shl);
+            }
+            b.op(I64.xor).i64const(0n).op(I64.ltS);
+            e.orFlag(OF);
+            e.close();
+        }
+        return true;
+    }
+    const sign = SIGN_BITS[widthCode(size)];
     // The rotation is by the count modulo the width -- none at all for a
     // count of the width, though the flags are still written from the value.
     const pushN = ()=>{
@@ -2210,16 +2247,18 @@ function rotate(e, instruction, flagsLive){
 }
 
 /**
- * Leaves the rotation count masked to five bits in `count`; answers false
- * when it is a constant zero, which leaves everything as it is.
+ * Leaves the rotation count masked to five bits in `count`, a quadword's to
+ * six; answers false when it is a constant zero, which leaves everything as
+ * it is.
  *
- * @param {E} e @param {Operand} count
+ * @param {E} e @param {Operand} count @param {number} size
  */
-function rotationCount(e, count){
+function rotationCount(e, count, size){
     const { b } = e;
+    const countMask = size === 8 ? 63 : 31;
     if (count.kind === 'imm')
     {
-        const raw = /** @type {number} */ (count.value) & 31;
+        const raw = /** @type {number} */ (count.value) & countMask;
         if (raw === 0)
         {
             return false;
@@ -2228,15 +2267,28 @@ function rotationCount(e, count){
         return true;
     }
     readOp(e, count);
-    b.i32const(31).op(I32.and).localSet(Local.count);
+    b.i32const(countMask).op(I32.and).localSet(Local.count);
     return true;
 }
 
 /**
+ * A rotation by a constant zero: nothing, but in long mode a dword register
+ * is written all the same, its high half cleared.
+ *
+ * @param {E} e @param {Operand} dst
+ */
+function unrotated(e, dst){
+    if (isLong(e) && dst.kind === 'reg' && dst.size === 4)
+    {
+        writeOp(e, dst, ()=>readOp(e, dst), true);
+    }
+}
+
+/**
  * rcl/rcr: a rotation of the value with the carry as its top bit, one bit
- * wider than the operand, done in i64 for every width. The count is taken
- * modulo the width plus one; a nonzero count that comes to zero still
- * writes CF (unchanged) and OF.
+ * wider than the operand, done in i64 for every width below a quadword's.
+ * The count is taken modulo the width plus one; a nonzero count that comes
+ * to zero still writes CF (unchanged) and OF.
  *
  * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
  */
@@ -2248,8 +2300,9 @@ function rotateCarry(e, instruction, flagsLive){
     const sign = SIGN_BITS[widthCode(size)];
     const left = op === 'rcl';
     prepare(e, dst);
-    if (!rotationCount(e, count))
+    if (!rotationCount(e, count, size))
     {
+        unrotated(e, dst);
         return true;
     }
     e.pushFlag(CF);
@@ -2257,6 +2310,22 @@ function rotateCarry(e, instruction, flagsLive){
     if (flagsLive)
     {
         e.materialise();
+    }
+    if (size === 8)
+    {
+        if (count.kind !== 'imm')
+        {
+            // A count of zero leaves the quadword and the flags as they are.
+            b.localGet(Local.count).i32const(0).op(I32.ne);
+            e.openIf('rotated', EMPTY);
+            rotateCarry64(e, dst, left, flagsLive);
+            e.close();
+        }
+        else
+        {
+            rotateCarry64(e, dst, left, flagsLive);
+        }
+        return true;
     }
     // n, as an i64 shift count
     b.localGet(Local.count).i32const(bits + 1).op(I32_EXTRA.remU).op(I64.extendU)
@@ -2306,6 +2375,82 @@ function rotateCarry(e, instruction, flagsLive){
 }
 
 /**
+ * A quadword's rcl/rcr, 65 bits wide: the count (1..63, never past the width
+ * plus one; a zero at run time is the caller's to skip) splits the value in
+ * two around the carry, the far part shifted in two steps so a shift of 64
+ * comes to nothing rather than wrapping. The carry in is in `t2`, the count
+ * in `count`.
+ *
+ * @param {E} e @param {Operand} dst @param {boolean} left @param {boolean} flagsLive
+ */
+function rotateCarry64(e, dst, left, flagsLive){
+    const { b } = e;
+    const n = ()=>b.localGet(Local.count).op(I64.extendU);
+    const rest = ()=>b.i64const(64n).localGet(Local.count).op(I64.extendU).op(I64.sub);
+    readOp(e, dst);
+    b.localSet(Local.t64);
+    if (flagsLive)
+    {
+        // CF out: rcl's bit 64 - n of the value, rcr's bit n - 1.
+        b.localGet(Local.t64);
+        if (left)
+        {
+            rest();
+        }
+        else
+        {
+            n();
+            b.i64const(1n).op(I64.sub);
+        }
+        b.op(I64.shrU).op(I64.wrap).i32const(1).op(I32.and).localSet(Local.t1);
+        if (!left)
+        {
+            // rcr's OF is from the value before: msb(value) ^ carry in.
+            b.localGet(Local.t64).i64const(0n).op(I64.ltS).localGet(Local.t2).op(I32.xor)
+                .localSet(Local.t0);
+        }
+    }
+    writeOp(e, dst, ()=>{
+        b.localGet(Local.t64);
+        n();
+        b.op(left ? I64.shl : I64.shrU);
+        b.localGet(Local.t2).op(I64.extendU);
+        if (left)
+        {
+            n();
+            b.i64const(1n).op(I64.sub);
+        }
+        else
+        {
+            rest();
+        }
+        b.op(I64.shl).op(I64.or);
+        b.localGet(Local.t64).i64const(1n).op(left ? I64.shrU : I64.shl);
+        rest();
+        b.op(left ? I64.shrU : I64.shl).op(I64.or);
+        if (flagsLive && left)
+        {
+            b.localTee(Local.t64b);
+        }
+    });
+    if (flagsLive)
+    {
+        b.localGet(Local.flags).i32const(~(CF | OF)).op(I32.and).localSet(Local.flags);
+        b.localGet(Local.t1);
+        e.orFlag(CF);
+        if (left)
+        {
+            b.localGet(Local.t64b).i64const(0n).op(I64.ltS).localGet(Local.t1).op(I32.xor);
+        }
+        else
+        {
+            b.localGet(Local.t0);
+        }
+        e.orFlag(OF);
+    }
+}
+
+/**
  * shld/shrd of a dword or a word: the destination shifted with the source's
  * bits coming in. The word form's count may exceed the width; the pair as
  * one 32-bit value shifted by the count gives the processor's answer for
@@ -2320,7 +2465,7 @@ function shiftDouble(e, instruction, flagsLive){
     const sign = SIGN_BITS[widthCode(size)];
     const left = op === 'shld';
     prepare(e, dst);
-    if (!rotationCount(e, count))
+    if (!rotationCount(e, count, size))
     {
         return true;
     }

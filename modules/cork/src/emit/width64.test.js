@@ -66,6 +66,20 @@ test('width edges of shifts run in the shared emitter\'s regions as interpreted'
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
 
+test('width edges of rotations run in the shared emitter\'s regions as interpreted', ()=>{
+    const cases = edges([
+        'd3c0', 'd3c8', 'd3d0', 'd3d8', 'c1c000', 'c1d000', 'c1d801', // rol/ror/rcl/rcr eax
+        '48d3c0', '48d3c8', '48d3d0', '48d3d8', '48c1c03f', '48c1d03f', '48d1d8', // rax
+        '49d3d0', '49d3d9', '66d3d0', '66d3c8', 'd2d0', 'd2dc', '41d2c1', // r8, r9, ax, al, ah, r9b
+    ], [0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65]).flatMap(one=>[one,
+        // The carry in set: rcl and rcr take it into the value.
+        { ...one, text: `${one.text} stc`, code: `f9${one.code}` }]);
+    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
+        shared);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
+
 test('seeded long programs run in the shared emitter\'s regions as interpreted', ()=>{
     const instructions = pool();
     const straight = Array.from({ length: 600 },
