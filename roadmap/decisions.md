@@ -569,6 +569,12 @@ DEACTIVATE_ACTCTX_FLAG_FORCE_EARLY_DEACTIVATION, and STATUS_SXS_INVALID_DEACTIVA
 that is no frame of the thread; here the call fails with the matching error and the stack stays
 as it was, so a program that gets a cookie wrong goes on. *2026-10-27.*
 
+**A61. A font has no file behind it.** Faces are drawn through the browser, and none comes from
+a file on the volume, so GetFontFileInfo answers the empty file Windows answers for a font added
+from memory -- no time, no size, an empty path -- and GetFontFileData has no byte to give; Windows
+names the face's file and reads it. GetFontRealizationInfo and GdiRealizationInfo answer the DC's
+font by its handle as the instance id. *2026-10-27, `90ecc574`.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
