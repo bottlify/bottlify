@@ -393,6 +393,24 @@ test('a record no later block reads is not folded, with the backward jumps throu
         }
     });
 
+test('a divide that faults hands over the flags the instruction before it wrote', ()=>{
+    // add eax, 1; div ecx; cmp eax, eax; hlt -- the cmp overwrites every flag the add
+    // writes, but with ecx zero the divide faults first: the add's flags are the
+    // fault's, which the handler reads in the context.
+    for (const precise of [false, true])
+    {
+        const m = createTestMachine({ precise });
+        m.write(CODE, [0x83, 0xc0, 0x01, 0xf7, 0xf1, 0x39, 0xc0, 0xf4]);
+        m.setReg('eax', 0xffffffff);
+        m.setReg('ecx', 0);
+        m.setEflags(0x202);
+        const exit = m.translate(CODE).run(CODE, 1000);
+        assert.equal(exit.kind, Exit.FAULT);
+        // 0xffffffff + 1: zero, carry out, auxiliary carry, even parity.
+        assert.equal(m.eflags() & 0x8d5, 0x55, `flags (precise: ${precise})`);
+    }
+});
+
 test('a shift by cl whose flags nothing reads folds no record, whatever the count', ()=>{
     // add ebx, 1; sar eax, cl; shld esi, edi, cl; test al, 2; setz dl; hlt -- the test
     // writes every flag the shifts would (its undefined AF too, outside `precise`), so

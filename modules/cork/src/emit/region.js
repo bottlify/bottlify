@@ -3523,7 +3523,7 @@ export function liveFlagsOut(blocks, labels, precise = true){
             }
             const kills = killedBy(instruction, precise, count);
             killed[i] |= kills;
-            read[i] = (read[i] & ~kills) | instruction.flagsRead;
+            read[i] = (read[i] & ~kills) | flagsReadBy(instruction);
         }
     });
     const liveIn = blocks.map(()=>0);
@@ -4057,10 +4057,22 @@ export function deadFlagPass(block, liveOut = ARITH_FLAGS | DF, after = [], prec
             continue;
         }
         live[i] = ((instruction.flagsWritten | instruction.flagsUndefined) & liveAfter) !== 0;
-        liveAfter = (liveAfter & ~killedBy(instruction, precise, count)) | instruction.flagsRead;
+        liveAfter = (liveAfter & ~killedBy(instruction, precise, count))
+            | flagsReadBy(instruction);
     }
     return live;
 }
+
+/**
+ * The flags an instruction reads, as the liveness passes take them: a divide
+ * reads them all, as the divide fault it may raise hands the handler the
+ * flags word whole -- a handler that does not resume the same code, so a
+ * record the code after it overwrites is not the translator's to drop.
+ *
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ */
+const flagsReadBy = instruction=>(instruction.faults === 'divide'
+    ? instruction.flagsRead | ARITH_FLAGS : instruction.flagsRead);
 
 /**
  * The flags an instruction leaves no earlier record's value in. A shift or
