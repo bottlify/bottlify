@@ -1861,6 +1861,22 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * The window a handle names, or null with ERROR_INVALID_WINDOW_HANDLE as
+     * the last error: what the window long and word calls answer for a
+     * handle that is no window (Wine's shlwapi test_SHSetWindowBits).
+     *
+     * @param {number} hwnd @returns {any | null}
+     */
+    const windowNamed = hwnd=>{
+        const record = live(hwnd);
+        if (!record)
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+        }
+        return record;
+    };
+
+    /**
      * The thread that created a window, whose queue its messages wait in and
      * whose loop its procedure runs on; null when the bridge named none.
      *
@@ -8029,7 +8045,7 @@ export function createWindowFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 return record ? readLong(record, index) : 0;
             },
         },
@@ -8039,7 +8055,7 @@ export function createWindowFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 if (!record)
                 {
                     return 0;
@@ -8054,7 +8070,7 @@ export function createWindowFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 return record ? readLong(record, index, true) : 0;
             },
         },
@@ -8064,7 +8080,7 @@ export function createWindowFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 if (!record)
                 {
                     return 0;
@@ -8141,7 +8157,7 @@ export function createWindowFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 const at = index | 0;
                 return record && at >= 0 && at + 2 <= record.extra.byteLength
                     ? record.extra.getUint16(at, true)
@@ -8153,7 +8169,7 @@ export function createWindowFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 const at = index | 0;
                 if (!record || at < 0 || at + 2 > record.extra.byteLength)
                 {

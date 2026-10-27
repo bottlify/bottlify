@@ -7246,3 +7246,22 @@ test('once the procedure handles run out, a procedure is read as its address', (
     }
     assert.notEqual(proc, 0xffff);
 });
+
+test('the window long and word calls on a handle that is no window fail with its error', ()=>{
+    // Wine's shlwapi test_SHSetWindowBits reads it back through GetWindowLong.
+    const { fns, errors, hwnd } = withWindow();
+    const calls = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (fns));
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['GetWindowLongA', [0, GWL_STYLE]], ['GetWindowLongW', [0xdead, GWL_STYLE]],
+        ['SetWindowLongA', [0, GWL_STYLE, 1]], ['SetWindowLongW', [0, GWL_STYLE, 1]],
+        ['GetWindowWord', [0, 0]], ['SetWindowWord', [0, 0, 1]]]))
+    {
+        errors.length = 0;
+        assert.equal(calls[name].handler(args), 0, name);
+        assert.deepEqual(errors, [1400], `${name}: ERROR_INVALID_WINDOW_HANDLE`);
+    }
+    errors.length = 0;
+    fns.GetWindowLongA.handler([hwnd, GWL_STYLE]);
+    assert.deepEqual(errors, [], 'a window there sets nothing');
+});
