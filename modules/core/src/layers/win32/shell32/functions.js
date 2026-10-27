@@ -102,6 +102,9 @@ const NOTEPAD = 'C:\\WINDOWS\\system32\\notepad.exe';
 /** An address the browser opens rather than a file. */
 const ADDRESS = /^(https?|ftp|mailto):/i;
 
+/** A URL's scheme: two characters at least, so that a drive is none. */
+const PROTOCOL = /^[A-Za-z][A-Za-z0-9+.-]+:/;
+
 /** E_NOTIMPL, for the allocator this build does not hand out. */
 const E_NOTIMPL = 0x80004001 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -149,6 +152,7 @@ const SHELLEXECUTEINFO_PROCESS = 56;
 const SEE_MASK_IDLIST = 0x00000004;
 const SEE_MASK_NOCLOSEPROCESS = 0x00000040;
 const SEE_MASK_CLASSNAME = 0x00000001;
+const SEE_MASK_DOENVSUBST = 0x00000200;
 
 /**
  * SHFILEOPSTRUCT, either spelling. shellapi.h packs the structure to one byte
@@ -466,6 +470,14 @@ export function createShellFunctions(host){
         ? name.slice(1, -1).trim() : name;
 
     /**
+     * A name without the dots that end it, which no file's name keeps:
+     * `readme.txt.` is readme.txt. A name that is all dots stays.
+     *
+     * @param {string} name
+     */
+    const withoutTrailingDots = name=>name.replace(/([^\\/.])\.+$/, '$1');
+
+    /**
      * The volume as the file operation needs it, or null in a build whose
      * volume cannot do all of it.
      *
@@ -627,30 +639,42 @@ export function createShellFunctions(host){
      * @returns {{ answer: number, record: any }}
      */
     const start = (verb, file, parameters, directory, given = null)=>{
-        const typed = pathOfFileUrl(unquote((file ?? '').trim()));
-        if (typed === null)
+        // A blank before the name is part of it, which names no file; one
+        // after it is not. A name in doubled quotes is the name inside them.
+        const url = pathOfFileUrl(unquote(unquote((file ?? '').trimEnd())));
+        if (url === null)
         {
             return { answer: SE_ERR_FNF, record: null };
         }
+        const typed = withoutTrailingDots(url);
         if (given !== null)
         {
             return openAssociated(typed, verb, parameters, given)
                 ?? { answer: SE_ERR_NOASSOC, record: null };
         }
         const runnable = RUNNABLE_VERBS.has((verb ?? 'open').trim().toLowerCase());
+        if (PROTOCOL.test(typed))
+        {
+            // A URL opens with its scheme's class; only an address the
+            // browser takes is opened without one.
+            return openAssociated(typed, verb, parameters)
+                ?? (ADDRESS.test(typed) && runnable ? openDocument(typed, parameters) : null)
+                ?? { answer: SE_ERR_NOASSOC, record: null };
+        }
+        const placed = inDirectory(typed, (directory ?? '').trim());
+        if (placed !== typed)
+        {
+            return start(verb, placed, parameters, directory);
+        }
         const link = extensionOf(typed) === 'lnk' && runnable ? targetOfLink(typed) : null;
         if (link !== null)
         {
-            // A shortcut is opened as its target, with its own arguments
-            // unless the caller gave some.
-            return start(verb, link.target, (parameters ?? '').trim() !== '' ? parameters
-                : link.arguments, directory ?? link.workingDirectory);
-        }
-        // An address is not a file name, whatever its last dot is followed by:
-        // `http://example.com` is not a .com program.
-        if (ADDRESS.test(typed) && RUNNABLE_VERBS.has((verb ?? 'open').trim().toLowerCase()))
-        {
-            return openDocument(typed, parameters) ?? { answer: SE_ERR_NOASSOC, record: null };
+            // A shortcut is opened as its target, with its own arguments and
+            // then the caller's (Wine's test_lnks).
+            const extra = (parameters ?? '').trim();
+            return start(verb, link.target,
+                [link.arguments.trim(), extra].filter(Boolean).join(' '),
+                directory ?? link.workingDirectory);
         }
         // A name with no extension is looked for as a program, as the shell
         // searches with ".exe" as the default extension: `msiexec` is
@@ -682,10 +706,11 @@ export function createShellFunctions(host){
         }
         if (!RUNNABLE_VERBS.has(wanted) || !SELF_EXECUTABLE.has(extensionOf(name)))
         {
-            // A verb is a handler, and a document is a handler: both come from
-            // registries this build does not have, so the ask is refused rather
-            // than answered with a launch that did not happen.
-            return { answer: SE_ERR_NOASSOC, record: null };
+            // A verb is a handler, and a document is a handler: neither is
+            // registered for this file, which has to be there to be told so.
+            const volume = readableVolume();
+            return { answer: volume && programOf(name) === null ? SE_ERR_FNF : SE_ERR_NOASSOC,
+                record: null };
         }
         if (!host.launcher)
         {
@@ -694,7 +719,7 @@ export function createShellFunctions(host){
             // file is exactly the kind the shell runs itself.
             return { answer: SE_ERR_ACCESSDENIED, record: null };
         }
-        const image = host.launcher.imageOf(name);
+        const image = host.launcher.imageOf(programOf(name) ?? '');
         if (image === null)
         {
             return { answer: SE_ERR_FNF, record: null };
@@ -715,6 +740,71 @@ export function createShellFunctions(host){
         return record
             ? { answer: LAUNCH_SUCCESS, record }
             : { answer: SE_ERR_FNF, record: null };
+    };
+
+    /**
+     * The program a name is, looked for where the shell looks: the current
+     * directory, then the system directories -- not the caller's own, and
+     * not split into a program and its arguments, which a file name never is
+     * (Wine's test_exes). The name itself in a build with no volume to look in.
+     *
+     * @param {string} name
+     * @returns {string | null}
+     */
+    const programOf = name=>{
+        const volume = readableVolume();
+        if (!volume)
+        {
+            return name;
+        }
+        const found = locate(volume, fullPath(name, ''))
+            ?? (isQualified(name) ? null : locate(volume, name));
+        if (found !== null || isQualified(name) || !host.launcher)
+        {
+            return found;
+        }
+        // A program of the system's own is in its directory without a file
+        // on the volume.
+        const launcher = host.launcher;
+        return [folderOf(CSIDL_SYSTEM), folderOf(CSIDL_WINDOWS)]
+            .map(folder=>(folder === null ? null : `${folder.replace(/[\\/]+$/, '')}\\${name}`))
+            .find(candidate=>candidate !== null && launcher.imageOf(candidate) !== null) ?? null;
+    };
+
+    /**
+     * Where a relative name is when a directory is asked for: the shell looks
+     * there before anywhere else (Wine's test_directory). The name as it is
+     * when the directory does not have it, as a program or as it is spelled.
+     *
+     * @param {string} name @param {string} directory
+     */
+    const inDirectory = (name, directory)=>{
+        const volume = readableVolume();
+        if (directory === '' || name === '' || isQualified(name) || !volume)
+        {
+            return name;
+        }
+        const joined = fullPath(name, directory);
+        const candidates = extensionOf(joined) === '' ? [joined, `${joined}.exe`] : [joined];
+        return candidates.find(candidate=>volume.stat(candidate)?.exists
+            && !volume.stat(candidate)?.isDirectory) ?? name;
+    };
+
+    /**
+     * A string with the caller's environment variables put in, as
+     * SEE_MASK_DOENVSUBST asks for; a name that is no variable stays as it is.
+     *
+     * @param {string | null} text
+     */
+    const substitute = text=>{
+        const variables = text?.includes('%') ? environment() : null;
+        if (text === null || !variables)
+        {
+            return text;
+        }
+        const named = new Map(Object.entries(variables)
+            .map(([name, value])=>[name.toUpperCase(), value]));
+        return text.replace(/%([^%]+)%/g, (whole, name)=>named.get(name.toUpperCase()) ?? whole);
     };
 
     /**
@@ -840,9 +930,12 @@ export function createShellFunctions(host){
         const protocol = given === null
             ? /^([A-Za-z][A-Za-z0-9+.-]+):/.exec(name)?.[1] ?? null : null;
         const extension = extensionOf(name);
-        const named = given ?? protocol
+        // A class named as an extension is the class that extension names.
+        const named = (given?.startsWith('.') ? associations?.classOf(given) : given) ?? protocol
             ?? (extension === '' ? null : associations?.classOf(`.${extension}`));
-        const command = named ? associations?.commandOf(named, verb) : null;
+        // A scheme is a class that says it is one (Wine's test_urls).
+        const command = named && (protocol === null || associations?.isProtocol(protocol))
+            ? associations?.commandOf(named, verb) : null;
         if (!command)
         {
             return null;
@@ -968,13 +1061,14 @@ export function createShellFunctions(host){
             const mask = dwordAt(at, SEI_MASK);
             /** @param {number} offset */
             const field = offset=>textOf(dwordAt(at, offset), wide);
+            const expanded = (mask & SEE_MASK_DOENVSUBST) !== 0 ? substitute : (/** @type {string | null} */ text)=>text;
             // A class asked for and not named is no class to open with.
             const given = (mask & SEE_MASK_CLASSNAME) !== 0 ? field(SEI_CLASS) : null;
             const started = (mask & SEE_MASK_IDLIST) !== 0
                 || ((mask & SEE_MASK_CLASSNAME) !== 0 && !given)
                 ? { answer: SE_ERR_NOASSOC, record: null }
-                : start(field(SEI_VERB), field(SEI_FILE), field(SEI_PARAMETERS),
-                    field(SEI_DIRECTORY), given);
+                : start(field(SEI_VERB), expanded(field(SEI_FILE)), field(SEI_PARAMETERS),
+                    expanded(field(SEI_DIRECTORY)), given);
             host.writeMemory(at + SHELLEXECUTEINFO_HINSTAPP, dword(started.answer));
             if ((mask & SEE_MASK_NOCLOSEPROCESS) !== 0)
             {
@@ -1212,35 +1306,35 @@ export function createShellFunctions(host){
                 write(result >>> 0, NOTEPAD);
                 return LAUNCH_SUCCESS;
             }
-            if (name !== null && host.resolve && !SELF_EXECUTABLE.has(extensionOf(name)))
-            {
-                const folder = textOf(directory, wide) ?? '';
-                const volume = readableVolume();
-                const qualified = folder !== '' && !isQualified(name)
-                    ? `${folder.replace(/[\\/]+$/, '')}\\${name}` : name;
-                const extension = extensionOf(name);
-                const named = extension === '' ? null : associations?.classOf(`.${extension}`);
-                const command = named ? associations?.commandOf(named, null) : null;
-                if (command && volume)
-                {
-                    if (!volume.stat(qualified)?.exists)
-                    {
-                        write(result >>> 0, '');
-                        return SE_ERR_FNF;
-                    }
-                    const image = imageOfCommand(argify(command.value,
-                        host.resolve(qualified), '').trim());
-                    write(result >>> 0, image ?? '');
-                    return image === null ? SE_ERR_NOASSOC : LAUNCH_SUCCESS;
-                }
-            }
-            if (name === null || !host.resolve || !SELF_EXECUTABLE.has(extensionOf(name)))
+            const volume = readableVolume();
+            if (name === null || !host.resolve || !volume)
             {
                 write(result >>> 0, '');
                 return SE_ERR_NOASSOC;
             }
-            write(result >>> 0, fullPath(name, textOf(directory, wide) ?? ''));
-            return LAUNCH_SUCCESS;
+            // The file is found before its type is asked about: in the
+            // directory given, else where the shell looks for a program; a
+            // file: URL is no file's name here (Wine's test_fileurls).
+            const spelled = withoutTrailingDots(unquote(name.trim()));
+            const placed = inDirectory(spelled, (textOf(directory, wide) ?? '').trim());
+            const found = placed !== spelled ? placed : programOf(spelled);
+            if (found === null || volume.stat(found)?.isDirectory)
+            {
+                write(result >>> 0, '');
+                return found === null ? SE_ERR_FNF : SE_ERR_NOASSOC;
+            }
+            const extension = extensionOf(found);
+            if (SELF_EXECUTABLE.has(extension))
+            {
+                write(result >>> 0, host.resolve(found));
+                return LAUNCH_SUCCESS;
+            }
+            const named = extension === '' ? null : associations?.classOf(`.${extension}`);
+            const command = named ? associations?.commandOf(named, null) : null;
+            const image = command
+                ? imageOfCommand(argify(command.value, host.resolve(found), '').trim()) : null;
+            write(result >>> 0, image ?? '');
+            return image === null ? SE_ERR_NOASSOC : LAUNCH_SUCCESS;
         },
     });
 

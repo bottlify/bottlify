@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { argify, namesFile, pathOfFileUrl, splitParameters } from './associations.js';
+import {
+    argify, createAssociations, namesFile, pathOfFileUrl, splitParameters,
+} from './associations.js';
 
 test('the shell splits parameters at spaces alone, halving runs of quotes', ()=>{
     // Wine's test_argify, as its comments set the rules out.
@@ -55,4 +57,109 @@ test('a file: URL names its path when it has up to four slashes, or localhost', 
     {
         assert.equal(pathOfFileUrl(url), path, url);
     }
+});
+
+/**
+ * The classes' registry, as advapi32 answers for it: keys by path, each with
+ * its values by name ('' the default).
+ *
+ * @param {Record<string, Record<string, string>>} keys
+ */
+function classes(keys){
+    const memory = new Uint8Array(0x10000);
+    const view = new DataView(memory.buffer);
+    let heap = 0x1000;
+    /** @param {number} at */
+    const text = at=>String.fromCharCode(...memory.subarray(at, memory.indexOf(0, at)));
+    /** @type {Map<number, string>} */
+    const open = new Map();
+    const lower = new Map(Object.entries(keys).map(([path, values])=>[path.toLowerCase(), values]));
+    const advapi = {
+        RegOpenKeyExA: { handler: (/** @type {number[]} */ [, name, , , out])=>{
+            const path = text(name).toLowerCase();
+            if (!lower.has(path))
+            {
+                return 2;
+            }
+            const handle = 0x100 + open.size;
+            open.set(handle, path);
+            view.setUint32(out, handle, true);
+            return 0;
+        } },
+        RegQueryValueExA: { handler: (/** @type {number[]} */ [key, name, , type, data])=>{
+            const value = lower.get(open.get(key) ?? '')?.[name ? text(name) : ''];
+            if (value === undefined)
+            {
+                return 2;
+            }
+            if (type)
+            {
+                view.setUint32(type, 1, true);
+            }
+            if (data)
+            {
+                memory.set(Array.from(`${value}\0`, c=>c.charCodeAt(0)), data);
+            }
+            return 0;
+        } },
+        RegEnumKeyA: { handler: (/** @type {number[]} */ [key, index, out])=>{
+            const prefix = `${open.get(key)}\\`;
+            const children = [...lower.keys()].filter(path=>path.startsWith(prefix)
+                && !path.slice(prefix.length).includes('\\'));
+            const child = children[index];
+            if (child === undefined)
+            {
+                return 259;
+            }
+            memory.set(Array.from(`${child.slice(prefix.length)}\0`, c=>c.charCodeAt(0)), out);
+            return 0;
+        } },
+        RegCloseKey: { handler: ()=>0 },
+    };
+    return createAssociations({
+        readMemory: (at, length)=>memory.slice(at, at + length),
+        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        allocate: bytes=>{
+            const at = heap;
+            heap += bytes + 16;
+            return at;
+        },
+        library: name=>(name === 'ADVAPI32.dll' ? advapi : undefined),
+    });
+}
+
+test('a class is found by its extension, or as the extension itself with a shell', ()=>{
+    const found = classes({
+        '.qqqq': { '': 'exefile' },
+        '.own': {}, '.own\\shell': {}, '.own\\shell\\open': {},
+        '.own\\shell\\open\\command': { '': 'own.exe "%1"' },
+    });
+    assert.equal(found.classOf('.qqqq'), 'exefile');
+    assert.equal(found.classOf('.own'), '.own');
+    assert.equal(found.classOf('.none'), null);
+    assert.equal(found.commandOf('.own', null)?.value, 'own.exe "%1"');
+});
+
+test('the classes Windows ships for programs run the file itself', ()=>{
+    const found = classes({});
+    assert.equal(found.classOf('.exe'), 'exefile');
+    assert.equal(found.classOf('.BAT'), 'batfile');
+    assert.deepEqual(found.commandOf('exefile', null),
+        { verb: 'open', value: '"%1" %*', expand: false });
+    assert.equal(found.commandOf('exefile', 'runas')?.value, '"%1" %*');
+    assert.equal(found.commandOf('exefile', 'print'), null, 'no other verb');
+    assert.equal(found.commandOf('qqqq', null), null);
+});
+
+test('a scheme is a class with a URL Protocol value, and its verb defaults', ()=>{
+    const found = classes({
+        shlproto: { 'URL Protocol': '' }, 'shlproto\\shell': {}, 'shlproto\\shell\\averb': {},
+        'shlproto\\shell\\averb\\command': { '': 'child.exe "%1"' },
+        fakeproto: {},
+    });
+    assert.equal(found.isProtocol('shlproto'), true);
+    assert.equal(found.isProtocol('fakeproto'), false);
+    assert.equal(found.isProtocol('notaproto'), false);
+    assert.deepEqual(found.commandOf('shlproto', null),
+        { verb: 'averb', value: 'child.exe "%1"', expand: false }, 'its first verb');
 });

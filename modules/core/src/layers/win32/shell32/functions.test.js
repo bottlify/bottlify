@@ -375,6 +375,19 @@ test('the extended launch refuses a record that names a list, or asks for a clas
         }
     });
 
+/** A volume with the executables and documents the FindExecutable tests name. */
+const PATHS = Object.freeze({ volume: {
+    files: new Set(['c:\\app\\setup.exe', 'c:\\games\\doom.exe', 'd:\\other\\setup.exe',
+        'c:\\app\\readme.txt']),
+    /** @param {string} path */
+    stat(path){
+        return { exists: this.files.has(path.toLowerCase()), isDirectory: false, size: 0 };
+    },
+    open: ()=>null,
+    read: ()=>new Uint8Array(0),
+    close: ()=>{},
+} });
+
 /**
  * The machine above with an ANSI string reader and a path resolver, which is
  * what FindExecutable needs to read a file name and qualify it. The resolver
@@ -423,7 +436,7 @@ test('finding an executable that cannot be read reports no association', ()=>{
 });
 
 test('an executable is associated with itself, qualified against the directory', ()=>{
-    const m = machineWithPaths('C:\\App');
+    const m = machineWithPaths('C:\\App', PATHS);
     m.put('setup.exe', 0x100);
     const answer = m.shell.FindExecutableA.handler([0x100, 0, 0x200]);
     assert.ok(answer > 32, 'success is a value above 32');
@@ -433,7 +446,7 @@ test('an executable is associated with itself, qualified against the directory',
 });
 
 test('a qualified executable is answered as itself, and a directory overrides', ()=>{
-    const m = machineWithPaths('C:\\App');
+    const m = machineWithPaths('C:\\App', PATHS);
     m.put('C:\\Games\\doom.exe', 0x100);
     assert.ok(m.shell.FindExecutableA.handler([0x100, 0, 0x200]) > 32);
     assert.equal(m.string(0x200), 'C:\\Games\\doom.exe');
@@ -445,8 +458,20 @@ test('a qualified executable is answered as itself, and a directory overrides', 
         'a relative name resolves against the directory it was given');
 });
 
+test('FindExecutable looks for the file before its type: missing is not found', ()=>{
+    const m = machineWithPaths('C:\\App', PATHS);
+    m.put('missing.exe', 0x100);
+    assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 2, 'SE_ERR_FNF');
+    assert.equal(m.memory[0x200], 0);
+    m.put('file:///C|/App/setup.exe', 0x100);
+    assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 2, 'a URL is no file name');
+    m.put('C:\\App\\setup.exe.', 0x100);
+    assert.ok(m.shell.FindExecutableA.handler([0x100, 0, 0x200]) > 32, 'a trailing dot is no part');
+    assert.equal(m.string(0x200), 'C:\\App\\setup.exe');
+});
+
 test('a document still reports no association, and clears the buffer', ()=>{
-    const m = machineWithPaths('C:\\App');
+    const m = machineWithPaths('C:\\App', PATHS);
     m.put('readme.txt', 0x100);
     assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 31,
         'this build has no document-handler registry to consult');
@@ -868,7 +893,7 @@ test('SHPathPrepareForWrite with no volume finds no path', ()=>{
 });
 
 test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no drop', async()=>{
-    const m = machineWithPaths('C:\\App');
+    const m = machineWithPaths('C:\\App', PATHS);
     /** @param {string} text @param {number} at */
     const wide = (text, at)=>{
         [...text, '\0'].forEach((c, i)=>{

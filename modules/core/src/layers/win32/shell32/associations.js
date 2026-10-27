@@ -177,6 +177,16 @@ export const pathOfFileUrl = text=>{
     return `${drive[1]}:${path}`;
 };
 
+/**
+ * What Windows ships in HKEY_CLASSES_ROOT for the files it runs itself, which
+ * a program names as a class without registering it: the class of each
+ * extension, and the command of each class -- the file run as the program.
+ */
+const SHIPPED_CLASSES = Object.freeze(new Map([['.exe', 'exefile'], ['.com', 'comfile'],
+    ['.bat', 'batfile'], ['.cmd', 'cmdfile']]));
+const SHIPPED_VERBS = Object.freeze(new Set(['open', 'runas']));
+const SHIPPED_COMMAND = '"%1" %*';
+
 const HKEY_CLASSES_ROOT = 0x80000000;
 const KEY_READ = 0x20019;
 const ERROR_SUCCESS = 0;
@@ -276,6 +286,16 @@ export function createAssociations(host){
             expand: type === REG_EXPAND_SZ };
     });
 
+    /**
+     * Whether a key has a value of that name, whatever it holds.
+     *
+     * @param {string} path @param {string} value
+     */
+    const hasValue = (path, value)=>withKey(path, (key, scratch)=>{
+        host.writeMemory(scratch + 0x300, ansi(value));
+        return call('RegQueryValueExA', [key, scratch + 0x300, 0, 0, 0, 0]) === ERROR_SUCCESS;
+    }) ?? false;
+
     /** @param {string} path @returns {string | null} its first subkey */
     const firstSubkey = path=>withKey(path, (key, scratch)=>(call('RegEnumKeyA',
         [key, 0, scratch + 0x200, 0x100]) === ERROR_SUCCESS
@@ -293,13 +313,15 @@ export function createAssociations(host){
         const asked = verb?.trim() || null;
         const chosen = asked ?? (defaultOf(`${name}\\shell`)?.value || null)
             ?? (defaultOf(`${name}\\shell\\open\\command`) ? 'open'
-                : firstSubkey(`${name}\\shell`));
-        if (chosen === null)
-        {
-            return null;
-        }
+                : firstSubkey(`${name}\\shell`) ?? 'open');
         const command = defaultOf(`${name}\\shell\\${chosen}\\command`);
-        return command ? { verb: chosen, ...command } : null;
+        if (command)
+        {
+            return { verb: chosen, ...command };
+        }
+        return [...SHIPPED_CLASSES.values()].includes(name.toLowerCase())
+            && SHIPPED_VERBS.has(chosen.toLowerCase())
+            ? { verb: chosen, value: SHIPPED_COMMAND, expand: false } : null;
     };
 
     return {
@@ -315,8 +337,16 @@ export function createAssociations(host){
             {
                 return named;
             }
-            return withKey(`${extension}\\shell`, ()=>extension);
+            return withKey(`${extension}\\shell`, ()=>extension)
+                ?? SHIPPED_CLASSES.get(extension.toLowerCase()) ?? null;
         },
         commandOf,
+        /**
+         * Whether a class is a URL scheme: its key says so with a
+         * `URL Protocol` value.
+         *
+         * @param {string} name
+         */
+        isProtocol: name=>hasValue(name, 'URL Protocol'),
     };
 }
