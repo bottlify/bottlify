@@ -15,7 +15,8 @@ import { standardDirids } from './dirids.js';
 import { createStringTableFunctions } from './stringtable.js';
 import { createDiskSpaceFunctions } from './diskspace.js';
 import {
-    CLASS_KEY, DEVICE_CLASSES_KEY, ENUM_KEY, GUID_NULL, SPINT, createDeviceStore, interfacePath,
+    CLASS_KEY, DEVICE_CLASSES_KEY, ENUM_KEY, GUID_NULL, ROOT_DEVNODE, ROOT_ID, SPINT,
+    createDeviceStore, interfacePath,
 } from './devices.js';
 import { infNumber, installRegistry } from './registry.js';
 import {
@@ -78,9 +79,12 @@ const DEVPKEY_INSTANCE = '{78c34fc8-104a-4aca-9ea4-524d52996e57}';
 const DEVPKEY_RELATIONS = '{4340a6c5-93fa-4706-972c-7b648008a5a7}';
 const DEVPKEY_BUS_DESCRIPTION = '{540b947e-8b40-45bc-a8a2-6a0b894cbda2}';
 const DEVPKEY_CONTAINER = '{8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c}';
+/** The device interface format: its name, whether it is enabled, its class. */
+const DEVPKEY_INTERFACE = '{026e516e-b814-414b-83cd-856d6fef4822}';
 
-/** Every device's parent here: the root of the device tree, which enumerates them all. */
-const ROOT_PARENT = 'HTREE\\ROOT\\0';
+/** DEVPROP_TYPE_BOOLEAN: one byte, 0 or 0xff. */
+const DEVPROP_TYPE_BOOLEAN = 0x11;
+
 
 const SPDRP_CLASSGUID = 0x8;
 const SPDRP_PHYSICAL_DEVICE_OBJECT_NAME = 0xe;
@@ -96,6 +100,21 @@ const DEVPROP_OF_REG = new Map([[1, DEVPROP_TYPE.STRING], [2, DEVPROP_TYPE.STRIN
 
 const ERROR_NOT_FOUND = 1168;
 const ERROR_WRONG_INF_STYLE = 0xe0000100;
+const ERROR_DEVICE_INTERFACE_REMOVED = 0xe000021c;
+/** CONFIGRET codes, cfgmgr32.h. */
+const CR_SUCCESS = 0x00;
+const CR_INVALID_POINTER = 0x03;
+const CR_INVALID_FLAG = 0x04;
+const CR_INVALID_DEVNODE = 0x05;
+const CR_NO_SUCH_DEVNODE = 0x0d;
+const CR_BUFFER_SMALL = 0x1a;
+
+/** CM_Get_Device_ID_List's filters, and CM_Get_Device_Interface_List's one flag. */
+const CM_GETIDLIST_FILTER_NONE = 0x0;
+const CM_GETIDLIST_FILTER_ENUMERATOR = 0x1;
+const CM_GETIDLIST_FILTER_CLASS = 0x200;
+const CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES = 0x1;
+
 
 const ERROR_PARTIAL_COPY = 299;
 const ERROR_DEVINFO_NOT_REGISTERED = 0xe0000208;
@@ -1129,7 +1148,7 @@ export function createSetupapiFunctions(host){
     const INNATE = new Map(/** @type {[string, Innate][]} */ ([
         [`${DEVPKEY_INSTANCE}|256`, device=>({ type: DEVPROP_TYPE.STRING,
             data: utf16z(device.id) })],
-        [`${DEVPKEY_RELATIONS}|8`, ()=>({ type: DEVPROP_TYPE.STRING, data: utf16z(ROOT_PARENT) })],
+        [`${DEVPKEY_RELATIONS}|8`, ()=>({ type: DEVPROP_TYPE.STRING, data: utf16z(ROOT_ID) })],
         [`${DEVPKEY_RELATIONS}|10`, device=>({ type: DEVPROP_TYPE.STRING_LIST,
             data: utf16z([...(devices?.allInstances() ?? [])]
                 .filter(id=>id.toUpperCase() !== device.id.toUpperCase())
@@ -1291,6 +1310,321 @@ export function createSetupapiFunctions(host){
             return { guid: guid.toLowerCase(),
                 name: value ? decodeAnsi(value.data).replace(/\0[\s\S]*$/, '') : '' };
         });
+    };
+
+    /**
+     * A list of strings as the CM_ calls answer it: each terminated, an
+     * empty one after the last, sized in characters; too small a buffer is
+     * CR_BUFFER_SMALL, nothing written.
+     *
+     * @param {string} strings  Each terminated already.
+     * @param {number} buffer @param {number} length @param {boolean} wide
+     */
+    const answerList = (strings, buffer, length, wide)=>{
+        if ((length >>> 0) < strings.length + 1)
+        {
+            return CR_BUFFER_SMALL;
+        }
+        host.writeMemory(buffer >>> 0, encodeIn(strings, wide));
+        return CR_SUCCESS;
+    };
+
+    /**
+     * CM_Get_Device_ID_List's instances for a filter, or the CONFIGRET
+     * that refuses it.
+     *
+     * @param {string | null} filter @param {number} flags
+     * @returns {{ text: string } | { error: number }}
+     */
+    const deviceIdList = (filter, flags)=>{
+        const ids = devices?.allInstances() ?? [];
+        /** @param {(id: string) => boolean} keep */
+        const listed = keep=>({ text: ids.filter(keep).map(id=>`${id}\0`).join('') });
+        if (flags === CM_GETIDLIST_FILTER_NONE)
+        {
+            return listed(()=>true);
+        }
+        if (filter === null)
+        {
+            return { error: CR_INVALID_POINTER };
+        }
+        if (flags === CM_GETIDLIST_FILTER_ENUMERATOR)
+        {
+            const prefix = `${filter.replace(/\\$/, '')}\\`.toUpperCase();
+            return listed(id=>id.toUpperCase().startsWith(prefix));
+        }
+        if (flags === CM_GETIDLIST_FILTER_CLASS)
+        {
+            const guid = filter.toLowerCase();
+            return listed(id=>devices?.classOf(id) === guid);
+        }
+        return { error: CR_INVALID_FLAG };
+    };
+
+    /**
+     * CM_Get_Device_Interface_List's links, or the CONFIGRET that refuses
+     * the arguments.
+     *
+     * @param {number} classGuid @param {string | null} deviceId @param {number} flags
+     * @returns {{ text: string } | { error: number }}
+     */
+    const interfaceList = (classGuid, deviceId, flags)=>{
+        if ((flags & ~CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES) !== 0)
+        {
+            return { error: CR_INVALID_FLAG };
+        }
+        const guid = guidAt(classGuid);
+        const all = (flags & CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES) !== 0;
+        const wanted = deviceId === null || deviceId === '' ? null : deviceId.toUpperCase();
+        const links = (devices?.allInstances() ?? [])
+            .filter(id=>(wanted === null || id.toUpperCase() === wanted)
+                && (all || devices?.registered(id)))
+            .flatMap(id=>(devices?.storedInterfaces(id) ?? [])
+                .filter(face=>face.classGuid === guid)
+                .map(face=>interfacePath(id, face.classGuid, face.reference)));
+        return { text: links.map(link=>`${link}\0`).join('') };
+    };
+
+    /**
+     * The Device Parameters key of the interface interface data names, or
+     * the error: a removed interface has none.
+     *
+     * @param {number} handle @param {number} data
+     * @returns {{ path: string } | { error: number }}
+     */
+    const interfaceKey = (handle, data)=>{
+        const set = deviceSet(handle);
+        if (!set || !devices || !host.registry)
+        {
+            return { error: ERROR_INVALID_HANDLE };
+        }
+        const held = interfaceIn(set, data);
+        if (!held)
+        {
+            return { error: ERROR_INVALID_PARAMETER };
+        }
+        if ((held.face.flags & SPINT.REMOVED) !== 0)
+        {
+            return { error: ERROR_DEVICE_INTERFACE_REMOVED };
+        }
+        return { path: `${devices.interfaceKeyPath(held.device.id, held.face.classGuid,
+            held.face.reference)}\\Device Parameters` };
+    };
+
+    /**
+     * @template T
+     * @typedef {Object} PropertyTarget  What a set of property calls works on.
+     * @property {(handle: number, data: number) => { target: T } | { error: number }} resolve
+     * @property {(target: T, fmtid: string, pid: number) =>
+     *     { type: number, data: Uint8Array } | null} read
+     * @property {(target: T, fmtid: string, pid: number, type: number, bytes: Uint8Array)
+     *     => number} write  The error, 0 for none.
+     * @property {(target: T) => { fmtid: string, pid: number }[]} keys
+     * @property {number} noKeyOnGet  What the Get call answers no property key with.
+     */
+
+    /**
+     * The unified property model's three calls -- set, get, list the keys
+     * -- for devices or interfaces alike, the arguments checked in
+     * Windows' order.
+     *
+     * @template T @template {string} S @template {string} G @template {string} K
+     * @param {S} setName @param {G} getName @param {K} keysName
+     * @param {PropertyTarget<T>} on
+     * @returns {Record<S | G | K, { argBytes: number, handler: (args: number[]) => number }>}
+     */
+    const propertyCalls = (setName, getName, keysName, on)=>/** @type {any} */ ({
+        [setName]: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, keyPointer, type, buffer, size,
+                flags])=>{
+                const found = on.resolve(handle, data);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                if ((keyPointer >>> 0) === 0 || !validType(type >>> 0))
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                if ((buffer >>> 0) === 0 && (size >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                const removing = (type >>> 0) === DEVPROP_TYPE.EMPTY
+                    || (type >>> 0) === DEVPROP_TYPE.NULL;
+                if (!removing && (size >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_FLAGS);
+                }
+                const { fmtid, pid } = propKeyAt(keyPointer);
+                const bytes = removing ? new Uint8Array(0)
+                    : host.readMemory(buffer >>> 0, size >>> 0).slice();
+                const error = on.write(found.target, fmtid, pid, type >>> 0, bytes);
+                return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
+            },
+        },
+        [getName]: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, keyPointer, typeOut, buffer, size,
+                required, flags])=>{
+                const found = on.resolve(handle, data);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                if ((keyPointer >>> 0) === 0)
+                {
+                    return fail(on.noKeyOnGet);
+                }
+                if ((typeOut >>> 0) === 0 || ((buffer >>> 0) === 0 && (size >>> 0) !== 0))
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_FLAGS);
+                }
+                const { fmtid, pid } = propKeyAt(keyPointer);
+                const value = on.read(found.target, fmtid, pid);
+                if (!value)
+                {
+                    return fail(ERROR_NOT_FOUND);
+                }
+                writeU32(typeOut, value.type);
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, value.data.length);
+                }
+                if ((size >>> 0) < value.data.length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory(buffer >>> 0, value.data);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+        [keysName]: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, array, count, required, flags])=>{
+                const found = on.resolve(handle, data);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                if ((array >>> 0) === 0 && (count >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_FLAGS);
+                }
+                const keys = on.keys(found.target);
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, keys.length);
+                }
+                if ((count >>> 0) < keys.length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                keys.forEach((key, index)=>{
+                    const at = (array >>> 0) + index * DEVPROPKEY_SIZE;
+                    writeGuid(at, key.fmtid);
+                    writeU32(at + 16, key.pid);
+                });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+    });
+
+    /**
+     * An interface's properties the system keeps: whether it is enabled,
+     * its class, its device's instance id.
+     *
+     * @typedef {{ device: import('./devices.js').Device,
+     *     face: import('./devices.js').DeviceInterface }} HeldInterface
+     * @typedef {(held: HeldInterface) => { type: number, data: Uint8Array }} InterfaceInnate
+     * @type {Map<string, InterfaceInnate>}
+     */
+    const INTERFACE_INNATE = new Map(/** @type {[string, InterfaceInnate][]} */ ([
+        [`${DEVPKEY_INTERFACE}|3`, held=>({ type: DEVPROP_TYPE_BOOLEAN,
+            data: Uint8Array.of((held.face.flags & SPINT.ACTIVE) !== 0 ? 0xff : 0) })],
+        [`${DEVPKEY_INTERFACE}|4`, held=>({ type: DEVPROP_TYPE.GUID,
+            data: guidBytes(held.face.classGuid) })],
+        [`${DEVPKEY_INSTANCE}|256`, held=>({ type: DEVPROP_TYPE.STRING,
+            data: utf16z(held.device.id) })],
+    ]));
+
+    /** An interface's own key in the hive, made when `create`. @param {HeldInterface} held @param {boolean} create */
+    const interfaceHiveKey = (held, create)=>{
+        const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+        const path = /** @type {NonNullable<typeof devices>} */ (devices)
+            .interfaceKeyPath(held.device.id, held.face.classGuid, held.face.reference);
+        const root = hive.root(HKEY_LOCAL_MACHINE);
+        return create ? hive.create(root, path).key : hive.open(root, path);
+    };
+
+    /** @param {HeldInterface} held @param {string} fmtid @param {number} pid */
+    const interfacePropertyOf = (held, fmtid, pid)=>{
+        const innate = INTERFACE_INNATE.get(`${fmtid}|${pid}`);
+        if (innate)
+        {
+            return innate(held);
+        }
+        const key = interfaceHiveKey(held, false);
+        return key ? storedProperty(host.registry, key, fmtid, pid) : null;
+    };
+
+    /**
+     * Sets an interface's property; whether it is enabled only to what it
+     * is, a boolean being 0 or 0xff.
+     *
+     * @param {HeldInterface} held @param {string} fmtid @param {number} pid
+     * @param {number} type @param {Uint8Array} bytes
+     */
+    const setInterfaceProperty = (held, fmtid, pid, type, bytes)=>{
+        const removing = type === DEVPROP_TYPE.EMPTY || type === DEVPROP_TYPE.NULL;
+        const innate = INTERFACE_INNATE.get(`${fmtid}|${pid}`);
+        if (innate)
+        {
+            const now = innate(held);
+            if (removing || type !== now.type
+                || (type === DEVPROP_TYPE_BOOLEAN && (bytes.length !== 1
+                    || (bytes[0] !== 0 && bytes[0] !== 0xff))))
+            {
+                return removing ? ERROR_ACCESS_DENIED : ERROR_INVALID_DATA;
+            }
+            return now.data.length === bytes.length
+                && now.data.every((byte, at)=>byte === bytes[at]) ? ERROR_SUCCESS
+                : ERROR_ACCESS_DENIED;
+        }
+        if (removing)
+        {
+            const key = interfaceHiveKey(held, false);
+            return key && deleteProperty(host.registry, key, fmtid, pid) ? ERROR_SUCCESS
+                : ERROR_NOT_FOUND;
+        }
+        storeProperty(host.registry, interfaceHiveKey(held, true), fmtid, pid, type, bytes);
+        return ERROR_SUCCESS;
+    };
+
+    /** @param {HeldInterface} held */
+    const interfacePropertyKeys = held=>{
+        const innate = [...INTERFACE_INNATE.keys()].map(name=>{
+            const [fmtid, pid] = name.split('|');
+            return { fmtid, pid: Number(pid) };
+        });
+        const key = interfaceHiveKey(held, false);
+        return key ? [...innate, ...storedKeys(host.registry, key)] : innate;
     };
 
     /** An instance's Device Parameters key. @param {string} id */
@@ -2983,6 +3317,170 @@ export function createSetupapiFunctions(host){
                     appendLog(log.errors, message);
                 }
                 return 1;
+            },
+        })),
+
+        /**
+         * CONFIGRET CM_Get_Device_IDA(DEVINST dnDevInst, PSTR Buffer, ULONG BufferLen,
+         *     ULONG ulFlags), the W form, and CM_Get_Device_ID_Size
+         *
+         * A device node's instance id, phantoms' too. A buffer with no room
+         * for the terminator takes the id without one; one too small for
+         * the id is CR_BUFFER_SMALL, as much of it as fits copied.
+         */
+        ...bothWidths('CM_Get_Device_ID', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [devnode, buffer, length, flags])=>{
+                if ((buffer >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return CR_INVALID_FLAG;
+                }
+                const id = devices?.idOf(devnode >>> 0) ?? null;
+                if (id === null)
+                {
+                    return CR_INVALID_DEVNODE;
+                }
+                const unit = wide ? 2 : 1;
+                const bytes = encodeIn(id, wide);
+                const room = (length >>> 0) * unit;
+                host.writeMemory(buffer >>> 0, bytes.subarray(0, Math.min(room, bytes.length)));
+                return room < bytes.length - unit ? CR_BUFFER_SMALL : CR_SUCCESS;
+            },
+        })),
+        /** CONFIGRET CM_Get_Device_ID_Size(PULONG pulLen, DEVINST dnDevInst, ULONG ulFlags) */
+        CM_Get_Device_ID_Size: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([lengthOut, devnode, flags])=>{
+                if ((lengthOut >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return CR_INVALID_FLAG;
+                }
+                const id = devices?.idOf(devnode >>> 0) ?? null;
+                if (id === null)
+                {
+                    return CR_INVALID_DEVNODE;
+                }
+                writeU32(lengthOut, id.length);
+                return CR_SUCCESS;
+            },
+        },
+
+        /**
+         * CONFIGRET CM_Get_Parent(PDEVINST pdnDevInst, DEVINST dnDevInst, ULONG ulFlags)
+         *
+         * Every device's parent is the tree's root, which enumerates them
+         * all here; the root has none.
+         */
+        CM_Get_Parent: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([parentOut, devnode, flags])=>{
+                if ((parentOut >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return CR_INVALID_FLAG;
+                }
+                if ((devnode >>> 0) === ROOT_DEVNODE)
+                {
+                    return CR_NO_SUCH_DEVNODE;
+                }
+                if (devices?.idOf(devnode >>> 0) == null)
+                {
+                    return CR_INVALID_DEVNODE;
+                }
+                writeU32(parentOut, ROOT_DEVNODE);
+                return CR_SUCCESS;
+            },
+        },
+
+        /**
+         * CONFIGRET CM_Get_Device_ID_ListA(PCSTR pszFilter, PCHAR Buffer, ULONG BufferLen,
+         *     ULONG ulFlags), the W form, and the _Size forms
+         *
+         * Every instance, phantoms too, in the tree's order, each terminated
+         * and an empty one after the last; CM_GETIDLIST_FILTER_ENUMERATOR
+         * those under an enumerator (or an enumerator's device),
+         * CM_GETIDLIST_FILTER_CLASS those of a class. Sizes are in characters.
+         */
+        ...bothWidths('CM_Get_Device_ID_List', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [filterPointer, buffer, length, flags])=>{
+                if ((buffer >>> 0) === 0 || (length >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                const list = deviceIdList(textOf(filterPointer, wide), flags >>> 0);
+                return 'error' in list ? list.error : answerList(list.text, buffer, length, wide);
+            },
+        })),
+        ...bothWidths('CM_Get_Device_ID_List_Size', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [lengthOut, filterPointer, flags])=>{
+                if ((lengthOut >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                const list = deviceIdList(textOf(filterPointer, wide), flags >>> 0);
+                if ('error' in list)
+                {
+                    return list.error;
+                }
+                writeU32(lengthOut, list.text.length + 1);
+                return CR_SUCCESS;
+            },
+        })),
+
+        /**
+         * CONFIGRET CM_Get_Device_Interface_ListA(LPGUID InterfaceClassGuid,
+         *     DEVINSTID_A pDeviceID, PCHAR Buffer, ULONG BufferLen, ULONG ulFlags),
+         *     the W form, and the _Size forms
+         *
+         * The symbolic links of a class's interfaces, of one device or of
+         * all; those of present devices only, unless
+         * CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES.
+         */
+        ...bothWidths('CM_Get_Device_Interface_List', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [classGuid, devicePointer, buffer, length, flags])=>{
+                if ((classGuid >>> 0) === 0 || (buffer >>> 0) === 0 || (length >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                const list = interfaceList(classGuid, textOf(devicePointer, wide), flags >>> 0);
+                return 'error' in list ? list.error : answerList(list.text, buffer, length, wide);
+            },
+        })),
+        ...bothWidths('CM_Get_Device_Interface_List_Size', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [lengthOut, classGuid, devicePointer, flags])=>{
+                if ((lengthOut >>> 0) === 0 || (classGuid >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                const list = interfaceList(classGuid, textOf(devicePointer, wide), flags >>> 0);
+                if ('error' in list)
+                {
+                    return list.error;
+                }
+                writeU32(lengthOut, list.text.length + 1);
+                return CR_SUCCESS;
             },
         })),
 
@@ -4853,145 +5351,141 @@ export function createSetupapiFunctions(host){
          * BOOL SetupDiSetDevicePropertyW(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
          *     const DEVPROPKEY *PropertyKey, DEVPROPTYPE PropertyType, const BYTE *PropertyBuffer,
          *     ULONG PropertyBufferSize, DWORD Flags)
-         *
-         * DEVPROP_TYPE_EMPTY or NULL deletes the property, ERROR_NOT_FOUND
-         * when there is none. A property the system keeps is
-         * ERROR_ACCESS_DENIED unless it is set to what it is.
-         */
-        SetupDiSetDevicePropertyW: {
-            argBytes: 28,
-            /** @param {number[]} args */
-            handler: ([handle, data, keyPointer, type, buffer, size, flags])=>{
-                const set = deviceSet(handle);
-                if (!set || !devices || !host.registry)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                const device = deviceIn(set, data);
-                if (!device)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                if ((keyPointer >>> 0) === 0 || !validType(type >>> 0))
-                {
-                    return fail(ERROR_INVALID_DATA);
-                }
-                if ((buffer >>> 0) === 0 && (size >>> 0) !== 0)
-                {
-                    return fail(ERROR_INVALID_USER_BUFFER);
-                }
-                const removing = (type >>> 0) === DEVPROP_TYPE.EMPTY
-                    || (type >>> 0) === DEVPROP_TYPE.NULL;
-                if (!removing && (size >>> 0) === 0)
-                {
-                    return fail(ERROR_INVALID_DATA);
-                }
-                if ((flags >>> 0) !== 0)
-                {
-                    return fail(ERROR_INVALID_FLAGS);
-                }
-                const { fmtid, pid } = propKeyAt(keyPointer);
-                const bytes = removing ? new Uint8Array(0)
-                    : host.readMemory(buffer >>> 0, size >>> 0).slice();
-                const error = setDeviceProperty(device, fmtid, pid, type >>> 0, bytes);
-                return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
-            },
-        },
-
-        /**
          * BOOL SetupDiGetDevicePropertyW(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
          *     const DEVPROPKEY *PropertyKey, DEVPROPTYPE *PropertyType, PBYTE PropertyBuffer,
          *     DWORD PropertyBufferSize, PDWORD RequiredSize, DWORD Flags)
+         * BOOL SetupDiGetDevicePropertyKeys(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DEVPROPKEY *PropertyKeyArray,
+         *     DWORD PropertyKeyCount, PDWORD RequiredPropertyKeyCount, DWORD Flags)
          *
-         * A property the device has not is ERROR_NOT_FOUND, nothing written.
+         * DEVPROP_TYPE_EMPTY or NULL deletes a property, ERROR_NOT_FOUND
+         * when there is none. A property the system keeps is
+         * ERROR_ACCESS_DENIED unless it is set to what it is.
          */
-        SetupDiGetDevicePropertyW: {
-            argBytes: 32,
+        ...propertyCalls('SetupDiSetDevicePropertyW', 'SetupDiGetDevicePropertyW',
+            'SetupDiGetDevicePropertyKeys', /** @type {PropertyTarget<import('./devices.js').Device>} */ ({
+                resolve: (handle, data)=>{
+                    const set = deviceSet(handle);
+                    if (!set || !devices || !host.registry)
+                    {
+                        return { error: ERROR_INVALID_HANDLE };
+                    }
+                    const device = deviceIn(set, data);
+                    return device ? { target: device } : { error: ERROR_INVALID_PARAMETER };
+                },
+                read: (device, fmtid, pid)=>devicePropertyOf(device, fmtid, pid),
+                write: (device, fmtid, pid, type, bytes)=>
+                    setDeviceProperty(device, fmtid, pid, type, bytes),
+                keys: device=>devicePropertyKeys(device),
+                noKeyOnGet: ERROR_INVALID_DATA,
+            })),
+
+        /**
+         * BOOL SetupDiSetDeviceInterfacePropertyW(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData, const DEVPROPKEY *PropertyKey,
+         *     DEVPROPTYPE PropertyType, const BYTE *PropertyBuffer, DWORD PropertyBufferSize,
+         *     DWORD Flags), its Get form and SetupDiGetDeviceInterfacePropertyKeys
+         *
+         * As the device's: the interface's own properties kept under its
+         * reference's key; whether it is enabled, its class and its device's
+         * instance id the system's.
+         */
+        ...propertyCalls('SetupDiSetDeviceInterfacePropertyW',
+            'SetupDiGetDeviceInterfacePropertyW', 'SetupDiGetDeviceInterfacePropertyKeys',
+            /** @type {PropertyTarget<HeldInterface>} */ ({
+                resolve: (handle, data)=>{
+                    const set = deviceSet(handle);
+                    if (!set || !devices || !host.registry)
+                    {
+                        return { error: ERROR_INVALID_HANDLE };
+                    }
+                    const held = interfaceIn(set, data);
+                    return held ? { target: held } : { error: ERROR_INVALID_PARAMETER };
+                },
+                read: (held, fmtid, pid)=>interfacePropertyOf(held, fmtid, pid),
+                write: (held, fmtid, pid, type, bytes)=>
+                    setInterfaceProperty(held, fmtid, pid, type, bytes),
+                keys: held=>interfacePropertyKeys(held),
+                noKeyOnGet: ERROR_INVALID_USER_BUFFER,
+            })),
+
+        /**
+         * HKEY SetupDiCreateDeviceInterfaceRegKeyA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData, DWORD Reserved,
+         *     REGSAM samDesired, HINF InfHandle, PCSTR InfSectionName), and the W form
+         *
+         * The interface's Device Parameters key, under its reference's; an
+         * INF section's registry lines go into it as HKR.
+         */
+        ...bothWidths('SetupDiCreateDeviceInterfaceRegKey', wide=>({
+            argBytes: 24,
             /** @param {number[]} args */
-            handler: ([handle, data, keyPointer, typeOut, buffer, size, required, flags])=>{
-                const set = deviceSet(handle);
-                if (!set || !devices || !host.registry)
+            handler: (/** @type {number[]} */ [handle, data, , , infHandle, sectionPointer])=>{
+                const found = interfaceKey(handle, data);
+                if ('error' in found)
                 {
-                    return fail(ERROR_INVALID_HANDLE);
+                    return fail(found.error, INVALID_HANDLE_VALUE);
                 }
-                const device = deviceIn(set, data);
-                if (!device)
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                const { key } = hive.create(hive.root(HKEY_LOCAL_MACHINE), found.path);
+                const open = (infHandle >>> 0) === 0 ? null : openInf(infHandle);
+                const section = open?.inf.section(textOf(sectionPointer, wide) ?? '');
+                if (open && section)
                 {
-                    return fail(ERROR_INVALID_PARAMETER);
+                    installRegistry(hive, open.inf, section, { relativeRoot: key,
+                        expand: value=>expand(open, value),
+                        divergence: detail=>host.divergence?.(
+                            `SetupDiCreateDeviceInterfaceRegKey${wide ? 'W' : 'A'}`, detail) });
                 }
-                if ((keyPointer >>> 0) === 0)
+                return fail(ERROR_SUCCESS, host.keyHandle?.(found.path) || INVALID_HANDLE_VALUE);
+            },
+        })),
+
+        /**
+         * HKEY SetupDiOpenDeviceInterfaceRegKey(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData, DWORD Reserved, REGSAM samDesired)
+         *
+         * The key SetupDiCreateDeviceInterfaceRegKey makes, if it is there.
+         */
+        SetupDiOpenDeviceInterfaceRegKey: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, data])=>{
+                const found = interfaceKey(handle, data);
+                if ('error' in found)
                 {
-                    return fail(ERROR_INVALID_DATA);
+                    return fail(found.error, INVALID_HANDLE_VALUE);
                 }
-                if ((typeOut >>> 0) === 0 || ((buffer >>> 0) === 0 && (size >>> 0) !== 0))
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                if (!hive.open(hive.root(HKEY_LOCAL_MACHINE), found.path))
                 {
-                    return fail(ERROR_INVALID_USER_BUFFER);
+                    return fail(ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE);
                 }
-                if ((flags >>> 0) !== 0)
-                {
-                    return fail(ERROR_INVALID_FLAGS);
-                }
-                const { fmtid, pid } = propKeyAt(keyPointer);
-                const value = devicePropertyOf(device, fmtid, pid);
-                if (!value)
-                {
-                    return fail(ERROR_NOT_FOUND);
-                }
-                writeU32(typeOut, value.type);
-                if ((required >>> 0) !== 0)
-                {
-                    writeU32(required, value.data.length);
-                }
-                if ((size >>> 0) < value.data.length)
-                {
-                    return fail(ERROR_INSUFFICIENT_BUFFER);
-                }
-                host.writeMemory(buffer >>> 0, value.data);
-                return fail(ERROR_SUCCESS, 1);
+                return fail(ERROR_SUCCESS, host.keyHandle?.(found.path) || INVALID_HANDLE_VALUE);
             },
         },
 
         /**
-         * BOOL SetupDiGetDevicePropertyKeys(HDEVINFO DeviceInfoSet,
-         *     PSP_DEVINFO_DATA DeviceInfoData, DEVPROPKEY *PropertyKeyArray,
-         *     DWORD PropertyKeyCount, PDWORD RequiredPropertyKeyCount, DWORD Flags)
+         * BOOL SetupDiDeleteDeviceInterfaceRegKey(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData, DWORD Reserved)
          */
-        SetupDiGetDevicePropertyKeys: {
-            argBytes: 24,
+        SetupDiDeleteDeviceInterfaceRegKey: {
+            argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, data, array, count, required, flags])=>{
-                const set = deviceSet(handle);
-                if (!set || !devices || !host.registry)
+            handler: ([handle, data])=>{
+                const found = interfaceKey(handle, data);
+                if ('error' in found)
                 {
-                    return fail(ERROR_INVALID_HANDLE);
+                    return fail(found.error);
                 }
-                const device = deviceIn(set, data);
-                if (!device)
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                const at = found.path.lastIndexOf('\\');
+                const parent = hive.open(hive.root(HKEY_LOCAL_MACHINE), found.path.slice(0, at));
+                if (!parent || !hive.open(parent, found.path.slice(at + 1)))
                 {
-                    return fail(ERROR_INVALID_PARAMETER);
+                    return fail(ERROR_FILE_NOT_FOUND);
                 }
-                if ((array >>> 0) === 0 && (count >>> 0) !== 0)
-                {
-                    return fail(ERROR_INVALID_USER_BUFFER);
-                }
-                if ((flags >>> 0) !== 0)
-                {
-                    return fail(ERROR_INVALID_FLAGS);
-                }
-                const keys = devicePropertyKeys(device);
-                if ((required >>> 0) !== 0)
-                {
-                    writeU32(required, keys.length);
-                }
-                if ((count >>> 0) < keys.length)
-                {
-                    return fail(ERROR_INSUFFICIENT_BUFFER);
-                }
-                keys.forEach((key, index)=>{
-                    const at = (array >>> 0) + index * DEVPROPKEY_SIZE;
-                    writeGuid(at, key.fmtid);
-                    writeU32(at + 16, key.pid);
-                });
+                hive.remove(parent, found.path.slice(at + 1));
                 return fail(ERROR_SUCCESS, 1);
             },
         },

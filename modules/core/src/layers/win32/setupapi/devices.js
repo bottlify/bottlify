@@ -39,6 +39,10 @@ export const DEVICE_CLASSES_KEY = 'SYSTEM\\CurrentControlSet\\Control\\DeviceCla
 /** The longest instance id, its terminator included. */
 export const MAX_DEVICE_ID_LEN = 200;
 
+/** The device tree's root: its device node and its instance id. */
+export const ROOT_DEVNODE = 1;
+export const ROOT_ID = 'HTREE\\ROOT\\0';
+
 export const GUID_NULL = '{00000000-0000-0000-0000-000000000000}';
 
 /** SP_DEVICE_INTERFACE_DATA's flags. */
@@ -154,8 +158,14 @@ export function createDeviceStore(hive){
     /** @param {string} id */
     const instanceKey = id=>open(`${ENUM_KEY}\\${id}`);
 
-    /** Each instance's device node, made the first time it is asked for. */
+    /**
+     * Each instance's device node, made the first time it is asked for, in
+     * the order the instances came to be: the device tree's order. The
+     * root's is 1, as cfgmgr32 numbers it.
+     */
     const devnodes = new Map();
+    /** The instance id each device node was made for. @type {Map<number, string>} */
+    const ids = new Map([[ROOT_DEVNODE, ROOT_ID]]);
     let nextDevnode = 2;
     let nextKey = 1;
 
@@ -164,7 +174,8 @@ export function createDeviceStore(hive){
         const name = id.toUpperCase();
         if (!devnodes.has(name))
         {
-            devnodes.set(name, nextDevnode++);
+            devnodes.set(name, nextDevnode);
+            ids.set(nextDevnode++, id);
         }
         return /** @type {number} */ (devnodes.get(name));
     };
@@ -238,8 +249,9 @@ export function createDeviceStore(hive){
     };
 
     /**
-     * Every instance under Enum, three levels down, in the order the
-     * registry enumerates them: sorted, case aside.
+     * Every instance under Enum, three levels down, in the device tree's
+     * order: the order they were made in, as Windows enumerates them -- an
+     * instance this run has not met yet after them, sorted, case aside.
      *
      * @returns {string[]}
      */
@@ -253,7 +265,7 @@ export function createDeviceStore(hive){
         const sorted = names=>[...names].sort((a, b)=>(a.toUpperCase() < b.toUpperCase() ? -1
             : a.toUpperCase() > b.toUpperCase() ? 1 : 0));
         /** @type {string[]} */
-        const ids = [];
+        const found = [];
         for (const enumerator of sorted(hive.subkeys(root)))
         {
             const enumKey = hive.open(root, enumerator);
@@ -262,11 +274,12 @@ export function createDeviceStore(hive){
                 const deviceKey = hive.open(enumKey, device);
                 for (const instance of sorted(hive.subkeys(deviceKey)))
                 {
-                    ids.push(`${enumerator}\\${device}\\${instance}`);
+                    found.push(`${enumerator}\\${device}\\${instance}`);
                 }
             }
         }
-        return ids;
+        found.forEach(devnodeOf);
+        return found.sort((a, b)=>devnodeOf(a) - devnodeOf(b));
     };
 
     const store = {
@@ -275,6 +288,14 @@ export function createDeviceStore(hive){
         classOf,
         storedInterfaces,
         allInstances,
+
+        /**
+         * The instance id a device node was made for, null for one never
+         * made; the root's is HTREE\\ROOT\\0.
+         *
+         * @param {number} devnode
+         */
+        idOf: (/** @type {number} */ devnode)=>ids.get(devnode) ?? null,
 
         /** Whether an instance's key is there, phantom or not. @param {string} id */
         exists: (/** @type {string} */ id)=>instanceKey(id) !== null,
@@ -437,6 +458,16 @@ export function createDeviceStore(hive){
                 hive.remove(/** @type {any} */ (open(`${ENUM_KEY}\\${parts[0]}`)), parts[1]);
             }
         },
+
+        /**
+         * Where an interface's own key is: its reference's, under the
+         * device's link in its class's key.
+         *
+         * @param {string} id @param {string} classGuid @param {string} reference
+         */
+        interfaceKeyPath: (/** @type {string} */ id, /** @type {string} */ classGuid,
+            /** @type {string} */ reference)=>
+            `${DEVICE_CLASSES_KEY}\\${classGuid}\\${linkName(id, classGuid)}\\#${reference}`,
 
         /**
          * An interface kept for an instance: its class's key, the device's

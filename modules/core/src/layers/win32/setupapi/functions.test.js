@@ -2095,3 +2095,92 @@ test('SetupDiGetINFClass reads an INF\'s class, the installed classes filling th
     assert.equal(m.readCString(name, 64), 'DeadBeef');
     assert.equal(m.u32(guid), 0xdeadbeef);
 });
+
+test('device nodes, ID lists, interface keys and interface properties', async()=>{
+    // Wine's setupapi test_devnode, test_device_interface_key,
+    // test_device_interface_properties and test_class_device_order.
+    const [CR_SUCCESS, CR_INVALID_POINTER, CR_BUFFER_SMALL] = [0, 3, 0x1a];
+    const ERROR_ACCESS_DENIED = 5;
+    const BOOLEAN = 0x11;
+    const m = await machine();
+    const guid = m.buffer(16);
+    m.view.setUint32(guid, 0x6a55b5a6, true);
+    const set = m.fns.SetupDiCreateDeviceInfoList.handler([guid, 0]);
+    const device = m.buffer(28);
+    m.view.setUint32(device, 28, true);
+    const face = m.buffer(28);
+    m.view.setUint32(face, 28, true);
+    const names = ['ROOT\\WINE_ENUM_TEST\\3000', 'ROOT\\WINE_ENUM_TEST2\\4000',
+        'ROOT\\WINE_ENUM_TEST\\1000'];
+    for (const name of names)
+    {
+        m.fns.SetupDiCreateDeviceInfoA.handler([set, m.str(name), guid, 0, 0, 0, device]);
+        m.fns.SetupDiCreateDeviceInterfaceA.handler([set, device, guid, 0, 0, face]);
+    }
+    const out = m.buffer(512);
+    assert.equal(m.fns.CM_Get_Device_IDA.handler([m.u32(device + 20), out, 64, 0]), CR_SUCCESS);
+    assert.equal(m.readCString(out, 64), names[2]);
+    assert.equal(m.fns.CM_Get_Device_IDA.handler([m.u32(device + 20), out, 4, 0]),
+        CR_BUFFER_SMALL);
+    assert.equal(m.fns.CM_Get_Parent.handler([0, m.u32(device + 20), 0]), CR_INVALID_POINTER);
+    const parent = m.buffer(4);
+    assert.equal(m.fns.CM_Get_Parent.handler([parent, m.u32(device + 20), 0]), CR_SUCCESS);
+    m.fns.CM_Get_Device_IDA.handler([m.u32(parent), out, 64, 0]);
+    assert.equal(m.readCString(out, 64), 'HTREE\\ROOT\\0');
+    /** @param {number} at */
+    const strings = at=>{
+        const found = [];
+        for (let text = m.readCString(at, 512); text !== ''; text = m.readCString(at, 512))
+        {
+            found.push(text);
+            at += text.length + 1;
+        }
+        return found;
+    };
+    assert.equal(m.fns.CM_Get_Device_ID_ListA.handler([
+        m.str('{6a55b5a6-0000-0000-0000-000000000000}'), out, 512, 0x200]), CR_SUCCESS);
+    assert.deepEqual(strings(out), names, 'phantoms too, in the order they were made');
+    assert.equal(m.fns.CM_Get_Device_Interface_ListA.handler([guid, 0, out, 512, 1]), CR_SUCCESS);
+    assert.equal(strings(out).length, 3);
+    assert.equal(m.fns.CM_Get_Device_Interface_ListA.handler([guid, 0, out, 512, 0]), CR_SUCCESS);
+    assert.deepEqual(strings(out), [], 'none of a present device');
+
+    const key = m.fns.SetupDiCreateDeviceInterfaceRegKeyA.handler([set, face, 0, 0xf003f, 0, 0]);
+    assert.equal(key, 0x7700);
+    assert.ok(m.hive.open(/** @type {any} */ (m.hive.root(0x80000002)),
+        'SYSTEM\\CurrentControlSet\\Control\\DeviceClasses\\{6a55b5a6-0000-0000-0000-000000000000}'
+        + '\\##?#ROOT#WINE_ENUM_TEST#1000#{6a55b5a6-0000-0000-0000-000000000000}\\#'
+        + '\\Device Parameters'));
+    assert.equal(m.fns.SetupDiOpenDeviceInterfaceRegKey.handler([set, face, 0, 0xf003f]), 0x7700);
+    assert.equal(m.fns.SetupDiDeleteDeviceInterfaceRegKey.handler([set, face, 0]), 1);
+    assert.equal(m.fns.SetupDiOpenDeviceInterfaceRegKey.handler([set, face, 0, 0xf003f]),
+        INVALID_HANDLE_VALUE);
+
+    const enabled = m.buffer(20);
+    m.view.setUint32(enabled, 0x026e516e, true);
+    m.view.setUint16(enabled + 4, 0xb814, true);
+    m.view.setUint16(enabled + 6, 0x414b, true);
+    [0x83, 0xcd, 0x85, 0x6d, 0x6f, 0xef, 0x48, 0x22].forEach((byte, index)=>
+        m.view.setUint8(enabled + 8 + index, byte));
+    m.view.setUint32(enabled + 16, 3, true);
+    const type = m.buffer(4);
+    const size = m.buffer(4);
+    assert.equal(m.fns.SetupDiGetDeviceInterfacePropertyW.handler([set, face, enabled, type, out,
+        16, size, 0]), 1);
+    assert.deepEqual([m.u32(type), m.u32(size), m.view.getUint8(out)], [BOOLEAN, 1, 0]);
+    m.view.setUint8(out, 0xff);
+    assert.equal(m.fns.SetupDiSetDeviceInterfacePropertyW.handler([set, face, enabled, BOOLEAN,
+        out, 1, 0]), 0);
+    assert.equal(m.lastError(), ERROR_ACCESS_DENIED, 'not toggled');
+    m.view.setUint8(out, 0xde);
+    assert.equal(m.fns.SetupDiSetDeviceInterfacePropertyW.handler([set, face, enabled, BOOLEAN,
+        out, 1, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_DATA, 'a boolean is 0 or 0xff');
+    assert.equal(m.fns.SetupDiGetDeviceInterfacePropertyW.handler([set, face, 0, type, out, 16,
+        size, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_USER_BUFFER, 'no key, as the interface form answers');
+    const count = m.buffer(4);
+    assert.equal(m.fns.SetupDiGetDeviceInterfacePropertyKeys.handler([set, face, 0, 0, count, 0]),
+        0);
+    assert.equal(m.u32(count), 3, 'enabled, class and instance id');
+});
