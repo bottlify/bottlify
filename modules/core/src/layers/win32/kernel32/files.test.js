@@ -2746,3 +2746,35 @@ test('MoveFile to a name with a wildcard is refused as an invalid name', ()=>{
     assert.equal(error.code, 123, 'ERROR_INVALID_NAME');
     assert.equal(files.stat('C:\\GAME\\SAVE.DAT')?.exists, true);
 });
+
+test('CopyFile reads sharing everything and writes sharing all but deletion, refusals named', ()=>{
+    const { files, error, fns, at } = setup();
+    files.put('C:\\GAME\\A.DAT', 'abc');
+    files.put('C:\\GAME\\B.DAT', 'old!');
+    const anyFiles = /** @type {any} */ (files);
+    const opened = anyFiles.open.bind(files);
+    /** @type {any[]} */
+    const asked = [];
+    anyFiles.open = (/** @type {string} */ path, /** @type {any} */ mode)=>{
+        asked.push({ path, ...mode });
+        return opened(path, mode);
+    };
+    assert.equal(fns.CopyFileA.handler([at(NAME, 'C:\\GAME\\A.DAT'),
+        at(NAME2, 'C:\\GAME\\B.DAT'), 0]), 1);
+    const [input, output] = asked;
+    assert.deepEqual([input.read, input.shareRead, input.shareWrite, input.shareDelete],
+        [true, true, true, true]);
+    assert.deepEqual([output.write, output.shareRead, output.shareWrite,
+        output.shareDelete ?? false, output.truncate ?? false], [true, true, true, false, false],
+    'settled before it is emptied');
+    assert.equal(files.stat('C:\\GAME\\B.DAT')?.size, 3);
+
+    anyFiles.mappedAs = ()=>'readonly';
+    assert.equal(fns.CopyFileA.handler([NAME, NAME2, 0]), 0);
+    assert.equal(error.code, 1224, 'ERROR_USER_MAPPED_FILE');
+    anyFiles.mappedAs = ()=>null;
+    anyFiles.open = ()=>null;
+    anyFiles.openRefusal = ()=>'SHARING_VIOLATION';
+    assert.equal(fns.CopyFileA.handler([NAME, NAME2, 0]), 0);
+    assert.equal(error.code, 32, 'ERROR_SHARING_VIOLATION');
+});

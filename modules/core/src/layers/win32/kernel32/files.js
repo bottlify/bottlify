@@ -1378,18 +1378,34 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_ACCESS_DENIED);
         }
-        const input = files.open(source, { read: true });
+        /** @param {string} path */
+        const refusal = path=>(files.openRefusal?.() === 'SHARING_VIOLATION'
+            ? ERROR_SHARING_VIOLATION : onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT
+                : files.stat(path)?.exists ? ERROR_ACCESS_DENIED : missing(path));
+        // The source is read sharing everything; the destination written
+        // sharing reading and writing, but not its deletion -- a holder of
+        // DELETE keeps it -- and settled before it is emptied.
+        const input = files.open(source, { read: true, shareRead: true, shareWrite: true,
+            shareDelete: true });
         if (!input)
         {
-            return fail(ERROR_ACCESS_DENIED);
+            return fail(refusal(source));
         }
-        const output = files.open(destination, { write: true, create: true, truncate: true });
+        const output = files.open(destination, { read: false, write: true, create: true,
+            shareRead: true, shareWrite: true });
         if (!output)
         {
             files.close(input);
-            return fail(onReadOnlyMedia(destination) ? ERROR_WRITE_PROTECT
-                : present?.exists ? ERROR_ACCESS_DENIED : missing(destination));
+            return fail(refusal(destination));
         }
+        const mapped = files.mappedAs?.(destination);
+        if (mapped && mapped !== 'image')
+        {
+            files.close(input);
+            files.close(output);
+            return fail(ERROR_USER_MAPPED_FILE);
+        }
+        files.truncate(output, 0);
         // A chunk at a time: the files a game copies are the ones it
         // shipped, and holding one of those whole is a copy that works
         // in a test and runs out of memory on a real install. A chunk of a
