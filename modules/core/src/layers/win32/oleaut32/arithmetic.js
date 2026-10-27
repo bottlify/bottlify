@@ -805,9 +805,18 @@ const bitwise = (operation, withNull)=>
         }
         const types = [a.type, b.type];
         let type;
-        if (types.includes(VT_I8) || types.includes(VT_I4))
+        if (types.includes(VT_I8))
         {
-            type = types.includes(VT_I8) ? VT_I8 : VT_I4;
+            // Beside an I8 an unsigned operand keeps its value, where in an
+            // I4 it is its bits: UI4 0xffffffff xor I8 0 is 0xffffffff.
+            /** @param {Value} side @param {bigint} bits */
+            const wide = (side, bits)=>(side.type === VT_UI4 || side.type === VT_UINT
+                ? BigInt.asUintN(32, bits) : bits);
+            return bitsResult(VT_I8, operation(wide(left, a.bits), wide(right, b.bits)));
+        }
+        if (types.includes(VT_I4))
+        {
+            type = VT_I4;
         }
         else
         {

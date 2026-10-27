@@ -540,7 +540,7 @@ test('VariantClear frees the string a variant held and empties the type', ()=>{
 
     assert.equal(call('VariantClear', [VARIANT_A]), S_OK);
     assert.equal(host.u16(VARIANT_A), VT_EMPTY);
-    assert.equal(host.u32(VARIANT_A + 8), 0);
+    assert.equal(host.u32(VARIANT_A + 8), bstr, 'only the type changes, as Windows leaves it');
     assert.equal(host.live.has(bstr - 4), false);
 });
 
@@ -2050,4 +2050,45 @@ test('VarBstrCmp takes only a missing or zero-length string as empty, a lone NUL
     assert.equal(call('VarBstrCmp', [nul, empty, 0x409, 0]), 2, 'VARCMP_GT');
     assert.equal(call('VarBstrCmp', [empty, 0, 0x409, 0]), 1, 'VARCMP_EQ');
     assert.equal(call('VarBstrCmp', [0, nul, 0, 0]), 0, 'VARCMP_LT');
+});
+
+test('VariantClear, VariantCopy and VariantCopyInd refuse a VARTYPE no variant holds', ()=>{
+    setUp();
+    const DISP_E_BADVARTYPE = 0x80020008;
+    const VT_CLSID = 72;
+    const VT_VECTOR = 0x1000;
+    /** @type {[number, boolean][]} */
+    const cases = [[15, false], [24, false], [VT_CLSID, true], [VT_BYREF | 1, false],
+        [0x2000 | VT_I4, true], [VT_VECTOR | VT_I4, false], [36, true]];
+    for (const [declared, clearable] of cases)
+    {
+        host.putVariant(VARIANT_A, declared, 0);
+        assert.equal(call('VariantClear', [VARIANT_A]), clearable ? S_OK : DISP_E_BADVARTYPE,
+            `VariantClear of ${declared}`);
+    }
+    host.putVariant(VARIANT_A, VT_CLSID, 0);
+    host.putVariant(VARIANT_B, VT_EMPTY, 0);
+    assert.equal(call('VariantCopy', [VARIANT_B, VARIANT_A]), DISP_E_BADVARTYPE,
+        'a CLSID is cleared, never copied');
+    host.putVariant(VARIANT_A, VT_UI1, 7);
+    host.putVariant(VARIANT_B, 15, 0);
+    assert.equal(call('VariantCopy', [VARIANT_B, VARIANT_A]), DISP_E_BADVARTYPE);
+    assert.equal(host.u16(VARIANT_B), 15, 'a target that cannot be cleared stays');
+    const VALUE = 0x3000;
+    host.putU32(VALUE, 0x12345678);
+    host.putU32(VALUE + 4, 0x9abcdef0);
+    host.putVariant(VARIANT_A, VT_BYREF | 20, VALUE);
+    host.putVariant(VARIANT_B, VT_EMPTY, 0);
+    assert.equal(call('VariantCopyInd', [VARIANT_B, VARIANT_A]), S_OK);
+    assert.deepEqual([host.u16(VARIANT_B), host.u32(VARIANT_B + 8), host.u32(VARIANT_B + 12)],
+        [20, 0x12345678, 0x9abcdef0], 'an I8 by its bytes');
+    host.putVariant(VARIANT_A, VT_BYREF | VT_VECTOR | VT_I4, VALUE);
+    assert.equal(call('VariantCopyInd', [VARIANT_B, VARIANT_A]), E_INVALIDARG);
+    host.putVariant(VARIANT_A, VT_BYREF | 25, VALUE);
+    assert.equal(call('VariantCopyInd', [VARIANT_B, VARIANT_A]), E_INVALIDARG);
+    host.putVariant(VARIANT_A, VT_BYREF | VT_BSTR, VALUE);
+    host.putU32(VALUE, call('SysAllocString', [TEXT]));
+    assert.equal(call('VariantCopyInd', [VARIANT_A, VARIANT_A]), S_OK);
+    assert.equal(host.u16(VARIANT_A), VT_BSTR);
+    assert.notEqual(host.u32(VARIANT_A + 8), host.u32(VALUE), 'a string is copied, not shared');
 });

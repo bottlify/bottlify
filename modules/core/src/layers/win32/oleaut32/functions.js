@@ -37,21 +37,22 @@ import { findResource } from '../../loader/internal/resources.js';
 import { compareStrings, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { dateOf, fieldsOf, rollYear } from './dates.js';
 import {
-    compareExact, decimalBytes, exactOf, readDecimal, round, roundNumber, toNumber,
+    compareExact, decimalBytes, exactOf, fitDecimal, readDecimal, round, roundNumber, toNumber,
 } from './varmath.js';
 import {
     add, and, divide, integerDivide, isOperandType, modulo, multiply, nearest,
     coerce, negate, not, or, subtract, variantValue, xor,
 } from './arithmetic.js';
 import {
-    boolOf, dateFromText, numberOf, parseNumber, textOfCurrency, textOfDate, textOfExact,
-    textOfReal,
+    boolOf, dateFromText, exactOfNumber, numberOf, parseNumber, textOfCurrency, textOfDate,
+    textOfExact, textOfReal,
 } from './vartext.js';
 import {
     DISP_E_BADVARTYPE, DISP_E_OVERFLOW, DISP_E_TYPEMISMATCH, VARIANT_FALSE, VARIANT_TRUE,
-    VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH, VT_EMPTY,
-    VT_ERROR, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_NULL, VT_R4, VT_R8, VT_RESERVED,
+    VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_CLSID, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH,
+    VT_EMPTY, VT_ERROR, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_NULL, VT_R4, VT_R8, VT_RESERVED,
     VT_RECORD, VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
+    VT_VECTOR,
 } from './vartypes.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
@@ -95,10 +96,6 @@ const ELEMENT_BYTES = Object.freeze({
     [VT_I8]: 8, [VT_UI8]: 8, [VT_DECIMAL]: 16,
 });
 
-/** The types whose value is its bytes alone, with nothing it owns to copy. */
-const PLAIN_TYPES = new Set([VT_I1, VT_UI1, VT_I2, VT_UI2, VT_I4, VT_UI4, VT_INT, VT_UINT, VT_I8,
-    VT_UI8, VT_R4, VT_R8, VT_CY, VT_DATE, VT_BOOL, VT_ERROR, VT_DECIMAL]);
-
 /** VariantChangeType's flags: only the one that changes an answer here. */
 const VARIANT_ALPHABOOL = 0x0002;
 
@@ -117,6 +114,8 @@ const DISP_E_PARAMNOTFOUND = 0x80020004 | 0;
 const DISP_E_BADINDEX = 0x8002000b | 0;
 const E_UNEXPECTED = 0x8000ffff | 0;
 const DISPID_VALUE = 0;
+/** IRecordInfo::RecordClear's place in the vtable. */
+const RECORDINFO_RECORDCLEAR = 4;
 const DISPATCH_PROPERTYGET = 2;
 
 /**
@@ -156,7 +155,6 @@ const VARCMP_EQ = 1;
 const VARCMP_GT = 2;
 const VARCMP_NULL = 3;
 /** VarCmp's flag for a comparison of text without case. */
-const NORM_IGNORECASE = 1;
 
 /**
  * @typedef {Object} AutomationHeap
@@ -238,6 +236,7 @@ const NORM_IGNORECASE = 1;
  * @typedef {Object} Owed
  * @property {number[]} addRef
  * @property {number[]} release
+ * @property {[number, number][]} recordClear  IRecordInfo and the record it empties
  */
 
 /**
@@ -376,27 +375,6 @@ export function createAutomationFunctions(host){
                 return number === null && type !== VT_NULL ? null : { ...none, number };
             }
         }
-    };
-
-    /** @param {Operand} value @returns {string | null} */
-    const textOf = value=>{
-        if (value.text !== null)
-        {
-            return value.text;
-        }
-        if (value.type === VT_NULL || value.type === VT_EMPTY)
-        {
-            return '';
-        }
-        if (value.type === VT_BOOL)
-        {
-            return value.number !== 0 ? 'True' : 'False';
-        }
-        if (value.exact !== null)
-        {
-            return String(toNumber(value.exact));
-        }
-        return value.number === null ? null : String(value.number);
     };
 
     /**
@@ -639,8 +617,22 @@ export function createAutomationFunctions(host){
                     owed.release.push(pointer);
                 }
             }
+            else if (type === VT_RECORD)
+            {
+                // The record is emptied by its own IRecordInfo, whose
+                // reference the variant held, and the variant lets go of it.
+                const record = readU32(pvar + VARIANT_VALUE);
+                const info = readU32(pvar + VARIANT_VALUE + 4);
+                if (info !== 0)
+                {
+                    owed.recordClear.push([info, record]);
+                    owed.release.push(info);
+                }
+                writeU32(pvar + VARIANT_VALUE, 0);
+            }
         }
-        host.writeMemory(pvar, new Uint8Array(VARIANT_BYTES));
+        // Only the type changes: what was in the union stays where it was.
+        writeU16(pvar, VT_EMPTY);
         return S_OK;
     };
 
@@ -655,7 +647,7 @@ export function createAutomationFunctions(host){
         : answer.then(then));
 
     /** @returns {Owed} */
-    const nothingOwed = ()=>({ addRef: [], release: [] });
+    const nothingOwed = ()=>({ addRef: [], release: [], recordClear: [] });
 
     /**
      * Takes and gives back the references a call owes, one call into the
@@ -667,8 +659,10 @@ export function createAutomationFunctions(host){
      * @returns {number | Promise<number>}
      */
     const settle = (owed, thread, hr)=>{
-        const calls = [...owed.addRef.map(object=>[object, 1]),
-            ...owed.release.map(object=>[object, 2])];
+        // The object, its vtable slot and the arguments after it.
+        const calls = /** @type {[number, number, number[]][]} */ ([...owed.addRef.map(object=>[object, 1, []]),
+            ...owed.recordClear.map(([info, record])=>[info, RECORDINFO_RECORDCLEAR, [record]]),
+            ...owed.release.map(object=>[object, 2, []])]);
         if (calls.length === 0)
         {
             return hr;
@@ -679,8 +673,8 @@ export function createAutomationFunctions(host){
             report('OLE Automation', 'an interface a variant takes or gives up is not counted');
             return hr;
         }
-        return calls.reduce((before, [object, slot])=>before.then(()=>
-            call(readU32(readU32(object) + slot * 4), [object], thread)),
+        return calls.reduce((before, [object, slot, rest])=>before.then(()=>
+            call(readU32(readU32(object) + slot * 4), [object, ...rest], thread)),
         Promise.resolve(0)).then(()=>hr);
     };
 
@@ -942,13 +936,206 @@ export function createAutomationFunctions(host){
     };
 
     /**
+     * The types VarCmp will not compare, whatever is beside them: Windows
+     * refuses these even where every other call converts them, and an INT
+     * only on the right.
+     */
+    const UNCOMPARED = new Set([VT_I1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_DISPATCH, VT_UNKNOWN,
+        VT_VARIANT, VT_RECORD, VT_CLSID]);
+
+    /**
+     * VarCmp of two values read: VARCMP_LT, VARCMP_EQ, VARCMP_GT or
+     * VARCMP_NULL, or the HRESULT refusing them.
+     *
+     * Text beside a number is greater whatever it says, unless VT_RESERVED is
+     * on exactly one side: on the text, the number is spelled and the two
+     * compared as text; on the number, the text is read as a number -- and
+     * is greater still when it holds none. On both sides, text that reads as
+     * a negative number is less, any other greater: Wine's vartest records
+     * Windows so for every string it tries. EMPTY beside text is "". Two
+     * numbers compare exactly where either is a CY or a DECIMAL, a double
+     * as a float beside a float.
+     *
+     * @param {import('./arithmetic.js').Value} left
+     * @param {import('./arithmetic.js').Value} right
+     * @param {boolean[]} reserved  whether each side carried VT_RESERVED
+     * @param {number} lcid @param {number} flags
+     * @returns {number}
+     */
+    const compareValues = (left, right, reserved, lcid, flags)=>{
+        if (left.flags !== 0 || right.flags !== 0)
+        {
+            return (left.flags | right.flags) & ~VT_ARRAY & ~VT_BYREF ? DISP_E_BADVARTYPE
+                : DISP_E_TYPEMISMATCH;
+        }
+        if (!isVariantType(left.type) || !isVariantType(right.type))
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        if (UNCOMPARED.has(left.type) || UNCOMPARED.has(right.type) || right.type === VT_INT)
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        if (left.type === VT_ERROR || right.type === VT_ERROR)
+        {
+            return left.type === right.type
+                ? orderOf(Number(left.integer), Number(right.integer)) : DISP_E_TYPEMISMATCH;
+        }
+        if (left.type === VT_NULL || right.type === VT_NULL)
+        {
+            return VARCMP_NULL;
+        }
+        const text = [left, right].map(side=>side.type === VT_BSTR);
+        if (text[0] || text[1])
+        {
+            /** @param {import('./arithmetic.js').Value} side */
+            const spell = side=>(side.type === VT_EMPTY ? '' : spelled(side, 0));
+            if (text[0] && text[1] || left.type === VT_EMPTY || right.type === VT_EMPTY
+                || reserved[text[0] ? 0 : 1] && !reserved[text[0] ? 1 : 0])
+            {
+                const a = spell(left);
+                const b = spell(right);
+                return typeof a === 'number' || typeof b === 'number' ? DISP_E_TYPEMISMATCH
+                    : compareTexts(a, b, lcid, flags);
+            }
+            const string = String((text[0] ? left : right).text);
+            if (reserved[0] && reserved[1])
+            {
+                // With the flag on both sides the text is greater still --
+                // unless it is a negative number, which is less.
+                const negative = (parseText(string) ?? 0) < 0;
+                return text[0] === negative ? VARCMP_LT : VARCMP_GT;
+            }
+            const number = reserved[text[0] ? 1 : 0] ? parseText(string) : null;
+            if (number === null)
+            {
+                return text[0] ? VARCMP_GT : VARCMP_LT;
+            }
+            const parsed = parseNumber(string);
+            const exact = parsed && exactOfNumber(parsed);
+            const read = exact ? variantValue(VT_DECIMAL, { exact })
+                : variantValue(VT_R8, { real: number });
+            return compareNumbers(text[0] ? read : left, text[0] ? right : read);
+        }
+        return compareNumbers(left, right);
+    };
+
+    /** @param {number | bigint | string} a @param {number | bigint | string} b */
+    const orderOf = (a, b)=>(a < b ? VARCMP_LT : a > b ? VARCMP_GT : VARCMP_EQ);
+
+    /**
+     * Two numbers' order: exactly when either is a CY or a DECIMAL and both
+     * can be had exactly, as whole numbers when both are, and otherwise as
+     * doubles -- a double rounded to a float beside a float first, so a float
+     * 1 equals a double 1+1e-8.
+     *
+     * @param {import('./arithmetic.js').Value} left
+     * @param {import('./arithmetic.js').Value} right
+     */
+    const compareNumbers = (left, right)=>{
+        /** @param {import('./arithmetic.js').Value} side */
+        const real = side=>(side.real ?? (side.exact
+            ? Number(side.exact.value) / 10 ** side.exact.scale : Number(side.integer ?? 0n)));
+        if (left.exact !== null || right.exact !== null)
+        {
+            /** @param {import('./arithmetic.js').Value} side */
+            const exact = side=>side.exact ?? (side.real !== null ? exactOf(side.real)
+                : { value: side.integer ?? 0n, scale: 0 });
+            const a = exact(left);
+            const b = exact(right);
+            if (a && b)
+            {
+                return compareExact(a, b) + 1;
+            }
+        }
+        else if (left.real === null && right.real === null)
+        {
+            return orderOf(left.integer ?? 0n, right.integer ?? 0n);
+        }
+        const float = left.type === VT_R4 || right.type === VT_R4;
+        const [a, b] = [left, right].map(side=>(float && side.real !== null
+            ? Math.fround(side.real) : real(side)));
+        return orderOf(a, b);
+    };
+
+    /**
+     * Two strings' order as VarBstrCmp gives it: none and empty alike and
+     * below anything else, then by the locale's collation, or by code units
+     * where there is no locale.
+     *
+     * @param {string} a @param {string} b @param {number} lcid @param {number} flags
+     */
+    const compareTexts = (a, b, lcid, flags)=>{
+        if (a === '' || b === '')
+        {
+            return orderOf(a.length, b.length);
+        }
+        if (lcid !== 0)
+        {
+            return compareStrings(a, b, flags) - 1;
+        }
+        return orderOf(a, b);
+    };
+
+    /** The types VarCat spells and joins. */
+    const CATENATED = new Set([VT_EMPTY, VT_NULL, VT_I2, VT_I4, VT_R4, VT_R8, VT_CY, VT_DATE,
+        VT_BSTR, VT_BOOL, VT_DECIMAL, VT_I1, VT_UI1, VT_UI2, VT_UI4, VT_I8, VT_UI8, VT_INT,
+        VT_UINT]);
+
+    /**
+     * Why VarCat refuses two values, or S_OK: by Windows' table, as Wine's
+     * vartest records it type pair by type pair -- an error code, a variant
+     * and an interface are mismatches beside what VarCat spells, a type no
+     * variant holds a bad type, and which of the two is answered depends on
+     * the side.
+     *
+     * @param {import('./arithmetic.js').Value} left
+     * @param {import('./arithmetic.js').Value} right
+     */
+    const catRefusal = (left, right)=>{
+        const l = left.type;
+        const r = right.type;
+        const odd = new Set([VT_ERROR, VT_DATE, VT_DECIMAL]);
+        if (left.flags !== 0 || right.flags !== 0)
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        if (CATENATED.has(l) && CATENATED.has(r))
+        {
+            return S_OK;
+        }
+        if ([VT_DISPATCH, VT_UNKNOWN, VT_RECORD].some(type=>type === l || type === r))
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        if (l === VT_VARIANT && odd.has(r) || r === VT_ERROR && l < 24
+            || l === VT_ERROR && odd.has(r))
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        if (odd.has(r))
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        return l === VT_ERROR || r === VT_ERROR || l === VT_VARIANT
+            || r === VT_VARIANT && CATENATED.has(l) ? DISP_E_TYPEMISMATCH : DISP_E_BADVARTYPE;
+    };
+
+    /**
      * Whether a VARTYPE is one a variant can hold, so that whatever it holds
-     * can be cleared out of it: a destination that is not is left alone.
+     * can be cleared out of it: a base type of VT_EMPTY to VT_UINT but 15,
+     * VT_RECORD or VT_CLSID, by value, by reference or as an array -- but
+     * not a reference to or an array of nothing. A variant that is not is
+     * left alone by everything that would clear it.
      *
      * @param {number} declared
      */
-    const isVariantType = declared=>(declared & ~(VT_TYPEMASK | VT_BYREF | VT_ARRAY)) === 0
-        && isOperandType(declared & VT_TYPEMASK);
+    const isVariantType = declared=>{
+        const type = declared & VT_TYPEMASK;
+        const flags = declared & ~VT_TYPEMASK;
+        return (isOperandType(type) || type === VT_CLSID)
+            && (flags & ~(VT_BYREF | VT_ARRAY)) === 0 && (flags === 0 || type > VT_NULL);
+    };
 
     /** The types VariantChangeType makes by the shared conversion. */
     const CONVERTED = new Set([VT_I1, VT_UI1, VT_I2, VT_UI2, VT_I4, VT_UI4, VT_INT, VT_UINT,
@@ -1161,11 +1348,22 @@ export function createAutomationFunctions(host){
         {
             return E_INVALIDARG;
         }
+        const declared = readU16(src);
+        // A source that is no variant type, or a CLSID -- which a variant may
+        // be cleared of but never copied -- is refused, and so is a target
+        // that could not be cleared.
+        if (!isVariantType(declared) || (declared & VT_TYPEMASK) === VT_CLSID)
+        {
+            return DISP_E_BADVARTYPE;
+        }
         if (dest === src)
         {
             return S_OK;
         }
-        const declared = readU16(src);
+        if (!isVariantType(readU16(dest)))
+        {
+            return DISP_E_BADVARTYPE;
+        }
         const type = declared & VT_TYPEMASK;
         const byref = (declared & VT_BYREF) !== 0;
         clear(dest, owed);
@@ -1186,11 +1384,11 @@ export function createAutomationFunctions(host){
         }
         if (!byref && type === VT_BSTR)
         {
+            // No string at all is copied as an empty one.
             const source = readU32(src + VARIANT_VALUE);
-            const copy = source === 0
-                ? 0
-                : allocateBstr(host.readMemory(source, byteLengthOf(source)).slice());
-            if (source !== 0 && copy === 0)
+            const copy = allocateBstr(source === 0 ? new Uint8Array(0)
+                : host.readMemory(source, byteLengthOf(source)).slice());
+            if (copy === 0)
             {
                 return E_OUTOFMEMORY;
             }
@@ -1540,10 +1738,11 @@ export function createAutomationFunctions(host){
      * only a NUL inside a string VarAdd joins to another is lost by it.
      *
      * @param {number} pvar
+     * @param {number} [ignored]  flag bits read past, as VarCmp reads VT_RESERVED
      * @returns {import('./arithmetic.js').Value | number} the value, or an HRESULT
      */
-    const readOperand = pvar=>{
-        const declared = readU16(pvar);
+    const readOperand = (pvar, ignored = 0)=>{
+        const declared = readU16(pvar) & ~ignored;
         let type = declared & VT_TYPEMASK;
         let flags = declared & ~VT_TYPEMASK;
         // A reference to an empty or a null is no reference a variant holds.
@@ -2540,6 +2739,10 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
+                if (!isVariantType(readU16(variant)))
+                {
+                    return DISP_E_BADVARTYPE;
+                }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
                 const hr = clear(variant, owed);
@@ -2581,40 +2784,69 @@ export function createAutomationFunctions(host){
                 {
                     return settle(owed, thread, copyVariant(dest, src, owed));
                 }
+                // A reference is followed to a value of a type a variant holds
+                // by value -- an array included -- and that value copied as
+                // VariantCopy copies it; a reference to anything else, or to
+                // nothing, is an invalid argument.
                 const declared = readU16(src);
-                const plain = declared & ~VT_BYREF;
-                if (PLAIN_TYPES.has(plain))
-                {
-                    // Copied as the bytes they are: a 64-bit integer or a
-                    // DECIMAL is no number a double can carry.
-                    const target = readU32(src + VARIANT_VALUE);
-                    if (target === 0)
-                    {
-                        return E_INVALIDARG;
-                    }
-                    const size = ELEMENT_BYTES[plain];
-                    const bytes = new Uint8Array(VARIANT_BYTES);
-                    bytes.set(host.readMemory(target, size),
-                        plain === VT_DECIMAL ? 0 : VARIANT_VALUE);
-                    new DataView(bytes.buffer).setUint16(0, plain, true);
-                    clear(dest, owed);
-                    host.writeMemory(dest, bytes);
-                    return settle(owed, thread, S_OK);
-                }
-                const value = load(src, true);
-                if (value === null)
+                const type = declared & VT_TYPEMASK;
+                const target = readU32(src + VARIANT_VALUE);
+                if (type <= VT_NULL || type === 15 || type >= 24
+                    || (declared & (VT_VECTOR | VT_RESERVED)) !== 0 || target === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if (dest !== src)
+                if (dest !== src && !isVariantType(readU16(dest)))
                 {
-                    clear(dest, owed);
+                    return DISP_E_BADVARTYPE;
+                }
+                /** @param {number} reference @param {number} at */
+                const valueOf = (reference, at)=>{
+                    const bytes = new Uint8Array(VARIANT_BYTES);
+                    const size = (reference & VT_ARRAY) !== 0 ? 4
+                        : ELEMENT_BYTES[reference & VT_TYPEMASK];
+                    bytes.set(host.readMemory(at, size),
+                        (reference & VT_TYPEMASK) === VT_DECIMAL && size === 16 ? 0
+                            : VARIANT_VALUE);
+                    new DataView(bytes.buffer).setUint16(0, reference & ~VT_BYREF, true);
+                    return bytes;
+                };
+                let bytes;
+                if (type === VT_VARIANT && (declared & VT_ARRAY) === 0)
+                {
+                    // A variant referred to is copied, and a reference it
+                    // holds followed in turn -- unless that is to yet
+                    // another variant.
+                    bytes = host.readMemory(target, VARIANT_BYTES).slice();
+                    const inner = readU16(target);
+                    if ((inner & VT_BYREF) !== 0)
+                    {
+                        const at = readU32(target + VARIANT_VALUE);
+                        if ((inner & VT_TYPEMASK) === VT_VARIANT || at === 0
+                            || ELEMENT_BYTES[inner & VT_TYPEMASK] === undefined)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        bytes = valueOf(inner, at);
+                    }
                 }
                 else
                 {
+                    bytes = valueOf(declared, target);
+                }
+                const scratch = host.heap.allocate(VARIANT_BYTES);
+                if (scratch === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                host.writeMemory(scratch, bytes);
+                if (dest === src)
+                {
                     host.writeMemory(dest, new Uint8Array(VARIANT_BYTES));
                 }
-                return settle(owed, thread, store(dest, value.type, value, 0, owed));
+                const hr = copyVariant(dest, scratch, owed);
+                host.heap.free(scratch);
+                return settle(owed, thread, hr);
             },
         },
 
@@ -2712,7 +2944,11 @@ export function createAutomationFunctions(host){
                     case VT_NULL:
                         return writeVariant(out, VT_NULL, new Uint8Array(0));
                     case VT_BSTR: {
-                        const parsed = parseText(String(value.text));
+                        // Read to its terminator, as a Var*FromStr reads one:
+                        // a plain OLECHAR string passed as a BSTR is read too.
+                        const read = readOperand(pin >>> 0);
+                        const parsed = typeof read === 'number' ? null
+                            : parseText(String(read.text));
                         return parsed === null ? DISP_E_TYPEMISMATCH
                             : writeVariant(out, VT_R8, valueBytes(view=>
                                 view.setFloat64(0, roundNumber(parsed, places), true)));
@@ -2762,67 +2998,29 @@ export function createAutomationFunctions(host){
         VarCmp: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pleft, pright, , flags])=>{
-                const types = [pleft, pright].map(pvar=>readU16(pvar >>> 0));
-                // Refused as Windows refuses them, even the ones it would
-                // convert anywhere else -- and an int only on the right.
-                const refused = [VT_I1, VT_UI2, VT_UI4, VT_UI8, VT_UINT];
-                if (types.some(type=>refused.includes(type & VT_TYPEMASK))
-                    || (types[1] & VT_TYPEMASK) === VT_INT)
+            handler: ([pleft, pright, lcid, flags])=>{
+                if ((pleft >>> 0) === 0 || (pright >>> 0) === 0)
                 {
-                    return DISP_E_TYPEMISMATCH;
+                    return E_INVALIDARG;
                 }
-                // Text beside a number is above it whatever it says, and is
-                // not read.
-                const isText = types.map(type=>(type & VT_TYPEMASK) === VT_BSTR);
-                const blank = types.map(type=>[VT_EMPTY, VT_NULL, VT_BSTR]
-                    .includes(type & VT_TYPEMASK));
-                if (isText[0] !== isText[1] && !blank[0] !== !blank[1])
+                const reserved = [pleft, pright]
+                    .map(pvar=>(readU16(pvar >>> 0) & VT_RESERVED) !== 0);
+                // A string beside a number is not read unless the flags ask
+                // for it, so one that points nowhere is still text.
+                /** @param {number} pvar */
+                const read = pvar=>{
+                    const value = readOperand(pvar, VT_RESERVED);
+                    return typeof value !== 'number' && value.type === VT_BSTR
+                        && value.flags === VT_BYREF && (readU16(pvar) & VT_BYREF) === 0
+                        ? variantValue(VT_BSTR, { text: '' }) : value;
+                };
+                const left = read(pleft >>> 0);
+                const right = read(pright >>> 0);
+                if (typeof left === 'number' || typeof right === 'number')
                 {
-                    const other = operand((isText[0] ? pright : pleft) >>> 0);
-                    if (other === null || (other.number === null && other.exact === null))
-                    {
-                        return DISP_E_TYPEMISMATCH;
-                    }
-                    return isText[0] ? 2 : 0;
+                    return typeof left === 'number' ? left : /** @type {number} */ (right);
                 }
-                const left = operand(pleft >>> 0);
-                const right = operand(pright >>> 0);
-                if (left === null || right === null)
-                {
-                    return DISP_E_BADVARTYPE;
-                }
-                if (left.type === VT_NULL || right.type === VT_NULL)
-                {
-                    return VARCMP_NULL;
-                }
-                if (left.text !== null || right.text !== null)
-                {
-                    const texts = [left, right].map(side=>(side.text !== null ? side.text
-                        : side.type === VT_EMPTY ? '' : null));
-                    if (texts[0] === null || texts[1] === null)
-                    {
-                        return texts[0] === null ? 0 : 2;
-                    }
-                    const [a, b] = texts.map(text=>((flags & NORM_IGNORECASE) !== 0
-                        ? String(text).toLowerCase() : String(text)));
-                    return a < b ? 0 : a > b ? 2 : 1;
-                }
-                if ((left.number === null && left.exact === null)
-                    || (right.number === null && right.exact === null))
-                {
-                    return DISP_E_TYPEMISMATCH;
-                }
-                if (left.exact === null && right.exact === null)
-                {
-                    const a = Number(left.number);
-                    const b = Number(right.number);
-                    return a < b ? 0 : a > b ? 2 : 1;
-                }
-                /** @param {Operand} side */
-                const exact = side=>side.exact
-                    ?? exactOf(Number(side.number)) ?? { value: 0n, scale: 0 };
-                return compareExact(exact(left), exact(right)) + 1;
+                return compareValues(left, right, reserved, lcid >>> 0, flags >>> 0);
             },
         },
 
@@ -2836,29 +3034,29 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pleft, pright, pout])=>{
-                const left = operand(pleft >>> 0);
-                const right = operand(pright >>> 0);
-                if (left === null || right === null)
+                const left = readOperand(pleft >>> 0);
+                const right = readOperand(pright >>> 0);
+                if (typeof left === 'number' || typeof right === 'number')
                 {
-                    return DISP_E_BADVARTYPE;
+                    return writeOutcome(pout >>> 0, typeof left === 'number' ? left
+                        : /** @type {number} */ (right));
+                }
+                const refusal = catRefusal(left, right);
+                if (refusal !== S_OK)
+                {
+                    return writeOutcome(pout >>> 0, refusal);
                 }
                 if (left.type === VT_NULL && right.type === VT_NULL)
                 {
-                    return writeVariant(pout >>> 0, VT_NULL, new Uint8Array(0));
+                    return writeOutcome(pout >>> 0, variantValue(VT_NULL));
                 }
-                const a = textOf(left);
-                const b = textOf(right);
-                if (a === null || b === null)
-                {
-                    return DISP_E_TYPEMISMATCH;
-                }
-                const bstr = allocateBstr(encode(a + b));
-                if (bstr === 0)
-                {
-                    return E_OUTOFMEMORY;
-                }
-                return writeVariant(pout >>> 0, VT_BSTR,
-                    valueBytes(view=>view.setUint32(0, bstr, true)));
+                /** @param {import('./arithmetic.js').Value} value */
+                const text = value=>(value.type === VT_NULL ? ''
+                    : spelled(value, VARIANT_ALPHABOOL));
+                const a = text(left);
+                const b = text(right);
+                return writeOutcome(pout >>> 0, typeof a === 'number' ? a
+                    : typeof b === 'number' ? b : variantValue(VT_BSTR, { text: a + b }));
             },
         },
 
@@ -3084,15 +3282,12 @@ export function createAutomationFunctions(host){
                     fields.getInt32(NUMPARSE_BASE_SHIFT, true), negative, vtBits >>> 0);
                 if (made === null)
                 {
-                    if ((vtBits & (1 << VT_DECIMAL)) !== 0)
-                    {
-                        report('VarNumFromParseNum', 'VT_DECIMAL is never produced');
-                    }
                     return DISP_E_OVERFLOW;
                 }
                 const variant = new Uint8Array(VARIANT_BYTES);
+                // A DECIMAL fills the variant from its third byte on.
+                variant.set(made.bytes, made.type === VT_DECIMAL ? 0 : VARIANT_VALUE);
                 variant[0] = made.type;
-                variant.set(made.bytes, VARIANT_VALUE);
                 host.writeMemory(pvar >>> 0, variant);
                 return S_OK;
             },
@@ -3135,7 +3330,7 @@ export function createAutomationFunctions(host){
                     heldErrorInfo.set(thread, given);
                 }
                 return settle({ addRef: given !== 0 ? [given] : [],
-                    release: held !== 0 ? [held] : [] }, thread, S_OK);
+                    release: held !== 0 ? [held] : [], recordClear: [] }, thread, S_OK);
             },
         },
 
@@ -4040,83 +4235,95 @@ export function parseNumberText(text, allowed, capacity){
 /**
  * The VARIANT VarNumFromParseNum makes of parsed digits: the first type in
  * `vtBits` (a mask of 1 << VT_*) that holds the value, integers smallest
- * first, then R4 for at most seven significant digits, R8, CY. A fraction
- * given only integer types is rounded to one. null when nothing holds it;
- * VT_DECIMAL is never chosen, since this build does not carry it.
+ * first, then R4 for at most seven significant digits, R8, CY, DECIMAL. A
+ * fraction given only integer types is rounded to one, a half to the even
+ * neighbour. null when nothing holds it.
  *
  * @param {number[]} digits @param {number} pwr10 @param {number} baseShift
  * @param {boolean} negative @param {number} vtBits
- * @returns {{ type: number, bytes: Uint8Array } | null} the eight value bytes
+ * @returns {{ type: number, bytes: Uint8Array } | null} the eight value bytes, or
+ *     a DECIMAL's sixteen
  */
 export function numberVariant(digits, pwr10, baseShift, negative, vtBits){
-    let magnitude;
+    const bytes = new Uint8Array(16);
+    const data = new DataView(bytes.buffer);
+    const allows = (/** @type {number} */ type)=>(vtBits & (1 << type)) !== 0;
+    /** @type {[number, number, boolean][]} each integral type, its bits, whether signed */
+    const integers = [[VT_I1, 8, true], [VT_UI1, 8, false], [VT_I2, 16, true],
+        [VT_UI2, 16, false], [VT_I4, 32, true], [VT_UI4, 32, false], [VT_I8, 64, true],
+        [VT_UI8, 64, false]];
+    /** @param {number} type @param {number} width @param {boolean} signed @param {bigint} value */
+    const integer = (type, width, signed, value)=>{
+        if (signed)
+        {
+            data.setBigInt64(0, BigInt.asIntN(width, value), true);
+        }
+        else
+        {
+            data.setBigUint64(0, BigInt.asUintN(width, value), true);
+        }
+        return { type, bytes: bytes.subarray(0, 8) };
+    };
+    /** @type {import('./varmath.js').Exact} */
+    let exact;
     if (baseShift !== 0)
     {
-        magnitude = digits.reduce((sum, digit)=>sum * (1 << baseShift) + digit, 0);
+        // Hex and octal digits are bits: the first type wide enough holds
+        // them as they are, so &H82 is the I1 -126 and &H7F the I1 127.
+        const bits = digits.reduce((sum, digit)=>(sum << BigInt(baseShift)) + BigInt(digit), 0n);
+        const fitting = integers.find(([type, width])=>allows(type) && bits < 1n << BigInt(width));
+        if (fitting)
+        {
+            return integer(fitting[0], fitting[1], fitting[2], bits);
+        }
+        exact = { value: bits, scale: 0 };
     }
     else
     {
-        magnitude = Number(`${digits.join('') || '0'}e${pwr10}`);
+        const magnitude = BigInt(digits.join('') || '0');
+        const signed = negative ? -magnitude : magnitude;
+        exact = pwr10 >= 0 ? { value: signed * 10n ** BigInt(pwr10), scale: 0 }
+            : { value: signed, scale: -pwr10 };
     }
-    const value = negative ? -magnitude : magnitude;
-    const bytes = new Uint8Array(8);
-    const data = new DataView(bytes.buffer);
-    const allows = (/** @type {number} */ type)=>(vtBits & (1 << type)) !== 0;
-    const integral = Number.isInteger(value);
-    const floats = allows(VT_R4) || allows(VT_R8) || allows(VT_CY);
-    // Rounding to an integer happens only when no type could keep the fraction.
-    const whole = integral || floats ? value : Math.sign(value) * Math.round(Math.abs(value));
-    if (Number.isInteger(whole))
+    const fractional = exact.scale > 0 && round(exact, 0).value * 10n ** BigInt(exact.scale)
+        !== exact.value;
+    const keepsFraction = allows(VT_R4) || allows(VT_R8) || allows(VT_CY) || allows(VT_DECIMAL);
+    // Rounding to a whole number happens only when no type could keep the fraction.
+    if (!fractional || !keepsFraction)
     {
-        /** @type {[number, number, number, (n: number) => void][]} */
-        const integers = [
-            [VT_I1, -128, 127, n=>data.setInt8(0, n)],
-            [VT_UI1, 0, 255, n=>data.setUint8(0, n)],
-            [VT_I2, -32768, 32767, n=>data.setInt16(0, n, true)],
-            [VT_UI2, 0, 65535, n=>data.setUint16(0, n, true)],
-            [VT_I4, -2147483648, 2147483647, n=>data.setInt32(0, n, true)],
-            [VT_UI4, 0, 4294967295, n=>data.setUint32(0, n, true)],
-        ];
-        for (const [type, low, high, write] of integers)
+        const whole = round(exact, 0).value;
+        const fitting = integers.find(([type, width, signed])=>allows(type)
+            && (signed ? whole >= -(1n << BigInt(width - 1)) && whole < 1n << BigInt(width - 1)
+                : whole >= 0n && whole < 1n << BigInt(width)));
+        if (fitting)
         {
-            if (allows(type) && whole >= low && whole <= high)
-            {
-                write(whole);
-                return { type, bytes };
-            }
-        }
-        const big = Number.isSafeInteger(whole)
-            ? BigInt(whole)
-            : (baseShift === 0 && pwr10 >= 0
-                ? BigInt(digits.join('')) * 10n ** BigInt(pwr10) * (negative ? -1n : 1n)
-                : null);
-        if (big !== null && allows(VT_I8) && big >= -(2n ** 63n) && big < 2n ** 63n)
-        {
-            data.setBigInt64(0, big, true);
-            return { type: VT_I8, bytes };
-        }
-        if (big !== null && allows(VT_UI8) && big >= 0n && big < 2n ** 64n)
-        {
-            data.setBigUint64(0, big, true);
-            return { type: VT_UI8, bytes };
+            return integer(fitting[0], fitting[1], fitting[2], whole);
         }
     }
-    const significant = digits.length;
-    if (allows(VT_R4) && significant <= 7 && Math.abs(value) <= 3.4028234663852886e38)
+    const value = toNumber(exact);
+    if (allows(VT_R4) && digits.length <= 7 && Math.abs(value) <= 3.4028234663852886e38)
     {
         data.setFloat32(0, value, true);
-        return { type: VT_R4, bytes };
+        return { type: VT_R4, bytes: bytes.subarray(0, 8) };
     }
     if (allows(VT_R8) && Number.isFinite(value))
     {
         data.setFloat64(0, value, true);
-        return { type: VT_R8, bytes };
+        return { type: VT_R8, bytes: bytes.subarray(0, 8) };
     }
-    const units = Math.round(value * 10000);
-    if (allows(VT_CY) && Number.isSafeInteger(units))
+    const units = round(exact, 4);
+    const cy = units.value * 10n ** BigInt(4 - units.scale);
+    if (allows(VT_CY) && cy >= -(1n << 63n) && cy < 1n << 63n)
     {
-        data.setBigInt64(0, BigInt(units), true);
-        return { type: VT_CY, bytes };
+        data.setBigInt64(0, cy, true);
+        return { type: VT_CY, bytes: bytes.subarray(0, 8) };
+    }
+    const decimal = allows(VT_DECIMAL) ? fitDecimal(exact) : null;
+    const fourteen = decimal && decimalBytes(decimal);
+    if (fourteen)
+    {
+        bytes.set(fourteen, 2);
+        return { type: VT_DECIMAL, bytes };
     }
     return null;
 }
