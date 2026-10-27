@@ -211,12 +211,12 @@ export const fileUrlOf = (path, escape)=>{
 };
 
 /**
- * UrlCanonicalize's answer.
+ * UrlCanonicalize's answer for a `file:` URL, or a path that becomes one.
  *
  * @param {string} input @param {number} flags
  * @param {(code: number) => string} char
  */
-export const canonicalizeUrl = (input, flags, char)=>{
+const canonicalizeFile = (input, flags, char)=>{
     let url = trimmed(input);
     const fromPath = isDosPath(url);
     if (fromPath)
@@ -297,6 +297,221 @@ export const canonicalizeUrl = (input, flags, char)=>{
     };
     const extraEscaped = (flags & URL_DONT_ESCAPE_EXTRA_INFO) !== 0 ? extra : escaped(extra);
     return `${head}${escaped(main)}${extraEscaped}`;
+};
+
+/** The schemes UrlCanonicalize reads a backslash in as a slash. */
+const CANON_SLASHED = new Set(['gopher', 'http', 'https', 'news', 'nntp', 'snews', 'telnet']);
+/** The schemes it keeps a backslash in, reading it as a separator all the same. */
+const CANON_BACKSLASHED = new Set(['ftp', 'local', 'res', 'wais']);
+
+/**
+ * @typedef {Object} DotRules
+ * @property {boolean | 'dots'} backslash
+ *           A backslash separates elements too, and is kept; 'dots', only
+ *           before a dot element that a slash or the end closes.
+ * @property {boolean} keepExcess  A `..` with nothing to undo stays, rather than going.
+ * @property {boolean} guarded     A first element that is a dot leaves the path as it is.
+ */
+
+/**
+ * A path's dot elements resolved: a `.` goes, a `..` undoes the element
+ * before it -- never one it could not undo, which stays or goes as the
+ * scheme's rules say -- and a path whose last element was a dot ends in a
+ * separator. Each element keeps the separator that followed it.
+ *
+ * @param {string} path  What follows the host, or the root, or the scheme.
+ * @param {DotRules} rules
+ * @param {boolean} simplifying  False for URL_DONT_SIMPLIFY: only the trailing separator.
+ */
+const resolveDots = (path, rules, simplifying)=>{
+    const parts = rules.backslash === true ? path.split(/(?<=[/\\])/)
+        : path.split(/(?<=\/)/).flatMap(part=>(rules.backslash === 'dots'
+            ? part.split(/(?<=\\)(?=\.\.?\/?$)/) : [part]));
+    /** @type {{ text: string, separator: string }[]} */
+    const elements = parts.map((part, at)=>{
+        // A backslash the 'dots' split left at a part's end is the separator
+        // before a dot; any other stays in the element's text.
+        const next = parts[at + 1]?.replace(/\/$/, '');
+        const backslash = rules.backslash === true
+            || (rules.backslash === 'dots' && (next === '.' || next === '..'));
+        const separator = part.endsWith('/') || (backslash && part.endsWith('\\'))
+            ? part.slice(-1) : '';
+        return { text: part.slice(0, part.length - separator.length), separator };
+    });
+    if (path === '')
+    {
+        return '';
+    }
+    const last = elements.at(-1);
+    const dotLast = last !== undefined && (last.text === '.' || last.text === '..')
+        && last.separator === '';
+    // The guard reads the first element between slashes, whatever a
+    // backslash in it does.
+    const first = path.split('/')[0];
+    if (!simplifying || (rules.guarded && (first === '.' || first === '..')))
+    {
+        return dotLast && rules.keepExcess ? `${path}/` : path;
+    }
+    /** @type {{ text: string, separator: string, fixed: boolean }[]} */
+    const kept = [];
+    elements.forEach(element=>{
+        if (element.text === '.')
+        {
+            return;
+        }
+        if (element.text === '..')
+        {
+            const top = kept.at(-1);
+            if (top && !top.fixed)
+            {
+                kept.pop();
+            }
+            else if (rules.keepExcess)
+            {
+                kept.push({ ...element, fixed: true });
+            }
+            return;
+        }
+        kept.push({ ...element, fixed: false });
+    });
+    const text = kept.map(element=>element.text + element.separator).join('');
+    const top = kept.at(-1);
+    return dotLast && top !== undefined && top.separator === '' ? `${text}/` : text;
+};
+
+/**
+ * UrlCanonicalize's answer.
+ *
+ * Each scheme's family reads a path its own way (Wine's
+ * test_UrlCanonicalizeA, against Windows): one that is not known, or no
+ * scheme at all, keeps a `..` it cannot undo and moves a query before a
+ * fragment that came first; the hosted ones read a backslash as a slash,
+ * drop a `..` that would climb past the host and leave a path that starts
+ * with a dot alone; the ftp-like ones are those but keep a backslash, and a
+ * `file:` URL is a path's. The host of a `//` URL is never simplified, and a
+ * slash always follows it. After the first `?` or `#` nothing is simplified.
+ *
+ * @param {string} input @param {number} flags
+ * @param {(code: number) => string} char
+ */
+export const canonicalizeUrl = (input, flags, char)=>{
+    const url = trimmed(input.replace(/[\t\n\r]/g, ''));
+    const parsed = isDosPath(url) ? null : parseScheme(url);
+    if (isDosPath(url) || parsed?.scheme === 'file')
+    {
+        return canonicalizeFile(url, flags, char);
+    }
+    const simplifying = (flags & URL_DONT_SIMPLIFY) === 0;
+    const scheme = parsed?.scheme ?? null;
+    const opaque = scheme !== null && OPAQUE.has(scheme);
+    const slashed = scheme !== null && CANON_SLASHED.has(scheme);
+    const backslashed = scheme !== null && CANON_BACKSLASHED.has(scheme);
+    const hosted = slashed || backslashed;
+    let rest = parsed ? parsed.rest : url;
+    let main = rest;
+    let extra = '';
+    if (scheme === 'mk')
+    {
+        main = canonicalMk(rest, simplifying);
+    }
+    else if (!opaque)
+    {
+        const split = rest.search(/[?#]/);
+        main = split < 0 ? rest : rest.slice(0, split);
+        extra = split < 0 ? '' : rest.slice(split);
+        const query = extra.indexOf('?');
+        if (!hosted && extra.startsWith('#') && query > 0)
+        {
+            extra = extra.slice(query) + extra.slice(0, query);
+        }
+        if (slashed)
+        {
+            main = main.replace(/\\/g, '/');
+        }
+        /** @type {DotRules} */
+        const rules = { backslash: backslashed, keepExcess: !hosted, guarded: hosted };
+        const twoSlashes = hosted ? /^[/\\]{2}/ : /^\/\//;
+        if (twoSlashes.test(main))
+        {
+            const after = main.slice(2);
+            const end = after.indexOf('/');
+            const host = end < 0 ? after : after.slice(0, end);
+            const path = end < 0 ? '' : after.slice(end + 1);
+            main = `${main.slice(0, 2)}${hosted ? host.toLowerCase() : host}/`
+                + resolveDots(path, rules, simplifying);
+        }
+        else if (main.startsWith('/'))
+        {
+            // A backslash right after the root is passed over: it is no separator.
+            const path = !hosted && main[1] === '\\' ? main.slice(2) : main.slice(1);
+            main = hosted ? resolveDots(main, rules, simplifying)
+                : `/${resolveDots(path, rules, simplifying)}`;
+        }
+        else if (scheme === null)
+        {
+            const resolved = resolveDots(main, rules, simplifying);
+            main = resolved === '' && main !== '' && simplifying ? '/' : resolved;
+        }
+        else if (hosted)
+        {
+            main = resolveDots(main, { ...rules, guarded: false }, simplifying);
+        }
+        else if (main === '.' && simplifying)
+        {
+            main = '';
+        }
+    }
+    rest = main;
+    const head = parsed ? `${scheme}:` : '';
+    return `${head}${escapeParts(rest, flags, char, opaque)}`
+        + `${(flags & URL_DONT_ESCAPE_EXTRA_INFO) !== 0 ? extra
+            : escapeParts(extra, flags, char, opaque)}`;
+};
+
+/**
+ * What follows `mk:`: an `@` moniker's name up to the first slash is its
+ * host, never simplified and always followed by a slash; a path is
+ * simplified up to the first `?` or `#`, a `..` with nothing to undo
+ * dropped, and a backslash is a separator only before a dot element.
+ *
+ * @param {string} rest @param {boolean} simplifying
+ */
+const canonicalMk = (rest, simplifying)=>{
+    /** @type {DotRules} */
+    const rules = { backslash: 'dots', keepExcess: false, guarded: false };
+    if (rest.startsWith('@'))
+    {
+        const end = rest.indexOf('/');
+        const host = end < 0 ? rest : rest.slice(0, end);
+        const after = end < 0 ? '' : rest.slice(end + 1);
+        const split = after.search(/[?#]/);
+        const path = split < 0 ? after : after.slice(0, split);
+        return `${host}/${resolveDots(path, { ...rules, guarded: true }, simplifying)}`
+            + (split < 0 ? '' : after.slice(split));
+    }
+    const split = rest.search(/[?#]/);
+    const path = split < 0 ? rest : rest.slice(0, split);
+    return resolveDots(path, rules, simplifying) + (split < 0 ? '' : rest.slice(split));
+};
+
+/**
+ * The flags' escaping and unescaping of a part of a canonical URL.
+ *
+ * @param {string} text @param {number} flags @param {(code: number) => string} char
+ * @param {boolean} opaque
+ */
+const escapeParts = (text, flags, char, opaque)=>{
+    let out = (flags & URL_UNESCAPE) !== 0 ? unescapeUrl(text, true, char) : text;
+    if ((flags & URL_ESCAPE_SPACES_ONLY) !== 0 && !opaque)
+    {
+        out = out.replace(/ /g, '%20');
+    }
+    else if ((flags & URL_ESCAPE_UNSAFE) !== 0)
+    {
+        const percent = (flags & URL_ESCAPE_PERCENT) !== 0;
+        out = escapeWhere(out, c=>isUnsafe(c) || (percent && c === '%'));
+    }
+    return out;
 };
 
 /**

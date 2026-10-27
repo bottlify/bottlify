@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shlwapiMachine } from './memory.fixture.js';
+import { canonicalizeUrl } from './url.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -343,5 +344,36 @@ test('each URL function declares the arguments it pops, in both spellings', ()=>
     {
         assert.equal(fns[`${name}A`].argBytes, bytes, `${name}A`);
         assert.equal(fns[`${name}W`].argBytes, bytes, `${name}W`);
+    }
+});
+
+test('UrlCanonicalize reads a path by its scheme\'s family', ()=>{
+    // Wine's test_UrlCanonicalizeA: unk_scheme_tests, http_tests and misc_tests, a sample.
+    const DONT_SIMPLIFY = 0x08000000;
+    for (const [url, flags, expected] of /** @type {[string, number, string][]} */ ([
+        // A scheme not known, or none: a `..` that cannot undo stays.
+        ['wine://', 0, 'wine:///'], ['wine://a', 0, 'wine://a/'], ['wine://..', 0, 'wine://../'],
+        ['wine://a/../../b/./c/..', 0, 'wine://a/../../b/'], ['wine:////..', 0, 'wine:///'],
+        ['wine://a/b#c?d#e', 0, 'wine://a/b?d#e#c'], ['wine://a/b\\c/../.\\', 0, 'wine://a/.\\'],
+        ['/\\/././a', 0, '//a'], ['/a/../..', 0, '/../'], ['a/..', 0, '/'], ['..', 0, '../'],
+        ['wine:.', 0, 'wine:'], ['wine:./', 0, 'wine:./'], ['wine://a/.', DONT_SIMPLIFY, 'wine://a/./'],
+        // The hosted ones: backslashes are slashes, a path that starts with a dot stays.
+        ['http://a/./b/./../', 0, 'http://a/./b/./../'], ['http://a/b/../../../c', 0, 'http://a/c'],
+        ['http://a\\b/..', 0, 'http://a/'], ['http:/\\a\\..', 0, 'http://a/..'],
+        ['http://a/b#c?d', 0, 'http://a/b#c?d'], ['http:a/..', 0, 'http:'], ['http://a/b/.', DONT_SIMPLIFY,
+            'http://a/b/.'],
+        ['hTtP://A/b/../../C', 0, 'http://a/C'],
+        // The ftp-like ones keep a backslash, a separator all the same.
+        ['ftp://a/b\\./c', 0, 'ftp://a/b\\c'], ['ftp://a\\b', 0, 'ftp://a\\b/'],
+        ['ftp:/\\a\\..', 0, 'ftp:/\\a\\../'],
+        // mk: a moniker's name is its host.
+        ['mk://..', 0, 'mk:/'], ['mk:@progid', 0, 'mk:@progid/'], ['mk:a\\./b', 0, 'mk:a\\b'],
+        ['mk:a/.\\', 0, 'mk:a/.\\'], ['mk:@progid/.\\..', 0, 'mk:@progid/'],
+        ['mk:@MSITStore:dir/test.chm::/file.html/../..', 0, 'mk:@MSITStore:dir/'],
+        ['about://a/b/./', 0, 'about://a/b/./'],
+    ]))
+    {
+        assert.equal(canonicalizeUrl(url, flags, c=>String.fromCharCode(c)), expected,
+            `${url} ${flags.toString(16)}`);
     }
 });

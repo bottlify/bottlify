@@ -464,3 +464,46 @@ test('PathAddExtension adds only where there is none, ".exe" for an empty one', 
         assert.equal(m.fns[`PathAddExtension${suffix}`].argBytes, 8);
     }
 });
+
+test('PathMakePretty, PathUnquoteSpaces, PathUndecorate, PathGetDriveNumber, PathBuildRoot', ()=>{
+    // Wine's test_PathMakePretty, test_PathUnquoteSpaces, test_PathUndecorate,
+    // test_PathGetDriveNumber and test_PathBuildRootA.
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        /** @param {string} name @param {string} text */
+        const apply = (name, text)=>{
+            const at = m.put(text, wide);
+            const answer = m.fns[`${name}${suffix}`].handler([at]);
+            return [answer, m.read(at, wide)];
+        };
+        assert.deepEqual(apply('PathMakePretty', 'C:\\A LONG NAME.TXT'),
+            [1, 'C:\\a long name.txt']);
+        assert.deepEqual(apply('PathMakePretty', 'TEST'), [1, 'Test']);
+        assert.deepEqual(apply('PathMakePretty', 'C:\\Mixed'), [0, 'C:\\Mixed']);
+        for (const [text, expected] of [['"abcdef"', 'abcdef'], ['"abcdef', '"abcdef'],
+            ['""abcdef""', '"abcdef"'], ['"abc"def"', 'abc"def'], ['"', ''], ['""', '']])
+        {
+            assert.equal(apply('PathUnquoteSpaces', text)[1], expected, text);
+        }
+        for (const [text, expected] of [['c:\\test\\a[123].txt', 'c:\\test\\a.txt'],
+            ['c:\\test\\a[123]', 'c:\\test\\a'], ['c:\\test\\a.txt[123]', 'c:\\test\\a.txt[123]'],
+            ['c:\\test\\a[12a].txt', 'c:\\test\\a[12a].txt'],
+            ['c:\\test\\[123]', 'c:\\test\\[123]'],
+            ['a[]', 'a'], ['[123]', '[123]']])
+        {
+            assert.equal(apply('PathUndecorate', text)[1], expected, text);
+        }
+        assert.equal(apply('PathGetDriveNumber', 'a:\\test.file')[0], 0);
+        assert.equal(apply('PathGetDriveNumber', 'file:///c:\\x')[0], -1);
+        assert.equal(apply('PathGetDriveNumber', '\\\\?\\C:\\dir')[0], wide ? 2 : -1,
+            'the prefix is the wide spelling\'s');
+        assert.equal(m.fns[`PathGetDriveNumber${suffix}`].handler([0]), -1);
+        const root = m.put('aaaaaaaaa', wide);
+        assert.equal(m.fns[`PathBuildRoot${suffix}`].handler([root, 25]), root);
+        assert.equal(m.read(root, wide), 'Z:\\');
+        const left = m.put('aaaaaaaaa', wide);
+        assert.equal(m.fns[`PathBuildRoot${suffix}`].handler([left, 26]), left);
+        assert.equal(m.read(left, wide), 'aaaaaaaaa');
+    }
+});

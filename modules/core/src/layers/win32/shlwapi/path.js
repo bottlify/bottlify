@@ -610,6 +610,91 @@ export function createPathFunctions(host, { A, W }){
         }),
 
         /**
+         * BOOL PathMakePrettyA(LPSTR lpPath)
+         *
+         * A path all in capitals put in small letters but its first
+         * character; one with a small letter anywhere is left as it is, and
+         * FALSE (Wine's test_PathMakePretty).
+         */
+        ...both('PathMakePretty', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null || path !== path.toUpperCase())
+            {
+                return 0;
+            }
+            write(pointer, width, path.slice(0, 1) + path.slice(1).toLowerCase());
+            return 1;
+        }),
+
+        /**
+         * void PathUnquoteSpacesA(LPSTR lpszPath)
+         *
+         * One double quote taken off each end, when both ends have one; a
+         * lone quote is the empty path.
+         */
+        ...both('PathUnquoteSpaces', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path !== null && path.startsWith('"') && (path.length === 1 || path.endsWith('"')))
+            {
+                write(pointer, width, path.slice(1, Math.max(1, path.length - 1)));
+            }
+            return 0;
+        }),
+
+        /**
+         * void PathUndecorateA(LPSTR pszPath)
+         *
+         * The "[n]" a browser's cache puts before a file's extension taken
+         * out: only ASCII digits, only right before the extension -- or the
+         * end, for a name with none -- and never the whole name (Wine's
+         * test_PathUndecorate).
+         */
+        ...both('PathUndecorate', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null)
+            {
+                return 0;
+            }
+            const dot = extensionIndex(path);
+            const stem = path.slice(0, dot);
+            const decoration = /\[[0-9]*\]$/.exec(stem);
+            const start = decoration ? stem.length - decoration[0].length : -1;
+            if (decoration && start > 0 && !isSeparator(stem[start - 1]))
+            {
+                write(pointer, width, stem.slice(0, start) + path.slice(dot));
+            }
+            return 0;
+        }),
+
+        /**
+         * int PathGetDriveNumberA(LPCSTR lpszPath)
+         *
+         * The drive a path starts with, 0 for A; through a `\\?\` prefix in
+         * the wide spelling, which alone has one; -1 for none, and for NULL
+         * with the last error left alone (Wine's test_PathGetDriveNumber).
+         */
+        ...both('PathGetDriveNumber', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            const drive = path === null ? null
+                : (width.wide ? /^(?:\\\\\?\\)?([A-Za-z]):/ : /^([A-Za-z]):/).exec(path);
+            return drive ? drive[1].toUpperCase().charCodeAt(0) - 0x41 : -1;
+        }),
+
+        /**
+         * LPSTR PathBuildRootA(LPSTR pszRoot, int iDrive)
+         *
+         * "A:\" for drive 0 to "Z:\" for 25 into the buffer; another number
+         * leaves it alone. The buffer either way.
+         */
+        ...both('PathBuildRoot', 8, (width, [pointer, drive])=>{
+            if ((pointer >>> 0) !== 0 && (drive | 0) >= 0 && (drive | 0) < 26)
+            {
+                write(pointer, width, `${String.fromCharCode(0x41 + (drive | 0))}:\\`);
+            }
+            return pointer >>> 0;
+        }),
+
+        /**
          * BOOL PathRemoveFileSpecA(LPSTR pszPath)
          *
          * The last component and the backslash before it cut off, a root's
@@ -630,15 +715,16 @@ export function createPathFunctions(host, { A, W }){
          * int PathCommonPrefixA(LPCSTR pszFile1, LPCSTR pszFile2, LPSTR achPath)
          *
          * The shared length (`commonPrefixLength`), and the prefix itself
-         * into achPath when one is given.
+         * into achPath when one is given; a missing path leaves it alone
+         * (Wine's test_PathCommonPrefixA).
          */
         ...both('PathCommonPrefix', 12, (width, [first, second, out])=>{
             const one = width.read(first);
             const two = width.read(second);
             const length = one === null || two === null ? 0 : commonPrefixLength(one, two);
-            if ((out >>> 0) !== 0)
+            if ((out >>> 0) !== 0 && one !== null && two !== null)
             {
-                write(out, width, (one ?? '').slice(0, length));
+                write(out, width, one.slice(0, length));
             }
             return length;
         }),
