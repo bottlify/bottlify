@@ -196,6 +196,10 @@ export function createVolume(fs, fetchBlocks = null){
      */
     const watches = new Set();
 
+    /** Why the last open was refused, for the surface to answer with: `openRefusal`. */
+    /** @type {string | null} */
+    let refusedOpen = null;
+
     /**
      * Where each open file is, so a write through it can be told to the
      * directory watching it. Kept only while something watches.
@@ -361,6 +365,14 @@ export function createVolume(fs, fetchBlocks = null){
         },
 
         /**
+         * Why the last `open` answered null: the volume's code -- NOT_FOUND,
+         * SHARING_VIOLATION and the rest -- or null when it opened.
+         *
+         * @returns {string | null}
+         */
+        openRefusal: ()=>refusedOpen,
+
+        /**
          * @param {string} path
          * @param {any} mode
          * @returns {any} an open file, or null
@@ -368,15 +380,26 @@ export function createVolume(fs, fetchBlocks = null){
         open(path, mode){
             const existed = watches.size > 0 && (mode.create || mode.truncate)
                 ? attempt(()=>fs.stat(path), null) !== null : null;
-            const node = attempt(()=>fs.open(path, {
-                read: mode.read !== false,
-                write: Boolean(mode.write),
-                shareWrite: mode.shareWrite === true,
-                delete: mode.delete === true,
-                shareDelete: mode.shareDelete === true,
-                disposition: dispositionOf(mode),
-                inherited: mode.inherited === true,
-            }), null);
+            refusedOpen = null;
+            const node = attempt(()=>{
+                try
+                {
+                    return fs.open(path, {
+                        read: mode.read !== false,
+                        write: Boolean(mode.write),
+                        shareRead: mode.shareRead !== false,
+                        shareWrite: mode.shareWrite === true,
+                        delete: mode.delete === true,
+                        shareDelete: mode.shareDelete === true,
+                        disposition: dispositionOf(mode),
+                        inherited: mode.inherited === true,
+                    });
+                }
+                catch (e){
+                    refusedOpen = /** @type {any} */ (e)?.code ?? null;
+                    throw e;
+                }
+            }, null);
             if (node && watches.size > 0)
             {
                 openedAt.set(node, path);

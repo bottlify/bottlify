@@ -48,6 +48,7 @@ const ERROR_PRIVILEGE_NOT_HELD = 1314;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ACCESS_DENIED = 5;
 /** CreateFile's dwShareMode bit that lets another handle write the file too. */
+const FILE_SHARE_READ = 0x1;
 const FILE_SHARE_WRITE = 0x2;
 const FILE_SHARE_DELETE = 0x4;
 /** A buffer the call cannot read from, as NT answers a null one. */
@@ -109,6 +110,8 @@ const FILE_WRITE_DATA = 0x0002;
 const FILE_APPEND_DATA = 0x0004;
 const DELETE = 0x00010000;
 const GENERIC_ALL = 0x10000000;
+const GENERIC_EXECUTE = 0x20000000;
+const FILE_EXECUTE = 0x20;
 const GENERIC_WRITE = 0x40000000;
 const GENERIC_READ = 0x80000000;
 
@@ -328,6 +331,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  * @property {boolean} [create]        Make the file when it is not there.
  * @property {boolean} [truncate]      Discard whatever it already holds.
  * @property {boolean} [failIfExists]  Refuse rather than open an existing file.
+ * @property {boolean} [shareRead]     Another handle may read the file while this one is open;
+ *                                     absent, it may.
  * @property {boolean} [shareWrite]    Another handle may write the file while this one is open.
  * @property {boolean} [delete]        DELETE access: it may be renamed or deleted through it.
  * @property {boolean} [shareDelete]   Another may rename or delete the file while it is open.
@@ -342,6 +347,7 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  * @property {(path: string) => string | null} [removalRefused]
  *           Why the file may not be renamed or deleted as its opens stand, or null.
  * @property {(path: string) => boolean} [isOpen]  whether any process holds the file open
+ * @property {() => string | null} [openRefusal]  why the last `open` answered null
  * @property {(path: string, existing: string) => string | null} [link]
  *           Gives a file one more name: null, or the volume's code for why not.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
@@ -1798,13 +1804,23 @@ export function createFileFunctions(host){
             }
         }
 
+        // Executing a file reads it, as far as sharing is concerned; whether
+        // ReadFile may is this handle's own `read`.
+        const executes = (rights & (GENERIC_EXECUTE | FILE_EXECUTE)) !== 0;
         const node = files.open(path, {
-            read, write, ...mode, shareWrite: ((share >>> 0) & FILE_SHARE_WRITE) !== 0,
+            read: read || executes, write, ...mode,
+            shareRead: ((share >>> 0) & FILE_SHARE_READ) !== 0,
+            shareWrite: ((share >>> 0) & FILE_SHARE_WRITE) !== 0,
             delete: deleteOnClose || (rights & (DELETE | GENERIC_ALL)) !== 0,
             shareDelete: ((share >>> 0) & FILE_SHARE_DELETE) !== 0,
         });
         if (!node)
         {
+            // Another open's terms refuse this one's, as CreateFile says it.
+            if (files.openRefusal?.() === 'SHARING_VIOLATION')
+            {
+                return { error: ERROR_SHARING_VIOLATION };
+            }
             return { error: onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT
                 : exists ? ERROR_ACCESS_DENIED : missing(path) };
         }

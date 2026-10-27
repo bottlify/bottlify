@@ -2706,3 +2706,34 @@ test('an open CreateFile refuses is told, with its path, its error and what was 
         access: GENERIC_READ, share: 1, disposition: OPEN_EXISTING, flags: 0x80 }],
     'only the open that failed');
 });
+
+test('CreateFile hands on its sharing terms; their refusal is a sharing violation', ()=>{
+    const { files, error, fns, at } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    const anyFiles = /** @type {any} */ (files);
+    const opened = anyFiles.open.bind(files);
+    /** @type {any[]} */
+    const asked = [];
+    anyFiles.open = (/** @type {string} */ path, /** @type {any} */ mode)=>{
+        asked.push(mode);
+        return opened(path, mode);
+    };
+    const GENERIC_EXECUTE = 0x20000000;
+    const FILE_SHARE_DELETE = 0x4;
+    const handle = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\SAVE.DAT'),
+        GENERIC_EXECUTE | 0x10000, FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    const terms = [asked[0].read, asked[0].shareRead, asked[0].shareWrite, asked[0].delete,
+        asked[0].shareDelete];
+    assert.deepEqual(terms, [true, false, false, true, true],
+        'executing reads, as sharing counts it; only deletion shared');
+
+    anyFiles.open = ()=>null;
+    anyFiles.openRefusal = ()=>'SHARING_VIOLATION';
+    assert.equal(fns.CreateFileA.handler([NAME, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]),
+        INVALID_HANDLE_VALUE);
+    assert.equal(error.code, 32, 'ERROR_SHARING_VIOLATION');
+    anyFiles.openRefusal = ()=>null;
+    fns.CreateFileA.handler([NAME, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]);
+    assert.equal(error.code, ERROR_ACCESS_DENIED, 'any other refusal of a file that is there');
+});
