@@ -31,7 +31,8 @@ import { readGuid, writeGuid } from '../ole32/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
 import { createStdDispatchObjects } from './stddispatch.js';
-import { TKIND_DISPATCH, TKIND_INTERFACE } from './typelib.js';
+import { createRecordInfoObjects } from './recordinfo.js';
+import { TKIND_DISPATCH, TKIND_INTERFACE, TKIND_RECORD } from './typelib.js';
 import { parseTypeLibrary } from './sltg.js';
 import { STDOLE2, isStdole } from './stdole.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
@@ -1282,6 +1283,31 @@ export function createAutomationFunctions(host){
             ? host.call(entry, args, host.callerThread?.())
             : Promise.reject(new Error('no way to call guest code'))),
         adapt: (state, interfaces, destroy)=>createAdapter(state, interfaces, destroy),
+    }) : null;
+
+    const recordInfos = host.vtables && host.call ? createRecordInfoObjects({
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        heap: host.heap,
+        publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
+        call: (entry, args, thread)=>(host.call
+            ? host.call(entry, args, thread)
+            : Promise.reject(new Error('no way to call guest code'))),
+        thread: ()=>host.callerThread?.(),
+        adapt: (state, interfaces, destroy)=>createAdapter(state, interfaces, destroy),
+        clearVariant: (pvar, thread)=>{
+            const owed = nothingOwed();
+            return settle(owed, thread, clear(pvar, owed));
+        },
+        copyVariant: (dest, src, thread)=>{
+            const owed = nothingOwed();
+            return settle(owed, thread, copyVariant(dest, src, owed));
+        },
+        copyBstr: bstr=>(bstr === 0 ? 0
+            : allocateBstr(host.readMemory(bstr, byteLengthOf(bstr)).slice())),
+        freeBstr,
+        allocateBstr: text=>allocateBstr(encode(text)),
+        divergence: report,
     }) : null;
 
     const errorInfos = host.vtables ? createErrorInfoObjects({
@@ -4772,6 +4798,40 @@ export function createAutomationFunctions(host){
                     return E_NOTIMPL;
                 }
                 return stdDispatches.create(outer >>> 0, self >>> 0, typeInfo >>> 0)
+                    .then(pointer=>{
+                        writeU32(out >>> 0, pointer);
+                        return pointer === 0 ? E_OUTOFMEMORY : S_OK;
+                    });
+            },
+        },
+
+        /**
+         * HRESULT GetRecordInfoFromTypeInfo(ITypeInfo *pTypeInfo, IRecordInfo **ppRecInfo)
+         *
+         * An IRecordInfo for a record type this library described; anything
+         * but a record is an invalid argument.
+         */
+        GetRecordInfoFromTypeInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([typeInfo, out])=>{
+                if ((typeInfo >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out >>> 0, 0);
+                const loaded = typeLibraries?.typeInfoAt(typeInfo >>> 0) ?? null;
+                if (!loaded || !recordInfos)
+                {
+                    report('GetRecordInfoFromTypeInfo', 'only a type this library loaded is'
+                        + ' described as a record');
+                    return E_NOTIMPL;
+                }
+                if (loaded.description.kind !== TKIND_RECORD)
+                {
+                    return E_INVALIDARG;
+                }
+                return recordInfos.create(loaded.library, loaded.description, typeInfo >>> 0)
                     .then(pointer=>{
                         writeU32(out >>> 0, pointer);
                         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
