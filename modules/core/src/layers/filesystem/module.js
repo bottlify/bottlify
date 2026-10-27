@@ -477,10 +477,17 @@ export function createFilesystemModule(){
                  * fetched, never uploaded, so what travels is only what the program
                  * itself produced.
                  *
+                 * A file with more than one name is in it once, under the path
+                 * its bytes are kept at, and `exportLinks` gives its other
+                 * names -- unless `everyName` asks for each name as a file of
+                 * its own: what a reader that keeps no links takes, a bottle's
+                 * read-only files among them.
+                 *
                  * @param {string} [letter]
+                 * @param {{ everyName?: boolean }} [options]
                  * @returns {{ path: string, bytes: Uint8Array }[]}
                  */
-                export(letter){
+                export(letter, options){
                     if (!live())
                     {
                         return [];
@@ -497,6 +504,14 @@ export function createFilesystemModule(){
                         {
                             const components = splitComponents(entry.path);
                             out.push(handedOut(tree, components, formatPath(key, components)));
+                        }
+                        for (const record of options?.everyName ? tree.links() : [])
+                        {
+                            for (const name of record.names)
+                            {
+                                const components = splitComponents(name);
+                                out.push(handedOut(tree, components, formatPath(key, components)));
+                            }
                         }
                     }
                     return out;
@@ -610,7 +625,24 @@ export function createFilesystemModule(){
                     }
                     const { tree, drive, components } = locate(path);
                     const entry = tree.stat(components);
-                    return entry ? { ...entry, path: formatPath(drive, components) } : null;
+                    return entry ? { ...entry, path: formatPath(drive, components),
+                        identity: formatPath(drive, splitComponents(entry.identity)) } : null;
+                },
+
+                /**
+                 * Every name the file at `path` has, as full paths: its own
+                 * alone unless it is linked.
+                 *
+                 * @param {string} path @returns {string[]}
+                 */
+                namesOf(path){
+                    if (!live())
+                    {
+                        return [];
+                    }
+                    const { tree, drive } = locate(path);
+                    return tree.namesOf(locate(path).components).map(
+                        (/** @type {string} */ name)=>formatPath(drive, splitComponents(name)));
                 },
 
                 /**
@@ -647,6 +679,7 @@ export function createFilesystemModule(){
                         (/** @type {any} */ entry)=>({
                             ...entry,
                             path: formatPath(drive, [...components, entry.name]),
+                            identity: formatPath(drive, splitComponents(entry.identity)),
                         }));
                 },
 
@@ -678,6 +711,82 @@ export function createFilesystemModule(){
                     }
                     const { tree, components } = locate(path);
                     tree.removeFile(components);
+                },
+
+                /**
+                 * Gives the file at `existing` the further name `name`, a hard
+                 * link: one file under both, a write through either seen
+                 * through the other, its bytes gone with its last name. Both
+                 * have to be on one drive.
+                 *
+                 * @param {string} name @param {string} existing
+                 */
+                link(name, existing){
+                    if (!live())
+                    {
+                        return;
+                    }
+                    const from = locate(existing);
+                    const to = locate(name);
+                    if (from.tree !== to.tree)
+                    {
+                        throw fsError(ErrorCode.NOT_SAME_DEVICE,
+                            `"${existing}" and "${name}" are on different drives`);
+                    }
+                    from.tree.link(from.components, to.components);
+                },
+
+                /**
+                 * The files with more than one name, as full paths: the path
+                 * each one's bytes travel under in `export`, and its other
+                 * names -- the part of a session `export` cannot carry.
+                 *
+                 * @param {string} [letter]
+                 * @returns {{ owner: string, names: string[] }[]}
+                 */
+                exportLinks(letter){
+                    if (!live())
+                    {
+                        return [];
+                    }
+                    /** @type {{ owner: string, names: string[] }[]} */
+                    const out = [];
+                    for (const [key, tree] of state.drives)
+                    {
+                        if (letter && key !== String(letter).toUpperCase())
+                        {
+                            continue;
+                        }
+                        for (const record of tree.links())
+                        {
+                            out.push({ owner: formatPath(key, splitComponents(record.owner)),
+                                names: record.names.map((/** @type {string} */ path)=>
+                                    formatPath(key, splitComponents(path))) });
+                        }
+                    }
+                    return out;
+                },
+
+                /**
+                 * Gives files the further names `exportLinks` recorded, once
+                 * `apply` has put the files themselves in. A record whose names
+                 * span drives, or whose file is not there, is passed over.
+                 *
+                 * @param {{ owner: string, names: string[] }[]} records
+                 */
+                applyLinks(records){
+                    if (!live())
+                    {
+                        return;
+                    }
+                    for (const record of records)
+                    {
+                        const owner = locate(record.owner);
+                        const names = record.names.map(path=>locate(path))
+                            .filter(at=>at.tree === owner.tree);
+                        owner.tree.restoreLinks([{ owner: owner.components.join('\\'),
+                            names: names.map(at=>at.components.join('\\')) }]);
+                    }
                 },
 
                 /**

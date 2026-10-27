@@ -207,3 +207,71 @@ test('what was copied up is visible in diagnostics', ()=>{
     tree.write(['Readme.TXT'], 0, bytes('x'));
     assert.equal(tree.diagnostics().copied, 1);
 });
+
+test('a hard link is one file under two names', ()=>{
+    const { tree, writable } = mounted();
+    tree.createDirectory(['Saves']);
+    tree.createFile(['Saves', 'A.DAT']);
+    tree.write(['Saves', 'A.DAT'], 0, bytes('first'));
+    const made = tree.link(['Saves', 'A.DAT'], ['Game', 'B.DAT']);
+    assert.equal(made.links, 2);
+
+    // A write through either name is seen through the other; one store file.
+    tree.write(['Game', 'B.DAT'], 0, bytes('FI'));
+    assert.equal(text(tree.read(['Saves', 'A.DAT'], 0, 10)), 'FIrst');
+    assert.equal(writable.stat('Game\\B.DAT'), null, 'the bytes are kept once');
+    assert.deepEqual(tree.writableFiles().map(file=>file.path), ['Saves\\A.DAT']);
+    assert.equal(tree.stat(['saves', 'a.dat'])?.identity, tree.stat(['game', 'b.dat'])?.identity);
+    tree.setModified(['Game', 'B.DAT'], 1234);
+    assert.equal(tree.stat(['Saves', 'A.DAT'])?.modified, 1234, 'the time is the file\'s');
+    assert.deepEqual(tree.links(), [{ owner: 'Saves\\A.DAT', names: ['Game\\B.DAT'] }]);
+
+    // Renaming one name leaves the other; deleting the owner name moves the bytes.
+    assert.equal(tree.moveFile(['Game', 'B.DAT'], ['Game', 'C.DAT']), true);
+    assert.equal(tree.stat(['Game', 'B.DAT']), null);
+    assert.equal(tree.stat(['Saves', 'A.DAT'])?.links, 2);
+    tree.removeFile(['Saves', 'A.DAT']);
+    assert.equal(tree.stat(['Saves', 'A.DAT']), null);
+    assert.deepEqual([tree.stat(['Game', 'C.DAT'])?.links,
+        text(tree.read(['Game', 'C.DAT'], 0, 9))], [1, 'FIrst']);
+    assert.equal(writable.stat('Saves\\A.DAT'), null);
+    assert.equal(writable.stat('Game\\C.DAT')?.size, 5);
+    assert.deepEqual(tree.links(), [], 'one name left: an ordinary file');
+
+    // The last name takes the bytes.
+    tree.removeFile(['Game', 'C.DAT']);
+    assert.equal(writable.stat('Game\\C.DAT'), null);
+});
+
+test('a link to a source file copies it up; a directory or a taken name is refused', ()=>{
+    const { tree, source } = mounted();
+    tree.link(['Readme.TXT'], ['Game', 'Readme2.TXT']);
+    tree.write(['Game', 'Readme2.TXT'], 0, bytes('R'));
+    assert.equal(text(tree.read(['Readme.TXT'], 0, 7)), 'Read me');
+    assert.equal(text(source.read('Readme.TXT', 0, 7)), 'read me', 'the source untouched');
+    assert.throws(()=>tree.link(['Game'], ['G2']), { code: 'ACCESS_DENIED' });
+    assert.throws(()=>tree.link(['Readme.TXT'], ['Game', 'Setup.EXE']),
+        { code: 'ALREADY_EXISTS' });
+    assert.throws(()=>tree.link(['Nothing.TXT'], ['N2.TXT']), { code: 'NOT_FOUND' });
+    // Deleting the source name leaves a tombstone and the link its bytes.
+    tree.removeFile(['Readme.TXT']);
+    assert.equal(tree.stat(['Readme.TXT']), null);
+    assert.equal(text(tree.read(['Game', 'Readme2.TXT'], 0, 7)), 'Read me');
+});
+
+test('a drive remounted from its files and links has the same names', ()=>{
+    const { tree, writable } = mounted();
+    tree.createFile(['A.DAT']);
+    tree.write(['A.DAT'], 0, bytes('abc'));
+    tree.link(['A.DAT'], ['Game', 'Data', 'B.DAT']);
+    tree.link(['A.DAT'], ['New', 'C.DAT'].slice(1));
+    const records = tree.links();
+    const again = createOverlay({ source: null, writable });
+    again.restoreLinks(records);
+    for (const name of [['A.DAT'], ['Game', 'Data', 'B.DAT'], ['C.DAT']])
+    {
+        assert.deepEqual([again.stat(name)?.links, text(again.read(name, 0, 3))], [3, 'abc']);
+    }
+    again.write(['C.DAT'], 0, bytes('X'));
+    assert.equal(text(again.read(['A.DAT'], 0, 3)), 'Xbc');
+});

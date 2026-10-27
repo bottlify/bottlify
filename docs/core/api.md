@@ -162,7 +162,7 @@ counts the frames that went so.
 | `canvas`, `host` | The viewport and where the engine runs. |
 | `frames()`, `presented()` | Frames shown so far; the history of presents. |
 | `files.list(path)`, `files.read(path)` | The volume as the program sees it. |
-| `session.export()`, `registry().toJSON()` | After the exit: the files the program wrote (with `collectOnExit`) and its registry. |
+| `session.export()`, `registry().toJSON()` | After the exit: the files the program wrote (with `collectOnExit`) and its registry. A file with more than one name (a hard link) is in the list under each of its names, with the same bytes. |
 | `attachLog(sink)`, `detachLog(sink)` | What the program writes to its standard handles, as `(handle, text)`. |
 | `diagnostics(layer?)` | Every layer's diagnostics, or one layer's; a request to the engine thread, not for polling. Besides the layers' tables, a `windows` table lists the run's windows as every process reports them: every process's top-level windows, topmost first, each with its process, title, class, visibility and rectangle, and the run's foreground and captured windows. |
 | `report()` | Everything the engine can say about the run in one answer: every layer's diagnostics, the phase profile and recent frames, `trace()`, the threads, guest time by module, and the guest code around its most-sampled addresses (`hotCode`, 4 KiB pages as base64). The app layer's table lists the divergences reported so far (`divergences`, the first 128). Devices drawing in the graphics worker are asked for their counters and awaited for up to a second, so the graphics table includes them. A request, not for polling. |

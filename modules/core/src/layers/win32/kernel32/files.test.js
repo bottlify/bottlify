@@ -2481,20 +2481,35 @@ test('a watch made with no room loses every change and says so', ()=>{
     assert.equal(memory.dword(ov), 0x10c, 'the first call\'s room is the watch\'s');
 });
 
-test('CreateHardLink answers as a volume without links does, and says so', ()=>{
+test('CreateHardLink links through the volume and answers its refusals as Windows does', ()=>{
     /** @type {string[]} */
     const said = [];
     const { files, error, fns, at } = setup({
         divergence: (/** @type {string} */ api)=>said.push(api) });
-    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    const anyFiles = /** @type {any} */ (files);
     assert.equal(fns.CreateHardLinkA.argBytes, 12);
     assert.equal(fns.CreateHardLinkA.handler(
         [at(NAME2, 'C:\\GAME\\LINK.DAT'), at(NAME, 'C:\\GAME\\SAVE.DAT'), 0]), 0);
-    assert.equal(error.code, 1, 'ERROR_INVALID_FUNCTION, as FAT answers');
+    assert.equal(error.code, 1, 'a volume that keeps no links: ERROR_INVALID_FUNCTION');
     assert.deepEqual(said, ['CreateHardLink']);
-    assert.equal(fns.CreateHardLinkA.handler(
-        [NAME2, at(NAME, 'C:\\GAME\\NONE.DAT'), 0]), 0);
-    assert.equal(error.code, 2, 'a missing file is missing first');
+
+    /** @type {string[][]} */
+    const asked = [];
+    let refusal = /** @type {string | null} */ (null);
+    anyFiles.link = (/** @type {string} */ name, /** @type {string} */ existing)=>{
+        asked.push([name, existing]);
+        return refusal;
+    };
+    assert.equal(fns.CreateHardLinkA.handler([NAME2, NAME, 0]), 1);
+    assert.deepEqual(asked, [['C:\\GAME\\LINK.DAT', 'C:\\GAME\\SAVE.DAT']]);
+    for (const [code, expected] of /** @type {[string, number][]} */ ([
+        ['ALREADY_EXISTS', 183], ['ACCESS_DENIED', 5], ['NOT_SAME_DEVICE', 17],
+        ['NOT_FOUND', 2], ['PATH_NOT_FOUND', 3], ['WRITE_PROTECTED', 19]]))
+    {
+        refusal = code;
+        assert.equal(fns.CreateHardLinkA.handler([NAME2, NAME, 0]), 0, code);
+        assert.equal(error.code, expected, code);
+    }
 
     assert.equal(fns.CreateSymbolicLinkW.argBytes, 12);
     assert.equal(fns.CreateSymbolicLinkA.handler([NAME2, NAME, 0]), 0);

@@ -334,12 +334,13 @@ export function fileAttributes(entry){
  * @property {(handle: number, type?: string) => any} resolveHandle
  * @property {(path: string) => { exists: boolean, isDirectory: boolean,
  *                                size: number, modified?: number, readOnly?: boolean,
- *                                hidden?: boolean } | null} stat
+ *                                hidden?: boolean, links?: number,
+ *                                identity?: string } | null} stat
  * @property {(path: string, modified: number) => boolean} [setModified]
  *           Stamps a file's write time, in milliseconds since the epoch.
  * @property {(path: string, pattern: string) => { name: string, isDirectory: boolean,
  *     size: number, modified?: number, readOnly?: boolean, hidden?: boolean,
- *     attributes?: number }[]} [list]
+ *     attributes?: number, identity?: string }[]} [list]
  *           A directory's entries, for a listing by handle. Absent, a directory
  *           lists only its dots.
  */
@@ -489,7 +490,7 @@ export function createFileTimeFunctions(host){
             const own = entry.name === '.' ? file.path
                 : entry.name === '..' ? file.path.replace(/\\[^\\]*$/, '')
                     : `${file.path}\\${entry.name}`;
-            view.setUint32(96, fileIndex(own), true);
+            view.setUint32(96, fileIndex(entry.identity ?? own), true);
             [...entry.name].forEach((unit, at)=>view.setUint16(ID_BOTH_DIR_FIXED + at * 2,
                 unit.charCodeAt(0), true));
             records.push({ start, record });
@@ -678,7 +679,7 @@ export function createFileTimeFunctions(host){
                 }
                 const entry = host.stat(file.path);
                 const size = entry?.size ?? 0;
-                const index = fileIndex(file.path);
+                const index = fileIndex(entry?.identity ?? file.path);
 
                 const data = new Uint8Array(BY_HANDLE_FILE_INFORMATION.SIZE);
                 const view = new DataView(data.buffer);
@@ -693,7 +694,7 @@ export function createFileTimeFunctions(host){
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileSizeHigh,
                     Math.floor(size / 0x100000000) >>> 0, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileSizeLow, size >>> 0, true);
-                view.setUint32(BY_HANDLE_FILE_INFORMATION.nNumberOfLinks, 1, true);
+                view.setUint32(BY_HANDLE_FILE_INFORMATION.nNumberOfLinks, entry?.links ?? 1, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileIndexLow, index, true);
                 host.writeMemory(information >>> 0, data);
                 return 1;

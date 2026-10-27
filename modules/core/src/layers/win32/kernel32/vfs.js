@@ -150,6 +150,15 @@ export function createVolume(fs, fetchBlocks = null){
     const recorded = new Map();
     /** @param {string} path */
     const keyOf = path=>path.toLowerCase();
+    /**
+     * A file with more than one name says how many and what it is known by;
+     * one with its own alone says nothing of either.
+     *
+     * @param {any} entry
+     * @returns {{ links?: number, identity?: string }}
+     */
+    const linked = entry=>(entry.links > 1 ? { links: entry.links, identity: entry.identity } : {});
+
     /** @param {string} path */
     const setBy = path=>{
         const attributes = recorded.get(keyOf(path));
@@ -267,13 +276,14 @@ export function createVolume(fs, fetchBlocks = null){
          * @param {string} path
          * @returns {{ exists: boolean, isDirectory: boolean, size: number,
          *             modified: number, readOnly?: boolean, hidden?: boolean,
-         *             attributes?: number } | null}
+         *             attributes?: number, links?: number, identity?: string } | null}
          */
         stat(path){
             const entry = attempt(()=>fs.stat(path), null);
             return entry
                 ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size,
-                    modified: entry.modified ?? 0, ...marks(entry), ...setBy(path) }
+                    modified: entry.modified ?? 0, ...linked(entry), ...marks(entry),
+                    ...setBy(path) }
                 : null;
         },
 
@@ -290,15 +300,51 @@ export function createVolume(fs, fetchBlocks = null){
                 return false;
             }
             changed(path, CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
-            if (attributes === null)
+            // The attributes are the file's: every name it has shows them.
+            for (const name of attempt(()=>fs.namesOf?.(path), null) ?? [path])
             {
-                recorded.delete(keyOf(path));
-            }
-            else
-            {
-                recorded.set(keyOf(path), attributes >>> 0);
+                if (attributes === null)
+                {
+                    recorded.delete(keyOf(name));
+                }
+                else
+                {
+                    recorded.set(keyOf(name), attributes >>> 0);
+                }
             }
             return true;
+        },
+
+        /**
+         * Gives the file at `existing` the further name `path`: null when it
+         * did, or the volume's code for why not -- NOT_SAME_DEVICE across
+         * drives, ACCESS_DENIED for a directory, ALREADY_EXISTS for a name
+         * taken, NOT_FOUND or PATH_NOT_FOUND for what is not there. The new
+         * name shows the attributes the file was given.
+         *
+         * @param {string} path @param {string} existing
+         * @returns {string | null}
+         */
+        link(path, existing){
+            try
+            {
+                fs.link(path, existing);
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return error.code;
+            }
+            const attributes = recorded.get(keyOf(existing));
+            if (attributes !== undefined)
+            {
+                recorded.set(keyOf(path), attributes);
+            }
+            changed(path, CHANGE_FILE_NAME, FILE_ACTION_ADDED);
+            return null;
         },
 
         /**
@@ -535,6 +581,7 @@ export function createVolume(fs, fetchBlocks = null){
                 isDirectory: Boolean(entry.directory),
                 size: entry.size,
                 modified: entry.modified ?? 0,
+                ...linked(entry),
                 ...marks(entry),
                 ...setBy(`${path.replace(/\\$/, '')}\\${entry.name}`),
             })), []),

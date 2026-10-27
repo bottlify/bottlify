@@ -532,6 +532,11 @@ was opened, which is what a program comparing two handles asks, and different fo
 but for a hash collision. NTFS numbers files by their place in the MFT, which nothing here has; a
 rename gives a file another number here where NTFS keeps it. *2026-10-26, `08e7ceb`, `33a6087`.*
 
+*Reconsidered 2026-10-27:* a file with hard links has one number under all its names: the hash of
+the path its bytes are kept at, which is always one of its names. The number changes when that
+name is renamed or deleted and another of its names keeps the bytes. A file with one name is
+unchanged.
+
 **A57. The engine's side-by-side store holds the Visual C++ 8 and 9 runtimes and Common Controls
 6, each found where the bottle really has it.** A bottle carries no WinSxS, so an assembly a
 program's manifest names -- Microsoft.VC80/VC90 .CRT, .OpenMP, .ATL, .MFC, Common-Controls 6 --

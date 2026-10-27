@@ -265,3 +265,31 @@ test('a watch is told what happened to which name, below the directory it watche
     assert.ok(vol.rename('C:\\Watched', 'C:\\Moved'));
     assert.deepEqual(own, [], 'the watched directory moved is not told');
 });
+
+test('a hard link is one file: bytes, attributes, count and identity shared', async()=>{
+    const { volume: vol } = await volume();
+    const node = vol.open('C:\\A.DAT', { read: true, write: true, create: true });
+    vol.write(node, 0, Uint8Array.of(1, 2, 3));
+    vol.close(node);
+    assert.equal(vol.link('C:\\B.DAT', 'C:\\A.DAT'), null);
+    const a = vol.stat('C:\\A.DAT');
+    const b = vol.stat('C:\\b.dat');
+    assert.deepEqual([a?.links, b?.links, a?.identity === b?.identity], [2, 2, true]);
+    vol.setAttributes('C:\\B.DAT', 0x21);
+    assert.equal(vol.stat('C:\\A.DAT')?.attributes, 0x21, 'the attributes are the file\'s');
+
+    const other = vol.open('C:\\B.DAT', { read: true, write: true });
+    vol.write(other, 0, Uint8Array.of(9));
+    vol.close(other);
+    const reader = vol.open('C:\\A.DAT', { read: true });
+    assert.deepEqual([...(/** @type {Uint8Array} */ (vol.read(reader, 0, 3)))], [9, 2, 3]);
+    vol.close(reader);
+
+    assert.equal(vol.link('C:\\A.DAT', 'C:\\B.DAT'), 'ALREADY_EXISTS');
+    assert.equal(vol.link('C:\\C.DAT', 'C:\\NONE.DAT'), 'NOT_FOUND');
+    vol.mkdir('C:\\DIR');
+    assert.equal(vol.link('C:\\D.DAT', 'C:\\DIR'), 'ACCESS_DENIED');
+    assert.equal(vol.remove('C:\\A.DAT'), true);
+    assert.deepEqual([vol.stat('C:\\B.DAT')?.links, vol.stat('C:\\B.DAT')?.size], [undefined, 3],
+        'one name left: an ordinary file');
+});

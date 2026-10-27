@@ -3731,6 +3731,7 @@ async function openSession({ options, events, filesystem, registry, inherited, s
         saver = coalescedSaver({
             snapshot: ()=>({
                 files: filesystem.export(),
+                links: filesystem.exportLinks?.() ?? null,
                 // The bottle's revision it was saved under rides with the hive.
                 registry: { ...registry.toJSON(), revision: options.bundle?.revision ?? 0 },
             }),
@@ -3761,7 +3762,7 @@ async function openSession({ options, events, filesystem, registry, inherited, s
  * registry the installation wrote into `registry`, when there is one to fill.
  *
  * @param {{ options: AppOptions, events: any, filesystem: any, blocks: any,
- *     seeded: { files: any[], registry?: any }, registry: any }} deps
+ *     seeded: { files: any[], registry?: any, links?: any[] | null }, registry: any }} deps
  */
 async function furnishVolume({ options, events, filesystem, blocks, seeded, registry }){
     if (blocks)
@@ -3790,6 +3791,11 @@ async function furnishVolume({ options, events, filesystem, blocks, seeded, regi
     if (seeded.files.length > 0)
     {
         filesystem.apply(seeded.files);
+    }
+    // The names a saved file had besides its own, once the files are down.
+    if (seeded.links && seeded.links.length > 0)
+    {
+        filesystem.applyLinks(seeded.links);
     }
     // The person's own edits to the title's files -- a realm list, a config
     // line -- laid over the session's, so they win over what the program
@@ -8332,8 +8338,13 @@ async function buildApp(options){
          * files in from outside.
          */
         session: {
-            /** @returns {{ path: string, bytes: Uint8Array }[]} */
-            export: ()=>filesystem.export(),
+            /**
+             * Every file, a file with more than one name under each of them:
+             * what a reader that keeps no links -- a bottle -- takes.
+             *
+             * @returns {{ path: string, bytes: Uint8Array }[]}
+             */
+            export: ()=>filesystem.export(undefined, { everyName: true }),
             /** @returns {string[]} The empty directories it made, which `export` cannot carry. */
             directories: ()=>filesystem.exportDirectories(),
             /**
@@ -9062,7 +9073,7 @@ async function buildSystemHost(deps){
         // Asked while the program stands; once it is over, what it knew.
         systemLibraries: ()=>(across().length > 0 ? ask('systemLibraries') : libraries()),
         session: {
-            export: ()=>filesystem.export(),
+            export: ()=>filesystem.export(undefined, { everyName: true }),
             directories: ()=>filesystem.exportDirectories(),
             /** @param {any[]} changes @param {{ quiet?: boolean }} [how] */
             apply: (changes, how)=>filesystem.apply(changes, how),

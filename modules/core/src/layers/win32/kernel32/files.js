@@ -56,6 +56,7 @@ const ERROR_NOACCESS = 998;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_WRITE_PROTECT = 19;
+const ERROR_NOT_SAME_DEVICE = 17;
 const ERROR_FILE_EXISTS = 80;
 const ERROR_INVALID_PARAMETER = 87;
 /** The unit a FILE_SEGMENT_ELEMENT names: one page of the caller's memory. */
@@ -298,6 +299,9 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {boolean} [readOnly]  On read-only media.
  * @property {boolean} [hidden]
  * @property {number} [attributes]  What a program set, when one did.
+ * @property {number} [links]  How many names the file has; one when absent.
+ * @property {string} [identity]  What the file is known by whatever its names:
+ *           its own path unless it has others.
  */
 
 /**
@@ -309,6 +313,8 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {boolean} [readOnly]
  * @property {boolean} [hidden]
  * @property {number} [attributes]
+ * @property {number} [links]
+ * @property {string} [identity]
  */
 
 /** The handle kinds that are file objects: what CancelIo takes. */
@@ -330,6 +336,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *
  * @typedef {Object} FileSystem
  * @property {(path: string) => FileStat | null} stat
+ * @property {(path: string, existing: string) => string | null} [link]
+ *           Gives a file one more name: null, or the volume's code for why not.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
  * @property {(node: any, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} read
  *           Short at the end of the file; empty past it, which is not an error.
@@ -1215,18 +1223,40 @@ export function createFileFunctions(host){
     const moveFileWithProgress = bothForms(20, ([from, to, , , flags], text)=>
         moveFileEx[text === ANSI ? 'ansi' : 'wide'].handler([from, to, flags]));
 
+    /** How the volume says a link could not be made, as CreateHardLink answers it. */
+    const LINK_ERRORS = Object.freeze({
+        NOT_SAME_DEVICE: ERROR_NOT_SAME_DEVICE, ACCESS_DENIED: ERROR_ACCESS_DENIED,
+        IS_A_DIRECTORY: ERROR_ACCESS_DENIED, ALREADY_EXISTS: ERROR_ALREADY_EXISTS,
+        NOT_FOUND: ERROR_FILE_NOT_FOUND, PATH_NOT_FOUND: ERROR_PATH_NOT_FOUND,
+        NOT_A_DIRECTORY: ERROR_PATH_NOT_FOUND, WRITE_PROTECTED: ERROR_WRITE_PROTECT,
+        INVALID_PATH: ERROR_INVALID_NAME, NO_SUCH_DRIVE: ERROR_PATH_NOT_FOUND,
+    });
+
     /**
-     * The volume has no hard links, as a FAT volume has none, and it answers
-     * as FAT does; NTFS would link the name, so the refusal is reported.
+     * BOOL CreateHardLink(LPCTSTR lpFileName, LPCTSTR lpExistingFileName,
+     *     LPSECURITY_ATTRIBUTES)
+     *
+     * One file under one more name, on its own drive: what is written
+     * through either is read through both, and the bytes go with the last
+     * name. A directory has none (ACCESS_DENIED), nor has a name already
+     * taken (ALREADY_EXISTS), whatever case it is spelt in.
      */
     const createHardLink = bothForms(12, ([name, existing], text)=>{
+        const path = text.path(name);
         const target = text.path(existing);
-        if (!files.stat(target)?.exists)
+        if (!files.link)
         {
-            return fail(missing(target));
+            host.divergence?.('CreateHardLink', `the volume keeps no links; ${path} not linked`);
+            return fail(ERROR_INVALID_FUNCTION);
         }
-        host.divergence?.('CreateHardLink', `no hard links; ${text.path(name)} not linked`);
-        return fail(ERROR_INVALID_FUNCTION);
+        const refused = files.link(path, target);
+        if (refused !== null)
+        {
+            return fail(LINK_ERRORS[/** @type {keyof typeof LINK_ERRORS} */ (refused)]
+                ?? ERROR_ACCESS_DENIED);
+        }
+        host.setLastError(ERROR_SUCCESS);
+        return 1;
     });
 
     /**
@@ -2192,8 +2222,9 @@ export function createFileFunctions(host){
             | (file.deleteOnClose ? FILE_DELETE_ON_CLOSE : 0);
         const access = (file.read ? FILE_GENERIC_READ : 0) | (file.write ? FILE_GENERIC_WRITE : 0);
         // A file's number on its volume, GetFileInformationByHandle's: the
-        // same for the same path, which is what comparing two handles asks.
-        const index = fileIndex(file.path);
+        // same for the same file under any of its names, which is what
+        // comparing two handles asks.
+        const index = fileIndex(entry?.identity ?? file.path);
         switch (kind)
         {
             case FILE_BASIC_INFORMATION:
@@ -2207,7 +2238,7 @@ export function createFileFunctions(host){
                 return record(24, view=>{
                     view.setBigUint64(0, allocated, true);
                     view.setBigUint64(8, size, true);
-                    view.setUint32(16, 1, true);
+                    view.setUint32(16, entry?.links ?? 1, true);
                     view.setUint8(20, file.deleteOnClose ? 1 : 0);
                     view.setUint8(21, file.directory ? 1 : 0);
                 });
