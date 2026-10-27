@@ -30,6 +30,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { ZF } from './decode/table.js';
+import { Kind, kindOf } from './emit/flags.js';
 import { MODE_64, decode } from './decode/decoder.js';
 import { Fault } from './ir.js';
 import { blockState64, interpret64 } from './interp64.js';
@@ -1101,19 +1102,19 @@ test('the trap port leaves after the write with the value, another port is left'
 });
 
 test('the flag record translated long-mode code leaves is folded by the host first', ()=>{
-    // setc al; hlt
+    // setc al; hlt -- after a region's sub rax, 1 of 0, its CF left in the record.
     const m = machine();
     load(m, { code: '0f92c0f4', regs: Array(16).fill('0'), flags: 0, seed: 1 });
-    let folded = 0;
+    const at = /** @type {number} */ (m.layout.flagRecord);
+    m.view.setUint32(at, kindOf(Kind.SUB, 8), true);
+    m.view.setBigUint64(at + 8, (1n << 64n) - 1n, true);
+    m.view.setBigUint64(at + 16, 0n, true);
+    m.view.setBigUint64(at + 24, 1n, true);
     const tier = createWasmInterpreter({ memory: m.memory, layout: m.layout, area: m.area,
-        hotThreshold: 2, statics: m.layout.regs + WASM_INTERPRETER_STATICS_AT, parkBase: 0,
-        fold: ()=>{
-            folded++;
-            m.view.setUint32(m.layout.eflags, 0x203, true);
-        } });
+        hotThreshold: 2, statics: m.layout.regs + WASM_INTERPRETER_STATICS_AT, parkBase: 0 });
     assert.ok(tier);
     assert.equal(tier.run(100), WasmExit.HALT);
-    assert.equal(folded, 1);
+    assert.equal(m.view.getUint32(at, true), 0, 'the record folded');
     assert.equal(m.view.getUint8(m.layout.regs), 1, 'the folded CF');
 });
 

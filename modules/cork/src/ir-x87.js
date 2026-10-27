@@ -959,9 +959,19 @@ function stepX87(instruction, state, address){
         case 'fxch':
         {
             const i = Number(src.reg);
-            guard(state, TWO_SOURCES[0][i], false);
+            const t1 = guard(state, TWO_SOURCES[0][i], false);
             const a = state.top;
             const c = (state.top + i) & 7;
+            // An empty one becomes the indefinite before the exchange, and both
+            // are held after it, as the processor answers the stack fault.
+            for (const k of t1 !== 0 ? [a, c] : [])
+            {
+                if ((state.empty >>> k & 1) !== 0)
+                {
+                    state.f80[k] = INDEFINITE;
+                    state.empty &= ~(1 << k);
+                }
+            }
             const swap = state.f80[a];
             state.f80[a] = state.f80[c];
             state.f80[c] = swap;
@@ -1056,7 +1066,11 @@ function stepX87(instruction, state, address){
             let significand;
             if (value === 0)
             {
-                state.status |= Status.ZE;
+                // A stack fault is the invalid operation alone.
+                if (t1 === 0)
+                {
+                    state.status |= Status.ZE;
+                }
                 exponent = -Infinity;
                 significand = original;
             }
@@ -1139,7 +1153,9 @@ function stepX87(instruction, state, address){
                 {
                     state.status |= Status.IE;
                 }
-                const log = quiet(Math.log2(stOf(state, 0)));
+                // A negative argument's logarithm is the invalid operation's
+                // indefinite, not the host's NaN.
+                const log = stOf(state, 0) < 0 ? INDEFINITE : quiet(Math.log2(stOf(state, 0)));
                 result = twoNaN(stOf(state, 1) * log, stOf(state, 1), log);
             }
             else
@@ -1148,7 +1164,8 @@ function stepX87(instruction, state, address){
                 {
                     state.status |= Status.IE;
                 }
-                const log = quiet(Math.log1p(stOf(state, 0))) / Math.LN2;
+                const log = stOf(state, 0) < -1 ? INDEFINITE
+                    : quiet(Math.log1p(stOf(state, 0))) / Math.LN2;
                 result = twoNaN(stOf(state, 1) * log, stOf(state, 1), log);
             }
             setStOf(state, 1, orIndefinite(result, t1));
@@ -1297,8 +1314,14 @@ function stepX87(instruction, state, address){
         }
         case 'fcmovb': case 'fcmove': case 'fcmovbe': case 'fcmovu':
         case 'fcmovnb': case 'fcmovne': case 'fcmovnbe': case 'fcmovnu':
-            guard(state, TWO_SOURCES[0][Number(src.reg)], false);
-            if (condition(/** @type {number} */ (instruction.cc), state.eflags))
+            // A stack fault leaves the indefinite in ST0, held, whatever the
+            // condition, as the processor answers it.
+            if (guard(state, TWO_SOURCES[0][Number(src.reg)], false) !== 0)
+            {
+                setStOf(state, 0, INDEFINITE);
+                state.empty &= ~(1 << state.top);
+            }
+            else if (condition(/** @type {number} */ (instruction.cc), state.eflags))
             {
                 setStOf(state, 0, stOf(state, Number(src.reg)));
             }
@@ -1309,7 +1332,8 @@ function stepX87(instruction, state, address){
             state.status &= ~Status.CONDITION;
             state.status &= ~Status.C1;
             scratchF[0] = value;
-            if ((scratchU32[1] & 0x80000000) !== 0)
+            // The sign of a held value: an empty register's leaves C1 clear.
+            if ((scratchU32[1] & 0x80000000) !== 0 && ((state.empty >>> state.top) & 1) === 0)
             {
                 state.status |= Status.C1;
             }

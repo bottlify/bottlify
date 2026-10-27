@@ -1325,7 +1325,8 @@ static u32 x87(const u8 *p)
         {
             double v = ST(0);
             status &= ~S_CONDITION;
-            if (bitsOf(v) >> 63) status |= S_C1;
+            /* The sign of a held value: an empty register's leaves C1 clear. */
+            if (bitsOf(v) >> 63 && !((empty >> top) & 1)) status |= S_C1;
             if ((empty >> top) & 1) status |= S_C3 | S_C0;
             else if (isNaN(v)) status |= S_C0;
             else if (__builtin_fabs(v) == __builtin_inf()) status |= S_C2 | S_C0;
@@ -1357,13 +1358,15 @@ static u32 x87(const u8 *p)
             {
                 if (precise && ST(0) == 0 && __builtin_fabs(ST(1)) < __builtin_inf() && ST(1) != 0) status |= S_ZE;
                 if (precise && ST(0) < 0) status |= S_IE;
-                double log = quietNaN(hostLog2(ST(0)));
+                /* A negative argument's logarithm is the indefinite, not the host's NaN. */
+                double log = ST(0) < 0 ? fromBits(INDEFINITE_BITS) : quietNaN(hostLog2(ST(0)));
                 r = twoNaN(ST(1) * log, ST(1), log);
             }
             else
             {
                 if (precise && ST(0) < -1) status |= S_IE;
-                double log = quietNaN(hostLog1p(ST(0))) / fromBits(0x3fe62e42fefa39efull);
+                double log = ST(0) < -1 ? fromBits(INDEFINITE_BITS)
+                    : quietNaN(hostLog1p(ST(0))) / fromBits(0x3fe62e42fefa39efull);
                 r = twoNaN(ST(1) * log, ST(1), log);
             }
             ST(1) = OR_INDEFINITE(r, t1);
@@ -1419,7 +1422,8 @@ static u32 x87(const u8 *p)
             }
             if (v == 0)
             {
-                if (precise) status |= S_ZE;
+                /* A stack fault is the invalid operation alone. */
+                if (precise && !t1) status |= S_ZE;
                 exponent = -__builtin_inf();
                 significand = original;
             }
@@ -1505,8 +1509,14 @@ static u32 x87(const u8 *p)
                 code = X_LEAVE;
                 break;
             }
-            GUARD(1 | 1u << i, 0);
-            if (holds(CONDITIONS[g & 3] + (e & 1), *eflagsField)) ST(0) = ST(i);
+            /* A stack fault leaves the indefinite in ST0, held, whatever the condition. */
+            if (GUARD(1 | 1u << i, 0))
+            {
+                ST(0) = fromBits(INDEFINITE_BITS);
+                empty &= ~(1u << top);
+                exactMarks &= ~(1u << top);
+            }
+            else if (holds(CONDITIONS[g & 3] + (e & 1), *eflagsField)) ST(0) = ST(i);
             xnone = 1;
             break;
         }
@@ -1598,7 +1608,14 @@ static u32 x87(const u8 *p)
     goto done;
 fxch:
 {
-    GUARD(1 | 1u << i, 0);
+    /* An empty one becomes the indefinite before the exchange, and both are
+       held after it, as the processor answers the stack fault. */
+    if (GUARD(1 | 1u << i, 0))
+    {
+        if ((empty >> top) & 1) REG(top) = fromBits(INDEFINITE_BITS);
+        if ((empty >> PHYS(i)) & 1) ST(i) = fromBits(INDEFINITE_BITS);
+        empty &= ~(1u << top | 1u << PHYS(i));
+    }
     double v = REG(top);
     REG(top) = ST(i);
     ST(i) = v;
@@ -2386,7 +2403,9 @@ static u32 sse(const u8 *p)
             else
             {
                 double x = widen(b.w[i]);
-                double r = op2 == 0x51 ? __builtin_sqrt(x) : op2 == 0x52 ? 1 / __builtin_sqrt(x) : 1 / x;
+                /* rsqrt's root rounded to a single first, as the translation does it */
+                double r = op2 == 0x51 ? __builtin_sqrt(x)
+                    : op2 == 0x52 ? 1 / (double)(float)__builtin_sqrt(x) : 1 / x;
                 a.w[i] = lane32(r, b.w[i], 0, 1);
             }
         }

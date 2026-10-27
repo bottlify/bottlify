@@ -72,7 +72,7 @@ function program(seed, count){
 async function run(code, bits, cork){
     const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
         entryVector: ENTRY_VECTOR, initialStack: 0x300000, ...bits === 64 ? { bits } : {},
-        cork: { ...bits === 64 ? { long: 'shared' } : {}, ...cork } });
+        cork });
     h.writePhysical(CODE, Uint8Array.from(code.match(/../g) ?? [], byte=>parseInt(byte, 16)));
     const next = random(0x87);
     h.writePhysical(DATA, Uint8Array.from({ length: 256 }, ()=>next() & 0xff));

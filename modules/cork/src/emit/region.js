@@ -3693,11 +3693,10 @@ export function planStructure(region, returns, callReturn = false){
 
 /**
  * The order and the loops of `planStructure` from the region's graph alone,
- * the 32-bit emitter's and the long-mode one's (`long/emit.js`): the loops
- * are the natural loops of the jumps from the roots, and the blocks are in a
- * topological order of the jumps that close no loop, a loop's blocks
- * together after its head, ties going to the block the last one falls
- * through to, then to the lowest index.
+ * at either width: the loops are the natural loops of the jumps from the
+ * roots, and the blocks are in a topological order of the jumps that close
+ * no loop, a loop's blocks together after its head, ties going to the block
+ * the last one falls through to, then to the lowest index.
  *
  * @param {number[][]} successors  by block, the blocks it jumps to inside the region, once each
  * @param {number[]} roots  the blocks entered from outside, the region's entry first

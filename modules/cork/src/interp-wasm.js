@@ -125,19 +125,16 @@ function wasmModule(shared, long){
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     area: number, statics: number, hotThreshold: number, trapPort?: number,
- *     parkBase: number, precise?: boolean, atomic?: boolean, fold?: () => void }} options
+ *     parkBase: number, precise?: boolean, atomic?: boolean }} options
  *     area: where the tier's `WASM_INTERPRETER_AREA` bytes lie; statics: where the
  *     instance's `WASM_INTERPRETER_STATICS` bytes, its data and stack, lie; parkBase: the
  *     park loop's address, whose jumps the ring leaves out; precise: the engine's `precise`,
  *     the x87 bookkeeping games do not read kept as the JavaScript interpreter keeps it;
- *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier;
- *     fold: long mode's, called before every run to fold the flag record translated code
- *     left (`longFlagRecord`) into the block's flags word, which the tier reads whole
- *     (the long runtime's `fold`); a 32-bit layout's record the tier folds itself
+ *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier
  * @returns {WasmInterpreter | null}
  */
 export function createWasmInterpreter({ memory, layout, area, statics, hotThreshold, trapPort,
-    parkBase, precise = false, atomic = false, fold })
+    parkBase, precise = false, atomic = false })
 {
     const long = layout.bits === 64;
     if ((layout.codePages ?? -1) >= 0 || layout.fsBase < 0
@@ -200,14 +197,7 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
     return {
         run(budget){
             // The record a region left, folded into the word the tier reads.
-            if (long)
-            {
-                fold?.();
-            }
-            else
-            {
-                eflagsOf(view, layout);
-            }
+            eflagsOf(view, layout);
             return (run ?? instantiate())(budget);
         },
         retired: ()=>retired(),

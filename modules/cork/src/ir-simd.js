@@ -832,8 +832,11 @@ export function evaluateSimd(instruction, state, address){
         case 'rsqrtps': case 'rsqrtss': case 'rcpps': case 'rcpss':
         {
             const inverseRoot = op.startsWith('rsqrt');
+            // The root rounded to a single before it is divided, as the
+            // translation's f32x4 sqrt and div do: the processor's own answer
+            // is an estimate within 1.5 * 2^-12, which this is.
             /** @type {(x: number) => number} */
-            const operation = inverseRoot ? x=>1 / Math.sqrt(x) : x=>1 / x;
+            const operation = inverseRoot ? x=>1 / Math.fround(Math.sqrt(x)) : x=>1 / x;
             floatUnary(state, dst, src, op.endsWith('ss'), false, operation, address);
             return true;
         }

@@ -1566,6 +1566,18 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     };
 
     /**
+     * Whether a region's code reaches memory through esp alone (a push, a call,
+     * an operand off esp with no index): the accesses a loose region leaves
+     * untested.
+     *
+     * @param {import('../region.js').Region} region
+     */
+    const throughStack = region=>region.blocks.some(block=>block.instructions.some(
+        ({ op, operands })=>op.startsWith('push') || op === 'call' || op === 'enter'
+            || operands.some(operand=>operand.kind === 'mem' && operand.base === 4
+                && (operand.index ?? -1) < 0)));
+
+    /**
      * Code is translated on a page of a thread's stack: the regions that store
      * through esp untested go, and every region from now on tests them -- a
      * store through esp could write the code itself.
@@ -2704,6 +2716,16 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         countExtents(record, 1);
         regions.add(record);
+        if (record.loose && !loose && throughStack(region))
+        {
+            // Its own code lies on a stack (`stackCodeSeen` above, which ran before
+            // it was among the regions): its stores through esp, untested, could
+            // write it. Asked for again, it is formed tested.
+            unpublish([record]);
+            counts.dropped++;
+            counts.publishMs += clock() - publishAt;
+            return 0;
+        }
         // With other executors, the bytes are read again now that the pages say
         // there is code on them: a store another executor made before its check
         // could see that is caught here, one after it by the check. Its own

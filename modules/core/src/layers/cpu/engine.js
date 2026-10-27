@@ -65,10 +65,6 @@ export function engineContractProblem(engineModule, url){
  * @property {number} eip
  * @property {number} previousIp
  * @property {number} eflags       The eager word (hybrid: the emulator's `flags`).
- * @property {number} [longFlagRecord] Long-mode translated code's own: the pending flag
- *           record a region leaves for the next (kind and width i32, two operands and the
- *           result i64, carry in and the flags written i32), kind 0 for none; folded into
- *           `eflags` before the host reads them.
  * @property {number} [flagRecord] Cork's own: five i32 (kind, result, op1, op2, carry in) of
  *     the arithmetic record a region leaves instead of folding it into `eflags`; the word
  *     is whole only once `eflagsOf` has folded it. Absent (hybrid): the word is folded at exit.
@@ -371,8 +367,6 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [yieldChunk]  Instructions translated code runs at a time while a slice may
  *     end early. Default 10000.
  * @property {number} [interpretChunk]  Instructions the interpreter runs at a time. Default 8192.
- * @property {'long' | 'shared'} [long]  Long mode's translator: the long runner (`long`, the
- *     default) or the shared runtime and emitter the 32-bit code runs on (`shared`).
  * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
  * @property {number} [tscDriftMs]  How far `rdtsc` runs ahead of the guest's clock. Default 16.
  * @property {number} [spinMs]  With several executors, how long a side of their channel, and the

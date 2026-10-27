@@ -8,19 +8,19 @@
  * Long-mode code run by the shared runtime (`runtime/runtime.js` over a 64-bit
  * layout): its regions, its entry hash and transfers between them, the
  * interpreter (`interp64.js`) taking cold code and every fault, as the
- * smallest host of the runtime does (`machine.js`). The interface of the long
- * runner's that `testing/long-machine.js` drives -- `run(state, budget)`,
- * `invalidate`, `stats` -- so its corpus and programs judge the runtime the
- * same way.
+ * smallest host of the runtime does (`machine.js`), for `testing/long-machine.js`
+ * to drive: `run(state, budget)`, `invalidate`, `stats`. A write to the trap
+ * port (`config.trapPort`) is the interpreter's: its value goes on the state's
+ * `trapped`, and the program on past it.
  */
 
 import { createCorkRuntime } from '../runtime/runtime.js';
 import { eflagsOf } from '../emit/flags.js';
-import { TRAP_END_TURN } from '../emit/integer.js';
 import { pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
 import { WasmExit } from '../interp-wasm.js';
+import { features as probeFeatures } from '../wasm/features.js';
 
 /**
  * With `tier`, the interpreter tier in wasm (`createWasmInterpreter`) runs what no
@@ -29,36 +29,49 @@ import { WasmExit } from '../interp-wasm.js';
  *
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
- *     config?: Record<string, unknown>,
+ *     config?: Record<string, unknown>, defaultNaNNegative?: boolean,
  *     tier?: import('../../../core/src/layers/cpu/engine.js').WasmInterpreter | null }} settings
+ *     `defaultNaNNegative`: the float code as for that host (false: an arm64 one), the
+ *     host's own unless given
  */
-export function createRuntimeRunner64({ memory, layout, config = {}, tier = null }){
+export function createRuntimeRunner64({ memory, layout, config = {}, defaultNaNNegative = undefined,
+    tier = null })
+{
     const flagsAt = pageFlagsAt(layout);
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
     /** @param {number} address */
     const read = address=>((bytes()[flagsAt + (address >>> 12)] & PageFlag.INACCESSIBLE) === 0
         ? bytes()[layout.ramBase + address] : 0);
+    /** The state the current run is of, whose `trapped` a trap goes on. @type {any} */
+    let current = null;
+    const stats = { translated: 0, interpreted: 0, exits: 0, stepped: 0, tiered: 0, traps: 0 };
     const runtime = createCorkRuntime({
         memory, layout,
+        ...defaultNaNNegative === undefined ? {}
+            : { features: { ...probeFeatures(), defaultNaNNegative } },
         config: { feed: 'slice', precise: true, hotThreshold: 1, missThreshold: 1,
             // The harness rewrites one code page for every case: never left to the interpreter.
             volatileWindowMs: 0, ...config },
         read,
         imports: {
-            trap: ()=>TRAP_END_TURN,
+            trap: (/** @type {number} */ value)=>{
+                stats.traps++;
+                current.trapped.push(value >>> 0);
+                return 0;
+            },
             getEflags: ()=>view().getUint32(layout.eflags, true),
             x87Read: (/** @type {number} */ index)=>view().getFloat64(layout.x87 + index * 16, true),
             rdtsc: ()=>0n,
         },
     });
-    const stats = { translated: 0, interpreted: 0, exits: 0, stepped: 0, tiered: 0 };
     if (tier !== null)
     {
         runtime.interpretWith?.(tier.entry(), tier.entered);
     }
-    /** Ranges the caller rewrites, dropped at the next run: the runtime drops a
-     * region only for bytes that changed, which they have by then. @type {number[][]} */
+    /** Ranges the caller or the interpreter rewrote, dropped before the next region
+     * runs: the runtime drops a region only for bytes that changed, which they
+     * have by then. @type {number[][]} */
     const rewritten = [];
     const rip = ()=>view().getBigUint64(layout.eip, true);
 
@@ -110,15 +123,18 @@ export function createRuntimeRunner64({ memory, layout, config = {}, tier = null
          * @returns {number} retired
          */
         run(state, budget){
-            for (const [address, size] of rewritten.splice(0))
-            {
-                runtime.codeWritten(address, size);
-                asked.clear();
-            }
             state.syncOut();
+            current = state;
             const before = state.retired;
             while (state.retired - before < budget && !state.halted)
             {
+                // Code the interpreter wrote, its regions gone before any runs
+                // again, as the host's write hook drops them.
+                for (const [address, size] of rewritten.splice(0))
+                {
+                    runtime.codeWritten(address, size);
+                    asked.clear();
+                }
                 // What the runtime noted itself (its misses), formed now.
                 void runtime.translatePending();
                 const at = rip();
@@ -156,6 +172,12 @@ export function createRuntimeRunner64({ memory, layout, config = {}, tier = null
                 {
                     state.halted = true;
                 }
+                else if (exit.kind === 'trap')
+                {
+                    // Past the write, the handler's to answer: the value in eax.
+                    stats.traps++;
+                    state.trapped.push(view().getUint32(layout.regs, true));
+                }
                 else if (exit.kind === 'fault' || exit.retired === 0 && rip() === at)
                 {
                     stats.exits++;
@@ -169,6 +191,13 @@ export function createRuntimeRunner64({ memory, layout, config = {}, tier = null
         /** @param {number} address @param {number} size */
         invalidate(address, size){
             rewritten.push([address, size]);
+        },
+        /** @param {number} base @param {number} size */
+        noteStack(base, size){
+            runtime.noteStack(base, size);
+        },
+        readsFaulted(){
+            runtime.readsFaulted?.();
         },
     };
 }

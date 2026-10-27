@@ -648,9 +648,16 @@ export function stackUse(instruction, state){
             use.sources = [0];
             pop();
             return use;
-        case 'fxch': case 'fcmovb': case 'fcmove': case 'fcmovbe': case 'fcmovu':
-        case 'fcmovnb': case 'fcmovne': case 'fcmovnbe': case 'fcmovnu':
+        case 'fxch':
+            // Both held after it: an empty one is the indefinite first.
             use.sources = [0, reg(src)];
+            use.marks.push([at(0), 1], [at(reg(src)), 1]);
+            return use;
+        case 'fcmovb': case 'fcmove': case 'fcmovbe': case 'fcmovu':
+        case 'fcmovnb': case 'fcmovne': case 'fcmovnbe': case 'fcmovnu':
+            // ST0 held after it: a stack fault leaves the indefinite there.
+            use.sources = [0, reg(src)];
+            use.marks.push([at(0), 1]);
             return use;
         case 'ffree': case 'ffreep':
             use.marks.push([at(reg(dst)), 0]);
@@ -3008,8 +3015,27 @@ export function emitX87(e, instruction, flagsLive){
             const i = /** @type {number} */ (src.reg);
             const a = state.top;
             const c = (state.top + i) & 7;
-            // An empty register faults, and the registers keep their values.
+            // An empty register faults and becomes the indefinite before the
+            // exchange; both are held after it, as the processor answers.
             guard();
+            if (!clear)
+            {
+                b.localGet(Local.t1);
+                e.openIf('fault', EMPTY);
+                for (const [position, k] of [[0, a], [i, c]])
+                {
+                    b.localGet(Local.x87Empty).i32const(1 << k).op(I32.and);
+                    e.openIf('emptied', EMPTY);
+                    indefinite();
+                    b.localSet(st(position));
+                    // Its MMX view too, as a write leaves it.
+                    syncMm(k, st(position));
+                    e.close();
+                }
+                e.close();
+                mark(a, true);
+                mark(c, true);
+            }
             b.localGet(Local.x87Dirty).i32const((1 << a) | (1 << c)).op(I32.or)
                 .localSet(Local.x87Dirty);
             if (x.hasMmx)
@@ -3159,7 +3185,16 @@ export function emitX87(e, instruction, flagsLive){
             e.openIf('finite', EMPTY);
             b.localGet(x.temp).f64const(0).op(F64.eq);
             e.openIf('zero', EMPTY);
-            setStatus(Status.ZE);
+            if (clear)
+            {
+                setStatus(Status.ZE);
+            }
+            else
+            {
+                // A stack fault is the invalid operation alone.
+                b.localGet(Local.x87Status).i32const(0).i32const(Status.ZE).localGet(Local.t1)
+                    .select().op(I32.or).localSet(Local.x87Status);
+            }
             b.f64const(-Infinity).localSet(x.temp2);
             b.else();
             b.localGet(x.temp).op(F64.abs).f64const(2 ** -1022).op(F64.lt);
@@ -3291,8 +3326,15 @@ export function emitX87(e, instruction, flagsLive){
                     setStatus(Status.IE);
                     e.close();
                 }
-                b.localGet(st(1)).localGet(x.temp).call(math.log2).op(F64.mul);
+                // A negative argument's logarithm is the invalid operation's
+                // indefinite, not the host's NaN.
+                b.localGet(x.temp).call(math.log2).localSet(x.temp2);
+                indefinite();
+                b.localGet(x.temp2).localGet(x.temp).f64const(0).op(F64.lt).select()
+                    .localSet(x.temp2);
+                b.localGet(st(1)).localGet(x.temp2).op(F64.mul);
                 noteIfMade(st(1), x.temp);
+                hostNaN([st(1), x.temp2]);
             }
             else
             {
@@ -3303,9 +3345,14 @@ export function emitX87(e, instruction, flagsLive){
                     setStatus(Status.IE);
                     e.close();
                 }
-                b.localGet(st(1)).localGet(x.temp).call(math.log1p).f64const(Math.LN2).op(F64.div)
-                    .op(F64.mul);
+                b.localGet(x.temp).call(math.log1p).f64const(Math.LN2).op(F64.div)
+                    .localSet(x.temp2);
+                indefinite();
+                b.localGet(x.temp2).localGet(x.temp).f64const(-1).op(F64.lt).select()
+                    .localSet(x.temp2);
+                b.localGet(st(1)).localGet(x.temp2).op(F64.mul);
                 noteIfMade(st(1), x.temp);
+                hostNaN([st(1), x.temp2]);
             }
             orIndefinite();
             b.localSet(st(1));
@@ -3561,6 +3608,11 @@ export function emitX87(e, instruction, flagsLive){
             orIndefinite();
             b.localSet(st(0));
             dirty(0);
+            if (!clear)
+            {
+                // A stack fault leaves the indefinite in ST0, held.
+                mark(state.top, true);
+            }
             return finish();
         case 'fxam':
         {
@@ -3570,14 +3622,15 @@ export function emitX87(e, instruction, flagsLive){
             x87Flush(e, true);
             b.localGet(Local.x87Status).i32const(~Status.CONDITION).op(I32.and)
                 .localSet(Local.x87Status);
+            b.localGet(Local.x87Empty).i32const(1 << state.top).op(I32.and);
+            e.openIf('empty', EMPTY);
+            // An empty register's sign is not asked: C1 stays clear.
+            setStatus(Status.C3 | Status.C0);
+            b.else();
             b.localGet(v).op(I64.reinterpretF64).i64const(0n).op(I64.ltS);
             e.openGuard('negative', EMPTY);
             setStatus(Status.C1);
             e.close();
-            b.localGet(Local.x87Empty).i32const(1 << state.top).op(I32.and);
-            e.openIf('empty', EMPTY);
-            setStatus(Status.C3 | Status.C0);
-            b.else();
             b.localGet(v).localGet(v).op(F64.ne);
             e.openGuard('nan', EMPTY);
             setStatus(Status.C0);

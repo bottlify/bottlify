@@ -36,7 +36,6 @@ export {
 } from './runtime/layout.js';
 export { interpret, blockState } from './interp.js';
 export { interpret64, blockState64 } from './interp64.js';
-export { createLongRunner } from './long/runtime.js';
 export {
     createWasmInterpreter, WasmExit, WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS,
     WASM_INTERPRETER_STATICS_AT, HOT_SLOTS,

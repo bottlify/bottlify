@@ -5,10 +5,10 @@
  */
 
 /**
- * x86-64 code on cork's long-mode machine, for the tests: the long-mode
- * translator's regions over its interpreter, as a 64-bit process runs them
- * (`createLongRunner`), RAM from address 0 with the engine's state pages
- * closed to stores, as the engine lays a process out.
+ * x86-64 code on cork's long-mode machine, for the tests: the shared
+ * runtime's regions over the long-mode interpreter, as a 64-bit process runs
+ * them (`createRuntimeRunner64`), RAM from address 0 with the engine's state
+ * pages closed to stores, as the engine lays a process out.
  *
  * A call is made as the x64 convention makes one: the return address at RSP,
  * which is 8 past a multiple of 16; the 32 bytes above it the home space,
@@ -22,9 +22,9 @@
  */
 
 import { ownLayout, pageFlagsAt, pagesFor, tablesSize } from '../../../cork/src/runtime/layout.js';
-import { PageFlag, createPageTable } from '../../../cork/src/runtime/pages.js';
+import { PageFlag } from '../../../cork/src/runtime/pages.js';
 import { blockState64 } from '../../../cork/src/interp64.js';
-import { createLongRunner } from '../../../cork/src/long/runtime.js';
+import { createRuntimeRunner64 } from '../../../cork/src/testing/runtime-runner64.js';
 
 /** Where a function's code goes: above the null range, where blocks are translated. */
 export const CODE_64 = 0x100000;
@@ -73,8 +73,7 @@ export function longMachine(){
     flags.fill(PageFlag.INACCESSIBLE);
     flags.fill(0, 0, RAM >>> 12);
     flags.fill(PageFlag.INACCESSIBLE, ENGINE_PAGES[0] >>> 12, ENGINE_PAGES[1] >>> 12);
-    const pages = createPageTable(memory, layout);
-    const runner = createLongRunner({ memory, layout, pages, hot: 1 });
+    const runner = createRuntimeRunner64({ memory, layout });
     const state = blockState64({ memory, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
     const view = ()=>new DataView(memory.buffer);

@@ -8,20 +8,21 @@
  * The long-mode translator's test harness: a machine over the hardware
  * corpus's areas (`x64-corpus.json.gz`), its cases and seeded programs run as
  * translated regions and on the interpreter alone, and what a program can see
- * compared (`compare`). The suites in `long/runtime*.test.js` share it.
+ * compared (`compare`). The suites in `runtime/runtime64*.itest.js` and
+ * `emit/width64.itest.js` share it.
  */
 
 import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { ownLayout, pageFlagsAt, pagesFor, tablesSize } from '../runtime/layout.js';
-import { PageFlag, createPageTable } from '../runtime/pages.js';
+import { PageFlag } from '../runtime/pages.js';
 import { blockState64, interpret64 } from '../interp64.js';
 import { MODE_64, decode } from '../decode/decoder.js';
-import { createLongRunner } from '../long/runtime.js';
+import { createRuntimeRunner64 } from './runtime-runner64.js';
 import {
     WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, createWasmInterpreter,
 } from '../interp-wasm.js';
-import { endsBlock, translates } from '../long/emit.js';
+import { translatesLong } from '../emit/long-ops.js';
 
 export const CORPUS = JSON.parse(gunzipSync(readFileSync(new URL('../x64-corpus.json.gz',
     import.meta.url))).toString('utf8'));
@@ -48,29 +49,21 @@ export function fill(seed, size){
 }
 
 /**
+ * @typedef {(memory: WebAssembly.Memory, layout: any, tier: any) => any} MakeRunner  the
+ *     translator a machine runs: the shared runtime's (`runtime-runner64.js`) unless
+ *     another is named (`shared-runner64.js`, the emitter alone)
+ */
+
+/**
  * A machine with the corpus's data and code areas open and every other page closed.
  *
- * @param {boolean} [transfers]  regions go on into each other without the host
- * @param {boolean} [checkReads]  translated reads test their pages from the start
- * @param {boolean} [looseStacks]  false: stores through rsp test their pages too
- * @param {boolean} [defaultNaNNegative]  false: float code as for a host whose default NaN is
- *     positive, an arm64 one (the host's own unless given)
- * @param {boolean} [leafCalls]  false: every call a wasm call, no callee formed in
- * @param {number} [volatileWindowMs]  the runner's: none by default, so that the cases'
- *     code, written over for each, is never left to the interpreter
- * @param {number} [trapPort]
- * @param {boolean} [tiered]  what no region holds runs on the interpreter tier in wasm
+ * @param {{ config?: Record<string, unknown>, trapPort?: number, tiered?: boolean,
+ *     makeRunner?: MakeRunner | null }} [options]  `config`: the runtime's settings over
+ *     the runner's; `tiered`: what no region holds runs on the interpreter tier in wasm
  *     (`createWasmInterpreter`), `interp64.js` taking what it hands back
- * @param {((memory: WebAssembly.Memory, layout: any, tier: any) => any) | null} [makeRunner]  a
- *     runner of another translator in the long runner's place (`shared-runner64.js`), given
- *     the tier where `tiered`
- *
- * Its regions are gathered into one module every three (`packRegions`), so every case
- * runs packed regions beside fresh ones.
  */
-export function machine(transfers = true, checkReads = undefined, looseStacks = undefined,
-    defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0,
-    /** @type {number | undefined} */ trapPort = undefined, tiered = false, makeRunner = null)
+export function machine({ config = {}, trapPort = undefined, tiered = false,
+    makeRunner = null } = {})
 {
     const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
@@ -82,16 +75,13 @@ export function machine(transfers = true, checkReads = undefined, looseStacks = 
     {
         flags.fill(0, at >>> 12, (at + size) >>> 12);
     }
-    const pages = createPageTable(memory, layout);
     const tier = tiered ? createWasmInterpreter({ memory, layout,
         area: layout.tables + tablesSize(layout),
         statics: layout.regs + WASM_INTERPRETER_STATICS_AT, hotThreshold: 1, trapPort,
         parkBase: 0 }) : null;
-    const runner = makeRunner !== null ? makeRunner(memory, layout, tier) : createLongRunner({
-        memory, layout, pages, hot: 1, transfers, checkReads,
-        looseStacks, leafCalls, volatileWindowMs, callTargets: true, packRegions: 3, tier,
-        ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }),
-        ...(trapPort === undefined ? {} : { trapPort }) });
+    const runner = makeRunner !== null ? makeRunner(memory, layout, tier)
+        : createRuntimeRunner64({ memory, layout, tier,
+            config: { ...config, ...(trapPort === undefined ? {} : { trapPort }) } });
     /** The writes to ports other than the trap port, each port and value. @type {number[][]} */
     const writes = [];
     const ports = trapPort === undefined ? undefined : {
@@ -130,7 +120,7 @@ export function pool(){
                 && kept.has(/** @type {number} */ (operand.reg))
                 && (operand === operands[0] || op === 'xchg' || op === 'xadd'))
                 && op !== 'cmp' && op !== 'test' && op !== 'bt';
-            if (translates(instruction) && !endsBlock(op) && op !== 'push' && op !== 'pop'
+            if (translatesLong(instruction) && !endsBlock(op) && op !== 'push' && op !== 'pop'
                 && !writesKept && !operands.some(operand=>operand.kind === 'mem' && operand.rip))
             {
                 out.add(code.subarray(at, at + instruction.length).toString('hex'));
@@ -370,23 +360,13 @@ export function run(m, translated, budget = 7){
 /**
  * Runs every case on both machines and answers the differences.
  *
- * @param {any[]} cases @param {number} [budget]  each translated run's
- * @param {boolean} [transfers]  the translated machine's regions go on into each
- *     other without the host: both ways must be the interpreter's
- * @param {boolean} [checkReads]  its reads test their pages, as the interpreter's do
- * @param {boolean} [defaultNaNNegative]  its float code as for that host (`machine`)
- * @param {boolean} [leafCalls]  its small callees formed into their callers (`machine`)
- * @param {number} [volatileWindowMs]  its runner's (`machine`)
- * @param {boolean} [tiered]  its runner's (`machine`)
- * @param {((memory: WebAssembly.Memory, layout: any, tier: any) => any) | null} [makeRunner]
- *     (`machine`)
+ * @param {any[]} cases
+ * @param {{ budget?: number, config?: Record<string, unknown>, tiered?: boolean,
+ *     makeRunner?: MakeRunner | null }} [options]  `budget`: each translated run's;
+ *     the rest the translated machine's (`machine`)
  */
-export function compare(cases, budget = 7, transfers = true, checkReads = undefined,
-    defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0, tiered = false,
-    makeRunner = null)
-{
-    const translatedMachine = machine(transfers, checkReads, undefined, defaultNaNNegative,
-        leafCalls, volatileWindowMs, undefined, tiered, makeRunner);
+export function compare(cases, { budget = 7, ...options } = {}){
+    const translatedMachine = machine(options);
     const interpretedMachine = machine();
     /** @type {string[]} */
     const failures = [];
@@ -441,9 +421,18 @@ export function compare(cases, budget = 7, transfers = true, checkReads = undefi
 
 /**
  * Four switches run eight rounds, then eight more after a table is rewritten, each
- * case changing a word of [rbx] its own way (`long/runtime.test.js` gives the
- * source): GCC's absolute quadwords, MSVC's RVAs from a base, MinGW's offsets and a
- * table in the data area the program fills.
+ * case changing a word of [rbx] its own way, a default the indices past the bound
+ * (GNU as, `ld -Ttext=0x20000000 --oformat binary`):
+ *
+ *     jmp [tableA + rax*8]                 GCC's absolute quadwords, bound by cmp esi, 5; ja
+ *     lea rdx, [rip + base]; mov ecx, [rdx + rax*4 + tableB - base]; add rcx, rdx; jmp rcx
+ *                                          MSVC's RVAs from a base below the code (the
+ *                                          image's), the index widened by movsxd
+ *     lea rdx, [rip + tableC]; movsxd rax, [rdx + rax*4]; add rax, rdx; jmp rax
+ *                                          MinGW's offsets, the bound tested in memory
+ *     jmp [0x10000040 + rax*8]             a table in the data area, filled by the program
+ *                                          (read at forming before or after the fill), and
+ *                                          an entry rewritten once its region has run
  */
 export const SWITCHES = ''
     + '488d05d40000004889042540000010488d05cc0000004889042548000010488d05c4000000488904'
@@ -457,7 +446,23 @@ export const SWITCHES = ''
     + '56000020000000005f0000200000000081000000880000008f0000008f0000008100000051ffffff'
     + '58ffffff5effffff51ffffff';
 
-/** Clang's tables, the base's `lea` hoisted out of each loop (`long/runtime.test.js`). */
+/**
+ * Clang's tables, the base's `lea` hoisted out of each loop:
+ *
+ *             lea r13, [rip + table]; xor esi, esi; lea rax, [rip + loop]; jmp rax
+ *     loop:   mov eax, esi; and eax, 3; cmp rax, 3; ja next     entered through a register:
+ *             movsxd rcx, [r13 + rax*4]; add rcx, r13; jmp rcx  the base only in r13
+ *     c0..c3: add [rbx], 1 / add [rbx], 10 / [rbx] *= 3 / sub [rbx], 7; jmp next
+ *     next:   inc esi; cmp esi, 200; jb loop
+ *             lea r12, [rip + table2]; xor esi, esi; jmp loop2
+ *     loop2:  as loop through r12 and table2                   the lea in the region
+ *     d0..d3: xor [rbx + 8], rsi / add 5 / rol 3 / not; next2: as next
+ *             xor esi, esi; lea rax, [rip + loop3]; jmp rax
+ *     loop3:  mov ecx, esi; and ecx, 3; cmp rcx, 3; ja next3   the index written over
+ *             movsxd rcx, [r13 + rcx*4 - 16]; add rcx, r13; jmp rcx   by the table's read
+ *     e0..e3: add [rbx + 16], 3 / [rbx + 16] *= 5 / xor rsi / ror 7; next3: as next; jmp done
+ *     table3, table, table2: the cases' offsets from table (table3's) or their own table
+ */
 export const HOISTED_SWITCHES = ''
     + '4c8d2ddd00000031f6488d0502000000ffe089f083e0034883f803772349634c85004c01e9ffe148'
     + '830301eb134883030aeb0d486b1303488913eb0448832b07ffc681fec800000072c84c8d25a30000'
@@ -502,10 +507,44 @@ export const FAR_SWITCH = ''
     + '1048830301eb044883030affc683fe1e7514488d05eeffffff480fbae820488904254800001083fe2872ca';
 
 /**
- * Programs of calls and returns (`long/runtime.test.js` gives each one's source):
- * recursion past the wasm call depth, a callee that returns elsewhere, calls whose
- * callees are formed in, indirect calls predicted and not, a callee that jumps out
- * past its caller and a region left by a jump while a call waits.
+ * Programs of calls and returns: recursion past the wasm call depth, a callee that
+ * returns elsewhere, calls whose callees are formed in, indirect calls predicted and
+ * not, a callee that jumps out past its caller and a region left by a jump while a
+ * call waits. Their sources:
+ *
+ * calls:   mov ecx, 12; call fib; mov [rbx], rax; mov ecx, 80; call depth
+ *          mov [rbx + 8], rax; call skip; mov qword [rbx + 16], 1  (skip returns past it)
+ *          mov qword [rbx + 24], 2; call cold; mov [rbx + 32], rax; jmp done
+ *          fib: cmp ecx, 2; jb small; push rcx; dec ecx; call fib; pop rcx; push rax
+ *               sub ecx, 2; call fib; pop rdx; add rax, rdx; ret
+ *          small: mov eax, ecx; ret
+ *          depth: test ecx, ecx; jz zero; dec ecx; call depth; inc rax; ret
+ *          zero: xor eax, eax; ret; skip: add qword [rsp], 8; ret
+ *          cold: pxor xmm0, xmm0; mov eax, 7; ret
+ * fresh:   jmp start; f1: add ebx, 7; movd xmm3, ebx; ret
+ *          f2: lea rax, [rbx + 100]; movd edx, xmm3; add ebx, 3; paddd xmm3, xmm3; ret
+ *          body: test r10, r10; jz b; mov ebx, 1; movd xmm3, ebx; jmp q
+ *          b: call f1; q: call f2; add r13, rax; add r13, rdx; ret
+ *          start: mov r12d, 4; again: call body; dec r12d; jnz again
+ * formedAfter: mov ecx, 3; loop: call g; call leaf; dec ecx; jnz loop; jmp done
+ *          g: add eax, 0x1234; call h; ret; h: ret; leaf: mov [rbx], rax; add rbx, 8; ret
+ * predicted: mov ecx, 20000; loop: mov eax, ecx; xor edx, edx; mov r9d, 3; div r9d
+ *          lea rax, [rip + f0]; shl edx, 3; add rax, rdx; lea r10, [rcx + 7]; call rax
+ *          call g; dec ecx; jnz loop; jmp done
+ *          f0..f2: add rbx, 1 / 2 / 4; ret (eight bytes apart)
+ *          g: add rbx, r10; call h; ret; h: ret
+ * indirect: mov esi, 3; again: lea rdx, [rip + fib]; mov ecx, 10; call rdx; add [rbx], rax
+ *          lea rax, [rip + small]; mov [rbx + 64], rax; mov ecx, 7; call qword [rbx + 64]
+ *          add [rbx + 8], rax; dec esi; jnz again; jmp done
+ *          fib: as calls', its first call through rdx; small: mov eax, ecx; ret
+ * jumpedOut: mov esi, 2; again: xor eax, eax; call f
+ *          after: add [rbx], rax; dec esi; jnz again; jmp done
+ *          f: lea rdx, [rip + g]; call rdx; mov eax, 1000; ret
+ *          g: mov eax, 7; add rsp, 16; lea rdx, [rip + after]; jmp rdx
+ * expect:  mov esi, 2; again: mov ecx, 3; xor eax, eax; call f; add [rbx], rax; dec esi
+ *          jnz again; jmp done
+ *          f: call g; L: inc eax; dec ecx; jz fret; lea rdx, [rip + far]; jmp rdx
+ *          fret: ret; g: ret; far: add eax, 100; lea rdx, [rip + L]; jmp rdx
  */
 export const CALLS = Object.freeze({
     calls: ''
@@ -534,6 +573,10 @@ export const CALLS = Object.freeze({
     + 'be02000000b90300000031c0e809000000480103ffce75edeb22e810000000ffc0ffc97409'
         + '488d1504000000ffe2c3c383c064488d15e5ffffffffe2',
 });
+
+/** Whether the instruction ends a block: control leaves the straight line. @param {string} op */
+const endsBlock = op=>op === 'jmp' || op === 'call' || op === 'ret' || op.startsWith('j')
+    || op === 'loop' || op === 'loope' || op === 'loopne';
 
 /** The shift and rotate operations, which write no flag for a count of zero. */
 const SHIFTS = new Set(['shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'shld', 'shrd']);

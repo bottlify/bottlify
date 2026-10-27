@@ -196,7 +196,7 @@ test('long mode on the shared runtime steps a self-patching routine an instructi
     ()=>{
         const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
             entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
-            cork: { long: 'shared' } });
+            cork: {} });
         // At 0x11000: for ebx in 0..2999, r12d += scale(edi = ebx, esi = ebx & 3); hlt.
         // At 0x12000, scale: cmp [add's imm], esi; je; mov [add's imm], esi;
         // imul eax, edi, 0x12345678; add eax, imm; ret -- a store into its own page
@@ -225,7 +225,7 @@ test('long mode on the shared runtime steps a self-patching routine an instructi
 test('long mode\'s writes to the trap port run translated on the shared runtime', async()=>{
     const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
         entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
-        cork: { long: 'shared' } });
+        cork: {} });
     // For ebx in 0..1999: mov edx, port; mov eax, ebx; out dx, eax; add r12, rax; hlt.
     load(h, 0x11000, hex('31dbba3412000089d8ef4901c4ffc381fbd007000075ebf4'));
     let calls = 0;

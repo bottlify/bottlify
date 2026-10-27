@@ -25,8 +25,7 @@ import { createRuntimeRunner64 } from '../testing/runtime-runner64.js';
 const runtime = (memory, layout)=>createRuntimeRunner64({ memory, layout });
 
 test('the shared runtime runs long-mode code as the interpreter does on the corpus', ()=>{
-    const { failures, exits, stats } = compare(CORPUS.cases, 7, true, undefined, undefined,
-        true, 0, false, runtime);
+    const { failures, exits, stats } = compare(CORPUS.cases, { budget: 7, makeRunner: runtime });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(exits > CORPUS.cases.length * 0.9, `${exits} cases ran to their exit`);
     assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
@@ -49,8 +48,7 @@ test('outside precise, as a program runs, the corpus\'s cases that run to their 
     });
     const loose = (/** @type {WebAssembly.Memory} */ memory, /** @type {any} */ layout)=>
         createRuntimeRunner64({ memory, layout, config: { precise: false } });
-    const { failures, exits, stats } = compare(clean, 7, true, undefined, undefined, true, 0,
-        false, loose);
+    const { failures, exits, stats } = compare(clean, { budget: 7, makeRunner: loose });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.equal(exits, clean.length);
     assert.ok(clean.length > CORPUS.cases.length * 0.8, `${clean.length} cases`);
@@ -64,8 +62,7 @@ test('seeded long programs run in the shared runtime as interpreted', ()=>{
     const loops = Array.from({ length: 150 }, (_, i)=>nested(instructions, 0x2005 + i));
     for (const [cases, budget] of /** @type {const} */ ([[straight, 7], [loops, 1000]]))
     {
-        const { failures, exits, stats } = compare(cases, budget, true, undefined, undefined,
-            true, 0, false, runtime);
+        const { failures, exits, stats } = compare(cases, { budget, makeRunner: runtime });
         assert.ok(exits > cases.length * 0.6, `${exits} programs ran to their exit`);
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
@@ -82,8 +79,7 @@ test('calls and returns, switches among them, run in the shared runtime as inter
         }));
     for (const budget of [7, 100000])
     {
-        const { failures, exits, stats } = compare(cases, budget, true, undefined, undefined,
-            true, 0, false, runtime);
+        const { failures, exits, stats } = compare(cases, { budget, makeRunner: runtime });
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.equal(exits, cases.length);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
@@ -95,8 +91,7 @@ test('a switch whose entry is rewritten past the 4 GiB window faults as interpre
         ({ ...one, text: `far ${i}`, code: FAR_SWITCH }));
     for (const budget of [7, 100000])
     {
-        const { failures, stats } = compare(cases, budget, true, undefined, undefined, true, 0,
-            false, runtime);
+        const { failures, stats } = compare(cases, { budget, makeRunner: runtime });
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
@@ -107,8 +102,7 @@ test('loops whose accesses move by a stride run as interpreted, to the turn a pa
     const cases = loopCases();
     for (const budget of [7, 100000])
     {
-        const { failures, stats } = compare(cases, budget, true, undefined, undefined, true, 0,
-            false, runtime);
+        const { failures, stats } = compare(cases, { budget, makeRunner: runtime });
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
@@ -124,8 +118,8 @@ test('the interpreter tier in wasm runs translated code\'s misses in place,'
         .map((/** @type {any} */ one)=>({ ...one, text: 'calls', code })))];
     for (const budget of [7, 100000])
     {
-        const { failures, stats } = compare([...CORPUS.cases.slice(0, 600), ...cases], budget,
-            true, undefined, undefined, true, 0, true, tiered);
+        const { failures, stats } = compare([...CORPUS.cases.slice(0, 600), ...cases],
+            { budget, tiered: true, makeRunner: tiered });
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.tiered > 0, JSON.stringify(stats));
     }

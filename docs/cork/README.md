@@ -24,6 +24,9 @@ and in Node.
 
 - 32-bit user-mode x86: integer instructions, the x87, MMX, SSE, SSE2 and SSE3, with POPCNT and
   RDRAND. Exactly the set cork reports through `cpuid`.
+- 64-bit user-mode x86-64, the same set with the sixteen 64-bit registers, by the same
+  translator and runtime at a 64-bit width, its memory a 4 GiB window: an address at or past
+  4 GiB faults ([`roadmap/x64.md`](../../roadmap/x64.md)).
 - Code that rewrites itself. When the program writes over code that is already translated, the old
   translation is thrown away and a new one made. A page rewritten over and over (eight times within
   100 ms) is left to the interpreter for a while.
@@ -37,8 +40,8 @@ and in Node.
 
 ## What it does not run
 
-- 64-bit code (planned, see [`roadmap/x64.md`](../../roadmap/x64.md)), 16-bit code, privileged
-  instructions, segments other than the `fs` base (a `gs:` override adds nothing).
+- 16-bit code, privileged instructions, segments other than the `fs` base in 32-bit code and
+  the `gs` base in 64-bit code (another override adds nothing).
 - SSSE3 and anything newer: SSE4.1, SSE4.2 (POPCNT aside), AVX.
 - The x87's 80-bit precision. The FPU registers are plain 64-bit doubles: single and double
   precision are honoured, extended is computed as double. Sine, logarithm and the rest come from

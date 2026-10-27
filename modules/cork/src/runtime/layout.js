@@ -353,10 +353,6 @@ function longLayout(state, ramBase, ramSize, hashSlots){
         counter: state + 584,
         callProfile: state + 592,
         origin: state + 728,
-        // Translated long-mode code's pending flag record (`long/emit.js`):
-        // kind, width, carry in and the flags it writes in one word, then
-        // the two operands and the result.
-        longFlagRecord: state + 736,
         // The shared emitter's record (`emit/flags.js`, `recordOffsets`): kind
         // and carry in as dwords, result and operands as quadwords.
         flagRecord: state + 768,

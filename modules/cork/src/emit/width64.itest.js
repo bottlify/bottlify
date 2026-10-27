@@ -25,8 +25,7 @@ const shared = (memory, layout)=>createSharedRunner64({ memory, layout });
 test('long-mode regions of the shared emitter do what the interpreter does on the corpus', ()=>{
     for (const budget of [7, 100000])
     {
-        const { failures, exits, stats } = compare(CORPUS.cases, budget, true, undefined,
-            undefined, true, 0, false, shared);
+        const { failures, exits, stats } = compare(CORPUS.cases, { budget, makeRunner: shared });
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(exits > CORPUS.cases.length * 0.9, `${exits} cases ran to their exit`);
         assert.ok(stats.translated > 5000, JSON.stringify(stats));
@@ -64,8 +63,7 @@ test('width edges of shifts run in the shared emitter\'s regions as interpreted'
         'd2e0', 'd2fc', '41d2e1', // al, ah, r9b
         '40d2e6', // sil
     ], [0, 1, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65]);
-    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
-        shared);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
@@ -78,8 +76,7 @@ test('width edges of rotations run in the shared emitter\'s regions as interpret
     ], [0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65]).flatMap(one=>[one,
         // The carry in set: rcl and rcr take it into the value.
         { ...one, text: `${one.text} stc`, code: `f9${one.code}` }]);
-    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
-        shared);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
@@ -100,8 +97,7 @@ test('width edges of multiplies and divides run in the shared emitter\'s regions
         ], counts, ['', '31d2', '4899', 'b86400000031d2', '48c7c09cffffff4899', '99']);
         for (const cases of [multiplies, divides])
         {
-            const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0,
-                false, shared);
+            const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
             assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
             assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
         }
@@ -119,8 +115,7 @@ test('width edges of moves, scans, swaps and widenings run in the shared emitter
         '0f94c0', '410f95c0', '400f9cc6', '0f97c4', // sete al, setne r8b, setl sil, seta ah
     ], [0, 1, 0x80, 0x8000, 0x80000000, 0x100000000, -1, -0x8000000000000000n],
     ['', '4885c9', '31c0', 'b8feffffff', '66b8fe80']);
-    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
-        shared);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
@@ -131,8 +126,7 @@ test('lea under the address-size prefix keeps the address\'s low 32 bits in the 
         '67488d0408', '67488d40f0', '678d0408', '674c8d0410', '67488d8401ffffff7f', // lea r, [e..]
         '67668d0408', '488d0408', // lea ax, [eax + ecx]; lea rax, [rax + rcx]
     ], [0, 1, 0x7fffffff, 0xffffffff, 0x100000000, -1]);
-    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
-        shared);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
@@ -144,8 +138,7 @@ test('leave and indirect jumps and calls run in the shared emitter\'s regions as
         '4c8d050300000041ffe0', // jmp r8
         '48b80000000001000000ffe0', '48b80000000001000000ffd0', // past the window
     ], [0], ['', '4885c9']);
-    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
-        shared);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
@@ -161,8 +154,7 @@ test('SIMD moves and conversions of quadword general operands run in the shared 
         'f20f2cc0', 'f30f2dc0', // the dword forms
     ], [0, 1, -1, 0x7fffffff, 0x80000000, 0x7fffffffffffffffn, -0x8000000000000000n, 12345678901n],
     ['', 'f2480f2ac1', 'f3480f2ac1', '66480f6ec1', '48b800000000000000c3', '48b80000000000f04743']);
-    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
-        shared);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
@@ -175,8 +167,7 @@ test('bit tests run in the shared emitter\'s regions as interpreted', ()=>{
         '480fa30c24', '0fab0c24', '660fb30c24', '480fbb0c24', // bit strings from [rsp]
         '480fba242405', '0fba2c241f', // bt [rsp], imm
     ], [0, 1, 31, 32, 63, 64, 100, -1, -64, -65, -0x1000]);
-    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
-        shared);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
     // Every bit string lies in the data around rsp: none leaves for the interpreter.
@@ -189,8 +180,7 @@ test('switches run in the shared emitter\'s regions as interpreted, their index 
             code })));
     for (const budget of [7, 100000])
     {
-        const { failures, exits, stats } = compare(cases, budget, true, undefined, undefined,
-            true, 0, false, shared);
+        const { failures, exits, stats } = compare(cases, { budget, makeRunner: shared });
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.equal(exits, cases.length);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
@@ -205,8 +195,7 @@ test('seeded long programs run in the shared emitter\'s regions as interpreted',
     for (const [cases, budget] of /** @type {const} */ ([[straight, 7], [loops, 7],
         [loops, 1000]]))
     {
-        const { failures, exits, stats } = compare(cases, budget, true, undefined, undefined,
-            true, 0, false, shared);
+        const { failures, exits, stats } = compare(cases, { budget, makeRunner: shared });
         assert.ok(exits > cases.length * 0.6, `${exits} programs ran to their exit`);
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(stats.translated > 0, JSON.stringify(stats));
@@ -219,8 +208,7 @@ test('loops whose accesses move by a stride run as interpreted, to the turn a pa
     const cases = loopCases(false);
     for (const budget of [7, 100000])
     {
-        const { failures, stats } = compare(cases, budget, true, undefined, undefined, true, 0,
-            false, shared);
+        const { failures, stats } = compare(cases, { budget, makeRunner: shared });
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }

@@ -605,6 +605,17 @@ function emitForm(e, instruction, flagsLive){
         case 'cvtsi2ss': case 'cvtsi2sd':
         {
             const double = op === 'cvtsi2sd';
+            if (src.size === 8)
+            {
+                // A quadword rounds by MXCSR's rounding control, which wasm's
+                // conversion does not read: nearest here, any other mode the
+                // interpreter's.
+                atState(e.context, b).load('i32', { offset: e.layout.mxcsr }).i32const(0x6000)
+                    .op(I32.and);
+                e.openGuard('rounded', EMPTY);
+                e.exitBefore(e.current.eip, Exit.UNTRANSLATED);
+                e.close();
+            }
             prepareAddress(e, src);
             readV(e, dst, 16);
             readOp(e, src);
