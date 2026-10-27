@@ -1817,3 +1817,237 @@ test('DispCallFunc pushes each argument as its type occupies the stack', async()
     assert.equal(OLEAUT32_ORDINALS[420], 'OleCreateFontIndirect');
     assert.equal(fx.OleCreateFontIndirect.argBytes, 12);
 });
+
+/**
+ * A double, or a 64-bit integer, as the two stack words it is passed in.
+ *
+ * @param {number | bigint} value
+ */
+const words = value=>{
+    const view = new DataView(new ArrayBuffer(8));
+    if (typeof value === 'bigint')
+    {
+        view.setBigInt64(0, value, true);
+    }
+    else
+    {
+        view.setFloat64(0, value, true);
+    }
+    return [view.getUint32(0, true), view.getUint32(4, true)];
+};
+
+/** @param {number} address */
+const i64At = address=>new DataView(host.bytes.buffer).getBigInt64(address, true);
+
+test('Var<to>From<from> rounds a half to even, overflows past the range, and wraps a boolean', ()=>{
+    setUp();
+    const OUT = 0x3000;
+    assert.equal(call('VarI1FromR8', [...words(-128.5), OUT]), S_OK);
+    assert.equal(host.bytes[OUT], 0x80);
+    assert.equal(call('VarI1FromR8', [...words(127.5), OUT]), DISP_E_OVERFLOW);
+    assert.equal(call('VarI4FromR8', [...words(2.5), OUT]), S_OK);
+    assert.equal(host.u32(OUT), 2);
+    assert.equal(call('VarUI1FromI1', [-1, OUT]), DISP_E_OVERFLOW);
+    // A boolean is not range-checked: it wraps into the narrower type.
+    assert.equal(call('VarUI1FromBool', [0xffff, OUT]), S_OK);
+    assert.equal(host.bytes[OUT], 255);
+    assert.equal(call('VarUI4FromBool', [0x8000, OUT]), S_OK);
+    assert.equal(host.u32(OUT), 0xffff8000);
+    assert.equal(call('VarI8FromStr', [TEXT, 0x409, 0, OUT]), DISP_E_TYPEMISMATCH, 'no string yet');
+    host.putWide(TEXT, '-9223372036854775808');
+    assert.equal(call('VarI8FromStr', [TEXT, 0x409, 0, OUT]), S_OK);
+    assert.equal(i64At(OUT), -(1n << 63n));
+    assert.equal(fx.VarI2FromR8.argBytes, 12);
+    assert.equal(fx.VarI2FromDec.argBytes, 8);
+    assert.equal(fx.VarDecFromStr.argBytes, 16);
+    assert.equal(OLEAUT32_ORDINALS[58], 'VarI4FromUI1');
+    assert.equal(OLEAUT32_ORDINALS[283 - 1], 'VarUI4FromDec');
+});
+
+test('a CY is made from a double as the x87 multiplies, and an I8 short of its limit', ()=>{
+    setUp();
+    const OUT = 0x3000;
+    assert.equal(call('VarCyFromR8', [...words(-461168601842738.8125), OUT]), S_OK);
+    assert.equal(BigInt.asUintN(64, i64At(OUT)), 0xbfffffffffffff23n);
+    assert.equal(call('VarCyFromR4', [new Uint32Array(new Float32Array([-0.00005]).buffer)[0],
+        OUT]), S_OK);
+    assert.equal(i64At(OUT), 0n);
+    assert.equal(call('VarCyFromI8', [...words(-922337203685477n), OUT]), DISP_E_OVERFLOW);
+    assert.equal(call('VarCyFromI8', [...words(-922337203685476n), OUT]), S_OK);
+    assert.equal(call('VarCyFromUI8', [...words(922337203685477n), OUT]), S_OK);
+    // A negative CY becomes an I8 one below its whole part.
+    assert.equal(call('VarI8FromCy', [...words(-1280000n), OUT]), S_OK);
+    assert.equal(i64At(OUT), -129n);
+    assert.equal(call('VarI8FromCy', [...words(5000n), OUT]), S_OK);
+    assert.equal(i64At(OUT), 0n);
+});
+
+test('a DECIMAL from a boolean is -1, its sign is worked unchecked, and rounding keeps it', ()=>{
+    setUp();
+    const IN = 0x3000;
+    const OUT = 0x3020;
+    assert.equal(call('VarDecFromBool', [5, OUT]), S_OK);
+    assert.deepEqual([host.bytes[OUT + 3], host.u32(OUT + 8)], [0x80, 1]);
+    host.bytes.fill(0, IN, IN + 16);
+    assert.equal(call('VarDecNeg', [IN, OUT]), S_OK);
+    assert.equal(host.bytes[OUT + 3], 0x80, 'zero negated is negative zero');
+    host.bytes[IN + 3] = 0x7f;
+    host.putU32(IN + 8, 1);
+    assert.equal(call('VarDecNeg', [IN, OUT]), S_OK);
+    assert.equal(host.bytes[OUT + 3], 0xff);
+    assert.equal(call('VarDecAbs', [IN, OUT]), S_OK);
+    assert.equal(host.bytes[OUT + 3], 0x7f);
+    host.bytes[IN + 2] = 1;
+    host.bytes[IN + 3] = 0x80;
+    assert.equal(call('VarDecRound', [IN, 0, OUT]), S_OK);
+    assert.deepEqual([host.bytes[OUT + 2], host.bytes[OUT + 3], host.u32(OUT + 8)], [0, 0x80, 0]);
+    assert.equal(call('VarDecRound', [IN, -1, OUT]), E_INVALIDARG);
+    host.bytes[IN + 2] = 29;
+    assert.equal(call('VarI4FromDec', [IN, OUT]), E_INVALIDARG);
+});
+
+test('VarCy* work exactly on the four places, and Int and Fix cut down and towards zero', ()=>{
+    setUp();
+    const OUT = 0x3000;
+    assert.equal(call('VarCyMul', [...words(5000n), ...words(-6000n), OUT]), S_OK);
+    assert.equal(i64At(OUT), -3000n);
+    assert.equal(call('VarCyMul', [...words(9223372036854760000n), ...words(200000000n), OUT]),
+        DISP_E_OVERFLOW);
+    assert.equal(call('VarCyInt', [...words(-1n), OUT]), S_OK);
+    assert.equal(i64At(OUT), -10000n);
+    assert.equal(call('VarCyFix', [...words(-19999n), OUT]), S_OK);
+    assert.equal(i64At(OUT), -10000n);
+    assert.equal(call('VarCyRound', [...words(5568n), 2, OUT]), S_OK);
+    assert.equal(i64At(OUT), 5600n);
+    assert.equal(call('VarCyCmpR8', [...words(10000n), ...words(2), OUT]), 0, 'VARCMP_LT');
+    assert.equal(call('VarR8Round', [...words(0.5568), -1, OUT]), E_INVALIDARG);
+});
+
+test('a float is spelled to seven digits and a double to fifteen, E+ past them', ()=>{
+    setUp();
+    const OUT = 0x3000;
+    /** @param {string} name @param {number[]} args */
+    const spelled = (name, args)=>{
+        assert.equal(call(name, [...args, 0x409, 0, OUT]), S_OK);
+        const bstr = host.u32(OUT);
+        return String.fromCharCode(...new Uint16Array(host.bytes.slice(bstr,
+            bstr + host.u32(bstr - 4)).buffer));
+    };
+    assert.equal(spelled('VarBstrFromR8', words(5.6789e-11)), '0.000000000056789');
+    assert.equal(spelled('VarBstrFromR8', words(5.6789e-12)), '5.6789E-12');
+    assert.equal(spelled('VarBstrFromR8', words(999999999999999)), '999999999999999');
+    assert.equal(spelled('VarBstrFromR8', words(1.234e16)), '1.234E+16');
+    assert.equal(spelled('VarBstrFromR8', words(Math.PI)), '3.14159265358979');
+    const float = (/** @type {number} */ number)=>[new Uint32Array(
+        new Float32Array([number]).buffer)[0]];
+    assert.equal(spelled('VarBstrFromR4', float(Math.PI)), '3.141593');
+    assert.equal(spelled('VarBstrFromR4', float(1e8)), '1E+08');
+    assert.equal(spelled('VarBstrFromI4', [-7]), '-7');
+    host.bytes.fill(0, 0x3100, 0x3110);
+    host.bytes[0x3102] = 2;
+    host.putU32(0x3108, 150);
+    assert.equal(spelled('VarBstrFromDec', [0x3100]), '1.5');
+});
+
+test('VariantChangeType moves same-width integers by their bits; a failure touches nothing', ()=>{
+    setUp();
+    const VT_I1 = 16;
+    const VT_ERROR = 10;
+    const VT_NULL = 1;
+    host.putVariant(VARIANT_A, VT_I1, 0xff);
+    host.putVariant(VARIANT_B, VT_I4, 77);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_UI1]), S_OK);
+    assert.deepEqual([host.u16(VARIANT_B), host.bytes[VARIANT_B + 8]], [VT_UI1, 255]);
+    host.putVariant(VARIANT_B, VT_I4, 77);
+    host.putVariant(VARIANT_A, VT_ERROR, 1);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_I4]), DISP_E_TYPEMISMATCH);
+    assert.equal(host.u32(VARIANT_B + 8), 77, 'a failure leaves the target');
+    host.putVariant(VARIANT_A, VT_NULL, 0);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_EMPTY]),
+        DISP_E_TYPEMISMATCH);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_NULL]), S_OK);
+    host.putVariant(VARIANT_A, VT_BOOL, 1);
+    host.putVariant(VARIANT_B, 0xff, 0);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_BSTR]), 0x80020008,
+        'DISP_E_BADVARTYPE: a target holding no variant type is not cleared');
+    host.putVariant(VARIANT_B, VT_EMPTY, 0);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_BSTR]), S_OK);
+    assert.equal(host.u16(host.u32(VARIANT_B + 8)), '1'.charCodeAt(0), 'a boolean 1 is "1"');
+    host.putVariant(VARIANT_A, VT_BYREF | 12, 0);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_BYREF | VT_I4]),
+        DISP_E_TYPEMISMATCH, 'a reference to nothing, before the reference asked for');
+});
+
+test('a conversion from an object reads its default value through Invoke', async()=>{
+    setUp();
+    const OBJECT = 0x4000;
+    const VTABLE = 0x4010;
+    host.putU32(OBJECT, VTABLE);
+    host.putU32(VTABLE + 6 * 4, 0x5000);
+    let fail = false;
+    /** @type {number[][]} */
+    const calls = [];
+    Object.assign(host, {
+        /** @param {number} entry @param {number[]} args */
+        call: (entry, args)=>{
+            calls.push([entry, ...args]);
+            if (!fail)
+            {
+                host.putVariant(args[6], VT_UI1, 1);
+            }
+            return Promise.resolve(fail ? 0x8007000e : 0);
+        },
+    });
+    fx = createAutomationFunctions(host);
+    const OUT = 0x3000;
+    host.bytes[OUT] = 10;
+    assert.equal(await fx.VarUI1FromDisp.handler([OBJECT, 0x409, OUT]), S_OK);
+    assert.equal(host.bytes[OUT], 1);
+    const [entry, object, dispid, , , flags, params] = calls[0];
+    assert.deepEqual([entry, object, dispid, flags, host.u32(params + 8)],
+        [0x5000, OBJECT, 0, 2, 0]);
+    fail = true;
+    host.bytes[OUT] = 10;
+    assert.equal(await fx.VarUI1FromDisp.handler([OBJECT, 0x409, OUT]), DISP_E_TYPEMISMATCH);
+    assert.equal(host.bytes[OUT], 10);
+});
+
+test('SysReAllocStringLen shrinks in place and keeps the characters without a source', ()=>{
+    setUp();
+    host.putU32(SLOT, call('SysAllocStringLen', [0, 64]));
+    const before = host.u32(SLOT);
+    host.putWide(before, 'abcdef');
+    assert.equal(call('SysReAllocStringLen', [SLOT, 0, 24]), 1);
+    assert.equal(host.u32(SLOT), before);
+    assert.equal(host.u32(before - 4), 48);
+    assert.equal(host.u16(before + 48), 0);
+    assert.equal(host.u16(before), 'a'.charCodeAt(0));
+    assert.equal(call('SysReAllocStringLen', [SLOT, 0, 100]), 1);
+    assert.equal(host.u16(host.u32(SLOT) + 2), 'b'.charCodeAt(0),
+        'a grown string keeps its text');
+    assert.equal(call('SysAllocStringByteLen', [TEXT, 0x80000000]), 0);
+});
+
+test('ClearCustData clears each item, frees the items and zeroes both fields', ()=>{
+    setUp();
+    const CUSTOM = 0x3000;
+    const items = host.heap.allocate(64);
+    host.bytes.fill(0, items, items + 64);
+    host.putU32(CUSTOM, 2);
+    host.putU32(CUSTOM + 4, items);
+    host.putU32(SLOT, call('SysAllocString', [TEXT]));
+    host.putVariant(items + 32 + 16, VT_BSTR, host.u32(SLOT));
+    const live = host.live.size;
+    call('ClearCustData', [CUSTOM]);
+    assert.deepEqual([host.u32(CUSTOM), host.u32(CUSTOM + 4)], [0, 0]);
+    assert.equal(host.live.size, live - 2, 'the string and the items');
+});
+
+test('VarBstrCmp takes only a missing or zero-length string as empty, a lone NUL as text', ()=>{
+    setUp();
+    const nul = call('SysAllocStringLen', [0, 1]);
+    const empty = call('SysAllocStringLen', [0, 0]);
+    assert.equal(call('VarBstrCmp', [nul, empty, 0x409, 0]), 2, 'VARCMP_GT');
+    assert.equal(call('VarBstrCmp', [empty, 0, 0x409, 0]), 1, 'VARCMP_EQ');
+    assert.equal(call('VarBstrCmp', [0, nul, 0, 0]), 0, 'VARCMP_LT');
+});

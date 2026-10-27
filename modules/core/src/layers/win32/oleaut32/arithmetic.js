@@ -912,3 +912,143 @@ export function currencyFromText(text){
     const outcome = attempt(()=>currencyResult(exactIn(variantValue(VT_BSTR, { text }))));
     return typeof outcome === 'number' ? outcome : /** @type {Exact} */ (outcome.exact).value;
 }
+
+/**
+ * A value converted to another type, as VariantChangeType and the
+ * Var<to>From<from> functions convert it: an integral type rounded a half to
+ * the even neighbour and refused with an overflow where it does not fit, a
+ * boolean true for anything but zero, a float or a date past its range an
+ * overflow, a CY and a DECIMAL read exactly. A string is read as a number --
+ * or, for a boolean, also as True or False -- but not as a date, whose
+ * reading needs the clock and belongs to the caller; nor is a value spelled
+ * here. EMPTY is zero; anything else no conversion takes is a mismatch.
+ *
+ * @param {Value} value @param {number} type
+ * @returns {Outcome}
+ */
+export const coerce = (value, type)=>attempt(()=>{
+    if (value.type === VT_NULL || value.type === VT_ERROR
+        || value.type === VT_DISPATCH || value.type === VT_UNKNOWN)
+    {
+        return refuse(DISP_E_TYPEMISMATCH);
+    }
+    switch (type)
+    {
+        case VT_BOOL: {
+            if (value.type === VT_BSTR)
+            {
+                const truth = boolOf(String(value.text));
+                return truth === null ? refuse(DISP_E_TYPEMISMATCH)
+                    : variantValue(VT_BOOL, { integer: BigInt(truth) });
+            }
+            const zero = value.integer !== null ? value.integer === 0n
+                : value.exact !== null ? value.exact.value === 0n : realOf(value) === 0;
+            return variantValue(VT_BOOL, { integer: zero ? 0n : -1n });
+        }
+        case VT_R4: {
+            const real = realOf(value);
+            return Math.abs(real) <= R4_MAX || Number.isNaN(real)
+                ? variantValue(VT_R4, { real: Math.fround(real) }) : refuse(DISP_E_OVERFLOW);
+        }
+        case VT_R8:
+            return variantValue(VT_R8, { real: realOf(value) });
+        case VT_DATE: {
+            const real = realOf(value);
+            return real > FIRST_DAY - 1 && real < LAST_DAY + 1
+                ? variantValue(VT_DATE, { real }) : refuse(DISP_E_OVERFLOW);
+        }
+        case VT_CY:
+            return variantValue(VT_CY, { exact: { value: currencyIn(value), scale: 4 } });
+        case VT_DECIMAL:
+            return decimalResult(exactIn(value));
+        default:
+            if (!RANGES.has(type))
+            {
+                return refuse(DISP_E_BADVARTYPE);
+            }
+            // A boolean is not range-checked but wraps: VarUI1FromBool(-1) is
+            // 255 and VarUI4FromBool(-32768) is 0xffff8000.
+            if (value.type === VT_BOOL && value.integer !== null)
+            {
+                const [low] = /** @type {bigint[]} */ (RANGES.get(type));
+                const bits = BITS.get(type) ?? 32;
+                return variantValue(type, { integer: low < 0n
+                    ? BigInt.asIntN(bits, value.integer) : BigInt.asUintN(bits, value.integer) });
+            }
+            // A negative CY becomes an I8 one below its whole part, -1 for
+            // -0.4 and -129 for -128, where every other conversion rounds.
+            if (value.type === VT_CY && type === VT_I8 && value.exact !== null
+                && value.exact.value < 0n)
+            {
+                return variantValue(type, { integer: value.exact.value / 10000n - 1n });
+            }
+            return variantValue(type, { integer: integerIn(value, type) });
+    }
+});
+
+/** The whole units an I8 may have to become a CY, both ends excluded. */
+const CY_WHOLE = 922337203685477n;
+
+/**
+ * A value as a CY's ten-thousandths, as the Var*FromCy conversions make it.
+ * A double is multiplied by 10000 as the x87 multiplies, to a 64-bit
+ * mantissa, and that rounded to a whole number a half to the even
+ * neighbour -- not read by the digits it spells, which is how
+ * -461168601842738.7904 lands on ...ff23. An I8 is refused from
+ * +/-922337203685477 on, one short of what the units would hold; a UI8
+ * is not.
+ *
+ * @param {Value} value
+ * @returns {bigint}
+ */
+const currencyIn = value=>{
+    if (value.type === VT_I8)
+    {
+        const integer = /** @type {bigint} */ (value.integer);
+        return integer > -CY_WHOLE && integer < CY_WHOLE ? integer * 10000n
+            : refuse(DISP_E_OVERFLOW);
+    }
+    if (value.type !== VT_R4 && value.type !== VT_R8 && value.type !== VT_DATE)
+    {
+        return currencyOf(value);
+    }
+    const real = /** @type {number} */ (value.real);
+    if (!Number.isFinite(real))
+    {
+        return refuse(DISP_E_OVERFLOW);
+    }
+    const view = new DataView(new ArrayBuffer(8));
+    view.setFloat64(0, real, true);
+    const bits = view.getBigUint64(0, true);
+    const biased = Number((bits >> 52n) & 0x7ffn);
+    const fraction = bits & ((1n << 52n) - 1n);
+    let mantissa = (biased === 0 ? fraction : fraction | (1n << 52n)) * 10000n;
+    let exponent = (biased === 0 ? 1 : biased) - 1075;
+    const width = mantissa.toString(2).length;
+    if (width > 64)
+    {
+        mantissa = halfEven(mantissa, width - 64);
+        exponent += width - 64;
+    }
+    const units = exponent >= 0 ? mantissa << BigInt(exponent)
+        : halfEven(mantissa, -exponent);
+    const signed = real < 0 ? -units : units;
+    return signed >= CY_RANGE[0] && signed <= CY_RANGE[1] ? signed : refuse(DISP_E_OVERFLOW);
+};
+
+/**
+ * A magnitude shifted right `shift` bits, rounded a half to the even neighbour.
+ *
+ * @param {bigint} magnitude @param {number} shift
+ */
+const halfEven = (magnitude, shift)=>{
+    const by = BigInt(shift);
+    const kept = magnitude >> by;
+    const rest = magnitude - (kept << by);
+    const half = 1n << (by - 1n);
+    return rest > half || (rest === half && (kept & 1n) === 1n) ? kept + 1n : kept;
+};
+
+/** The width of each integral type a boolean wraps into. */
+const BITS = new Map([[VT_I1, 8], [VT_UI1, 8], [VT_I2, 16], [VT_UI2, 16], [VT_I8, 64],
+    [VT_UI8, 64]]);

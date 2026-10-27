@@ -40,17 +40,18 @@ import {
     compareExact, decimalBytes, exactOf, readDecimal, round, roundNumber, toNumber,
 } from './varmath.js';
 import {
-    add, and, currencyFromText, divide, integerDivide, isOperandType, modulo, multiply, nearest,
-    negate, not, or, subtract, variantValue, xor,
+    add, and, divide, integerDivide, isOperandType, modulo, multiply, nearest,
+    coerce, negate, not, or, subtract, variantValue, xor,
 } from './arithmetic.js';
 import {
-    boolOf, dateFromText, numberOf, parseNumber, textOfCurrency, textOfDate,
+    boolOf, dateFromText, numberOf, parseNumber, textOfCurrency, textOfDate, textOfExact,
+    textOfReal,
 } from './vartext.js';
 import {
     DISP_E_BADVARTYPE, DISP_E_OVERFLOW, DISP_E_TYPEMISMATCH, VARIANT_FALSE, VARIANT_TRUE,
     VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH, VT_EMPTY,
     VT_ERROR, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_NULL, VT_R4, VT_R8, VT_RESERVED,
-    VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
+    VT_RECORD, VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
 } from './vartypes.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
@@ -90,8 +91,13 @@ const DISP_E_ARRAYISLOCKED = 0x8002000d | 0;
 const ELEMENT_BYTES = Object.freeze({
     [VT_I2]: 2, [VT_I4]: 4, [VT_R4]: 4, [VT_R8]: 8, [VT_BSTR]: 4, [VT_DISPATCH]: 4,
     [VT_ERROR]: 4, [VT_BOOL]: 2, [VT_VARIANT]: VARIANT_BYTES, [VT_UNKNOWN]: 4, [VT_I1]: 1,
-    [VT_UI1]: 1, [VT_UI2]: 2, [VT_UI4]: 4, [VT_INT]: 4, [VT_UINT]: 4,
+    [VT_UI1]: 1, [VT_UI2]: 2, [VT_UI4]: 4, [VT_INT]: 4, [VT_UINT]: 4, [VT_CY]: 8, [VT_DATE]: 8,
+    [VT_I8]: 8, [VT_UI8]: 8, [VT_DECIMAL]: 16,
 });
+
+/** The types whose value is its bytes alone, with nothing it owns to copy. */
+const PLAIN_TYPES = new Set([VT_I1, VT_UI1, VT_I2, VT_UI2, VT_I4, VT_UI4, VT_INT, VT_UINT, VT_I8,
+    VT_UI8, VT_R4, VT_R8, VT_CY, VT_DATE, VT_BOOL, VT_ERROR, VT_DECIMAL]);
 
 /** VariantChangeType's flags: only the one that changes an answer here. */
 const VARIANT_ALPHABOOL = 0x0002;
@@ -110,6 +116,8 @@ const E_OUTOFMEMORY = 0x8007000e;
 const DISP_E_PARAMNOTFOUND = 0x80020004 | 0;
 const DISP_E_BADINDEX = 0x8002000b | 0;
 const E_UNEXPECTED = 0x8000ffff | 0;
+const DISPID_VALUE = 0;
+const DISPATCH_PROPERTYGET = 2;
 
 /**
  * NUMPARSE's fields (six 32-bit words) and the NUMPRS_* flags this build
@@ -636,6 +644,16 @@ export function createAutomationFunctions(host){
         return S_OK;
     };
 
+    /**
+     * `then` of an answer that may still be on its way, at once when it is not.
+     *
+     * @param {number | Promise<number>} answer
+     * @param {(hr: number) => number | Promise<number>} then
+     * @returns {number | Promise<number>}
+     */
+    const whenAnswered = (answer, then)=>(typeof answer === 'number' ? then(answer)
+        : answer.then(then));
+
     /** @returns {Owed} */
     const nothingOwed = ()=>({ addRef: [], release: [] });
 
@@ -704,7 +722,7 @@ export function createAutomationFunctions(host){
         }
         if (type === VT_BSTR)
         {
-            const text = value.text ?? formatNumber(value, flags);
+            const text = value.text;
             if (text === null)
             {
                 return DISP_E_TYPEMISMATCH;
@@ -777,29 +795,40 @@ export function createAutomationFunctions(host){
     };
 
     /**
-     * A number as a program expects to read it back.
+     * A value as VariantChangeType and the VarBstrFrom* functions spell it in
+     * English: a boolean as its number -- 1 when it holds 1 -- unless
+     * VARIANT_ALPHABOOL asks for words, a float to seven digits and a double to fifteen, a CY and a
+     * DECIMAL exactly, a date as VarBstrFromDate spells it, EMPTY as nothing.
      *
-     * @param {LoadedVariant} value @param {number} flags
-     * @returns {string | null}
+     * @param {import('./arithmetic.js').Value} value @param {number} flags
+     * @param {number} dateFlags  VAR_TIMEVALUEONLY or VAR_DATEVALUEONLY
+     * @returns {string | number} the text, or the HRESULT
      */
-    const formatNumber = (value, flags)=>{
-        if (value.number === null)
+    const spelled = (value, flags, dateFlags = 0)=>{
+        switch (value.type)
         {
-            return null;
+            case VT_EMPTY:
+                return '';
+            case VT_BOOL:
+                if ((flags & VARIANT_ALPHABOOL) !== 0)
+                {
+                    return value.integer !== 0n ? 'True' : 'False';
+                }
+                return String(value.integer);
+            case VT_R4:
+                return textOfReal(Number(value.real), 7);
+            case VT_R8:
+                return textOfReal(Number(value.real), 15);
+            case VT_DATE:
+                return textOfDate(Number(value.real), dateFlags) ?? E_INVALIDARG;
+            case VT_CY:
+            case VT_DECIMAL:
+                return textOfExact(/** @type {import('./varmath.js').Exact} */ (value.exact));
+            case VT_BSTR:
+                return String(value.text);
+            default:
+                return value.integer === null ? DISP_E_TYPEMISMATCH : String(value.integer);
         }
-        if (value.type === VT_BOOL)
-        {
-            // Windows spells a boolean as its number unless asked for words,
-            // which is what VARIANT_ALPHABOOL asks for.
-            const alpha = (flags & VARIANT_ALPHABOOL) !== 0;
-            const truth = value.number !== 0;
-            return alpha ? (truth ? 'True' : 'False') : (truth ? '-1' : '0');
-        }
-        if (value.type === VT_EMPTY || value.type === VT_NULL)
-        {
-            return '';
-        }
-        return String(value.number);
     };
 
     /**
@@ -815,28 +844,131 @@ export function createAutomationFunctions(host){
 
     /**
      * VariantChangeType and VariantChangeTypeEx, which differ only in taking a
-     * locale this build has nothing to do with.
+     * locale this build has nothing to do with. A number, a boolean, a date, a
+     * CY or a DECIMAL is made by the conversion the Var<to>From<from>
+     * functions make, an object's default value read first; the destination
+     * is touched only once the conversion has succeeded, so a failure leaves
+     * it as it was. An object is converted to its default value only when it
+     * cannot answer by itself, which is answered after the program's Invoke.
      *
      * @param {number} dest @param {number} src @param {number} flags @param {number} vt
-     * @param {Owed} owed
+     * @param {Owed} owed @param {number} [lcid] @param {unknown} [thread]
+     * @returns {number | Promise<number>}
      */
-    const changeType = (dest, src, flags, vt, owed)=>{
+    const changeType = (dest, src, flags, vt, owed, lcid = 0, thread = undefined)=>{
         if (dest === 0 || src === 0)
         {
             return E_INVALIDARG;
         }
         const type = vt & VT_TYPEMASK;
-        if ((vt & VT_BYREF) !== 0)
+        if (!isOperandType(type) || (vt & ~(VT_TYPEMASK | VT_BYREF | VT_ARRAY)) !== 0)
         {
             return DISP_E_BADVARTYPE;
         }
+        // A reference to nothing is refused before a reference is as a target.
         const value = load(src, true);
         if (value === null)
         {
             return DISP_E_TYPEMISMATCH;
         }
-        clear(dest, owed);
-        return store(dest, type, value, flags, owed);
+        if ((vt & VT_BYREF) !== 0)
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        // An error code and a null convert to nothing but their own type.
+        if (type === VT_VARIANT || type === VT_RECORD
+            || (type === VT_ERROR || value.type === VT_ERROR || value.type === VT_NULL)
+                && value.type !== type)
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        if (!CONVERTED.has(type) && (type !== VT_BSTR || value.type === VT_BSTR
+            || value.type === VT_NULL))
+        {
+            if (!isVariantType(readU16(dest)))
+            {
+                return DISP_E_BADVARTYPE;
+            }
+            clear(dest, owed);
+            return store(dest, type, value, flags, owed);
+        }
+        /** @param {import('./arithmetic.js').Value} from */
+        const convert = from=>{
+            const outcome = type === VT_BSTR ? bstrOutcome(spelled(from, flags))
+                : from.type === VT_BSTR && type === VT_DATE ? dateOutcome(String(from.text))
+                    : coerce(SAME_WIDTH.get(from.type)?.has(type) ? reinterpreted(from, type)
+                        : from, type);
+            if (typeof outcome === 'number')
+            {
+                return outcome;
+            }
+            if (!isVariantType(readU16(dest)))
+            {
+                return DISP_E_BADVARTYPE;
+            }
+            clear(dest, owed);
+            return writeOutcome(dest, outcome);
+        };
+        if (value.type === VT_DISPATCH)
+        {
+            return defaultValue(value.pointer, lcid, thread, convert);
+        }
+        const read = readOperand(src);
+        return typeof read === 'number' ? read : convert(read);
+    };
+
+    /**
+     * The integral types VariantChangeType moves a value between by its bits
+     * rather than its number: a signed type and the unsigned one of its width,
+     * so VT_I1 -1 becomes VT_UI1 255 and VT_UI4 0xffffffff becomes VT_I4 -1,
+     * where VarUI1FromI1 and VarI4FromUI4 refuse with an overflow.
+     */
+    const SAME_WIDTH = new Map([[VT_I1, new Set([VT_UI1])], [VT_UI1, new Set([VT_I1])],
+        [VT_I2, new Set([VT_UI2])], [VT_UI2, new Set([VT_I2])],
+        [VT_I4, new Set([VT_UI4, VT_UINT])], [VT_INT, new Set([VT_UI4, VT_UINT])],
+        [VT_UI4, new Set([VT_I4, VT_INT])], [VT_UINT, new Set([VT_I4, VT_INT])]]);
+
+    /**
+     * @param {import('./arithmetic.js').Value} value @param {number} type
+     * @returns {import('./arithmetic.js').Value}
+     */
+    const reinterpreted = (value, type)=>{
+        const bits = value.type === VT_I1 || value.type === VT_UI1 ? 8
+            : value.type === VT_I2 || value.type === VT_UI2 ? 16 : 32;
+        const integer = /** @type {bigint} */ (value.integer);
+        const signed = type === VT_I1 || type === VT_I2 || type === VT_I4 || type === VT_INT;
+        return variantValue(type, { integer: signed ? BigInt.asIntN(bits, integer)
+            : BigInt.asUintN(bits, integer) });
+    };
+
+    /**
+     * Whether a VARTYPE is one a variant can hold, so that whatever it holds
+     * can be cleared out of it: a destination that is not is left alone.
+     *
+     * @param {number} declared
+     */
+    const isVariantType = declared=>(declared & ~(VT_TYPEMASK | VT_BYREF | VT_ARRAY)) === 0
+        && isOperandType(declared & VT_TYPEMASK);
+
+    /** The types VariantChangeType makes by the shared conversion. */
+    const CONVERTED = new Set([VT_I1, VT_UI1, VT_I2, VT_UI2, VT_I4, VT_UI4, VT_INT, VT_UINT,
+        VT_I8, VT_UI8, VT_R4, VT_R8, VT_DATE, VT_CY, VT_DECIMAL, VT_BOOL]);
+
+    /**
+     * @param {string | number} text
+     * @returns {import('./arithmetic.js').Outcome}
+     */
+    const bstrOutcome = text=>(typeof text === 'number' ? text : variantValue(VT_BSTR, { text }));
+
+    /**
+     * A string read as a date, as VarDateFromStr reads it.
+     *
+     * @param {string} text
+     * @returns {import('./arithmetic.js').Outcome}
+     */
+    const dateOutcome = text=>{
+        const date = dateFromText(text, 0, thisYear);
+        return date === null ? DISP_E_TYPEMISMATCH : variantValue(VT_DATE, { real: date });
     };
 
     const typeLibraries = host.vtables ? createTypeLibraryObjects({
@@ -1359,27 +1491,6 @@ export function createAutomationFunctions(host){
     });
 
     /**
-     * Var*FromStr for an integral type: the text read as VarR8FromStr reads
-     * it, rounded as every conversion to an integral type here rounds, and an
-     * overflow outside the type's range rather than a wrap.
-     *
-     * @param {string} api @param {number} type @param {number} size  the bytes written
-     */
-    const integerFromString = (api, type, size)=>fromString(api, text=>{
-        const number = parseText(text);
-        if (number === null)
-        {
-            return DISP_E_TYPEMISMATCH;
-        }
-        const whole = nearest(number);
-        if (!fits(type, whole))
-        {
-            return DISP_E_OVERFLOW;
-        }
-        return valueBytes(view=>view.setInt32(0, whole | 0, true)).subarray(0, size);
-    });
-
-    /**
      * A VarBstrFrom*: the value `spell` spells, in a new BSTR through the last
      * argument, or the HRESULT spelling it failed with. The out pointer is
      * required, E_POINTER without it.
@@ -1616,7 +1727,444 @@ export function createAutomationFunctions(host){
         },
     });
 
+    /**
+     * How each type a Var<to>From<from> takes arrives on the stack -- its
+     * VARTYPE and the bytes it takes there -- and how many bytes each type
+     * the answer can be is written as. A DECIMAL arrives by pointer and a
+     * string as an OLECHAR pointer, a locale and flags.
+     */
+    const CONVERSION_SOURCES = Object.freeze({
+        I1: [VT_I1, 4], UI1: [VT_UI1, 4], I2: [VT_I2, 4], UI2: [VT_UI2, 4], I4: [VT_I4, 4],
+        UI4: [VT_UI4, 4], I8: [VT_I8, 8], UI8: [VT_UI8, 8], R4: [VT_R4, 4], R8: [VT_R8, 8],
+        Date: [VT_DATE, 8], Cy: [VT_CY, 8], Bool: [VT_BOOL, 4], Dec: [VT_DECIMAL, 4],
+        Str: [VT_BSTR, 12],
+    });
+    const CONVERSION_TARGETS = Object.freeze({
+        I1: [VT_I1, 1], UI1: [VT_UI1, 1], I2: [VT_I2, 2], UI2: [VT_UI2, 2], I4: [VT_I4, 4],
+        UI4: [VT_UI4, 4], I8: [VT_I8, 8], UI8: [VT_UI8, 8], R4: [VT_R4, 4], R8: [VT_R8, 8],
+        Date: [VT_DATE, 8], Cy: [VT_CY, 8], Bool: [VT_BOOL, 2], Dec: [VT_DECIMAL, 14],
+    });
+
+    /**
+     * A Var<to>From<from>'s argument as a value, read by its type's width
+     * and sign; a DECIMAL whose scale or sign byte no DECIMAL has is an
+     * invalid argument, and a missing string holds no number.
+     *
+     * @param {number} type @param {number[]} args
+     * @returns {import('./arithmetic.js').Value | number}
+     */
+    const argumentValue = (type, args)=>{
+        const words = valueBytes(view=>{
+            view.setUint32(0, args[0] >>> 0, true);
+            view.setUint32(4, (args[1] ?? 0) >>> 0, true);
+        });
+        const view = new DataView(words.buffer);
+        switch (type)
+        {
+            case VT_I1: return variantValue(type, { integer: BigInt(view.getInt8(0)) });
+            case VT_UI1: return variantValue(type, { integer: BigInt(view.getUint8(0)) });
+            case VT_I2:
+            case VT_BOOL: return variantValue(type, { integer: BigInt(view.getInt16(0, true)) });
+            case VT_UI2: return variantValue(type, { integer: BigInt(view.getUint16(0, true)) });
+            case VT_I4: return variantValue(type, { integer: BigInt(args[0] | 0) });
+            case VT_UI4: return variantValue(type, { integer: BigInt(args[0] >>> 0) });
+            case VT_I8: return variantValue(type, { integer: view.getBigInt64(0, true) });
+            case VT_UI8: return variantValue(type, { integer: view.getBigUint64(0, true) });
+            case VT_R4: return variantValue(type, { real: view.getFloat32(0, true) });
+            case VT_CY:
+                return variantValue(type,
+                    { exact: { value: view.getBigInt64(0, true), scale: 4 } });
+            case VT_DECIMAL: {
+                const bytes = host.readMemory(args[0] >>> 0, 16);
+                return bytes[2] > 28 || (bytes[3] & 0x7f) !== 0 ? E_INVALIDARG
+                    : variantValue(type, { exact: readDecimal(bytes) });
+            }
+            case VT_BSTR:
+                return (args[0] >>> 0) === 0 ? DISP_E_TYPEMISMATCH
+                    : variantValue(type, { text: wideAt(args[0] >>> 0) });
+            default: return variantValue(type, { real: view.getFloat64(0, true) });
+        }
+    };
+
+    /**
+     * A converted value's bytes as its type is stored: a DECIMAL as the
+     * fourteen past its reserved word.
+     *
+     * @param {import('./arithmetic.js').Value} value
+     * @returns {Uint8Array}
+     */
+    const valueBytesOf = value=>{
+        switch (value.type)
+        {
+            case VT_DECIMAL: return /** @type {Uint8Array} */ (
+                decimalBytes(/** @type {import('./varmath.js').Exact} */ (value.exact)));
+            case VT_CY: return cyBytes(value.exact?.value ?? 0n);
+            case VT_R4: return valueBytes(view=>view.setFloat32(0, Number(value.real), true));
+            case VT_R8:
+            case VT_DATE: return valueBytes(view=>view.setFloat64(0, Number(value.real), true));
+            default: return valueBytes(view=>view.setBigUint64(0,
+                BigInt.asUintN(64, value.integer ?? 0n), true));
+        }
+    };
+
+    /**
+     * Every Var<to>From<from> between the numeric types, the boolean, DATE,
+     * CY, DECIMAL and a string read as a number, by one conversion: the
+     * one VariantChangeType makes. A date from a string is read as a date,
+     * by VarDateFromStr below.
+     *
+     * @type {Record<string, { argBytes: number,
+     *     handler: (args: number[]) => number | Promise<number> }>}
+     */
+    const conversions = {};
+    for (const [to, [target, size]] of Object.entries(CONVERSION_TARGETS))
+    {
+        for (const [from, [source, width]] of Object.entries(CONVERSION_SOURCES))
+        {
+            if (to === from)
+            {
+                continue;
+            }
+            const api = `Var${to}From${from}`;
+            conversions[api] = {
+                argBytes: width + 4,
+                handler: args=>{
+                    const out = args[width / 4] >>> 0;
+                    const value = argumentValue(source, args);
+                    if (typeof value === 'number')
+                    {
+                        return value;
+                    }
+                    if (out === 0)
+                    {
+                        return E_INVALIDARG;
+                    }
+                    if (source === VT_BSTR)
+                    {
+                        english(api, args[1]);
+                    }
+                    // VarDecFromBool makes any true -1, where VariantChangeType
+                    // keeps a boolean's 1 as 1.
+                    if (source === VT_BOOL && target === VT_DECIMAL)
+                    {
+                        value.integer = value.integer === 0n ? 0n : -1n;
+                    }
+                    const outcome = coerce(value, target);
+                    if (typeof outcome === 'number')
+                    {
+                        return outcome;
+                    }
+                    host.writeMemory(out + (target === VT_DECIMAL ? 2 : 0),
+                        valueBytesOf(outcome).subarray(0, size));
+                    return S_OK;
+                },
+            };
+        }
+    }
+
+    /**
+     * An object's value, as every conversion from VT_DISPATCH reads it: its
+     * default property, got by IDispatch::Invoke(DISPID_VALUE,
+     * DISPATCH_PROPERTYGET) with no arguments, and then converted as `then`
+     * converts it. An object that will not answer is a mismatch, whatever it
+     * failed with.
+     *
+     * @param {number} dispatch @param {number} lcid @param {unknown} thread
+     * @param {(value: import('./arithmetic.js').Value) => number} then
+     * @returns {number | Promise<number>}
+     */
+    const defaultValue = (dispatch, lcid, thread, then)=>{
+        const call = host.call;
+        if (dispatch === 0 || !call)
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        // The result variant, the empty DISPPARAMS and IID_NULL, zeroed.
+        const block = host.heap.allocate(48);
+        if (block === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(block, new Uint8Array(48));
+        const invoke = readU32(readU32(dispatch) + 6 * 4);
+        return call(invoke, [dispatch, DISPID_VALUE, block + 32, lcid >>> 0,
+            DISPATCH_PROPERTYGET, block + 16, block, 0, 0], thread).then(hr=>{
+            const value = (hr | 0) < 0 ? DISP_E_TYPEMISMATCH : readOperand(block);
+            const answer = typeof value === 'number' ? value : then(value);
+            const owed = nothingOwed();
+            clear(block, owed);
+            return settle(owed, thread, answer);
+        }).finally(()=>host.heap.free(block));
+    };
+
+    for (const [to, [target, size]] of Object.entries(CONVERSION_TARGETS))
+    {
+        /** HRESULT Var<to>FromDisp(IDispatch *pdispIn, LCID lcid, <to> *pOut) */
+        conversions[`Var${to}FromDisp`] = {
+            argBytes: 12,
+            handler: ([dispatch, lcid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                return defaultValue(dispatch >>> 0, lcid, host.callerThread?.(), value=>{
+                    const outcome = coerce(value, target);
+                    if (typeof outcome === 'number')
+                    {
+                        return outcome;
+                    }
+                    host.writeMemory((out >>> 0) + (target === VT_DECIMAL ? 2 : 0),
+                        valueBytesOf(outcome).subarray(0, size));
+                    return S_OK;
+                });
+            },
+        };
+    }
+
+    /**
+     * VarCy* and VarDec*: the operators over two CYs or two DECIMALs, an
+     * answer of the same type, each argument arriving as Var<to>From<from>'s
+     * do. An answer is written only when there is one.
+     *
+     * @param {number} type  VT_CY or VT_DECIMAL
+     * @param {[number, number][]} widths  each operand's VARTYPE and stack bytes, in order
+     * @param {(...operands: import('./arithmetic.js').Value[]) =>
+     *     import('./arithmetic.js').Outcome} operation
+     */
+    const exactOperation = (type, widths, operation)=>{
+        const argBytes = widths.reduce((sum, [, bytes])=>sum + bytes, 4);
+        return {
+            argBytes,
+            /** @param {number[]} args */
+            handler: args=>{
+                const out = args[argBytes / 4 - 1] >>> 0;
+                /** @type {import('./arithmetic.js').Value[]} */
+                const operands = [];
+                let at = 0;
+                for (const [operandType, bytes] of widths)
+                {
+                    const value = operandType === VT_I4
+                        ? variantValue(VT_I4, { integer: BigInt(args[at] | 0) })
+                        : argumentValue(operandType, args.slice(at, at + bytes / 4));
+                    if (typeof value === 'number')
+                    {
+                        return value;
+                    }
+                    operands.push(value);
+                    at += bytes / 4;
+                }
+                if (out === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const answer = operation(...operands);
+                const outcome = typeof answer === 'number' ? answer : coerce(answer, type);
+                if (typeof outcome === 'number')
+                {
+                    return outcome;
+                }
+                host.writeMemory(out + (type === VT_DECIMAL ? 2 : 0),
+                    valueBytesOf(outcome).subarray(0, type === VT_DECIMAL ? 14 : 8));
+                return S_OK;
+            },
+        };
+    };
+
+    /**
+     * A CY or a DECIMAL cut to a whole number: towards zero for Fix, down
+     * for Int.
+     *
+     * @param {boolean} down
+     * @returns {(value: import('./arithmetic.js').Value) => import('./arithmetic.js').Value}
+     */
+    const whole = down=>value=>{
+        const { value: units, scale } = /** @type {import('./varmath.js').Exact} */ (value.exact);
+        const unit = 10n ** BigInt(scale);
+        const cut = units / unit - (down && units < 0n && units % unit !== 0n ? 1n : 0n);
+        return variantValue(value.type, { exact: { value: cut, scale: 0 } });
+    };
+
+    /**
+     * A CY or a DECIMAL rounded to `places`, a half to the even neighbour;
+     * fewer than none is an invalid argument.
+     *
+     * @param {import('./arithmetic.js').Value} value @param {import('./arithmetic.js').Value} places
+     * @returns {import('./arithmetic.js').Outcome}
+     */
+    const roundExact = (value, places)=>(Number(places.integer) < 0 ? E_INVALIDARG
+        : variantValue(value.type, { exact: round(
+            /** @type {import('./varmath.js').Exact} */ (value.exact), Number(places.integer)) }));
+
+    /**
+     * VarCyCmp, VarCyCmpR8, VarDecCmp and VarDecCmpR8: VARCMP_LT, VARCMP_EQ
+     * or VARCMP_GT, a double first made the left side's type.
+     *
+     * @param {number} type @param {[number, number][]} widths
+     */
+    const exactComparison = (type, widths)=>{
+        const argBytes = widths.reduce((sum, [, bytes])=>sum + bytes, 0);
+        return {
+            argBytes,
+            /** @param {number[]} args */
+            handler: args=>{
+                const left = argumentValue(type, args.slice(0, widths[0][1] / 4));
+                const read = argumentValue(widths[1][0], args.slice(widths[0][1] / 4));
+                if (typeof left === 'number' || typeof read === 'number')
+                {
+                    return typeof left === 'number' ? left : read;
+                }
+                const right = coerce(read, type);
+                if (typeof right === 'number')
+                {
+                    return right;
+                }
+                const order = compareExact(/** @type {import('./varmath.js').Exact} */ (left.exact),
+                    /** @type {import('./varmath.js').Exact} */ (right.exact));
+                return order < 0 ? VARCMP_LT : order > 0 ? VARCMP_GT : VARCMP_EQ;
+            },
+        };
+    };
+
+    /**
+     * VarDecAbs and VarDecNeg: the DECIMAL copied with its sign byte changed,
+     * nothing else checked -- a sign of 0x7f negates to 0xff, a scale of 29
+     * stays -- and zero negated is a negative zero.
+     *
+     * @param {(sign: number) => number} change
+     */
+    const decimalSign = change=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([pin, pout])=>{
+            if ((pin >>> 0) === 0 || (pout >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const bytes = host.readMemory(pin >>> 0, 16).slice();
+            bytes[3] = change(bytes[3]);
+            host.writeMemory((pout >>> 0) + 2, bytes.subarray(2));
+            return S_OK;
+        },
+    });
+
+    /**
+     * VarDecFix, VarDecInt and VarDecRound: worked on the magnitude, the sign
+     * kept as it was even where the answer is zero -- -0.1 rounds to -0.
+     *
+     * @param {number} argCount
+     * @param {(magnitude: bigint, scale: number, negative: boolean, places: number) =>
+     *     import('./varmath.js').Exact | number} operation
+     */
+    const decimalMagnitude = (argCount, operation)=>({
+        argBytes: argCount * 4,
+        /** @param {number[]} args */
+        handler: args=>{
+            const out = args[argCount - 1] >>> 0;
+            const value = argumentValue(VT_DECIMAL, args);
+            if (typeof value === 'number')
+            {
+                return value;
+            }
+            if (out === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const sign = host.readMemory(args[0] >>> 0, 4)[3];
+            const exact = /** @type {import('./varmath.js').Exact} */ (value.exact);
+            const magnitude = exact.value < 0n ? -exact.value : exact.value;
+            const answer = operation(magnitude, exact.scale, sign !== 0, args[1] | 0);
+            if (typeof answer === 'number')
+            {
+                return answer;
+            }
+            const bytes = decimalBytes(answer);
+            if (!bytes)
+            {
+                return DISP_E_OVERFLOW;
+            }
+            bytes[1] = sign;
+            host.writeMemory(out + 2, bytes);
+            return S_OK;
+        },
+    });
+
+    /** @type {[number, number]} */
+    const CY = [VT_CY, 8];
+    /** @type {[number, number]} */
+    const DEC = [VT_DECIMAL, 4];
+    /** @type {[number, number]} */
+    const PLACES = [VT_I4, 4];
+    /** @type {[number, number]} */
+    const I8 = [VT_I8, 8];
+    /** @type {[number, number]} */
+    const R8 = [VT_R8, 8];
+    Object.assign(conversions, {
+        VarCyAdd: exactOperation(VT_CY, [CY, CY], add),
+        VarCySub: exactOperation(VT_CY, [CY, CY], subtract),
+        VarCyMul: exactOperation(VT_CY, [CY, CY], multiply),
+        VarCyMulI4: exactOperation(VT_CY, [CY, PLACES], multiply),
+        VarCyMulI8: exactOperation(VT_CY, [CY, I8], multiply),
+        VarCyAbs: exactOperation(VT_CY, [CY], value=>(/** @type {import('./varmath.js').Exact} */
+            (value.exact).value < 0n ? negate(value) : value)),
+        VarCyNeg: exactOperation(VT_CY, [CY], negate),
+        VarCyFix: exactOperation(VT_CY, [CY], whole(false)),
+        VarCyInt: exactOperation(VT_CY, [CY], whole(true)),
+        VarCyRound: exactOperation(VT_CY, [CY, PLACES], roundExact),
+        VarCyCmp: exactComparison(VT_CY, [CY, CY]),
+        VarCyCmpR8: exactComparison(VT_CY, [CY, R8]),
+        VarDecAdd: exactOperation(VT_DECIMAL, [DEC, DEC], add),
+        VarDecSub: exactOperation(VT_DECIMAL, [DEC, DEC], subtract),
+        VarDecMul: exactOperation(VT_DECIMAL, [DEC, DEC], multiply),
+        VarDecDiv: exactOperation(VT_DECIMAL, [DEC, DEC], divide),
+        VarDecAbs: decimalSign(sign=>sign & 0x7f),
+        VarDecNeg: decimalSign(sign=>sign ^ 0x80),
+        VarDecFix: decimalMagnitude(2, (magnitude, scale)=>({
+            value: magnitude / 10n ** BigInt(scale), scale: 0 })),
+        VarDecInt: decimalMagnitude(2, (magnitude, scale, negative)=>{
+            const unit = 10n ** BigInt(scale);
+            return { value: magnitude / unit + (negative && magnitude % unit !== 0n ? 1n : 0n),
+                scale: 0 };
+        }),
+        VarDecRound: decimalMagnitude(3, (magnitude, scale, negative, places)=>(
+            places < 0 ? E_INVALIDARG : round({ value: magnitude, scale }, places))),
+        VarDecCmp: exactComparison(VT_DECIMAL, [DEC, DEC]),
+        VarDecCmpR8: exactComparison(VT_DECIMAL, [DEC, R8]),
+
+        /** HRESULT VarR8Round(double dblIn, int nDig, double *pDblOut) */
+        VarR8Round: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([low, high, places, out])=>{
+                if ((places | 0) < 0 || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeDouble(out >>> 0, roundNumber(doubleOf(low, high), places | 0));
+                return S_OK;
+            },
+        },
+    });
+
+    /**
+     * VarBstrFrom<from> for the types without a spelling of their own below:
+     * the text VariantChangeType makes of the value.
+     */
+    for (const [from, [source, width]] of Object.entries(CONVERSION_SOURCES))
+    {
+        if (source !== VT_BSTR)
+        {
+            /** HRESULT VarBstrFrom<from>(<from> in, LCID lcid, ULONG dwFlags, BSTR *pbstrOut) */
+            conversions[`VarBstrFrom${from}`] = toBstr(width + 12, args=>{
+                english(`VarBstrFrom${from}`, args[width / 4]);
+                const value = argumentValue(source, args);
+                return typeof value === 'number' ? value : spelled(value, args[width / 4 + 1]);
+            });
+        }
+    }
+
     const table = {
+        ...conversions,
+
         /** BSTR SysAllocString(const OLECHAR *psz) */
         SysAllocString: {
             argBytes: 4,
@@ -1653,6 +2201,12 @@ export function createAutomationFunctions(host){
             handler: ([psz, len])=>{
                 const source = psz >>> 0;
                 const bytes = len >>> 0;
+                // A length with the top bit set is no string on a 32-bit
+                // system, refused before anything is read.
+                if (bytes >= 0x80000000)
+                {
+                    return 0;
+                }
                 const data = source === 0
                     ? new Uint8Array(bytes)
                     : host.readMemory(source, bytes).slice();
@@ -1694,12 +2248,35 @@ export function createAutomationFunctions(host){
                 {
                     return 0;
                 }
-                const replacement = allocateFrom(psz >>> 0, len >>> 0);
+                // A reallocation: without a source the characters already
+                // there stay, and a string that is not growing keeps its
+                // block, as the heap's realloc keeps one it can shrink in.
+                const old = readU32(slot);
+                const oldBytes = old === 0 ? 0 : readU32(old - PREFIX_BYTES);
+                const bytes = (len >>> 0) * 2;
+                const data = new Uint8Array(bytes);
+                if ((psz >>> 0) !== 0)
+                {
+                    data.set(host.readMemory(psz >>> 0, bytes));
+                }
+                else if (old !== 0)
+                {
+                    data.set(host.readMemory(old, Math.min(oldBytes, bytes)));
+                }
+                if (old !== 0 && bytes <= oldBytes)
+                {
+                    const block = new Uint8Array(PREFIX_BYTES + bytes + 2);
+                    new DataView(block.buffer).setUint32(0, bytes, true);
+                    block.set(data, PREFIX_BYTES);
+                    host.writeMemory(old - PREFIX_BYTES, block);
+                    return 1;
+                }
+                const replacement = allocateBstr(data);
                 if (replacement === 0)
                 {
                     return 0;
                 }
-                freeBstr(readU32(slot));
+                freeBstr(old);
                 writeU32(slot, replacement);
                 return 1;
             },
@@ -1779,8 +2356,10 @@ export function createAutomationFunctions(host){
             handler: ([left, right, lcid, flags])=>{
                 const leftBytes = byteLengthOf(left >>> 0);
                 const rightBytes = byteLengthOf(right >>> 0);
-                const leftEmpty = leftBytes < 2 || readU16(left >>> 0) === 0;
-                const rightEmpty = rightBytes < 2 || readU16(right >>> 0) === 0;
+                // Empty is no string or no characters: a lone NUL is a
+                // character, greater than nothing.
+                const leftEmpty = leftBytes === 0;
+                const rightEmpty = rightBytes === 0;
                 if (leftEmpty || rightEmpty)
                 {
                     return leftEmpty === rightEmpty ? VARCMP_EQ
@@ -2002,6 +2581,26 @@ export function createAutomationFunctions(host){
                 {
                     return settle(owed, thread, copyVariant(dest, src, owed));
                 }
+                const declared = readU16(src);
+                const plain = declared & ~VT_BYREF;
+                if (PLAIN_TYPES.has(plain))
+                {
+                    // Copied as the bytes they are: a 64-bit integer or a
+                    // DECIMAL is no number a double can carry.
+                    const target = readU32(src + VARIANT_VALUE);
+                    if (target === 0)
+                    {
+                        return E_INVALIDARG;
+                    }
+                    const size = ELEMENT_BYTES[plain];
+                    const bytes = new Uint8Array(VARIANT_BYTES);
+                    bytes.set(host.readMemory(target, size),
+                        plain === VT_DECIMAL ? 0 : VARIANT_VALUE);
+                    new DataView(bytes.buffer).setUint16(0, plain, true);
+                    clear(dest, owed);
+                    host.writeMemory(dest, bytes);
+                    return settle(owed, thread, S_OK);
+                }
                 const value = load(src, true);
                 if (value === null)
                 {
@@ -2029,8 +2628,8 @@ export function createAutomationFunctions(host){
             handler: ([pvargDest, pvarSrc, wFlags, vt])=>{
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                return settle(owed, thread, changeType(pvargDest >>> 0, pvarSrc >>> 0,
-                    wFlags & 0xffff, vt & 0xffff, owed));
+                return whenAnswered(changeType(pvargDest >>> 0, pvarSrc >>> 0,
+                    wFlags & 0xffff, vt & 0xffff, owed, 0, thread), hr=>settle(owed, thread, hr));
             },
         },
 
@@ -2052,8 +2651,9 @@ export function createAutomationFunctions(host){
                 }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                return settle(owed, thread, changeType(pvargDest >>> 0, pvarSrc >>> 0,
-                    wFlags & 0xffff, vt & 0xffff, owed));
+                return whenAnswered(changeType(pvargDest >>> 0, pvarSrc >>> 0,
+                    wFlags & 0xffff, vt & 0xffff, owed, lcid, thread),
+                hr=>settle(owed, thread, hr));
             },
         },
 
@@ -2284,122 +2884,6 @@ export function createAutomationFunctions(host){
         VarNeg: unary(negate),
         VarNot: unary(not),
 
-        /** HRESULT VarCyFromI4(LONG lIn, CY *pCyOut) */
-        VarCyFromI4: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([number, out])=>{
-                host.writeMemory(out >>> 0, cyBytes(BigInt(number | 0) * 10000n));
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarR8FromCy(CY cyIn, double *pDblOut) */
-        VarR8FromCy: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([low, high, out])=>{
-                const cy = BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(low >>> 0));
-                writeDouble(out >>> 0, toNumber({ value: cy, scale: 4 }));
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarDecFromI4(LONG lIn, DECIMAL *pDecOut) */
-        VarDecFromI4: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([number, out])=>{
-                host.writeMemory((out >>> 0) + 2, /** @type {Uint8Array} */ (
-                    decimalBytes({ value: BigInt(number | 0), scale: 0 })));
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarDecFromR8(double dblIn, DECIMAL *pDecOut) */
-        VarDecFromR8: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([low, high, out])=>{
-                const exact = exactOf(doubleOf(low, high));
-                const bytes = exact && decimalBytes(exact);
-                if (!bytes)
-                {
-                    return DISP_E_OVERFLOW;
-                }
-                host.writeMemory((out >>> 0) + 2, bytes);
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarR8FromDec(const DECIMAL *pDecIn, double *pDblOut) */
-        VarR8FromDec: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([decimal, out])=>{
-                const bytes = host.readMemory(decimal >>> 0, 16);
-                if (bytes[2] > 28)
-                {
-                    return E_INVALIDARG;
-                }
-                writeDouble(out >>> 0, toNumber(readDecimal(bytes)));
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarR8FromStr(LPCOLESTR strIn, LCID lcid, ULONG dwFlags, double *pDblOut) */
-        VarR8FromStr: fromString('VarR8FromStr', text=>{
-            const number = parseText(text);
-            if (number === null)
-            {
-                return DISP_E_TYPEMISMATCH;
-            }
-            return Number.isFinite(number)
-                ? valueBytes(view=>view.setFloat64(0, number, true)) : DISP_E_OVERFLOW;
-        }),
-
-        /**
-         * HRESULT VarR4FromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, FLOAT *pFltOut)
-         *
-         * The double VarR8FromStr reads, as the float nearest it; past the
-         * floats' range an overflow rather than an infinity.
-         */
-        VarR4FromStr: fromString('VarR4FromStr', text=>{
-            const number = parseText(text);
-            if (number === null)
-            {
-                return DISP_E_TYPEMISMATCH;
-            }
-            return Math.abs(number) <= 3.4028234663852886e38
-                ? valueBytes(view=>view.setFloat32(0, number, true)).subarray(0, 4)
-                : DISP_E_OVERFLOW;
-        }),
-
-        /**
-         * HRESULT VarCyFromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, CY *pCyOut)
-         *
-         * Read exactly, not through a double, and rounded to the fourth place
-         * a half to the even neighbour; past a CY's range an overflow.
-         */
-        VarCyFromStr: fromString('VarCyFromStr', text=>{
-            const units = currencyFromText(text);
-            return typeof units === 'number' ? units : cyBytes(units);
-        }),
-
-        /**
-         * HRESULT VarBoolFromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags,
-         *                        VARIANT_BOOL *pBoolOut)
-         *
-         * #TRUE# and #FALSE# as spelled, True and False in any case, or a
-         * number, non-zero for VARIANT_TRUE. Yes, No, On and Off are not
-         * booleans, and a localised word is not read: this build speaks English.
-         */
-        VarBoolFromStr: fromString('VarBoolFromStr', text=>{
-            const truth = boolOf(text);
-            return truth === null ? DISP_E_TYPEMISMATCH
-                : valueBytes(view=>view.setInt16(0, truth, true)).subarray(0, 2);
-        }),
-
         /**
          * HRESULT VarDateFromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, DATE *pdateOut)
          *
@@ -2414,17 +2898,6 @@ export function createAutomationFunctions(host){
             return date === null ? DISP_E_TYPEMISMATCH
                 : valueBytes(view=>view.setFloat64(0, date, true));
         }),
-
-        /**
-         * HRESULT VarI4FromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, LONG *plOut),
-         * and the same for the other integral types
-         */
-        VarI1FromStr: integerFromString('VarI1FromStr', VT_I1, 1),
-        VarUI1FromStr: integerFromString('VarUI1FromStr', VT_UI1, 1),
-        VarI2FromStr: integerFromString('VarI2FromStr', VT_I2, 2),
-        VarUI2FromStr: integerFromString('VarUI2FromStr', VT_UI2, 2),
-        VarI4FromStr: integerFromString('VarI4FromStr', VT_I4, 4),
-        VarUI4FromStr: integerFromString('VarUI4FromStr', VT_UI4, 4),
 
         /** HRESULT VarUdateFromDate(DATE dateIn, ULONG dwFlags, UDATE *pudateOut) */
         VarUdateFromDate: {
@@ -3266,12 +3739,14 @@ export function createAutomationFunctions(host){
                 const source = args + (count - 1 - (position >>> 0)) * VARIANT_BYTES;
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                const result = changeType(pvarResult >>> 0, source, 0, vtTarg & 0xffff, owed);
-                if (result !== S_OK && (puArgErr >>> 0) !== 0)
-                {
-                    writeU32(puArgErr >>> 0, position >>> 0);
-                }
-                return settle(owed, thread, result);
+                return whenAnswered(changeType(pvarResult >>> 0, source, 0, vtTarg & 0xffff,
+                    owed, 0, thread), result=>{
+                    if (result !== S_OK && (puArgErr >>> 0) !== 0)
+                    {
+                        writeU32(puArgErr >>> 0, position >>> 0);
+                    }
+                    return settle(owed, thread, result);
+                });
             },
         },
 
@@ -3399,6 +3874,38 @@ export function createAutomationFunctions(host){
          *
          * A fresh, empty error object with one reference, the caller's.
          */
+        /**
+         * void ClearCustData(CUSTDATA *pCustData)
+         *
+         * Each item's variant cleared, the items' block given back to the
+         * task allocator it came from, and both fields zeroed.
+         */
+        ClearCustData: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pcust])=>{
+                const custom = pcust >>> 0;
+                if (custom === 0)
+                {
+                    return 0;
+                }
+                const count = readU32(custom);
+                const items = readU32(custom + 4);
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                if (items !== 0)
+                {
+                    for (let index = 0; index < count; index++)
+                    {
+                        clear(items + index * 32 + 16, owed);
+                    }
+                    host.heap.free(items);
+                }
+                host.writeMemory(custom, new Uint8Array(8));
+                return settle(owed, thread, 0);
+            },
+        },
+
         CreateErrorInfo: {
             argBytes: 4,
             /** @param {number[]} args */
@@ -3643,11 +4150,6 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     12: 'VariantChangeType',
     13: 'VariantTimeToDosDateTime',
     14: 'DosDateTimeToVariantTime',
-    35: 'GetActiveObject',
-    146: 'DispCallFunc',
-    147: 'VariantChangeTypeEx',
-    149: 'SysStringByteLen',
-    150: 'SysAllocStringByteLen',
     15: 'SafeArrayCreate',
     16: 'SafeArrayDestroy',
     17: 'SafeArrayGetDim',
@@ -3663,26 +4165,85 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     27: 'SafeArrayCopy',
     28: 'DispGetParam',
     29: 'DispGetIDsOfNames',
+    35: 'GetActiveObject',
     40: 'SafeArrayRedim',
     46: 'VarParseNumFromStr',
     47: 'VarNumFromParseNum',
+    48: 'VarI2FromUI1',
+    49: 'VarI2FromI4',
+    50: 'VarI2FromR4',
+    51: 'VarI2FromR8',
+    52: 'VarI2FromCy',
+    53: 'VarI2FromDate',
     54: 'VarI2FromStr',
+    56: 'VarI2FromBool',
+    58: 'VarI4FromUI1',
+    59: 'VarI4FromI2',
+    60: 'VarI4FromR4',
+    61: 'VarI4FromR8',
+    62: 'VarI4FromCy',
+    63: 'VarI4FromDate',
     64: 'VarI4FromStr',
+    66: 'VarI4FromBool',
+    68: 'VarR4FromUI1',
+    69: 'VarR4FromI2',
+    70: 'VarR4FromI4',
+    71: 'VarR4FromR8',
+    72: 'VarR4FromCy',
+    73: 'VarR4FromDate',
     74: 'VarR4FromStr',
+    76: 'VarR4FromBool',
+    78: 'VarR8FromUI1',
+    79: 'VarR8FromI2',
+    80: 'VarR8FromI4',
+    81: 'VarR8FromR4',
     82: 'VarR8FromCy',
+    83: 'VarR8FromDate',
     84: 'VarR8FromStr',
+    86: 'VarR8FromBool',
+    88: 'VarDateFromUI1',
+    89: 'VarDateFromI2',
+    90: 'VarDateFromI4',
+    91: 'VarDateFromR4',
+    92: 'VarDateFromR8',
+    93: 'VarDateFromCy',
     94: 'VarDateFromStr',
+    96: 'VarDateFromBool',
+    98: 'VarCyFromUI1',
+    99: 'VarCyFromI2',
     100: 'VarCyFromI4',
+    101: 'VarCyFromR4',
+    102: 'VarCyFromR8',
+    103: 'VarCyFromDate',
     104: 'VarCyFromStr',
+    106: 'VarCyFromBool',
     113: 'VarBstrFromCy',
     114: 'VarBstrFromDate',
     116: 'VarBstrFromBool',
+    118: 'VarBoolFromUI1',
+    119: 'VarBoolFromI2',
+    120: 'VarBoolFromI4',
+    121: 'VarBoolFromR4',
+    122: 'VarBoolFromR8',
+    123: 'VarBoolFromDate',
+    124: 'VarBoolFromCy',
     125: 'VarBoolFromStr',
+    130: 'VarUI1FromI2',
+    131: 'VarUI1FromI4',
+    132: 'VarUI1FromR4',
+    133: 'VarUI1FromR8',
+    134: 'VarUI1FromCy',
+    135: 'VarUI1FromDate',
     136: 'VarUI1FromStr',
+    138: 'VarUI1FromBool',
     141: 'VarAdd',
     142: 'VarAnd',
     143: 'VarDiv',
+    146: 'DispCallFunc',
+    147: 'VariantChangeTypeEx',
     148: 'SafeArrayPtrOfIndex',
+    149: 'SysStringByteLen',
+    150: 'SysAllocStringByteLen',
     153: 'VarIdiv',
     155: 'VarMod',
     156: 'VarMul',
@@ -3700,15 +4261,89 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     184: 'SystemTimeToVariantTime',
     185: 'VariantTimeToSystemTime',
     186: 'UnRegisterTypeLib',
+    190: 'VarDecFromUI1',
+    191: 'VarDecFromI2',
     192: 'VarDecFromI4',
+    193: 'VarDecFromR4',
     194: 'VarDecFromR8',
+    195: 'VarDecFromDate',
+    196: 'VarDecFromCy',
+    197: 'VarDecFromStr',
+    199: 'VarDecFromBool',
     200: 'GetErrorInfo',
     201: 'SetErrorInfo',
     202: 'CreateErrorInfo',
+    205: 'VarI2FromI1',
+    206: 'VarI2FromUI2',
+    207: 'VarI2FromUI4',
+    208: 'VarI2FromDec',
+    209: 'VarI4FromI1',
+    210: 'VarI4FromUI2',
+    211: 'VarI4FromUI4',
+    212: 'VarI4FromDec',
+    213: 'VarR4FromI1',
+    214: 'VarR4FromUI2',
+    215: 'VarR4FromUI4',
+    216: 'VarR4FromDec',
+    217: 'VarR8FromI1',
+    218: 'VarR8FromUI2',
+    219: 'VarR8FromUI4',
     220: 'VarR8FromDec',
+    221: 'VarDateFromI1',
+    222: 'VarDateFromUI2',
+    223: 'VarDateFromUI4',
+    224: 'VarDateFromDec',
+    225: 'VarCyFromI1',
+    226: 'VarCyFromUI2',
+    227: 'VarCyFromUI4',
+    228: 'VarCyFromDec',
+    233: 'VarBoolFromI1',
+    234: 'VarBoolFromUI2',
+    235: 'VarBoolFromUI4',
+    236: 'VarBoolFromDec',
+    237: 'VarUI1FromI1',
+    238: 'VarUI1FromUI2',
+    239: 'VarUI1FromUI4',
+    240: 'VarUI1FromDec',
+    241: 'VarDecFromI1',
+    242: 'VarDecFromUI2',
+    243: 'VarDecFromUI4',
+    244: 'VarI1FromUI1',
+    245: 'VarI1FromI2',
+    246: 'VarI1FromI4',
+    247: 'VarI1FromR4',
+    248: 'VarI1FromR8',
+    249: 'VarI1FromDate',
+    250: 'VarI1FromCy',
     251: 'VarI1FromStr',
+    253: 'VarI1FromBool',
+    254: 'VarI1FromUI2',
+    255: 'VarI1FromUI4',
+    256: 'VarI1FromDec',
+    257: 'VarUI2FromUI1',
+    258: 'VarUI2FromI2',
+    259: 'VarUI2FromI4',
+    260: 'VarUI2FromR4',
+    261: 'VarUI2FromR8',
+    262: 'VarUI2FromDate',
+    263: 'VarUI2FromCy',
     264: 'VarUI2FromStr',
+    266: 'VarUI2FromBool',
+    267: 'VarUI2FromI1',
+    268: 'VarUI2FromUI4',
+    269: 'VarUI2FromDec',
+    270: 'VarUI4FromUI1',
+    271: 'VarUI4FromI2',
+    272: 'VarUI4FromI4',
+    273: 'VarUI4FromR4',
+    274: 'VarUI4FromR8',
+    275: 'VarUI4FromDate',
+    276: 'VarUI4FromCy',
     277: 'VarUI4FromStr',
+    279: 'VarUI4FromBool',
+    280: 'VarUI4FromI1',
+    281: 'VarUI4FromUI2',
+    282: 'VarUI4FromDec',
     283: 'BSTR_UserSize',
     284: 'BSTR_UserMarshal',
     285: 'BSTR_UserUnmarshal',
