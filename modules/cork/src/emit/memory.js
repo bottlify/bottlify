@@ -531,6 +531,10 @@ const STRING_ACCESSES = new Map([
 const SAVED_EBP = /** @type {import('../decode/decoder.js').Operand} */ ({
     kind: 'mem', size: 4, base: 5, index: -1, scale: 1, disp: 0, segment: 3, addressSize: 32,
 });
+/** Long mode's: the saved rbp. */
+const SAVED_RBP = /** @type {import('../decode/decoder.js').Operand} */ ({
+    ...SAVED_EBP, size: 8, addressSize: 64,
+});
 
 /**
  * @typedef {{ block: number, i: number, off: number, size: number, store: boolean }} Access
@@ -562,11 +566,13 @@ const SAVED_EBP = /** @type {import('../decode/decoder.js').Operand} */ ({
  * The one access an instruction makes that a group can take, or null.
  *
  * @param {import('../decode/decoder.js').Instruction} ins
+ * @param {4 | 8} [word]  the stack's slot: 8 in long mode, whose addresses a
+ *     32-bit address size truncates (such an access is left to its own test)
  * @returns {{ operand: import('../decode/decoder.js').Operand | null, size: number,
  *     store: boolean, stack: number } | null}
  *     `stack`: the access's offset from esp for a push or pop, else 0
  */
-function accessOf(ins){
+function accessOf(ins, word = 4){
     const { op, operands } = ins;
     const [dst] = operands;
     if (ins.prefixes.operand && (op === 'call' || op === 'ret' || op === 'leave'))
@@ -575,24 +581,24 @@ function accessOf(ins){
     }
     if (op === 'call' && (dst.kind === 'rel' || dst.kind === 'reg'))
     {
-        return { operand: null, size: 4, store: true, stack: -4 };
+        return { operand: null, size: word, store: true, stack: -word };
     }
     if (op === 'ret')
     {
-        return { operand: null, size: 4, store: false, stack: 0 };
+        return { operand: null, size: word, store: false, stack: 0 };
     }
     if (op === 'leave')
     {
-        return { operand: SAVED_EBP, size: 4, store: false, stack: 0 };
+        return { operand: word === 8 ? SAVED_RBP : SAVED_EBP, size: word, store: false, stack: 0 };
     }
-    if (op === 'push' && ins.size === 4
-        && (dst.kind === 'imm' || dst.kind === 'reg' && dst.size === 4))
+    if (op === 'push' && ins.size === word
+        && (dst.kind === 'imm' || dst.kind === 'reg' && dst.size === word))
     {
-        return { operand: null, size: 4, store: true, stack: -4 };
+        return { operand: null, size: word, store: true, stack: -word };
     }
-    if (op === 'pop' && dst.kind === 'reg' && dst.size === 4)
+    if (op === 'pop' && dst.kind === 'reg' && dst.size === word)
     {
-        return { operand: null, size: 4, store: false, stack: 0 };
+        return { operand: null, size: word, store: false, stack: 0 };
     }
     const at = operands.findIndex(o=>o.kind === 'mem');
     if (at < 0 || operands.some((o, k)=>k !== at && o.kind === 'mem'))
@@ -600,7 +606,8 @@ function accessOf(ins){
         return null;
     }
     const mem = operands[at];
-    if (mem.addressSize === 16 || mem.segment === 4 || mem.segment === 5 || ins.prefixes.rep
+    if (mem.addressSize === (word === 8 ? 32 : 16) || mem.segment === 4 || mem.segment === 5
+        || ins.prefixes.rep
         || ins.prefixes.repne || ins.prefixes.lock)
     {
         return null;
@@ -659,24 +666,25 @@ function readsOnly(ins){
  * two of a `push`, `call` or `jmp` through memory -- the operand read, then
  * the push.
  *
- * @param {import('../decode/decoder.js').Instruction} ins
+ * @param {import('../decode/decoder.js').Instruction} ins @param {4 | 8} [word]  (`accessOf`)
  * @returns {Place[]}
  */
-function groupAccessesOf(ins){
+function groupAccessesOf(ins, word = 4){
     const { op, operands, prefixes } = ins;
     if (!ins.memory && !STACK_OPS.has(op))
     {
         return NO_PLACES;
     }
     const [dst] = operands;
-    if ((op === 'push' || op === 'call' || op === 'jmp') && dst?.kind === 'mem' && dst.size === 4
-        && !prefixes.operand && dst.addressSize !== 16 && dst.segment !== 4 && dst.segment !== 5)
+    if ((op === 'push' || op === 'call' || op === 'jmp') && dst?.kind === 'mem'
+        && dst.size === word && !prefixes.operand && dst.addressSize !== (word === 8 ? 32 : 16)
+        && dst.segment !== 4 && dst.segment !== 5)
     {
-        const read = placeOf({ operand: dst, size: 4, store: false, stack: 0 });
+        const read = placeOf({ operand: dst, size: word, store: false, stack: 0 });
         return op === 'jmp' ? [read]
-            : [read, placeOf({ operand: null, size: 4, store: true, stack: -4 })];
+            : [read, placeOf({ operand: null, size: word, store: true, stack: -word })];
     }
-    const access = accessOf(ins);
+    const access = accessOf(ins, word);
     return access === null ? NO_PLACES : [placeOf(access)];
 }
 
@@ -1219,16 +1227,17 @@ function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dr
 }
 
 /**
- * Eight registers holding values of their own.
+ * The registers -- eight, or long mode's sixteen -- holding values of their own.
  *
  * @param {{ n: number }} next  the count the values are numbered from
+ * @param {number} [regs]
  * @returns {Values}
  */
-function freshValues(next){
+function freshValues(next, regs = 8){
     const n = next.n;
-    next.n += 8;
-    return { sym: [n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, n + 7],
-        delta: [0, 0, 0, 0, 0, 0, 0, 0], next };
+    next.n += regs;
+    return { sym: Array.from({ length: regs }, (_, r)=>n + r), delta: new Array(regs).fill(0),
+        next };
 }
 
 /** @param {Values} values @returns {Values} */
@@ -1254,13 +1263,16 @@ const KNOWN_OPS = new Map();
  * @param {Values} values
  * @param {boolean} [forward]  DF is known clear: a string instruction with no
  *     repeat moves its pointers by its size rather than starting them afresh
+ * @param {4 | 8} [word]  a register's width and the stack's slot: in long mode
+ *     only a quadword write moves a register by a known amount, a dword one
+ *     giving it a value of its own (it zero-extends)
  */
-function effect(ins, values, forward = false){
+function effect(ins, values, forward = false, word = 4){
     const { op, operands, prefixes } = ins;
     const [dst, src] = operands;
     const { sym, delta } = values;
-    const reg32 = dst?.kind === 'reg' && dst.size === 4 ? /** @type {number} */ (dst.reg) : -1;
-    const from = src?.kind === 'reg' && src.size === 4 ? /** @type {number} */ (src.reg) : -1;
+    const reg32 = dst?.kind === 'reg' && dst.size === word ? /** @type {number} */ (dst.reg) : -1;
+    const from = src?.kind === 'reg' && src.size === word ? /** @type {number} */ (src.reg) : -1;
     const pointers = STRING_POINTERS.get(op);
     if (pointers !== undefined && !prefixes.address)
     {
@@ -1286,27 +1298,27 @@ function effect(ins, values, forward = false){
         }
         return;
     }
-    if (op === 'push' && (ins.size === 4 || ins.size === 2) && dst.kind !== 'seg')
+    if (op === 'push' && (ins.size === word || ins.size === 2) && dst.kind !== 'seg')
     {
         delta[4] -= ins.size;
         return;
     }
     if (op === 'pop' && reg32 >= 0)
     {
-        delta[4] += 4;
+        delta[4] += word;
         bumpReg(values, reg32);
         return;
     }
     if ((op === 'pushf' || op === 'popf' || op === 'call' || op === 'ret') && !prefixes.operand)
     {
         // A call pushes its return address; a return pops it, and imm16 more.
-        delta[4] += op === 'pushf' || op === 'call' ? -4
-            : 4 + (op === 'ret' && dst?.kind === 'imm' ? /** @type {number} */ (dst.value) : 0);
+        delta[4] += op === 'pushf' || op === 'call' ? -word
+            : word + (op === 'ret' && dst?.kind === 'imm' ? /** @type {number} */ (dst.value) : 0);
         return;
     }
     if (op === 'leave' && !prefixes.operand)
     {
-        copyReg(values, 4, 5, 4);
+        copyReg(values, 4, 5, word);
         bumpReg(values, 5);
         return;
     }
@@ -1335,7 +1347,8 @@ function effect(ins, values, forward = false){
     }
     if (op === 'lea' && reg32 >= 0)
     {
-        if ((src.base ?? -1) >= 0 && (src.index ?? -1) < 0 && src.addressSize !== 16)
+        if ((src.base ?? -1) >= 0 && (src.index ?? -1) < 0
+            && src.addressSize !== (word === 8 ? 32 : 16) && !src.rip)
         {
             copyReg(values, reg32, /** @type {number} */ (src.base), src.disp ?? 0);
         }
@@ -1384,7 +1397,7 @@ function effect(ins, values, forward = false){
     const known = byOp || isX87Opcode(ins.opcode) || operands.some(o=>o.kind === 'xmm');
     if (!known || op === 'push' || op === 'pop')
     {
-        for (let r = 0; r < 8; r++)
+        for (let r = 0; r < sym.length; r++)
         {
             bumpReg(values, r);
         }
@@ -1553,15 +1566,17 @@ export function emitGroupChecks(e, checks, at = -1){
  * when no access qualifies.
  *
  * @param {import('../decode/decoder.js').Instruction[]} instructions
+ * @param {boolean} [long]  long mode's: sixteen registers, quadword pointers
  * @returns {{ plan: Map<number, Planned>, streams: Stream[], turns: number,
  *     forward: boolean } | null}  `forward`: planned for DF clear
  */
-export function planLoop(instructions){
+export function planLoop(instructions, long = false){
+    const word = long ? 8 : 4;
     // A string instruction moves its pointers by its size a turn while DF is
     // clear, and a loop that writes no DF keeps it as it was found: such a
     // loop is planned for DF clear, and its window test takes DF too.
     const forward = instructions.every(ins=>(ins.flagsWritten & DF) === 0);
-    const values = freshValues({ n: 0 });
+    const values = freshValues({ n: 0 }, long ? 16 : 8);
     const { sym: initial } = copyValues(values);
     const { delta } = values;
     /** @type {{ i: number, base: number, index: number, scale: number, off: number,
@@ -1570,7 +1585,7 @@ export function planLoop(instructions){
     /** How many accesses each instruction makes that a stream could take. */
     const made = instructions.map(()=>0);
     instructions.forEach((ins, i)=>{
-        const accesses = loopAccessesOf(ins, forward);
+        const accesses = loopAccessesOf(ins, forward, word);
         made[i] = accesses.length;
         for (const { base, index, scale, disp, size, store } of accesses)
         {
@@ -1585,7 +1600,7 @@ export function planLoop(instructions){
                 found.push({ i, base: from, index: by, scale, off, size, store });
             }
         }
-        effect(ins, values, forward);
+        effect(ins, values, forward, word);
     });
     /** A register holding its own value of the turn's start, moved by `delta`. @param {number} r */
     const fixed = r=>r < 0 || values.sym[r] === initial[r];
@@ -1648,10 +1663,10 @@ export function planLoop(instructions){
  * a string instruction with no repeat, off esi and edi.
  *
  * @param {import('../decode/decoder.js').Instruction} ins
- * @param {boolean} forward
+ * @param {boolean} forward @param {4 | 8} [word]  (`accessOf`)
  * @returns {Place[]}
  */
-function loopAccessesOf(ins, forward){
+function loopAccessesOf(ins, forward, word = 4){
     const strings = STRING_ACCESSES.get(ins.op);
     if (strings !== undefined)
     {
@@ -1664,7 +1679,7 @@ function loopAccessesOf(ins, forward){
         return strings.map(([base, store])=>({ base, index: -1, scale: 1, disp: 0,
             size: ins.size, store }));
     }
-    return groupAccessesOf(ins);
+    return groupAccessesOf(ins, word);
 }
 
 /**
@@ -1689,25 +1704,51 @@ export function emitStreamWindow(e, streams, turns, forward = false){
     {
         b.i32const(0);
     }
+    const long = e.width.bits === 64;
     for (const stream of streams)
     {
         const span = (turns - 1) * stream.stride;
         const from = stream.lo + Math.min(0, span);
         const width = stream.hi - stream.lo + Math.abs(span);
-        if (stream.base >= 0)
+        if (long)
         {
-            b.localGet(registerLocal(e, stream.base));
+            // Long mode's registers are quadwords: the reach lies inside the
+            // 4 GiB window, or the window is not clean.
+            if (stream.base >= 0)
+            {
+                b.localGet(registerLocal(e, stream.base));
+            }
+            else
+            {
+                b.i64const(0n);
+            }
+            if (stream.index >= 0)
+            {
+                b.localGet(registerLocal(e, stream.index)).i64const(BigInt(stream.scale))
+                    .op(I64.mul).op(I64.add);
+            }
+            b.i64const(BigInt(from)).op(I64.add).localTee(Local.t64)
+                .localGet(Local.t64).i64const(BigInt(width - 1)).op(I64.add).op(I64.or)
+                .i64const(32n).op(I64.shrU).op(I64.wrap).op(I32.or);
+            b.localGet(Local.t64).op(I64.wrap).localSet(Local.addr);
         }
         else
         {
-            b.i32const(0);
+            if (stream.base >= 0)
+            {
+                b.localGet(registerLocal(e, stream.base));
+            }
+            else
+            {
+                b.i32const(0);
+            }
+            if (stream.index >= 0)
+            {
+                b.localGet(registerLocal(e, stream.index)).i32const(stream.scale).op(I32.mul)
+                    .op(I32.add);
+            }
+            b.i32const(from | 0).op(I32.add).localSet(Local.addr);
         }
-        if (stream.index >= 0)
-        {
-            b.localGet(registerLocal(e, stream.index)).i32const(stream.scale).op(I32.mul)
-                .op(I32.add);
-        }
-        b.i32const(from | 0).op(I32.add).localSet(Local.addr);
         const bits = PageFlag.INACCESSIBLE | (stream.store ? PageFlag.HAS_CODE : 0);
         const reach = [0, Math.min(4096, width - 1), width - 1];
         reach.forEach((at, k)=>{
@@ -1777,7 +1818,12 @@ function planned(e, size, store){
  * @param {E} e @param {number} size
  */
 export function stackAccess(e, size){
-    if (e.width.bits === 64)
+    if (e.width.bits === 64 && e.memPlan?.access != null)
+    {
+        // A stream's window test covered it, the window included.
+        e.b.localGet(registerLocal(e, 4)).op(I64.wrap).localSet(Local.addr);
+    }
+    else if (e.width.bits === 64)
     {
         windowAddress(e, ()=>e.b.localGet(registerLocal(e, 4)), size);
     }

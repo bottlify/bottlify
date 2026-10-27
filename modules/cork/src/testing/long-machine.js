@@ -541,3 +541,49 @@ export function flagsLeftUndefined(state, read){
     }
     return undefinedFlags;
 }
+
+/**
+ * Loops onto themselves whose accesses move by a fixed stride a turn, each from
+ * rdx (`loopCases`): a fill of a quadword and a dword at 12 bytes a turn, a copy,
+ * a fill downward by words, pushes of a register and an immediate -- more turns
+ * than one window takes, so a closed page lies past the first -- and an indexed
+ * store and add. Source:
+ *
+ *     fill:   mov rdi, rdx; mov ecx, 300; 1: mov [rdi], rcx; mov [rdi + 8], eax
+ *             add rdi, 12; dec ecx; jnz 1b
+ *     copy:   mov rsi, rdx; lea rdi, [rdx + 0x800]; mov ecx, 200
+ *             1: mov rax, [rsi]; add rax, rcx; mov [rdi], rax; add rsi, 8; add rdi, 8
+ *             dec ecx; jnz 1b
+ *     down:   mov rdi, rdx; mov ecx, 300; 1: mov [rdi], cx; sub rdi, 6; dec ecx; jnz 1b
+ *     pushes: mov r8, rsp; mov rsp, rdx; mov ecx, 600; 1: push rcx; push 7; dec ecx; jnz 1b
+ *             mov rsp, r8
+ *     index:  xor ecx, ecx; 1: mov [rdx + rcx*4 + 16], ecx; add [rdx + rcx*4 + 0x400], ecx
+ *             inc rcx; cmp rcx, 250; jne 1b
+ */
+export const LOOPS = Object.freeze({
+    fill: '4889d7b92c01000048890f8947084883c70cffc975f2',
+    copy: '4889d6488dba00080000b9c8000000488b064801c84889074883c6084883c708ffc975eb',
+    down: '4889d7b92c01000066890f4883ef06ffc975f5',
+    pushes: '4989e04889d4b958020000516a07ffc975f94c89c4',
+    index: '31c9894c8a10018c8a0004000048ffc14881f9fa00000075e9',
+});
+
+/**
+ * Every loop of `LOOPS` from starts that keep its turns in the data area, run off
+ * its end or below its start into a closed page, start past the 4 GiB window
+ * (whose low half is the data area: wrapped, the stores would land there), and
+ * -- with `code` -- store into the code area's page, down over the loop itself.
+ *
+ * @param {boolean} [intoCode]  for a runner that notes stores into code
+ */
+export function loopCases(intoCode = true){
+    const starts = [CORPUS.dataAt + 0x100, CORPUS.dataAt + 0x1800, CORPUS.dataAt + 0x1f00,
+        CORPUS.dataAt + 0x200, 2 ** 32 + CORPUS.dataAt + 0x100, 2 ** 63,
+        ...intoCode ? [CORPUS.codeAt + 0x300] : []];
+    return Object.entries(LOOPS).flatMap(([name, code])=>starts.map(start=>{
+        const one = CORPUS.cases[0];
+        const regs = [...one.regs];
+        regs[2] = BigInt(start).toString(16);
+        return { ...one, text: `${name} from ${regs[2]}`, code, regs };
+    }));
+}

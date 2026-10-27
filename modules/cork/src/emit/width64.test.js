@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CORPUS, HOISTED_SWITCHES, SWITCHES, compare, nested, pool, program,
+    CORPUS, HOISTED_SWITCHES, SWITCHES, compare, loopCases, nested, pool, program,
 } from '../testing/long-machine.js';
 import { createSharedRunner64 } from '../testing/shared-runner64.js';
 
@@ -198,5 +198,18 @@ test('seeded long programs run in the shared emitter\'s regions as interpreted',
         assert.ok(exits > cases.length * 0.6, `${exits} programs ran to their exit`);
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(stats.translated > 0, JSON.stringify(stats));
+    }
+});
+
+test('loops whose accesses move by a stride run as interpreted, to the turn a page or the'
+    + ' 4 GiB window stops them', ()=>{
+    // The emitter alone notes no store into code: the runtime's gate has those.
+    const cases = loopCases(false);
+    for (const budget of [7, 100000])
+    {
+        const { failures, stats } = compare(cases, budget, true, undefined, undefined, true, 0,
+            false, shared);
+        assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
+        assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
 });

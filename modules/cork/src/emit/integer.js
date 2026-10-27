@@ -1620,8 +1620,9 @@ function windowed(e, operand, store){
         b.i32const(disp | 0).localSet(Local.addr);
         return;
     }
-    if (wrapsRead(e, store))
+    if (wrapsRead(e, store) || e.memPlan?.access != null)
     {
+        // Untested, or a stream's window test covered it, the window included.
         emitAddress64(e, operand);
         b.op(I64.wrap).localSet(Local.addr);
         return;

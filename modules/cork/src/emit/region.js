@@ -2817,9 +2817,8 @@ export class RegionEmitter {
         {
             relaxedFlagReads(block, this.relaxedReads);
         }
-        // Hoisted stream windows address in dwords: the 32-bit width's, so far.
         const streams = this.selfLoop && !x.active && this.layout.codePages < 0
-            && this.width.bits === 32 ? planLoop(block.instructions) : null;
+            ? planLoop(block.instructions, this.width.bits === 64) : null;
         if (streams !== null)
         {
             this.emitHoistedLoop(block, index, live, streams);
@@ -2881,7 +2880,9 @@ export class RegionEmitter {
         this.openLoop(`checked${index}`);
         this.blockDepth = this.controls.length;
         this.blockRetired = 0;
-        if (!this.emitInstructions(block, index, live, planBlock(block.instructions)))
+        // Long mode's accesses are tested one by one outside the streams (no groups yet).
+        if (!this.emitInstructions(block, index, live,
+            this.width.bits === 64 ? new Map() : planBlock(block.instructions)))
         {
             while (this.controls.length > depth)
             {
