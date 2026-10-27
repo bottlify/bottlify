@@ -549,10 +549,9 @@ export function prepareModule(m, layout, features, memory = {},
         // The transfer's index is taken before any region's, which call it;
         // its body waits for the module's last region (`finishModule`).
         context.transfer = m.function(regionType, [], new Uint8Array([0x00, 0x0b]));
-        // Long mode has no interpreter tier in wasm yet to resume on.
-        if (resume && (layout.flagRecord ?? -1) >= 0 && width.bits === 32)
+        if (resume && (layout.flagRecord ?? -1) >= 0)
         {
-            context.resume = addResume(m, layout, bases, materialise, context.transfer);
+            context.resume = addResume(m, layout, bases, materialise, context.transfer, width);
         }
     }
     if (hashed && !crossTailCalls)
@@ -897,21 +896,26 @@ function emptyReturn(context, b, slotAt, code){
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {import('./bases.js').Bases} bases
  * @param {number} materialise @param {number} transfer
+ * @param {import('./width.js').Width} [width]
  * @returns {number} the function's index
  */
-function addResume(m, layout, bases, materialise, transfer){
+function addResume(m, layout, bases, materialise, transfer, width = WIDTH_32){
     const record = /** @type {number} */ (layout.flagRecord);
     const [budget, code, left] = [0, 1, 2];
     const tierType = m.type({ params: [ValType.i32], results: [ValType.i32] });
     const b = new Body();
-    // The record folded into the word, as `eflagsOf` folds it for the tier's own runs.
-    atState(bases, b).load('i32', { offset: record }).localTee(code);
+    // The record folded into the word, as `eflagsOf` folds it for the tier's own runs:
+    // the kind, the result, the operands and the carry in, long mode's quadwords.
+    const at = recordOffsets(layout);
+    const value = width.bits === 64 ? 'i64' : 'i32';
+    atState(bases, b).load('i32', { offset: record + at.kind }).localTee(code);
     b.if(EMPTY);
     atState(bases, b).localGet(code);
-    for (let i = 1; i < 5; i++)
+    for (const field of [at.res, at.op1, at.op2])
     {
-        atState(bases, b).load('i32', { offset: record + i * 4 });
+        atState(bases, b).load(value, { offset: record + field });
     }
+    atState(bases, b).load('i32', { offset: record + at.cin });
     atState(bases, b).load('i32', { offset: layout.eflags });
     b.call(materialise).store('i32', { offset: layout.eflags });
     atState(bases, b).i32const(0).store('i32', { offset: record });
@@ -931,9 +935,9 @@ function addResume(m, layout, bases, materialise, transfer){
         .store('i32', { offset: /** @type {number} */ (layout.origin) });
     atState(bases, b).load('i32', { offset: layout.eip });
     b.localGet(left);
-    for (let r = 0; r < CARRIED_REGS; r++)
+    for (const r of width.carried)
     {
-        atState(bases, b).load('i32', { offset: layout.regs + r * 4 });
+        atState(bases, b).load(value, { offset: layout.regs + r * width.slot });
     }
     b.returnCall(transfer);
     b.end();

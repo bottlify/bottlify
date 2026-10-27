@@ -9,7 +9,7 @@
  * its regions in modules, the entry hash and the transfers between them, its
  * invalidation of rewritten code, judged by the long-mode interpreter on the
  * hardware corpus and on seeded programs drawn from it, as the emitter alone
- * is (`emit/width64.test.js`).
+ * is (`emit/width64.itest.js`).
  */
 
 import { test } from 'node:test';
@@ -22,10 +22,8 @@ import { createRuntimeRunner64 } from '../testing/runtime-runner64.js';
 
 /** @param {WebAssembly.Memory} memory @param {any} layout */
 const runtime = (memory, layout)=>createRuntimeRunner64({ memory, layout });
-/** The corpus's runs take 15 to 20 s alone: three times that beside the suite. */
-const LONG = { timeout: 180000 };
 
-test('the shared runtime runs long-mode code as the interpreter does on the corpus', LONG, ()=>{
+test('the shared runtime runs long-mode code as the interpreter does on the corpus', ()=>{
     const { failures, exits, stats } = compare(CORPUS.cases, 7, true, undefined, undefined,
         true, 0, false, runtime);
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
@@ -34,7 +32,7 @@ test('the shared runtime runs long-mode code as the interpreter does on the corp
 });
 
 test('outside precise, as a program runs, the corpus\'s cases that run to their end run as'
-    + ' interpreted', LONG, ()=>{
+    + ' interpreted', ()=>{
     // A read left untested reads RAM where a closed page or one past the window
     // faults: the cases where the interpreter faults are another answer by design.
     // The flags a case leaves undefined are the emitter's to leave as it will there.
@@ -58,7 +56,7 @@ test('outside precise, as a program runs, the corpus\'s cases that run to their 
     assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
 });
 
-test('seeded long programs run in the shared runtime as interpreted', LONG, ()=>{
+test('seeded long programs run in the shared runtime as interpreted', ()=>{
     const instructions = pool();
     const straight = Array.from({ length: 200 },
         (_, i)=>program(instructions, 0x7eed + i, 20 + i % 60));
@@ -100,5 +98,22 @@ test('loops whose accesses move by a stride run as interpreted, to the turn a pa
             false, runtime);
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+    }
+});
+
+test('the interpreter tier in wasm runs translated code\'s misses in place,'
+    + ' as interpreted', ()=>{
+    // Every start hot at once and formed where it is first met: a miss is a target
+    // the runtime has not formed yet, the tier taking it from inside the region.
+    const tiered = (/** @type {WebAssembly.Memory} */ memory, /** @type {any} */ layout,
+        /** @type {any} */ tier)=>createRuntimeRunner64({ memory, layout, tier });
+    const cases = [...loopCases(), ...Object.values(CALLS).flatMap(code=>CORPUS.cases.slice(0, 2)
+        .map((/** @type {any} */ one)=>({ ...one, text: 'calls', code })))];
+    for (const budget of [7, 100000])
+    {
+        const { failures, stats } = compare([...CORPUS.cases.slice(0, 600), ...cases], budget,
+            true, undefined, undefined, true, 0, true, tiered);
+        assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
+        assert.ok(stats.tiered > 0, JSON.stringify(stats));
     }
 });

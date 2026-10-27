@@ -20,13 +20,19 @@ import { TRAP_END_TURN } from '../emit/integer.js';
 import { pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
+import { WasmExit } from '../interp-wasm.js';
 
 /**
+ * With `tier`, the interpreter tier in wasm (`createWasmInterpreter`) runs what no
+ * region holds, from translated code's misses as from here, as the core's host
+ * installs it (`interpretWith`); what it stops for answered as the host answers it.
+ *
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
- *     config?: Record<string, unknown> }} settings
+ *     config?: Record<string, unknown>,
+ *     tier?: import('../../../core/src/layers/cpu/engine.js').WasmInterpreter | null }} settings
  */
-export function createRuntimeRunner64({ memory, layout, config = {} }){
+export function createRuntimeRunner64({ memory, layout, config = {}, tier = null }){
     const flagsAt = pageFlagsAt(layout);
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
@@ -46,7 +52,11 @@ export function createRuntimeRunner64({ memory, layout, config = {} }){
             rdtsc: ()=>0n,
         },
     });
-    const stats = { translated: 0, interpreted: 0, exits: 0, stepped: 0 };
+    const stats = { translated: 0, interpreted: 0, exits: 0, stepped: 0, tiered: 0 };
+    if (tier !== null)
+    {
+        runtime.interpretWith?.(tier.entry(), tier.entered);
+    }
     /** Ranges the caller rewrites, dropped at the next run: the runtime drops a
      * region only for bytes that changed, which they have by then. @type {number[][]} */
     const rewritten = [];
@@ -118,6 +128,27 @@ export function createRuntimeRunner64({ memory, layout, config = {} }){
                 const exit = runtime.run(entry, budget - (state.retired - before));
                 state.retired += exit.retired;
                 stats.translated += exit.retired;
+                if (exit.kind === 'interpreted')
+                {
+                    // The tier ran in place of a miss and stopped: what for.
+                    stats.tiered++;
+                    const code = exit.vector & 0xff;
+                    if (code === WasmExit.CODE_WRITE)
+                    {
+                        const held = /** @type {NonNullable<typeof tier>} */ (tier);
+                        runtime.codeWritten(held.exitValue(), held.exitSize());
+                        asked.clear();
+                    }
+                    else if (code === WasmExit.HALT)
+                    {
+                        state.halted = true;
+                    }
+                    else if (code === WasmExit.FAULT || code === WasmExit.UNSUPPORTED)
+                    {
+                        step(state);
+                    }
+                    continue;
+                }
                 if (exit.kind === 'halt')
                 {
                     state.halted = true;

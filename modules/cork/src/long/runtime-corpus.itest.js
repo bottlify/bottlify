@@ -16,10 +16,8 @@ import assert from 'node:assert/strict';
 
 import { CORPUS, compare } from '../testing/long-machine.js';
 
-/** Each takes 10 to 30 s alone: three times that beside the suite. */
-const LONG = { timeout: 180000 };
 
-test('translated long-mode blocks do what the interpreter does on every corpus case', LONG, ()=>{
+test('translated long-mode blocks do what the interpreter does on every corpus case', ()=>{
     const { failures, exits, stats } = compare(CORPUS.cases);
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     // The gate means something only if most of the corpus ran translated.
@@ -28,7 +26,7 @@ test('translated long-mode blocks do what the interpreter does on every corpus c
         JSON.stringify(stats));
 });
 
-test('with the wasm tier beside the regions, every corpus case ends as interpreted', LONG, ()=>{
+test('with the wasm tier beside the regions, every corpus case ends as interpreted', ()=>{
     // Short runs: the regions stop often, and what they leave is the tier's.
     const { failures, exits, stats } = compare(CORPUS.cases, 7, true, undefined, undefined,
         true, 0, true);
@@ -38,7 +36,7 @@ test('with the wasm tier beside the regions, every corpus case ends as interpret
 });
 
 test('stos and movs run translated as interpreted: by pages, across them,'
-    + ' into a closed one', LONG, ()=>{
+    + ' into a closed one', ()=>{
     const base = CORPUS.cases[0];
     const cases = [];
     // stos and movs of every width: byte, word, dword, qword.
