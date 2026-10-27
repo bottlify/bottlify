@@ -390,7 +390,10 @@ export function createVolume(fs, fetchBlocks = null){
                         shareRead: mode.shareRead !== false,
                         shareWrite: mode.shareWrite === true,
                         delete: mode.delete === true,
-                        shareDelete: mode.shareDelete === true,
+                        // Only CreateFile says how it shares deletion; a layer's own
+                        // reader (an installer's database, a library a DLL loads) does
+                        // not stand in the way of the program deleting the file.
+                        shareDelete: mode.shareDelete !== false,
                         disposition: dispositionOf(mode),
                         inherited: mode.inherited === true,
                     });

@@ -299,7 +299,7 @@ test('a file is renamed or deleted only while every open with access shares dele
     const made = vol.open('C:\\F.DAT', { read: true, write: true, create: true });
     vol.close(made);
 
-    const holding = vol.open('C:\\F.DAT', { read: true, delete: true });
+    const holding = vol.open('C:\\F.DAT', { read: true, delete: true, shareDelete: false });
     assert.equal(vol.removalRefused('C:\\F.DAT'), 'SHARING_VIOLATION');
     assert.throws(()=>fs.rename('C:\\F.DAT', 'C:\\G.DAT'), { code: 'SHARING_VIOLATION' });
     assert.throws(()=>fs.deleteFile('C:\\F.DAT'), { code: 'SHARING_VIOLATION' });
@@ -310,6 +310,13 @@ test('a file is renamed or deleted only while every open with access shares dele
     const sharing = vol.open('C:\\F.DAT', { read: true, shareDelete: true });
     assert.equal(vol.removalRefused('C:\\F.DAT'), null);
     vol.close(sharing);
+    const layerReader = vol.open('C:\\F.DAT', { read: true });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), null,
+        'a reader that says nothing of deletion, a layer\'s own, shares it');
+    vol.close(layerReader);
+    const refusing = vol.open('C:\\F.DAT', { read: true, shareDelete: false });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), 'SHARING_VIOLATION');
+    vol.close(refusing);
     const attributesOnly = fs.open('C:\\F.DAT', { read: false, shareRead: false });
     assert.equal(vol.removalRefused('C:\\F.DAT'), null);
     const second = fs.open('C:\\F.DAT', { read: true, write: true });

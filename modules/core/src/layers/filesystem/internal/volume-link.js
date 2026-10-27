@@ -26,7 +26,8 @@ import { openSharedSharing } from './shared-sharing.js';
 
 /** What a process may ask of a drive. */
 const OPERATIONS = new Set(['stat', 'list', 'size', 'read', 'write', 'truncate', 'createFile',
-    'createDirectory', 'moveFile', 'removeFile', 'removeDirectory', 'setModified']);
+    'createDirectory', 'moveFile', 'removeFile', 'removeDirectory', 'setModified', 'link',
+    'namesOf']);
 
 /**
  * What the system answers about the run's volume, as a link's handlers.

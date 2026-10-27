@@ -337,7 +337,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *                                     absent, it may.
  * @property {boolean} [shareWrite]    Another handle may write the file while this one is open.
  * @property {boolean} [delete]        DELETE access: it may be renamed or deleted through it.
- * @property {boolean} [shareDelete]   Another may rename or delete the file while it is open.
+ * @property {boolean} [shareDelete]   Another may rename or delete the file while it is open;
+ *                                     absent, it may.
  */
 
 /**
