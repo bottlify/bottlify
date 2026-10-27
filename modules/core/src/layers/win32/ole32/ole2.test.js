@@ -31,6 +31,11 @@ const DV_E_CLIPFORMAT = 0x8004006a | 0;
 const DV_E_NOIVIEWOBJECT = 0x80040073 | 0;
 const STG_E_FILENOTFOUND = 0x80030002 | 0;
 const DRAGDROP_S_CANCEL = 0x00040101;
+const DRAGDROP_S_DROP = 0x00040100;
+const DRAGDROP_S_USEDEFAULTCURSORS = 0x00040102;
+const DROPEFFECT_NONE = 0;
+const DROPEFFECT_COPY = 1;
+const DROPEFFECT_MOVE = 2;
 const CONVERT10_E_OLESTREAM_FMT = 0x800401c2 | 0;
 const CONVERT10_E_STG_NO_STD_STREAM = 0x800401c5 | 0;
 
@@ -40,6 +45,8 @@ const IID_IOLEOBJECT = '{00000112-0000-0000-C000-000000000046}';
 const IID_IPERSISTSTORAGE = '{0000010A-0000-0000-C000-000000000046}';
 const IID_IOLECACHE = '{0000011E-0000-0000-C000-000000000046}';
 const IID_IDATAOBJECT = '{0000010E-0000-0000-C000-000000000046}';
+const IID_IDROPSOURCE = '{00000121-0000-0000-C000-000000000046}';
+const IID_IDROPTARGET = '{00000122-0000-0000-C000-000000000046}';
 const IID_IENUMFORMATETC = '{00000103-0000-0000-C000-000000000046}';
 
 const CLSID_OLD = '{12345678-1234-1234-1234-123456789ABC}';
@@ -628,10 +635,10 @@ test('a menu descriptor holds the menu and its widths until it is destroyed', as
     assert.equal(await run('OleDestroyMenuDescriptor', [0]), S_OK);
 });
 
-test('DoDragDrop ends as a cancelled drop, after dragdrop.c\'s argument checks', async()=>{
+test('DoDragDrop answers dragdrop.c\'s argument checks', async()=>{
     const { p, run } = setup();
     const data = composite(p, { [IID_IDATAOBJECT]: {} });
-    const source = composite(p, { '{00000121-0000-0000-C000-000000000046}': {} });
+    const source = composite(p, { [IID_IDROPSOURCE]: {} });
     const effect = p.out(0xdeadbeef);
     p.thread.ole32.oleDepth = 0;
     assert.equal(await run('DoDragDrop', [0, 0, 0, 0]), CO_E_NOTINITIALIZED);
@@ -641,11 +648,138 @@ test('DoDragDrop ends as a cancelled drop, after dragdrop.c\'s argument checks',
     {
         assert.equal(await run('DoDragDrop', args), E_INVALIDARG);
     }
-    assert.equal(await run('DoDragDrop', [data.unknown, source.unknown, 1, effect]),
-        DRAGDROP_S_CANCEL);
-    assert.equal(p.u32(effect), 0, 'DROPEFFECT_NONE');
     assert.deepEqual([...data.log, ...source.log], [], 'the source is not run');
-    assert.equal(p.reported.length, 1);
+});
+
+/**
+ * A drag over one window with a drop target, the source answering in turn
+ * from `going` and the target with `effects` for DragEnter, DragOver and
+ * Drop, as dragdrop.c's call_lists drive them.
+ *
+ * @param {{ going: number[], enter?: number, over?: number, drop?: [number, number],
+ *     allowed: number, targetless?: boolean }} plan
+ */
+async function drag(plan){
+    const { p, run } = setup();
+    const data = composite(p, { [IID_IDATAOBJECT]: {} });
+    const going = [...plan.going];
+    /** Both objects' calls, in the order made. @type {string[]} */
+    const calls = [];
+    /**
+     * @param {string} name @param {(args: number[]) => number} body
+     * @returns {[string, (args: number[]) => number]}
+     */
+    const logged = (name, body)=>[name, args=>{
+        calls.push(name);
+        return body(args);
+    }];
+    const source = composite(p, { [IID_IDROPSOURCE]: {
+        3: logged('QueryContinueDrag', ()=>going.shift() ?? DRAGDROP_S_CANCEL),
+        4: logged('GiveFeedback', ([effect])=>{
+            feedback.push(effect);
+            return DRAGDROP_S_USEDEFAULTCURSORS;
+        }),
+    } });
+    /** @type {number[]} */
+    const feedback = [];
+    /** @type {number[]} */
+    const offered = [];
+    /** @param {number} answer @returns {(args: number[]) => number} */
+    const answering = answer=>args=>{
+        const at = args[args.length - 1];
+        offered.push(p.u32(at));
+        p.put(at, answer);
+        return S_OK;
+    };
+    const target = composite(p, { [IID_IDROPTARGET]: {
+        3: logged('DragEnter', answering(plan.enter ?? DROPEFFECT_COPY)),
+        4: logged('DragOver', answering(plan.over ?? DROPEFFECT_COPY)),
+        5: logged('DragLeave', ()=>S_OK),
+        6: logged('Drop', args=>{
+            const [hr, effect] = plan.drop ?? [S_OK, DROPEFFECT_COPY];
+            answering(effect)(args);
+            return hr;
+        }),
+    } });
+    const WINDOW = 0x800;
+    /** @type {number[]} */
+    const captured = [];
+    Object.assign(p.exports, {
+        'USER32.dll!CreateWindowExW': ()=>0x700,
+        'USER32.dll!SetCapture': (/** @type {number[]} */ [window])=>captured.push(window),
+        'USER32.dll!ReleaseCapture': ()=>captured.push(0),
+        'USER32.dll!DestroyWindow': ()=>1,
+        'USER32.dll!GetAsyncKeyState': ()=>0,
+        'USER32.dll!GetCursorPos': (/** @type {number[]} */ [at])=>{
+            p.put(at, 50);
+            p.put(at + 4, 60);
+            return 1;
+        },
+        'USER32.dll!WindowFromPoint': (/** @type {number[]} */ [x, y])=>(x === 50 && y === 60
+            ? WINDOW : 0),
+        'USER32.dll!GetPropW': (/** @type {number[]} */ [window, name])=>(!plan.targetless
+            && window === WINDOW && p.readWide(name) === 'OleDropTargetInterface'
+            ? target.unknown : 0),
+        'USER32.dll!GetAncestor': ()=>0,
+        'USER32.dll!MsgWaitForMultipleObjects': ()=>0,
+        'USER32.dll!PeekMessageW': ()=>0,
+    });
+    const effect = p.out(0xdeadbeef);
+    const hr = await run('DoDragDrop', [data.unknown, source.unknown, plan.allowed, effect]);
+    return { hr, effect: p.u32(effect), calls, feedback,
+        offered, captured };
+}
+
+test('DoDragDrop: a drop taken answers DRAGDROP_S_DROP, a failed one its error', async()=>{
+    const failed = await drag({ going: [DRAGDROP_S_DROP], allowed: DROPEFFECT_COPY,
+        drop: [0xbeefbeef | 0, DROPEFFECT_COPY] });
+    assert.deepEqual(failed.calls, ['QueryContinueDrag', 'DragEnter', 'GiveFeedback', 'Drop']);
+    assert.equal(failed.hr, 0xbeefbeef | 0, 'Drop\'s own answer');
+    assert.equal(failed.effect, DROPEFFECT_COPY, 'and its effect');
+    assert.deepEqual(failed.captured, [0x700, 0], 'a window of its own held the capture');
+
+    const several = await drag({ going: [DRAGDROP_S_DROP],
+        allowed: DROPEFFECT_COPY | DROPEFFECT_MOVE,
+        drop: [S_OK, DROPEFFECT_NONE] });
+    assert.equal(several.hr, DRAGDROP_S_DROP);
+    assert.equal(several.effect, DROPEFFECT_NONE, 'the effect Drop wrote');
+    assert.deepEqual(several.offered, [DROPEFFECT_COPY | DROPEFFECT_MOVE,
+        DROPEFFECT_COPY | DROPEFFECT_MOVE], 'every call is offered the allowed effects');
+    assert.deepEqual(several.feedback, [DROPEFFECT_COPY]);
+});
+
+test('DoDragDrop: a drop no allowed effect fits leaves the target', async()=>{
+    const none = await drag({ going: [DRAGDROP_S_DROP], allowed: DROPEFFECT_NONE });
+    assert.deepEqual(none.calls, ['QueryContinueDrag', 'DragEnter', 'GiveFeedback', 'DragLeave']);
+    assert.deepEqual(none.feedback, [DROPEFFECT_NONE], 'the target\'s COPY narrowed to none');
+    assert.equal(none.hr, DRAGDROP_S_DROP);
+    assert.equal(none.effect, DROPEFFECT_NONE);
+
+    const nowhere = await drag({ going: [DRAGDROP_S_DROP], allowed: DROPEFFECT_COPY,
+        targetless: true });
+    assert.deepEqual(nowhere.calls, ['QueryContinueDrag']);
+    assert.equal(nowhere.hr, DRAGDROP_S_DROP);
+    assert.equal(nowhere.effect, DROPEFFECT_NONE);
+});
+
+test('DoDragDrop: a drag goes on over the target, and a cancel ends it with no effect', async()=>{
+    const moved = await drag({ going: [S_OK, S_OK, DRAGDROP_S_DROP],
+        allowed: DROPEFFECT_COPY | DROPEFFECT_MOVE, drop: [S_OK, DROPEFFECT_NONE] });
+    assert.deepEqual(moved.calls, ['QueryContinueDrag', 'DragEnter', 'GiveFeedback', 'DragOver',
+        'GiveFeedback', 'QueryContinueDrag', 'DragOver', 'GiveFeedback', 'QueryContinueDrag',
+        'Drop']);
+    assert.equal(moved.hr, DRAGDROP_S_DROP);
+
+    const cancelled = await drag({ going: [DRAGDROP_S_CANCEL], allowed: DROPEFFECT_COPY });
+    assert.deepEqual(cancelled.calls, ['QueryContinueDrag'], 'no target is entered');
+    assert.equal(cancelled.hr, DRAGDROP_S_CANCEL);
+    assert.equal(cancelled.effect, DROPEFFECT_NONE);
+
+    const later = await drag({ going: [S_OK, DRAGDROP_S_CANCEL], allowed: DROPEFFECT_COPY });
+    assert.deepEqual(later.calls.slice(-2), ['QueryContinueDrag', 'DragLeave']);
+    assert.equal(later.hr, DRAGDROP_S_CANCEL);
+    assert.equal(later.effect, DROPEFFECT_NONE);
+    assert.deepEqual(later.captured, [0x700, 0]);
 });
 
 test('what a data object can be made into is read from its formats', async()=>{

@@ -57,9 +57,35 @@ const DV_E_CLIPFORMAT = 0x8004006a | 0;
 const DV_E_NOIVIEWOBJECT = 0x80040073 | 0;
 const STG_E_FILENOTFOUND = 0x80030002 | 0;
 const STG_E_READFAULT = 0x8003001e | 0;
-const DRAGDROP_S_CANCEL = 0x00040101;
 const CONVERT10_E_OLESTREAM_FMT = 0x800401c2 | 0;
 const CONVERT10_E_STG_NO_STD_STREAM = 0x800401c5 | 0;
+
+/** DoDragDrop's loop: IDropSource's and IDropTarget's slots, and what it asks user32. */
+const DRAGDROP_S_DROP = 0x00040100;
+const DROPEFFECT_NONE = 0;
+const DROPSOURCE_QUERY_CONTINUE_DRAG = 3;
+const DROPSOURCE_GIVE_FEEDBACK = 4;
+const DROPTARGET_DRAG_ENTER = 3;
+const DROPTARGET_DRAG_OVER = 4;
+const DROPTARGET_DRAG_LEAVE = 5;
+const DROPTARGET_DROP = 6;
+const DRAG_POINT = 8;
+const MSG_SIZE = 28;
+const WS_POPUP = 0x80000000 | 0;
+const GA_PARENT = 1;
+const QS_ALLINPUT = 0x04ff;
+const PM_REMOVE = 1;
+const WM_QUIT = 0x0012;
+const WM_KEYFIRST = 0x0100;
+const WM_KEYLAST = 0x0109;
+const WM_MOUSEFIRST = 0x0200;
+const WM_MOUSELAST = 0x020e;
+const VK_ESCAPE = 0x1b;
+/** How long the loop waits for input before asking the source again. */
+const DRAG_POLL_MS = 50;
+/** grfKeyState: MK_LBUTTON, MK_RBUTTON, MK_SHIFT, MK_CONTROL, MK_MBUTTON, MK_ALT. */
+const DRAG_KEYS = [[0x01, 0x01], [0x02, 0x02], [0x10, 0x04], [0x11, 0x08], [0x04, 0x10],
+    [0x12, 0x20]];
 
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 const IID_IVIEWOBJECT = '{0000010D-0000-0000-C000-000000000046}';
@@ -883,6 +909,184 @@ export function createOle2Functions(env){
         };
     };
 
+    /**
+     * DoDragDrop's loop, after its argument checks.
+     *
+     * @param {number} data @param {number} source @param {number} allowed
+     * @param {unknown} thread
+     * @returns {Promise<{ hr: number, effect: number }>}
+     */
+    const dragAndDrop = async(data, source, allowed, thread)=>{
+        /** @param {string} name @param {number[]} args */
+        const user32 = async(name, args)=>
+            (await util.system('USER32.dll', name, args, thread)) ?? 0;
+        // A point, an effect and a MSG; the strings lent for the window's
+        // class and the target's property.
+        const block = env.heap.allocate(DRAG_POINT + 4 + MSG_SIZE) >>> 0;
+        const className = util.lendWide('STATIC');
+        const property = util.lendWide('OleDropTargetInterface');
+        if (block === 0 || className === 0 || property === 0)
+        {
+            for (const lent of [block, className, property].filter(at=>at !== 0))
+            {
+                env.heap.free(lent);
+            }
+            return { hr: E_OUTOFMEMORY, effect: DROPEFFECT_NONE };
+        }
+        const point = block;
+        const effectAt = block + DRAG_POINT;
+        const message = effectAt + 4;
+        const tracker = (await user32('CreateWindowExW',
+            [0, className, 0, WS_POPUP, 0, 0, 0, 0, 0, 0, 0, 0])) >>> 0;
+        if (tracker !== 0)
+        {
+            await user32('SetCapture', [tracker]);
+        }
+        /** @param {number} vk */
+        const down = async vk=>((await user32('GetAsyncKeyState', [vk])) & 0x8000) !== 0;
+        const keyState = async()=>{
+            let keys = 0;
+            for (const [vk, bit] of DRAG_KEYS)
+            {
+                keys |= (await down(vk)) ? bit : 0;
+            }
+            return keys;
+        };
+        /**
+         * The target under the point: its window's, or the nearest parent's.
+         *
+         * @param {number} x @param {number} y
+         */
+        const targetAt = async(x, y)=>{
+            let window = (await user32('WindowFromPoint', [x, y])) >>> 0;
+            for (let depth = 0; window !== 0 && depth < 64; depth++)
+            {
+                const target = (await user32('GetPropW', [window, property])) >>> 0;
+                if (target !== 0)
+                {
+                    return target;
+                }
+                window = (await user32('GetAncestor', [window, GA_PARENT])) >>> 0;
+            }
+            return 0;
+        };
+        /** @param {number} object @param {number} slot @param {number[]} args */
+        const call = async(object, slot, args)=>
+            (await env.callMethod(object, slot, args, thread)) | 0;
+        /**
+         * A target's call that answers an effect: it is handed the allowed
+         * ones and gives back its own, which the source sees narrowed.
+         *
+         * @param {number} at @param {number} slot @param {number[]} args
+         */
+        const ask = async(at, slot, args)=>{
+            writeU32(effectAt, allowed);
+            const hr = await call(at, slot, [...args, effectAt]);
+            return { hr, effect: readU32(effectAt) >>> 0 };
+        };
+        let target = 0;
+        let entered = false;
+        let effect = DROPEFFECT_NONE;
+        /** A WM_QUIT taken on the way, put back after. @type {number | null} */
+        let quit = null;
+        try
+        {
+            for (;;)
+            {
+                const keys = await keyState();
+                const escape = quit !== null || await down(VK_ESCAPE);
+                const going = await call(source, DROPSOURCE_QUERY_CONTINUE_DRAG,
+                    [escape ? 1 : 0, keys]);
+                if (going !== S_OK && going !== DRAGDROP_S_DROP)
+                {
+                    if (entered)
+                    {
+                        await call(target, DROPTARGET_DRAG_LEAVE, []);
+                    }
+                    return { hr: going, effect: DROPEFFECT_NONE };
+                }
+                env.writeMemory(point, new Uint8Array(8));
+                await user32('GetCursorPos', [point]);
+                const x = readU32(point) | 0;
+                const y = readU32(point + 4) | 0;
+                const under = await targetAt(x, y);
+                if (under !== target)
+                {
+                    if (entered)
+                    {
+                        await call(target, DROPTARGET_DRAG_LEAVE, []);
+                    }
+                    target = under;
+                    entered = false;
+                    effect = DROPEFFECT_NONE;
+                    if (target !== 0)
+                    {
+                        const answer = await ask(target, DROPTARGET_DRAG_ENTER, [data, keys, x, y]);
+                        entered = answer.hr >= 0;
+                        effect = entered ? answer.effect & allowed : DROPEFFECT_NONE;
+                    }
+                    await call(source, DROPSOURCE_GIVE_FEEDBACK, [effect]);
+                }
+                if (going === DRAGDROP_S_DROP)
+                {
+                    if (!entered)
+                    {
+                        return { hr: DRAGDROP_S_DROP, effect: DROPEFFECT_NONE };
+                    }
+                    if (effect === DROPEFFECT_NONE)
+                    {
+                        await call(target, DROPTARGET_DRAG_LEAVE, []);
+                        return { hr: DRAGDROP_S_DROP, effect: DROPEFFECT_NONE };
+                    }
+                    const dropped = await ask(target, DROPTARGET_DROP, [data, keys, x, y]);
+                    return dropped.hr === S_OK
+                        ? { hr: DRAGDROP_S_DROP, effect: dropped.effect }
+                        : { hr: dropped.hr, effect: dropped.effect };
+                }
+                if (entered)
+                {
+                    const answer = await ask(target, DROPTARGET_DRAG_OVER, [keys, x, y]);
+                    effect = answer.hr >= 0 ? answer.effect & allowed : DROPEFFECT_NONE;
+                    await call(source, DROPSOURCE_GIVE_FEEDBACK, [effect]);
+                }
+                // What arrived meanwhile: input is the drag's, the rest is
+                // the thread's windows' as ever; a WM_QUIT ends the drag as
+                // escape would and is put back.
+                await user32('MsgWaitForMultipleObjects', [0, 0, 0, DRAG_POLL_MS, QS_ALLINPUT]);
+                for (let taken = 0; taken < 100
+                    && (await user32('PeekMessageW', [message, 0, 0, 0, PM_REMOVE])) !== 0; taken++)
+                {
+                    const kind = readU32(message + 4) >>> 0;
+                    if (kind === WM_QUIT)
+                    {
+                        quit = readU32(message + 8) | 0;
+                    }
+                    else if (!(kind >= WM_KEYFIRST && kind <= WM_KEYLAST)
+                        && !(kind >= WM_MOUSEFIRST && kind <= WM_MOUSELAST))
+                    {
+                        await user32('TranslateMessage', [message]);
+                        await user32('DispatchMessageW', [message]);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            if (tracker !== 0)
+            {
+                await user32('ReleaseCapture', []);
+                await user32('DestroyWindow', [tracker]);
+            }
+            if (quit !== null)
+            {
+                await user32('PostQuitMessage', [quit]);
+            }
+            env.heap.free(block);
+            env.heap.free(className);
+            env.heap.free(property);
+        }
+    };
+
     const table = {
         /**
          * HRESULT OleRun(LPUNKNOWN pUnknown)
@@ -1593,16 +1797,25 @@ export function createOle2Functions(env){
          * HRESULT DoDragDrop(LPDATAOBJECT pDataObj, LPDROPSOURCE pDropSource,
          *   DWORD dwOKEffects, LPDWORD pdwEffect)
          *
-         * A drag runs while a person holds a mouse button down and moves it,
-         * and no person drives one here: the drag ends as one cancelled
-         * before it began, with no effect, the answer a source already
-         * handles. The source is not called. Outside OleInitialize, and with
-         * any argument missing, the answers are dragdrop.c test_DoDragDrop's.
+         * A modal loop on the calling thread, over a hidden window holding
+         * the capture: the source says each time round whether the drag
+         * goes on, is dropped or is cancelled; the target is the
+         * "OleDropTargetInterface" of the window under the cursor or of its
+         * nearest parent with one, entered, moved over, left and dropped
+         * on, and the source is told the effect it answered narrowed to the
+         * ones allowed. A drop on a target answering no allowed effect is
+         * a DragLeave instead, with DRAGDROP_S_DROP and no effect; a drop
+         * the target took answers DRAGDROP_S_DROP and the target's effect,
+         * a failed Drop its error. Input taken while dragging belongs to
+         * the drag and is not dispatched. dragdrop.c's call_lists are the
+         * sequences, but for the data object's formats Windows reads twice
+         * and queries before the loop, to publish them to other processes'
+         * targets: no other process takes a drop here, so they are not read.
          */
         DoDragDrop: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([data, source, , effect])=>{
+            handler: async([data, source, allowed, effect])=>{
                 if (!env.oleInitialized(env.currentThread()))
                 {
                     return CO_E_NOTINITIALIZED;
@@ -1611,9 +1824,10 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(effect, 0);
-                util.sayOnce('DoDragDrop', 'no drag is carried out; answered as cancelled');
-                return DRAGDROP_S_CANCEL;
+                const thread = env.callerThread();
+                const answer = await dragAndDrop(data >>> 0, source >>> 0, allowed >>> 0, thread);
+                writeU32(effect, answer.effect);
+                return answer.hr;
             },
         },
 

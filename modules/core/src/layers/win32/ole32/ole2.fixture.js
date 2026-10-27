@@ -445,7 +445,7 @@ export function oleProcess(options = {}){
     return {
         bytes, view, heap, u32, u16, put, wide, readWide, guid, guidAt, out, registry, records,
         callMethod, guestObject, queryPointer, hive, setKey, classes, created, user32, metafiles,
-        systemCalls, reported, releasedMedia, thread, env, storage, docfile,
+        systemCalls, reported, releasedMedia, thread, env, storage, docfile, exports,
         /** The object behind a pointer this layer published. @param {number} pointer */
         objectAt: pointer=>records.get(pointer)?.object,
     };
