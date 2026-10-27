@@ -16,6 +16,7 @@ const ERROR_SEM_TIMEOUT = 121;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_INVALID_NAME = 123;
 const ERROR_ALREADY_EXISTS = 183;
+const ERROR_INVALID_PARAMETER = 87;
 const GENERIC_READ = 0x80000000;
 const GENERIC_WRITE = 0x40000000;
 const NAME = '\\\\.\\mailslot\\wine_mailslot_test';
@@ -143,7 +144,7 @@ test('clients write messages the server reads one at a time, whole, in order', (
     assert.ok('handle' in opened);
     const writer = opened.handle;
     assert.equal(t.slots.read(writer, 0x400, 16, 0x500), 0);
-    assert.equal(t.errors.at(-1), ERROR_ACCESS_DENIED, 'a client does not read');
+    assert.equal(t.errors.at(-1), ERROR_INVALID_PARAMETER, 'a client does not read');
 
     t.bytes.set([0x61], 0x200);
     assert.equal(t.slots.write(writer, 0x200, 1, 0x500), 1);
@@ -202,4 +203,50 @@ test('a read of an empty slot waits its timeout, and a write answers it', ()=>{
     assert.equal(t.slots.read(slot, 0x400, 16, 0x500), 1, 'a message there: no wait');
     assert.equal(t.slots.read(slot, 0x400, 16, 0x500), 'parked');
     assert.equal(t.blocked.at(-1)?.timed, undefined);
+});
+
+test('the native calls answer with statuses, touching the block only on a transfer', ()=>{
+    const t = setup();
+    const slot = t.functions.CreateMailslotA.handler([t.ansi(0x100, NAME), 0, 0, 0]);
+    const writer = /** @type {{ handle: number }} */ (t.slots.open(NAME, GENERIC_WRITE)).handle;
+    const block = 0x700;
+    const untouched = ()=>[t.dword(block), t.dword(block + 4)];
+    t.bytes.fill(0xef, block, block + 8);
+
+    assert.equal(t.slots.read(slot, 0x400, 16, block, true), 0xc00000b5, 'STATUS_IO_TIMEOUT');
+    assert.equal(t.slots.write(slot, 0x400, 16, block, true), 0xc0000022, 'STATUS_ACCESS_DENIED');
+    assert.equal(t.slots.read(writer, 0x400, 16, block, true), 0xc000000d,
+        'STATUS_INVALID_PARAMETER');
+    assert.deepEqual(untouched(), [0xefefefef, 0xefefefef]);
+
+    t.bytes.set([7, 8], 0x200);
+    assert.equal(t.slots.write(writer, 0x200, 2, block, true), 0);
+    assert.deepEqual(untouched(), [0, 2]);
+    t.bytes.fill(0xef, block, block + 8);
+    assert.equal(t.slots.read(slot, 0x400, 1, block, true), 0xc0000023, 'STATUS_BUFFER_TOO_SMALL');
+    assert.deepEqual(untouched(), [0xefefefef, 0xefefefef]);
+    assert.equal(t.slots.read(slot, 0x400, 16, block, true), 0);
+    assert.deepEqual([...untouched(), t.bytes[0x400], t.bytes[0x401]], [0, 2, 7, 8]);
+
+    // A native reader parked on an empty slot is woken with a status.
+    assert.equal(t.functions.SetMailslotInfo.handler([slot, 500]), 1);
+    t.setThread('native');
+    assert.equal(t.slots.read(slot, 0x400, 16, block, true), 'parked');
+    assert.equal(t.blocked.at(-1)?.timed.result, 0xc00000b5);
+    assert.equal(t.slots.write(writer, 0x200, 1, 0x600), 1);
+    assert.deepEqual(t.woken.at(-1), { thread: 'native', result: 0 });
+    assert.deepEqual(untouched(), [0, 1]);
+
+    // FileMailslotQueryInformation, of the server and of a client alike.
+    t.bytes.set([9, 9, 9], 0x200);
+    assert.equal(t.slots.write(writer, 0x200, 3, 0x600), 1);
+    for (const handle of [slot, writer])
+    {
+        const record = /** @type {Uint8Array} */ (t.slots.information(handle, 26));
+        const view = new DataView(record.buffer);
+        assert.deepEqual([0, 4, 8, 12].map(at=>view.getUint32(at, true)), [0, 0, 3, 1]);
+        assert.equal(view.getBigInt64(16, true), -5000000n, '500 ms, relative');
+    }
+    assert.equal(t.slots.information(slot, 5), 'unknown class');
+    assert.equal(t.slots.information(0x9999, 26), null);
 });

@@ -2230,6 +2230,15 @@ export function createWin32Module(){
                                 void e;
                             }
                         },
+                        setEvent: handle=>{
+                            try
+                            {
+                                kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                            }
+                            catch (e){
+                                void e;
+                            }
+                        },
                         handles,
                         namedObjects,
                         currentThread: ()=>kernel.currentThread(),

@@ -138,6 +138,8 @@ const FILE_DELETE_ON_CLOSE = 0x1000;
 
 /** The statuses the native opens answer with. */
 const STATUS_SUCCESS = 0;
+const STATUS_END_OF_FILE = 0xc0000011;
+const STATUS_IO_DEVICE_ERROR = 0xc0000185;
 const STATUS_BUFFER_OVERFLOW = 0x80000005;
 const STATUS_INVALID_INFO_CLASS = 0xc0000003;
 const STATUS_INVALID_DEVICE_REQUEST = 0xc0000010;
@@ -361,13 +363,17 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
 /**
  * @typedef {Object} FileHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {{ read: (handle: number, buffer: number, length: number, read: number) => any,
- *     write: (handle: number, buffer: number, length: number, written: number) => any }[]}
- *     [streams]
- *           Handles ReadFile and WriteFile hand on before taking them for files:
+ * @property {{ read: (handle: number, buffer: number, length: number, out: number,
+ *     native?: boolean) => any,
+ *     write: (handle: number, buffer: number, length: number, out: number,
+ *     native?: boolean) => any }[]} [streams]
+ *           Handles the reads and writes hand on before taking them for files:
  *           each answers the call, or null for a handle that is not its own.
- * @property {{ open: (name: string, access: number) => { handle: number } | { error: number } }}
- *     [mailslots]  Opens a client of the mailslot CreateFile is given the name of.
+ *           `native` asks for NtReadFile's answers: `out` is the IO_STATUS_BLOCK.
+ * @property {{ open: (name: string, access: number) => { handle: number } | { error: number },
+ *     information: (handle: number, kind: number) => Uint8Array | 'unknown class' | null }}
+ *     [mailslots]  Opens a client of the mailslot CreateFile is given the name of, and
+ *     answers NtQueryInformationFile of a mailslot handle (null: not one).
  * @property {(address: number, length: number) => Uint8Array} [windowMemory]
  *           The guest's own bytes, not a copy, valid until the guest runs again:
  *           what a write hands a volume that keeps a copy of what it is given.
@@ -386,6 +392,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *           Where a write to a standard handle goes instead of the filesystem.
  * @property {(handle: number) => void} [resetEvent]
  *           Clears an OVERLAPPED's event when an operation on it starts pending.
+ * @property {(handle: number) => void} [setEvent]
+ *           Signals the event NtReadFile or NtWriteFile is given, when it completes.
  * @property {() => string[]} [drives]  the drive letters, for the mount manager
  * @property {(letter: string) => any} [volume]  a drive's volume, its `kind` read
  * @property {{ open: (type: string, object: any) => number,
@@ -2462,7 +2470,119 @@ export function createFileFunctions(host){
     /**
      * The native calls over this table's opens, which ntdll publishes.
      */
+    /**
+     * NtReadFile and NtWriteFile: the transfer finishes before the call
+     * answers, as ReadFile's does. The IO_STATUS_BLOCK is written when it
+     * happens and left alone when the call is refused; the event is
+     * signalled and the APC queued once it is done. A ByteOffset says where,
+     * unless it is FILE_USE_FILE_POINTER_POSITION, or for a write
+     * FILE_WRITE_TO_END_OF_FILE.
+     *
+     * @param {boolean} writing
+     */
+    const ntTransfer = writing=>({
+        argBytes: 36,
+        /** @param {number[]} args */
+        handler: ([handle, event, apc, context, block, buffer, length, offset])=>{
+            const status = (/** @type {number} */ answer)=>{
+                if (answer === STATUS_SUCCESS || answer === STATUS_END_OF_FILE)
+                {
+                    if ((event >>> 0) !== 0)
+                    {
+                        host.setEvent?.(event >>> 0);
+                    }
+                    if ((apc >>> 0) !== 0)
+                    {
+                        host.queueApc?.(host.currentThread?.() ?? null, apc >>> 0,
+                            [context >>> 0, block >>> 0, 0]);
+                    }
+                }
+                return answer;
+            };
+            for (const stream of host.streams ?? [])
+            {
+                const answer = writing
+                    ? stream.write(handle, buffer, length, block, true)
+                    : stream.read(handle, buffer, length, block, true);
+                if (answer !== null)
+                {
+                    return typeof answer === 'number' ? status(answer) : answer;
+                }
+            }
+            const file = object(handle, 'file');
+            if (!file)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+            if (writing ? !file.write : !file.read)
+            {
+                return STATUS_ACCESS_DENIED;
+            }
+            let at = file.position;
+            if ((offset >>> 0) !== 0)
+            {
+                const lower = readDword(offset >>> 0);
+                const upper = readDword((offset >>> 0) + 4);
+                if (upper !== 0xffffffff)
+                {
+                    at = upper * 0x100000000 + lower;
+                }
+                else if (writing && lower === 0xffffffff)
+                {
+                    at = sizeOf(file);
+                }
+            }
+            /** @param {number} done @param {number} code */
+            const finish = (done, code)=>{
+                file.position = at + done;
+                writeDword(block >>> 0, code);
+                writeDword((block >>> 0) + 4, done);
+                return status(code);
+            };
+            const count = length >>> 0;
+            if (writing)
+            {
+                const bytes = count === 0
+                    ? new Uint8Array(0) : host.readMemory(buffer >>> 0, count).slice();
+                const stored = (files.writeOrFetch ?? files.write)
+                    .call(files, file.node, at, bytes);
+                return typeof stored === 'number'
+                    ? finish(stored, STATUS_SUCCESS)
+                    : /** @type {any} */ (stored).then(
+                        (/** @type {number} */ done)=>finish(done, STATUS_SUCCESS),
+                        ()=>STATUS_IO_DEVICE_ERROR);
+            }
+            /** @param {Uint8Array} bytes */
+            const delivered = bytes=>{
+                if (bytes.length > 0)
+                {
+                    host.writeMemory(buffer >>> 0, bytes);
+                }
+                // Nothing left to read is an answer of its own here, where
+                // ReadFile answers TRUE with nothing read.
+                return finish(bytes.length,
+                    bytes.length === 0 && count > 0 ? STATUS_END_OF_FILE : STATUS_SUCCESS);
+            };
+            const bytes = files.read(file.node, at, count);
+            return typeof (/** @type {any} */ (bytes))?.then !== 'function'
+                ? delivered(/** @type {any} */ (bytes))
+                : /** @type {any} */ (bytes).then(delivered, ()=>STATUS_IO_DEVICE_ERROR);
+        },
+    });
+
     const natives = {
+        /**
+         * NTSTATUS NtReadFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID ApcContext,
+         *   PIO_STATUS_BLOCK, PVOID Buffer, ULONG Length, PLARGE_INTEGER ByteOffset,
+         *   PULONG Key)
+         */
+        NtReadFile: ntTransfer(false),
+        /**
+         * NTSTATUS NtWriteFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID ApcContext,
+         *   PIO_STATUS_BLOCK, const void *Buffer, ULONG Length, PLARGE_INTEGER ByteOffset,
+         *   PULONG Key)
+         */
+        NtWriteFile: ntTransfer(true),
         /**
          * NTSTATUS NtLockFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID ApcContext,
          *   PIO_STATUS_BLOCK, PLARGE_INTEGER ByteOffset, PLARGE_INTEGER Length,
@@ -2567,12 +2687,14 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, block, out, length, kind])=>{
-                const file = object(handle, 'file');
-                if (!file)
+                const slot = host.mailslots?.information(handle, kind >>> 0) ?? null;
+                const file = slot === null ? object(handle, 'file') : null;
+                if (slot === null && !file)
                 {
                     return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
                 }
-                const data = informationOf(file, kind >>> 0);
+                const known = slot ?? informationOf(file, kind >>> 0);
+                const data = known === 'unknown class' ? null : known;
                 if (data === null)
                 {
                     host.divergence?.('NtQueryInformationFile',

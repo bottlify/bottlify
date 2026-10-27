@@ -565,6 +565,45 @@ test('a write whose file is still being fetched parks, then reports its count', 
     assert.equal(memory.dword(OUT_COUNT), 2);
 });
 
+test('NtReadFile and NtWriteFile move bytes where ByteOffset says, and fill the block', ()=>{
+    const { memory, files, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    const block = 0x500;
+    const offset = 0x510;
+
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, block, BUFFER, 4, 0, 0]), 0);
+    assert.deepEqual([memory.dword(block), memory.dword(block + 4)], [0, 4]);
+    assert.equal(String.fromCharCode(...memory.bytes.subarray(BUFFER, BUFFER + 4)), 'abcd');
+
+    // At an offset; then from the pointer, which the read moved.
+    memory.putDword(offset, 1);
+    memory.putDword(offset + 4, 0);
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, block, BUFFER, 2, offset, 0]), 0);
+    assert.equal(String.fromCharCode(...memory.bytes.subarray(BUFFER, BUFFER + 2)), 'bc');
+    memory.putDword(offset, 0xfffffffe);
+    memory.putDword(offset + 4, 0xffffffff);
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, block, BUFFER, 8, offset, 0]), 0);
+    assert.deepEqual([memory.dword(block), memory.dword(block + 4)], [0, 3]);
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, block, BUFFER, 8, 0, 0]),
+        0xc0000011, 'STATUS_END_OF_FILE');
+    assert.deepEqual([memory.dword(block), memory.dword(block + 4)], [0xc0000011, 0]);
+
+    // Writing at the end of the file, wherever the pointer is.
+    memory.bytes.set([0x67, 0x68], BUFFER);
+    memory.putDword(offset, 0xffffffff);
+    memory.putDword(offset + 4, 0xffffffff);
+    assert.equal(natives.NtWriteFile.handler([handle, 0, 0, 0, block, BUFFER, 2, offset, 0]), 0);
+    assert.deepEqual([memory.dword(block), memory.dword(block + 4)], [0, 2]);
+    assert.equal(files.stat('C:\\GAME\\SAVE.DAT')?.size, 8);
+
+    memory.putDword(block, 0xdeadbeef);
+    assert.equal(natives.NtReadFile.handler([0x4321, 0, 0, 0, block, BUFFER, 2, 0, 0]),
+        0xc0000008, 'STATUS_INVALID_HANDLE');
+    assert.equal(memory.dword(block), 0xdeadbeef, 'a refusal leaves the block alone');
+});
+
 test('a zero-length write still reports a count', ()=>{
     const { memory, files, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcd');
