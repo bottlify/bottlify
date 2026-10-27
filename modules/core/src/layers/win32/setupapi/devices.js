@@ -49,6 +49,7 @@ const MACHINE_DEVICES = Object.freeze([
     {
         id: 'PCI\\VEN_0000&DEV_0000&SUBSYS_00000000&REV_00\\0000',
         classGuid: '{4d36e968-e325-11ce-bfc1-08002be10318}',
+        className: 'Display',
         description: 'WebGPU Display Adapter',
         interfaces: ['{5b45201d-f2f2-4f3b-85bb-30ff1f953599}',
             '{1ca05180-a699-450a-9a0c-de4fbe3ddd89}'],
@@ -56,6 +57,7 @@ const MACHINE_DEVICES = Object.freeze([
     {
         id: 'DISPLAY\\DEFAULT_MONITOR\\0000',
         classGuid: '{4d36e96e-e325-11ce-bfc1-08002be10318}',
+        className: 'Monitor',
         description: 'Default Monitor',
         interfaces: ['{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}'],
     },
@@ -294,14 +296,88 @@ export function createDeviceStore(hive){
         },
 
         /**
-         * A new phantom instance's key, with its class.
+         * A new phantom instance's key, with its class -- and the class's
+         * name when the class is installed, its description when given.
          *
-         * @param {string} id @param {string} classGuid
+         * @param {string} id @param {string} classGuid @param {string | null} [description]
          */
-        createPhantom(id, classGuid){
+        createPhantom(id, classGuid, description = null){
             const { key } = hive.create(machine(), `${ENUM_KEY}\\${id}`);
             hive.setValue(key, 'ClassGUID', REG_SZ, sz(classGuid));
             hive.setValue(key, 'Phantom', REG_DWORD, dword(1));
+            const installed = open(`${CLASS_KEY}\\${classGuid}`);
+            const name = installed ? hive.getValue(installed, 'Class') : null;
+            if (name)
+            {
+                hive.setValue(key, 'Class', REG_SZ, name.data);
+            }
+            if (description)
+            {
+                hive.setValue(key, 'DeviceDesc', REG_SZ, sz(description));
+            }
+        },
+
+        /** An instance's key, null for none. @param {string} id */
+        instanceKey,
+
+        /**
+         * Where an instance's driver key is, under the class key: its
+         * Driver value, null when it has none.
+         *
+         * @param {string} id
+         */
+        driverPath(id){
+            const key = instanceKey(id);
+            const driver = key ? textOf(hive.getValue(key, 'Driver')?.data) : '';
+            return driver === '' ? null : `${CLASS_KEY}\\${driver}`;
+        },
+
+        /**
+         * An instance's driver key, made when it has none: the first
+         * four-digit subkey free under its class's key, which the Driver
+         * value names.
+         *
+         * @param {string} id
+         */
+        makeDriver(id){
+            const there = store.driverPath(id);
+            if (there && open(there))
+            {
+                return there;
+            }
+            const guid = classOf(id);
+            const { key: classKey } = hive.create(machine(), `${CLASS_KEY}\\${guid}`);
+            let number = 0;
+            const name = ()=>String(number).padStart(4, '0');
+            while (hive.open(classKey, name()))
+            {
+                number++;
+            }
+            hive.create(classKey, name());
+            hive.setValue(instanceKey(id), 'Driver', REG_SZ, sz(`${guid}\\${name()}`));
+            return `${CLASS_KEY}\\${guid}\\${name()}`;
+        },
+
+        /** An instance's driver key gone, and the value naming it. @param {string} id */
+        removeDriver(id){
+            const path = store.driverPath(id);
+            if (!path)
+            {
+                return false;
+            }
+            const at = path.lastIndexOf('\\');
+            const parent = open(path.slice(0, at));
+            const had = parent !== null && hive.open(parent, path.slice(at + 1)) !== null;
+            if (had)
+            {
+                removeTree(parent, path.slice(at + 1));
+            }
+            const key = instanceKey(id);
+            if (key)
+            {
+                hive.deleteValue(key, 'Driver');
+            }
+            return had;
         },
 
         /** An instance made real: no longer a phantom. @param {string} id */
@@ -315,11 +391,12 @@ export function createDeviceStore(hive){
 
         /**
          * An instance gone from the registry, its interfaces with it, and
-         * its device and enumerator keys when it was their last.
+         * its device's key when it was the last instance of it.
          *
          * @param {string} id
          */
         removeInstance(id){
+            store.removeDriver(id);
             for (const { classGuid } of storedInterfaces(id))
             {
                 const classKey = open(`${DEVICE_CLASSES_KEY}\\${classGuid}`);
@@ -335,6 +412,10 @@ export function createDeviceStore(hive){
                 return;
             }
             removeTree(deviceKey, parts[2]);
+            if (hive.subkeys(deviceKey).length === 0)
+            {
+                hive.remove(/** @type {any} */ (open(`${ENUM_KEY}\\${parts[0]}`)), parts[1]);
+            }
         },
 
         /**
@@ -390,12 +471,21 @@ export function createDeviceStore(hive){
         seedMachine(){
             for (const device of MACHINE_DEVICES)
             {
+                // Its class installed, named, as the classes of a machine's
+                // own hardware are.
+                const { key: installed } = hive.create(machine(),
+                    `${CLASS_KEY}\\${device.classGuid}`);
+                if (!hive.getValue(installed, 'Class'))
+                {
+                    hive.setValue(installed, 'Class', REG_SZ, sz(device.className));
+                }
                 if (store.exists(device.id))
                 {
                     continue;
                 }
                 const { key } = hive.create(machine(), `${ENUM_KEY}\\${device.id}`);
                 hive.setValue(key, 'ClassGUID', REG_SZ, sz(device.classGuid));
+                hive.setValue(key, 'Class', REG_SZ, sz(device.className));
                 hive.setValue(key, 'DeviceDesc', REG_SZ, sz(device.description));
                 for (const guid of device.interfaces)
                 {

@@ -1841,3 +1841,115 @@ test('RegisterDlls loads each DLL and calls its entries inside a COM apartment',
         m.str('DefaultInstall'), SPINST_UNREGSVR, 0, 0, 0, 0, 0, 0, 0]), 1);
     assert.ok(heard.includes('DllUnregisterServer') && heard.includes('DllInstall 0 args'));
 });
+
+test('a device\'s registry properties are its instance key\'s values, sized in bytes', async()=>{
+    // Wine's setupapi test_registry_property_a and test_registry_property_w.
+    const ERROR_INVALID_REG_PROPERTY = 0xe0000209;
+    const SPDRP_DEVICEDESC = 0;
+    const SPDRP_HARDWAREID = 1;
+    const SPDRP_UNUSED0 = 3;
+    const SPDRP_FRIENDLYNAME = 0xc;
+    const SPDRP_ENUMERATOR_NAME = 0x16;
+    const m = await machine();
+    const guid = m.buffer(16);
+    m.view.setUint32(guid, 0x6a55b5a4, true);
+    const set = m.fns.SetupDiCreateDeviceInfoList.handler([guid, 0]);
+    const device = m.buffer(28);
+    m.view.setUint32(device, 28, true);
+    assert.equal(m.fns.SetupDiCreateDeviceInfoW.handler([set, m.wstr('LEGACY_BOGUS'), guid,
+        m.wstr('device_name'), 0, 1, device]), 1);
+    const out = m.buffer(64);
+    const size = m.buffer(4);
+    const type = m.buffer(4);
+    /** @param {number} property @param {boolean} wide @param {number} [buffer] @param {number} [length] */
+    const get = (property, wide, buffer = out, length = 64)=>m.fns[
+        `SetupDiGetDeviceRegistryProperty${wide ? 'W' : 'A'}`].handler([set, device, property,
+        type, buffer, length, size]);
+    assert.equal(get(SPDRP_DEVICEDESC, true), 1);
+    assert.equal(m.readWideString(out, 64), 'device_name');
+    assert.equal(m.u32(type), 1, 'REG_SZ');
+    assert.equal(get(SPDRP_ENUMERATOR_NAME, false), 1);
+    assert.equal(m.readCString(out, 64), 'ROOT');
+    for (const property of [SPDRP_HARDWAREID, SPDRP_UNUSED0, SPDRP_FRIENDLYNAME])
+    {
+        assert.equal(get(property, false), 0, `property ${property}`);
+        assert.equal(m.lastError(), ERROR_INVALID_DATA);
+    }
+    assert.equal(get(0x40, false), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_REG_PROPERTY);
+    assert.equal(m.fns.SetupDiGetDeviceRegistryPropertyA.handler([set, 0, 0, 0, 0, 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'no device');
+
+    const name = m.wstr('Bogus');
+    assert.equal(m.fns.SetupDiSetDeviceRegistryPropertyW.handler([set, device,
+        SPDRP_FRIENDLYNAME, name, 12]), 1);
+    assert.equal(get(SPDRP_FRIENDLYNAME, false, 0, 0), 0);
+    assert.equal(m.lastError(), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(m.u32(size), 6, 'the A form counts ANSI bytes');
+    assert.equal(get(SPDRP_FRIENDLYNAME, true, out, 4), 0);
+    assert.equal(m.u32(size), 12);
+    assert.equal(get(SPDRP_FRIENDLYNAME, false), 1);
+    assert.equal(m.readCString(out, 64), 'Bogus');
+    assert.equal(m.fns.SetupDiSetDeviceRegistryPropertyA.handler([set, device,
+        SPDRP_FRIENDLYNAME, 0, 0]), 1, 'no data deletes it');
+    assert.equal(get(SPDRP_FRIENDLYNAME, false), 0);
+    assert.equal(m.fns.SetupDiSetDeviceRegistryPropertyA.handler([set, device, 0x10, out, 4]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_REG_PROPERTY, 'one only the system sets');
+});
+
+test('a device\'s keys: Device Parameters and a driver key its Driver value names', async()=>{
+    // Wine's setupapi test_device_key.
+    const ERROR_INVALID_FLAGS = 1004;
+    const ERROR_KEY_DOES_NOT_EXIST = 0xe0000204;
+    const ERROR_DEVINFO_NOT_REGISTERED = 0xe0000208;
+    const [GLOBAL, DEV, DRV, BOTH, KEY_READ] = [1, 1, 2, 4, 0x20019];
+    const m = await machine();
+    const guid = m.buffer(16);
+    m.view.setUint32(guid, 0x6a55b5a4, true);
+    const set = m.fns.SetupDiCreateDeviceInfoList.handler([guid, 0]);
+    const device = m.buffer(28);
+    m.view.setUint32(device, 28, true);
+    m.fns.SetupDiCreateDeviceInfoA.handler([set, m.str('ROOT\\LEGACY_BOGUS\\0000'), guid, 0, 0,
+        0, device]);
+    /** @param {number} scope @param {number} type @param {number} [access] */
+    const open = (scope, type, access = KEY_READ)=>m.fns.SetupDiOpenDevRegKey.handler([set,
+        device, scope, 0, type, access]);
+    for (const [scope, type] of [[0, 0], [GLOBAL, 0], [GLOBAL, BOTH]])
+    {
+        assert.equal(open(scope, type), INVALID_HANDLE_VALUE);
+        assert.equal(m.lastError(), ERROR_INVALID_FLAGS, `${scope} ${type}`);
+    }
+    assert.equal(open(GLOBAL, DRV), INVALID_HANDLE_VALUE);
+    assert.equal(m.lastError(), ERROR_DEVINFO_NOT_REGISTERED);
+    assert.equal(m.fns.SetupDiRegisterDeviceInfo.handler([set, device, 0, 0, 0, 0]), 1);
+    assert.equal(open(GLOBAL, DRV), INVALID_HANDLE_VALUE);
+    assert.equal(m.lastError(), ERROR_KEY_DOES_NOT_EXIST);
+
+    assert.equal(m.fns.SetupDiCreateDevRegKeyW.handler([set, device, GLOBAL, 0, DRV, 0, 0]),
+        0x7700);
+    const driver = m.buffer(64);
+    assert.equal(m.fns.SetupDiGetDeviceRegistryPropertyA.handler([set, device, 9, 0, driver, 64,
+        0]), 1);
+    assert.equal(m.readCString(driver, 64), '{6a55b5a4-0000-0000-0000-000000000000}\\0000');
+    assert.equal(open(GLOBAL, DRV, 0), INVALID_HANDLE_VALUE);
+    assert.equal(m.lastError(), ERROR_INVALID_DATA, 'no access asked for');
+    assert.equal(open(GLOBAL, DRV), 0x7700);
+    assert.equal(m.fns.SetupDiDeleteDevRegKey.handler([set, device, GLOBAL, 0, DRV]), 1);
+    assert.equal(open(GLOBAL, DRV), INVALID_HANDLE_VALUE);
+    assert.equal(m.lastError(), ERROR_KEY_DOES_NOT_EXIST);
+
+    assert.equal(m.fns.SetupDiCreateDevRegKeyA.handler([set, device, GLOBAL, 0, DEV, 0, 0]),
+        0x7700);
+    const machineRoot = /** @type {any} */ (m.hive.root(0x80000002));
+    const parameters = 'SYSTEM\\CurrentControlSet\\Enum\\ROOT\\LEGACY_BOGUS\\0000'
+        + '\\Device Parameters';
+    assert.ok(m.hive.open(machineRoot, parameters));
+    assert.equal(m.fns.SetupDiDeleteDevRegKey.handler([set, device, GLOBAL, 0, BOTH]), 1);
+    assert.equal(m.hive.open(machineRoot, parameters), null);
+
+    m.fns.SetupDiCreateDevRegKeyW.handler([set, device, GLOBAL, 0, DRV, 0, 0]);
+    assert.equal(m.fns.SetupDiRemoveDevice.handler([set, device]), 1);
+    assert.equal(m.hive.open(machineRoot,
+        'SYSTEM\\CurrentControlSet\\Control\\Class\\{6a55b5a4-0000-0000-0000-000000000000}\\0000'),
+    null, 'the driver key goes with the device');
+});

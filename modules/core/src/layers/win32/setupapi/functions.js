@@ -15,9 +15,10 @@ import { standardDirids } from './dirids.js';
 import { createStringTableFunctions } from './stringtable.js';
 import { createDiskSpaceFunctions } from './diskspace.js';
 import {
-    CLASS_KEY, DEVICE_CLASSES_KEY, GUID_NULL, SPINT, createDeviceStore, interfacePath,
+    CLASS_KEY, DEVICE_CLASSES_KEY, ENUM_KEY, GUID_NULL, SPINT, createDeviceStore, interfacePath,
 } from './devices.js';
 import { infNumber, installRegistry } from './registry.js';
+import { readProperty, writeProperty } from './properties.js';
 import { writeShellLink } from '../common/shell-link.js';
 import { CATALOG_STORE } from '../sfc/functions.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
@@ -64,6 +65,17 @@ const ERROR_INVALID_MACHINENAME = 0xe0000220;
 const ERROR_INVALID_CLASS = 0xe0000206;
 const ERROR_BAD_SERVICE_INSTALLSECT = 0xe0000217;
 const ERROR_SERVICE_EXISTS = 1073;
+const ERROR_INVALID_FLAGS = 1004;
+const ERROR_PARTIAL_COPY = 299;
+const ERROR_DEVINFO_NOT_REGISTERED = 0xe0000208;
+const ERROR_KEY_DOES_NOT_EXIST = 0xe0000204;
+
+/** A device key's scope, and its type: the device's own, its driver's, both. */
+const DICS_FLAG_GLOBAL = 1;
+const DICS_FLAG_CONFIGSPECIFIC = 2;
+const DIREG_DEV = 1;
+const DIREG_DRV = 2;
+const DIREG_BOTH = 4;
 
 /** The notifications a callback is sent. */
 export const SPFILENOTIFY = Object.freeze({
@@ -1060,6 +1072,66 @@ export function createSetupapiFunctions(host){
         }
         const key = readU32(address + 24);
         return set.devices.find(device=>device.key === key) ?? null;
+    };
+
+    /** An instance's Device Parameters key. @param {string} id */
+    const parametersPath = id=>`${ENUM_KEY}\\${id}\\Device Parameters`;
+
+    /**
+     * A device key's path in a scope: as it is for DICS_FLAG_GLOBAL, under
+     * the current hardware profile's copy of the control set for
+     * DICS_FLAG_CONFIGSPECIFIC.
+     *
+     * @param {number} scope @param {string} path
+     */
+    const scopePath = (scope, path)=>((scope >>> 0) === DICS_FLAG_CONFIGSPECIFIC
+        ? `SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current\\${path}` : path);
+
+    /**
+     * Where a device's key of a type is, null for a driver key it has not.
+     *
+     * @param {import('./devices.js').Device} device @param {number} scope @param {number} keyType
+     */
+    const devKeyPath = (device, scope, keyType)=>{
+        if ((keyType >>> 0) === DIREG_DEV)
+        {
+            return scopePath(scope, parametersPath(device.id));
+        }
+        const driver = devices?.driverPath(device.id) ?? null;
+        return driver === null ? null : scopePath(scope, driver);
+    };
+
+    /**
+     * The checks the device key calls make, in Windows' order: the set, the
+     * device, the scope, the key type (DIREG_BOTH only where `both`), and
+     * for opening, that the device is registered.
+     *
+     * @param {number} handle @param {number} data @param {number} scope @param {number} keyType
+     * @param {boolean} registeredOnly @param {boolean} [both]
+     * @returns {{ device: import('./devices.js').Device } | { error: number }}
+     */
+    const devRegKey = (handle, data, scope, keyType, registeredOnly, both = false)=>{
+        const set = deviceSet(handle);
+        if (!set || !devices || !host.registry)
+        {
+            return { error: ERROR_INVALID_HANDLE };
+        }
+        const device = deviceIn(set, data);
+        if (!device)
+        {
+            return { error: ERROR_INVALID_PARAMETER };
+        }
+        const type = keyType >>> 0;
+        if (((scope >>> 0) !== DICS_FLAG_GLOBAL && (scope >>> 0) !== DICS_FLAG_CONFIGSPECIFIC)
+            || (type !== DIREG_DEV && type !== DIREG_DRV && !(both && type === DIREG_BOTH)))
+        {
+            return { error: ERROR_INVALID_FLAGS };
+        }
+        if (registeredOnly && !devices.registered(device.id))
+        {
+            return { error: ERROR_DEVINFO_NOT_REGISTERED };
+        }
+        return { device };
     };
 
     /**
@@ -3882,8 +3954,8 @@ export function createSetupapiFunctions(host){
         ...bothWidths('SetupDiCreateDeviceInfo', wide=>({
             argBytes: 28,
             /** @param {number[]} args */
-            handler: (/** @type {number[]} */ [handle, namePointer, classGuid, , , flags,
-                data])=>{
+            handler: (/** @type {number[]} */ [handle, namePointer, classGuid, description, ,
+                flags, data])=>{
                 const name = textOf(namePointer, wide);
                 if (name === null)
                 {
@@ -3914,7 +3986,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_DEVINST_ALREADY_EXISTS);
                 }
-                devices.createPhantom(id, guid);
+                devices.createPhantom(id, guid, textOf(description, wide) || null);
                 const device = devices.entry(id, guid);
                 set.devices.push(device);
                 set.made.add(id.toUpperCase());
@@ -4398,25 +4470,186 @@ export function createSetupapiFunctions(host){
         /**
          * BOOL SetupDiGetDeviceRegistryPropertyA(HDEVINFO DeviceInfoSet,
          *     PSP_DEVINFO_DATA DeviceInfoData, DWORD Property, PDWORD PropertyRegDataType,
-         *     PBYTE PropertyBuffer, DWORD PropertyBufferSize, PDWORD RequiredSize)
+         *     PBYTE PropertyBuffer, DWORD PropertyBufferSize, PDWORD RequiredSize),
+         *     and the W form
          *
-         * No device data can name a device of an empty set.
+         * A property of the device's instance key, sized in bytes: too small
+         * a buffer is ERROR_INSUFFICIENT_BUFFER with the size written; no
+         * buffer with a size, a bad pointer -- ERROR_INVALID_PARAMETER for the
+         * A form, ERROR_PARTIAL_COPY for the W one, as Windows answers.
          */
-        SetupDiGetDeviceRegistryPropertyA: {
+        ...bothWidths('SetupDiGetDeviceRegistryProperty', wide=>({
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([set])=>fail(deviceSet(set) ? ERROR_NO_SUCH_DEVINST : ERROR_INVALID_HANDLE),
-        },
+            handler: (/** @type {number[]} */ [handle, data, property, typeOut, buffer, size,
+                required])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail((data >>> 0) === 0 ? ERROR_INVALID_PARAMETER
+                        : ERROR_NO_SUCH_DEVINST);
+                }
+                const value = readProperty(host.registry, devices.instanceKey(device.id),
+                    device.id, property >>> 0, wide);
+                if ('error' in value)
+                {
+                    return fail(value.error);
+                }
+                if ((typeOut >>> 0) !== 0)
+                {
+                    writeU32(typeOut, value.type);
+                }
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, value.data.length);
+                }
+                if ((buffer >>> 0) === 0 && (size >>> 0) !== 0)
+                {
+                    return fail(wide ? ERROR_PARTIAL_COPY : ERROR_INVALID_PARAMETER);
+                }
+                if ((size >>> 0) < value.data.length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory(buffer >>> 0, value.data);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
 
         /**
          * BOOL SetupDiSetDeviceRegistryPropertyA(HDEVINFO DeviceInfoSet,
          *     PSP_DEVINFO_DATA DeviceInfoData, DWORD Property, const BYTE *PropertyBuffer,
-         *     DWORD PropertyBufferSize)
+         *     DWORD PropertyBufferSize), and the W form -- no data deletes it.
          */
-        SetupDiSetDeviceRegistryPropertyA: {
+        ...bothWidths('SetupDiSetDeviceRegistryProperty', wide=>({
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([set])=>fail(deviceSet(set) ? ERROR_NO_SUCH_DEVINST : ERROR_INVALID_HANDLE),
+            handler: (/** @type {number[]} */ [handle, data, property, buffer, size])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                const key = device ? devices.instanceKey(device.id) : null;
+                if (!device || !key)
+                {
+                    return fail((data >>> 0) === 0 ? ERROR_INVALID_PARAMETER
+                        : ERROR_NO_SUCH_DEVINST);
+                }
+                const bytes = (buffer >>> 0) === 0 ? null
+                    : host.readMemory(buffer >>> 0, size >>> 0).slice();
+                const error = writeProperty(host.registry, key, property >>> 0, bytes, wide);
+                return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
+            },
+        })),
+
+        /**
+         * HKEY SetupDiCreateDevRegKeyA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     DWORD Scope, DWORD HwProfile, DWORD KeyType, HINF InfHandle,
+         *     PCSTR InfSectionName), and the W form
+         *
+         * DIREG_DEV is the instance's Device Parameters key; DIREG_DRV its
+         * driver key under its class, made the first time with its Driver
+         * value naming it. With an INF section, the section's registry
+         * lines go into the key as HKR.
+         */
+        ...bothWidths('SetupDiCreateDevRegKey', wide=>({
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, scope, , keyType, infHandle,
+                sectionPointer])=>{
+                const found = devRegKey(handle, data, scope, keyType, false);
+                if ('error' in found)
+                {
+                    return fail(found.error, INVALID_HANDLE_VALUE);
+                }
+                const { device } = found;
+                const path = scopePath(scope, (keyType >>> 0) === DIREG_DEV
+                    ? parametersPath(device.id) : devices?.makeDriver(device.id) ?? '');
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                const { key } = hive.create(hive.root(HKEY_LOCAL_MACHINE), path);
+                const open = (infHandle >>> 0) === 0 ? null : openInf(infHandle);
+                const section = open?.inf.section(textOf(sectionPointer, wide) ?? '');
+                if (open && section)
+                {
+                    installRegistry(hive, open.inf, section, { relativeRoot: key,
+                        expand: value=>expand(open, value),
+                        divergence: detail=>host.divergence?.(
+                            `SetupDiCreateDevRegKey${wide ? 'W' : 'A'}`, detail) });
+                }
+                return fail(ERROR_SUCCESS, host.keyHandle?.(path) || INVALID_HANDLE_VALUE);
+            },
+        })),
+
+        /**
+         * HKEY SetupDiOpenDevRegKey(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     DWORD Scope, DWORD HwProfile, DWORD KeyType, REGSAM samDesired)
+         *
+         * The key SetupDiCreateDevRegKey makes, if it is there: a phantom
+         * device's is ERROR_DEVINFO_NOT_REGISTERED, a key not made
+         * ERROR_KEY_DOES_NOT_EXIST, and no access asked for ERROR_INVALID_DATA.
+         */
+        SetupDiOpenDevRegKey: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, data, scope, , keyType, access])=>{
+                const found = devRegKey(handle, data, scope, keyType, true);
+                if ('error' in found)
+                {
+                    return fail(found.error, INVALID_HANDLE_VALUE);
+                }
+                const path = devKeyPath(found.device, scope, keyType);
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                if (path === null || !hive.open(hive.root(HKEY_LOCAL_MACHINE), path))
+                {
+                    return fail(ERROR_KEY_DOES_NOT_EXIST, INVALID_HANDLE_VALUE);
+                }
+                if ((access >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_DATA, INVALID_HANDLE_VALUE);
+                }
+                return fail(ERROR_SUCCESS, host.keyHandle?.(path) || INVALID_HANDLE_VALUE);
+            },
+        },
+
+        /**
+         * BOOL SetupDiDeleteDevRegKey(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     DWORD Scope, DWORD HwProfile, DWORD KeyType) -- DIREG_BOTH for both
+         */
+        SetupDiDeleteDevRegKey: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, data, scope, , keyType])=>{
+                const found = devRegKey(handle, data, scope, keyType, true, true);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const { device } = found;
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                const both = (keyType >>> 0) === DIREG_BOTH;
+                if (both || (keyType >>> 0) === DIREG_DEV)
+                {
+                    const path = scopePath(scope, parametersPath(device.id));
+                    const at = path.lastIndexOf('\\');
+                    const parent = hive.open(hive.root(HKEY_LOCAL_MACHINE), path.slice(0, at));
+                    if (parent)
+                    {
+                        hive.remove(parent, path.slice(at + 1));
+                    }
+                }
+                if (both || (keyType >>> 0) === DIREG_DRV)
+                {
+                    devices?.removeDriver(device.id);
+                }
+                return fail(ERROR_SUCCESS, 1);
+            },
         },
 
         /**
