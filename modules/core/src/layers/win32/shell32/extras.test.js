@@ -77,7 +77,13 @@ function machine(paths = [], table = {}){
             return at;
         },
         free: ()=>{},
-        library: name=>(name === 'KERNEL32.dll' ? kernel32 : undefined),
+        library: name=>(name === 'KERNEL32.dll' ? kernel32 : name === 'ole32.dll' ? {
+            CoTaskMemAlloc: { handler: (/** @type {number[]} */ [bytes])=>{
+                const at = heap;
+                heap += bytes + 16;
+                return at;
+            } },
+        } : undefined),
         publish: object=>{
             published.push(object);
             return 0x7000 + published.length * 16;
@@ -263,4 +269,26 @@ test('the process\'s app id is the one set, and a window\'s property store keeps
     assert.equal(m.u32(0x1300), 0, 'a key never set is VT_EMPTY');
     m.memory.set([13, 0], 0x1200);
     assert.equal(call('SetValue', [key, 0x1200]), 0x80004001 | 0, 'VT_UNKNOWN is not kept');
+});
+
+test('a known folder\'s path is in task memory, and an unknown folder has none', async()=>{
+    /** @type {number[][]} */
+    const asked = [];
+    const m = machine([], { SHGetFolderPathW: { handler: (/** @type {number[]} */ args)=>{
+        asked.push(args);
+        m.put('C:\\Documents and Settings\\user\\Desktop', true, args[4]);
+        return 0;
+    } } });
+    const id = m.put('', false, 0x1000);
+    // FOLDERID_Desktop {B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
+    m.memory.set([0x3a, 0xcc, 0xbf, 0xb4, 0x2c, 0xdb, 0x4c, 0x42, 0xb0, 0x29, 0x7f, 0xe9,
+        0x9a, 0x87, 0xc6, 0x41], id);
+    assert.equal(await m.extras.SHGetKnownFolderPath.handler([id, 0x8000, 0, 0x3000]), 0);
+    assert.equal(m.wide(m.u32(0x3000)), 'C:\\Documents and Settings\\user\\Desktop');
+    assert.equal(asked[0][1], 0x8000, 'KF_FLAG_CREATE is CSIDL_FLAG_CREATE');
+    m.memory[id] = 0x3b;
+    assert.equal(await m.extras.SHGetKnownFolderPath.handler([id, 0, 0, 0x3000]),
+        0x80070057 | 0);
+    assert.equal(m.u32(0x3000), 0);
+    assert.equal(m.extras.ILCreateFromPath, m.extras.ILCreateFromPathW);
 });

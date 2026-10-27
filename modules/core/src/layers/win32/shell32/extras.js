@@ -27,6 +27,7 @@ const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_FILENAME_EXCED_RANGE = 206;
 const CSIDL_FLAG_DONT_VERIFY = 0x4000;
 const CSIDL_FLAG_CREATE = 0x8000;
+const KF_FLAG_CREATE = 0x8000;
 
 /** SHGetNewLinkInfo's flags. */
 const SHGNLI_PIDL = 0x1;
@@ -473,7 +474,7 @@ export function createShellExtras(host, parts){
     const notifications = new Set();
     let nextNotification = 1;
 
-    return {
+    const functions = {
         DoEnvironmentSubstA: doEnvironmentSubst(false),
         DoEnvironmentSubstW: doEnvironmentSubst(true),
 
@@ -592,6 +593,45 @@ export function createShellExtras(host, parts){
                     return E_INVALIDARG;
                 }
                 return parts.table.SHGetFolderLocation.handler([0, csidl, token, 0, out]);
+            },
+        },
+
+        /**
+         * HRESULT SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken,
+         *                              PWSTR *ppszPath)
+         *
+         * The folder's path in task memory, the caller's to CoTaskMemFree;
+         * KF_FLAG_CREATE makes it. A null where it would go on any failure.
+         */
+        SHGetKnownFolderPath: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: async([id, flags, token, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                const csidl = (id >>> 0) === 0 ? undefined
+                    : KNOWN_FOLDERS[/** @type {keyof typeof KNOWN_FOLDERS} */ (
+                        readGuid(host, id >>> 0))];
+                if (csidl === undefined)
+                {
+                    return E_INVALIDARG;
+                }
+                const create = ((flags >>> 0) & KF_FLAG_CREATE) !== 0 ? CSIDL_FLAG_CREATE : 0;
+                const found = await scratch(MAX_PATH * 2, async at=>{
+                    const hr = /** @type {number} */ (await parts.table.SHGetFolderPathW.handler(
+                        [0, csidl | create, token, 0, at])) | 0;
+                    return hr < 0 ? { hr, path: null } : { hr: S_OK, path: wide(at) };
+                }, { hr: E_OUTOFMEMORY, path: null });
+                if (found.path === null)
+                {
+                    return found.hr;
+                }
+                const at = await taskString(found.path);
+                writeU32(out, at);
+                return at ? S_OK : E_OUTOFMEMORY;
             },
         },
 
@@ -879,21 +919,6 @@ export function createShellExtras(host, parts){
         },
 
         /**
-         * HRESULT SHCreateItemFromParsingName(PCWSTR pszPath, IBindCtx *pbc, REFIID riid,
-         *                                     void **ppv)
-         *
-         * There is no IShellItem here: E_NOTIMPL, a null where it would go.
-         */
-        SHCreateItemFromParsingName: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([, , , out])=>{
-                writeU32(out, 0);
-                return E_NOTIMPL;
-            },
-        },
-
-        /**
          * BOOL SHGetNewLinkInfoA(LPCSTR pszLinkTo, LPCSTR pszDir, LPSTR pszName,
          *                        BOOL *pfMustCopy, UINT uFlags)
          */
@@ -913,5 +938,6 @@ export function createShellExtras(host, parts){
             handler: ([, , , adjust])=>adjust >>> 0,
         },
     };
+    // The name without a spelling is the wide one, as on every NT shell.
+    return { ...functions, ILCreateFromPath: functions.ILCreateFromPathW };
 }
-

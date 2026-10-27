@@ -369,8 +369,19 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
     const handOut = (object, iid, out)=>{
         const pointer = publish(object, iid) >>> 0;
         memory.writeMemory(out, dword(pointer));
+        if (pointer !== 0 && iid === IID_ISHELLFOLDER)
+        {
+            folders.set(pointer, object);
+        }
         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
     };
+    /**
+     * The folders handed out, by the pointer the program holds: a program
+     * hands one back to say where an item is (SHCreateShellItem).
+     *
+     * @type {Map<number, import('../oleaut32/objects.js').ComAdapter>}
+     */
+    const folders = new Map();
 
     /**
      * @typedef {Object} FolderState
@@ -677,6 +688,39 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
         },
         /** @param {string} text @returns {number} */
         listFor,
+        /**
+         * What an item's text names -- its parsing name, display name and
+         * attributes -- or null for one no longer there.
+         *
+         * @param {string} text
+         * @returns {NamespaceItem | null}
+         */
+        describe: text=>{
+            try
+            {
+                return itemFor(text);
+            }
+            catch (e){
+                if (e && typeof e === 'object' && 'code' in e)
+                {
+                    return null;
+                }
+                throw e;
+            }
+        },
+        /**
+         * The folder an IShellFolder pointer this namespace handed out is --
+         * its text, null for the desktop -- or undefined for any other
+         * pointer, and for one whose object is gone.
+         *
+         * @param {number} pointer
+         * @returns {string | null | undefined}
+         */
+        folderAt: pointer=>{
+            const object = folders.get(pointer >>> 0);
+            return object && !object.destroyed
+                ? /** @type {FolderState} */ (object.state).folder : undefined;
+        },
         /** @param {number} list */
         pathOf: list=>pathOfList(memory, list),
     };

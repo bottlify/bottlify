@@ -34,12 +34,13 @@
  */
 
 import {
-    CONTROL_PANEL, MY_COMPUTER, createShellNamespace, listBytes, pathOfList,
+    CONTROL_PANEL, MY_COMPUTER, createShellNamespace, itemsOf, listBytes, pathOfList,
 } from './namespace.js';
 import { createDirectoryPath, runFileOperation } from './fileop.js';
 import { readFileIcons } from './icons.js';
 import { splitCommandLine } from './commandline.js';
 import { createDesktopFunctions } from './desktop.js';
+import { createShellItems } from './shellitem.js';
 import { IDLIST_ORDINALS, createIdListFunctions } from './idlist.js';
 import { createDropFunctions } from './drop.js';
 import { createShellExtras } from './extras.js';
@@ -187,6 +188,8 @@ const E_FAIL = 0x80004005 | 0;
 /** The computer: a folder with no path, whose children are the drives. */
 const CSIDL_DRIVES = 0x11;
 const CSIDL_CONTROLS = 0x03;
+const CSIDL_DESKTOP = 0x00;
+const CSIDL_DESKTOPDIRECTORY = 0x10;
 /** The user's documents, "My Documents". */
 const CSIDL_PERSONAL = 0x05;
 
@@ -384,6 +387,16 @@ export function createShellFunctions(host){
             documents: ()=>folderOf(CSIDL_PERSONAL),
         }) : null;
 
+    /** @returns {number} the empty list, put where ILFree frees it, or zero */
+    const emptyList = ()=>{
+        const at = host.allocate?.(2) ?? 0;
+        if (at)
+        {
+            host.writeMemory(at, Uint8Array.of(0, 0));
+        }
+        return at;
+    };
+
     /**
      * An item id list of one item whose data is the text (a path, or the
      * computer's `::` name), then the empty item that ends every list. A
@@ -405,7 +418,10 @@ export function createShellFunctions(host){
     };
 
     /** @param {number} list @returns {string | null} */
-    const pathOf = list=>(list === 0 || !memory ? null : pathOfList(memory, list));
+    // The empty list is the desktop, whose files are its directory's.
+    const pathOf = list=>(list === 0 || !memory ? null
+        : itemsOf(memory, list).length === 0 ? folderOf(CSIDL_DESKTOPDIRECTORY)
+            : pathOfList(memory, list));
 
     /**
      * The ANSI string an argument points at, or null when there is none to
@@ -1918,7 +1934,8 @@ export function createShellFunctions(host){
                     host.writeMemory(out >>> 0, dword(0));
                     return E_INVALIDARG;
                 }
-                const list = listFor(folder);
+                // The desktop is the namespace's root: the empty list.
+                const list = virtual === CSIDL_DESKTOP ? emptyList() : listFor(folder);
                 host.writeMemory(out >>> 0, dword(list));
                 return list === 0 ? E_OUTOFMEMORY : S_OK;
             },
@@ -2133,6 +2150,12 @@ export function createShellFunctions(host){
         },
 
         ...createDesktopFunctions(host),
+
+        ...(namespace && memory && host.publish && host.allocate ? createShellItems({
+            readMemory: memory.readMemory, writeMemory: memory.writeMemory,
+            readWideString: host.readWideString, allocate: host.allocate, free: host.free,
+            publish: host.publish, library: host.library,
+        }, namespace) : {}),
 
         ...(host.readMemory ? createIdListFunctions({ readMemory: host.readMemory,
             writeMemory: host.writeMemory, allocate: host.allocate, free: host.free }) : {}),
