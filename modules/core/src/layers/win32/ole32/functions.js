@@ -36,6 +36,7 @@ import { createStorageFunctions } from './storage.js';
 import { createUserMarshalFunctions } from './usrmarshal.js';
 import { createPropVariantFunctions } from './propvariant.js';
 import { createPropertySetFunctions } from './propset.js';
+import { registerComponentCategories } from './comcat.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createClassTable, createRemoting } from './remote.js';
 import { createProxyStubs } from './proxy-stubs.js';
@@ -2884,6 +2885,7 @@ export function createOleFunctions(host){
         divergence: host.divergence,
     };
     const clipboard = createClipboardFunctions(oleEnv);
+    registerComponentCategories({ ...oleEnv, registry: host.registry, hive: host.hive });
     // Property sets, which a storage of ours answers IPropertySetStorage for.
     const { storageMethods: propertySetMethods, ...propertySetFunctions } =
         createPropertySetFunctions({ ...oleEnv,

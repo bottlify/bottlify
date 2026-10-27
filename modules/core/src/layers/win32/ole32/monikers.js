@@ -103,6 +103,8 @@ export const CLSID_COMPOSITE_MONIKER = '{00000309-0000-0000-C000-000000000046}';
 export const CLSID_CLASS_MONIKER = '{0000031A-0000-0000-C000-000000000046}';
 export const CLSID_OBJREF_MONIKER = '{00000327-0000-0000-C000-000000000046}';
 const IID_IMARSHAL = '{00000003-0000-0000-C000-000000000046}';
+/** An OBJREF_CUSTOM's bytes before its data: signature, flags, IID, CLSID, two counts. */
+const OBJREF_CUSTOM_HEADER = 48;
 
 /** Private classes of the objects that are no moniker. */
 const CLSID_BIND_CONTEXT = '{7B5B0B8E-1F8C-4B36-9D1C-2A6D4E4B0020}';
@@ -851,9 +853,11 @@ export function createMonikerFunctions(env){
         if (state.objref)
         {
             // Asked for the pointer moniker's class, it answers as one.
-            interfaces.push({ id: CLSID_POINTER_MONIKER, methods: MONIKER_METHODS },
-                { id: IID_IMARSHAL, methods: OBJREF_MARSHAL_METHODS });
+            interfaces.push({ id: CLSID_POINTER_MONIKER, methods: MONIKER_METHODS });
         }
+        interfaces.push({ id: IID_IMARSHAL, methods: state.kind === 'pointer'
+            ? OBJREF_MARSHAL_METHODS
+            : state.kind === 'composite' ? COMPOSITE_MARSHAL_METHODS : BY_VALUE_MARSHAL_METHODS });
         if (state.kind === 'class')
         {
             interfaces.push({ id: IID_IPERSIST, methods: MONIKER_METHODS.slice(0, 1) });
@@ -3145,17 +3149,187 @@ export function createMonikerFunctions(env){
     const ROT_DATA_METHODS = [monikerMethod('GetComparisonData', 16, getComparisonData)];
 
     /**
-     * An objref moniker's IMarshal: what crosses is its object, marshaled as
-     * any interface pointer is, and the side that unmarshals it makes an
-     * objref moniker of its own over what it got.
+     * A composite's halves as it marshals them: its first component, and the
+     * rest -- one moniker, or a composite of them made for the purpose. The
+     * second is the caller's to release when it was made.
+     *
+     * @param {MonikerState} state @param {unknown} thread
      */
-    const OBJREF_MARSHAL_METHODS = [
-        monikerMethod('GetUnmarshalClass', 28, (_state, [, , , , , out])=>{
+    const halves = async(state, thread)=>{
+        const [left, ...rest] = state.parts;
+        if (rest.length === 1)
+        {
+            return { left, right: rest[0], made: false };
+        }
+        for (const part of rest)
+        {
+            await addRef(part, thread);
+        }
+        return { left, right: await fromParts(rest, thread), made: true };
+    };
+
+    /**
+     * A generic composite's IMarshal: its two halves, each marshaled as its
+     * own OBJREF one after the other. The size it answers is each half's
+     * CoGetMarshalSizeMax and one more OBJREF header for each, which is what
+     * Windows answers for two item monikers (moniker.c: 300 for two of 102).
+     */
+    const COMPOSITE_MARSHAL_METHODS = [
+        monikerMethod('GetUnmarshalClass', 28, (state, [, , , , , out])=>{
             if (out === 0)
             {
                 return E_POINTER;
             }
-            env.writeMemory(out, guidBytes(CLSID_OBJREF_MONIKER));
+            env.writeMemory(out, guidBytes(classOf(state)));
+            return S_OK;
+        }),
+        monikerMethod('GetMarshalSizeMax', 28, async(state, args, thread)=>{
+            const [, , context, destination, flags, out] = args;
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            if (state.parts.length < 2 || !env.marshaling)
+            {
+                return E_UNEXPECTED;
+            }
+            const marshaling = env.marshaling;
+            const { left, right, made } = await halves(state, thread);
+            let total = 0;
+            let hr = S_OK;
+            for (const half of [left, right])
+            {
+                hr = await lend(new Uint8Array(4), async slot=>{
+                    const answer = (await marshaling.sizeMax(slot, IID_IMONIKER, half, context,
+                        destination, flags)) | 0;
+                    total += readU32(slot) + OBJREF_CUSTOM_HEADER;
+                    return answer;
+                }, E_OUTOFMEMORY);
+                if (hr < 0)
+                {
+                    break;
+                }
+            }
+            if (made)
+            {
+                await release(right, thread);
+            }
+            if (hr >= 0)
+            {
+                writeU32(out, total);
+            }
+            return hr;
+        }),
+        monikerMethod('MarshalInterface', 28, async(state, args, thread)=>{
+            const [stream, , , context, destination, flags] = args;
+            if (state.parts.length < 2 || !env.marshaling)
+            {
+                return E_UNEXPECTED;
+            }
+            const { left, right, made } = await halves(state, thread);
+            let hr = (await env.marshaling.marshal(stream, IID_IMONIKER, left, context,
+                destination, flags)) | 0;
+            if (hr >= 0)
+            {
+                hr = (await env.marshaling.marshal(stream, IID_IMONIKER, right, context,
+                    destination, flags)) | 0;
+            }
+            if (made)
+            {
+                await release(right, thread);
+            }
+            return hr;
+        }),
+        monikerMethod('UnmarshalInterface', 16, (state, [stream, iid, out], thread)=>lend(
+            new Uint8Array(8), async slot=>{
+                const marshaling = env.marshaling;
+                if (!marshaling)
+                {
+                    return E_UNEXPECTED;
+                }
+                let hr = (await marshaling.unmarshal(stream, IID_IMONIKER, slot)) | 0;
+                if (hr >= 0)
+                {
+                    hr = (await marshaling.unmarshal(stream, IID_IMONIKER, slot + 4)) | 0;
+                    if (hr < 0)
+                    {
+                        await release(readU32(slot), thread);
+                    }
+                }
+                if (hr < 0)
+                {
+                    return hr;
+                }
+                const left = readU32(slot);
+                const right = readU32(slot + 4);
+                const parts = [...await componentsOf(left, thread),
+                    ...await componentsOf(right, thread)];
+                for (const part of parts)
+                {
+                    await addRef(part, thread);
+                }
+                await releaseAll([...state.parts, left, right], thread);
+                state.parts = parts;
+                return env.callMethod(state.self, SLOT.QUERY_INTERFACE, [iid, out], thread);
+            }, E_OUTOFMEMORY)),
+        monikerMethod('ReleaseMarshalData', 8, async(_state, [stream])=>{
+            const first = (await env.marshaling?.releaseData(stream)) ?? E_UNEXPECTED;
+            return first < 0 ? first : (await env.marshaling?.releaseData(stream)) ?? E_UNEXPECTED;
+        }),
+        monikerMethod('DisconnectObject', 8, ()=>S_OK),
+    ];
+
+    /**
+     * The IMarshal of a moniker that crosses by value: its class unmarshals
+     * it, and what crosses is what IPersistStream::Save writes, sized as
+     * GetSizeMax says (moniker.c test_moniker's marshal data).
+     */
+    const BY_VALUE_MARSHAL_METHODS = [
+        monikerMethod('GetUnmarshalClass', 28, (state, [, , , , , out])=>{
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            env.writeMemory(out, guidBytes(classOf(state)));
+            return S_OK;
+        }),
+        monikerMethod('GetMarshalSizeMax', 28, (state, [, , , , , out], thread)=>{
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            return lend(new Uint8Array(8), async slot=>{
+                const hr = (await sizeMax(state, slot, thread)) | 0;
+                if (hr >= 0)
+                {
+                    writeU32(out, readU32(slot));
+                }
+                return hr;
+            }, E_OUTOFMEMORY);
+        }),
+        monikerMethod('MarshalInterface', 28, (state, [stream], thread)=>
+            save(state, stream, thread)),
+        monikerMethod('UnmarshalInterface', 16, async(state, [stream, iid, out], thread)=>{
+            const hr = (await load(state, stream, thread)) | 0;
+            return hr < 0 ? hr
+                : env.callMethod(state.self, SLOT.QUERY_INTERFACE, [iid, out], thread);
+        }),
+        monikerMethod('ReleaseMarshalData', 8, ()=>S_OK),
+        monikerMethod('DisconnectObject', 8, ()=>S_OK),
+    ];
+
+    /**
+     * A pointer or objref moniker's IMarshal: what crosses is its object, marshaled as
+     * any interface pointer is, and the side that unmarshals it makes an
+     * objref moniker of its own over what it got.
+     */
+    const OBJREF_MARSHAL_METHODS = [
+        monikerMethod('GetUnmarshalClass', 28, (state, [, , , , , out])=>{
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            env.writeMemory(out, guidBytes(classOf(state)));
             return S_OK;
         }),
         monikerMethod('GetMarshalSizeMax', 28, (state, [, , context, destination, flags, out])=>
