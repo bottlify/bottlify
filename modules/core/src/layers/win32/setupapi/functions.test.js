@@ -2419,3 +2419,76 @@ test('a class\'s devices list in the order they were made, an enumerator\'s in i
             0x14]), INVALID_HANDLE_VALUE, 'interfaces: a whole instance id or none');
         assert.equal(m.lastError(), ERROR_INVALID_DATA);
     });
+
+test('the machine\'s display adapter: its driver\'s properties, its interface opened by link',
+    async()=>{
+        // Wine's setupapi test_device_enum and test_SetupDiOpenDeviceInterface.
+        const ERROR_NOT_FOUND = 1168;
+        const ERROR_NO_SUCH_DEVICE_INTERFACE = 0xe0000225;
+        const m = await machine();
+        const display = m.buffer(16);
+        m.view.setUint32(display, 0x4d36e968, true);
+        m.view.setUint16(display + 4, 0xe325, true);
+        m.view.setUint16(display + 6, 0x11ce, true);
+        [0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18].forEach((byte, index)=>
+            m.view.setUint8(display + 8 + index, byte));
+        const set = m.fns.SetupDiGetClassDevsW.handler([display, 0, 0, 2]);
+        const device = m.buffer(28);
+        m.view.setUint32(device, 28, true);
+        assert.equal(m.fns.SetupDiEnumDeviceInfo.handler([set, 0, device]), 1);
+        /** @param {number} pid */
+        const driverKey = pid=>{
+            const at = m.buffer(20);
+            m.view.setUint32(at, 0xa8b865dd, true);
+            m.view.setUint16(at + 4, 0x2e3d, true);
+            m.view.setUint16(at + 6, 0x4094, true);
+            [0xad, 0x97, 0xe5, 0x93, 0xa7, 0x0c, 0x75, 0xd6].forEach((byte, index)=>
+                m.view.setUint8(at + 8 + index, byte));
+            m.view.setUint32(at + 16, pid, true);
+            return at;
+        };
+        const type = m.buffer(4);
+        const out = m.buffer(256);
+        const size = m.buffer(4);
+        /** @param {number} pid */
+        const get = pid=>m.fns.SetupDiGetDevicePropertyW.handler([set, device, driverKey(pid), type,
+            out, 256, size, 0]);
+        assert.equal(get(2), 1, 'DEVPKEY_Device_DriverDate');
+        assert.deepEqual([m.u32(type), m.u32(size)], [0x10, 8]);
+        assert.equal(m.view.getBigUint64(out, true) % 864000000000n, 0n, 'a date, no time');
+        for (const pid of [3, 4, 9])
+        {
+            assert.equal(get(pid), 1, `pid ${pid}`);
+            assert.equal(m.u32(type), 0x12);
+            assert.ok(m.readWideString(out, 256).length > 0);
+        }
+        assert.equal(get(11), 0, 'no co-installers');
+        assert.equal(m.lastError(), ERROR_NOT_FOUND);
+
+        const detail = m.buffer(600);
+        const face = m.buffer(28);
+        m.view.setUint32(face, 28, true);
+        const adapter = m.buffer(16);
+        m.view.setUint32(adapter, 0x5b45201d, true);
+        m.view.setUint16(adapter + 4, 0xf2f2, true);
+        m.view.setUint16(adapter + 6, 0x4f3b, true);
+        [0x85, 0xbb, 0x30, 0xff, 0x1f, 0x95, 0x35, 0x99].forEach((byte, index)=>
+            m.view.setUint8(adapter + 8 + index, byte));
+        const faces = m.fns.SetupDiGetClassDevsW.handler([adapter, 0, 0, 0x10]);
+        assert.equal(m.fns.SetupDiEnumDeviceInterfaces.handler([faces, 0, adapter, 0, face]), 1);
+        m.view.setUint32(detail, 6, true);
+        assert.equal(m.fns.SetupDiGetDeviceInterfaceDetailW.handler([faces, face, detail, 600, 0,
+            0]), 1);
+        const link = m.readWideString(detail + 4, 520);
+        const empty = m.fns.SetupDiCreateDeviceInfoList.handler([0, 0]);
+        assert.equal(m.fns.SetupDiOpenDeviceInterfaceW.handler([empty, 0, 0, face]), 0);
+        assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
+        assert.equal(m.fns.SetupDiOpenDeviceInterfaceW.handler([empty, m.wstr('\\\\?\\'), 0, face]),
+            0);
+        assert.equal(m.lastError(), ERROR_NO_SUCH_DEVICE_INTERFACE);
+        assert.equal(m.fns.SetupDiOpenDeviceInterfaceA.handler([empty, m.str(link.toUpperCase()),
+            0, face]), 1, 'case aside');
+        assert.equal(m.u32(face + 4), 0x5b45201d);
+        assert.equal(m.fns.SetupDiEnumDeviceInterfaces.handler([empty, 0, adapter, 0, face]), 1,
+            'now in the set');
+    });

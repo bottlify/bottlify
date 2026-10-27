@@ -81,6 +81,24 @@ const DEVPKEY_INSTANCE = '{78c34fc8-104a-4aca-9ea4-524d52996e57}';
 const DEVPKEY_RELATIONS = '{4340a6c5-93fa-4706-972c-7b648008a5a7}';
 const DEVPKEY_BUS_DESCRIPTION = '{540b947e-8b40-45bc-a8a2-6a0b894cbda2}';
 const DEVPKEY_CONTAINER = '{8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c}';
+/** The device's driver format: its driver key's values. */
+const DEVPKEY_DRIVER = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}';
+/** DEVPROP_TYPE_FILETIME. */
+const DEVPROP_TYPE_FILETIME = 0x10;
+/**
+ * The driver properties by id: the driver key's value and the type it is
+ * answered as.
+ *
+ * @type {ReadonlyMap<number, { name: string, type: number }>}
+ */
+const DRIVER_PROPERTIES = new Map([
+    [2, { name: 'DriverDateData', type: DEVPROP_TYPE_FILETIME }],
+    [3, { name: 'DriverVersion', type: 0x12 }], [4, { name: 'DriverDesc', type: 0x12 }],
+    [5, { name: 'InfPath', type: 0x12 }], [6, { name: 'InfSection', type: 0x12 }],
+    [7, { name: 'InfSectionExt', type: 0x12 }], [8, { name: 'MatchingDeviceId', type: 0x12 }],
+    [9, { name: 'ProviderName', type: 0x12 }], [11, { name: 'CoInstallers32', type: 0x2012 }],
+]);
+
 /** The device interface format: its name, whether it is enabled, its class. */
 const DEVPKEY_INTERFACE = '{026e516e-b814-414b-83cd-856d6fef4822}';
 
@@ -103,6 +121,7 @@ const DEVPROP_OF_REG = new Map([[1, DEVPROP_TYPE.STRING], [2, DEVPROP_TYPE.STRIN
 const ERROR_NOT_FOUND = 1168;
 const ERROR_WRONG_INF_STYLE = 0xe0000100;
 const ERROR_DEVICE_INTERFACE_REMOVED = 0xe000021c;
+const ERROR_NO_SUCH_DEVICE_INTERFACE = 0xe0000225;
 
 /** SP_DEVINSTALL_PARAMS: cbSize and the eight DWORDs after it, before the path. */
 const INSTALL_PARAMS_WORDS = 8;
@@ -1204,6 +1223,10 @@ export function createSetupapiFunctions(host){
             return innate(device);
         }
         const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+        if (fmtid === DEVPKEY_DRIVER)
+        {
+            return driverPropertyOf(device, pid);
+        }
         const key = devices?.instanceKey(device.id) ?? null;
         if (fmtid === DEVPKEY_DEVICE && pid >= 2)
         {
@@ -1226,6 +1249,33 @@ export function createSetupapiFunctions(host){
             }
         }
         return key ? storedProperty(hive, key, fmtid, pid) : null;
+    };
+
+    /**
+     * A device's driver property: a value of its driver key, by the name
+     * Windows keeps it under -- the date as the FILETIME DriverDateData
+     * holds, the strings widened, the co-installers a list.
+     *
+     * @param {import('./devices.js').Device} device @param {number} pid
+     * @returns {{ type: number, data: Uint8Array } | null}
+     */
+    const driverPropertyOf = (device, pid)=>{
+        const entry = DRIVER_PROPERTIES.get(pid);
+        const hive = host.registry;
+        const path = devices?.driverPath(device.id) ?? null;
+        const key = entry && hive && path ? hive.open(hive.root(HKEY_LOCAL_MACHINE), path) : null;
+        const value = key ? hive?.getValue(key, entry?.name ?? '') : null;
+        if (!entry || !value)
+        {
+            return null;
+        }
+        if (entry.type === DEVPROP_TYPE_FILETIME)
+        {
+            return value.data.length === 8 ? { type: entry.type, data: value.data.slice() } : null;
+        }
+        const stored = decodeAnsi(value.data);
+        return { type: entry.type, data: utf16z(entry.type === DEVPROP_TYPE.STRING_LIST
+            ? stored.replace(/\0+$/, '\0') : stored.replace(/\0[\s\S]*$/, '')) };
     };
 
     /**
@@ -6255,6 +6305,70 @@ export function createSetupapiFunctions(host){
                     });
             },
         },
+
+        /**
+         * BOOL SetupDiOpenDeviceInterfaceA(HDEVINFO DeviceInfoSet, PCSTR DevicePath,
+         *     DWORD OpenFlags, PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData), and the W form
+         *
+         * The interface a symbolic link names, case aside, added to the set
+         * with its device -- phantom or not -- and its data answered when
+         * asked for. A link no interface has is ERROR_NO_SUCH_DEVICE_INTERFACE;
+         * a device of another class than the set's ERROR_CLASS_MISMATCH.
+         */
+        ...bothWidths('SetupDiOpenDeviceInterface', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, pathPointer, , data])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const path = textOf(pathPointer, wide);
+                if (path === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((data >>> 0) !== 0 && readU32(data) !== SP_DEVICE_INTERFACE_DATA_SIZE)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                const wanted = path.toLowerCase();
+                const id = devices.allInstances('tree').find(candidate=>devices
+                    .storedInterfaces(candidate).some(face=>interfacePath(candidate,
+                        face.classGuid, face.reference) === wanted));
+                const stored = id === undefined ? undefined : devices.storedInterfaces(id)
+                    .find(face=>interfacePath(id, face.classGuid, face.reference) === wanted);
+                if (id === undefined || !stored)
+                {
+                    return fail(ERROR_NO_SUCH_DEVICE_INTERFACE);
+                }
+                const deviceClass = devices.classOf(id);
+                if (set.classGuid !== null && set.classGuid !== deviceClass)
+                {
+                    return fail(ERROR_CLASS_MISMATCH);
+                }
+                let device = set.devices.find(held=>held.id.toUpperCase() === id.toUpperCase());
+                if (!device)
+                {
+                    device = devices.entry(id, deviceClass);
+                    device.interfaces = [];
+                    set.devices.push(device);
+                }
+                let face = device.interfaces.find(held=>held.classGuid === stored.classGuid
+                    && held.reference.toLowerCase() === stored.reference.toLowerCase());
+                if (!face)
+                {
+                    face = { ...stored, flags: 0 };
+                    device.interfaces.push(face);
+                }
+                if ((data >>> 0) !== 0)
+                {
+                    writeInterface(data, set, device, face);
+                }
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
 
         /**
          * HKEY SetupDiCreateDevRegKeyA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,

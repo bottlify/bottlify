@@ -27,9 +27,11 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { msToFileTime } from '../kernel32/filetime.js';
 
 const HKEY_LOCAL_MACHINE = 0x80000002;
 const REG_SZ = 1;
+const REG_BINARY = 3;
 const REG_DWORD = 4;
 
 export const ENUM_KEY = 'SYSTEM\\CurrentControlSet\\Enum';
@@ -75,6 +77,9 @@ const MACHINE_DEVICES = Object.freeze([
         classGuid: '{4d36e968-e325-11ce-bfc1-08002be10318}',
         className: 'Display',
         description: 'WebGPU Display Adapter',
+        // Its driver is the browser's: what the driver key says of it.
+        driver: { description: 'WebGPU Display Adapter', provider: 'Bottlify',
+            version: '1.0.0.0', date: [2026, 1, 1] },
         interfaces: ['{5b45201d-f2f2-4f3b-85bb-30ff1f953599}',
             '{1ca05180-a699-450a-9a0c-de4fbe3ddd89}'],
     },
@@ -533,17 +538,31 @@ export function createDeviceStore(hive){
             }
             for (const device of MACHINE_DEVICES)
             {
-                if (store.exists(device.id))
+                if (!store.exists(device.id))
                 {
-                    continue;
+                    const { key } = hive.create(machine(), `${ENUM_KEY}\\${device.id}`);
+                    hive.setValue(key, 'ClassGUID', REG_SZ, sz(device.classGuid));
+                    hive.setValue(key, 'Class', REG_SZ, sz(device.className));
+                    hive.setValue(key, 'DeviceDesc', REG_SZ, sz(device.description));
+                    for (const guid of device.interfaces)
+                    {
+                        store.addInterface(device.id, guid, '');
+                    }
                 }
-                const { key } = hive.create(machine(), `${ENUM_KEY}\\${device.id}`);
-                hive.setValue(key, 'ClassGUID', REG_SZ, sz(device.classGuid));
-                hive.setValue(key, 'Class', REG_SZ, sz(device.className));
-                hive.setValue(key, 'DeviceDesc', REG_SZ, sz(device.description));
-                for (const guid of device.interfaces)
+                // Its driver too, on a registry kept from before it had one.
+                const driver = 'driver' in device ? device.driver : null;
+                if (driver && !store.driverPath(device.id))
                 {
-                    store.addInterface(device.id, guid, '');
+                    const driverKey = /** @type {any} */ (open(store.makeDriver(device.id)));
+                    const [year, month, day] = driver.date;
+                    hive.setValue(driverKey, 'DriverDesc', REG_SZ, sz(driver.description));
+                    hive.setValue(driverKey, 'ProviderName', REG_SZ, sz(driver.provider));
+                    hive.setValue(driverKey, 'DriverVersion', REG_SZ, sz(driver.version));
+                    hive.setValue(driverKey, 'DriverDate', REG_SZ, sz(`${month}-${day}-${year}`));
+                    const date = new Uint8Array(8);
+                    new DataView(date.buffer).setBigUint64(0,
+                        msToFileTime(Date.UTC(year, month - 1, day)), true);
+                    hive.setValue(driverKey, 'DriverDateData', REG_BINARY, date);
                 }
             }
         },
