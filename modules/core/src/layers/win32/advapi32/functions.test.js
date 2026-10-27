@@ -7,7 +7,9 @@
 import { createRegistryService } from './registry-service.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { KEY_OF_HANDLE, REGISTRY_NATIVES, USER_NAME, createRegistryFunctions } from './functions.js';
+import {
+    KEY_OF_HANDLE, REGISTRY_NATIVES, USER_NAME, createRegistryFunctions,
+} from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
     createHive,
