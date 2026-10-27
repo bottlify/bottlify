@@ -349,6 +349,7 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  * @property {(path: string) => string | null} [removalRefused]
  *           Why the file may not be renamed or deleted as its opens stand, or null.
  * @property {(path: string) => boolean} [isOpen]  whether any process holds the file open
+ * @property {(path: string) => string | null} [deviceOf]  the device a path names, upper case
  * @property {() => string | null} [openRefusal]  why the last `open` answered null
  * @property {(path: string) => string | null} [mappedAs]  how a section maps the file
  * @property {(path: string, existing: string) => string | null} [link]
@@ -812,6 +813,54 @@ export function createFileFunctions(host){
             return null;
         }
     };
+
+    /** @param {number} handle  whether it is the null device's */
+    const isNul = handle=>host.handles.typeOf?.(handle >>> 0) === 'device'
+        && object(handle, 'device')?.device === 'nul';
+
+    /**
+     * The null device as a stream: a read is the end of it, a write taken
+     * whole and kept nowhere -- in ReadFile's terms or NtReadFile's.
+     */
+    const nulStream = {
+        /** @param {number} handle @param {number} buffer @param {number} length
+         *  @param {number} out @param {boolean} [native] */
+        read: (handle, buffer, length, out, native = false)=>{
+            if (!isNul(handle))
+            {
+                return null;
+            }
+            if (native)
+            {
+                writeDword(out >>> 0, STATUS_END_OF_FILE);
+                writeDword((out >>> 0) + 4, 0);
+                return STATUS_END_OF_FILE;
+            }
+            writeDwordIf(out >>> 0, 0);
+            host.setLastError(ERROR_SUCCESS);
+            return 1;
+        },
+        /** @param {number} handle @param {number} buffer @param {number} length
+         *  @param {number} out @param {boolean} [native] */
+        write: (handle, buffer, length, out, native = false)=>{
+            if (!isNul(handle))
+            {
+                return null;
+            }
+            if (native)
+            {
+                writeDword(out >>> 0, STATUS_SUCCESS);
+                writeDword((out >>> 0) + 4, length >>> 0);
+                return STATUS_SUCCESS;
+            }
+            writeDwordIf(out >>> 0, length >>> 0);
+            host.setLastError(ERROR_SUCCESS);
+            return 1;
+        },
+    };
+
+    /** Handles that are no file, each answering a read or write of its own first. */
+    const streams = [nulStream, ...host.streams ?? []];
 
     /**
      * The size the filesystem currently reports for an open file. Taken by path
@@ -1671,6 +1720,18 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
         }
+        // A device named without wildcards is found as itself, wherever it
+        // is asked for: one entry, under the name it was asked by.
+        const asked = path.slice(path.lastIndexOf(SEPARATOR) + 1);
+        if (!/[*?]/.test(asked) && files.deviceOf?.(path))
+        {
+            /** @type {DirectoryEntry} */
+            const device = { name: asked, isDirectory: false, size: 0,
+                attributes: FILE_ATTRIBUTE_ARCHIVE };
+            text.findData(data >>> 0, device);
+            host.setLastError(ERROR_SUCCESS);
+            return host.handles.open('find', { entries: [device], index: 1 });
+        }
         const directory = parentOf(path);
         const pattern = path.slice(directory.endsWith(SEPARATOR)
             ? directory.length
@@ -1895,6 +1956,14 @@ export function createFileFunctions(host){
         {
             host.setLastError(ERROR_SUCCESS);
             return host.handles.open('device', { device: 'mountmgr' });
+        }
+        // The null device, by its name in any directory or as \\.\NUL: what
+        // is written to it goes nowhere, and reading it is the end at once.
+        if (name !== 0 && (/^\\\\\.\\nul$/i.test(text.raw(name))
+            || files.deviceOf?.(text.path(name)) === 'NUL'))
+        {
+            host.setLastError(ERROR_SUCCESS);
+            return host.handles.open('device', { device: 'nul' });
         }
         // A mailslot's name opens its client end.
         if (name !== 0 && host.mailslots && isMailslotName(text.raw(name)))
@@ -2611,7 +2680,7 @@ export function createFileFunctions(host){
                 }
                 return answer;
             };
-            for (const stream of host.streams ?? [])
+            for (const stream of streams)
             {
                 const answer = writing
                     ? stream.write(handle, buffer, length, block, true)
@@ -2899,7 +2968,7 @@ export function createFileFunctions(host){
                 {
                     return 1;
                 }
-                for (const stream of host.streams ?? [])
+                for (const stream of streams)
                 {
                     const answer = stream.read(handle, buffer, length, read);
                     if (answer !== null)
@@ -2991,7 +3060,7 @@ export function createFileFunctions(host){
                     writeDwordIf(written >>> 0, count);
                     return 1;
                 }
-                for (const stream of host.streams ?? [])
+                for (const stream of streams)
                 {
                     const answer = stream.write(handle, buffer, length, written);
                     if (answer !== null)

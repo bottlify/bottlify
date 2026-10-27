@@ -2778,3 +2778,29 @@ test('CopyFile reads sharing everything and writes sharing all but deletion, ref
     assert.equal(fns.CopyFileA.handler([NAME, NAME2, 0]), 0);
     assert.equal(error.code, 32, 'ERROR_SHARING_VIOLATION');
 });
+
+test('NUL opens anywhere, reads as its end, swallows writes, and is found as itself', ()=>{
+    const { memory, error, fns, at, files } = setup();
+    const handle = fns.CreateFileA.handler([at(NAME, '\\\\.\\NUL'), GENERIC_READ | GENERIC_WRITE,
+        0, 0, OPEN_EXISTING, 0, 0]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    memory.putDword(OUT_COUNT, 0xdeadbeef);
+    assert.equal(fns.ReadFile.handler([handle, BUFFER, 16, OUT_COUNT, 0]), 1);
+    assert.equal(memory.dword(OUT_COUNT), 0);
+    assert.equal(fns.WriteFile.handler([handle, BUFFER, 12, OUT_COUNT, 0]), 1);
+    assert.equal(memory.dword(OUT_COUNT), 12);
+    assert.equal(error.code, ERROR_SUCCESS);
+
+    // By its name in a folder, as a volume resolves one.
+    const anyFiles = /** @type {any} */ (files);
+    anyFiles.deviceOf = (/** @type {string} */ path)=>(/\\nul$/i.test(path) ? 'NUL' : null);
+    assert.notEqual(fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\nul'), GENERIC_WRITE, 0, 0,
+        OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
+    const found = fns.FindFirstFileA.handler([NAME, FIND_DATA]);
+    assert.notEqual(found, INVALID_HANDLE_VALUE);
+    assert.equal(memory.dword(FIND_DATA + WIN32_FIND_DATAA.dwFileAttributes), 0x20);
+    const named = FIND_DATA + WIN32_FIND_DATAA.cFileName;
+    assert.equal(String.fromCharCode(...memory.bytes.subarray(named, named + 3)), 'nul');
+    assert.equal(fns.FindNextFileA.handler([found, FIND_DATA]), 0);
+    assert.equal(error.code, ERROR_NO_MORE_FILES);
+});

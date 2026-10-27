@@ -1264,9 +1264,15 @@ export function createSystemFunctions(host){
                     case 'pipe-read':
                     case 'pipe-write':
                         return FILE_TYPE_PIPE;
+                    case 'device':
+                        if (target.device === 'nul')
+                        {
+                            return FILE_TYPE_CHAR;
+                        }
+                    // Another device: unknown, as a mailslot is.
+                    // falls through
                     case 'mailslot':
                     case 'mailslot-client':
-                    case 'device':
                         // A file object of no type of these: unknown, and no error.
                         host.setLastError(ERROR_SUCCESS);
                         return FILE_TYPE_UNKNOWN;

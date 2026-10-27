@@ -585,6 +585,14 @@ export function createVolume(fs, fetchBlocks = null){
         isOpen: path=>attempt(()=>fs.isOpen?.(path) ?? false, false),
 
         /**
+         * The device a path names wherever it is -- `nul`, `C:\\dir\\NUL.txt` --
+         * in upper case, or null.
+         *
+         * @param {string} path @returns {string | null}
+         */
+        deviceOf: path=>attempt(()=>fs.resolve?.(path)?.device ?? null, null),
+
+        /**
          * How a section maps the file, or null.
          *
          * @param {string} path @returns {'readonly' | 'readwrite' | 'image' | null}
