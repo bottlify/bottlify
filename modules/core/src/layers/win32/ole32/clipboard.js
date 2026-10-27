@@ -363,6 +363,15 @@ export function createClipboardFunctions(env){
                     { name: 'EnumDAdvise', argBytes: 8, invoke: ()=>OLE_E_ADVISENOTSUPPORTED },
                 ],
             }],
+            // The source is let go of inside the last Release, waited for.
+            lastRelease: async()=>{
+                const held = state.held;
+                state.held = 0;
+                if (held !== 0)
+                {
+                    await release(held, env.callerThread());
+                }
+            },
             destroy: ()=>{
                 if (state.held !== 0)
                 {

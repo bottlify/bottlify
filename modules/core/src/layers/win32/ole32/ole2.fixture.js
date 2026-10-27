@@ -164,6 +164,12 @@ export function oleProcess(options = {}){
             }
             if (method.builtin === 'release')
             {
+                // As the bridge does: what the object owes the program is
+                // made, and waited for, inside its last Release.
+                if (record.object.refCount === 1 && record.object.lastRelease)
+                {
+                    await record.object.lastRelease();
+                }
                 return record.object.release();
             }
             return (await method.invoke(record.object, args)) | 0;
@@ -201,7 +207,11 @@ export function oleProcess(options = {}){
                 return E_NOINTERFACE;
             },
             1: ()=>++object.refs,
-            2: ()=>--object.refs,
+            // A turn of the event loop, as a guest call takes: a Release
+            // nobody waits for has not happened when the caller looks.
+            2: ()=>new Promise(resolve=>{
+                setImmediate(()=>resolve(--object.refs));
+            }),
         };
         for (const [slot, fn] of Object.entries(slots))
         {

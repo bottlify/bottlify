@@ -429,6 +429,8 @@ const IID_IMALLOCSPY = '{0000001D-0000-0000-C000-000000000046}';
 const IID_IINITIALIZESPY = '{00000034-0000-0000-C000-000000000046}';
 /** Where a TEB keeps its thread's id: CLIENT_ID.UniqueThread. */
 const TEB_CLIENT_ID_THREAD = 0x24;
+/** The longest clipboard format name read back from user32, in characters. */
+const CLIPBOARD_NAME_UNITS = 256;
 const CLSID_TASK_ALLOCATOR = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0001}';
 
 /** The one memory context CoGetMalloc accepts. */
@@ -2811,6 +2813,43 @@ export function createOleFunctions(host){
             deleteEnhMetaFile: deleter('DeleteEnhMetaFile'),
         };
     };
+    /**
+     * user32's names of the registered clipboard formats, which a CLIPFORMAT
+     * carries to another machine: both calls answer at once.
+     */
+    const systemClipboardFormats = ()=>{
+        const system = /** @type {NonNullable<OleHost['system']>} */ (host.system);
+        return {
+            /** @param {number} format @returns {string | null} */
+            name: format=>{
+                const block = host.heap.allocate(CLIPBOARD_NAME_UNITS * 2);
+                if (block === 0)
+                {
+                    return null;
+                }
+                const length = system('USER32.dll', 'GetClipboardFormatNameW',
+                    [format, block, CLIPBOARD_NAME_UNITS], host.callerThread?.());
+                const text = typeof length === 'number' && length > 0
+                    ? String.fromCharCode(...new Uint16Array(host.readMemory(block,
+                        Math.min(length, CLIPBOARD_NAME_UNITS) * 2).slice().buffer))
+                    : null;
+                host.heap.free(block);
+                return text;
+            },
+            /** @param {string} name @returns {number} */
+            register: name=>{
+                const block = lendWide(name);
+                if (block === 0)
+                {
+                    return 0;
+                }
+                const format = system('USER32.dll', 'RegisterClipboardFormatW', [block],
+                    host.callerThread?.());
+                host.heap.free(block);
+                return typeof format === 'number' ? format & 0xffff : 0;
+            },
+        };
+    };
     const systemDeleteFile = ()=>{
         const system = host.system;
         return system
@@ -4198,7 +4237,8 @@ export function createOleFunctions(host){
         // What a MIDL proxy or stub calls to carry a handle, a block of
         // memory, a storage medium or an interface pointer to another process.
         ...createUserMarshalFunctions({ ...host, marshaler: ()=>marshaler,
-            ...(host.system ? { gdi: systemGdi(), deleteFile: systemDeleteFile() } : {}),
+            ...(host.system ? { gdi: systemGdi(), deleteFile: systemDeleteFile(),
+                clipboardFormats: systemClipboardFormats() } : {}),
             raise: host.raise ?? (code=>{
                 throw Object.assign(new Error(`RpcRaiseException 0x${(code >>> 0).toString(16)}`),
                     { code });

@@ -320,6 +320,9 @@ test('OleCreate makes the object in process and takes it through the steps ole2.
             return object.log;
         };
         assert.deepEqual(await create(0, 0), ['OleObjectPersistStg_InitNew']);
+        const clsidOut = p.out(0, 16);
+        assert.equal(p.storage.ReadClassStg.handler([storage, clsidOut]), S_OK);
+        assert.equal(p.guidAt(clsidOut), CLSID_OLD, 'the storage is made the class\'s');
         assert.deepEqual(await create(1, 0), ['OleObjectPersistStg_InitNew',
             'OleObjectRunnable_Run', 'OleObjectCache_Cache']);
         assert.deepEqual(await create(1, 0xdeadbeef), ['OleObject_GetMiscStatus',

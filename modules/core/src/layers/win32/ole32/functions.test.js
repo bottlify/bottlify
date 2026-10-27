@@ -1845,3 +1845,33 @@ test('a malloc spy is one for the process, registered once and revoked once', as
     assert.deepEqual(calls.map(call=>call.slot), [2]);
     assert.equal((await fns.CoRevokeMallocSpy.handler()) >>> 0, 0x800401fb);
 });
+
+test('a registered clipboard format crosses to another machine by the name user32 gives it',
+    ()=>{
+        // usrmarshal.c test_marshal_CLIPFORMAT: the name read through
+        // GetClipboardFormatNameW, rather than DV_E_CLIPFORMAT raised.
+        const { host } = setup();
+        const FLAGS = 0x1200;
+        const FORMAT = 0x1210;
+        const name = 'MyFormat';
+        /** @param {string} library @param {string} fn @param {number[]} args */
+        const system = (library, fn, args)=>{
+            if (library !== 'USER32.dll' || fn !== 'GetClipboardFormatNameW')
+            {
+                return null;
+            }
+            for (let index = 0; index < name.length; index++)
+            {
+                host.bytes[args[1] + index * 2] = name.charCodeAt(index);
+                host.bytes[args[1] + index * 2 + 1] = 0;
+            }
+            return name.length;
+        };
+        /** @type {any} */ (host).system = system;
+        const fns = /** @type {any} */ (createOleFunctions(host));
+        const view = new DataView(host.bytes.buffer);
+        view.setUint32(FLAGS, (0x10 << 16) | 2, true);
+        view.setUint16(FORMAT, 0xc000, true);
+        assert.equal(fns.CLIPFORMAT_UserSize.handler([FLAGS, 1, FORMAT]),
+            12 + 12 + (name.length + 1) * 2, 'the number, then the name as a string');
+    });

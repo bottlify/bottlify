@@ -840,7 +840,8 @@ export function createOle2Functions(env){
          *   LPFORMATETC pFormatEtc, LPOLECLIENTSITE pClientSite, LPSTORAGE pStg,
          *   LPVOID *ppvObj)
          *
-         * The object made in process, its storage initialised new, the site
+         * The object made in process, its storage made the class's and
+         * initialised new, the site
          * given, and -- to draw or for a format -- run and its cache asked
          * for the presentation, in the order ole2.c test_OleCreate records.
          * A class whose server is not in process has no default handler to
@@ -867,6 +868,9 @@ export function createOle2Functions(env){
                 {
                     return made.hr;
                 }
+                // The storage is the class's from here on, as OleLoad reads
+                // it back (ole2.c: the storage's class after OleCreate).
+                await env.callMethod(storage >>> 0, SLOT.STORAGE_SET_CLASS, [rclsid >>> 0], thread);
                 let hr = await prepare(made.unknown, site >>> 0, async persist=>
                     (await env.callMethod(persist, PERSIST.INIT_NEW, [storage], thread)) | 0,
                 thread);

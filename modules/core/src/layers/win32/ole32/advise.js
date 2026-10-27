@@ -79,11 +79,11 @@ export function createAdviseFunctions(env){
                     await env.callMethod(item.sink, SLOT.ADD_REF, [], caller);
                     return true;
                 },
-                release: ()=>{
+                release: async()=>{
                     const caller = env.callerThread();
                     for (const item of items)
                     {
-                        void release(item.sink, caller);
+                        await release(item.sink, caller);
                     }
                 },
             }, out);
@@ -117,11 +117,11 @@ export function createAdviseFunctions(env){
                 return S_OK;
             },
             /** Every sink let go of, as the holder goes. */
-            clear: ()=>{
+            clear: async()=>{
                 const caller = env.callerThread();
                 for (const connection of connections.splice(0))
                 {
-                    void release(connection.sink, caller);
+                    await release(connection.sink, caller);
                 }
             },
         };
@@ -260,7 +260,8 @@ export function createAdviseFunctions(env){
                             },
                         ],
                     }],
-                    destroy: ()=>sinks.clear(),
+                    lastRelease: ()=>sinks.clear(),
+                    destroy: ()=>void sinks.clear(),
                 }, out >>> 0);
             },
         },
@@ -337,7 +338,8 @@ export function createAdviseFunctions(env){
                                 invoke: ()=>notify(SINK.ON_CLOSE, []) },
                         ],
                     }],
-                    destroy: ()=>sinks.clear(),
+                    lastRelease: ()=>sinks.clear(),
+                    destroy: ()=>void sinks.clear(),
                 }, out >>> 0);
             },
         },
