@@ -20,6 +20,7 @@
 
 import { RUNTIME_HELPERS, helperAt, helperInstructions } from './helpers.js';
 import { decode } from './decode/decoder.js';
+import { switchTable64 } from './region-switch64.js';
 
 /**
  * @typedef {'fallthrough' | 'jump' | 'jcc' | 'loop' | 'ret' | 'indirect' | 'call' | 'trap'
@@ -68,9 +69,13 @@ import { decode } from './decode/decoder.js';
  * before it, as compilers lay out a switch: the table's entries as they were
  * when the region was formed. The jump still loads its target and compares it
  * with the entry, so a table written since leaves the region as any indirect
- * jump does.
+ * jump does. Long-mode tables (`region-switch64.js`) say how wide an entry is
+ * (`entrySize`, 4 where absent), and where a table's read writes the index
+ * register over, the address of that read (`before`): the index is the register
+ * as it stood there.
  *
- * @typedef {{ index: number, address: number, entries: number[] }} SwitchTable
+ * @typedef {{ index: number, address: number, entries: number[], entrySize?: 4 | 8,
+ *     before?: number }} SwitchTable
  */
 
 /**
@@ -124,9 +129,14 @@ const NO_ROOM = Object.freeze({ blocks: 0, bytes: 0 });
  * @param {number} target
  * @param {(eip: number) => boolean} translatable @param {boolean} [calls]
  * @param {{ blocks: number, bytes: number }} [limits]  its blocks and bytes at most
+ * @param {(instruction: import('./decode/decoder.js').Instruction) => boolean} [translates]
+ *     whether the emitter has a case for an instruction (`formRegion`'s)
+ * @param {boolean} [wide]  long-mode code
  * @returns {Apart | null}
  */
-function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIMITS){
+function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIMITS,
+    translates = undefined, wide = false)
+{
     const seen = new Set();
     const work = [target];
     let bytes = 0;
@@ -149,7 +159,7 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
         for (let eip = start; ;)
         {
             const decoded = decodeAt(eip);
-            if ('refused' in decoded)
+            if ('refused' in decoded || translates?.(decoded) === false)
             {
                 return 'shape';
             }
@@ -158,7 +168,9 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
             {
                 return 'bytes';
             }
-            eip = (eip + decoded.length) >>> 0;
+            // Long mode's targets are not taken mod 2^32: one past the window
+            // is not translatable, and no block is followed there.
+            eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
             const exit = exitOf(decoded, eip);
             if (exit === null)
             {
@@ -205,19 +217,28 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
  * @param {(address: number) => number} read
  * @param {import('./decode/decoder.js').Instruction} call
  * @param {(target: number, calls: boolean) => Apart | null} leafAt
+ * @param {boolean} [wide]  long-mode code
  * @returns {number[] | undefined}
  */
-function slotCallee(read, call, leafAt){
+function slotCallee(read, call, leafAt, wide = false){
     const [operand] = call.operands;
-    if (operand.kind !== 'mem' || operand.size !== 4 || (operand.base ?? -1) >= 0
+    if (operand.kind !== 'mem' || operand.size !== (wide ? 8 : 4) || (operand.base ?? -1) >= 0
         || (operand.index ?? -1) >= 0 || operand.segment === 4 || operand.segment === 5
-        || operand.addressSize === 16)
+        || operand.addressSize === 16 || wide && operand.addressSize !== 64)
     {
         return undefined;
     }
-    const slot = (operand.disp ?? 0) >>> 0;
-    const target = (read(slot) | read(slot + 1) << 8 | read(slot + 2) << 16
-        | read(slot + 3) << 24) >>> 0;
+    /** @param {number} at */
+    const dword = at=>(read(at) | read(at + 1) << 8 | read(at + 2) << 16
+        | read(at + 3) << 24) >>> 0;
+    // A long-mode slot, `call [rip + d]` as an import's call is, holds a
+    // quadword: a callee past the window is none to form in.
+    const slot = wide ? operand.disp ?? 0 : (operand.disp ?? 0) >>> 0;
+    if (wide && (slot < 0 || slot > 2 ** 32 - 8 || dword(slot + 4) !== 0))
+    {
+        return undefined;
+    }
+    const target = dword(slot);
     return target !== 0 && leafAt(target, false) === null ? [target] : undefined;
 }
 
@@ -519,7 +540,9 @@ export function formShared(){
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[],
  *     bytesOf?: (start: number, end: number) => Uint8Array,
- *     entered?: (eip: number) => boolean }} [options]
+ *     entered?: (eip: number) => boolean, mode?: { bits: 32 | 64 },
+ *     translates?: (instruction: import('./decode/decoder.js').Instruction) => boolean,
+ *     baseOf?: (reg: number) => number | null }} [options]
  *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`), of
  *     `leafBlocks` blocks and `leafBytes` bytes at most; formDepth: how many levels of
  *     callees formed in may have direct calls of their own, formed in in turn when small
@@ -547,7 +570,14 @@ export function formShared(){
  *     own function there is not formed again here: a jump or a fall-through to it leaves to
  *     that region, so a function's code is translated once however many of its blocks start
  *     regions. Not the blocks this region's calls return to (in the region a call is a wasm
- *     call and its return comes back into it), nor a callee formed in
+ *     call and its return comes back into it), nor a callee formed in;
+ *     mode: the decoder's (`MODE_64` for long-mode code: no address past the 4 GiB
+ *     window is translatable, and no runtime helper is formed); translates: whether the
+ *     emitter has a case for an instruction -- one it has none for ends its block,
+ *     which exits there (`cut`), and keeps a callee from being a leaf; baseOf: a long-mode
+ *     register's value as the region is formed, for a switch table whose base was set
+ *     outside the region (`region-switch64.js`) -- only where the region is formed where
+ *     it runs, never on a worker forming it again from copies of its pages
  * @returns {Region}
  */
 export function formRegion(read, entry,
@@ -555,8 +585,13 @@ export function formRegion(read, entry,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
         formDepth = 1, predictedRoom = PREDICTED_ROOM,
         ownRoom = { blocks: maxBlocks, bytes: maxBytes },
-        switchEntries = SWITCH_ENTRIES, bytesOf, entered } = {})
+        switchEntries = SWITCH_ENTRIES, bytesOf, entered, mode, translates, baseOf } = {})
 {
+    const wide = mode?.bits === 64;
+    if (wide)
+    {
+        helpers = false;
+    }
     // Every page forming reads decides what it forms -- an import slot a call is predicted
     // through, a callee looked at for a leaf or a runtime helper -- so a worker forms the
     // region again from copies of all of them (`reads`); only the pages its code is made
@@ -574,7 +609,7 @@ export function formRegion(read, entry,
     const granted = new Set();
     const asked = translatable;
     translatable = address=>{
-        const yes = asked(address);
+        const yes = (!wide || address >= 0 && address < 2 ** 32) && asked(address);
         if (yes)
         {
             granted.add(address >>> 12);
@@ -605,12 +640,13 @@ export function formRegion(read, entry,
         return source(address);
     };
     /** @param {number} address */
-    const decodeAt = shared === undefined ? (/** @type {number} */ address)=>decode(read, address)
+    const decodeAt = shared === undefined
+        ? (/** @type {number} */ address)=>decode(read, address, mode)
         : (/** @type {number} */ address)=>{
             let decoded = shared.decoded.get(address);
             if (decoded === undefined)
             {
-                decoded = decode(read, address);
+                decoded = decode(read, address, mode);
                 shared.decoded.set(address, decoded);
             }
             else
@@ -680,7 +716,7 @@ export function formRegion(read, entry,
         let leaf = leaves.get(key);
         if (leaf === undefined)
         {
-            leaf = isLeaf(decodeAt, target, translatable, calls, leafLimits);
+            leaf = isLeaf(decodeAt, target, translatable, calls, leafLimits, translates, wide);
             leaves.set(key, leaf);
         }
         return leaf;
@@ -832,7 +868,7 @@ export function formRegion(read, entry,
                 // instructions it amounts to, and the block goes on (helpers.js).
                 block.instructions.push(...helperInstructions(helper, decoded, called));
                 bytes += decoded.length;
-                eip = (eip + decoded.length) >>> 0;
+                eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
                 block.end = eip;
                 continue;
             }
@@ -842,6 +878,14 @@ export function formRegion(read, entry,
                 block.exit = {
                     kind: 'refused', targets: [], next: eip, backEdge: false, refusal: decoded,
                 };
+                break;
+            }
+            if (translates !== undefined && !translates(decoded)
+                || wide && eip + decoded.length > 2 ** 32)
+            {
+                // The emitter has no case for it, or it runs out of the window: the
+                // block leaves before it.
+                block.exit = { kind: 'cut', targets: [], next: eip, backEdge: false };
                 break;
             }
             // Two all-zero instructions in a row (`add [eax], al` twice) are
@@ -875,7 +919,7 @@ export function formRegion(read, entry,
             {
                 overlapping = true;
             }
-            eip = (eip + decoded.length) >>> 0;
+            eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
             block.end = eip;
             const exit = exitOf(decoded, eip);
             if (exit === null)
@@ -883,8 +927,9 @@ export function formRegion(read, entry,
                 continue;
             }
             block.exit = exit;
-            const table = exit.kind === 'indirect'
-                ? switchTable(read, block, blocks.values(), switchEntries) : null;
+            const table = exit.kind !== 'indirect' ? null
+                : wide ? switchTable64(read, block, blocks.values(), switchEntries, baseOf)
+                    : switchTable(read, block, blocks.values(), switchEntries);
             if (table !== null)
             {
                 // The cases join the region in the table's order: a switch's
@@ -923,7 +968,7 @@ export function formRegion(read, entry,
                 // in: it is sampled no more (`quiet`), a fixed slot still read.
                 const predicted = exit.kind !== 'indirect' ? undefined
                     : listed !== undefined && listed.length > 0 ? listed
-                        : slotCallee(read, decoded, leafAt);
+                        : slotCallee(read, decoded, leafAt, wide);
                 if (listed !== undefined && listed.length === 0)
                 {
                     exit.quiet = true;
@@ -996,7 +1041,7 @@ export function formRegion(read, entry,
     // on a worker, from copies of its pages -- from the same entries.
     for (const table of tables)
     {
-        const end = table.address + table.entries.length * 4;
+        const end = table.address + table.entries.length * (table.entrySize ?? 4);
         for (let page = table.address >>> 12; end > table.address && page <= (end - 1) >>> 12;
             page++)
         {
@@ -1121,7 +1166,7 @@ export function hashRegion(read, { blocks, tables = [] }){
     }
     for (const table of tables)
     {
-        const end = table.address + table.entries.length * 4;
+        const end = table.address + table.entries.length * (table.entrySize ?? 4);
         for (let address = table.address; address < end; address++)
         {
             mix(read(address));

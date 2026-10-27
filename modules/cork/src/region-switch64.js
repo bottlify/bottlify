@@ -5,14 +5,13 @@
  */
 
 /**
- * The cases of a long-mode switch: where a block's indirect jump goes through
- * a table the compiler laid out, read as data when the region is formed, so
- * the cases join the region and the jump becomes a branch among them by its
- * index (`emit.js`'s `dispatch`), as the 32-bit translator's `switchTable`
- * does at 32 bits. What was read is checked, not trusted: the jump still goes
- * where the instruction computes, and a case's branch is taken only where
- * that is the case read, so a table read wrong, or written since, sends the
- * jump out of the region, never astray.
+ * The switch tables of long-mode code, as `region.js`'s `switchTable` finds
+ * them at 32 bits: where a block's indirect jump goes through a table the
+ * compiler laid out, read as data when the region is formed, so the cases
+ * join the region and the jump becomes a branch among them. What was read is
+ * checked, not trusted: the jump still goes where the instruction computes,
+ * and a case is taken only where that is the case read, so a table read
+ * wrong, or written since, sends the jump out of the region, never astray.
  *
  * Two shapes, the ones x64 compilers lay a switch out in:
  *
@@ -28,9 +27,6 @@
  * widened from (`movsxd`, `mov`) at the block's start.
  */
 
-/** The most entries a switch's table is read for, as at 32 bits. */
-const MOST = 1024;
-
 /** What may stand between the bound test and the table read: a write to another register. */
 const PLAIN_WRITES = new Set([
     'mov', 'movzx', 'movsx', 'movsxd', 'lea', 'add', 'sub', 'and', 'or', 'xor', 'inc', 'dec', 'not',
@@ -38,17 +34,15 @@ const PLAIN_WRITES = new Set([
 ]);
 
 /**
- * @typedef {import('../decode/decoder.js').Instruction} Instruction
- * @typedef {{ entry: number, instructions: Instruction[] }} Block
+ * @typedef {import('./decode/decoder.js').Instruction} Instruction
+ * @typedef {import('./decode/decoder.js').Operand} Operand
+ * @typedef {import('./region.js').Block} Block
+ * @typedef {import('./region.js').SwitchTable} SwitchTable
  */
 
 /** Whether an instruction writes a register other than `reg` only. @param {Instruction} one @param {number} reg */
 const leaves = (one, reg)=>PLAIN_WRITES.has(one.op) && one.operands[0]?.kind === 'reg'
     && one.operands[0].reg !== reg && !(one.op === 'imul' && one.operands.length === 1);
-
-/**
- * @typedef {import('../decode/decoder.js').Operand} Operand
- */
 
 /** The registers an operand is made of. @param {Operand} operand */
 const registersOf = operand=>(operand.kind === 'reg' ? [Number(operand.reg)]
@@ -67,18 +61,22 @@ const same = (a, b)=>(a.kind === 'reg' ? b.kind === 'reg' && a.reg === b.reg && 
  * bound, with only writes to other registers between.
  *
  * @param {Block} block @param {Iterable<Block>} blocks @param {Operand} tested
+ * @param {number} most
  * @returns {number}  0 where none is found
  */
-function boundOf(block, blocks, tested){
+function boundOf(block, blocks, tested, most){
     const held = registersOf(tested);
     for (const guard of blocks)
     {
         const { instructions } = guard;
         const branch = instructions[instructions.length - 1];
-        const target = branch.operands[0]?.kind === 'rel' ? branch.operands[0].target : -1;
-        const next = branch.eip + branch.length;
-        const bounding = (branch.op === 'ja' || branch.op === 'jae') && next === block.entry
-            || (branch.op === 'jbe' || branch.op === 'jb') && target === block.entry;
+        if (guard.exit.kind !== 'jcc' || branch === undefined)
+        {
+            continue;
+        }
+        const { targets, next } = guard.exit;
+        const bounding = (branch.op === 'ja' || branch.op === 'jae') && next === block.start
+            || (branch.op === 'jbe' || branch.op === 'jb') && targets[0] === block.start;
         if (!bounding)
         {
             continue;
@@ -101,7 +99,7 @@ function boundOf(block, blocks, tested){
         }
         const bound = Number(right.value) >>> 0;
         const count = branch.op === 'ja' || branch.op === 'jbe' ? bound + 1 : bound;
-        if (count > 0 && count <= MOST)
+        if (count > 0 && count <= most)
         {
             return count;
         }
@@ -137,81 +135,68 @@ function testedOf(instructions, index, upTo){
 }
 
 /**
- * A block's switch, where its indirect jump goes through a table: the
- * register holding the index when the jump is made, and the case addresses
- * by index; null where it does not, or where the table cannot be read.
- * `before`, where the table's read writes the index register over (Clang's
- * `movsxd rcx, [b + rcx*4]`), is that read's place in the block: the index
- * is the register as it was there, kept aside for the jump.
+ * A long-mode block's switch table, or null where its jump goes through none
+ * this reads.
  *
- * @typedef {{ index: number, cases: number[], before?: number }} Switch
- *
- * @param {Block} block @param {Iterable<Block>} blocks  the region's blocks so far
- * @param {(address: number) => number} read  a byte of guest memory; throws where it cannot
- * @param {((reg: number) => number) | null} [valueOf]  a register's value as the region is
- *     formed, for a table base set before the block and outside the region
- * @returns {Switch | null}
+ * @param {(address: number) => number} read
+ * @param {Block} block  its last instruction the jump
+ * @param {Iterable<Block>} blocks  the region's blocks so far
+ * @param {number} most  entries a table may have
+ * @param {((reg: number) => number | null) | undefined} baseOf  a register's value as the
+ *     region is formed, for a table base set before the block and outside the region:
+ *     only where the region is formed where it runs, never on a worker forming it again
+ * @returns {SwitchTable | null}
  */
-export function switchCases(block, blocks, read, valueOf = null){
+export function switchTable64(read, block, blocks, most, baseOf){
+    // Looked through more than once: for the base's lea, then for the bound.
+    const all = [...blocks];
     const { instructions } = block;
     const jump = instructions[instructions.length - 1];
     if (jump.op !== 'jmp')
     {
         return null;
     }
+    /** @param {number} at */
+    const dword = at=>(read(at) | read(at + 1) << 8 | read(at + 2) << 16
+        | read(at + 3) << 24) >>> 0;
     const [operand] = jump.operands;
-    /** @param {number} at @param {number} size */
-    const word = (at, size)=>{
-        let value = 0;
-        for (let i = size - 1; i >= 0; i--)
-        {
-            value = value * 256 + read(at + i);
-        }
-        return value;
-    };
-    try
+    if (operand.kind === 'mem')
     {
-        if (operand.kind === 'mem')
+        if (operand.size !== 8 || (operand.base ?? -1) >= 0 || (operand.index ?? -1) < 0
+            || operand.scale !== 8 || operand.rip || operand.addressSize !== 64
+            || operand.segment === 4 || operand.segment === 5 || (operand.disp ?? 0) < 0
+            || (operand.disp ?? 0) >= 2 ** 32)
         {
-            if (operand.size !== 8 || (operand.base ?? -1) >= 0 || (operand.index ?? -1) < 0
-                || operand.scale !== 8 || operand.rip || operand.addressSize !== 64
-                || operand.segment === 4 || operand.segment === 5)
+            return null;
+        }
+        const index = /** @type {number} */ (operand.index);
+        const tested = testedOf(instructions, index, instructions.length - 1);
+        const count = tested === null ? 0 : boundOf(block, all, tested, most);
+        const address = /** @type {number} */ (operand.disp);
+        const entries = [];
+        for (let i = 0; i < count; i++)
+        {
+            if (dword(address + i * 8 + 4) !== 0)
             {
                 return null;
             }
-            const index = /** @type {number} */ (operand.index);
-            const tested = testedOf(instructions, index, instructions.length - 1);
-            const count = tested === null ? 0 : boundOf(block, blocks, tested);
-            const table = (operand.disp ?? 0) >>> 0;
-            const cases = [];
-            for (let i = 0; i < count; i++)
-            {
-                const high = word(table + i * 8 + 4, 4);
-                if (high !== 0)
-                {
-                    return null;
-                }
-                cases.push(word(table + i * 8, 4));
-            }
-            return count > 0 ? { index, cases } : null;
+            entries.push(dword(address + i * 8));
         }
-        return relativeCases(block, blocks, word, valueOf);
+        return count > 0 ? { index, address, entries, entrySize: 8 } : null;
     }
-    catch {
-        return null;
-    }
+    return relativeTable(block, all, dword, most, baseOf);
 }
 
 /**
  * `jmp r` after `r = load32(b + i*4 + d) + b`, b a `lea b, [rip + x]` of the
  * block, or set before it: the doubleword tables, signed (`movsxd`) or not (`mov`).
  *
- * @param {Block} block @param {Iterable<Block>} blocks
- * @param {(at: number, size: number) => number} word
- * @param {((reg: number) => number) | null} valueOf
- * @returns {Switch | null}
+ * @param {Block} block @param {Block[]} blocks
+ * @param {(at: number) => number} dword @param {number} most
+ * @param {((reg: number) => number | null) | undefined} baseOf
+ * @returns {SwitchTable | null}
  */
-function relativeCases(block, blocks, word, valueOf){
+function relativeTable(block, blocks, dword, most, baseOf){
     const { instructions } = block;
     const jump = instructions[instructions.length - 1];
     const [target] = jump.operands;
@@ -263,7 +248,7 @@ function relativeCases(block, blocks, word, valueOf){
         {
             return null;
         }
-        baseValue = /** @type {number} */ (made.operands[1].disp) >>> 0;
+        baseValue = /** @type {number} */ (made.operands[1].disp);
     }
     else
     {
@@ -271,16 +256,16 @@ function relativeCases(block, blocks, word, valueOf){
         // loop: the one lea of it among the region's blocks, else what the
         // register holds as the region is formed. Either is a guess the
         // dispatch checks, a case taken only where the jump goes to it.
-        const leas = new Set([...blocks].flatMap(one=>one.instructions)
+        const leas = new Set(blocks.flatMap(one=>one.instructions)
             .filter(one=>one.op === 'lea' && one.operands[0]?.kind === 'reg'
                 && one.operands[0].reg === base && one.operands[0].size === 8
                 && one.operands[1].rip)
-            .map(one=>/** @type {number} */ (one.operands[1].disp) >>> 0));
-        baseValue = leas.size === 1 ? [...leas][0] : valueOf?.(base) ?? null;
-        if (baseValue === null || baseValue < 0 || baseValue >= 2 ** 32)
-        {
-            return null;
-        }
+            .map(one=>/** @type {number} */ (one.operands[1].disp)));
+        baseValue = leas.size === 1 ? [...leas][0] : baseOf?.(base) ?? null;
+    }
+    if (baseValue === null || baseValue < 0 || baseValue >= 2 ** 32)
+    {
+        return null;
     }
     // The index as the load used it stays where the jump is made, or is the
     // load's own register, kept from before it.
@@ -290,23 +275,23 @@ function relativeCases(block, blocks, word, valueOf){
         return null;
     }
     const tested = testedOf(instructions, index, at);
-    const count = tested === null ? 0 : boundOf(block, blocks, tested);
-    const table = baseValue + (from.disp ?? 0);
-    const cases = [];
-    for (let i = 0; i < count; i++)
-    {
-        const entry = word(table + i * 4, 4);
-        const offset = signed ? entry | 0 : entry;
-        const address = baseValue + offset;
-        if (address < 0 || address >= 2 ** 32)
-        {
-            return null;
-        }
-        cases.push(address);
-    }
-    if (count === 0)
+    const count = tested === null ? 0 : boundOf(block, blocks, tested, most);
+    const address = baseValue + (from.disp ?? 0);
+    if (count === 0 || address < 0 || address + count * 4 > 2 ** 32)
     {
         return null;
     }
-    return r === index ? { index, cases, before: at } : { index, cases };
+    const entries = [];
+    for (let i = 0; i < count; i++)
+    {
+        const entry = dword(address + i * 4);
+        const landing = baseValue + (signed ? entry | 0 : entry);
+        if (landing < 0 || landing >= 2 ** 32)
+        {
+            return null;
+        }
+        entries.push(landing);
+    }
+    return { index, address, entries, entrySize: 4,
+        ...r === index ? { before: load.eip } : {} };
 }

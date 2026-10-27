@@ -29,28 +29,10 @@ import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { features } from '../wasm/features.js';
 import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
-import { switchCases } from './switch.js';
+import { formRegion as formShape } from '../region.js';
 import { createX87Calls } from './x87.js';
-import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, translates }
-    from './emit.js';
+import { LongExit, emitRegions, foldFunction, missFunction, translates } from './emit.js';
 
-/** Instructions a block holds at most. */
-const BLOCK_LIMIT = 64;
-/**
- * Blocks and bytes of code a region holds at most: what the 32-bit translator
- * lets the entry's own function take (`formRegion`'s caps, 128 blocks and
- * 8 KiB, and its `ownRoom` past them, the caps again), so that a loop of many
- * blocks is one region rather than several going round through the transfer,
- * each with a copy of the blocks the others hold.
- */
-const REGION_LIMIT = 256;
-const REGION_BYTES = 16384;
-/**
- * The callee a direct call is formed into its caller with, at most, as the
- * 32-bit translator's `LEAF_BLOCKS` and `LEAF_BYTES`.
- */
-const LEAF_BLOCKS = 16;
-const LEAF_BYTES = 512;
 /**
  * Indirect-call prediction, as the 32-bit runtime's `callTargets` settings:
  * the samples of a call before its callees are looked at, the share of them
@@ -134,7 +116,7 @@ const VOLATILE_HOLD_MS = 2000;
  *     until code is translated on a page of a thread's stack (`noteStack`), as the
  *     32-bit runtime's do; `defaultNaNNegative`, the host's own (`features`), false
  *     where float arithmetic puts an invalid operation's NaN right; `leafCalls`, unless
- *     false, a direct call's small callee is formed into its caller (`isLeaf`); false,
+ *     false, a direct call's small callee is formed into its caller (`formRegion`); false,
  *     every call is a wasm call, one into the region's own blocks too; `callTargets`,
  *     true, indirect calls are sampled and the small callees a call goes to formed
  *     into its region (`sampleCalls`) -- off by default: its regions formed again on the
@@ -315,133 +297,110 @@ export function createLongRunner(settings){
     };
 
     /**
-     * The instructions of the block at `entry`: up to a branch, an instruction
-     * the emitter has no case for, the limit, or an address `decoded` says
-     * a block of the region already holds, which this one falls through to.
+     * Whether an instruction's bytes lie on pages the program may run and the
+     * interpreter does not hold: forming reads a closed page as `hlt`
+     * (`codeByte`), and an instruction reaching into one is the interpreter's,
+     * whose fetch faults there.
      *
-     * @param {number} entry
-     * @param {(at: number) => boolean} [decoded]
+     * @param {number} at @param {number} length
      */
-    const blockAt = (entry, decoded = ()=>false)=>{
-        /** @type {import('../decode/decoder.js').Instruction[]} */
-        const instructions = [];
-        let at = entry;
-        if (entry < below)
+    const open = (at, length)=>{
+        for (let page = at >>> 12; page <= (at + length - 1) >>> 12; page++)
         {
-            return instructions;
-        }
-        while (instructions.length < BLOCK_LIMIT && (at === entry || !decoded(at)))
-        {
-            let instruction;
-            try
-            {
-                instruction = decode(fetch, at, MODE_64);
-            }
-            catch {
-                break;
-            }
-            if ('refused' in instruction || !translates(instruction))
-            {
-                break;
-            }
-            instructions.push(instruction);
-            at += instruction.length;
-            if (endsBlock(instruction.op))
-            {
-                break;
-            }
-        }
-        return instructions;
-    };
-
-    /** The address past a block's last instruction. @param {import('./emit.js').LongBlock} block */
-    const endOf = block=>{
-        const last = block.instructions[block.instructions.length - 1];
-        return last.eip + last.length;
-    };
-
-    /**
-     * Where a block goes when it ends, as far as its bytes say: both ways of a
-     * conditional jump, a direct jump's target, the next instruction of a
-     * block cut short.
-     *
-     * @param {import('../decode/decoder.js').Instruction[]} instructions
-     */
-    const successors = instructions=>{
-        const last = instructions[instructions.length - 1];
-        const next = last.eip + last.length;
-        if (!endsBlock(last.op))
-        {
-            return [next];
-        }
-        if (last.op === 'call')
-        {
-            // The callee is a region of its own, called; its return comes back here.
-            return [next];
-        }
-        const [operand] = last.operands;
-        if (operand?.kind !== 'rel')
-        {
-            return [];
-        }
-        const target = /** @type {number} */ (operand.target);
-        return last.op === 'jmp' ? [target] : [target, next];
-    };
-
-    /**
-     * Whether the function at `target` is small enough to form into its
-     * caller, as the 32-bit translator's `isLeaf` asks: at most `LEAF_BLOCKS`
-     * blocks and `LEAF_BYTES` bytes, reached by direct branches alone, every
-     * way out of them a `ret` -- no call, no indirect jump, nothing left to
-     * the interpreter. Only a guess at the shape: the call is still a push
-     * and a jump, and each `ret` still compares where it goes.
-     *
-     * @param {number} target
-     */
-    const isLeaf = target=>{
-        const seen = new Set();
-        const work = [target];
-        let size = 0;
-        while (work.length > 0)
-        {
-            const at = /** @type {number} */ (work.pop());
-            if (seen.has(at))
-            {
-                continue;
-            }
-            if (seen.size >= LEAF_BLOCKS)
+            if ((bytes[flagsAt + page] & PageFlag.INACCESSIBLE) !== 0
+                || volatileUntil.size > 0 && volatile(page))
             {
                 return false;
-            }
-            seen.add(at);
-            const instructions = blockAt(at);
-            const last = instructions[instructions.length - 1];
-            if (last === undefined || !endsBlock(last.op) || last.op === 'call')
-            {
-                return false;
-            }
-            size += last.eip + last.length - at;
-            if (size > LEAF_BYTES)
-            {
-                return false;
-            }
-            if (last.op !== 'ret')
-            {
-                if (last.operands[0]?.kind !== 'rel')
-                {
-                    return false;
-                }
-                work.push(...successors(instructions));
             }
         }
         return true;
     };
+    /** A byte of code as forming reads it. @param {number} address */
+    const codeByte = address=>(address < 2 ** 32
+        && (bytes[flagsAt + (address >>> 12)] & PageFlag.INACCESSIBLE) === 0
+        ? bytes[layout.ramBase + address] : 0xf4);
+    /**
+     * What the emitter here translates, of what forming decodes: `call $+5`, a
+     * push that ends no block there, is left to the interpreter, as the
+     * emitter takes every call for a block's end.
+     *
+     * @param {import('../decode/decoder.js').Instruction} instruction
+     */
+    const formable = instruction=>translates(instruction) && !(instruction.op === 'call'
+        && instruction.operands[0].kind === 'rel'
+        && instruction.operands[0].target === instruction.eip + instruction.length);
 
     /**
-     * The region from `entry`: the blocks its known jumps reach, decoded,
-     * emitted, compiled, their pages marked. A direct call's small callee
-     * (`isLeaf`) is formed in with it, the call a push and a jump and the
-     * callee's returns jumps back, as the 32-bit translator forms one.
+     * The region from `entry`, formed by the 32-bit translator's `formRegion`
+     * in long mode -- the entry's own function first, its small callees formed
+     * in, a switch's cases joined -- taken as the blocks the emitter here
+     * makes: the entry's first, each cut before an instruction the emitter has
+     * no case for, a switch's cases and a predicted call's callees on the
+     * blocks whose jump or call goes to them.
+     *
+     * @param {number} entry
+     * @returns {import('./emit.js').LongBlock[]}
+     */
+    const blocksFrom = entry=>{
+        const region = formShape(codeByte, entry, {
+            mode: MODE_64, translatable: at=>at >= below && open(at, 1), translates: formable,
+            leafCalls, callTargets: predictions, helpers: false, baseOf: registerValue,
+        });
+        const starts = new Set(region.entries);
+        /** @type {import('./emit.js').LongBlock[]} */
+        const blocks = [];
+        for (const block of region.blocks)
+        {
+            const cut = block.instructions.findIndex(one=>!open(one.eip, one.length));
+            const instructions = cut < 0 ? block.instructions : block.instructions.slice(0, cut);
+            if (instructions.length === 0)
+            {
+                continue;
+            }
+            /** @type {import('./emit.js').LongBlock} */
+            const made = { entry: block.start, instructions };
+            const { table: cases, predicted, quiet, targets, kind } = block.exit;
+            if (cut < 0 && cases !== undefined)
+            {
+                const before = cases.before === undefined ? -1
+                    : instructions.findIndex(one=>one.eip === cases.before);
+                if (cases.before === undefined || before >= 0)
+                {
+                    made.switch = { index: cases.index, cases: cases.entries,
+                        ...before >= 0 ? { before } : {} };
+                    stats.switches++;
+                }
+            }
+            if (cut < 0 && predicted === true)
+            {
+                // Its callees decided: those formed in, and the call sampled no more.
+                made.targets = targets.filter(target=>starts.has(target));
+                made.quiet = true;
+            }
+            else if (cut < 0 && quiet === true)
+            {
+                made.quiet = true;
+            }
+            if (cut < 0 && kind === 'call' && starts.has(targets[0]))
+            {
+                stats.leaves++;
+            }
+            if (block.start === entry)
+            {
+                blocks.unshift(made);
+            }
+            else
+            {
+                blocks.push(made);
+            }
+        }
+        return blocks[0]?.entry === entry ? blocks : [];
+    };
+
+    /**
+     * The region from `entry`: its blocks (`blocksFrom`), emitted, compiled,
+     * their pages marked. A direct call's small callee is formed in with it,
+     * the call a push and a jump and the callee's returns jumps back.
      *
      * @param {number} entry
      */
@@ -458,126 +417,7 @@ export function createLongRunner(settings){
 
     /** `form`'s work. @param {number} entry @returns {LongEntry} */
     const formRegion = entry=>{
-        /** @type {import('./emit.js').LongBlock[]} */
-        const blocks = [];
-        /** By start. @type {Map<number, import('./emit.js').LongBlock>} */
-        const byStart = new Map();
-        /** The starts in address order. @type {number[]} */
-        const ordered = [];
-        /** The first start not below `at`. @param {number} at */
-        const place = at=>{
-            let lo = 0;
-            let hi = ordered.length;
-            while (lo < hi)
-            {
-                const mid = (lo + hi) >> 1;
-                if (ordered[mid] < at)
-                {
-                    lo = mid + 1;
-                }
-                else
-                {
-                    hi = mid;
-                }
-            }
-            return lo;
-        };
-        // As the 32-bit translator's `formRegion`: until two blocks share a
-        // byte (code decoded at two offsets), the block holding an address is
-        // the last to start at or below it; after, the first made that does.
-        let overlapping = false;
-        /** @param {number} at */
-        const containing = at=>{
-            if (overlapping)
-            {
-                return blocks.find(block=>at >= block.entry && at < endOf(block)) ?? null;
-            }
-            const block = byStart.get(ordered[place(at + 1) - 1]);
-            return block !== undefined && at < endOf(block) ? block : null;
-        };
-        /** @param {number} at */
-        const decoded = at=>byStart.has(at) || containing(at) !== null;
-        let size = 0;
-        /** @type {Set<number>} */
-        const seen = new Set();
-        const queue = [entry];
-        while (queue.length > 0)
-        {
-            const at = /** @type {number} */ (queue.shift());
-            if (seen.has(at))
-            {
-                continue;
-            }
-            seen.add(at);
-            const inside = containing(at);
-            if (inside !== null)
-            {
-                const index = inside.instructions.findIndex(instruction=>instruction.eip === at);
-                if (index > 0)
-                {
-                    // A jump into a block made already: it is split there, both
-                    // halves the region's, rather than its tail translated twice.
-                    /** @type {import('./emit.js').LongBlock} */
-                    const tail = { entry: at, instructions: inside.instructions.slice(index),
-                        ...inside.switch === undefined ? {} : { switch: inside.switch } };
-                    inside.instructions = inside.instructions.slice(0, index);
-                    delete inside.switch;
-                    blocks.push(tail);
-                    byStart.set(at, tail);
-                    ordered.splice(place(at), 0, at);
-                    continue;
-                }
-                overlapping = true;
-            }
-            if (blocks.length >= REGION_LIMIT || size >= REGION_BYTES)
-            {
-                // Not followed: whoever jumps here leaves the region.
-                continue;
-            }
-            const instructions = blockAt(at, decoded);
-            if (instructions.length === 0)
-            {
-                continue;
-            }
-            const end = instructions[instructions.length - 1];
-            if (volatileUntil.size > 0 && (volatile(at >>> 12)
-                || volatile((end.eip + end.length - 1) >>> 12)))
-            {
-                // On a page left to the interpreter: whoever goes there leaves.
-                continue;
-            }
-            /** @type {import('./emit.js').LongBlock} */
-            const block = { entry: at, instructions };
-            blocks.push(block);
-            byStart.set(at, block);
-            ordered.splice(place(at), 0, at);
-            size += endOf(block) - at;
-            // A switch's cases join the region, its jump a branch among them.
-            const found = switchCases(block, blocks, fetch, registerValue);
-            if (found !== null)
-            {
-                block.switch = found;
-                queue.push(...found.cases);
-                stats.switches++;
-            }
-            queue.push(...successors(instructions));
-            const last = instructions[instructions.length - 1];
-            if (leafCalls && last.op === 'call' && last.operands[0]?.kind === 'rel'
-                && isLeaf(/** @type {number} */ (last.operands[0].target)))
-            {
-                queue.push(/** @type {number} */ (last.operands[0].target));
-                stats.leaves++;
-            }
-            const predicted = last.op === 'call' && last.operands[0]?.kind !== 'rel'
-                ? predictions.get(last.eip) : undefined;
-            if (predicted !== undefined)
-            {
-                // Its callees decided: formed in, and the call sampled no more.
-                block.targets = predicted;
-                block.quiet = true;
-                queue.push(...predicted);
-            }
-        }
+        const blocks = blocksFrom(entry);
         /** @type {LongEntry} */
         const record = { entry, ranges: [], run: null, hashed: [], wrapped: false, loose };
         if (blocks.length > 0)
@@ -784,7 +624,7 @@ export function createLongRunner(settings){
 
     /**
      * A register's value in the state block, as it stands while a region is
-     * formed: for a switch's table base set before its block (`switchCases`).
+     * formed: for a switch's table base set before its block (`region-switch64.js`).
      *
      * @param {number} reg
      */
@@ -793,12 +633,12 @@ export function createLongRunner(settings){
     /**
      * Decides an indirect call sampled `PREDICT_AFTER` times, as the 32-bit
      * runtime's `reformStep` does: the callees that took a share of its
-     * samples, small leaves to form in (`isLeaf`), and its regions dropped to
-     * be formed again with them. A call with none to form in, or formed again
-     * `REFORMS` times, is quiet: its regions, when they are formed again for
-     * another reason, form it as an indirect call that no longer samples. A
-     * decision that would take the forming past `REFORM_SHARE` of the run
-     * waits for the next samples.
+     * samples, formed in where forming finds them small enough (`formRegion`'s
+     * leaves), and its regions dropped to be formed again with them. A call
+     * with none to form in, or formed again `REFORMS` times, is quiet: its
+     * regions, when they are formed again for another reason, form it as an
+     * indirect call that no longer samples. A decision that would take the
+     * forming past `REFORM_SHARE` of the run waits for the next samples.
      *
      * @param {number} site
      */
@@ -817,7 +657,7 @@ export function createLongRunner(settings){
         const formed = reforms > REFORMS ? [] : [...seen.targets]
             .filter(([, count])=>count * PREDICT_SHARE >= seen.total)
             .sort((x, y)=>y[1] - x[1]).slice(0, PREDICT_CALLEES)
-            .map(([target])=>target).filter(target=>isLeaf(target));
+            .map(([target])=>target);
         predictions.set(site, formed);
         stats.predicted += formed.length;
         stats.quiet += formed.length === 0 ? 1 : 0;

@@ -882,8 +882,10 @@ test('calls from region to region return where they were made, and leave where t
                 assert.deepEqual(failures, [],
                     `budget ${budget}, transfers ${transfers}, leafCalls ${leafCalls}`);
                 assert.equal(exits, cases.length);
-                // Many short runs: regions gathered into modules between them.
-                assert.ok(budget > 7 || stats.packs > 0, JSON.stringify(stats));
+                // Many short runs: regions gathered into modules between them --
+                // where calls are wasm calls: with its leaves formed in, a case is
+                // two regions, fewer than a pack takes.
+                assert.ok(budget > 7 || leafCalls || stats.packs > 0, JSON.stringify(stats));
                 entered[`${budget} ${transfers} ${leafCalls}`] = stats.entered;
             }
         }

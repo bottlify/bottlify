@@ -2098,7 +2098,7 @@ class BlockEmitter {
      * case outside the region, on to the exit after it, which leaves through
      * the transfer.
      *
-     * @param {import('./switch.js').Switch} which @param {Map<number, number>} indexOf
+     * @param {LongSwitch} which @param {Map<number, number>} indexOf
      * @param {number} here  the block's index
      */
     dispatch(which, indexOf, here){
@@ -2554,12 +2554,22 @@ function shiftHelper(){
 }
 
 /**
+ * A block's switch: the register holding the index when the jump is made, and
+ * the case addresses by index. `before`, where the table's read writes the
+ * index register over (Clang's `movsxd rcx, [b + rcx*4]`), is that read's
+ * place in the block: the index is the register as it was there, kept aside
+ * for the jump.
+ *
+ * @typedef {{ index: number, cases: number[], before?: number }} LongSwitch
+ */
+
+/**
  * @typedef {Object} LongBlock
  * @property {number} entry
  * @property {import('../decode/decoder.js').Instruction[]} instructions  what it runs; the
  *     last a branch, or not when the block was cut short, and then it goes on past it
- * @property {import('./switch.js').Switch} [switch]  where its indirect jump goes through a
- *     switch's table (`switch.js`): the jump branches among the cases by index (`dispatch`)
+ * @property {LongSwitch} [switch]  where its indirect jump goes through a switch's table
+ *     (`region-switch64.js`): the jump branches among the cases by index (`dispatch`)
  * @property {number[]} [targets]  the callees its indirect call was predicted to (the
  *     runner's `sampleCalls`), formed into the region: the call compares its target with
  *     each and jumps there
