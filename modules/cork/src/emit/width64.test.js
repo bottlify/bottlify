@@ -38,18 +38,20 @@ test('long-mode regions of the shared emitter do what the interpreter does on th
  * overwritten after it.
  *
  * @param {string[]} codes  each operation's bytes, in hex
- * @param {number[]} counts  rcx's values
+ * @param {(number | bigint)[]} counts  rcx's values
+ * @param {string[]} [before]  code put before each operation, in hex
  */
-function edges(codes, counts){
+function edges(codes, counts, before = ['']){
     const one = CORPUS.cases[0];
     const regs = [...one.regs];
     regs[0] = 'fedcba9876543210';
     regs[2] = '8000000180000001';
     regs[8] = '7fffffff80000000';
     regs[9] = 'ffffffffffffffff';
-    return codes.flatMap(code=>counts.flatMap(count=>['', '31d2'].map(after=>({ ...one,
-        text: `${code} rcx ${count} ${after}`, code: code + after,
-        regs: regs.map((value, i)=>(i === 1 ? count.toString(16) : value)) }))));
+    return before.flatMap(first=>codes.flatMap(code=>counts.flatMap(count=>['', '31d2'].map(
+        after=>({ ...one, text: `${first} ${code} rcx ${count} ${after}`,
+            code: first + code + after, regs: regs.map((value, i)=>(i === 1
+                ? BigInt.asUintN(64, BigInt(count)).toString(16) : value)) })))));
 }
 
 test('width edges of shifts run in the shared emitter\'s regions as interpreted', ()=>{
@@ -79,6 +81,29 @@ test('width edges of rotations run in the shared emitter\'s regions as interpret
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
+
+test('width edges of multiplies and divides run in the shared emitter\'s regions as interpreted',
+    ()=>{
+        const counts = [0, 1, 2, 3, 7, -1, -3, 0x80000000, 0x100000000, 0x7fffffffffffffffn,
+            -0x8000000000000000n];
+        const multiplies = edges([
+            '48f7e1', '48f7e9', '49f7e0', '49f7e9', '48f7e2', '48f7ea', // mul/imul rcx, r8, r9, rdx
+            'f7e1', 'f7e9', '66f7e1', '66f7e9', 'f6e1', 'f6e9', // ecx, cx, cl
+            '480fafc1', '4c0fafc1', '0fafc1', '660fafc1', '480fafc0', // imul r, r
+            '486bc103', '4869c1ffffff7f', '486bc1ff', '6bc1fd', // imul r, r, imm
+        ], counts, ['', 'b864000000', '48c7c09cffffff']);
+        const divides = edges([
+            '48f7f1', '48f7f9', 'f7f1', 'f7f9', '66f7f1', '66f7f9', 'f6f1', 'f6f9', // rcx..cl
+            '49f7f0', '49f7f9', // r8, r9
+        ], counts, ['', '31d2', '4899', 'b86400000031d2', '48c7c09cffffff4899', '99']);
+        for (const cases of [multiplies, divides])
+        {
+            const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0,
+                false, shared);
+            assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+            assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+        }
+    });
 
 test('seeded long programs run in the shared emitter\'s regions as interpreted', ()=>{
     const instructions = pool();

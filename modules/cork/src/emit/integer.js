@@ -22,7 +22,7 @@
  * the other executor to run.
  */
 
-import { registerLocal } from './width.js';
+import { LONG_WIDE, registerLocal } from './width.js';
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
@@ -104,6 +104,19 @@ function addStack(e, delta){
     e.b.localGet(esp).i32const(delta).op(I32.add).localSet(esp);
 }
 
+/**
+ * Pushes a register's low dword as an i32: long mode's register wrapped.
+ *
+ * @param {E} e @param {number} reg
+ */
+function getReg32(e, reg){
+    e.b.localGet(registerLocal(e, reg));
+    if (isLong(e))
+    {
+        e.b.op(I64.wrap);
+    }
+}
+
 /** The selector values the flat segments carry, by segment index. */
 const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
 
@@ -117,7 +130,7 @@ const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
 const LONG_OPS = new Set([
     'nop', 'mov', 'movzx', 'movsx', 'movsxd', 'lea', 'add', 'adc', 'sub', 'sbb', 'cmp', 'and',
     'or', 'xor', 'test', 'inc', 'dec', 'neg', 'not', 'push', 'pop', 'jmp', 'call', 'ret', 'hlt',
-    'shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr',
+    'shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'imul', 'mul', 'div', 'idiv',
 ]);
 
 /**
@@ -2567,12 +2580,17 @@ function imul(e, instruction, flagsLive){
     };
     if (operands.length === 1)
     {
+        if (size === 8)
+        {
+            mulQuad(e, true, operands[0], flagsLive);
+            return true;
+        }
         if (size !== 4)
         {
             // Signed al * r/m8 -> ax, ax * r/m16 -> dx:ax; CF and OF say the
             // product does not fit its low half.
             prepare(e, operands[0]);
-            b.localGet(registerLocal(e, 0));
+            getReg32(e, 0);
             b.op(size === 1 ? I32_EXTRA.extend8s : I32_EXTRA.extend16s);
             readSigned(operands[0]);
             b.op(I32_EXTRA.mul).localSet(Local.t1);
@@ -2591,16 +2609,21 @@ function imul(e, instruction, flagsLive){
             return true;
         }
         prepare(e, operands[0]);
-        b.localGet(registerLocal(e, 0)).op(I64.extendS);
+        getReg32(e, 0);
+        b.op(I64.extendS);
         readSigned(operands[0]);
         b.op(I64.extendS).op(I64.mul).localSet(Local.t64);
-        b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
-        b.localGet(Local.t64).i64const(32n).op(I64.shrS).op(I64.wrap).localSet(registerLocal(e, 2));
+        b.localGet(Local.t64).op(I64.wrap);
+        writeReg(e, 0, 4, false);
+        b.localGet(Local.t64).i64const(32n).op(I64.shrS).op(I64.wrap);
+        writeReg(e, 2, 4, false);
         if (flagsLive)
         {
             e.eagerWrite(CF | OF);
             // Fits when the high half is the sign extension of the low half.
-            b.localGet(Local.t64).localGet(registerLocal(e, 0)).op(I64.extendS).op(I64.ne);
+            b.localGet(Local.t64);
+            getReg32(e, 0);
+            b.op(I64.extendS).op(I64.ne);
             b.localSet(Local.t1);
             b.localGet(Local.t1);
             e.orFlag(CF);
@@ -2611,6 +2634,27 @@ function imul(e, instruction, flagsLive){
     }
     const [dst, a, c] = operands.length === 3 ? operands : [operands[0], operands[0], operands[1]];
     prepare(e, a.kind === 'mem' ? a : c);
+    if (size === 8)
+    {
+        // The low quadword of the product; the flags from the high one.
+        readOp(e, a);
+        b.localSet(Local.t64);
+        readOp(e, c);
+        b.localSet(Local.t64b);
+        writeOp(e, dst, ()=>{
+            b.localGet(Local.t64).localGet(Local.t64b).op(I64.mul);
+            if (flagsLive)
+            {
+                b.localTee(LONG_WIDE + 2);
+            }
+        });
+        if (flagsLive)
+        {
+            productHigh(e, true);
+            productFlags(e, true);
+        }
+        return true;
+    }
     readSigned(a);
     b.op(I64.extendS);
     readSigned(c);
@@ -2642,11 +2686,17 @@ function imul(e, instruction, flagsLive){
 function mul(e, instruction, flagsLive){
     const { b } = e;
     const { operands, size } = instruction;
+    if (size === 8)
+    {
+        mulQuad(e, false, operands[0], flagsLive);
+        return true;
+    }
     if (size !== 4)
     {
         // al * r/m8 -> ax; ax * r/m16 -> dx:ax. The product fits an i32.
         prepare(e, operands[0]);
-        b.localGet(registerLocal(e, 0)).i32const(MASKS[widthCode(size)]).op(I32.and);
+        getReg32(e, 0);
+        b.i32const(MASKS[widthCode(size)]).op(I32.and);
         readOp(e, operands[0]);
         b.op(I32_EXTRA.mul).localSet(Local.t1);
         wideResult(e, size, ()=>b.localGet(Local.t1));
@@ -2663,21 +2713,103 @@ function mul(e, instruction, flagsLive){
         return true;
     }
     prepare(e, operands[0]);
-    b.localGet(registerLocal(e, 0)).op(I64.extendU);
+    getReg32(e, 0);
+    b.op(I64.extendU);
     readOp(e, operands[0]);
     b.op(I64.extendU).op(I64.mul).localSet(Local.t64);
-    b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
-    b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).localSet(registerLocal(e, 2));
+    b.localGet(Local.t64).op(I64.wrap);
+    writeReg(e, 0, 4, false);
+    b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);
+    writeReg(e, 2, 4, false);
     if (flagsLive)
     {
         e.eagerWrite(CF | OF);
-        b.localGet(registerLocal(e, 2)).i32const(0).op(I32.ne).localSet(Local.t1);
+        getReg32(e, 2);
+        b.i32const(0).op(I32.ne).localSet(Local.t1);
         b.localGet(Local.t1);
         e.orFlag(CF);
         b.localGet(Local.t1);
         e.orFlag(OF);
     }
     return true;
+}
+
+/**
+ * One-operand mul and imul of a quadword: rdx:rax = rax by the operand, the
+ * low quadword wasm's i64.mul, the high one from 32-bit pieces.
+ *
+ * @param {E} e @param {boolean} signed @param {Operand} operand @param {boolean} flagsLive
+ */
+function mulQuad(e, signed, operand, flagsLive){
+    const { b } = e;
+    prepare(e, operand);
+    b.localGet(registerLocal(e, 0)).localSet(Local.t64);
+    readOp(e, operand);
+    b.localTee(Local.t64b).localGet(Local.t64).op(I64.mul).localSet(LONG_WIDE + 2);
+    productHigh(e, signed);
+    b.localGet(LONG_WIDE + 2);
+    writeReg(e, 0, 8, false);
+    b.localGet(LONG_WIDE + 1);
+    writeReg(e, 2, 8, false);
+    if (flagsLive)
+    {
+        productFlags(e, signed);
+    }
+}
+
+/**
+ * The high quadword of the 128-bit product of `t64` and `t64b` into
+ * `LONG_WIDE + 1`: the unsigned one from four 32-bit products, then for a
+ * signed one each negative factor's other factor taken off.
+ *
+ * @param {E} e @param {boolean} signed
+ */
+function productHigh(e, signed){
+    const { b } = e;
+    const middle = LONG_WIDE;
+    const high = LONG_WIDE + 1;
+    const lo = (/** @type {number} */ local)=>b.localGet(local).i64const(0xffffffffn).op(I64.and);
+    const hi = (/** @type {number} */ local)=>b.localGet(local).i64const(32n).op(I64.shrU);
+    // middle = (lo*lo >> 32) + hi(a)*lo(b), below 2^64
+    lo(Local.t64); lo(Local.t64b); b.op(I64.mul).i64const(32n).op(I64.shrU);
+    hi(Local.t64); lo(Local.t64b); b.op(I64.mul).op(I64.add).localSet(middle);
+    // high = hi*hi + middle's high half + (lo(a)*hi(b) + middle's low half)'s high half
+    lo(Local.t64); hi(Local.t64b); b.op(I64.mul);
+    b.localGet(middle).i64const(0xffffffffn).op(I64.and).op(I64.add).i64const(32n).op(I64.shrU);
+    hi(Local.t64); hi(Local.t64b); b.op(I64.mul).op(I64.add);
+    b.localGet(middle).i64const(32n).op(I64.shrU).op(I64.add).localSet(high);
+    if (signed)
+    {
+        b.localGet(high).localGet(Local.t64b).i64const(0n).localGet(Local.t64).i64const(0n)
+            .op(I64.ltS).select().op(I64.sub);
+        b.localGet(Local.t64).i64const(0n).localGet(Local.t64b).i64const(0n).op(I64.ltS)
+            .select().op(I64.sub).localSet(high);
+    }
+}
+
+/**
+ * CF and OF of a quadword product: the high quadword (`LONG_WIDE + 1`) is
+ * more than the low one's (`LONG_WIDE + 2`) extension.
+ *
+ * @param {E} e @param {boolean} signed
+ */
+function productFlags(e, signed){
+    const { b } = e;
+    e.eagerWrite(CF | OF);
+    b.localGet(LONG_WIDE + 1);
+    if (signed)
+    {
+        b.localGet(LONG_WIDE + 2).i64const(63n).op(I64.shrS);
+    }
+    else
+    {
+        b.i64const(0n);
+    }
+    b.op(I64.ne).localSet(Local.t1);
+    b.localGet(Local.t1);
+    e.orFlag(CF);
+    b.localGet(Local.t1);
+    e.orFlag(OF);
 }
 
 /**
@@ -2690,6 +2822,10 @@ function divide(e, instruction){
     const { b } = e;
     const { op, operands, size } = instruction;
     prepare(e, operands[0]);
+    if (size === 8)
+    {
+        return divideQuad(e, instruction);
+    }
     readOp(e, operands[0]);
     b.localSet(Local.t1);
     // Divisor zero: the fault is raised at the instruction, state untouched.
@@ -2701,8 +2837,10 @@ function divide(e, instruction){
     {
         return divideNarrow(e, instruction);
     }
-    b.localGet(registerLocal(e, 2)).op(I64.extendU).i64const(32n).op(I64.shl)
-        .localGet(registerLocal(e, 0)).op(I64.extendU).op(I64.or).localSet(Local.t64);
+    getReg32(e, 2);
+    b.op(I64.extendU).i64const(32n).op(I64.shl);
+    getReg32(e, 0);
+    b.op(I64.extendU).op(I64.or).localSet(Local.t64);
     if (op === 'div')
     {
         b.localGet(Local.t64).localGet(Local.t1).op(I64.extendU).op(I64.divU).localSet(Local.t64b);
@@ -2711,8 +2849,8 @@ function divide(e, instruction){
         e.openGuard('overflow', EMPTY);
         e.exitBefore(instruction.eip, Exit.FAULT, 0);
         e.close();
-        b.localGet(Local.t64).localGet(Local.t1).op(I64.extendU).op(I64.remU).op(I64.wrap)
-            .localSet(registerLocal(e, 2));
+        b.localGet(Local.t64).localGet(Local.t1).op(I64.extendU).op(I64.remU).op(I64.wrap);
+        writeReg(e, 2, 4, false);
     }
     else
     {
@@ -2728,10 +2866,58 @@ function divide(e, instruction){
         e.openGuard('overflow', EMPTY);
         e.exitBefore(instruction.eip, Exit.FAULT, 0);
         e.close();
-        b.localGet(Local.t64).localGet(Local.t1).op(I64.extendS).op(I64.remS).op(I64.wrap)
-            .localSet(registerLocal(e, 2));
+        b.localGet(Local.t64).localGet(Local.t1).op(I64.extendS).op(I64.remS).op(I64.wrap);
+        writeReg(e, 2, 4, false);
     }
-    b.localGet(Local.t64b).op(I64.wrap).localSet(registerLocal(e, 0));
+    b.localGet(Local.t64b).op(I64.wrap);
+    writeReg(e, 0, 4, false);
+    return true;
+}
+
+/**
+ * div/idiv of a quadword: rdx:rax by the operand. A dividend that is rax
+ * extended -- rdx zero, or rax's sign -- divides in wasm; a wider one leaves
+ * before the instruction for the interpreter, which divides 128 bits by 64
+ * or raises the divide fault.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function divideQuad(e, instruction){
+    const { b } = e;
+    const signed = instruction.op === 'idiv';
+    const divisor = LONG_WIDE;
+    const rax = registerLocal(e, 0);
+    readOp(e, instruction.operands[0]);
+    b.localTee(divisor).op(I64.eqz);
+    e.openGuard('zero', EMPTY);
+    e.exitBefore(instruction.eip, Exit.FAULT, 0);
+    e.close();
+    b.localGet(registerLocal(e, 2));
+    if (signed)
+    {
+        b.localGet(rax).i64const(63n).op(I64.shrS);
+    }
+    else
+    {
+        b.i64const(0n);
+    }
+    b.op(I64.ne);
+    e.openGuard('wide', EMPTY);
+    e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
+    e.close();
+    if (signed)
+    {
+        // INT64_MIN / -1 would trap in wasm; on the processor it is a fault as well.
+        b.localGet(divisor).i64const(-1n).op(I64.eq);
+        b.localGet(rax).i64const(-0x8000000000000000n).op(I64.eq).op(I32.and);
+        e.openGuard('overflow', EMPTY);
+        e.exitBefore(instruction.eip, Exit.FAULT, 0);
+        e.close();
+    }
+    b.localGet(rax).localGet(divisor).op(signed ? I64.remS : I64.remU);
+    writeReg(e, 2, 8, false);
+    b.localGet(rax).localGet(divisor).op(signed ? I64.divS : I64.divU);
+    writeReg(e, 0, 8, false);
     return true;
 }
 
@@ -2752,7 +2938,8 @@ function divideNarrow(e, instruction){
     // The dividend.
     if (size === 1)
     {
-        b.localGet(registerLocal(e, 0)).i32const(0xffff).op(I32.and);
+        getReg32(e, 0);
+        b.i32const(0xffff).op(I32.and);
         if (signed)
         {
             b.op(I32_EXTRA.extend16s);
@@ -2760,8 +2947,10 @@ function divideNarrow(e, instruction){
     }
     else
     {
-        b.localGet(registerLocal(e, 2)).i32const(16).op(I32.shl)
-            .localGet(registerLocal(e, 0)).i32const(0xffff).op(I32.and).op(I32.or);
+        getReg32(e, 2);
+        b.i32const(16).op(I32.shl);
+        getReg32(e, 0);
+        b.i32const(0xffff).op(I32.and).op(I32.or);
     }
     b.localSet(Local.t2);
     if (signed)

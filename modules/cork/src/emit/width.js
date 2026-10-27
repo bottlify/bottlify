@@ -76,7 +76,8 @@ export const WIDTH_64 = Object.freeze({
         ValType.i32, ValType.i32, // flags, origin
         ...LOCALS_32.slice(11),
     ]),
-    upper: Object.freeze([...new Array(8).fill(ValType.i64), ValType.i32]),
+    upper: Object.freeze([...new Array(8).fill(ValType.i64), ValType.i32,
+        ValType.i64, ValType.i64, ValType.i64]),
     recordType: ValType.i64,
 });
 
@@ -85,6 +86,12 @@ export const WIDTH_64 = Object.freeze({
  * leaves on the stack while it keeps it zero-extended in the record.
  */
 export const LONG_SCRATCH = 48;
+
+/**
+ * Long mode's three i64 scratch locals past `LONG_SCRATCH`, from this one: a
+ * quadword multiply's and divide's pieces (`integer.js`).
+ */
+export const LONG_WIDE = 49;
 
 /**
  * @param {{ bits?: 32 | 64 }} layout
