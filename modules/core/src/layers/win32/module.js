@@ -3428,6 +3428,11 @@ export function createWin32Module(){
                         readCString,
                         setLastError: setError,
                         divergence: config?.divergence,
+                        // The providers are listed in the registry.
+                        hive,
+                        canWrite,
+                        // A provider's handle is a pointer into its own memory.
+                        allocate: bytes=>heap.allocate(bytes),
                     }),
                     // There is one user, so a child started as whichever user a
                     // token names is started as that one: CreateProcess, the token
