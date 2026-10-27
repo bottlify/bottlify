@@ -50,7 +50,7 @@ import { TOKEN_NATIVES } from '../advapi32/tokens.js';
 const CRT_EXPORTS = [
     'memchr', 'memcpy', 'memmove', 'memset', 'memcmp',
     'qsort', 'bsearch',
-    'sprintf', '_snprintf', 'vsprintf', 'sscanf',
+    'sprintf', '_snprintf', '_snwprintf', 'vsprintf', 'sscanf',
     'strcat', 'strchr', 'strcmp', 'strcpy', 'strcspn', 'strlen', 'strncat',
     'strncmp', 'strncpy', 'strpbrk', 'strrchr', 'strspn', 'strstr',
     '_stricmp', '_strnicmp', '_strlwr', '_strupr',
