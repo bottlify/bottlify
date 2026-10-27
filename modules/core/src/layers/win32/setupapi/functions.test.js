@@ -39,7 +39,8 @@ const SPINST_FILES = 0x10;
 const ARG = 0x1000;
 const HEAP = 0x20000;
 
-async function machine(){
+/** @param {Record<string, any>} [extra]  More of the host. */
+async function machine(extra = {}){
     const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
     const fs = await filesystemModule.create({});
@@ -126,6 +127,7 @@ async function machine(){
         folders: shellFolders(),
         registry: hive,
         keyHandle: path=>(hive.open(/** @type {any} */ (hive.root(0x80000002)), path) ? 0x7700 : 0),
+        ...extra,
     });
 
     let argAt = ARG;
@@ -1376,3 +1378,70 @@ test('SetupPromptForDisk answers with the path when the file is already there, a
         assert.equal(prompt(out, 6), 3, 'DPROMPT_BUFFERTOOSMALL');
         assert.equal(prompt(out, 63, 0), 1, 'asked for the disk: no one answers, cancelled');
     });
+
+test('services are made from an install section\'s AddService lines, all four values wanted',
+    async()=>{
+        // Wine's setupapi install test_install_svc_from and test_driver_install.
+        /** @type {any[]} */
+        const made = [];
+        const m = await machine({ createService: (/** @type {any} */ service)=>{
+            made.push(service);
+            return made.length > 1 ? 1073 : 0;
+        } });
+        m.file('C:\\src\\svc.inf', [
+            '[Version]', 'Signature="$Chicago$"',
+            '[Empty]',
+            '[Short]', 'AddService=Winetest,,ShortSvc',
+            '[ShortSvc]', 'ServiceType=1', 'StartType=4', 'ErrorControl=1',
+            '[Good]', 'AddService=,2', 'AddService=Winetest,,GoodSvc',
+            'AddService=Winetest,,GoodSvc',
+            '[GoodSvc]', 'DisplayName="Wine test"', 'ServiceType=1', 'StartType=4',
+            'ErrorControl=1', 'ServiceBinary=%12%\\winetest.sys', '',
+        ].join('\r\n'));
+        const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\svc.inf'), 0,
+            INF_STYLE_WIN4, 0]);
+        for (const [section, error] of /** @type {[string, number][]} */ ([
+            ['Missing', 0xe0000101], ['Empty', 0xe0000101], ['Short', 0xe0000217]]))
+        {
+            assert.equal(m.fns.SetupInstallServicesFromInfSectionA.handler([inf, m.str(section),
+                0]), 0, section);
+            assert.equal(m.lastError(), error, section);
+        }
+        assert.equal(made.length, 0);
+        assert.equal(m.fns.SetupInstallServicesFromInfSectionW.handler([inf, m.wstr('Good'), 0]),
+            1, 'a service already there is the one asked for');
+        assert.equal(m.lastError(), 0);
+        assert.deepEqual(made[0], { name: 'Winetest', displayName: 'Wine test',
+            binary: 'C:\\WINDOWS\\system32\\drivers\\winetest.sys', type: 1, start: 4,
+            errorControl: 1, startName: null });
+        assert.equal(made.length, 2, 'a line with no name makes none');
+    });
+
+test('InstallHinfSection installs the decorated section, then its services', async()=>{
+    /** @type {string[]} */
+    const made = [];
+    const m = await machine({ createService: (/** @type {any} */ service)=>{
+        made.push(service.name);
+        return 0;
+    } });
+    m.file('C:\\src\\hinf.inf', [
+        '[Version]', 'Signature="$Chicago$"',
+        '[Install.NT]', 'AddReg=Reg',
+        '[Install.NT.Services]', 'AddService=Hinf,,HinfSvc',
+        '[HinfSvc]', 'ServiceType=1', 'StartType=4', 'ErrorControl=1', 'ServiceBinary=%11%\\h.sys',
+        '[Reg]', 'HKLM,Software\\Hinf,Done,0x00010001,1', '',
+    ].join('\r\n'));
+    assert.equal(await m.fns.InstallHinfSectionA.handler([0, 0,
+        m.str('Install 128 C:\\src\\hinf.inf'), 0]), 0);
+    const key = m.hive.open(/** @type {any} */ (m.hive.root(0x80000002)), 'Software\\Hinf');
+    assert.ok(key && m.hive.getValue(key, 'Done'), 'the .NT section, its AddReg done');
+    assert.deepEqual(made, ['Hinf']);
+});
+
+test('DIRID 0 is empty, an unknown standard one the system directory\'s unknown', async()=>{
+    const { standardDirids } = await import('./dirids.js');
+    const dirid = standardDirids({ Windows: 'C:\\WINDOWS', System: 'C:\\WINDOWS\\system32' });
+    assert.equal(dirid(0), '');
+    assert.equal(dirid(99), 'C:\\WINDOWS\\system32\\unknown');
+    assert.equal(dirid(0x8000), null, 'a user DIRID is the INF\'s own');
+});

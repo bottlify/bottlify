@@ -2699,6 +2699,48 @@ export function createWin32Module(){
                     handles,
                     folders,
                     registry: hive,
+                    // A service an INF installs, made by advapi32's own CreateService
+                    // so the manager's database has the one way in. The error, 0
+                    // for none.
+                    createService: service=>{
+                        const strings = [service.name, service.displayName, service.binary,
+                            service.startName ?? null];
+                        const encoded = strings.map(text=>(text === null ? null
+                            : new TextEncoder().encode(`${text}\0`)));
+                        const size = encoded.reduce((sum, bytes)=>sum + (bytes?.length ?? 0), 0);
+                        const block = heap.allocate(Math.max(size, 1));
+                        if (!block)
+                        {
+                            return 8;
+                        }
+                        let at = block;
+                        const pointers = encoded.map(bytes=>{
+                            if (!bytes)
+                            {
+                                return 0;
+                            }
+                            writeMemory(at, bytes);
+                            at += bytes.length;
+                            return at - bytes.length;
+                        });
+                        const advapi = libraries['ADVAPI32.dll'];
+                        const manager = advapi.OpenSCManagerA.handler([0, 0, 0xf003f]) >>> 0;
+                        const made = manager === 0 ? 0 : advapi.CreateServiceA.handler([
+                            manager, pointers[0], pointers[1], 0xf01ff, service.type, service.start,
+                            service.errorControl, pointers[2], 0, 0, 0, pointers[3], 0]) >>> 0;
+                        const error = made === 0
+                            ? libraries['KERNEL32.dll'].GetLastError.handler([]) >>> 0 : 0;
+                        if (made !== 0)
+                        {
+                            advapi.CloseServiceHandle.handler([made]);
+                        }
+                        if (manager !== 0)
+                        {
+                            advapi.CloseServiceHandle.handler([manager]);
+                        }
+                        heap.free(block);
+                        return error;
+                    },
                     // An HKEY for a key under HKEY_LOCAL_MACHINE from advapi32's
                     // own table, so the program reads and closes what
                     // SetupDiOpenClassRegKey and its kin hand out with the

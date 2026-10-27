@@ -59,6 +59,8 @@ const ERROR_DEVINST_ALREADY_EXISTS = 0xe0000207;
 const ERROR_NO_ASSOCIATED_CLASS = 0xe0000200;
 const ERROR_INVALID_MACHINENAME = 0xe0000220;
 const ERROR_INVALID_CLASS = 0xe0000206;
+const ERROR_BAD_SERVICE_INSTALLSECT = 0xe0000217;
+const ERROR_SERVICE_EXISTS = 1073;
 
 /** The notifications a callback is sent. */
 export const SPFILENOTIFY = Object.freeze({
@@ -181,10 +183,23 @@ const SOURCE_MEDIA_SIZE = 24;
  * @property {Readonly<Record<string, string>>} folders  The shell's folders, for DIRIDs.
  * @property {any} [registry]  The hive: where registered OS components are kept, and
  *           what an install section's AddReg and DelReg write.
+ * @property {(service: { name: string, displayName: string, binary: string, type: number,
+ *     start: number, errorControl: number, startName: string | null }) => number} [createService]
+ *           A service made through the service control manager: the error, 0 for none.
+ * @property {(handle: number) => any} [keyOf]
+ *           The hive's key a registry handle the program holds is open on;
+ *           null for one that is none.
  * @property {(path: string) => number} [keyHandle]
  *           An HKEY for a key under HKEY_LOCAL_MACHINE, from the registry's
  *           own handle table; 0 for a key that is not there.
  * @property {(api: string, detail: string) => void} [divergence]
+ */
+
+/**
+ * A queue's callback: the program's, at an address, or one answered here.
+ *
+ * @typedef {number | ((message: number, first: any) => { answer: number, path: string })}
+ *     QueueCallback
  */
 
 /** @param {string} path */
@@ -744,15 +759,20 @@ export function createSetupapiFunctions(host){
      * sequence of SetupCommitFileQueue, each notification's structures laid
      * out in guest memory.
      *
-     * @param {any} queue @param {number} callback @param {number} context @param {any} thread
+     * The callback is the program's, at an address, or the default one
+     * answered here, a function, when no program callback is in the way. The
+     * structures are the W ones for a W call.
+     *
+     * @param {any} queue @param {QueueCallback} callback
+     * @param {number} context @param {any} thread @param {boolean} [wide]
      */
-    const commit = async(queue, callback, context, thread)=>{
+    const commit = async(queue, callback, context, thread, wide = false)=>{
         const memory = scratch();
         try
         {
             const paths = memory.block(FILEPATHS_SIZE);
             const media = memory.block(SOURCE_MEDIA_SIZE);
-            const newPath = memory.block(MAX_PATH);
+            const newPath = memory.block(MAX_PATH * 2);
             return await commitQueue(queue, {
                 files: host.files,
                 readWhole,
@@ -767,32 +787,36 @@ export function createSetupapiFunctions(host){
                  * @param {number} second
                  */
                 notify: async(message, first, second)=>{
+                    if (typeof callback === 'function')
+                    {
+                        return callback(message, first);
+                    }
                     let param1;
                     let param2 = second;
                     if (first.kind === 'paths')
                     {
                         const view = new DataView(new ArrayBuffer(FILEPATHS_SIZE));
-                        view.setUint32(0, memory.string(first.target), true);
-                        view.setUint32(4, memory.string(first.source), true);
+                        view.setUint32(0, memory.string(first.target, wide), true);
+                        view.setUint32(4, memory.string(first.source, wide), true);
                         view.setUint32(8, first.error ?? 0, true);
                         host.writeMemory(paths, new Uint8Array(view.buffer));
                         param1 = paths;
                         if (message === SPFILENOTIFY.COPYERROR)
                         {
-                            host.writeMemory(newPath, new Uint8Array(MAX_PATH));
+                            host.writeMemory(newPath, new Uint8Array(MAX_PATH * 2));
                             param2 = newPath;
                         }
                     }
                     else if (first.kind === 'media')
                     {
                         const view = new DataView(new ArrayBuffer(SOURCE_MEDIA_SIZE));
-                        view.setUint32(4, memory.string(first.tagfile), true);
-                        view.setUint32(8, memory.string(first.description), true);
-                        view.setUint32(12, memory.string(first.path), true);
-                        view.setUint32(16, memory.string(first.file), true);
+                        view.setUint32(4, memory.string(first.tagfile, wide), true);
+                        view.setUint32(8, memory.string(first.description, wide), true);
+                        view.setUint32(12, memory.string(first.path, wide), true);
+                        view.setUint32(16, memory.string(first.file, wide), true);
                         view.setUint32(20, first.flags, true);
                         host.writeMemory(media, new Uint8Array(view.buffer));
-                        host.writeMemory(newPath, new Uint8Array(MAX_PATH));
+                        host.writeMemory(newPath, new Uint8Array(MAX_PATH * 2));
                         param1 = media;
                         param2 = newPath;
                     }
@@ -802,7 +826,7 @@ export function createSetupapiFunctions(host){
                     }
                     const answer = (await host.call(callback >>> 0,
                         [context >>> 0, message, param1 >>> 0, param2 >>> 0], thread)) >>> 0;
-                    const path = param2 === newPath ? host.readCString(newPath, MAX_PATH) : '';
+                    const path = param2 === newPath ? textOf(newPath, wide) ?? '' : '';
                     return { answer, path };
                 },
             });
@@ -1193,6 +1217,139 @@ export function createSetupapiFunctions(host){
             host.files.write(node, host.files.stat(path)?.size ?? 0, encodeAnsi(line));
             host.files.close(node);
         }
+    };
+
+    /**
+     * The default queue callback as answered here, for the calls that commit
+     * a queue with no program callback: go on with everything, the media
+     * where the queue says it is, an error the end.
+     *
+     * @param {number} message @param {any} first
+     */
+    const defaultAnswer = (message, first)=>(message === SPFILENOTIFY.NEEDMEDIA
+        ? { answer: FILEOP.DOIT, path: first.path ?? '' }
+        : { answer: DEFAULT_ANSWERS.get(message) ?? ERROR_SUCCESS, path: '' });
+
+    /**
+     * An install section carried out: SPINST_FILES queues its CopyFiles,
+     * DelFiles and RenFiles and commits them through the callback, sources
+     * found from the root by SourceDisksNames and SourceDisksFiles;
+     * SPINST_REGISTRY then carries out its DelReg and AddReg, HKR the key
+     * given. The other directives are reported as not carried out. The
+     * error, 0 for none.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section
+     * @param {{ wanted: number, relative: any, root: string, copyFlags: number,
+     *     callback: QueueCallback, context: number, thread: any, wide: boolean, api: string }} how
+     *     `relative` is the key HKR stands for.
+     * @returns {number | Promise<number>}
+     */
+    const installSection = (open, section, how)=>{
+        const { wanted, relative, root, copyFlags, callback, context, thread, wide, api } = how;
+        for (const line of section.lines)
+        {
+            const directive = line.key?.toLowerCase() ?? '';
+            if (!['copyfiles', 'delfiles', 'renfiles', 'addreg', 'delreg'].includes(directive)
+                && directive !== '' && wanted & ~(SPINST_FILES | SPINST_REGISTRY))
+            {
+                host.divergence?.(api, `the ${line.key} directive is not carried out`);
+            }
+        }
+        const registry = ()=>{
+            if ((wanted & SPINST_REGISTRY) !== 0 && host.registry)
+            {
+                installRegistry(host.registry, open.inf, section, {
+                    relativeRoot: relative,
+                    expand: value=>expand(open, value),
+                    divergence: detail=>host.divergence?.(api, detail),
+                });
+            }
+            return ERROR_SUCCESS;
+        };
+        if ((wanted & SPINST_FILES) === 0)
+        {
+            return registry();
+        }
+        const queue = newQueue();
+        queueInstallSection(queue, open.inf, section, {
+            root, copyFlags, dirid: diridOf(open),
+        });
+        return commit(queue, callback, context, thread, wide)
+            .then(code=>(code === ERROR_SUCCESS ? registry() : code));
+    };
+
+    /**
+     * The key HKR stands for: a predefined root, or a key the program has
+     * open, when the registry's handle table can say which; null when there
+     * is none, the HKR lines then skipped and reported.
+     *
+     * @param {number} handle @param {string} api
+     */
+    const relativeKeyOf = (handle, api)=>{
+        if (handle === 0 || !host.registry)
+        {
+            return null;
+        }
+        const root = handle >= HKEY_CLASSES_ROOT && handle <= HKEY_USERS
+            ? host.registry.root(handle) : null;
+        const key = root ?? host.keyOf?.(handle) ?? null;
+        if (!key)
+        {
+            host.divergence?.(api, 'an HKR line under a key not known here is not carried out');
+        }
+        return key;
+    };
+
+    /**
+     * An install section's services: each AddService line's service made
+     * from the section it names -- ServiceType, StartType, ErrorControl and
+     * ServiceBinary all wanted, DisplayName and StartName taken when there.
+     * A line with no service name associates none and is no work. The
+     * error, 0 for none.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section @param {string} api
+     */
+    const installServices = (open, section, api)=>{
+        for (const line of section.lines)
+        {
+            if (line.key?.toLowerCase() !== 'addservice')
+            {
+                continue;
+            }
+            const [name = '', , install = ''] = line.fields.map(field=>expand(open, field));
+            if (name === '')
+            {
+                continue;
+            }
+            const values = open.inf.section(install)?.lines ?? [];
+            /** @param {string} key */
+            const value = key=>{
+                const found = values.find(entry=>entry.key?.toLowerCase() === key.toLowerCase());
+                return found ? expand(open, found.fields[0] ?? '') : null;
+            };
+            const numbers = ['ServiceType', 'StartType', 'ErrorControl']
+                .map(key=>value(key)).map(found=>(found === null ? Number.NaN : Number(found)));
+            const binary = value('ServiceBinary');
+            if (numbers.some(number=>Number.isNaN(number)) || binary === null)
+            {
+                return ERROR_BAD_SERVICE_INSTALLSECT;
+            }
+            if (!host.createService)
+            {
+                host.divergence?.(api, 'there is no service control manager to add a service to');
+                continue;
+            }
+            const error = host.createService({ name, displayName: value('DisplayName') ?? name,
+                binary, type: numbers[0], start: numbers[1], errorControl: numbers[2],
+                startName: value('StartName') });
+            // A service already there is the one the INF names, as a
+            // reinstall finds it.
+            if (error !== ERROR_SUCCESS && error !== ERROR_SERVICE_EXISTS)
+            {
+                return error;
+            }
+        }
+        return ERROR_SUCCESS;
     };
 
     /**
@@ -2516,79 +2673,125 @@ export function createSetupapiFunctions(host){
          * directives are not carried out here, and each one met is reported
          * as a divergence.
          */
-        SetupInstallFromInfSectionA: {
+        ...bothWidths('SetupInstallFromInfSection', wide=>({
             argBytes: 44,
             /** @param {number[]} args */
-            handler: ([, handle, sectionPointer, flags, relativeKey, rootPointer, copyFlags,
-                callback, context])=>{
+            handler: (/** @type {number[]} */ [, handle, sectionPointer, flags, relativeKey,
+                rootPointer, copyFlags, callback, context])=>{
+                const api = `SetupInstallFromInfSection${wide ? 'W' : 'A'}`;
                 const open = openInf(handle);
                 if (!open)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const name = text(sectionPointer) ?? '';
-                const section = open.inf.section(name);
+                const section = open.inf.section(textOf(sectionPointer, wide) ?? '');
                 if (!section)
                 {
                     return fail(ERROR_SECTION_NOT_FOUND);
                 }
                 const wanted = (flags >>> 0) & SPINST_ALL;
-                for (const line of section.lines)
-                {
-                    const directive = line.key?.toLowerCase() ?? '';
-                    if (!['copyfiles', 'delfiles', 'renfiles', 'addreg', 'delreg']
-                        .includes(directive) && directive !== ''
-                        && wanted & ~(SPINST_FILES | SPINST_REGISTRY))
-                    {
-                        host.divergence?.('SetupInstallFromInfSectionA',
-                            `the ${line.key} directive is not carried out`);
-                    }
-                }
-                const registry = ()=>{
-                    if ((wanted & SPINST_REGISTRY) === 0 || !host.registry)
-                    {
-                        return;
-                    }
-                    const relative = (relativeKey >>> 0) >= HKEY_CLASSES_ROOT
-                        && (relativeKey >>> 0) <= HKEY_USERS
-                        ? host.registry.root(relativeKey >>> 0) : null;
-                    if ((relativeKey >>> 0) !== 0 && !relative)
-                    {
-                        host.divergence?.('SetupInstallFromInfSectionA',
-                            'an HKR line under an opened key is not carried out');
-                    }
-                    installRegistry(host.registry, open.inf, section, {
-                        relativeRoot: relative,
-                        expand: value=>expand(open, value),
-                        divergence: detail=>host.divergence?.('SetupInstallFromInfSectionA',
-                            detail),
-                    });
-                };
-                if ((wanted & SPINST_FILES) === 0)
-                {
-                    registry();
-                    return fail(ERROR_SUCCESS, 1);
-                }
-                if ((callback >>> 0) === 0)
+                if ((wanted & SPINST_FILES) !== 0 && (callback >>> 0) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const root = text(rootPointer) || directoryOf(open.path).replace(/\\$/, '');
-                const queue = newQueue();
-                queueInstallSection(queue, open.inf, section, {
-                    root, copyFlags: copyFlags >>> 0, dirid: diridOf(open),
-                });
+                const relative = relativeKeyOf(relativeKey >>> 0, api);
+                const root = textOf(rootPointer, wide)
+                    || directoryOf(open.path).replace(/\\$/, '');
                 const thread = host.callerThread();
-                return commit(queue, callback, context, thread).then(code=>{
-                    if (code === ERROR_SUCCESS)
-                    {
-                        registry();
-                    }
+                const done = installSection(open, section, { wanted, relative, root,
+                    copyFlags: copyFlags >>> 0, callback: callback >>> 0, context: context >>> 0,
+                    thread, wide, api });
+                /** @param {number} code */
+                const answer = code=>{
                     host.setLastErrorFor(thread, code);
                     return code === ERROR_SUCCESS ? 1 : 0;
-                });
+                };
+                return typeof done === 'number' ? answer(done) : done.then(answer);
             },
-        },
+        })),
+
+        /**
+         * BOOL SetupInstallServicesFromInfSectionA(HINF InfHandle, PCSTR SectionName,
+         *     DWORD Flags), and the W form
+         *
+         * Each AddService line's service made. A section that is not there,
+         * or has no lines, is ERROR_SECTION_NOT_FOUND; a service section
+         * short of what a service needs, ERROR_BAD_SERVICE_INSTALLSECT.
+         */
+        ...bothWidths('SetupInstallServicesFromInfSection', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, sectionPointer])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const section = open.inf.section(textOf(sectionPointer, wide) ?? '');
+                if (!section || section.lines.length === 0)
+                {
+                    return fail(ERROR_SECTION_NOT_FOUND);
+                }
+                const error = installServices(open, section,
+                    `SetupInstallServicesFromInfSection${wide ? 'W' : 'A'}`);
+                return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
+            },
+        })),
+
+        /**
+         * VOID InstallHinfSectionA(HWND Window, HINSTANCE ModuleHandle, PCSTR CommandLine,
+         *     INT ShowCommand), and the W form
+         *
+         * The command line is a section, a reboot mode, and the INF's path --
+         * the rest of the line, spaces and all, taken as it is (quoted, it
+         * names no file). The section is installed whole, files through the
+         * default callback, and its .Services section after it.
+         */
+        ...bothWidths('InstallHinfSection', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [, , commandPointer])=>{
+                const api = `InstallHinfSection${wide ? 'W' : 'A'}`;
+                const command = textOf(commandPointer, wide) ?? '';
+                const match = /^\s*(\S+)\s+(\d+)\s+(.*)$/.exec(command);
+                if (!match)
+                {
+                    return 0;
+                }
+                const [, name, , path] = match;
+                const loaded = loadInf(pathOf(path) ?? undefined);
+                const thread = host.callerThread();
+                /** @param {{ open: OpenInf } | { error: number, line: number }} result */
+                const install = result=>{
+                    if ('error' in result)
+                    {
+                        return 0;
+                    }
+                    const actual = ['.NTx86', '.NT', ''].map(suffix=>name + suffix)
+                        .find(candidate=>result.open.inf.section(candidate)) ?? name;
+                    const section = result.open.inf.section(actual);
+                    if (!section)
+                    {
+                        return 0;
+                    }
+                    const root = directoryOf(result.open.path).replace(/\\$/, '');
+                    const done = installSection(result.open, section, { wanted: SPINST_ALL,
+                        relative: null, root, copyFlags: 0, callback: defaultAnswer, context: 0,
+                        thread, wide, api });
+                    /** @param {number} code */
+                    const services = code=>{
+                        const extra = result.open.inf.section(`${actual}.Services`);
+                        if (code === ERROR_SUCCESS && extra)
+                        {
+                            installServices(result.open, extra, api);
+                        }
+                        return 0;
+                    };
+                    return typeof done === 'number' ? services(done) : done.then(services);
+                };
+                return 'then' in loaded ? loaded.then(install) : install(loaded);
+            },
+        })),
 
         /**
          * BOOL SetupCopyOEMInfA(PCSTR SourceInfFileName, PCSTR OEMSourceMediaLocation,
