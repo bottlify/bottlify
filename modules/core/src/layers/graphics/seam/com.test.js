@@ -378,3 +378,62 @@ test('an object with no Release is given back, every interface it was published 
     alone.unpublish(other);
     assert.equal(alone.objectAt(kept), null, 'with no bridge to tell, the way back still goes');
 });
+
+test('an interface counted in the host keeps AddRef and Release at their traps', ()=>{
+    // DirectDraw's clipper is called through released pointers and through
+    // 0xdeadbeef by Wine's tests; the guest count routine follows `this` to
+    // its count cell, the trap asks the bridge, which never published it.
+    const bytes = new Uint8Array(0x10000);
+    const view = new DataView(bytes.buffer);
+    /** @type {Map<string, any>} */
+    const handlers = new Map();
+    /** @type {Map<string, number>} */
+    const traps = new Map();
+    let next = 0x4000;
+    let code = 0x8000;
+    const vtables = createVtables({
+        memory: {
+            writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+                view.setUint32(at, value, true),
+            readU32: (/** @type {number} */ at)=>view.getUint32(at, true),
+            writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+                bytes.set(data, at),
+            readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
+                bytes.slice(at, at + length),
+        },
+        register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
+            handlers.set(name, fn);
+            traps.set(name, 0x1000 + handlers.size * 0x10);
+            return 0x1000 + handlers.size * 0x10;
+        },
+        heap: {
+            allocate: (/** @type {number} */ size)=>{
+                const at = next;
+                next += (size + 15) & ~15;
+                return at;
+            },
+            allocateCode: (/** @type {number} */ size)=>{
+                const at = code;
+                code += (size + 15) & ~15;
+                return at;
+            },
+        },
+    });
+    const seam = createPublisher({
+        publishInterface: (object, id)=>vtables.publish(object, id),
+        unpublishInterface: (object, id)=>vtables.unpublish(object, id),
+    });
+    const slot = (/** @type {number} */ pointer, /** @type {number} */ index)=>
+        view.getUint32(view.getUint32(pointer, true) + index * 4, true);
+    const inGuest = seam.publish(counted(), [{ id: IID_ONE, methods: [] }], IID_ONE);
+    const inHost = seam.publish(counted(), [{ id: IID_TWO, methods: [], countedInHost: true }],
+        IID_TWO);
+
+    assert.ok(slot(inGuest, 1) >= 0x8000, 'the ordinary AddRef runs in the guest');
+    assert.ok(slot(inGuest, 2) >= 0x8000);
+    assert.equal(slot(inHost, 1), traps.get(`${IID_TWO}::AddRef`), 'counted in the host');
+    assert.equal(slot(inHost, 2), traps.get(`${IID_TWO}::Release`));
+    const addRef = handlers.get(`${IID_TWO}::AddRef`);
+    assert.equal(addRef.handler([inHost]), 2);
+    assert.equal(addRef.handler([0xdeadbeef]) >>> 0, E_POINTER, 'refused, not followed');
+});
