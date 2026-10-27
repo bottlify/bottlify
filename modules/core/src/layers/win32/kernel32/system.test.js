@@ -1074,3 +1074,31 @@ test('win.ini is not kernel32\'s table to answer', ()=>{
     assert.equal(fns.GetProfileStringA, undefined,
         'win.ini is the profile functions\' to answer, not a fixed default here');
 });
+
+test('GetLogicalProcessorInformationEx answers records of their own sizes, one kind or all', ()=>{
+    // Wine's kernel32 process.c test_GetLogicalProcessorInformationEx.
+    const host = fakeHost(0x4000);
+    const fns = createSystemFunctions(host);
+    assert.equal(fns.GetLogicalProcessorInformationEx.handler([0xffff, 0, 0]), 0);
+    assert.equal(host.errors.at(-1), 87, 'no length to read');
+    host.view.setUint32(0x200, 0, true);
+    assert.equal(fns.GetLogicalProcessorInformationEx.handler([0, 0, 0x200]), 0);
+    assert.equal(host.errors.at(-1), 122);
+    const cores = host.view.getUint32(0x200, true);
+    assert.ok(cores > 0 && cores % 44 === 0, 'whole core records');
+    host.view.setUint32(0x200, 0, true);
+    fns.GetLogicalProcessorInformationEx.handler([0xffff, 0, 0x200]);
+    const length = host.view.getUint32(0x200, true);
+    assert.ok(length > cores);
+    assert.equal(fns.GetLogicalProcessorInformationEx.handler([0xffff, 0x400, 0x200]), 1);
+    /** @type {number[]} */
+    const kinds = [];
+    for (let at = 0x400; at < 0x400 + length; at += host.view.getUint32(at + 4, true))
+    {
+        kinds.push(host.view.getUint32(at, true));
+        assert.ok(host.view.getUint32(at + 4, true) > 0);
+    }
+    assert.deepEqual([...new Set(kinds)].sort(), [0, 1, 2, 3, 4], 'every kind, one group');
+    assert.equal(kinds.at(-1), 4);
+    assert.equal(fns.GetLogicalProcessorInformationEx.handler([9, 0x400, 0x200]), 0);
+});

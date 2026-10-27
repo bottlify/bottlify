@@ -43,6 +43,8 @@ export const TEB = Object.freeze({
     TLS_POINTER: 0x2c,
     PEB: 0x30,
     LAST_ERROR: 0x34,
+    /** The thread's error mode, in ntdll's bits (RTL_SEM_*). */
+    HARD_ERROR_MODE: 0xf28,
     SIZE: 0x1000,
 });
 

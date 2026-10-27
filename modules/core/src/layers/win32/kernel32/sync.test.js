@@ -403,6 +403,25 @@ test('a spin count is recorded where a guest looks for it', ()=>{
     assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
 });
 
+test('InitializeCriticalSectionEx has no debug information unless it is forced', ()=>{
+    // Wine's kernel32 sync.c test_crit_section, as Windows 8 on answers it.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    for (const flags of [0, 0x01000000])
+    {
+        assert.equal(fns.InitializeCriticalSectionEx.handler([0x200, 4000, flags]), 1);
+        assert.equal(host.readI32(0x200), -1, 'DebugInfo');
+        assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
+        assert.equal(host.readI32(0x200 + CS_SPIN_COUNT), 4000);
+    }
+    assert.equal(fns.InitializeCriticalSectionEx.handler([0x200, 0, 0x10000000]), 1);
+    const debug = host.readI32(0x200);
+    assert.ok(debug !== 0 && debug !== -1, 'RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO');
+    assert.equal(host.readI32(debug + 4), 0x200, 'naming its section');
+    assert.equal(fns.InitializeCriticalSectionEx.handler([0x200, 0, 0x10]), 0);
+    assert.equal(host.errors.at(-1), 87);
+});
+
 test('SetCriticalSectionSpinCount keeps the count in the section and answers the old one', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);

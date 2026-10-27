@@ -137,7 +137,11 @@ const PAGE = 4096;
 const FILETIME_EPOCH_MS = 11_644_473_600_000n;
 
 /** Nothing sensible names a module beyond MAX_PATH. */
-const MAX_MODULE_NAME = 260;
+/**
+ * A module name is read to its terminator, as Windows reads it: a path may
+ * run to 32 767 characters, and one cut short names another module.
+ */
+const WHOLE_NAME = 32767;
 /** The one priority a process runs at here. */
 const NORMAL_PRIORITY_CLASS = 0x20;
 
@@ -1152,7 +1156,7 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readCString(pointer >>> 0, MAX_MODULE_NAME)),
+                : host.readCString(pointer >>> 0, WHOLE_NAME)),
         },
 
         /** HMODULE GetModuleHandleW(LPCWSTR lpModuleName) */
@@ -1161,15 +1165,15 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readWideString?.(pointer >>> 0, MAX_MODULE_NAME) ?? ''),
+                : host.readWideString?.(pointer >>> 0, WHOLE_NAME * 2) ?? ''),
         },
 
         /** BOOL GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModuleName, HMODULE *phModule) */
-        GetModuleHandleExA: moduleHandleEx(pointer=>host.readCString(pointer, MAX_MODULE_NAME)),
+        GetModuleHandleExA: moduleHandleEx(pointer=>host.readCString(pointer, WHOLE_NAME)),
 
         /** BOOL GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE *phModule) */
         GetModuleHandleExW: moduleHandleEx(pointer=>
-            host.readWideString?.(pointer, MAX_MODULE_NAME) ?? ''),
+            host.readWideString?.(pointer, WHOLE_NAME * 2) ?? ''),
 
         /**
          * BOOL GetSystemPowerStatus(LPSYSTEM_POWER_STATUS lpSystemPowerStatus)

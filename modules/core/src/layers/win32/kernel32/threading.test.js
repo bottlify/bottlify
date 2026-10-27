@@ -12,6 +12,7 @@ import { createNamedObjects } from './named-objects.js';
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_ALREADY_EXISTS = 183;
 
@@ -21,7 +22,7 @@ const ERROR_ALREADY_EXISTS = 183;
  * about scheduling.
  */
 function fakeKernel(){
-    /** @type {Map<number, { type: string, object: any }>} */
+    /** @type {Map<number, { type: string, object: any, access?: number | null }>} */
     const handles = new Map();
     let nextHandle = 4;
     const state = {
@@ -260,10 +261,10 @@ function fakeKernel(){
         block: (thread, reason, timed)=>state.blocked.push(
             timed === undefined ? { thread, reason } : { thread, reason, timed }),
         handles: {
-            /** @param {string} type @param {any} object */
-            open(type, object){
+            /** @param {string} type @param {any} object @param {number | null} [access] */
+            open(type, object, access = null){
                 const handle = nextHandle;
-                handles.set(handle, { type, object });
+                handles.set(handle, { type, object, access });
                 nextHandle += 4;
                 return handle;
             },
@@ -291,6 +292,8 @@ function fakeKernel(){
             },
             /** @param {number} handle */
             typeOf: handle=>handles.get(handle)?.type ?? null,
+            /** @param {number} handle */
+            access: handle=>handles.get(handle)?.access ?? null,
             /** @param {any} object */
             holds: object=>[...handles.values()].some(entry=>entry.object === object),
         },
@@ -681,7 +684,7 @@ test('a named semaphore is found by a second create, and by OpenSemaphore', ()=>
     assert.equal(kernel.handles.resolve(second, 'semaphore'),
         kernel.handles.resolve(first, 'semaphore'));
 
-    const opened = fns.OpenSemaphoreA.handler([0, 0, NAME]);
+    const opened = fns.OpenSemaphoreA.handler([0x1f0003, 0, NAME]);
     assert.equal(kernel.handles.resolve(opened, 'semaphore'),
         kernel.handles.resolve(first, 'semaphore'));
     assert.equal(fns.OpenSemaphoreW.argBytes, 12);
@@ -757,7 +760,7 @@ test('ReleaseSemaphore says why it refuses, and writes the previous count only o
 test('OpenSemaphoreA reports no such thing for a name nothing created', ()=>{
     const NAME = 0x2000;
     const { fns, errors } = setup({ [NAME]: 'Warcraft III' });
-    assert.equal(fns.OpenSemaphoreA.handler([0, 0, NAME]), 0);
+    assert.equal(fns.OpenSemaphoreA.handler([0x1f0003, 0, NAME]), 0);
     assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND);
 });
 
@@ -771,7 +774,7 @@ test('a named waitable timer is found by a second create, and by OpenWaitableTim
     assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS);
     assert.equal(kernel.handles.resolve(second, 'timer'), kernel.handles.resolve(first, 'timer'));
 
-    const opened = fns.OpenWaitableTimerW.handler([0, 0, NAME]);
+    const opened = fns.OpenWaitableTimerW.handler([0x1f0003, 0, NAME]);
     assert.equal(kernel.handles.resolve(opened, 'timer'), kernel.handles.resolve(first, 'timer'));
     assert.equal(fns.OpenWaitableTimerA.argBytes, 12);
 });
@@ -782,11 +785,11 @@ test('OpenMutexW and OpenEventW read the wide name too', ()=>{
     const { kernel, fns } = setup({ [MUTEX_NAME]: 'Warcraft III', [EVENT_NAME]: 'wc3-ready' });
 
     const mutex = fns.CreateMutexA.handler([0, 0, MUTEX_NAME]);
-    assert.equal(kernel.handles.resolve(fns.OpenMutexW.handler([0, 0, MUTEX_NAME]), 'mutex'),
+    assert.equal(kernel.handles.resolve(fns.OpenMutexW.handler([0x1f0001, 0, MUTEX_NAME]), 'mutex'),
         kernel.handles.resolve(mutex, 'mutex'));
 
     const event = fns.CreateEventA.handler([0, 0, 0, EVENT_NAME]);
-    assert.equal(kernel.handles.resolve(fns.OpenEventW.handler([0, 0, EVENT_NAME]), 'event'),
+    assert.equal(kernel.handles.resolve(fns.OpenEventW.handler([0x1f0003, 0, EVENT_NAME]), 'event'),
         kernel.handles.resolve(event, 'event'));
 });
 
@@ -804,6 +807,48 @@ test('a name lives only as long as a handle to the object behind it', ()=>{
     assert.equal(errors.at(-1), ERROR_SUCCESS);
 });
 
+test('a mutex opened by name is granted what was asked: none refused, a wait needing SYNCHRONIZE',
+    ()=>{
+        // Wine's kernel32 sync.c test_mutex.
+        const NAME = 0x2000;
+        const { kernel, fns, errors } = setup({ [NAME]: 'WineTestMutex' });
+        fns.CreateMutexA.handler([0, 0, NAME]);
+
+        assert.equal(fns.OpenMutexA.handler([0, 0, NAME]), 0);
+        assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
+        const execute = fns.OpenMutexA.handler([0x20000000, 0, NAME]);
+        assert.notEqual(execute, 0, 'GENERIC_EXECUTE');
+        assert.equal(fns.WaitForSingleObject.handler([execute, 0xffffffff]), 0);
+        const readWrite = fns.OpenMutexA.handler([0xc0000000, 0, NAME]);
+        assert.notEqual(readWrite, 0, 'GENERIC_READ | GENERIC_WRITE');
+        assert.equal(fns.WaitForSingleObject.handler([readWrite, 0xffffffff]), 0xffffffff);
+        assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
+        assert.equal(kernel.handles.access(readWrite), 0x20001);
+    });
+
+test('ReleaseMutex of a mutex not owned is ERROR_NOT_OWNER, of no mutex ERROR_INVALID_HANDLE',
+    ()=>{
+        // Wine's kernel32 sync.c test_mutex.
+        const { kernel, fns, errors } = setup();
+        const mutex = fns.CreateMutexA.handler([0, 0, 0]);
+        Object.assign(kernel, { releaseMutex: ()=>false });
+        assert.equal(fns.ReleaseMutex.handler([mutex]), 0);
+        assert.equal(errors.at(-1), 288);
+        assert.equal(fns.ReleaseMutex.handler([0x999]), 0);
+        assert.equal(errors.at(-1), 6);
+    });
+
+test('an event opened without EVENT_MODIFY_STATE is neither set nor reset', ()=>{
+    const NAME = 0x2000;
+    const { fns, errors } = setup({ [NAME]: 'WineTestEvent' });
+    fns.CreateEventA.handler([0, 1, 0, NAME]);
+    const query = fns.OpenEventA.handler([0x00100001, 0, NAME]);
+    assert.equal(fns.SetEvent.handler([query]), 0);
+    assert.equal(fns.ResetEvent.handler([query]), 0);
+    assert.deepEqual(errors.slice(-2), [ERROR_ACCESS_DENIED, ERROR_ACCESS_DENIED]);
+    assert.equal(fns.SetEvent.handler([fns.OpenEventA.handler([0x00000002, 0, NAME])]), 1);
+});
+
 test('a name taken by one kind of object is not a match for another', ()=>{
     const NAME = 0x2000;
     const { kernel, fns, errors } = setup({ [NAME]: 'shared' });
@@ -813,9 +858,10 @@ test('a name taken by one kind of object is not a match for another', ()=>{
     assert.equal(fns.CreateEventA.handler([0, 0, 0, NAME]), 0,
         'the name is not the event\'s to take');
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
-    assert.equal(fns.OpenEventA.handler([0, 0, NAME]), 0, 'nor is the mutex openable as an event');
+    assert.equal(fns.OpenEventA.handler([0x1f0003, 0, NAME]), 0,
+        'nor is the mutex openable as an event');
     assert.equal(
-        kernel.handles.resolve(fns.OpenMutexA.handler([0, 0, NAME]), 'mutex'),
+        kernel.handles.resolve(fns.OpenMutexA.handler([0x1f0001, 0, NAME]), 'mutex'),
         kernel.handles.resolve(mutex, 'mutex'),
         'and the mutex keeps the name it holds',
     );
@@ -826,7 +872,7 @@ test('OpenEventA finds an event created by name', ()=>{
     const { kernel, fns } = setup({ [NAME]: 'ready' });
 
     const created = fns.CreateEventA.handler([0, 1, 0, NAME]);
-    const opened = fns.OpenEventA.handler([0, 0, NAME]);
+    const opened = fns.OpenEventA.handler([0x1f0003, 0, NAME]);
 
     assert.notEqual(opened, 0);
     assert.notEqual(opened, created, 'opening yields a second handle, not the first');
@@ -841,7 +887,7 @@ test('OpenEventA reports no such thing for a name nothing created', ()=>{
     const NAME = 0x2000;
     const { fns, errors } = setup({ [NAME]: 'never-made' });
 
-    assert.equal(fns.OpenEventA.handler([0, 0, NAME]), 0);
+    assert.equal(fns.OpenEventA.handler([0x1f0003, 0, NAME]), 0);
     assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND,
         'a caller must tell this apart from a failure to open');
 });
@@ -1528,3 +1574,17 @@ test('Process32FirstW and Process32NextW walk the same processes into a PROCESSE
     assert.equal(fns.Process32FirstW.handler([0x7777, 0x100]), 0);
     assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
 });
+
+test('an object\'s name is read whole: ANSI refuses MAX_PATH or more, wide tells it apart',
+    ()=>{
+        const long = 'n'.repeat(300);
+        const { fns, errors } = setup({ 0x2000: long, 0x3000: `${long}x`, 0x4000: `${long}y` });
+        assert.equal(fns.CreateEventA.handler([0, 1, 0, 0x2000]), 0);
+        assert.equal(errors.at(-1), 206, 'ERROR_FILENAME_EXCED_RANGE');
+        assert.equal(fns.OpenMutexA.handler([0x1f0001, 0, 0x2000]), 0);
+        assert.equal(errors.at(-1), 206);
+        const first = fns.CreateEventW.handler([0, 1, 0, 0x3000]);
+        assert.notEqual(first, 0);
+        assert.equal(fns.OpenEventW.handler([0x1f0003, 0, 0x4000]), 0,
+            'a name differing past the 260th character is another name');
+    });

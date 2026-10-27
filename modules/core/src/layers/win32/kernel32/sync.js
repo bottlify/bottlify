@@ -14,6 +14,7 @@ import { SELECTORS } from './seh.js';
 import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
 import { createThreadInfoFunctions } from './thread-info.js';
 import { askChild, threadArg, threadEnd } from './cross-process.js';
+import { SYNCHRONIZE, allows } from './access.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -58,6 +59,11 @@ const CS_NO_DEBUG_INFO = -1;
 const CS_LOCK_COUNT = 0x04;
 const CS_SPIN_COUNT = 0x14;
 const CS_SIZE = 0x18;
+/** The flags InitializeCriticalSectionEx takes, all in the high byte. */
+const CS_FLAG_BITS = 0xff000000;
+const CS_FORCE_DEBUG_INFO = 0x10000000;
+/** RTL_CRITICAL_SECTION_DEBUG, which the forced debug information is. */
+const CS_DEBUG_SIZE = 0x20;
 
 /** LockCount while nobody holds the section. Held, it is zero or above. */
 const CS_UNLOCKED = -1;
@@ -674,6 +680,40 @@ export function createSyncFunctions(host){
         },
 
         /**
+         * BOOL InitializeCriticalSectionEx(LPCRITICAL_SECTION, DWORD dwSpinCount,
+         *     DWORD Flags)
+         *
+         * As InitializeCriticalSectionAndSpinCount, with no debug information
+         * unless RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO asks for it, as
+         * Windows 8 on; a flag outside the high byte the flags occupy is
+         * refused.
+         */
+        InitializeCriticalSectionEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pointer, spinCount, flags])=>{
+                if (((flags >>> 0) & ~CS_FLAG_BITS) !== 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                initialise(pointer >>> 0, spinCount & 0x00ffffff);
+                if (((flags >>> 0) & CS_FORCE_DEBUG_INFO) !== 0)
+                {
+                    const debug = host.allocate(CS_DEBUG_SIZE);
+                    if (debug !== 0)
+                    {
+                        host.writeMemory(debug, new Uint8Array(CS_DEBUG_SIZE));
+                        // CriticalSection, the field after Type and CreatorBackTraceIndex.
+                        writeI32(debug + 4, pointer | 0);
+                        writeI32((pointer >>> 0) + CS_DEBUG_INFO, debug | 0);
+                    }
+                }
+                return 1;
+            },
+        },
+
+        /**
          * DWORD SetCriticalSectionSpinCount(LPCRITICAL_SECTION, DWORD dwSpinCount)
          *
          * The count is kept in the section, where
@@ -776,6 +816,13 @@ export function createSyncFunctions(host){
                     if (!target)
                     {
                         host.setLastError?.(ERROR_INVALID_HANDLE);
+                        return WAIT_FAILED;
+                    }
+                    // One opened without SYNCHRONIZE fails the whole wait.
+                    if (!isStandardHandle(handle)
+                        && !allows(kernel.handles.access?.(untagged(handle)) ?? null, SYNCHRONIZE))
+                    {
+                        host.setLastError?.(ERROR_ACCESS_DENIED);
                         return WAIT_FAILED;
                     }
                     // A child process is in a set as the event its exit sets,

@@ -54,12 +54,13 @@ export const CROSS_CALLS = new Set([
     'VirtualAlloc', 'VirtualFree', 'VirtualProtect', 'VirtualQuery',
     'ReadProcessMemory', 'WriteProcessMemory',
     'SuspendThread', 'ResumeThread', 'GetThreadContext', 'SetThreadContext',
-    'CreateThread', 'GetExitCodeThread',
+    'CreateThread', 'GetExitCodeThread', 'NtQueryInformationProcess',
 ]);
 
 /**
  * @typedef {Object} ServeHost
- * @property {Record<string, { handler?: Function }>} table  The child's kernel32.
+ * @property {Record<string, { handler?: Function }>} table  The child's kernel32, and
+ *           the ntdll calls of CROSS_CALLS.
  * @property {(bytes: number) => number} allocate  Scratch in the child's memory; 0 for none.
  * @property {(address: number) => void} free
  * @property {(address: number, length: number) => Uint8Array} readMemory

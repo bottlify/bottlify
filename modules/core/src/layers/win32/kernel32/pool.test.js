@@ -631,3 +631,52 @@ test('WT_EXECUTEINWAITTHREAD callbacks run one after another on the one wait thr
     assert.equal(ask(thread), PARKED);
     assert.equal(fns.UnregisterWait.handler([second]), 1, 'its callback has returned');
 });
+
+test('a thread pool work runs once a submission, and a wait for it waits for its callbacks', ()=>{
+    // Wine's kernel32 thread.c test_threadpool: CreateThreadpoolWork,
+    // SubmitThreadpoolWork, WaitForThreadpoolWorkCallbacks, CloseThreadpoolWork.
+    const m = machine();
+    const work = m.fns.CreateThreadpoolWork.handler([0x403000, 0xcafe, 0]);
+    assert.notEqual(work, 0);
+    m.fns.SubmitThreadpoolWork.handler([work]);
+    assert.equal(m.fns.WaitForThreadpoolWorkCallbacks.handler([work, 0]), PARKED,
+        'its callback has not run yet');
+    assert.deepEqual(m.blocked, [m.main]);
+    assert.equal(m.ask(m.created[0]), RUN);
+    const { entry, args } = m.record(m.created[0]);
+    assert.equal(entry, 0x403000);
+    assert.deepEqual(args.slice(1, 3), [0xcafe, work], 'its instance, context and work');
+    assert.notEqual(args[0], 0);
+    m.ask(m.created[0]);
+    assert.deepEqual(m.woken.at(-1), { thread: m.main, result: 1 }, 'the wait is over');
+    assert.equal(m.fns.WaitForThreadpoolWorkCallbacks.handler([work, 0]), 0, 'nothing to wait for');
+
+    // Pending submissions dropped, the one running waited for.
+    m.fns.SubmitThreadpoolWork.handler([work]);
+    m.fns.SubmitThreadpoolWork.handler([work]);
+    m.fns.CloseThreadpoolWork.handler([work]);
+    assert.equal(m.freed.includes(work), false, 'not given back while callbacks are owed');
+    assert.equal(m.fns.CreateThreadpoolWork.handler([0, 0, 0]), 0);
+    assert.equal(m.errors.at(-1), 87);
+
+    const pool = m.fns.CreateThreadpool.handler();
+    assert.notEqual(pool, 0);
+    m.fns.CloseThreadpool.handler([pool]);
+    assert.ok(m.freed.includes(pool));
+});
+
+test('cancelling pending submissions leaves only the ones running to wait for', ()=>{
+    const m = machine();
+    const work = m.fns.CreateThreadpoolWork.handler([0x403000, 1, 0]);
+    for (let i = 0; i < 3; i++)
+    {
+        m.fns.SubmitThreadpoolWork.handler([work]);
+    }
+    assert.equal(m.fns.WaitForThreadpoolWorkCallbacks.handler([work, 1]), 0,
+        'none had started: all dropped, nothing to wait for');
+    assert.equal(m.ask(m.created[0]), PARKED, 'and none runs');
+    assert.equal(m.fns.TrySubmitThreadpoolCallback.handler([0x404000, 7, 0]), 1);
+    assert.deepEqual(m.woken.at(-1), { thread: m.created[0], result: RUN },
+        'the idle thread is woken to run it');
+    assert.deepEqual(m.record(m.created[0]).args.slice(1, 2), [7]);
+});

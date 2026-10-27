@@ -542,6 +542,17 @@ export function createWin32Module(){
             const threadState = createThreadState(()=>kernel.currentThread(),
                 { readU32: memory.readU32, writeU32: memory.writeU32 });
             const { setError, lastErrorOf, setErrorOn: setErrorOnBlock } = threadState;
+            /**
+             * A call made in a child (`kernel32/cross-process.js`). The thread
+             * asking waits on the child, as on Windows, so its answer does not
+             * put it back on the processor ahead of the threads that are ready.
+             *
+             * @type {import('./kernel32/cross-process.js').AskHost['askChild']}
+             */
+            const askChild = config?.askChild && ((record, call)=>{
+                kernel.answeredElsewhere?.(kernel.currentThread());
+                return /** @type {Function} */ (config.askChild)(record, call);
+            });
             // Absent unless a bundle is mounted, in which case a read of a block
             // that is not here yet becomes a wait rather than a fault.
             const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
@@ -1008,6 +1019,8 @@ export function createWin32Module(){
                 park: thread=>bridge.park(thread),
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} handle */
+                isHandle: handle=>kernel.handles.typeOf((handle & ~3) >>> 0) !== null,
             });
 
             // The thread a wave device's WOM_DONE callbacks run on. Made on first
@@ -1689,7 +1702,7 @@ export function createWin32Module(){
                     ...createThreadingFunctions({
                         kernel,
                         // A thread made in a child, and one waited on there.
-                        askChild: config?.askChild,
+                        askChild,
                         setLastErrorFor: setErrorOn,
                         readMemory,
                         readCString,
@@ -1767,7 +1780,7 @@ export function createWin32Module(){
                         guestHeap,
                         // A child's memory, reached where the child runs.
                         childOf: childProcessOf,
-                        askChild: config?.askChild,
+                        askChild,
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
                         /** @param {number} bytes */
@@ -1881,7 +1894,7 @@ export function createWin32Module(){
                         kernel,
                         processors,
                         // A child's first thread, reached where the child runs.
-                        askChild: config?.askChild,
+                        askChild,
                         setLastErrorFor: setErrorOn,
                         // A change notification watches a directory on the
                         // same volume every file call writes through.
@@ -2039,7 +2052,7 @@ export function createWin32Module(){
                     ...createSystemFunctions({
                         processors,
                         // A child's thread's exit code, asked where it runs.
-                        askChild: config?.askChild,
+                        askChild,
                         setLastErrorFor: setErrorOn,
                         // TerminateProcess wakes whoever waits on the child it ends.
                         wake: (/** @type {any} */ thread, /** @type {number} */ result)=>
@@ -2091,7 +2104,32 @@ export function createWin32Module(){
                         patchMemory: (address, bytes)=>
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
                         startup: ()=>config?.startup ?? null,
-                        askChild: config?.askChild,
+                        divergence: config?.divergence,
+                        // A path as the object manager names it: the drive's
+                        // device, as QueryDosDevice answers it, and the rest.
+                        nativePath: (/** @type {string} */ path)=>{
+                            const parts = /^([A-Za-z]):(\\.*)$/.exec(path);
+                            const kernel32 = /** @type {any} */ (libraries['KERNEL32.dll']);
+                            const scratch = parts && kernel32.QueryDosDeviceA
+                                ? allocator.allocate(0x110) : 0;
+                            if (!parts || scratch === 0)
+                            {
+                                return null;
+                            }
+                            try
+                            {
+                                writeMemory(scratch, new Uint8Array(
+                                    [parts[1].charCodeAt(0), 0x3a, 0]));
+                                return kernel32.QueryDosDeviceA.handler([scratch, scratch + 0x10,
+                                    0x100]) === 0 ? null : readCString(scratch + 0x10, 0x100)
+                                    + parts[2];
+                            }
+                            finally
+                            {
+                                allocator.free(scratch);
+                            }
+                        },
+                        askChild,
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
                         // Asked when a child is made: the table is assembled by then.
@@ -3667,6 +3705,10 @@ export function createWin32Module(){
                 setRegisters,
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                processOf: (/** @type {number} */ handle)=>
+                    (kernel.handles.typeOf(handle) === 'process'
+                        ? kernel.handles.resolve(handle, 'process') : null),
+                askChild,
                 // The processes a Toolhelp snapshot lists: this one and the
                 // children it started that are still running.
                 processes: ()=>[
@@ -4037,7 +4079,9 @@ export function createWin32Module(){
                  * @param {import('./kernel32/cross-process.js').CrossCall} call
                  */
                 answerCall: (/** @type {any} */ call)=>kernel.outside(()=>serveCall(call, {
-                    table: /** @type {any} */ (libraries['KERNEL32.dll']),
+                    table: /** @type {any} */ ({ ...libraries['KERNEL32.dll'],
+                        NtQueryInformationProcess:
+                            libraries['ntdll.dll']?.NtQueryInformationProcess }),
                     allocate: bytes=>allocator.allocate(bytes),
                     free: address=>{
                         allocator.free(address);

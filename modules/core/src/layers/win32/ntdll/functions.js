@@ -137,6 +137,8 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {() => import('./query.js').SystemProcess[]} [processes]
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {import('./query.js').QueryHost['processOf']} [processOf]
+ * @property {import('./query.js').QueryHost['askChild']} [askChild]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {Record<string | symbol, any>} [advapi32]
  *           The assembled ADVAPI32.dll table, whose registry NtUnloadKey
@@ -326,6 +328,8 @@ export function createNtdllFunctions(host){
             arena: host.arena,
             version: host.windows,
             handleType: host.handleType,
+            processOf: host.processOf,
+            askChild: host.askChild,
             divergence: host.divergence,
             processes: host.processes,
             processors: host.processors,

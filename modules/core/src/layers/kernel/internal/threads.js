@@ -1943,7 +1943,8 @@ export function createScheduler(options){
         account(next, instructions, began, from, cpu.eip?.() ?? 0, asked);
         // A slice that ended on a host call still answering: the answer is the
         // thread's own call, and once it comes the thread goes on (`pick`).
-        next.hostContinues = next.awaitingHost === true;
+        next.hostContinues = next.awaitingHost === true && !next.answeredElsewhere;
+        next.answeredElsewhere = false;
         return { ran: next, instructions, switched };
     };
 
@@ -2431,6 +2432,12 @@ export function createScheduler(options){
                  * a thread is ready in every other sense and has nothing to run.
                  */
                 awaitingHost: false,
+                /**
+                 * Set while the host call it waits on is answered by another
+                 * process: a wait on that process, not part of one call, so
+                 * the answer does not let it go on ahead of the others.
+                 */
+                answeredElsewhere: false,
                 // A thread is a waitable object in its own right: a program
                 // joins one by waiting on its handle, and it becomes signalled
                 // when it ends and stays that way. Carried here rather than in
@@ -2573,6 +2580,21 @@ export function createScheduler(options){
                 }
             }
             return playedBy(0);
+        },
+
+        /**
+         * The host call `thread` is making is answered by another process of
+         * the run: on Windows a wait on that process, during which every other
+         * ready thread runs. So its answer puts it among the ready threads
+         * rather than straight back on the processor.
+         *
+         * @param {any} thread
+         */
+        answeredElsewhere(thread){
+            if (thread)
+            {
+                thread.answeredElsewhere = true;
+            }
         },
 
         /**

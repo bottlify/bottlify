@@ -146,7 +146,11 @@ const CURRENT_PROCESS = 0xffffffff;
 const WINEXEC_SUCCESS = 33;
 
 /** A path argument is at most this long; longer is a pointer that is not one. */
-const MAX_PATH = 260;
+/**
+ * A path is read to its terminator, as Windows reads it: one cut at MAX_PATH
+ * names another program or directory.
+ */
+const WHOLE_NAME = 32767;
 /** And a command line, which Windows caps at the same place. */
 const MAX_COMMAND_LINE = 32768;
 
@@ -502,6 +506,9 @@ export function createSpawner(host){
  *           caller assembled it. Built here otherwise, from the same fields.
  * @property {number} [processId]  The running program's own identifier.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(path: string) => string | null} [nativePath]  A path as the object
+ *           manager names it, `\\Device\\HarddiskVolume1\\...`; null where it has no
+ *           drive.
  * @property {() => import('./startup-info.js').StartupRecord | null} [startup]
  *           This process's own, whose desktop a child named none of inherits.
  * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
@@ -626,8 +633,8 @@ export function createSpawnFunctions(host){
      * characters going in and the length without its terminator coming out;
      * a buffer too small for the path and its terminator leaves both the
      * buffer and the size as they were (Wine's test_QueryFullProcessImageName).
-     * The native form names the volume as the object manager does, which is
-     * the drives' to say and not reachable from here: refused, and said so.
+     * The native form names the volume as the object manager does, as the
+     * drives say; without them it is refused, and said so.
      *
      * @param {boolean} wide
      */
@@ -635,8 +642,8 @@ export function createSpawnFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([handle, flags, buffer, size])=>{
-            const path = imagePathOf(handle);
-            if (path === null)
+            const named = imagePathOf(handle);
+            if (named === null)
             {
                 host.setLastError(ERROR_INVALID_HANDLE);
                 return 0;
@@ -646,7 +653,9 @@ export function createSpawnFunctions(host){
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            if ((flags >>> 0) === PROCESS_NAME_NATIVE)
+            const native = (flags >>> 0) === PROCESS_NAME_NATIVE;
+            const path = native ? host.nativePath?.(named) ?? null : named;
+            if (path === null)
             {
                 host.divergence?.('QueryFullProcessImageName', 'the native path is not answered');
                 host.setLastError(ERROR_NOT_SUPPORTED);
@@ -744,8 +753,8 @@ export function createSpawnFunctions(host){
             // may be built on another thread from what crosses to it.
             startup: (startup >>> 0) === 0 ? null : readStartupInfo(
                 host.readMemory(startup >>> 0, STARTUPINFO.SIZE),
-                address=>(wide ? host.readWideString(address, MAX_PATH * 2)
-                    : host.readCString(address, MAX_PATH)),
+                address=>(wide ? host.readWideString(address, WHOLE_NAME * 2)
+                    : host.readCString(address, WHOLE_NAME)),
                 host.startup?.()?.desktop ?? null),
             // The process that started it, which its own snapshot names.
             parentId: (host.processId ?? 0) >>> 0,
@@ -789,12 +798,12 @@ export function createSpawnFunctions(host){
             /** @param {number[]} args */
             handler: ([application, commandLine, , , , flags, environment, directory, startup,
                 information])=>create(
-                (application >>> 0) === 0 ? null : host.readCString(application >>> 0, MAX_PATH),
+                (application >>> 0) === 0 ? null : host.readCString(application >>> 0, WHOLE_NAME),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readCString(commandLine >>> 0, MAX_COMMAND_LINE),
                 flags >>> 0, information, startup,
-                (directory >>> 0) === 0 ? '' : host.readCString(directory >>> 0, MAX_PATH),
+                (directory >>> 0) === 0 ? '' : host.readCString(directory >>> 0, WHOLE_NAME),
                 false, environment),
         },
 
@@ -805,12 +814,12 @@ export function createSpawnFunctions(host){
             handler: ([application, commandLine, , , , flags, environment, directory, startup,
                 information])=>create(
                 (application >>> 0) === 0 ? null
-                    : host.readWideString(application >>> 0, MAX_PATH * 2),
+                    : host.readWideString(application >>> 0, WHOLE_NAME * 2),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE * 2),
                 flags >>> 0, information, startup,
-                (directory >>> 0) === 0 ? '' : host.readWideString(directory >>> 0, MAX_PATH * 2),
+                (directory >>> 0) === 0 ? '' : host.readWideString(directory >>> 0, WHOLE_NAME * 2),
                 true, environment),
         },
 

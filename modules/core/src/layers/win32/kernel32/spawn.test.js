@@ -282,6 +282,32 @@ test('QueryFullProcessImageName answers this process\'s image and a child\'s', (
     assert.equal(fns.QueryFullProcessImageNameW.argBytes, 16);
 });
 
+test('PROCESS_NAME_NATIVE names the image by its volume\'s device, as the drives say', ()=>{
+    // Wine's kernel32 test_QueryFullProcessImageNameA/W, with the native flag.
+    const host = /** @type {any} */ (fakeHost());
+    /** @type {string[]} */
+    const asked = [];
+    host.nativePath = (/** @type {string} */ path)=>{
+        asked.push(path);
+        return `\\Device\\HarddiskVolume1${path.slice(2)}`;
+    };
+    const fns = /** @type {Record<string, any>} */ (createSpawnFunctions(host));
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x300, 260, true);
+    assert.equal(fns.QueryFullProcessImageNameA.handler([CURRENT_PROCESS, 1, 0x400, 0x300]), 1);
+    const native = '\\Device\\HarddiskVolume1\\App\\launcher.exe';
+    assert.equal(new TextDecoder().decode(host.bytes.subarray(0x400, 0x400 + native.length)),
+        native);
+    assert.equal(view.getUint32(0x300, true), native.length);
+    assert.deepEqual(asked, ['C:\\App\\launcher.exe']);
+
+    // A path no drive holds has no native name.
+    host.nativePath = ()=>null;
+    view.setUint32(0x300, 260, true);
+    assert.equal(fns.QueryFullProcessImageNameA.handler([CURRENT_PROCESS, 1, 0x400, 0x300]), 0);
+    assert.equal(host.errors.at(-1), 50);
+});
+
 test('the child is handed the STARTUPINFO its parent gave, a NULL desktop the parent\'s', ()=>{
     // Wine's kernel32 test_Startup reads it back in the child.
     const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));

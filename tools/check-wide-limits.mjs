@@ -48,8 +48,6 @@ const OWN_READERS = new Map([
  * @type {Map<string, string>}
  */
 export const KNOWN = new Map([
-    ['modules/core/src/layers/win32/kernel32/process.js MAX_MODULE_NAME',
-        'kernel32 process (package 1): GetModuleBaseName/GetModuleFileNameEx-side reads'],
 ]);
 
 /** Parameters a reader hands on unchanged: the unit is its caller's. */

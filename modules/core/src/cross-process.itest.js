@@ -274,15 +274,16 @@ const child = buildExe({
  * @param {Uint8Array} parent @param {import('./mode.js').Concurrency} concurrency
  * @param {boolean} through
  * @param {import('node:test').TestContext} t
+ * @param {Uint8Array} [childImage]  C:\App\child.exe
  */
-async function observed(parent, concurrency, through, t){
+async function observed(parent, concurrency, through, t, childImage = child){
     const app = await createApp({
         executable: through ? launcher() : parent,
         imagePath: through ? 'C:\\App\\launcher.exe' : 'C:\\App\\parent.exe',
         engine: 'cork',
         concurrency,
         storage: { load: async()=>({ files: [
-            { path: 'C:\\App\\child.exe', bytes: child },
+            { path: 'C:\\App\\child.exe', bytes: childImage },
             { path: 'C:\\App\\parent.exe', bytes: parent },
         ] }) },
     });
@@ -383,4 +384,170 @@ test('a thread a parent makes in its child runs there, and is waited on and read
             const run = await observed(parent, concurrency, through, t);
             assert.equal(run.code >>> 0, (1 << 16) + 42, name);
         }
+    });
+
+/**
+ * Code with labels: bytes pushed as they come, a jump's target named and
+ * patched once every label is known -- relative, or an absolute address.
+ *
+ * @param {(offset: number) => number} va  An offset in the code as an address.
+ */
+function assembler(va){
+    /** @type {number[]} */
+    const bytes = [];
+    /** @type {Record<string, number>} */
+    const labels = {};
+    /** @type {{ at: number, label: string, absolute: boolean }[]} */
+    const patches = [];
+    return {
+        bytes,
+        /** @param {...number} more */
+        emit: (...more)=>bytes.push(...more),
+        /** @param {string} label */
+        mark: label=>{
+            labels[label] = bytes.length;
+        },
+        /** @param {number[]} opcode @param {string} label */
+        jump: (opcode, label)=>{
+            bytes.push(...opcode);
+            patches.push({ at: bytes.length, label, absolute: false });
+            bytes.push(0, 0, 0, 0);
+        },
+        /** push imm32 of a label's address @param {string} label */
+        pushAddress: label=>{
+            bytes.push(0x68);
+            patches.push({ at: bytes.length, label, absolute: true });
+            bytes.push(0, 0, 0, 0);
+        },
+        done(){
+            for (const { at, label, absolute } of patches)
+            {
+                const target = labels[label];
+                bytes.splice(at, 4, ...u32(absolute ? va(target) : target - (at + 4)));
+            }
+            return bytes;
+        },
+    };
+}
+
+test('a thread waiting on its child\'s answers does not hold the processor from a thread it woke',
+    { timeout: 120000 }, async t=>{
+        // Wine's kernel32 sync.c test_apc_deadlock: one thread allocates and
+        // frees in the child and sets an event after each; the main thread,
+        // two hundred times, suspends the child's thread, waits for the event
+        // and resumes it. The asking thread went on through every answer, so
+        // the main thread waited the four-second starvation bound each round.
+        const ROUNDS = 200;
+        const sleeper = buildExe({
+            imports: { 'KERNEL32.dll': ['SleepEx'] },
+            // for (;;) SleepEx(INFINITE, TRUE);
+            code: ({ iat })=>[0x6a, 1, 0x6a, 0xff, 0xff, 0x15, ...u32(iat('SleepEx')), 0xeb, 0xf5],
+        });
+        const parent = buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'CreateEventA', 'CreateThread',
+                'SetEvent', 'WaitForSingleObject', 'SuspendThread', 'ResumeThread', 'Sleep',
+                'TerminateProcess', 'ExitProcess'],
+            'ntdll.dll': ['NtAllocateVirtualMemory', 'NtFreeVirtualMemory'] },
+            data: {
+                command: ascii('C:\\App\\child.exe'),
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+                event: u32(0), running: u32(1), base: u32(0), size: u32(0), rounds: u32(0),
+            },
+            codeSize: 0x200,
+            code: ({ iat, at, code: va })=>{
+                const a = assembler(va);
+                /** @param {string} name */
+                const call = name=>a.emit(0xff, 0x15, ...u32(iat(name)));
+                /** @param {string} name @param {number} [offset] */
+                const pushOf = (name, offset = 0)=>a.emit(0xff, 0x35, ...u32(at(name) + offset));
+                /** @param {number} value */
+                const push = value=>a.emit(0x68, ...u32(value));
+                push(at('info'));
+                push(at('startup'));
+                a.emit(0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0);
+                push(at('command'));
+                a.emit(0x6a, 0);
+                call('CreateProcessA');
+                a.emit(0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0);
+                call('CreateEventA');
+                a.emit(0xa3, ...u32(at('event')));
+                a.emit(0x6a, 0, 0x6a, 0, 0x6a, 0);
+                a.pushAddress('worker');
+                a.emit(0x6a, 0, 0x6a, 0);
+                call('CreateThread');
+                a.emit(0x89, 0xc7); // mov edi, eax: the worker
+                push(1000);
+                pushOf('event');
+                call('WaitForSingleObject');
+                a.emit(0x31, 0xf6); // xor esi, esi: the rounds done
+                a.mark('round');
+                a.emit(0x81, 0xfe, ...u32(ROUNDS)); // cmp esi, ROUNDS
+                a.jump([0x0f, 0x8d], 'done');
+                pushOf('info', 4);
+                call('SuspendThread');
+                a.emit(0x6a, 0);
+                pushOf('event');
+                call('WaitForSingleObject');
+                push(1000);
+                pushOf('event');
+                call('WaitForSingleObject');
+                a.emit(0x85, 0xc0); // test eax, eax: anything but WAIT_OBJECT_0 ends it
+                a.jump([0x0f, 0x85], 'done');
+                pushOf('info', 4);
+                call('ResumeThread');
+                a.emit(0x6a, 1);
+                call('Sleep');
+                a.emit(0x46); // inc esi
+                a.jump([0xe9], 'round');
+                a.mark('done');
+                a.emit(0xc7, 0x05, ...u32(at('running')), ...u32(0));
+                push(1000);
+                a.emit(0x57);
+                call('WaitForSingleObject');
+                a.emit(0x6a, 0);
+                pushOf('info');
+                call('TerminateProcess');
+                a.emit(0x6a, 0xff);
+                pushOf('info');
+                call('WaitForSingleObject');
+                a.emit(0x56); // ExitProcess(rounds)
+                call('ExitProcess');
+
+                // The worker: while running, allocate and free a page in the child.
+                a.mark('worker');
+                a.emit(0x83, 0x3d, ...u32(at('running')), 0);
+                a.jump([0x0f, 0x84], 'out');
+                a.emit(0xc7, 0x05, ...u32(at('base')), ...u32(0));
+                a.emit(0xc7, 0x05, ...u32(at('size')), ...u32(0x1000));
+                a.emit(0x6a, 4);
+                push(0x3000);
+                push(at('size'));
+                a.emit(0x6a, 0);
+                push(at('base'));
+                pushOf('info');
+                call('NtAllocateVirtualMemory');
+                pushOf('event');
+                call('SetEvent');
+                a.emit(0xc7, 0x05, ...u32(at('size')), ...u32(0));
+                push(0x8000);
+                push(at('size'));
+                push(at('base'));
+                pushOf('info');
+                call('NtFreeVirtualMemory');
+                pushOf('event');
+                call('SetEvent');
+                a.jump([0xe9], 'worker');
+                a.mark('out');
+                a.emit(0x31, 0xc0, 0xc2, 4, 0);
+                return a.done();
+            },
+        });
+        const started = performance.now();
+        const run = await observed(parent, 1, false, t, sleeper);
+        const seconds = (performance.now() - started) / 1000;
+        assert.equal(run.code, ROUNDS, 'every round saw the event');
+        // A round each starvation bound was 800 s; now a round is the asking
+        // thread's quantum or two.
+        assert.ok(seconds < 30, `${ROUNDS} rounds in ${seconds.toFixed(1)} s`);
     });

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { guestException } from '../common/raise.js';
+
 /**
  * Critical sections that stay in the guest.
  *
@@ -50,7 +52,12 @@ export const CS = {
     LOCK_COUNT: 4,
     RECURSION_COUNT: 8,
     OWNING_THREAD: 12,
+    LOCK_SEMAPHORE: 16,
 };
+
+/** What a wait on a section whose LockSemaphore is no handle raises, not continuable. */
+const STATUS_INVALID_HANDLE = 0xc0000008;
+const EXCEPTION_NONCONTINUABLE = 1;
 
 /** Where a thread's id lives in its environment block. */
 const TEB_THREAD_ID = 0x24;
@@ -239,6 +246,8 @@ export function tryEnterCode(counters){
  * @property {(thread?: any) => any} park
  * @property {(bytes: number) => number} allocate
  *           Guest memory for the two counters the fast paths keep.
+ * @property {(handle: number) => boolean} [isHandle]  Whether a handle names an
+ *           object; without it a section's LockSemaphore is not looked at.
  */
 
 /**
@@ -319,6 +328,14 @@ export function createCriticalSections(host){
          */
         wait(address){
             waits++;
+            // The semaphore a contended entry waits on is made when first
+            // needed, and one there that names nothing fails the wait, which
+            // Windows raises (Wine's kernel32 sync.c test_crit_section).
+            const semaphore = readU32(address + CS.LOCK_SEMAPHORE);
+            if (semaphore !== 0 && host.isHandle && !host.isHandle(semaphore))
+            {
+                throw guestException(STATUS_INVALID_HANDLE, EXCEPTION_NONCONTINUABLE);
+            }
             const thread = host.currentThread();
             const queue = queueAt(address);
             if (queue.owed > 0)

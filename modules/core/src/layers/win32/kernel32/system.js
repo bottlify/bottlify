@@ -26,6 +26,8 @@ import { lstrcpyCode, lstrlenCode } from './lstr.js';
 import { assemble } from '../msvcrt/guest-code.js';
 import { createWin9xFunctions } from './win9x.js';
 import { askChild, threadArg } from './cross-process.js';
+import { TEB } from './teb.js';
+import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
 import {
     PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION, createProcessors,
 } from './processor.js';
@@ -61,6 +63,17 @@ const RELATION_PROCESSOR_CORE = 0;
 const RELATION_NUMA_NODE = 1;
 const RELATION_CACHE = 2;
 const RELATION_PROCESSOR_PACKAGE = 3;
+const RELATION_GROUP = 4;
+/** RelationAll, which the extended form takes for every kind. */
+const RELATION_ALL = 0xffff;
+/**
+ * SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX's records as a 32-bit program lays
+ * them out: Relationship and Size, then the kind's structure, each ending in
+ * one GROUP_AFFINITY (a 4-byte mask, its group, three reserved words) but the
+ * group's, which ends in one PROCESSOR_GROUP_INFO.
+ */
+const PROCESSOR_EX = Object.freeze({ CORE: 44, NUMA: 44, CACHE: 52, GROUP: 76,
+    BODY: 8, GROUP_COUNT: 22, CACHE_GROUP_COUNT: 30, MASK: 24, CACHE_MASK: 32 });
 /** PROCESSOR_CACHE_TYPE, by the kind leaf 4 names. */
 const CACHE_TYPES = Object.freeze({ unified: 0, instruction: 1, data: 2 });
 
@@ -743,6 +756,26 @@ export function createSystemFunctions(host){
         ? host.currentThread()
         : object(handle, 'thread'));
 
+    /** The calling thread's block, where its error mode is; 0 for none. */
+    const ownBlock = ()=>(host.currentThread()?.tebAddress ?? 0) >>> 0;
+    /** @returns {number} the calling thread's error mode, in ntdll's bits */
+    const threadErrorMode = ()=>{
+        const block = ownBlock();
+        return block === 0 ? 0
+            : new DataView(host.readMemory(block + TEB.HARD_ERROR_MODE, 4).slice().buffer)
+                .getUint32(0, true);
+    };
+    /** @param {number} mode  in ntdll's bits */
+    const setThreadErrorMode = mode=>{
+        const block = ownBlock();
+        if (block !== 0)
+        {
+            const bytes = new Uint8Array(4);
+            new DataView(bytes.buffer).setUint32(0, mode >>> 0, true);
+            host.writeMemory(block + TEB.HARD_ERROR_MODE, bytes);
+        }
+    };
+
     /** @param {bigint} filetime @returns {Uint8Array} SYSTEMTIME */
     const systemTimeFrom = filetime=>{
         const milliseconds = Number((filetime - FILETIME_AT_UNIX_EPOCH) / 10_000n);
@@ -851,6 +884,91 @@ export function createSystemFunctions(host){
         return bytes;
     };
 
+    /**
+     * The extended form's records of one relationship or all: the same cores,
+     * caches, package and node as above, and the one group, each processor's
+     * mask in group 0.
+     *
+     * @param {number} relation
+     * @returns {Uint8Array | null}  null for a relationship that is none
+     */
+    const logicalProcessorsEx = relation=>{
+        const wants = (/** @type {number} */ kind)=>relation === RELATION_ALL || relation === kind;
+        if (relation !== RELATION_ALL && (relation < 0 || relation > RELATION_GROUP))
+        {
+            return null;
+        }
+        const count = processors.count();
+        const all = processors.systemMask();
+        /** @type {Uint8Array[]} */
+        const records = [];
+        /** @param {number} kind @param {number} size */
+        const record = (kind, size)=>{
+            const bytes = new Uint8Array(size);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(0, kind, true);
+            view.setUint32(4, size, true);
+            records.push(bytes);
+            return view;
+        };
+        /** @param {number} kind @param {number} mask */
+        const affine = (kind, mask)=>{
+            const view = record(kind, PROCESSOR_EX.CORE);
+            view.setUint16(PROCESSOR_EX.BODY + PROCESSOR_EX.GROUP_COUNT, 1, true);
+            view.setUint32(PROCESSOR_EX.BODY + PROCESSOR_EX.MASK, mask, true);
+        };
+        for (let index = 0; index < count; index++)
+        {
+            const mask = (1 << index) >>> 0;
+            if (wants(RELATION_PROCESSOR_CORE))
+            {
+                affine(RELATION_PROCESSOR_CORE, mask);
+            }
+            if (wants(RELATION_CACHE))
+            {
+                for (const cache of PROCESSOR_CACHES)
+                {
+                    const view = record(RELATION_CACHE, PROCESSOR_EX.CACHE);
+                    const body = PROCESSOR_EX.BODY;
+                    view.setUint8(body, cache.level);
+                    view.setUint8(body + 1, cache.ways);
+                    view.setUint16(body + 2, cache.lineSize, true);
+                    view.setUint32(body + 4, cache.size, true);
+                    view.setUint32(body + 8, CACHE_TYPES[cache.type], true);
+                    view.setUint16(body + PROCESSOR_EX.CACHE_GROUP_COUNT, 1, true);
+                    view.setUint32(body + PROCESSOR_EX.CACHE_MASK, mask, true);
+                }
+            }
+        }
+        if (wants(RELATION_PROCESSOR_PACKAGE))
+        {
+            affine(RELATION_PROCESSOR_PACKAGE, all);
+        }
+        if (wants(RELATION_NUMA_NODE))
+        {
+            // Node 0, its number the structure's first DWORD.
+            affine(RELATION_NUMA_NODE, all);
+        }
+        if (wants(RELATION_GROUP))
+        {
+            const view = record(RELATION_GROUP, PROCESSOR_EX.GROUP);
+            const body = PROCESSOR_EX.BODY;
+            view.setUint16(body, 1, true);
+            view.setUint16(body + 2, 1, true);
+            view.setUint8(body + 24, count);
+            view.setUint8(body + 25, count);
+            view.setUint32(body + 64, all, true);
+        }
+        const bytes = new Uint8Array(records.reduce((sum, one)=>sum + one.length, 0));
+        let at = 0;
+        for (const one of records)
+        {
+            bytes.set(one, at);
+            at += one.length;
+        }
+        return bytes;
+    };
+
     /** GetSystemWow64Directory in either form: the buffer is never written. */
     const wow64Directory = {
         argBytes: 8,
@@ -912,6 +1030,38 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 const bytes = logicalProcessors();
+                const room = new DataView(host.readMemory(returned >>> 0, 4).slice().buffer)
+                    .getUint32(0, true);
+                const length = new Uint8Array(4);
+                new DataView(length.buffer).setUint32(0, bytes.length, true);
+                host.writeMemory(returned >>> 0, length);
+                if (room < bytes.length || (buffer >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                host.writeMemory(buffer >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetLogicalProcessorInformationEx(LOGICAL_PROCESSOR_RELATIONSHIP,
+         *     PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX Buffer, PDWORD ReturnedLength)
+         *
+         * As the plain form, in records of their own sizes, of one relationship
+         * or of all (Wine's kernel32 process.c test_GetLogicalProcessorInformationEx).
+         */
+        GetLogicalProcessorInformationEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([relation, buffer, returned])=>{
+                const bytes = logicalProcessorsEx(relation >>> 0);
+                if ((returned >>> 0) === 0 || bytes === null)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 const room = new DataView(host.readMemory(returned >>> 0, 4).slice().buffer)
                     .getUint32(0, true);
                 const length = new Uint8Array(4);
@@ -1357,6 +1507,40 @@ export function createSystemFunctions(host){
                 const previous = errorMode;
                 errorMode = mode >>> 0;
                 return previous;
+            },
+        },
+
+        /**
+         * DWORD GetThreadErrorMode(void) and
+         * BOOL SetThreadErrorMode(DWORD dwNewMode, LPDWORD lpOldMode)
+         *
+         * The calling thread's own mode, kept where Windows keeps it, in its
+         * block, in ntdll's bits (RtlGetThreadErrorMode reads the same word).
+         * Only SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX and
+         * SEM_NOOPENFILEERRORBOX are a thread's.
+         */
+        GetThreadErrorMode: {
+            argBytes: 0,
+            handler: ()=>fromRtlMode(threadErrorMode()),
+        },
+        SetThreadErrorMode: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([mode, old])=>{
+                if (((mode >>> 0) & ~THREAD_ERROR_MODES) !== 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const previous = fromRtlMode(threadErrorMode());
+                setThreadErrorMode(toRtlMode(mode >>> 0));
+                if ((old >>> 0) !== 0)
+                {
+                    const bytes = new Uint8Array(4);
+                    new DataView(bytes.buffer).setUint32(0, previous, true);
+                    host.writeMemory(old >>> 0, bytes);
+                }
+                return 1;
             },
         },
 

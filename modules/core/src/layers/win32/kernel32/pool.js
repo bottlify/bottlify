@@ -462,6 +462,20 @@ export function createThreadPool(host){
         return 0;
     };
 
+    /** A closed work object with nothing outstanding is given back. @param {number} handle */
+    const forgetWork = handle=>{
+        const work = works.get(handle);
+        if (work && work.closed && work.outstanding === 0)
+        {
+            works.delete(handle);
+            host.free?.(handle);
+        }
+    };
+
+    /** The instance a simple callback is handed, one for all of them. */
+    let simple = 0;
+    const simpleInstance = ()=>(simple ||= host.allocate(4));
+
     /** @param {number} handle */
     const eventOf = handle=>{
         try
@@ -493,6 +507,15 @@ export function createThreadPool(host){
     /** What QueueUserWorkItem's callbacks count against: nothing waits for them. */
     /** @type {Owner} */
     const workItems = { outstanding: 0, waiters: [] };
+
+    /**
+     * The work objects of the thread pool API (CreateThreadpoolWork), each
+     * its own owner: a wait for its callbacks waits for its own alone.
+     *
+     * @type {Map<number, Owner & { callback: number, context: number, instance: number,
+     *     closed: boolean }>}
+     */
+    const works = new Map();
 
     /** @param {number} handle */
     const makeQueue = handle=>{
@@ -997,6 +1020,130 @@ export function createThreadPool(host){
              * callback is. The flags that choose a kind of thread choose
              * nothing here: every work item runs on the pool's.
              */
+            /**
+             * PTP_POOL CreateThreadpool(PVOID reserved) and
+             * VOID CloseThreadpool(PTP_POOL): a pool of its own is the
+             * process's here, whose threads every callback shares.
+             */
+            CreateThreadpool: {
+                argBytes: 4,
+                handler: ()=>{
+                    const pool = host.allocate(4);
+                    return pool === 0 ? fail(ERROR_NOT_ENOUGH_MEMORY) : pool;
+                },
+            },
+            CloseThreadpool: {
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([pool])=>{
+                    host.free?.(pool >>> 0);
+                    return 0;
+                },
+            },
+
+            /**
+             * PTP_WORK CreateThreadpoolWork(PTP_WORK_CALLBACK, PVOID, PTP_CALLBACK_ENVIRON)
+             *
+             * A callback each submission runs once on a pool thread, handed
+             * its instance, its context and the work.
+             */
+            CreateThreadpoolWork: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([callback, context])=>{
+                    if ((callback >>> 0) === 0)
+                    {
+                        return fail(ERROR_INVALID_PARAMETER);
+                    }
+                    const handle = host.allocate(8);
+                    if (handle === 0)
+                    {
+                        return fail(ERROR_NOT_ENOUGH_MEMORY);
+                    }
+                    works.set(handle, { callback: callback >>> 0, context: context >>> 0,
+                        instance: handle + 4, closed: false, outstanding: 0, waiters: [],
+                        settled: ()=>forgetWork(handle) });
+                    return handle;
+                },
+            },
+
+            /** VOID SubmitThreadpoolWork(PTP_WORK) */
+            SubmitThreadpoolWork: {
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([handle])=>{
+                    const work = works.get(handle >>> 0);
+                    if (work && !work.closed)
+                    {
+                        dispatch({ entry: work.callback, args: [work.instance, work.context,
+                            handle >>> 0], owner: work });
+                    }
+                    return 0;
+                },
+            },
+
+            /**
+             * VOID WaitForThreadpoolWorkCallbacks(PTP_WORK, BOOL fCancelPendingCallbacks)
+             *
+             * Returns once every submission has run; those not yet started
+             * are dropped first where asked. One of its own callbacks asking
+             * does not wait for itself.
+             */
+            WaitForThreadpoolWorkCallbacks: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([handle, dropPending])=>{
+                    const work = works.get(handle >>> 0);
+                    if (!work)
+                    {
+                        return 0;
+                    }
+                    if (dropPending !== 0)
+                    {
+                        const kept = poolLane.backlog.filter(job=>job.owner !== work);
+                        work.outstanding -= poolLane.backlog.length - kept.length;
+                        poolLane.backlog.splice(0, poolLane.backlog.length, ...kept);
+                    }
+                    const own = running()?.owner === work ? 1 : 0;
+                    const done = complete(work, INVALID_HANDLE_VALUE, own);
+                    return done === 1 ? 0 : done;
+                },
+            },
+
+            /** VOID CloseThreadpoolWork(PTP_WORK): gone once its callbacks have run. */
+            CloseThreadpoolWork: {
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([handle])=>{
+                    const work = works.get(handle >>> 0);
+                    if (work)
+                    {
+                        work.closed = true;
+                        forgetWork(handle >>> 0);
+                    }
+                    return 0;
+                },
+            },
+
+            /**
+             * BOOL TrySubmitThreadpoolCallback(PTP_SIMPLE_CALLBACK, PVOID,
+             *     PTP_CALLBACK_ENVIRON): one callback, handed its instance and
+             * its context.
+             */
+            TrySubmitThreadpoolCallback: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([callback, context])=>{
+                    if ((callback >>> 0) === 0)
+                    {
+                        return fail(ERROR_INVALID_PARAMETER);
+                    }
+                    dispatch({ entry: callback >>> 0, args: [simpleInstance(), context >>> 0],
+                        owner: workItems });
+                    return 1;
+                },
+            },
+
             QueueUserWorkItem: {
                 argBytes: 12,
                 /** @param {number[]} args */

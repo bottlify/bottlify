@@ -576,6 +576,18 @@ export function createKernelModule(){
                  * caller can tell progress from an idle system from a finished one.
                  * Once this instance is disposed there is nothing to run.
                  */
+                /**
+                 * The calling thread's host call is answered by another process
+                 * (`kernel32/cross-process.js`): its answer is a wait's end.
+                 *
+                 * @param {any} thread
+                 */
+                answeredElsewhere: (/** @type {any} */ thread)=>{
+                    if (live())
+                    {
+                        state.scheduler.answeredElsewhere(thread);
+                    }
+                },
                 /** @param {number} ticks @param {boolean} answered */
                 noteHostAnswer: (ticks, answered)=>{
                     if (live())
@@ -950,8 +962,18 @@ export function createKernelModule(){
                 },
 
                 handles: {
-                    /** @param {string} type @param {any} object */
-                    open: (type, object)=>live() ? state.handles.open(type, object) : 0,
+                    /**
+                     * @param {string} type @param {any} object
+                     * @param {number | null} [access]  fewer rights than all
+                     */
+                    open: (type, object, access)=>live()
+                        ? state.handles.open(type, object, access) : 0,
+                    /**
+                     * The rights a handle was granted, null for all of them.
+                     *
+                     * @param {number} handle
+                     */
+                    access: handle=>live() ? state.handles.access(handle) : null,
                     /** @param {number} handle @param {string} [type] */
                     resolve: (handle, type)=>live() ? state.handles.resolve(handle, type) : null,
                     /** @param {number} handle */

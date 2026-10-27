@@ -8,6 +8,7 @@ import { encodeAnsi } from './locale.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
 import { askChild, childThread, threadEnd } from './cross-process.js';
+import { MODIFY_STATE, SYNCHRONIZE, allows, grantedAccess } from './access.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, eventStateCode, releaseMutexCode,
     waitOneCode } from './wait-one.js';
@@ -55,9 +56,18 @@ const ERROR_FILE_NOT_FOUND = 2;
 
 /** A name is at most this long; longer is a pointer that is not a string. */
 const MAX_NAME = 260;
+/**
+ * An object's name is read whole, as Windows reads it, up to what a name may
+ * hold: two longer names that share their first 259 characters are two objects.
+ */
+const WHOLE_NAME = 32767;
+const ERROR_FILENAME_EXCED_RANGE = 206;
+/** What reading an ANSI name of MAX_PATH characters or more throws, to refuse the call. */
+const TOO_LONG = Symbol('a name too long');
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_ACCESS_DENIED = 5;
+const ERROR_NOT_OWNER = 288;
 const ERROR_INVALID_PARAMETER = 87;
 /** ReleaseSemaphore past the semaphore's maximum. */
 const ERROR_TOO_MANY_POSTS = 298;
@@ -494,10 +504,27 @@ export function createThreadingFunctions(host){
      * @param {number} argBytes
      * @param {(args: number[], wide: boolean) => number} body
      */
-    const bothNamedForms = (argBytes, body)=>({
-        ansi: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, false) },
-        wide: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, true) },
-    });
+    const bothNamedForms = (argBytes, body)=>{
+        /** @param {number[]} args @param {boolean} wide */
+        const call = (args, wide)=>{
+            try
+            {
+                return body(args, wide);
+            }
+            catch (e){
+                if (e !== TOO_LONG)
+                {
+                    throw e;
+                }
+                host.setLastError(ERROR_FILENAME_EXCED_RANGE);
+                return 0;
+            }
+        };
+        return {
+            ansi: { argBytes, handler: (/** @type {number[]} */ args)=>call(args, false) },
+            wide: { argBytes, handler: (/** @type {number[]} */ args)=>call(args, true) },
+        };
+    };
 
     /**
      * @param {number} pointer @param {boolean} [wide] @returns {string | null}
@@ -507,8 +534,14 @@ export function createThreadingFunctions(host){
         {
             return null;
         }
-        return (wide ? host.readWideString(pointer >>> 0, MAX_NAME * 2)
-            : host.readCString(pointer >>> 0, MAX_NAME)) || null;
+        const name = wide ? host.readWideString(pointer >>> 0, WHOLE_NAME * 2)
+            : host.readCString(pointer >>> 0, WHOLE_NAME);
+        // The ANSI forms take a name shorter than MAX_PATH, as Windows' do.
+        if (!wide && name.length >= MAX_NAME)
+        {
+            throw TOO_LONG;
+        }
+        return name || null;
     };
 
     // The table itself is shared with the file-mapping surface and lives
@@ -521,12 +554,13 @@ export function createThreadingFunctions(host){
 
     /**
      * What an Open* call reports for a name: no name at all is a bad
-     * parameter, nothing by that name is "no such thing", and a different
-     * kind holding it is a bad handle rather than a silent conversion between
-     * kinds.
-     * @param {string} kind @param {string | null} name
+     * parameter, nothing by that name is "no such thing", a different kind
+     * holding it is a bad handle rather than a silent conversion between
+     * kinds, and rights the kind does not have -- or none at all -- are
+     * refused. The handle carries what it was granted.
+     * @param {string} kind @param {string | null} name @param {number} desired
      */
-    const namedOpen = (kind, name)=>{
+    const namedOpen = (kind, name, desired)=>{
         if (name === null)
         {
             host.setLastError(ERROR_INVALID_PARAMETER);
@@ -538,12 +572,32 @@ export function createThreadingFunctions(host){
             host.setLastError(found === TAKEN ? ERROR_INVALID_HANDLE : ERROR_FILE_NOT_FOUND);
             return 0;
         }
+        const access = grantedAccess(kind, desired);
+        if ('error' in access)
+        {
+            host.setLastError(access.error);
+            return 0;
+        }
         host.namedObjects.reference(found);
-        return kernel.handles.open(kind, found);
+        return kernel.handles.open(kind, found, access.granted);
     };
 
-    const openMutex = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('mutex', nameOf(namePointer, wide)));
+    /**
+     * Whether a handle may do what needs `right`, set as refused where not.
+     *
+     * @param {number} handle @param {number} right
+     */
+    const permitted = (handle, right)=>{
+        if (allows(kernel.handles.access?.(untagged(handle >>> 0)) ?? null, right))
+        {
+            return true;
+        }
+        host.setLastError(ERROR_ACCESS_DENIED);
+        return false;
+    };
+
+    const openMutex = bothNamedForms(12, ([access, , namePointer], wide)=>
+        namedOpen('mutex', nameOf(namePointer, wide), access));
 
     /**
      * Unlike the mutex form this can succeed, and routinely does: one process
@@ -551,14 +605,14 @@ export function createThreadingFunctions(host){
      * how two parts of the same program that do not know about each other
      * agree on a signal.
      */
-    const openEvent = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('event', nameOf(namePointer, wide)));
+    const openEvent = bothNamedForms(12, ([access, , namePointer], wide)=>
+        namedOpen('event', nameOf(namePointer, wide), access));
 
-    const openSemaphore = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('semaphore', nameOf(namePointer, wide)));
+    const openSemaphore = bothNamedForms(12, ([access, , namePointer], wide)=>
+        namedOpen('semaphore', nameOf(namePointer, wide), access));
 
-    const openWaitableTimer = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('timer', nameOf(namePointer, wide)));
+    const openWaitableTimer = bothNamedForms(12, ([access, , namePointer], wide)=>
+        namedOpen('timer', nameOf(namePointer, wide), access));
 
     const createMutex = bothNamedForms(12, ([, initialOwner, namePointer], wide)=>{
         const name = nameOf(namePointer, wide);
@@ -921,6 +975,11 @@ export function createThreadingFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return WAIT_FAILED;
                 }
+                // A handle opened without SYNCHRONIZE cannot be waited on.
+                if (!permitted(handle, SYNCHRONIZE))
+                {
+                    return WAIT_FAILED;
+                }
                 const wait = timeout >>> 0;
                 const thread = host.currentThread();
 
@@ -1025,6 +1084,10 @@ export function createThreadingFunctions(host){
                 if (!semaphore)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if (!permitted(handle, MODIFY_STATE))
+                {
                     return 0;
                 }
                 if ((count | 0) <= 0)
@@ -1198,9 +1261,17 @@ export function createThreadingFunctions(host){
                 const mutex = object(handle >>> 0, 'mutex');
                 if (!mutex)
                 {
+                    host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                return kernel.releaseMutex(mutex, host.currentThread()) ? 1 : 0;
+                if (!kernel.releaseMutex(mutex, host.currentThread()))
+                {
+                    // Wine's kernel32 sync.c test_mutex: a mutex the caller
+                    // does not own, as Windows says.
+                    host.setLastError(ERROR_NOT_OWNER);
+                    return 0;
+                }
+                return 1;
             },
         },
 
@@ -1230,7 +1301,7 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const event = object(handle >>> 0, 'event');
-                if (!event)
+                if (!event || !permitted(handle, MODIFY_STATE))
                 {
                     return 0;
                 }
@@ -1252,7 +1323,7 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const event = object(handle >>> 0, 'event');
-                if (!event)
+                if (!event || !permitted(handle, MODIFY_STATE))
                 {
                     return 0;
                 }
@@ -1277,7 +1348,7 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const event = object(handle >>> 0, 'event');
-                if (!event)
+                if (!event || !permitted(handle, MODIFY_STATE))
                 {
                     return 0;
                 }
