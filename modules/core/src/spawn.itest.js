@@ -481,9 +481,11 @@ test('a parent that polls its child\'s exit code without ever blocking still let
 
 /**
  * A setup that starts a helper and waits for it to say it is done rather than
- * for its process: it names an event, starts the helper, waits on the event
- * alone and exits with 3. The helper opens the event by name, signals it and
- * exits with 0.
+ * for its process: it names an event, starts the helper, waits on the event,
+ * then on the helper's process, and exits with 3. The helper opens the event
+ * by name, signals it and exits with 0. The second wait makes the parent the
+ * last to end however the two are scheduled: a child runs from CreateProcess
+ * on, and may signal before its parent has begun to wait.
  */
 function buildSignalled(){
     const parent = buildExe({
@@ -508,6 +510,9 @@ function buildSignalled(){
             0xff, 0x15, ...u32(iat('CreateProcessA')),
             // WaitForSingleObject(event, INFINITE)
             0x6a, 0xff, 0xff, 0x35, ...u32(at('event')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            // WaitForSingleObject(info.hProcess, INFINITE)
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
             0xff, 0x15, ...u32(iat('WaitForSingleObject')),
             0x6a, 3, 0xff, 0x15, ...u32(iat('ExitProcess')),
         ],
