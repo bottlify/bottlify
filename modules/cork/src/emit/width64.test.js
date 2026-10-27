@@ -153,6 +153,22 @@ test('SIMD moves and conversions of quadword general operands run in the shared 
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
 
+test('bit tests run in the shared emitter\'s regions as interpreted', ()=>{
+    const cases = edges([
+        '480fa3c8', '0fa3c8', '660fa3c8', '480fabc8', '480fb3c8', '480fbbc8', // bt/s/r/c rax, rcx
+        '0fabc8', '0fb3c8', '0fbbc8', '490fa3c8', // eax forms, r8
+        '480fbae03f', '0fbae81f', '480fbaf001', // bt rax, 63; bts eax, 31; btr rax, 1
+        '480fa30c24', '0fab0c24', '660fb30c24', '480fbb0c24', // bit strings from [rsp]
+        '480fba242405', '0fba2c241f', // bt [rsp], imm
+    ], [0, 1, 31, 32, 63, 64, 100, -1, -64, -65, -0x1000]);
+    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
+        shared);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+    // Every bit string lies in the data around rsp: none leaves for the interpreter.
+    assert.equal(stats.exits, 0, JSON.stringify(stats));
+});
+
 test('seeded long programs run in the shared emitter\'s regions as interpreted', ()=>{
     const instructions = pool();
     const straight = Array.from({ length: 600 },

@@ -133,7 +133,7 @@ const LONG_OPS = new Set([
     'shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'imul', 'mul', 'div', 'idiv',
     'xchg', 'popcnt', 'cwde', 'cdq', 'leave', 'bsf', 'bsr', 'bswap', 'prefetch', 'prefetchw',
     'prefetchnta', 'prefetcht0', 'prefetcht1', 'prefetcht2', 'lfence', 'mfence', 'sfence', 'pause',
-    'emms', 'ldmxcsr', 'stmxcsr',
+    'emms', 'ldmxcsr', 'stmxcsr', 'bt', 'bts', 'btr', 'btc',
 ]);
 
 /**
@@ -161,7 +161,8 @@ export function translatesLong(instruction){
     {
         return false;
     }
-    const simd = operands.some(operand=>operand.kind === 'xmm' || operand.kind === 'mm');
+    const simd = operands.some(operand=>operand.kind === 'xmm' || operand.kind === 'mm')
+        || LONG_SIMD_QUAD.has(op);
     if (simd)
     {
         // A general register other SIMD operations read or write as a dword only.
@@ -3238,6 +3239,11 @@ function bitTest(e, instruction, flagsLive){
     const { op, operands, size } = instruction;
     const [dst, offset] = operands;
     const bits = size * 8;
+    if (isLong(e))
+    {
+        bitTestLong(e, instruction, flagsLive);
+        return true;
+    }
     if (dst.kind === 'mem' && offset.kind !== 'imm')
     {
         // A bit string: the register names a bit anywhere from the address,
@@ -3288,6 +3294,114 @@ function bitTest(e, instruction, flagsLive){
         });
     }
     return true;
+}
+
+/**
+ * Long mode's bt/bts/btr/btc: as `bitTest`, the bit string's address taken in
+ * i64 from the offset sign-extended (a quadword's names a bit anywhere in the
+ * window) and tested against it, a quadword's value in i64.
+ *
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
+ */
+function bitTestLong(e, instruction, flagsLive){
+    const { b } = e;
+    const { op, operands, size } = instruction;
+    const [dst, offset] = operands;
+    const bits = size * 8;
+    const ops = opsOf(size);
+    const value = size === 8 ? Local.t64b : Local.t1;
+    if (dst.kind === 'mem' && offset.kind !== 'imm')
+    {
+        readOp(e, offset);
+        if (size === 2)
+        {
+            b.i32const(16).op(I32.shl).i32const(16).op(I32.shrS); // the word offset is signed
+        }
+        if (size === 8)
+        {
+            b.localTee(LONG_WIDE);
+            b.op(I64.wrap);
+        }
+        else
+        {
+            b.localTee(Local.t2);
+            b.op(I64.extendS).localSet(LONG_WIDE);
+            b.localGet(Local.t2);
+        }
+        b.i32const(bits - 1).op(I32.and).localSet(Local.count);
+        windowAddress(e, ()=>{
+            emitAddress64(e, dst);
+            b.localGet(LONG_WIDE).i64const(BigInt(Math.log2(bits))).op(I64.shrS)
+                .i64const(BigInt(Math.log2(size))).op(I64.shl).op(I64.add);
+        }, size);
+        checkAccess(e, size);
+    }
+    else
+    {
+        prepare(e, dst);
+        readOp(e, offset);
+        if (size === 8 && offset.kind !== 'imm')
+        {
+            b.op(I64.wrap);
+        }
+        b.i32const(bits - 1).op(I32.and).localSet(Local.count);
+    }
+    readOp(e, dst);
+    b.localSet(value);
+    /** The single bit at the count, of the operand's type. */
+    const pushBit = ()=>{
+        if (size === 8)
+        {
+            b.i64const(1n).localGet(Local.count).op(I64.extendU).op(I64.shl);
+        }
+        else
+        {
+            b.i32const(1).localGet(Local.count).op(I32.shl);
+        }
+    };
+    if (flagsLive)
+    {
+        e.eagerWrite(CF);
+        b.localGet(value);
+        pushBit();
+        b.op(ops.and);
+        if (size === 8)
+        {
+            b.i64const(0n).op(I64.ne);
+        }
+        else
+        {
+            b.i32const(0).op(I32.ne);
+        }
+        e.orFlag(CF);
+    }
+    if (op !== 'bt')
+    {
+        writeOp(e, dst, ()=>{
+            b.localGet(value);
+            pushBit();
+            if (op === 'bts')
+            {
+                b.op(ops.or);
+            }
+            else if (op === 'btr')
+            {
+                if (size === 8)
+                {
+                    b.i64const(-1n);
+                }
+                else
+                {
+                    b.i32const(-1);
+                }
+                b.op(ops.xor).op(ops.and);
+            }
+            else
+            {
+                b.op(ops.xor);
+            }
+        }, true);
+    }
 }
 
 /**
