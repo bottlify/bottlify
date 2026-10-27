@@ -3916,6 +3916,79 @@ test('a WH_MOUSE_LL hook of the calling thread is shown each piece of injected m
     assert.equal(inputs.length, 2, 'taken away');
 });
 
+test('device input is shown to a low-level hook on the hook\'s own thread, and a thread that '
+    + 'never looks at its queue holds it for LowLevelHooksTimeout at most', async()=>{
+    // The input layer asks through the queue's seam. No hook: nothing is
+    // asked. A hook is called as its thread next looks at its queue, with
+    // the device's MSLLHOOKSTRUCT -- where the cursor is, not injected -- and
+    // what it answers decides; unanswered, the timeout lets the input in.
+    const WH_MOUSE_LL = 14;
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    /** @type {(() => void)[]} */
+    const timers = [];
+    /** @type {number[][]} */
+    const shown = [];
+    let refuse = 1;
+    const context = setup({ heap: true, caller, threadExists: id=>id === 2,
+        later: (/** @type {number} */ _ms, /** @type {() => void} */ fn)=>{
+            timers.push(fn);
+            return true;
+        },
+        hookReply: (_entry, args)=>{
+            shown.push([args[1], ...[0, 4, 8, 12, 16].map(at=>context.memory.u32(args[2] + at))]);
+            return refuse;
+        } });
+    const { fns, queue } = context;
+    const seam = /** @type {any} */ (queue).lowLevel;
+    assert.equal(seam.hooked('mouse'), false, 'no hook installed');
+    const hook = fns.SetWindowsHookExA.handler([WH_MOUSE_LL, HOOK_PROC, HINSTANCE, 0]);
+    assert.equal(seam.hooked('mouse'), true);
+    assert.equal(seam.hooked('keyboard'), false);
+
+    caller.current = null;
+    const move = { hwnd: 0, message: 0x0203, wParam: 0, lParam: 0, x: 5, y: 6, time: 9 };
+    const answer = seam.show('mouse', move);
+    assert.equal(typeof answer?.then, 'function', 'waits for the hook\'s thread');
+    assert.deepEqual(shown, [], 'not called on nobody\'s thread');
+    caller.current = worker;
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.equal(await answer, 1);
+    // [message, x, y, mouseData, flags, time]: a double-click is a click to it.
+    assert.deepEqual(shown, [[0x0201, 5, 6, 0, 0, 9]]);
+
+    caller.current = null;
+    const unanswered = seam.show('mouse', move);
+    timers.forEach(fire=>fire());
+    assert.equal(await unanswered, 0, 'in after the timeout');
+
+    caller.current = worker;
+    fns.UnhookWindowsHookEx.handler([hook]);
+    assert.equal(seam.hooked('mouse'), false);
+    refuse = 0;
+});
+
+test('a device key is shown to a low-level keyboard hook with its side and flags', async()=>{
+    const WH_KEYBOARD_LL = 13;
+    /** @type {number[][]} */
+    const shown = [];
+    const context = setup({ heap: true, hookReply: (_entry, args)=>{
+        shown.push([args[1], ...[0, 4, 8, 12].map(at=>context.memory.u32(args[2] + at))]);
+        return 0;
+    } });
+    const { fns, queue } = context;
+    fns.SetWindowsHookExA.handler([WH_KEYBOARD_LL, HOOK_PROC, 0, 0]);
+    const seam = /** @type {any} */ (queue).lowLevel;
+    // A right control let go: extended, released.
+    await seam.show('keyboard', { hwnd: 0, message: 0x0101, wParam: 0x11,
+        lParam: (0xc0000001 | 1 << 24 | 0x1d << 16) >>> 0, time: 4 });
+    // A right shift pressed with Alt down, as a system key.
+    await seam.show('keyboard', { hwnd: 0, message: 0x0104, wParam: 0x10,
+        lParam: (0x20000001 | 0x36 << 16) >>> 0, time: 5 });
+    // [message, vkCode, scanCode, flags, time]
+    assert.deepEqual(shown, [[0x0101, 0xa3, 0x1d, 0x81, 4], [0x0104, 0xa1, 0x36, 0x20, 5]]);
+});
+
 test('a WH_KEYBOARD_LL hook is shown an injected key with its KBDLLHOOKSTRUCT', async()=>{
     const WH_KEYBOARD_LL = 13;
     const caller = { current: /** @type {any} */ ({ id: 7 }) };

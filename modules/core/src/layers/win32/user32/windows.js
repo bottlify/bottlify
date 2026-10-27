@@ -239,6 +239,62 @@ const WH_JOURNALPLAYBACK = 1;
 const WH_SYSMSGFILTER = 6;
 const WH_KEYBOARD_LL = 13;
 const WH_MOUSE_LL = 14;
+
+/**
+ * What a low-level mouse hook is told a device's message is: a click, never
+ * the double-click the queue may later make of it.
+ *
+ * @param {'mouse' | 'keyboard'} kind @param {number} message
+ */
+const lowLevelMessage = (kind, message)=>{
+    const DOUBLE_CLICKS = new Map([[0x0203, 0x0201], [0x0206, 0x0204], [0x0209, 0x0207],
+        [0x020d, 0x020b]]);
+    return kind === 'mouse' ? DOUBLE_CLICKS.get(message) ?? message : message;
+};
+
+/**
+ * The MSLLHOOKSTRUCT or KBDLLHOOKSTRUCT a device's message is shown to a
+ * low-level hook with. A keyboard hook is told which shift, control or alt:
+ * the right shift by its scan code, the right control and alt by the
+ * extended flag. A mouse hook is told where the cursor is and, for the wheel
+ * and the extra buttons, the high word the message carries.
+ *
+ * @param {'mouse' | 'keyboard'} kind
+ * @param {{ message: number, wParam: number, lParam: number, time?: number,
+ *     x?: number, y?: number }} message
+ */
+const lowLevelStructure = (kind, message)=>{
+    const time = (message.time ?? 0) >>> 0;
+    if (kind === 'mouse')
+    {
+        const WM_MOUSEHWHEEL = 0x020e;
+        const carries = [WM_MOUSEWHEEL, WM_MOUSEHWHEEL, 0x020b, 0x020c, 0x020d]
+            .includes(message.message);
+        return new Uint8Array(new Uint32Array([(message.x ?? 0) >>> 0, (message.y ?? 0) >>> 0,
+            carries ? (message.wParam & 0xffff0000) >>> 0 : 0, 0, time, 0]).buffer);
+    }
+    const LLKHF_EXTENDED = 0x01, LLKHF_ALTDOWN = 0x20, LLKHF_UP = 0x80;
+    const VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_MENU = 0x12, RIGHT_SHIFT_SCAN = 0x36;
+    const scan = (message.lParam >>> 16) & 0xff;
+    const extended = ((message.lParam >>> 24) & 1) !== 0;
+    let vk = message.wParam & 0xff;
+    if (vk === VK_SHIFT)
+    {
+        vk = scan === RIGHT_SHIFT_SCAN ? 0xa1 : 0xa0;
+    }
+    else if (vk === VK_CONTROL)
+    {
+        vk = extended ? 0xa3 : 0xa2;
+    }
+    else if (vk === VK_MENU)
+    {
+        vk = extended ? 0xa5 : 0xa4;
+    }
+    const flags = (extended ? LLKHF_EXTENDED : 0)
+        | (((message.lParam >>> 29) & 1) !== 0 ? LLKHF_ALTDOWN : 0)
+        | ((message.lParam >>> 31) !== 0 ? LLKHF_UP : 0);
+    return new Uint8Array(new Uint32Array([vk, scan, flags, time, 0]).buffer);
+};
 const GLOBAL_ONLY_HOOKS = [WH_JOURNALRECORD, WH_JOURNALPLAYBACK, WH_SYSMSGFILTER, WH_KEYBOARD_LL,
     WH_MOUSE_LL];
 const ERROR_INVALID_HOOK_HANDLE = 1404;
@@ -3230,10 +3286,12 @@ export function createWindowFunctions(host){
      * @param {number} type @param {number} wParam  The message the event makes.
      * @param {() => Uint8Array} structure  The MSLLHOOKSTRUCT or KBDLLHOOKSTRUCT.
      * @param {unknown} [thread]  The thread putting the event in.
+     * @param {boolean} [device]  The event is the device's, put in by no
+     *     thread of the program: every hook is called on its own thread.
      * @returns {number | Promise<number>}
      */
-    const lowLevelHook = (type, wParam, structure, thread)=>{
-        const on = thread ?? host.callerThread?.();
+    const lowLevelHook = (type, wParam, structure, thread, device = false)=>{
+        const on = device ? null : thread ?? host.callerThread?.();
         const hook = chainOf(type, on)[0];
         if (!hook || !host.call || !host.allocate)
         {
@@ -3252,8 +3310,8 @@ export function createWindowFunctions(host){
             });
         };
         const caller = threadIdOf(on);
-        if (hook.owner === undefined || hook.owner === null || caller === null
-            || hook.owner === caller)
+        if (hook.owner === undefined || hook.owner === null
+            || (!device && (caller === null || hook.owner === caller)))
         {
             return run(on);
         }
@@ -3281,6 +3339,21 @@ export function createWindowFunctions(host){
             }
         });
     };
+
+    // Device input, from the input layer, is shown to the low-level hooks
+    // through the queue it is posted to. With no such hook nothing is asked
+    // and the input layer posts as it always did.
+    if (host.queue && 'lowLevel' in host.queue)
+    {
+        /** @param {'mouse' | 'keyboard'} kind */
+        const typeOf = kind=>(kind === 'mouse' ? WH_MOUSE_LL : WH_KEYBOARD_LL);
+        host.queue.lowLevel = {
+            hooked: kind=>hooks.some(hook=>hook.type === typeOf(kind)),
+            show: (kind, message)=>lowLevelHook(typeOf(kind),
+                lowLevelMessage(kind, message.message), ()=>lowLevelStructure(kind, message),
+                null, true),
+        };
+    }
 
     /**
      * Asks a thread's CBT hooks about what is about to happen to a window;
