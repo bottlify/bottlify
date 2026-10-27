@@ -24,6 +24,8 @@
  * rather than an invented one.
  */
 
+import { ZONE_KEYS, zoneForYear } from './timezones.js';
+
 /** Codes this surface reports. */
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
@@ -32,6 +34,16 @@ const ERROR_BAD_LENGTH = 24;
 const ERROR_MORE_DATA = 234;
 const ERROR_NOACCESS = 998;
 const ERROR_NO_MORE_FILES = 18;
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_NO_MORE_ITEMS = 259;
+
+/**
+ * DYNAMIC_TIME_ZONE_INFORMATION: a TIME_ZONE_INFORMATION, the zone's
+ * registry key as WCHAR[128], and whether its year-by-year rules are off.
+ */
+const DYNAMIC_TIME_ZONE = Object.freeze({ KeyName: 172, Disabled: 428, SIZE: 432 });
+/** The key of the zone this machine is in. */
+const MACHINE_ZONE_KEY = 'UTC';
 
 /** GetFileInformationByHandleEx's classes here, and the fixed ones' sizes. */
 const FILE_BASIC_INFO = 0;
@@ -390,6 +402,56 @@ export function createFileTimeFunctions(host){
     const fail = (code, result = 0)=>{
         host.setLastError(code);
         return result;
+    };
+
+    /** A DYNAMIC_TIME_ZONE_INFORMATION's key. @param {number} address */
+    const zoneKeyOf = address=>{
+        const bytes = host.readMemory(address + DYNAMIC_TIME_ZONE.KeyName, 256);
+        let key = '';
+        for (let at = 0; at < 256; at += 2)
+        {
+            const code = bytes[at] | bytes[at + 1] << 8;
+            if (code === 0)
+            {
+                break;
+            }
+            key += String.fromCharCode(code);
+        }
+        return key;
+    };
+
+    /**
+     * A zone's TIME_ZONE_INFORMATION for a year, by its key; the machine's
+     * own for its key, null for a key Windows does not have.
+     *
+     * @param {string} key @param {number} year
+     */
+    const zoneByKey = (key, year)=>(key === MACHINE_ZONE_KEY ? currentZone()
+        : zoneForYear(key, year));
+
+    /**
+     * The rules a DYNAMIC_TIME_ZONE_INFORMATION stands for at a moment: its
+     * zone's for that year, or the TIME_ZONE_INFORMATION it carries when its
+     * year-by-year rules are off or its key is none Windows has.
+     *
+     * @param {number} address @param {number} utc
+     */
+    const dynamicRules = (address, utc)=>{
+        const carried = host.readMemory(address, DYNAMIC_TIME_ZONE.SIZE).slice();
+        if (carried[DYNAMIC_TIME_ZONE.Disabled] !== 0)
+        {
+            return carried.subarray(0, TIME_ZONE_INFORMATION.SIZE);
+        }
+        return zoneByKey(zoneKeyOf(address), new Date(utc).getUTCFullYear())
+            ?? carried.subarray(0, TIME_ZONE_INFORMATION.SIZE);
+    };
+
+    /** @param {number} address @param {Uint8Array} zone @param {string} key */
+    const writeDynamic = (address, zone, key)=>{
+        const bytes = new Uint8Array(DYNAMIC_TIME_ZONE.SIZE);
+        bytes.set(zone);
+        bytes.set(wide(key).subarray(0, 254), DYNAMIC_TIME_ZONE.KeyName);
+        host.writeMemory(address, bytes);
     };
 
     /** @param {number} address @returns {bigint} */
@@ -820,6 +882,128 @@ export function createFileTimeFunctions(host){
                 }
                 host.writeMemory(information >>> 0, currentZone());
                 return TIME_ZONE_ID_UNKNOWN;
+            },
+        },
+
+        /**
+         * DWORD GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION)
+         *
+         * GetTimeZoneInformation's answer, and the key of the zone it is.
+         */
+        GetDynamicTimeZoneInformation: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([information])=>{
+                if (information === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, 0xffffffff);
+                }
+                writeDynamic(information >>> 0, currentZone(), MACHINE_ZONE_KEY);
+                return TIME_ZONE_ID_UNKNOWN;
+            },
+        },
+
+        /**
+         * BOOL GetTimeZoneInformationForYear(USHORT wYear,
+         *   PDYNAMIC_TIME_ZONE_INFORMATION pdtzi, LPTIME_ZONE_INFORMATION ptzi)
+         *
+         * A zone's rules as they stood that year (`timezones.js`); a NULL zone
+         * is the machine's. A key Windows has no zone for is
+         * ERROR_FILE_NOT_FOUND, the missing registry key it is there.
+         */
+        GetTimeZoneInformationForYear: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([year, dynamic, information])=>{
+                if (information === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const zone = dynamic === 0 ? currentZone()
+                    : zoneByKey(zoneKeyOf(dynamic >>> 0), year & 0xffff);
+                if (zone === null)
+                {
+                    return fail(ERROR_FILE_NOT_FOUND);
+                }
+                host.writeMemory(information >>> 0, zone);
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD EnumDynamicTimeZoneInformation(DWORD dwIndex,
+         *                                      PDYNAMIC_TIME_ZONE_INFORMATION)
+         *
+         * The zones in their keys' order, each with this year's rules.
+         */
+        EnumDynamicTimeZoneInformation: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([index, information])=>{
+                if (information === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const key = ZONE_KEYS[index >>> 0];
+                const zone = key === undefined ? null
+                    : zoneByKey(key, new Date().getUTCFullYear());
+                if (key === undefined || zone === null)
+                {
+                    return ERROR_NO_MORE_ITEMS;
+                }
+                writeDynamic(information >>> 0, zone, key);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL SystemTimeToTzSpecificLocalTimeEx(
+         *   const DYNAMIC_TIME_ZONE_INFORMATION *, const SYSTEMTIME *, LPSYSTEMTIME)
+         *
+         * As SystemTimeToTzSpecificLocalTime, by the zone's rules for the
+         * year of the time.
+         */
+        SystemTimeToTzSpecificLocalTimeEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([zone, universal, local])=>{
+                if (universal === 0 || local === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const utc = systemTimeToMs(host.readMemory(universal >>> 0, SYSTEMTIME_SIZE));
+                if (utc === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const data = zone === 0 ? currentZone() : dynamicRules(zone >>> 0, utc);
+                const bias = biasAt(new DataView(data.buffer, data.byteOffset), utc);
+                host.writeMemory(local >>> 0, msToSystemTime(utc - bias * 60_000));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL TzSpecificLocalTimeToSystemTimeEx(
+         *   const DYNAMIC_TIME_ZONE_INFORMATION *, const SYSTEMTIME *, LPSYSTEMTIME)
+         */
+        TzSpecificLocalTimeToSystemTimeEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([zone, local, universal])=>{
+                if (local === 0 || universal === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const wall = systemTimeToMs(host.readMemory(local >>> 0, SYSTEMTIME_SIZE));
+                if (wall === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const data = zone === 0 ? currentZone() : dynamicRules(zone >>> 0, wall);
+                const bias = biasOnLocalClock(new DataView(data.buffer, data.byteOffset), wall);
+                host.writeMemory(universal >>> 0, msToSystemTime(wall + bias * 60_000));
+                return 1;
             },
         },
 

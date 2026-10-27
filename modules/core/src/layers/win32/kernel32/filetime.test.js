@@ -162,6 +162,46 @@ test('the timezone reports no bias and no daylight saving', ()=>{
         'and no transition date, which is what makes the bias mean anything');
 });
 
+test('the dynamic zone calls: the machine\'s zone by its key, another by its key and year', ()=>{
+    // Wine's time.c test_GetDynamicTimeZoneInformation and test_GetTimeZoneInformationForYear.
+    const { fns, bytes, errors } = setup();
+    const view = new DataView(bytes.buffer);
+    const DYNAMIC = 0x800;
+    const keyOf = (/** @type {number} */ at)=>{
+        let key = '';
+        for (let code = view.getUint16(at + 172, true), next = 0; code !== 0;
+            code = view.getUint16(at + 172 + (next += 2), true))
+        {
+            key += String.fromCharCode(code);
+        }
+        return key;
+    };
+    const plantKey = (/** @type {string} */ key)=>{
+        bytes.fill(0, DYNAMIC, DYNAMIC + 432);
+        [...key].forEach((character, at)=>view.setUint16(DYNAMIC + 172 + at * 2,
+            character.charCodeAt(0), true));
+    };
+
+    assert.equal(fns.GetDynamicTimeZoneInformation.handler([DYNAMIC]), 0);
+    assert.equal(keyOf(DYNAMIC), 'UTC');
+    assert.equal(fns.GetTimeZoneInformation.handler([0x600]), 0);
+    assert.deepEqual(bytes.subarray(DYNAMIC, DYNAMIC + 172), bytes.subarray(0x600, 0x600 + 172));
+
+    assert.equal(fns.GetTimeZoneInformationForYear.handler([2020, 0, 0x400]), 1);
+    assert.deepEqual(bytes.subarray(0x400, 0x400 + 172), bytes.subarray(0x600, 0x600 + 172));
+    plantKey('Greenland Standard Time');
+    assert.equal(fns.GetTimeZoneInformationForYear.handler([2016, DYNAMIC, 0x400]), 1);
+    assert.equal(view.getInt32(0x400, true), 180);
+    assert.equal(view.getUint16(0x400 + 68 + 2, true), 10, 'standard time from October');
+    plantKey('Greenland Daylight Time');
+    assert.equal(fns.GetTimeZoneInformationForYear.handler([2016, DYNAMIC, 0x400]), 0);
+    assert.deepEqual(errors, [2]);
+
+    assert.equal(fns.EnumDynamicTimeZoneInformation.handler([0, DYNAMIC]), 0);
+    assert.ok(keyOf(DYNAMIC).length > 0);
+    assert.equal(fns.EnumDynamicTimeZoneInformation.handler([100000, DYNAMIC]), 259);
+});
+
 test('the clock cannot be set', ()=>{
     // It is what every timestamp and every elapsed-time measurement in the run
     // is taken against; letting a program move it makes a measurement that
