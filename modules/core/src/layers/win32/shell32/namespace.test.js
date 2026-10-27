@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createShellFunctions } from './functions.js';
 import { IID_IENUMIDLIST, IID_ISHELLFOLDER, MY_COMPUTER, itemsOf } from './namespace.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { createComRegistry } from '../ole32/objects.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -46,7 +47,11 @@ function machine(){
         'C:\\Program Files\\Common': { isDirectory: true, children: [] },
         'C:\\readme.txt': { isDirectory: false, children: [] },
     };
+    /** @type {Map<string, () => any>} */
+    const classes = new Map();
     const host = {
+        registerClass: (/** @type {string} */ clsid, /** @type {() => any} */ factory)=>
+            classes.set(clsid, factory),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
         allocate: (/** @type {number} */ bytes)=>{
@@ -104,7 +109,7 @@ function machine(){
     const lists = { readMemory: host.readMemory, writeMemory: host.writeMemory };
     /** @param {number} list */
     const texts = list=>itemsOf(lists, list);
-    return { memory, view, shell, call, u32, put, string, wide, texts, published };
+    return { memory, view, shell, call, u32, put, string, wide, texts, published, classes };
 }
 
 /**
@@ -442,4 +447,22 @@ test('the Control Panel is a folder of the desktop\'s, with nothing of the volum
     assert.equal(m.u32(0x110), (0x4 | 0x20000000 | 0x80000000) >>> 0,
         'SFGAO_CANLINK, SFGAO_FOLDER and SFGAO_HASSUBFOLDER');
     assert.equal(m.shell.SHGetPathFromIDListA.handler([m.u32(0x108), 0x200]), 0, 'no path');
+});
+
+test('CoCreateInstance(CLSID_ShellDesktop) makes the desktop SHGetDesktopFolder answers', ()=>{
+    // ole32's marshal test makes the desktop this way.
+    const m = machine();
+    const registry = createComRegistry();
+    const CLSID_SHELL_DESKTOP = '{00021400-0000-0000-C000-000000000046}';
+    const factory = m.classes.get(CLSID_SHELL_DESKTOP);
+    assert.ok(factory, 'registered');
+    registry.registerClass(CLSID_SHELL_DESKTOP, factory);
+    const object = /** @type {any} */ (registry.create(CLSID_SHELL_DESKTOP));
+    const folder = object.queryInterface(IID_ISHELLFOLDER);
+    assert.ok(folder, 'as an IShellFolder');
+    assert.equal(m.shell.SHGetSpecialFolderLocation.handler([0, CSIDL_DRIVES, 0x100]), S_OK);
+    const name = folder.methods.find((/** @type {any} */ method)=>
+        method.name === 'GetDisplayNameOf');
+    assert.equal(name.invoke(object, [m.u32(0x100), 0, 0x140]), S_OK);
+    assert.equal(m.string(0x144), 'My Computer', 'the desktop\'s own answer for its child');
 });

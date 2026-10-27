@@ -188,6 +188,7 @@ const E_FAIL = 0x80004005 | 0;
 /** The computer: a folder with no path, whose children are the drives. */
 const CSIDL_DRIVES = 0x11;
 const CSIDL_CONTROLS = 0x03;
+const CLSID_SHELL_DESKTOP = '{00021400-0000-0000-C000-000000000046}';
 const CSIDL_DESKTOP = 0x00;
 const CSIDL_DESKTOPDIRECTORY = 0x10;
 /** The user's documents, "My Documents". */
@@ -297,6 +298,8 @@ const CSIDL_FOLDERS = Object.freeze({
  *           The running program's path, what GetModuleFileName answers for
  *           it: CommandLineToArgvW's whole answer to an empty command line.
  * @property {(code: number) => void} [setLastError]
+ * @property {(clsid: string, factory: () => import('../ole32/objects.js').ComClassDefinition)
+ *     => void} [registerClass]  Where CoCreateInstance finds a class of the shell's.
  */
 
 /** @param {string} text @returns {Uint8Array} text in the ANSI page, with its terminator */
@@ -386,6 +389,11 @@ export function createShellFunctions(host){
             publish: host.publish, allocate: host.allocate, memory, volume: host.volume,
             documents: ()=>folderOf(CSIDL_PERSONAL),
         }) : null;
+    if (namespace)
+    {
+        // The desktop is a class too, which COM makes for a program that asks.
+        host.registerClass?.(CLSID_SHELL_DESKTOP, ()=>namespace.desktopClass());
+    }
 
     /** @returns {number} the empty list, put where ILFree frees it, or zero */
     const emptyList = ()=>{

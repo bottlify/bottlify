@@ -634,6 +634,18 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
          */
         desktop: out=>handOut(folderObject(null), IID_ISHELLFOLDER, out),
         /**
+         * The desktop folder as a COM class's object, what
+         * CoCreateInstance(CLSID_ShellDesktop) makes: the same folder
+         * SHGetDesktopFolder answers.
+         *
+         * @returns {import('../ole32/objects.js').ComClassDefinition}
+         */
+        desktopClass: ()=>({
+            state: /** @type {FolderState} */ ({ folder: null }),
+            interfaces: [{ id: IID_ISHELLFOLDER, methods: /** @type {any[]} */ (
+                folderMethods.slice(IUNKNOWN_METHODS.length)) }],
+        }),
+        /**
          * The folder a list's last item is in, into guest memory, and where
          * that item starts: SHBindToParent. An empty list is the desktop,
          * bound to itself.

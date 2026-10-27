@@ -2517,6 +2517,8 @@ export function createWin32Module(){
                     library: name=>libraries[name],
                     // SHBindToObject calls a folder of the program's own.
                     drive: steps=>bridge.drive(steps),
+                    // CLSID_ShellDesktop is the desktop folder's class.
+                    registerClass: (clsid, factory)=>com.registerClass(clsid, factory),
                     // ExtractIcon hands out an icon of pixels read from another
                     // file: the object user32's CreateIcon makes.
                     icon: picture=>handles.open('icon', {
