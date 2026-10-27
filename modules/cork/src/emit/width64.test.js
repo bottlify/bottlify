@@ -105,6 +105,37 @@ test('width edges of multiplies and divides run in the shared emitter\'s regions
         }
     });
 
+test('width edges of moves, scans, swaps and widenings run in the shared emitter\'s regions as'
+    + ' interpreted', ()=>{
+    const cases = edges([
+        '4891', '87c8', '87c0', '4987c8', '6687c8', '86e1', // xchg rax/eax/r8/cx/ah
+        'f3480fb8c1', 'f30fb8c1', 'f3660fb8c1', // popcnt rax/eax/ax, rcx
+        '4898', '98', '6698', '4899', '99', '6699', // cdqe cwde cbw cqo cdq cwd
+        '480fbcc1', '0fbcc1', '480fbdc1', '0fbdc1', '660fbcc1', // bsf/bsr from rcx
+        '480fc8', '0fc8', '490fc8', // bswap rax eax r8
+        '480f44c1', '0f44c1', '0f45c1', '660f44c1', '4c0f42c1', '0f47c1', // cmov from rcx
+        '0f94c0', '410f95c0', '400f9cc6', '0f97c4', // sete al, setne r8b, setl sil, seta ah
+    ], [0, 1, 0x80, 0x8000, 0x80000000, 0x100000000, -1, -0x8000000000000000n],
+    ['', '4885c9', '31c0', 'b8feffffff', '66b8fe80']);
+    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
+        shared);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
+
+test('leave and indirect jumps and calls run in the shared emitter\'s regions as interpreted', ()=>{
+    const cases = edges([
+        'c9', '66c9', // leave, its word form
+        '488d0502000000ffe0', '488d0502000000ffd0', // jmp rax, call rax to the next instruction
+        '4c8d050300000041ffe0', // jmp r8
+        '48b80000000001000000ffe0', '48b80000000001000000ffd0', // past the window
+    ], [0], ['', '4885c9']);
+    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
+        shared);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
+
 test('seeded long programs run in the shared emitter\'s regions as interpreted', ()=>{
     const instructions = pool();
     const straight = Array.from({ length: 600 },
