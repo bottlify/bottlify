@@ -7,7 +7,7 @@
 import { createRegistryService } from './registry-service.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REGISTRY_NATIVES, USER_NAME, createRegistryFunctions } from './functions.js';
+import { KEY_OF_HANDLE, REGISTRY_NATIVES, USER_NAME, createRegistryFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
     createHive,
@@ -1450,4 +1450,21 @@ test('IsTextUnicode reads the buffer, the tests asked for, and writes back which
     assert.deepEqual([...memory.readMemory(RESULT, 4)], [0, 0, 0, 0]);
     assert.equal(fns.IsTextUnicode.handler([BUFFER, 1, 0]), 0, 'less than a character');
     assert.equal(fns.IsTextUnicode.argBytes, 12);
+});
+
+test('a handle the program holds names the hive\'s key, for a library installing under it', ()=>{
+    // setupapi's HKR under a key the program opened: its values go into
+    // that key, the one the program reads them back through.
+    const { hive, fns, create, setString } = setup();
+    const handle = create('Software\\Hkr');
+    const keyOf = /** @type {any} */ (fns)[KEY_OF_HANDLE];
+    const key = keyOf(handle);
+    assert.ok(key);
+    hive.setValue(key, 'Installed', REG_SZ, Uint8Array.of(0x79, 0));
+    assert.equal(setString(handle, 'Other', 'x'), ERROR_SUCCESS);
+    assert.ok(hive.getValue(key, 'Other'), 'the same key both ways');
+    assert.ok(keyOf(HKEY_LOCAL_MACHINE), 'a predefined root is its root');
+    assert.equal(keyOf(0x12345), null, 'not a key');
+    fns.RegCloseKey.handler([handle]);
+    assert.equal(keyOf(handle), null, 'a handle closed names none');
 });

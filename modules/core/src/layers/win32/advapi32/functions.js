@@ -72,6 +72,13 @@ export const UNLOAD_KEY = Symbol('unloadKey');
  */
 export const REGISTRY_NATIVES = Symbol('registryNatives');
 
+/**
+ * The hive's key a registry handle is open on, for a library that installs
+ * into a key the program opened (setupapi's HKR): null for a handle that is
+ * not a key.
+ */
+export const KEY_OF_HANDLE = Symbol('keyOfHandle');
+
 /** NtQueryKey's and NtEnumerateKey's classes, and the value classes, this answers. */
 const KEY_BASIC_INFORMATION = 0;
 const KEY_NODE_INFORMATION = 1;
@@ -2320,5 +2327,6 @@ export function createRegistryFunctions(host){
 
         [UNLOAD_KEY]: unload,
         [REGISTRY_NATIVES]: nativeRegistry(),
+        [KEY_OF_HANDLE]: keyOf,
     };
 }

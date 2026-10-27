@@ -58,7 +58,7 @@ import { createUcrtbaseFunctions } from './msvcrt/ucrtbase.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createWindowDirectory } from './user32/directory.js';
 import { createMessageQueue } from './user32/messages.js';
-import { createRegistryFunctions } from './advapi32/functions.js';
+import { KEY_OF_HANDLE, createRegistryFunctions } from './advapi32/functions.js';
 import {
     ADMINISTRATORS_SID, USER_SID_TEXT, createTokenFunctions, isTokenMember,
 } from './advapi32/tokens.js';
@@ -2808,6 +2808,10 @@ export function createWin32Module(){
                     handles,
                     folders,
                     registry: hive,
+                    // The hive's key behind a registry handle the program holds,
+                    // which an INF's HKR lines install under.
+                    keyOf: handle=>/** @type {any} */ (libraries['ADVAPI32.dll'])[KEY_OF_HANDLE]?.(
+                        handle) ?? null,
                     // The DLLs an INF registers, loaded as the program loads its own.
                     libraries: {
                         /** @param {number} name */
