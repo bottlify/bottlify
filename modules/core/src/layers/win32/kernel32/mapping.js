@@ -667,7 +667,9 @@ export function createMappingFunctions(host){
                     return fail(placed === 0 ? ERROR_NOT_ENOUGH_MEMORY : ERROR_INVALID_ADDRESS);
                 }
 
-                const writable = mapping.writable
+                // A copy-on-write section's view is written in memory alone:
+                // its pages are the process's own copies, never the file's.
+                const writable = (mapping.node ? mapping.writesFile === true : mapping.writable)
                     && ((access >>> 0) & (FILE_MAP_WRITE | FILE_MAP_ALL_ACCESS)) !== 0;
                 const metrics = host.metrics;
                 /** @param {Uint8Array} bytes */

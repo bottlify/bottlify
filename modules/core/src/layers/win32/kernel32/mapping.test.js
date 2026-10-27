@@ -216,6 +216,23 @@ test('a read-only view is not written back', ()=>{
     assert.equal(file.data[0], 1, 'the file kept what it had');
 });
 
+test('a copy-on-write view is written in memory and never reaches its file', ()=>{
+    // PAGE_WRITECOPY and PAGE_EXECUTE_WRITECOPY give the process its own copy
+    // of each page it writes; the file, which may be open for reading alone,
+    // keeps what it had through the unmap and any flush.
+    for (const page of [0x08, 0x80])
+    {
+        const { fns, bytes, file, fileHandle } = setup();
+        const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, page, 0, 8, 0]);
+        const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 8]);
+        assert.notEqual(view, 0);
+        bytes[view] = 0x77;
+        assert.equal(fns.FlushViewOfFile.handler([view, 0]), 1);
+        assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
+        assert.equal(file.data[0], 1, `the file kept what it had (0x${page.toString(16)})`);
+    }
+});
+
 test('a mapping of a file with no size given is as large as the file', ()=>{
     // The usual way a program maps a file whole: neither the mapping nor the
     // view names a size, and both mean "all of it".
