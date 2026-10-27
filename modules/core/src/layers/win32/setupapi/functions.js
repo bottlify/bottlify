@@ -272,7 +272,16 @@ export function createSetupapiFunctions(host){
         {
             return null;
         }
-        const stat = host.files.stat(path);
+        // A path the volume refuses outright -- a component of blanks --
+        // names no file, which is the answer the caller is after.
+        let stat;
+        try
+        {
+            stat = host.files.stat(path);
+        }
+        catch {
+            return null;
+        }
         if (!stat || stat.isDirectory)
         {
             return null;
@@ -2554,7 +2563,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const source = name === '' ? null : host.fullPath(name);
+                const source = name === '' ? null : pathOf(name);
                 const bytes = source === null ? null : readWhole(source);
                 if (bytes === null)
                 {
