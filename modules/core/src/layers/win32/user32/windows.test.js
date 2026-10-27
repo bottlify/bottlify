@@ -5137,6 +5137,17 @@ test('RegisterRawInputDevices checks its devices, and the registered list is ord
     assert.equal(memory.u32(COUNT), 0, 'both removed');
 });
 
+test('DefRawInputProc answers 0 for a RAWINPUTHEADER\'s size and -1 for another, leaving the '
+    + 'last error', ()=>{
+    // input.c test_DefRawInputProc.
+    const { fns, errors } = setup();
+    assert.equal(fns.DefRawInputProc.handler([0, 0, RAWINPUTHEADER_SIZE]), 0);
+    assert.equal(fns.DefRawInputProc.handler([0xcafe, 0xbeef, RAWINPUTHEADER_SIZE]), 0);
+    assert.equal(fns.DefRawInputProc.handler([0, 0, RAWINPUTHEADER_SIZE - 1]), 0xffffffff);
+    assert.equal(fns.DefRawInputProc.handler([0, 0, RAWINPUTHEADER_SIZE + 1]), 0xffffffff);
+    assert.deepEqual(errors, []);
+});
+
 test('GetRawInputBuffer takes the queued reports end to end, as many as fit', ()=>{
     const RAWINPUT_MOUSE_SIZE = 40;
     const { fns, memory, hwnd, queue, service, errors } = withWindow({ style: WS_VISIBLE });
@@ -5644,8 +5655,12 @@ test('GetClassInfoW reports the class by the wide name it was asked by', ()=>{
     const { fns, memory } = withWindow();
     putWide(memory, WIDE_CLASS, 'MAINWND');
     assert.equal(fns.GetClassInfoW.handler([HINSTANCE, WIDE_CLASS, 0x10800]), 1);
-    assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc), WNDPROC);
+    // Registered through the ANSI form, its procedure reads ANSI: the wide
+    // call answers its handle, the ANSI one its address.
+    assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc) >>> 16, 0xffff);
     assert.equal(memory.u32(0x10800 + WNDCLASSA.lpszClassName), WIDE_CLASS);
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, 0x10800]), 1);
+    assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc), WNDPROC);
 });
 
 test('GetMessage on a window already destroyed fails at once rather than waiting for ever', ()=>{
@@ -7044,3 +7059,83 @@ test('activation brings a window with children that is already on top to the top
         assert.ok(!seen.some(([, message])=>message === WM_WINDOWPOSCHANGED));
         assert.ok(seen.some(([hwnd, message])=>hwnd === child && message === WM_SETFOCUS));
     });
+
+test('a procedure read through the other encoding is a handle, which sets and calls it as '
+    + 'what it reads', ()=>{
+    // class.c test_wndproc_handles, win.c test_set_window_long: a window
+    // whose procedure reads ANSI answers GetWindowLongW with a handle -- its
+    // high word 0xffff -- and its address to GetWindowLongA; set back through
+    // either form, the handle restores the procedure and its encoding;
+    // CallWindowProcW through it hands the procedure ANSI text; and NULL
+    // keeps the procedure, switching only the encoding.
+    const OTHER = 0x402000;
+    const { fns, memory, dispatched } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const wide = fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]);
+    assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_WNDPROC]), WNDPROC);
+    assert.equal(wide >>> 16, 0xffff, 'the wide read is a handle');
+    assert.equal(fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]), wide, 'the same one each time');
+
+    assert.equal(fns.SetWindowLongW.handler([hwnd, GWL_WNDPROC, OTHER]), wide);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 1);
+    assert.equal(fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]), OTHER);
+    assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_WNDPROC]) >>> 16, 0xffff);
+
+    fns.SetWindowLongW.handler([hwnd, GWL_WNDPROC, wide]);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 0, 'the handle sets an ANSI procedure');
+    assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_WNDPROC]), WNDPROC);
+
+    putWide(memory, TITLE, 'caption');
+    dispatched.length = 0;
+    fns.CallWindowProcW.handler([wide, hwnd, WM_SETTEXT, 0, TITLE]);
+    const told = dispatched.at(-1);
+    assert.equal(told.wndProc, WNDPROC);
+    assert.equal(memory.readCString(told.lParam, 32), 'caption', 'converted to ANSI');
+    dispatched.length = 0;
+    fns.CallWindowProcW.handler([WNDPROC, hwnd, WM_SETTEXT, 0, TITLE]);
+    assert.equal(dispatched.at(-1).lParam, TITLE, 'an address is called as the call reads');
+
+    assert.equal(fns.SetWindowLongW.handler([hwnd, GWL_WNDPROC, 0]), wide);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 1, 'NULL switches the encoding');
+    assert.equal(fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]), wide,
+        'and keeps the procedure, which still reads ANSI');
+});
+
+test('SetClassLongW of the procedure makes the class\'s next windows wide, not those it has',
+    ()=>{
+    // win.c test_IsWindowUnicode: a class procedure set through one form
+    // decides the encoding of windows made after; a window made before keeps
+    // its own.
+        const GCL_WNDPROC = -24;
+        const { fns, memory } = setup({ heap: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const before = createWindow(fns, memory);
+        fns.SetClassLongW.handler([before, GCL_WNDPROC, WNDPROC]);
+        assert.equal(fns.IsWindowUnicode.handler([before]), 0);
+        assert.equal(fns.GetClassLongW.handler([before, GCL_WNDPROC]), WNDPROC);
+        assert.equal(fns.GetClassLongA.handler([before, GCL_WNDPROC]) >>> 16, 0xffff);
+        const after = createWindow(fns, memory);
+        assert.equal(fns.IsWindowUnicode.handler([after]), 1);
+    });
+
+test('once the procedure handles run out, a procedure is read as its address', ()=>{
+    // win.c test_winproc_limit: setting ever new ANSI procedures and reading
+    // them wide runs out of handles before 0xffff of them.
+    const { fns, memory } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    let proc = 2;
+    for (; proc < 0xffff; proc++)
+    {
+        fns.SetWindowLongA.handler([hwnd, GWL_WNDPROC, proc]);
+        if (fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]) === proc)
+        {
+            break;
+        }
+    }
+    assert.notEqual(proc, 0xffff);
+});

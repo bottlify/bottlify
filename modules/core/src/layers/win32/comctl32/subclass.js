@@ -24,12 +24,11 @@
  * While subclassed the window carries the property "CC32SubclassInfo", as
  * the 5.8 library marks its windows, and a program may look for it.
  *
- * comctl32's procedure is set in the encoding the window's own was set in,
- * and passes messages on in it. Windows sets it wide and converts for an
- * ANSI procedure through the procedure handles CallWindowProc takes; user32
- * here has no such handles and hands a procedure named by its address a
- * message as it came, so a wide stub in front of an ANSI edit had it write
- * bytes into a buffer its caller read as wide text.
+ * comctl32's procedure is set wide, as Windows sets it, and passes messages
+ * on wide: the window's own procedure, read through GetWindowLongW, is a
+ * procedure handle when it reads ANSI, and CallWindowProcW converts the
+ * message for it; set back through SetWindowLongW, the handle makes it the
+ * ANSI procedure it was.
  */
 
 const GWLP_WNDPROC = -4;
@@ -60,8 +59,8 @@ const PROPERTY = 'CC32SubclassInfo';
 /**
  * @typedef {Object} Subclassed
  * @property {Subclass[]} chain     Oldest first.
- * @property {number} original      The procedure the window had.
- * @property {boolean} unicode      Whether that procedure was set wide.
+ * @property {number} original      The procedure the window had, as SetWindowLongW
+ *     answered it: a handle when it reads ANSI.
  * @property {number[]} running     The order of each subclass a message is in, innermost last.
  */
 
@@ -110,8 +109,7 @@ export function createSubclassFunctions(host){
         const next = held.chain.filter(each=>each.order < below).at(-1);
         if (!next || !host.call)
         {
-            return user32(held.unicode ? 'CallWindowProcW' : 'CallWindowProcA',
-                [held.original, hwnd, ...message]);
+            return user32('CallWindowProcW', [held.original, hwnd, ...message]);
         }
         held.running.push(next.order);
         return andThen(host.call(next.proc, [hwnd, ...message, next.id, next.ref],
@@ -135,8 +133,7 @@ export function createSubclassFunctions(host){
         }
         if ((user32('GetWindowLongW', [hwnd, GWLP_WNDPROC]) >>> 0) === stub)
         {
-            user32(held.unicode ? 'SetWindowLongW' : 'SetWindowLongA',
-                [hwnd, GWLP_WNDPROC, held.original]);
+            user32('SetWindowLongW', [hwnd, GWLP_WNDPROC, held.original]);
             property('RemovePropA', hwnd);
             windows.delete(hwnd);
         }
@@ -151,7 +148,7 @@ export function createSubclassFunctions(host){
         const held = windows.get(hwnd >>> 0);
         if (!held)
         {
-            return user32('DefWindowProcA', [hwnd, message, wParam, lParam]);
+            return user32('DefWindowProcW', [hwnd, message, wParam, lParam]);
         }
         return andThen(runFrom(hwnd >>> 0, held, Infinity, [message, wParam, lParam]), answer=>{
             // A window being destroyed takes its subclasses with it.
@@ -189,12 +186,9 @@ export function createSubclassFunctions(host){
                     stub ||= host.procedure('comctl32 subclass', dispatch);
                     held = {
                         chain: [], running: [],
-                        unicode: user32('IsWindowUnicode', [hwnd]) !== 0,
-                        original: user32('GetWindowLongW', [hwnd, GWLP_WNDPROC]) >>> 0,
+                        original: user32('SetWindowLongW', [hwnd, GWLP_WNDPROC, stub]) >>> 0,
                     };
                     windows.set(hwnd >>> 0, held);
-                    user32(held.unicode ? 'SetWindowLongW' : 'SetWindowLongA',
-                        [hwnd, GWLP_WNDPROC, stub]);
                     property('SetPropA', hwnd, [1]);
                 }
                 const same = held.chain.find(each=>each.proc === (proc >>> 0)
@@ -268,8 +262,7 @@ export function createSubclassFunctions(host){
                 const inside = held?.running.at(-1);
                 if (!held || inside === undefined)
                 {
-                    return user32(held?.unicode ? 'DefWindowProcW' : 'DefWindowProcA',
-                        [hwnd, message, wParam, lParam]);
+                    return user32('DefWindowProcW', [hwnd, message, wParam, lParam]);
                 }
                 return runFrom(hwnd >>> 0, held, inside, [message, wParam, lParam]);
             },

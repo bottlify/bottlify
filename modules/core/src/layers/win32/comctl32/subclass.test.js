@@ -41,25 +41,41 @@ function setup(){
     /** @type {Map<number, (args: number[]) => any>} */
     const procedures = new Map();
     let orig3 = 0;
+    // user32's procedure handles: a procedure read through the other
+    // encoding's call is a handle, which sets it back as what it reads.
+    /** @type {{ proc: number, unicode: boolean }[]} */
+    const handles = [];
+    /** @param {number} proc @param {boolean} unicode */
+    const handleOf = (proc, unicode)=>{
+        let at = handles.findIndex(each=>each.proc === proc && each.unicode === unicode);
+        if (at < 0)
+        {
+            at = handles.push({ proc, unicode }) - 1;
+        }
+        return (0xffff0000 | at) >>> 0;
+    };
+    /** @param {number} value */
+    const behind = value=>((value >>> 16) === 0xffff ? handles[value & 0xffff] : null);
+    /** @param {boolean} reader */
+    const read = reader=>(window.unicode === reader || procedures.has(window.proc)
+        ? window.proc : handleOf(window.proc, window.unicode));
+    /** @param {number} value @param {boolean} unicode */
+    const set = (value, unicode)=>{
+        const previous = read(unicode);
+        const named = behind(value);
+        window.proc = named ? named.proc : value;
+        window.unicode = named ? named.unicode : unicode;
+        return previous;
+    };
     /** @type {Record<string, (args: number[]) => any>} */
     const user32 = {
         IsWindow: ([hwnd])=>(hwnd === HWND && window.alive ? 1 : 0),
         IsWindowUnicode: ()=>(window.unicode ? 1 : 0),
-        GetWindowLongW: ()=>window.proc,
-        SetWindowLongW: ([, , value])=>{
-            const previous = window.proc;
-            window.proc = value;
-            window.unicode = true;
-            return previous;
-        },
-        SetWindowLongA: ([, , value])=>{
-            const previous = window.proc;
-            window.proc = value;
-            window.unicode = false;
-            return previous;
-        },
-        CallWindowProcW: ([proc, ...message])=>run(proc, message),
-        CallWindowProcA: ([proc, ...message])=>run(proc, message),
+        GetWindowLongW: ()=>read(true),
+        SetWindowLongW: ([, , value])=>set(value, true),
+        SetWindowLongA: ([, , value])=>set(value, false),
+        CallWindowProcW: ([proc, ...message])=>run(behind(proc)?.proc ?? proc, message),
+        CallWindowProcA: ([proc, ...message])=>run(behind(proc)?.proc ?? proc, message),
         DefWindowProcW: ()=>0,
         DefWindowProcA: ()=>0,
         SetPropA: ([hwnd, name, value])=>{
@@ -162,7 +178,7 @@ test('a subclass runs before the window\'s procedure, which it reaches through D
     + 'and the window reads what its own procedure reads', ()=>{
     const { window, send, subclass, take } = setup();
     assert.equal(subclass(2, 0), 1);
-    assert.equal(window.unicode, false, 'ANSI as wnd_proc_1 was set: see subclass.js');
+    assert.equal(window.unicode, true, 'comctl32\'s procedure is set wide');
     assert.notEqual(window.proc, WND_PROC_1);
     send(1, 0);
     send(2, 0);

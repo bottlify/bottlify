@@ -336,6 +336,19 @@ export function createRawInput({ host, isWindow, focus, foreground }){
         },
 
         /**
+         * LRESULT DefRawInputProc(PRAWINPUT *paRawInput, INT nInput, UINT cbSizeHeader)
+         *
+         * Nothing to do with the reports: 0, or -1 for a header size that is
+         * not a RAWINPUTHEADER's; the last error is left alone (input.c
+         * test_DefRawInputProc).
+         */
+        DefRawInputProc: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , headerSize])=>((headerSize >>> 0) === RAWINPUTHEADER_SIZE ? 0 : FAILED),
+        },
+
+        /**
          * UINT GetRawInputBuffer(PRAWINPUT pData, PUINT pcbSize, UINT cbSizeHeader)
          *
          * The reports whose WM_INPUT are still queued, taken off the queue

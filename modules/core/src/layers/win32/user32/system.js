@@ -870,14 +870,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         // A system class's procedure lives on this side, and a program
-        // that subclassed one calls it through here with its address.
-        return host.callProcedure(previous >>> 0, {
+        // that subclassed one calls it through here with its address. An
+        // address is called as a procedure of the call's own encoding; a
+        // handle names one of the other, and the message is converted on
+        // its way (class.c test_wndproc_handles).
+        const behind = host.procBehind?.(previous) ?? null;
+        return host.callProcedure(behind ? behind.address : previous >>> 0, {
             hwnd: hwnd >>> 0,
             message: message >>> 0,
             wParam: wParam >>> 0,
             lParam: lParam >>> 0,
             ...unicode ? { unicode } : {},
-        }, host.callerThread?.());
+        }, host.callerThread?.(), behind ? behind.unicode : unicode);
     };
 
     /**
@@ -1302,13 +1306,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return record ? classes.get(record.className) ?? null : null;
     };
 
-    /** @param {any} cls @param {number} index */
-    const readClassLong = (cls, index)=>{
+    /**
+     * @param {any} cls @param {number} index
+     * @param {boolean} [unicode]  Read through GetClassLongW: a procedure of
+     *     the other encoding is answered as its handle.
+     */
+    const readClassLong = (cls, index, unicode = false)=>{
         switch (index | 0){
             case GCL_STYLE:
                 return cls.style;
             case GCL_WNDPROC:
-                return cls.wndProc;
+                return host.procAs ? host.procAs(cls.wndProc, cls.unicode === true, unicode)
+                    : cls.wndProc;
             case GCL_CBCLSEXTRA:
                 return cls.classExtra;
             case GCL_CBWNDEXTRA:
@@ -1347,15 +1356,23 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return (index | 0) >= 0 && (index | 0) + 2 <= cls.extra.byteLength ? index | 0 : null;
     };
 
-    /** @param {any} cls @param {number} index @param {number} value */
-    const writeClassLong = (cls, index, value)=>{
+    /**
+     * @param {any} cls @param {number} index @param {number} value
+     * @param {boolean} [unicode]  Set through SetClassLongW: the windows made
+     *     of the class from now on read wide text; those made already keep
+     *     their own procedure (win.c test_IsWindowUnicode).
+     */
+    const writeClassLong = (cls, index, value, unicode = false)=>{
         switch (index | 0){
             case GCL_STYLE:
                 cls.style = value >>> 0;
                 return;
-            case GCL_WNDPROC:
-                cls.wndProc = value >>> 0;
+            case GCL_WNDPROC: {
+                const behind = host.procBehind?.(value) ?? null;
+                cls.wndProc = behind ? behind.address : value >>> 0;
+                cls.unicode = behind ? behind.unicode : unicode;
                 return;
+            }
             case GCL_HICON:
                 cls.icon = value >>> 0;
                 return;
@@ -5422,7 +5439,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
                 const cls = classOfWindow(hwnd);
-                return cls ? readClassLong(cls, index) : 0;
+                return cls ? readClassLong(cls, index, true) : 0;
             },
         },
 
@@ -5436,8 +5453,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 {
                     return 0;
                 }
-                const previous = readClassLong(cls, index);
-                writeClassLong(cls, index, value);
+                const previous = readClassLong(cls, index, true);
+                writeClassLong(cls, index, value, true);
                 return previous;
             },
         },

@@ -946,6 +946,64 @@ export function createWindowFunctions(host){
     const procedures = new Map();
     /** @type {Map<string, any>} lower-case name or atom spelling -> class */
     const systemClasses = new Map();
+
+    /**
+     * Window procedures read through the other encoding's call. A procedure
+     * set through SetWindowLongA reads ANSI text; GetWindowLongW answers a
+     * handle for it rather than its address, and CallWindowProcW converts
+     * the message on its way through that handle (win32u winproc.c's
+     * WINPROC_HANDLE, class.c test_wndproc_handles, win.c
+     * test_set_window_long). A procedure on this side reads either.
+     *
+     * @type {{ address: number, unicode: boolean }[]}
+     */
+    const winprocs = [];
+    const WINPROC_HANDLE = 0xffff0000;
+    /**
+     * What a window's procedure reads: the encoding it was set in, which a
+     * SetWindowLong of NULL leaves although IsWindowUnicode then answers the
+     * call's.
+     *
+     * @param {any} record
+     */
+    const procReads = record=>record.procUnicode ?? record.unicode === true;
+    /**
+     * How many handles there are room for. Past them, a procedure is answered
+     * as its address, as Windows answers it once its table is full (win.c
+     * test_winproc_limit).
+     */
+    const WINPROC_ROOM = 4096;
+    /** @param {number} address @param {boolean} unicode */
+    const procHandle = (address, unicode)=>{
+        let index = winprocs.findIndex(each=>each.address === address && each.unicode === unicode);
+        if (index < 0)
+        {
+            if (winprocs.length >= WINPROC_ROOM)
+            {
+                return address;
+            }
+            index = winprocs.length;
+            winprocs.push({ address, unicode });
+        }
+        return (WINPROC_HANDLE | index) >>> 0;
+    };
+    /**
+     * The procedure a handle stands for, or null for an address.
+     *
+     * @param {number} value
+     */
+    const procBehind = value=>(((value >>> 0) & 0xffff0000) >>> 0 === WINPROC_HANDLE
+        ? winprocs[value & 0xffff] ?? null : null);
+    /**
+     * A procedure as a call of one encoding reads it: its address when it
+     * reads that encoding or lives on this side, else its handle.
+     *
+     * @param {number} address @param {boolean} unicode  what the procedure reads
+     * @param {boolean} reader  whether the call reading it is the wide one
+     */
+    const procAs = (address, unicode, reader)=>((address >>> 0) === 0
+        || procedures.has(address >>> 0) || unicode === reader
+        ? address >>> 0 : procHandle(address >>> 0, unicode));
     /**
      * The procedure of each built-in class by name: the seven user32 ones and
      * whatever the common controls file beside them. Kept apart from the
@@ -986,7 +1044,7 @@ export function createWindowFunctions(host){
         // procedure named by its address, as CallWindowProc names one, is
         // handed the message as it came.
         const reads = unicode ?? (record && (address >>> 0) === record.wndProc
-            ? record.unicode === true : message.unicode === true);
+            ? procReads(record) : message.unicode === true);
         return translated(host, message, reads,
             text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)),
             record?.style);
@@ -2628,10 +2686,21 @@ export function createWindowFunctions(host){
             return 0;
         }
         const atom = nextAtom++;
-        classes.set(name, { ...fields, name, atom, unicode });
+        // A handle registers the procedure behind it, reading what it reads.
+        const behind = procBehind(fields.wndProc);
+        classes.set(name, { ...fields, name, atom, unicode,
+            ...behind ? { wndProc: behind.address, unicode: behind.unicode } : {} });
         atoms.set(atom, name);
         return atom;
     };
+
+    /**
+     * A class with its procedure as a call of one encoding reads it.
+     *
+     * @param {any} cls @param {boolean} reader
+     */
+    const procRead = (cls, reader)=>({ ...cls,
+        wndProc: procAs(cls.wndProc, cls.unicode === true, reader) });
 
     /**
      * Forgets a class, which only a class with no window left may be.
@@ -2845,11 +2914,14 @@ export function createWindowFunctions(host){
         }
     };
 
-    /** @param {any} record @param {number} index */
-    const readLong = (record, index)=>{
+    /**
+     * @param {any} record @param {number} index
+     * @param {boolean} [unicode]  Read through GetWindowLongW.
+     */
+    const readLong = (record, index, unicode = false)=>{
         switch (index | 0){
             case GWL_WNDPROC:
-                return record.wndProc;
+                return procAs(record.wndProc, procReads(record), unicode);
             case GWL_HINSTANCE:
                 return record.instance;
             case GWL_HWNDPARENT:
@@ -2880,10 +2952,22 @@ export function createWindowFunctions(host){
      */
     const writeLong = (record, index, value, unicode = false)=>{
         switch (index | 0){
-            case GWL_WNDPROC:
-                record.wndProc = value >>> 0;
-                record.unicode = unicode;
+            case GWL_WNDPROC: {
+                // A handle sets the procedure behind it, reading what it
+                // reads; NULL keeps the procedure and only switches the
+                // encoding (win.c test_set_window_long).
+                const behind = procBehind(value);
+                if ((value >>> 0) === 0)
+                {
+                    record.procUnicode = procReads(record);
+                    record.unicode = unicode;
+                    return;
+                }
+                delete record.procUnicode;
+                record.wndProc = behind ? behind.address : value >>> 0;
+                record.unicode = behind ? behind.unicode : unicode;
                 return;
+            }
             case GWL_HWNDPARENT: {
                 // A window whose parent is the desktop is given an owner this
                 // way, never itself; any other is moved to another parent, the
@@ -7151,7 +7235,7 @@ export function createWindowFunctions(host){
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
-                heldByCaller, lowLevelHook, winEvent,
+                heldByCaller, lowLevelHook, winEvent, procAs, procBehind,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
                 appear, beforeChange, afterChange, eraseShown, wholeOnScreen, moveBits, dragging,
@@ -7360,7 +7444,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClassA(host, out, cls);
+                writeWindowClassA(host, out, procRead(cls, false));
                 return 1;
             },
         },
@@ -7381,7 +7465,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClassA(host, out, { ...cls, className: className >>> 0 });
+                writeWindowClassA(host, out,
+                    { ...procRead(cls, true), className: className >>> 0 });
                 return 1;
             },
         },
@@ -7397,7 +7482,7 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 writeWindowClassA(host, (out >>> 0) + WNDCLASSEXA.style,
-                    { ...cls, className: className >>> 0 });
+                    { ...procRead(cls, true), className: className >>> 0 });
                 writeU32s(host, (out >>> 0) + WNDCLASSEXA.hIconSm, [cls.iconSm ?? 0]);
                 return 1;
             },
@@ -7419,7 +7504,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClassA(host, (out >>> 0) + WNDCLASSEXA.style, cls);
+                writeWindowClassA(host, (out >>> 0) + WNDCLASSEXA.style, procRead(cls, false));
                 writeU32s(host, (out >>> 0) + WNDCLASSEXA.hIconSm, [cls.iconSm ?? 0]);
                 return 1;
             },
@@ -7855,7 +7940,10 @@ export function createWindowFunctions(host){
         GetWindowLongW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: args=>table.GetWindowLongA.handler(args),
+            handler: ([hwnd, index])=>{
+                const record = live(hwnd);
+                return record ? readLong(record, index, true) : 0;
+            },
         },
 
         /** LONG SetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong) */
@@ -7868,7 +7956,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                const previous = readLong(record, index);
+                const previous = readLong(record, index, true);
                 return writeLong(record, index, value, true) === false ? 0 : previous;
             },
         },
