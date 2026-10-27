@@ -957,6 +957,58 @@ test('FormatMessageW formats in UTF-16, a bare insert wide and a capital S narro
         String.fromCharCode(...host.bytes.slice(0x500, 0x500 + length)), 'the same system text');
 });
 
+test('FormatMessage leaves its buffers as Windows does, and a va_list past what it read', ()=>{
+    // Wine's format_msg.c: the insufficient, empty and allocating cases, A and W.
+    const ERROR_NO_WORK_DONE = 235;
+    const ERROR_MR_MID_NOT_FOUND = 317;
+    const host = { ...fakeHost(), allocate: ()=>0x400 };
+    const fns = createSystemFunctions(host);
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>host.writeMemory(at,
+        new Uint8Array(Uint16Array.from([...text, '\0'].map(c=>c.charCodeAt(0))).buffer));
+    /** @param {number} at @param {number} units */
+    const readBack = (at, units)=>String.fromCharCode(
+        ...new Uint16Array(host.bytes.slice(at, at + units * 2).buffer));
+    /** @param {number} at @param {number} count */
+    const ansi = (at, count)=>
+        String.fromCharCode(...host.bytes.subarray(at, at + count));
+
+    wide(0x200, 'test');
+    wide(0x300, 'xxxxxx');
+    assert.equal(fns.FormatMessageW.handler([0x400, 0x200, 0, 0, 0x300, 4, 0]), 0);
+    assert.equal(readBack(0x300, 6), 'tes\0xx', 'cut to the buffer, terminated');
+    host.writeMemory(0x220, Uint8Array.from([...'test', '\0'].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x340, Uint8Array.from([...'xxxxx'].map(c=>c.charCodeAt(0))));
+    assert.equal(fns.FormatMessageA.handler([0x400, 0x220, 0, 0, 0x340, 4, 0]), 0);
+    assert.equal(ansi(0x340, 5), 'xxxxx', 'FormatMessageA writes no part of a message');
+
+    wide(0x200, 'test%');
+    wide(0x300, 'xxxxxx');
+    assert.equal(fns.FormatMessageW.handler([0x400, 0x200, 0, 0, 0x300, 16, 0]), 0);
+    assert.equal(readBack(0x300, 6), 'testxx', 'formatted until the error, unterminated');
+
+    host.errors.length = 0;
+    wide(0x200, '');
+    host.view.setUint32(0x2f0, 0xdeadbeef, true);
+    assert.equal(fns.FormatMessageW.handler([0x500, 0x200, 0, 0, 0x2f0, 0, 0]), 0);
+    assert.equal(host.view.getUint32(0x2f0, true), 0, 'no message, no buffer');
+    assert.equal(fns.FormatMessageW.handler([0x1000, 0, 3044, 0, 0x300, 16, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_NO_WORK_DONE, ERROR_MR_MID_NOT_FOUND]);
+
+    assert.equal(fns.FormatMessageA.handler([0x1000, 0, 2, 0, 0x340, 0x80, 0]), 44);
+    assert.equal(ansi(0x340, 44), 'The system cannot find the file specified.\r\n');
+    assert.equal(fns.FormatMessageA.handler([0x1000 | 0xff, 0, 0x80070002, 0, 0x340, 0x80, 0]),
+        43, 'an HRESULT of FACILITY_WIN32, and a width turning the line break into a space');
+
+    wide(0x200, '%1!s! %2!s!');
+    wide(0x240, 'eaten');
+    host.view.setUint32(0x280, 0x240, true);
+    host.view.setUint32(0x284, 0x240, true);
+    host.view.setUint32(0x290, 0x280, true);
+    assert.equal(fns.FormatMessageW.handler([0x400, 0x200, 0, 0, 0x300, 1, 0x290]), 0);
+    assert.equal(host.view.getUint32(0x290, true), 0x284, 'the va_list past the one read');
+});
+
 test('the undecorated lstr names are the ANSI entries themselves', ()=>{
     const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
     for (const name of ['lstrcat', 'lstrcmp', 'lstrcmpi', 'lstrcpy', 'lstrcpyn', 'lstrlen'])
