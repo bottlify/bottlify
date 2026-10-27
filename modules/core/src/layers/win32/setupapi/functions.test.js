@@ -1953,3 +1953,108 @@ test('a device\'s keys: Device Parameters and a driver key its Driver value name
         'SYSTEM\\CurrentControlSet\\Control\\Class\\{6a55b5a4-0000-0000-0000-000000000000}\\0000'),
     null, 'the driver key goes with the device');
 });
+
+test('device properties by DEVPROPKEY: stored, the registry\'s, and the system\'s own', async()=>{
+    // Wine's setupapi test_device_property.
+    const ERROR_NOT_FOUND = 1168;
+    const ERROR_ACCESS_DENIED = 5;
+    const ERROR_INVALID_FLAGS = 1004;
+    const [EMPTY, NULL, UINT32, GUID, STRING, STRING_LIST] = [0, 1, 7, 0xd, 0x12, 0x2012];
+    const m = await machine();
+    const guid = m.buffer(16);
+    m.view.setUint32(guid, 0x6a55b5a4, true);
+    const set = m.fns.SetupDiCreateDeviceInfoList.handler([guid, 0]);
+    const device = m.buffer(28);
+    m.view.setUint32(device, 28, true);
+    m.fns.SetupDiCreateDeviceInfoW.handler([set, m.wstr('Root\\LEGACY_BOGUS\\0000'), guid, 0, 0, 0,
+        device]);
+    /** @param {string} fmtid @param {number} pid */
+    const propKey = (fmtid, pid)=>{
+        const at = m.buffer(20);
+        const hex = fmtid.replace(/[{}-]/g, '');
+        m.view.setUint32(at, Number.parseInt(hex.slice(0, 8), 16), true);
+        m.view.setUint16(at + 4, Number.parseInt(hex.slice(8, 12), 16), true);
+        m.view.setUint16(at + 6, Number.parseInt(hex.slice(12, 16), 16), true);
+        for (let index = 0; index < 8; index++)
+        {
+            m.view.setUint8(at + 8 + index, Number.parseInt(hex.slice(16 + index * 2,
+                18 + index * 2), 16));
+        }
+        m.view.setUint32(at + 16, pid, true);
+        return at;
+    };
+    const DEVICE = '{a45c254e-df1c-4efd-8020-67d146a850e0}';
+    const friendly = propKey(DEVICE, 14);
+    const hardware = propKey(DEVICE, 3);
+    const classGuid = propKey(DEVICE, 10);
+    const instance = propKey('{78c34fc8-104a-4aca-9ea4-524d52996e57}', 256);
+    const own = propKey('{12345678-0000-0000-0000-000000000000}', 2);
+    const value = m.wstr('deadbeef');
+    /** @param {number} key @param {number} type @param {number} data @param {number} size @param {number} [flags] */
+    const put = (key, type, data, size, flags = 0)=>m.fns.SetupDiSetDevicePropertyW.handler([set,
+        device, key, type, data, size, flags]);
+    const type = m.buffer(4);
+    const out = m.buffer(256);
+    const size = m.buffer(4);
+    /** @param {number} key @param {number} [length] */
+    const get = (key, length = 256)=>m.fns.SetupDiGetDevicePropertyW.handler([set, device, key,
+        type, out, length, size, 0]);
+
+    for (const [args, error] of /** @type {[number[], number][]} */ ([
+        [[0, STRING, value, 18], ERROR_INVALID_DATA], [[friendly, 0xffff, value, 18],
+            ERROR_INVALID_DATA], [[friendly, STRING, 0, 18], ERROR_INVALID_USER_BUFFER],
+        [[friendly, STRING, value, 0], ERROR_INVALID_DATA], [[friendly, STRING, value, 18, 1],
+            ERROR_INVALID_FLAGS], [[friendly, EMPTY, 0, 0], ERROR_NOT_FOUND]]))
+    {
+        assert.equal(put(...args), 0, `${args}`);
+        assert.equal(m.lastError(), error, `${args}`);
+    }
+    assert.equal(put(friendly, STRING, value, 18), 1);
+    assert.equal(get(friendly, 4), 0);
+    assert.equal(m.lastError(), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(m.u32(size), 18);
+    assert.equal(get(friendly), 1);
+    assert.equal(m.u32(type), STRING);
+    assert.equal(m.readWideString(out, 256), 'deadbeef');
+    const name = m.buffer(32);
+    m.fns.SetupDiGetDeviceRegistryPropertyA.handler([set, device, 0xc, 0, name, 32, 0]);
+    assert.equal(m.readCString(name, 32), 'deadbeef', 'the same as SPDRP_FRIENDLYNAME');
+    assert.equal(put(friendly, NULL, 0, 0), 1, 'deleted');
+    assert.equal(get(friendly), 0);
+    assert.equal(m.lastError(), ERROR_NOT_FOUND);
+    assert.equal(get(hardware), 0);
+    assert.equal(m.lastError(), ERROR_NOT_FOUND);
+
+    assert.equal(get(instance), 1);
+    assert.equal(m.readWideString(out, 256), 'ROOT\\LEGACY_BOGUS\\0000');
+    assert.equal(put(instance, STRING, value, 18), 0);
+    assert.equal(m.lastError(), ERROR_ACCESS_DENIED, 'the system keeps it');
+    assert.equal(put(instance, STRING, out, m.u32(size)), 1, 'unless set to what it is');
+    assert.equal(get(classGuid), 1);
+    assert.equal(m.u32(type), GUID);
+    assert.equal(m.u32(out), 0x6a55b5a4);
+
+    const data = m.buffer(4);
+    m.view.setUint32(data, 0xdeadbeef, true);
+    assert.equal(put(own, UINT32, data, 4), 1);
+    assert.equal(get(own), 1);
+    assert.deepEqual([m.u32(type), m.u32(out)], [UINT32, 0xdeadbeef]);
+    assert.equal(put(propKey(DEVICE, 0x10 + 2), UINT32, data, 4), 0);
+    assert.equal(m.lastError(), ERROR_ACCESS_DENIED, 'SPDRP_UI_NUMBER');
+    const list = m.wstr('a\0b\0');
+    assert.equal(put(hardware, STRING_LIST, list, 10), 1);
+
+    const keys = m.buffer(20 * 16);
+    const count = m.buffer(4);
+    assert.equal(m.fns.SetupDiGetDevicePropertyKeys.handler([set, device, 0, 0, count, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INSUFFICIENT_BUFFER);
+    const needed = m.u32(count);
+    assert.equal(m.fns.SetupDiGetDevicePropertyKeys.handler([set, device, keys, 16, count, 1]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_FLAGS);
+    assert.equal(m.fns.SetupDiGetDevicePropertyKeys.handler([set, device, keys, 16, count, 0]), 1);
+    const pids = Array.from({ length: needed }, (_, index)=>m.u32(keys + index * 20 + 16));
+    for (const pid of [256, 10, 3, 2])
+    {
+        assert.ok(pids.includes(pid), `${pid} among ${pids}`);
+    }
+});

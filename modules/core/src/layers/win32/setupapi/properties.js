@@ -63,6 +63,14 @@ const PROPERTIES = new Map([
     [0x21, { name: 'RemovalPolicy', type: REG_DWORD, settable: true }],
 ]);
 
+/**
+ * A property's entry -- its value name, type and whether a program sets
+ * it -- null for an index with no value.
+ *
+ * @param {number} property
+ */
+export const propertyEntry = property=>PROPERTIES.get(property) ?? null;
+
 /** The string types, whose data changes width between the hive and a W call. */
 const STRINGS = new Set([REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ]);
 

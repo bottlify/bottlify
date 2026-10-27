@@ -18,7 +18,13 @@ import {
     CLASS_KEY, DEVICE_CLASSES_KEY, ENUM_KEY, GUID_NULL, SPINT, createDeviceStore, interfacePath,
 } from './devices.js';
 import { infNumber, installRegistry } from './registry.js';
-import { readProperty, writeProperty } from './properties.js';
+import {
+    ERROR_INVALID_REG_PROPERTY, propertyEntry, readProperty, writeProperty,
+} from './properties.js';
+import {
+    DEVPROPKEY_SIZE, DEVPROP_TYPE, deleteProperty, storeProperty, storedKeys, storedProperty,
+    validType,
+} from './devprops.js';
 import { writeShellLink } from '../common/shell-link.js';
 import { CATALOG_STORE } from '../sfc/functions.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
@@ -66,6 +72,30 @@ const ERROR_INVALID_CLASS = 0xe0000206;
 const ERROR_BAD_SERVICE_INSTALLSECT = 0xe0000217;
 const ERROR_SERVICE_EXISTS = 1073;
 const ERROR_INVALID_FLAGS = 1004;
+/** The device property formats: the device's registry properties, its instance, its relations, its bus, its container. */
+const DEVPKEY_DEVICE = '{a45c254e-df1c-4efd-8020-67d146a850e0}';
+const DEVPKEY_INSTANCE = '{78c34fc8-104a-4aca-9ea4-524d52996e57}';
+const DEVPKEY_RELATIONS = '{4340a6c5-93fa-4706-972c-7b648008a5a7}';
+const DEVPKEY_BUS_DESCRIPTION = '{540b947e-8b40-45bc-a8a2-6a0b894cbda2}';
+const DEVPKEY_CONTAINER = '{8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c}';
+
+/** Every device's parent here: the root of the device tree, which enumerates them all. */
+const ROOT_PARENT = 'HTREE\\ROOT\\0';
+
+const SPDRP_CLASSGUID = 0x8;
+const SPDRP_PHYSICAL_DEVICE_OBJECT_NAME = 0xe;
+/** The last index, which no call may set. */
+const SPDRP_BASE_CONTAINERID = 0x24;
+
+/** DEVPROP_TYPE_BINARY: an array of bytes. */
+const DEVPROP_TYPE_BINARY = 0x1003;
+
+/** The DEVPROPTYPE a registry property's type is answered as. */
+const DEVPROP_OF_REG = new Map([[1, DEVPROP_TYPE.STRING], [2, DEVPROP_TYPE.STRING],
+    [7, DEVPROP_TYPE.STRING_LIST], [4, DEVPROP_TYPE.UINT32], [3, DEVPROP_TYPE_BINARY]]);
+
+const ERROR_NOT_FOUND = 1168;
+
 const ERROR_PARTIAL_COPY = 299;
 const ERROR_DEVINFO_NOT_REGISTERED = 0xe0000208;
 const ERROR_KEY_DOES_NOT_EXIST = 0xe0000204;
@@ -1033,7 +1063,10 @@ export function createSetupapiFunctions(host){
         : guidText(host.readMemory(pointer >>> 0, 16).slice()).toLowerCase());
 
     /** @param {number} address @param {string} guid  Braced. */
-    const writeGuid = (address, guid)=>{
+    const writeGuid = (address, guid)=>host.writeMemory(address >>> 0, guidBytes(guid));
+
+    /** A GUID's sixteen bytes. @param {string} guid  Braced. */
+    const guidBytes = guid=>{
         const hex = guid.replace(/[{}-]/g, '');
         const bytes = new Uint8Array(16);
         const view = new DataView(bytes.buffer);
@@ -1044,7 +1077,7 @@ export function createSetupapiFunctions(host){
         {
             bytes[8 + at] = Number.parseInt(hex.slice(16 + at * 2, 18 + at * 2), 16);
         }
-        host.writeMemory(address >>> 0, bytes);
+        return bytes;
     };
 
     /**
@@ -1072,6 +1105,170 @@ export function createSetupapiFunctions(host){
         }
         const key = readU32(address + 24);
         return set.devices.find(device=>device.key === key) ?? null;
+    };
+
+    /** A DEVPROPKEY at an address: its format, braced and lower case, and its id. @param {number} address */
+    const propKeyAt = address=>({
+        fmtid: guidText(host.readMemory(address >>> 0, 16).slice()).toLowerCase(),
+        pid: readU32((address >>> 0) + 16),
+    });
+
+    /** UTF-16, terminated. @param {string} value */
+    const utf16z = value=>encodeIn(value, true);
+
+    /**
+     * The properties of a device the system keeps, by format and id: how
+     * each is answered, null when the device has none. None can be set to
+     * anything but what it is.
+     *
+     * @typedef {(device: import('./devices.js').Device) =>
+     *     { type: number, data: Uint8Array } | null} Innate
+     * @type {Map<string, Innate>}
+     */
+    const INNATE = new Map(/** @type {[string, Innate][]} */ ([
+        [`${DEVPKEY_INSTANCE}|256`, device=>({ type: DEVPROP_TYPE.STRING,
+            data: utf16z(device.id) })],
+        [`${DEVPKEY_RELATIONS}|8`, ()=>({ type: DEVPROP_TYPE.STRING, data: utf16z(ROOT_PARENT) })],
+        [`${DEVPKEY_RELATIONS}|10`, device=>({ type: DEVPROP_TYPE.STRING_LIST,
+            data: utf16z([...(devices?.allInstances() ?? [])]
+                .filter(id=>id.toUpperCase() !== device.id.toUpperCase())
+                .map(id=>`${id}\0`).join('')) })],
+        [`${DEVPKEY_RELATIONS}|9`, ()=>null],
+        [`${DEVPKEY_BUS_DESCRIPTION}|4`, ()=>null],
+        [`${DEVPKEY_CONTAINER}|2`, ()=>null],
+    ]));
+
+    /**
+     * A device's property by its key, as SetupDiGetDevicePropertyW answers
+     * it; null for one it has not. A key in the device format whose id is
+     * an SPDRP index plus two is that registry property.
+     *
+     * @param {import('./devices.js').Device} device @param {string} fmtid @param {number} pid
+     * @returns {{ type: number, data: Uint8Array } | null}
+     */
+    const devicePropertyOf = (device, fmtid, pid)=>{
+        const innate = INNATE.get(`${fmtid}|${pid}`);
+        if (innate)
+        {
+            return innate(device);
+        }
+        const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+        const key = devices?.instanceKey(device.id) ?? null;
+        if (fmtid === DEVPKEY_DEVICE && pid >= 2)
+        {
+            const spdrp = pid - 2;
+            const entry = propertyEntry(spdrp);
+            if (entry)
+            {
+                const value = readProperty(hive, key, device.id, spdrp, true);
+                if ('error' in value)
+                {
+                    return null;
+                }
+                if (spdrp === SPDRP_CLASSGUID)
+                {
+                    return { type: DEVPROP_TYPE.GUID, data: guidBytes(devices?.classOf(device.id)
+                        ?? GUID_NULL) };
+                }
+                return { type: DEVPROP_OF_REG.get(value.type) ?? DEVPROP_TYPE_BINARY,
+                    data: value.data };
+            }
+        }
+        return key ? storedProperty(hive, key, fmtid, pid) : null;
+    };
+
+    /**
+     * Sets a device's property, or deletes it for DEVPROP_TYPE_EMPTY or
+     * NULL; the error, 0 for none.
+     *
+     * @param {import('./devices.js').Device} device @param {string} fmtid @param {number} pid
+     * @param {number} type @param {Uint8Array} data
+     */
+    const setDeviceProperty = (device, fmtid, pid, type, data)=>{
+        const removing = type === DEVPROP_TYPE.EMPTY || type === DEVPROP_TYPE.NULL;
+        const innate = INNATE.get(`${fmtid}|${pid}`);
+        if (innate)
+        {
+            const now = innate(device);
+            const same = now !== null && !removing && now.type === type
+                && now.data.length === data.length && now.data.every((byte, at)=>byte === data[at]);
+            return same ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
+        }
+        const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+        const key = devices?.instanceKey(device.id) ?? null;
+        if (!key)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if (fmtid === DEVPKEY_DEVICE && pid >= 2 && pid - 2 <= SPDRP_BASE_CONTAINERID)
+        {
+            const spdrp = pid - 2;
+            const entry = propertyEntry(spdrp);
+            if (spdrp === SPDRP_BASE_CONTAINERID)
+            {
+                return ERROR_INVALID_REG_PROPERTY;
+            }
+            if ((entry && !entry.settable) || spdrp === SPDRP_PHYSICAL_DEVICE_OBJECT_NAME)
+            {
+                return ERROR_ACCESS_DENIED;
+            }
+            if (entry)
+            {
+                if (removing)
+                {
+                    return hive.deleteValue(key, entry.name) ? ERROR_SUCCESS : ERROR_NOT_FOUND;
+                }
+                if (spdrp === SPDRP_CLASSGUID)
+                {
+                    if (type !== DEVPROP_TYPE.GUID || data.length !== 16)
+                    {
+                        return ERROR_INVALID_DATA;
+                    }
+                    hive.setValue(key, entry.name, 1, encodeAnsi(`${guidText(data)
+                        .toLowerCase()}\0`));
+                    return ERROR_SUCCESS;
+                }
+                if (DEVPROP_OF_REG.get(entry.type) !== type)
+                {
+                    return ERROR_INVALID_DATA;
+                }
+                return writeProperty(hive, key, spdrp, data, true);
+            }
+        }
+        if (removing)
+        {
+            return deleteProperty(hive, key, fmtid, pid) ? ERROR_SUCCESS : ERROR_NOT_FOUND;
+        }
+        storeProperty(hive, key, fmtid, pid, type, data);
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * The keys of the properties a device has: the system's it has, the
+     * registry properties with a value, and its own.
+     *
+     * @param {import('./devices.js').Device} device
+     */
+    const devicePropertyKeys = device=>{
+        /** @type {{ fmtid: string, pid: number }[]} */
+        const keys = [];
+        for (const [name, answer] of INNATE)
+        {
+            if (answer(device))
+            {
+                const [fmtid, pid] = name.split('|');
+                keys.push({ fmtid, pid: Number(pid) });
+            }
+        }
+        for (let spdrp = 0; spdrp < SPDRP_BASE_CONTAINERID; spdrp++)
+        {
+            if (propertyEntry(spdrp) && devicePropertyOf(device, DEVPKEY_DEVICE, spdrp + 2))
+            {
+                keys.push({ fmtid: DEVPKEY_DEVICE, pid: spdrp + 2 });
+            }
+        }
+        const key = devices?.instanceKey(device.id) ?? null;
+        return key ? [...keys, ...storedKeys(host.registry, key)] : keys;
     };
 
     /** An instance's Device Parameters key. @param {string} id */
@@ -4548,6 +4745,153 @@ export function createSetupapiFunctions(host){
                 return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
             },
         })),
+
+        /**
+         * BOOL SetupDiSetDevicePropertyW(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     const DEVPROPKEY *PropertyKey, DEVPROPTYPE PropertyType, const BYTE *PropertyBuffer,
+         *     ULONG PropertyBufferSize, DWORD Flags)
+         *
+         * DEVPROP_TYPE_EMPTY or NULL deletes the property, ERROR_NOT_FOUND
+         * when there is none. A property the system keeps is
+         * ERROR_ACCESS_DENIED unless it is set to what it is.
+         */
+        SetupDiSetDevicePropertyW: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([handle, data, keyPointer, type, buffer, size, flags])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices || !host.registry)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((keyPointer >>> 0) === 0 || !validType(type >>> 0))
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                if ((buffer >>> 0) === 0 && (size >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                const removing = (type >>> 0) === DEVPROP_TYPE.EMPTY
+                    || (type >>> 0) === DEVPROP_TYPE.NULL;
+                if (!removing && (size >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_FLAGS);
+                }
+                const { fmtid, pid } = propKeyAt(keyPointer);
+                const bytes = removing ? new Uint8Array(0)
+                    : host.readMemory(buffer >>> 0, size >>> 0).slice();
+                const error = setDeviceProperty(device, fmtid, pid, type >>> 0, bytes);
+                return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
+            },
+        },
+
+        /**
+         * BOOL SetupDiGetDevicePropertyW(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     const DEVPROPKEY *PropertyKey, DEVPROPTYPE *PropertyType, PBYTE PropertyBuffer,
+         *     DWORD PropertyBufferSize, PDWORD RequiredSize, DWORD Flags)
+         *
+         * A property the device has not is ERROR_NOT_FOUND, nothing written.
+         */
+        SetupDiGetDevicePropertyW: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([handle, data, keyPointer, typeOut, buffer, size, required, flags])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices || !host.registry)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((keyPointer >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                if ((typeOut >>> 0) === 0 || ((buffer >>> 0) === 0 && (size >>> 0) !== 0))
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_FLAGS);
+                }
+                const { fmtid, pid } = propKeyAt(keyPointer);
+                const value = devicePropertyOf(device, fmtid, pid);
+                if (!value)
+                {
+                    return fail(ERROR_NOT_FOUND);
+                }
+                writeU32(typeOut, value.type);
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, value.data.length);
+                }
+                if ((size >>> 0) < value.data.length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory(buffer >>> 0, value.data);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiGetDevicePropertyKeys(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DEVPROPKEY *PropertyKeyArray,
+         *     DWORD PropertyKeyCount, PDWORD RequiredPropertyKeyCount, DWORD Flags)
+         */
+        SetupDiGetDevicePropertyKeys: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, data, array, count, required, flags])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices || !host.registry)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((array >>> 0) === 0 && (count >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_FLAGS);
+                }
+                const keys = devicePropertyKeys(device);
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, keys.length);
+                }
+                if ((count >>> 0) < keys.length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                keys.forEach((key, index)=>{
+                    const at = (array >>> 0) + index * DEVPROPKEY_SIZE;
+                    writeGuid(at, key.fmtid);
+                    writeU32(at + 16, key.pid);
+                });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
 
         /**
          * HKEY SetupDiCreateDevRegKeyA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
