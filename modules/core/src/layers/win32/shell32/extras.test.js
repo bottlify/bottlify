@@ -226,3 +226,41 @@ test('a stock icon is in the shell\'s library, and an id out of range is no icon
     }
     assert.equal(await m.extras.SHGetStockIconInfo.handler([3, 0, 0]), 0x80070057 | 0);
 });
+
+test('the process\'s app id is the one set, and a window\'s property store keeps values', async()=>{
+    const m = machine();
+    assert.equal(await m.extras.GetCurrentProcessExplicitAppUserModelID.handler([0x5000]),
+        0x80004005 | 0, 'E_FAIL before one is set');
+    assert.equal(m.u32(0x5000), 0);
+    const iid = m.put('', false, 0x1000);
+    const guid = (/** @type {number[]} */ bytes)=>m.memory.set(bytes, iid);
+    // IID_IDispatch is no store's interface.
+    guid([0, 0x04, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+    assert.equal(m.extras.SHGetPropertyStoreForWindow.handler([0x10, iid, 0x5000]),
+        0x80004002 | 0);
+    assert.equal(m.u32(0x5000), 0);
+    // IID_IPropertyStore {886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}
+    guid([0xeb, 0x8e, 0x6d, 0x88, 0xf2, 0x8c, 0x46, 0x44, 0x8d, 0x02, 0xcd, 0xba, 0x1d, 0xbd,
+        0xcf, 0x99]);
+    assert.equal(m.extras.SHGetPropertyStoreForWindow.handler([0x10, iid, 0x5000]), 0);
+    assert.notEqual(m.u32(0x5000), 0);
+    const store = m.published.at(-1);
+    /** @param {string} name @param {number[]} args */
+    const call = (name, args)=>store.interfaceFor('{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}')
+        .methods.find((/** @type {any} */ method)=>method.name === name).invoke(store, args);
+    const key = 0x1100;
+    m.memory.set(Array.from({ length: 16 }, (_, at)=>at + 1), key);
+    m.memory.set([5, 0, 0, 0], key + 16);
+    m.memory.set([3, 0, 0, 0, 0, 0, 0, 0, 42, 0, 0, 0, 0, 0, 0, 0], 0x1200);
+    assert.equal(call('SetValue', [key, 0x1200]), 0, 'VT_I4');
+    assert.equal(call('GetCount', [0x5004]), 0);
+    assert.equal(m.u32(0x5004), 1);
+    m.memory.fill(0xcc, 0x1300, 0x1310);
+    assert.equal(await call('GetValue', [key, 0x1300]), 0);
+    assert.deepEqual([m.u32(0x1300) & 0xffff, m.u32(0x1308)], [3, 42]);
+    m.memory[key + 16] = 6;
+    assert.equal(await call('GetValue', [key, 0x1300]), 0);
+    assert.equal(m.u32(0x1300), 0, 'a key never set is VT_EMPTY');
+    m.memory.set([13, 0], 0x1200);
+    assert.equal(call('SetValue', [key, 0x1200]), 0x80004001 | 0, 'VT_UNKNOWN is not kept');
+});

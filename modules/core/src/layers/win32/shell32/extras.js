@@ -71,6 +71,14 @@ const KNOWN_FOLDERS = Object.freeze({
 
 const IID_IIMAGELIST = '{46EB5926-582E-4017-9FDF-E8998DAA0950}';
 
+const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
+const IID_IPROPERTYSTORE = '{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}';
+const E_FAIL = 0x80004005 | 0;
+/** PROPVARIANT types a store copies as they are: none of them points anywhere. */
+const SCALAR_TYPES = Object.freeze(new Set([0, 1, 2, 3, 4, 5, 11, 16, 17, 18, 19, 20, 21, 22,
+    23, 64]));
+const VT_LPWSTR = 31;
+
 /** SHSTOCKICONINFO: cbSize, hIcon, iSysImageIndex, iIcon, then szPath[MAX_PATH]. */
 const SHSTOCKICONINFO_SIZE = 16 + MAX_PATH * 2;
 /** SIID_MAX_ICONS: the stock icons are numbered from 0 to one below it. */
@@ -312,6 +320,108 @@ export function createShellExtras(host, parts){
     };
     let toldImageLists = false;
 
+    /** @type {string | null} What SetCurrentProcessExplicitAppUserModelID named. */
+    let appUserModelId = null;
+
+    /**
+     * A string in task memory, which the caller frees with CoTaskMemFree; 0
+     * when there is none to be had.
+     *
+     * @param {string} text
+     */
+    const taskString = async text=>{
+        const alloc = host.library?.('ole32.dll')?.CoTaskMemAlloc;
+        const bytes = utf16z(text);
+        const at = alloc ? /** @type {number} */ (await alloc.handler([bytes.length])) >>> 0 : 0;
+        if (at)
+        {
+            host.writeMemory(at, bytes);
+        }
+        return at;
+    };
+
+    /**
+     * A property store's methods over the values it was given, by key: a
+     * scalar as it was, a string copied, any other type refused.
+     */
+    const propertyStoreMethods = Object.freeze([
+        ...IUNKNOWN_METHODS,
+        /** HRESULT GetCount(DWORD *cProps) */
+        { name: 'GetCount', argBytes: 8,
+            /** @param {any} object @param {number[]} args */
+            invoke: (object, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, object.state.values.size);
+                return S_OK;
+            } },
+        /** HRESULT GetAt(DWORD iProp, PROPERTYKEY *pkey) */
+        { name: 'GetAt', argBytes: 12,
+            /** @param {any} object @param {number[]} args */
+            invoke: (object, [index, key])=>{
+                const found = [...object.state.values.values()][index >>> 0];
+                if (!found || (key >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                host.writeMemory(key >>> 0, found.key);
+                return S_OK;
+            } },
+        /** HRESULT GetValue(REFPROPERTYKEY key, PROPVARIANT *pv) */
+        { name: 'GetValue', argBytes: 12,
+            /** @param {any} object @param {number[]} args */
+            invoke: async(object, [key, value])=>{
+                if ((key >>> 0) === 0 || (value >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const found = object.state.values.get(keyOf(key));
+                const bytes = new Uint8Array(16);
+                if (found?.text !== undefined)
+                {
+                    bytes.set(dword(VT_LPWSTR), 0);
+                    bytes.set(dword(await taskString(found.text)), 8);
+                }
+                else if (found)
+                {
+                    bytes.set(found.bytes);
+                }
+                host.writeMemory(value >>> 0, bytes);
+                return S_OK;
+            } },
+        /** HRESULT SetValue(REFPROPERTYKEY key, REFPROPVARIANT propvar) */
+        { name: 'SetValue', argBytes: 12,
+            /** @param {any} object @param {number[]} args */
+            invoke: (object, [key, value])=>{
+                if ((key >>> 0) === 0 || (value >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const bytes = host.readMemory(value >>> 0, 16).slice();
+                const type = bytes[0] | bytes[1] << 8;
+                const stored = { key: host.readMemory(key >>> 0, 20).slice(), bytes };
+                if (type === VT_LPWSTR)
+                {
+                    object.state.values.set(keyOf(key),
+                        { ...stored, text: wide(readU32(value + 8)) ?? '' });
+                    return S_OK;
+                }
+                if (!SCALAR_TYPES.has(type))
+                {
+                    return E_NOTIMPL;
+                }
+                object.state.values.set(keyOf(key), stored);
+                return S_OK;
+            } },
+        /** HRESULT Commit(void): the values are kept as they are set. */
+        { name: 'Commit', argBytes: 4, invoke: ()=>S_OK },
+    ]);
+    /** @param {number} key  A PROPERTYKEY: its GUID and property id, as the store's own key. */
+    const keyOf = key=>`${readGuid(host, key >>> 0)}/${readU32(key + 16)}`;
+
+
     /**
      * SHGetNewLinkInfo for either width: the name a shortcut to the target
      * would take in the directory -- its name with " - Shortcut", or
@@ -520,6 +630,81 @@ export function createShellExtras(host, parts){
          * each time. It answers its size; holding no icons, it draws
          * nothing, and a HIMAGELIST call on it is not comctl32's list.
          */
+        /**
+         * HRESULT SetCurrentProcessExplicitAppUserModelID(PCWSTR AppID)
+         *
+         * The name the taskbar would group the process's windows under, kept
+         * for the getter.
+         */
+        SetCurrentProcessExplicitAppUserModelID: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([id])=>{
+                const text = wide(id);
+                if (text === null)
+                {
+                    return E_INVALIDARG;
+                }
+                appUserModelId = text;
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT GetCurrentProcessExplicitAppUserModelID(PWSTR *AppID)
+         *
+         * The name the setter gave, in task memory; E_FAIL with a null until
+         * one was (Wine's test_GetCurrentProcessExplicitAppUserModelID).
+         */
+        GetCurrentProcessExplicitAppUserModelID: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([out])=>{
+                writeU32(out, 0);
+                if (appUserModelId === null)
+                {
+                    return E_FAIL;
+                }
+                const at = await taskString(appUserModelId);
+                writeU32(out, at);
+                return at ? S_OK : E_OUTOFMEMORY;
+            },
+        },
+
+        /**
+         * HRESULT SHGetPropertyStoreForWindow(HWND hwnd, REFIID riid, void **ppv)
+         *
+         * A property store for the window, through IUnknown or
+         * IPropertyStore; any other interface is E_NOINTERFACE with a null
+         * (Wine's test_SHGetPropertyStoreForWindow). Nothing reads what is
+         * set in it: there is no taskbar to group or label the window by it.
+         */
+        SHGetPropertyStoreForWindow: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, riid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                const iid = (riid >>> 0) === 0 ? null : readGuid(host, riid >>> 0);
+                if (iid !== IID_IUNKNOWN && iid !== IID_IPROPERTYSTORE)
+                {
+                    return E_NOINTERFACE;
+                }
+                if (!host.publish)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                const adapter = createAdapter({ values: new Map() },
+                    { [IID_IPROPERTYSTORE]: propertyStoreMethods });
+                const pointer = host.publish(adapter, IID_IPROPERTYSTORE) >>> 0;
+                writeU32(out, pointer);
+                return pointer ? S_OK : E_OUTOFMEMORY;
+            },
+        },
+
         /**
          * HRESULT SHGetStockIconInfo(SHSTOCKICONID siid, UINT uFlags, SHSTOCKICONINFO *psii)
          *
