@@ -189,8 +189,16 @@ const SHORT_DATE = 'M/d/yyyy';
 const LONG_DATE = 'dddd, MMMM dd, yyyy';
 
 /** The time formats EnumTimeFormats enumerates, the locale's own first. */
-const TIME_FORMATS = ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss', 'HH:mm:ss',
-    'h:mm tt', 'hh:mm tt', 'H:mm', 'HH:mm'];
+const TIME_FORMATS = ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss', 'HH:mm:ss'];
+/** And with TIME_NOSECONDS, the locale's short ones. */
+const SHORT_TIME_FORMATS = ['h:mm tt', 'hh:mm tt', 'H:mm', 'HH:mm'];
+/** EnumTimeFormatsW's one kind. */
+const TIME_NOSECONDS = 0x00000002;
+/**
+ * The LCTYPEs only the wide GetLocaleInfo answers: the shortest day names,
+ * the short time and the shortest time markers came after the ANSI form.
+ */
+const WIDE_ONLY_TYPES = [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x79, 0x7e, 0x7f];
 
 /** And the date formats EnumDateFormats does, by kind, the locale's own first. */
 const YEAR_MONTH = 'MMMM, yyyy';
@@ -1170,7 +1178,8 @@ export function createLocaleFunctions(host){
                 }
             }
             host.free?.(block);
-            return answer;
+            void answer;
+            return 1;
         };
         return run();
     };
@@ -1384,8 +1393,9 @@ export function createLocaleFunctions(host){
             {
                 return number;
             }
-            return own ?? (HEX_TYPES.includes(wanted)
-                ? number.toString(16).padStart(4, '0') : String(number));
+            return own ?? (HEX_TYPES.includes(wanted) ? number.toString(16).padStart(4, '0')
+                : wanted === LCTYPE.IDEFAULTEBCDICCODEPAGE ? String(number).padStart(3, '0')
+                    : String(number));
         }
         if (asNumber)
         {
@@ -1432,7 +1442,8 @@ export function createLocaleFunctions(host){
         // parameter, and a caller that tells the two apart retries without
         // the flag: a string has no number, and only the wide form carries
         // the genitive month names.
-        if (answer === null || (genitive && (!isWide || wanted < LOCALE_SMONTHNAME1
+        if (answer === null || (!isWide && WIDE_ONLY_TYPES.includes(wanted))
+            || (genitive && (!isWide || wanted < LOCALE_SMONTHNAME1
             || (wanted > LOCALE_SMONTHNAME1 + 11 && wanted !== LOCALE_SMONTHNAME13))))
         {
             host.setLastError(ERROR_INVALID_FLAGS);
@@ -2601,12 +2612,17 @@ export function createLocaleFunctions(host){
         EnumTimeFormatsA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([proc])=>enumerateFormats(proc, TIME_FORMATS, false),
+            handler: ([proc, , flags])=>((flags >>> 0) & ~LOCALE_USE_CP_ACP) !== 0
+                ? refuse(ERROR_INVALID_FLAGS) : enumerateFormats(proc, TIME_FORMATS, false),
         },
         EnumTimeFormatsW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([proc])=>enumerateFormats(proc, TIME_FORMATS, true),
+            handler: ([proc, , flags])=>{
+                const kind = (flags >>> 0) & ~LOCALE_USE_CP_ACP;
+                return kind !== 0 && kind !== TIME_NOSECONDS ? refuse(ERROR_INVALID_FLAGS)
+                    : enumerateFormats(proc, kind === 0 ? TIME_FORMATS : SHORT_TIME_FORMATS, true);
+            },
         },
 
         /** GetDateFormatA/W and GetTimeFormatA/W: see whenFormat. */

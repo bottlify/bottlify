@@ -120,8 +120,8 @@ test('EnumTimeFormatsA hands each format to the callback until it stops', async(
         },
     });
 
-    assert.equal(await fns.EnumTimeFormatsA.handler([0x1234, 0x0409, 0]), 0,
-        'the callback stopped the run');
+    assert.equal(await fns.EnumTimeFormatsA.handler([0x1234, 0x0409, 0]), 1,
+        'the callback stopped the run, and the call succeeded');
     assert.deepEqual(seen, ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss'],
         'the locale formats, first three then stopped');
     // Three arguments, as winnls.h declares it: a fourth popped moved the
