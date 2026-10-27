@@ -1823,3 +1823,20 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** A cloud container (Xeon 2.30 GHz, 4 vCPU), node 22.22; GPU, driver, power plan
   and bundle hash not recorded.
 - **Decision.** Not taken; the long-mode scheme is not ported to the 32-bit translator.
+
+### 2026-10-27: long mode's window test folded into the page test
+
+- **Idea.** A long-mode operand access tests the 4 GiB window (`windowAddress`: the address and
+  its last byte or'd, shifted down 32 bits, a branch) and then the page flags (`checkAccess`: a
+  branch). Kept in an i32 local and or'd into the page test's word, the two tests are one branch
+  on the hot path.
+- **Workload.** cork-bench x86-64 images, `--bits 64 --cork '{"long":"shared"}'`; the measure is
+  machine instructions an iteration under callgrind (node 22.22 `--no-liftoff`, 20 warm
+  iterations, the run of 10 + K iterations less the run of 10, divided by K), base c23d5167.
+- **Values.** vm-x64, K = 200: base 2.927 M an iteration (5.11 a guest instruction), folded
+  3.017 M (5.26); K = 100 runs before: 5.20 base, 5.30 folded. tree-x64 (K = 50) 5.89 -> 5.73,
+  sort-x64 4.53 -> 4.50, within the 0.1 a guest instruction the measure moves between runs.
+- **Why.** Not attributed; the local carried from the window test to the page test is one more
+  value live across the address computation in handlers already spilling.
+- **Machine.** A cloud container (Xeon, 4 vCPU), node 22.22, valgrind 3.22.
+- **Decision.** Not taken.
