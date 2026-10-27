@@ -1258,6 +1258,21 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Whether a message to a window runs its procedure on the calling thread
+     * now -- its own window, or one whose thread takes no messages -- rather
+     * than waiting in that thread's queue.
+     *
+     * @param {number} hwnd @param {unknown} [thread]
+     */
+    const answeredHere = (hwnd, thread)=>{
+        const record = live(hwnd);
+        const owner = record ? creatorOf(record) : null;
+        const self = threadIdOf(thread ?? host.callerThread?.());
+        return !record || owner === null || self === null || owner === self
+            || !queueing.has(owner);
+    };
+
+    /**
      * What activation and the focus moving tell a window: WM_NCACTIVATE,
      * WM_ACTIVATE, WM_ACTIVATEAPP, WM_KILLFOCUS, WM_SETFOCUS. A window of the
      * thread that moved them hears it now; a window of another thread hears it
@@ -1274,11 +1289,7 @@ export function createWindowFunctions(host){
      * @returns {number | Promise<number>}
      */
     const tellOwner = (hwnd, message, wParam, lParam, thread)=>{
-        const record = live(hwnd);
-        const owner = record ? creatorOf(record) : null;
-        const self = threadIdOf(thread ?? host.callerThread?.());
-        if (!record || owner === null || self === null || owner === self
-            || !queueing.has(owner))
+        if (answeredHere(hwnd, thread))
         {
             return send(hwnd, message, wParam, lParam, thread);
         }
@@ -2000,12 +2011,16 @@ export function createWindowFunctions(host){
      * @param {any} record
      * @param {boolean} [marks]  False when the caller marks what changed itself,
      *        as SetWindowPos does for the move it restacks with.
+     * @returns {boolean} whether it moved in the stacking
      */
     const raise = (record, marks = true)=>{
         const top = topLevelOf(record);
-        if (windows.get(top.hwnd) !== top || [...windows.keys()].at(-1) === top.hwnd)
+        // On top already when the last record is it or one of its own, which
+        // follow it.
+        const last = [...windows.values()].at(-1);
+        if (windows.get(top.hwnd) !== top || (last && topLevelOf(last) === top))
         {
-            return;
+            return false;
         }
         const watched = marks && shown(top) ? beforeChange(top) : null;
         // Its descendants follow it, so that a walk in record order still
@@ -2026,6 +2041,7 @@ export function createWindowFunctions(host){
         }
         tell(top);
         adoptOrder();
+        return true;
     };
 
     /**
@@ -2039,14 +2055,15 @@ export function createWindowFunctions(host){
      *
      * @param {any} record @param {number} after
      * @param {boolean} [marks]  As `raise`.
+     * @returns {boolean} whether it moved in the stacking
      */
     const restack = (record, after, marks = true)=>{
-        const HWND_BOTTOM = 1;
+        if (inPlace(record, after))
+        {
+            return false;
+        }
         const watched = marks && shown(record) ? beforeChange(record) : null;
-        const others = childrenOf({ hwnd: record.parent }).filter(each=>each !== record);
-        const sibling = others.findIndex(each=>each.hwnd === (after >>> 0));
-        const at = (after >>> 0) === HWND_BOTTOM ? others.length : sibling + 1;
-        const order = [...others.slice(0, at), record, ...others.slice(at)];
+        const order = stackingFor(record, after);
         const moved = new Set(order);
         /** @type {any[]} */
         const kept = [];
@@ -2073,6 +2090,45 @@ export function createWindowFunctions(host){
             afterChange(watched);
         }
         tell(record);
+        return true;
+    };
+
+    /**
+     * A child's siblings, itself among them, as `restack` would order them.
+     *
+     * @param {any} record @param {number} after
+     */
+    const stackingFor = (record, after)=>{
+        const HWND_BOTTOM = 1;
+        const others = childrenOf({ hwnd: record.parent }).filter(each=>each !== record);
+        const sibling = others.findIndex(each=>each.hwnd === (after >>> 0));
+        const at = (after >>> 0) === HWND_BOTTOM ? others.length : sibling + 1;
+        return [...others.slice(0, at), record, ...others.slice(at)];
+    };
+
+    /**
+     * Whether SetWindowPos's restacking would leave what shows as it is: a
+     * child already where hWndInsertAfter puts it; a top-level window with
+     * nothing shown over it, or sent to the bottom, which this build does not
+     * do. A top-level window raised over hidden ones is still raised.
+     *
+     * @param {any} record @param {number} after
+     */
+    const inPlace = (record, after)=>{
+        if (isChild(record))
+        {
+            const order = stackingFor(record, after);
+            const was = childrenOf({ hwnd: record.parent });
+            return was.length === order.length && was.every((each, index)=>each === order[index]);
+        }
+        const top = topLevelOf(record);
+        if ((after | 0) === 1 || windows.get(top.hwnd) !== top)
+        {
+            return true;
+        }
+        const records = [...windows.values()];
+        return records.slice(records.indexOf(top) + 1)
+            .every(each=>each.destroyed || !shown(each) || topLevelOf(each) === top);
     };
 
     /** @param {any} record  Whether it and every ancestor is shown. */
@@ -2102,6 +2158,11 @@ export function createWindowFunctions(host){
      * sliding in, the camera settling -- so the picture never stops arriving.
      */
     let active = 0;
+    /**
+     * The window of this program that held the focus when activation moved
+     * the run's foreground away from it, until the focus moves on.
+     */
+    let detached = 0;
     /**
      * Whether the run's foreground window is another process's: this one's
      * windows were told they lost it, and none of them is active until one is
@@ -2144,10 +2205,11 @@ export function createWindowFunctions(host){
      * its top-level windows hears WM_ACTIVATEAPP(1) first (WmCreatePopupSeq).
      *
      * @param {number} hwnd
-     * @param {{ thread?: unknown, how?: number,
+     * @param {{ thread?: unknown, how?: number, focus?: boolean,
      *     from?: { hwnd: number, thread: number } | null }} [options]
      *        `how` is WM_ACTIVATE's wParam for the window gaining it:
-     *        WA_CLICKACTIVE when a click did it.
+     *        WA_CLICKACTIVE when a click did it. `focus`: false when SetFocus
+     *        activates, which places the focus itself.
      * @returns {number | Promise<number>} once every procedure told has answered
      */
     const activate = (hwnd, options = {})=>{
@@ -2194,32 +2256,23 @@ export function createWindowFunctions(host){
      * The activation itself, once nothing has forbidden it.
      *
      * @param {number} hwnd
-     * @param {{ thread?: unknown, how?: number,
+     * @param {{ thread?: unknown, how?: number, focus?: boolean,
      *     from?: { hwnd: number, thread: number } | null }} options
      *     `from`: the window and thread of another program that had the
      *     foreground, when that program made this window the foreground one
      * @returns {number | Promise<number>}
      */
-    const activateNow = (hwnd, { thread, how = WA_ACTIVE, from = null })=>{
+    const activateNow = (hwnd, { thread, how = WA_ACTIVE, from = null, focus = true })=>{
         const record = live(hwnd);
         const previous = active;
         // The run's foreground window as it was, before the focus moving
         // into this one makes this one the run's.
         const runBefore = directory.foreground?.() ?? 0;
+        const focusBefore = focusWindow();
         active = record ? topLevelOf(record).hwnd : 0;
         if (record)
         {
             rootOwnerOf(record).lastActivePopup = active;
-        }
-        // The keyboard follows activation: a focus outside the window that
-        // became active is moved to it, as DefWindowProc's WM_ACTIVATE moves
-        // it. A caller that placed the focus itself -- SetFocus -- tells it.
-        const current = focusWindow();
-        const moved = active !== 0
-            && (current === 0 || topLevelOf(live(current)).hwnd !== active);
-        if (moved)
-        {
-            holdFocus(active);
         }
         if (active === previous)
         {
@@ -2255,6 +2308,13 @@ export function createWindowFunctions(host){
                 directory.setForeground?.(0);
             }
         }
+        // The run lets go of a focus outside the new foreground window at
+        // once; to this program it is still where it was until the focus
+        // moves and that window hears WM_KILLFOCUS.
+        if (focusBefore !== 0 && (directory.focus?.() ?? 0) === 0)
+        {
+            detached = focusBefore;
+        }
         /** @type {[number, number, number, number][]} */
         const told = [];
         if (previous !== 0)
@@ -2283,38 +2343,58 @@ export function createWindowFunctions(host){
             told.push([gained, WM_NCACTIVATE, 1, 0],
                 [gained, WM_ACTIVATE, how, previous !== 0 ? previous : foreign]);
         }
-        /** @param {number} index @returns {number | Promise<number>} */
-        const tell = index=>{
-            if (index >= told.length)
+        /**
+         * The messages from `index` up to `end`, one after another.
+         *
+         * @param {number} index @param {number} end
+         * @returns {number | Promise<number>}
+         */
+        const tell = (index, end)=>{
+            if (index >= end)
             {
                 return 0;
             }
             const [target, message, wParam, lParam] = told[index];
             return andThen(live(target) ? tellOwner(target, message, wParam, lParam, thread) : 0,
-                ()=>tell(index + 1));
+                ()=>tell(index + 1, end));
         };
-        // EVENT_SYSTEM_FOREGROUND first, as soon as the CBT hook has let the
-        // activation be, then the messages.
-        const begin = ()=>andThen(programs(gained)
-            ? winEvent(EVENT_SYSTEM_FOREGROUND, gained, OBJID_WINDOW, thread) : 0, ()=>tell(0));
-        if (!moved)
-        {
-            return begin();
-        }
-        // The focus follows as SetFocus moves it, a CBT hook first: one that
-        // forbids it leaves the focus where it was.
-        return andThen(begin(), ()=>andThen(askCbt(HCBT_SETFOCUS, gained, current,
-            thread ?? host.callerThread?.()), refused=>{
-            if ((refused | 0) !== 0)
+        const SWP_RAISE = 0x0001 | 0x0002;
+        const deactivating = previous !== 0 ? 2 : 0;
+        // The order Windows tells it in: the window losing the activation,
+        // EVENT_SYSTEM_FOREGROUND, the one gaining it brought to the top
+        // (WM_WINDOWPOSCHANGING, and WM_WINDOWPOSCHANGED only if it moved in
+        // the stacking), the applications, the window gaining it -- whose
+        // WM_ACTIVATE gives it the focus in the default procedure -- and then,
+        // unless SetFocus asked, the focus put in it if it still has none
+        // (win32u set_active_window; msg.c WmSetFocus_1, WmShowNormal).
+        // The raise is the gaining window's own thread's to make: another
+        // thread's window hears only the notifications, which wait for nobody.
+        return andThen(tell(0, deactivating), ()=>andThen(programs(gained)
+            ? winEvent(EVENT_SYSTEM_FOREGROUND, gained, OBJID_WINDOW, thread) : 0,
+        ()=>andThen(programs(gained) && live(gained) && answeredHere(gained, thread)
+            ? placeWindow([gained, 0, 0, 0, 0, 0, SWP_RAISE], thread) : 0,
+        ()=>andThen(tell(deactivating, told.length), ()=>{
+            const current = focusWindow();
+            // Gone to the desktop or to nothing, the program keeps no focus.
+            if (!programs(gained) && current !== 0 && detached === current)
             {
-                holdFocus(current);
+                detached = 0;
+                return tellOwner(current, WM_KILLFOCUS, 0, 0, thread);
+            }
+            // Another thread's window answers WM_ACTIVATE -- and its default
+            // procedure takes the focus -- only when that thread looks at its
+            // queue; the focus is placed for it now, as SetFocus expects to
+            // find it (msg.c test_SetFocus, input attached).
+            if ((!focus && answeredHere(gained, thread)) || active !== gained || !programs(gained)
+                || !live(gained) || (current !== 0 && topLevelOf(live(current)).hwnd === gained))
+            {
                 return 0;
             }
-            return andThen(current !== 0 && live(current)
-                ? tellOwner(current, WM_KILLFOCUS, gained, 0, thread) : 0,
-            ()=>andThen(winEvent(EVENT_OBJECT_FOCUS, gained, OBJID_CLIENT, thread),
-                ()=>(live(gained) ? tellOwner(gained, WM_SETFOCUS, current, 0, thread) : 0)));
-        }));
+            holdFocus(gained);
+            return andThen(current !== 0 ? tellOwner(current, WM_KILLFOCUS, gained, 0, thread) : 0,
+                ()=>andThen(winEvent(EVENT_OBJECT_FOCUS, gained, OBJID_CLIENT, thread),
+                    ()=>(live(gained) ? tellOwner(gained, WM_SETFOCUS, current, 0, thread) : 0)));
+        }))));
     };
 
     /**
@@ -2328,7 +2408,12 @@ export function createWindowFunctions(host){
     // cells). One of its windows has the focus when that word names it.
     const focusWindow = ()=>{
         const held = directory.focus?.() ?? 0;
-        return held !== 0 && live(held) ? held : 0;
+        if (held !== 0)
+        {
+            detached = 0;
+            return live(held) ? held : 0;
+        }
+        return detached !== 0 && live(detached) ? detached : 0;
     };
     /**
      * A window of this program takes the focus, from every window of every
@@ -2339,6 +2424,7 @@ export function createWindowFunctions(host){
      * @param {number} hwnd
      */
     const holdFocus = hwnd=>{
+        detached = 0;
         const record = live(hwnd);
         if (record)
         {
@@ -2356,36 +2442,101 @@ export function createWindowFunctions(host){
      * @returns {number | Promise<number>} the window that had it
      */
     const setFocus = (hwnd, thread)=>{
-        const previous = focusWindow();
+        const before = focusWindow();
         const target = hwnd >>> 0;
-        if (target !== 0 && !live(target))
+        const on = thread ?? host.callerThread?.();
+        const WS_POPUP_CHILD = WS_CHILD | 0x80000000;
+        if (target === 0)
+        {
+            // Taking the focus from everything: nothing to do with none.
+            if (before === 0)
+            {
+                return 0;
+            }
+            return andThen(askCbt(HCBT_SETFOCUS, 0, before, on), refused=>{
+                if ((refused | 0) !== 0)
+                {
+                    return 0;
+                }
+                holdFocus(0);
+                return andThen(tellOwner(before, WM_KILLFOCUS, 0, 0, on), ()=>before);
+            });
+        }
+        const record = live(target);
+        if (!record)
         {
             return 0;
         }
-        if (previous === target)
+        // The desktop, and a window of a thread whose input is not joined to
+        // the caller's, are not the caller's to focus (msg.c test_SetFocus).
+        if (record === desktop || heldByCaller(target) === 0)
         {
-            return previous;
+            host.setLastError?.(ERROR_ACCESS_DENIED);
+            return 0;
         }
-        const on = thread ?? host.callerThread?.();
+        if (before === target)
+        {
+            return before;
+        }
+        // Up to the top-level window, which is activated first: none on the
+        // way may be minimized or disabled, and a child must have a parent.
+        let top = record;
+        // A child whose parent is the desktop takes no focus, though the CBT
+        // hook still hears it asked for (msg.c WmSetFocus_3).
+        let orphan = false;
+        for (;;)
+        {
+            if ((top.style & (WS_MINIMIZE | WS_DISABLED)) !== 0)
+            {
+                return 0;
+            }
+            if ((top.style & WS_POPUP_CHILD) !== WS_CHILD)
+            {
+                break;
+            }
+            const parent = live(top.parent);
+            if (!parent || parent === desktop)
+            {
+                orphan = true;
+                break;
+            }
+            top = parent;
+        }
         // A CBT hook hears first, and may forbid it: then nothing moves.
-        return andThen(askCbt(HCBT_SETFOCUS, target, previous, on), refused=>{
+        return andThen(askCbt(HCBT_SETFOCUS, target, before, on), refused=>{
             if ((refused | 0) !== 0)
             {
                 return 0;
             }
-            holdFocus(target);
-            // Activation is told first, then the focus: a window gaining both
-            // hears WM_ACTIVATE before WM_SETFOCUS.
-            const activated = target !== 0 ? activate(target, { thread: on }) : 0;
-            // EVENT_OBJECT_FOCUS between the one losing it hearing so and the
-            // one gaining it.
-            const gaining = ()=>(target !== 0
-                ? andThen(winEvent(EVENT_OBJECT_FOCUS, target, OBJID_CLIENT, on),
-                    ()=>tellOwner(target, WM_SETFOCUS, previous, 0, on))
-                : 0);
-            return andThen(activated, ()=>
-                andThen(previous !== 0 ? tellOwner(previous, WM_KILLFOCUS, target, 0, on) : 0,
-                    ()=>andThen(gaining(), ()=>previous)));
+            if (orphan)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            // Activation is told first, the top-level window taking the focus
+            // with it; then the focus moves on, from whatever has it by then,
+            // which is what the call answers.
+            const activated = top.hwnd !== active
+                ? activate(top.hwnd, { thread: on, focus: false }) : 0;
+            return andThen(activated, ()=>{
+                if (!live(target) || active !== top.hwnd)
+                {
+                    return 0;
+                }
+                const previous = focusWindow();
+                if (previous === target)
+                {
+                    return previous;
+                }
+                holdFocus(target);
+                // EVENT_OBJECT_FOCUS between the one losing it hearing so and
+                // the one gaining it.
+                return andThen(previous !== 0
+                    ? tellOwner(previous, WM_KILLFOCUS, target, 0, on) : 0,
+                ()=>andThen(winEvent(EVENT_OBJECT_FOCUS, target, OBJID_CLIENT, on),
+                    ()=>andThen(tellOwner(target, WM_SETFOCUS, previous, 0, on),
+                        ()=>previous)));
+            });
         });
     };
 
@@ -2397,7 +2548,9 @@ export function createWindowFunctions(host){
      * A window the calling thread's input holds, or zero: the active window
      * and the focus are a thread's own, as Windows keeps them per message
      * queue, and another thread asking is answered NULL unless
-     * AttachThreadInput joined the two (input.c test_attach_input). A setup
+     * AttachThreadInput joined the two, directly or through other threads
+     * joined to both: attached threads share one input state (input.c
+     * test_attach_input, test_AttachThreadInput). A setup
      * that made its wizard while a please-wait dialog of another thread was
      * active had it owned by that dialog, and gone with it.
      *
@@ -2411,7 +2564,24 @@ export function createWindowFunctions(host){
         {
             return hwnd;
         }
-        return attachedInput.get(caller)?.has(owner) ? hwnd : 0;
+        const reached = new Set([caller]);
+        const pending = [caller];
+        for (let at = pending.pop(); at !== undefined; at = pending.pop())
+        {
+            for (const next of attachedInput.get(at) ?? [])
+            {
+                if (next === owner)
+                {
+                    return hwnd;
+                }
+                if (!reached.has(next))
+                {
+                    reached.add(next);
+                    pending.push(next);
+                }
+            }
+        }
+        return 0;
     };
 
     /** The window that has the mouse, or zero. */
@@ -4053,12 +4223,20 @@ export function createWindowFunctions(host){
         {
             windows.set(each.hwnd, each);
         }
-        for (const [index, hwnd] of wanted.entries())
-        {
+        // Only a window that moved among those shown shows anything new: one
+        // raised over hidden windows keeps its pixels.
+        /** @param {number} hwnd */
+        const visible = hwnd=>{
             const record = windows.get(hwnd);
-            if (index !== current.indexOf(hwnd) && record && shown(record))
+            return Boolean(record) && shown(record);
+        };
+        const wantedShown = wanted.filter(visible);
+        const currentShown = current.filter(visible);
+        for (const [index, hwnd] of wantedShown.entries())
+        {
+            if (index !== currentShown.indexOf(hwnd))
             {
-                appear(record);
+                appear(windows.get(hwnd));
             }
         }
     };
@@ -5465,6 +5643,15 @@ export function createWindowFunctions(host){
                     ? send(record.parent, WM_MOUSEWHEEL, message.wParam, message.lParam, thread)
                     : 0;
             case WM_ACTIVATE:
+                // A window being activated, and not minimized, takes the focus
+                // -- if it is still the active one: another thread's window
+                // hears its activation from its queue, possibly after the
+                // activation moved on, and taking it back then would have
+                // two threads hand it to each other for good.
+                return (message.wParam & 0xffff) !== WA_INACTIVE
+                    && (record.style & WS_MINIMIZE) === 0
+                    && topLevelOf(record).hwnd === active
+                    ? andThen(setFocus(record.hwnd, thread), ()=>0) : 0;
             case WM_NCACTIVATE:
             case WM_SHOWWINDOW:
             default:
@@ -6979,7 +7166,7 @@ export function createWindowFunctions(host){
                 },
                 activateOther,
                 calcClient,
-                shown, raise, restack, tell, desktop: desktopWindow, showWindow,
+                shown, raise, restack, inPlace, tell, desktop: desktopWindow, showWindow,
                 // What the run answers for every process's windows.
                 runForeground: ()=>directory.foreground?.() ?? 0,
                 /**
@@ -7922,12 +8109,15 @@ export function createWindowFunctions(host){
          * the other's active window and focus (`heldByCaller`). A thread
          * attached to itself, one that does not exist, or one that has no
          * message queue yet -- no window made, no look at a queue -- is
-         * ERROR_INVALID_PARAMETER.
+         * ERROR_INVALID_PARAMETER. The calling thread has one by calling,
+         * as any call into user32 gives a thread its queue (input.c
+         * test_AttachThreadInput_thread attaches before it makes a window).
          */
         AttachThreadInput: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([from, to, attach])=>{
+                hasQueue(host.callerThread?.());
                 const one = from >>> 0;
                 const other = to >>> 0;
                 const exists = (/** @type {number} */ id)=>(host.threadExists

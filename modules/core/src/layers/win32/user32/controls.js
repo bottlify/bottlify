@@ -206,6 +206,10 @@ const IMAGE_ICON = 1;
 const WS_TABSTOP = 0x00010000;
 const WS_DISABLED = 0x08000000;
 const WS_VISIBLE = 0x10000000;
+const WS_MINIMIZE = 0x20000000;
+const WS_CHILD = 0x40000000;
+/** WM_ACTIVATE: the window gaining or losing the activation. */
+const WM_ACTIVATE = 0x0006;
 
 /** Edit styles and messages. */
 const ES_MULTILINE = 0x0004;
@@ -4052,6 +4056,55 @@ export function createControlProcedures(host){
                 return 0;
             })));
 
+    /** @param {any} dialog @param {any} control  Whether the control is inside the dialog. */
+    const inside = (dialog, control)=>{
+        for (let at = control; at && (at.style & WS_CHILD) !== 0; at = host.live(at.parent))
+        {
+            if (at.parent === dialog.hwnd)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /** @param {any} dialog  A dialog losing the activation remembers its control with the focus. */
+    const saveFocus = dialog=>{
+        const focus = host.live(host.focus());
+        if (focus && inside(dialog, focus))
+        {
+            dialog.savedFocus = focus.hwnd;
+        }
+    };
+
+    /**
+     * The focus given back to the control a dialog remembers. Only on
+     * activation (`justActivated`) is nothing done when it remembers none;
+     * otherwise its first tab stop takes it, or the dialog itself.
+     *
+     * @param {any} dialog @param {boolean} justActivated @param {unknown} thread
+     */
+    const restoreFocus = (dialog, justActivated, thread)=>{
+        if ((dialog.style & WS_MINIMIZE) !== 0)
+        {
+            return 0;
+        }
+        const saved = host.live(dialog.savedFocus ?? 0);
+        dialog.savedFocus = 0;
+        if (saved && saved !== dialog && inside(dialog, saved))
+        {
+            return justActivated ? after(host.setFocus(saved.hwnd, thread), ()=>0)
+                : giveFocus(dialog, saved, thread);
+        }
+        if (justActivated)
+        {
+            return 0;
+        }
+        const first = host.children(dialog).find(child=>(child.style
+            & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE));
+        return first ? giveFocus(dialog, first, thread) : 0;
+    };
+
     /**
      * The messages whose answer is the dialog procedure's own return value
      * rather than DWLP_MSGRESULT.
@@ -4126,13 +4179,27 @@ export function createControlProcedures(host){
                 return 0;
             case WM_GETFONT:
                 return record.font ?? 0;
-            case WM_SETFOCUS: {
-                // The dialog passes the focus on, to its first control that
-                // stops the Tab key.
-                const first = host.children(record).find(child=>(child.style
-                    & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE));
-                return first ? giveFocus(record, first, thread) : 0;
-            }
+            case WM_ACTIVATE:
+                // Activated, a dialog gives the focus back to the control
+                // that had it when it was deactivated, if one did; deactivated,
+                // it remembers that control (win32u DEFDLG_RestoreFocus,
+                // DEFDLG_SaveFocus).
+                if ((message.wParam & 0xffff) !== 0)
+                {
+                    return restoreFocus(record, true, thread);
+                }
+                saveFocus(record);
+                return 0;
+            case WM_SHOWWINDOW:
+                if (message.wParam === 0)
+                {
+                    saveFocus(record);
+                }
+                return host.defWindowProc(record, message, thread);
+            case WM_SETFOCUS:
+                // The dialog passes the focus on: to the control it remembers,
+                // else to its first control that stops the Tab key.
+                return restoreFocus(record, false, thread);
             case WM_NEXTDLGCTL: {
                 // The control named when lParam's low word says so, else the
                 // next or previous tab stop from the focus; the default id

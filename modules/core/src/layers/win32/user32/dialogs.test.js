@@ -1336,6 +1336,69 @@ test('DefDlgProcA(WM_SETFOCUS) passes the focus to the first control that stops 
     assert.equal(seen[1].wParam, 0);
 });
 
+test('DefDlgProcA remembers the control with the focus when deactivated and gives it back when '
+    + 'activated', ()=>{
+    // dialog.c test_focus: a dialog activated again has the focus back in the
+    // control that had it. Deactivated, DefDlgProc remembers that control;
+    // activated, it gives it the focus with SetFocus alone, and with nothing
+    // remembered leaves the focus be. WM_SETFOCUS gives the remembered one
+    // the focus too, as the dialog manager moves it.
+    const DEFDLGPROC = 0x404000;
+    const WM_ACTIVATE = 0x0006;
+    const WM_SETFOCUS = 0x0007;
+    const WM_GETDLGCODE = 0x0087;
+    const WS_CHILD = 0x40000000;
+    const WS_VISIBLE = 0x10000000;
+    const WS_TABSTOP = 0x00010000;
+    const EDITPROC = 0x405000;
+    /** @type {number[]} */
+    const seen = [];
+    const context = setup({
+        dispatch: (wndProc, message)=>{
+            if (wndProc === EDITPROC)
+            {
+                seen.push(message.message);
+            }
+            return 0;
+        },
+    });
+    const { memory, fns } = context;
+    const dialog = customDialog(context, DEFDLGPROC);
+    const CLASS_STRUCT = 0x10a00;
+    const CLASS_NAME = 0x10b00;
+    memory.putString(CLASS_NAME, 'my_edit_class');
+    memory.writeMemory(CLASS_STRUCT, new Uint8Array(new Uint32Array([
+        0, EDITPROC, 0, 0, HINSTANCE, 0, 0, 0, 0, CLASS_NAME,
+    ]).buffer));
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    /** @param {number} id @param {number} y */
+    const edit = (id, y)=>fns.CreateWindowExA.handler([0, CLASS_NAME, 0,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, y, 80, 20, dialog, id, HINSTANCE, 0]);
+    const first = edit(1, 0);
+    const second = edit(2, 40);
+    fns.SetFocus.handler([second]);
+
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_ACTIVATE, 0, 0]), 0);
+    fns.SetFocus.handler([dialog]);
+    seen.length = 0;
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_ACTIVATE, 1, 0]), 0);
+    assert.equal(fns.GetFocus.handler([]), second, 'the remembered control has it back');
+    assert.equal(seen.includes(WM_GETDLGCODE), false, 'by SetFocus alone');
+
+    fns.SetFocus.handler([dialog]);
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_ACTIVATE, 1, 0]), 0);
+    assert.equal(fns.GetFocus.handler([]), dialog, 'nothing remembered: the focus stays');
+
+    fns.SetFocus.handler([second]);
+    fns.DefDlgProcA.handler([dialog, WM_ACTIVATE, 0, 0]);
+    fns.SetFocus.handler([dialog]);
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_SETFOCUS, 0, 0]), 0);
+    assert.equal(fns.GetFocus.handler([]), second, 'WM_SETFOCUS: the remembered one');
+    fns.SetFocus.handler([dialog]);
+    fns.DefDlgProcA.handler([dialog, WM_SETFOCUS, 0, 0]);
+    assert.equal(fns.GetFocus.handler([]), first, 'and then the first tab stop');
+});
+
 test('DefDlgProcA(WM_NEXTDLGCTL) moves the focus to the next tab stop, or the one named, '
     + 'restyling the push buttons and keeping the default id', ()=>{
     // user32's dialog tests (test_WM_NEXTDLGCTL): an edit, a push button and

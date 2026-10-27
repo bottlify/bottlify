@@ -2366,6 +2366,9 @@ test('the foreground window is the one the program showed, never nothing while o
 
     const shown = makeWindow(memory, fns, WS_VISIBLE);
     assert.equal(fns.GetForegroundWindow.handler([]), shown, 'a window made visible is active');
+    // Activated first; this procedure leaves WM_ACTIVATE unanswered by
+    // DefWindowProc, so the focus is still where it was when SetFocus moves
+    // it, and that is what it answers (win32u NtUserSetFocus).
     assert.equal(fns.SetFocus.handler([hidden]), shown, 'SetFocus answers the window that had it');
     assert.equal(fns.GetForegroundWindow.handler([]), hidden);
 
@@ -3792,4 +3795,39 @@ test('with no DDE instance its handles are refused, and string handles still com
     assert.equal(fns.DdeCmpStringHandles.handler([0, 0]), 0);
     assert.equal(fns.SendIMEMessageExA.handler([0, 0]), 0, 'no IME to take the request');
     assert.equal(fns.SendIMEMessageExW.argBytes, 8);
+});
+
+test('SetActiveWindow refuses what win.c test_SetActiveWindow finds refused', ()=>{
+    // A handle that names no window: NULL and ERROR_INVALID_WINDOW_HANDLE. A
+    // child: nothing changes and the active window is answered. The desktop:
+    // nothing changes, NULL. NULL itself, as Windows 10 answers it, changes
+    // nothing and answers NULL (test_SetActiveWindow_0_proc).
+    const WS_CHILD = 0x40000000;
+    const { memory, fns, errors } = setup();
+    const first = makeWindow(memory, fns, WS_VISIBLE);
+    const second = makeWindow(memory, fns, WS_VISIBLE);
+    memory.putString(TITLE, 'child');
+    const child = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, first, 0, HINSTANCE, 0]);
+    assert.equal(fns.GetActiveWindow.handler([]), second);
+
+    assert.equal(fns.SetActiveWindow.handler([0xdead0]), 0);
+    assert.equal(errors.at(-1), 1400);
+    assert.equal(fns.SetActiveWindow.handler([child]), second, 'a child answers the active one');
+    assert.equal(fns.GetActiveWindow.handler([]), second, 'and changes nothing');
+    assert.equal(fns.SetActiveWindow.handler([fns.GetDesktopWindow.handler([])]), 0);
+    assert.equal(fns.GetActiveWindow.handler([]), second);
+
+    assert.equal(fns.SetActiveWindow.handler([first]), second);
+    assert.equal(fns.GetActiveWindow.handler([]), first);
+    const said = errors.length;
+    assert.equal(fns.SetActiveWindow.handler([0]), 0, 'NULL');
+    assert.equal(fns.GetActiveWindow.handler([]), first, 'changes nothing');
+    assert.equal(errors.length, said, 'and leaves the last error');
+});
+
+test('SetFocus of a handle that names no window is ERROR_INVALID_WINDOW_HANDLE', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.SetFocus.handler([0xdead0]), 0);
+    assert.equal(errors.at(-1), 1400);
 });

@@ -969,7 +969,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 height: (flags & SWP_NOSIZE) !== 0 ? record.height : cy,
             }, thread, pos) ?? 0 : 0;
             /** WM_WINDOWPOSCHANGED, with what became of what was asked. */
-            const changed = ()=>{
+            /** @param {boolean} restacked */
+            const changed = restacked=>{
                 const window = host.geometry.windowRect(record);
                 const client = host.geometry.clientRect(record);
                 const same = (/** @type {any} */ a, /** @type {any} */ b)=>a.left === b.left
@@ -985,7 +986,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 {
                     final &= ~(SWP_SHOWWINDOW | SWP_HIDEWINDOW);
                 }
-                if ((final & SWP_STATUS) === SWP_NO_CHANGE)
+                // Nothing changed, not even the stacking: only WM_WINDOWPOSCHANGING
+                // was sent (msg.c WmSetFocus_1's raise of the active window).
+                if (((final | (restacked ? 0 : SWP_NOZORDER)) & SWP_STATUS) === SWP_NO_CHANGE)
                 {
                     return 0;
                 }
@@ -1015,7 +1018,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      *
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
      * @param {unknown} [thread]
-     * @param {() => any} [changed]
+     * @param {(restacked: boolean) => any} [changed]  Told whether the window
+     *     moved in the stacking.
      */
     const place = (args, thread = host.callerThread?.(), changed = ()=>0)=>{
         const [hwnd, after, x, y, cx, cy, flags] = args;
@@ -1040,7 +1044,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // Moved while it holds the mouse, it is being dragged: held as it is,
         // its picture taken before it moves.
         const dragged = wasShown && moved && !sized && host.dragging?.(record) === true;
-        const watched = host.beforeChange?.(record, dragged) ?? null;
+        // A placement that changes nothing -- activation bringing a window
+        // already on top to the top -- marks, paints and tells nothing.
+        const nothing = !moved && !sized && (flags & SWP_FRAMECHANGED) === 0
+            && ((flags & SWP_SHOWWINDOW) === 0 || (record.style & WS_VISIBLE) !== 0)
+            && ((flags & SWP_HIDEWINDOW) === 0 || (record.style & WS_VISIBLE) === 0)
+            && ((flags & SWP_NOZORDER) !== 0 || host.inPlace?.(record, after >>> 0) === true);
+        const watched = nothing ? null : host.beforeChange?.(record, dragged) ?? null;
         if ((flags & SWP_NOMOVE) === 0)
         {
             record.x = x | 0;
@@ -1059,13 +1069,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             record.style = (record.style & ~WS_VISIBLE) >>> 0;
         }
+        let restacked = false;
         if ((flags & SWP_NOZORDER) === 0 && (record.style & WS_CHILD) !== 0)
         {
-            host.restack(record, after >>> 0, false);
+            restacked = host.restack(record, after >>> 0, false) !== false;
         }
         else if ((flags & SWP_NOZORDER) === 0 && (after | 0) !== HWND_BOTTOM)
         {
-            host.raise(record, false);
+            restacked = host.raise(record, false) !== false;
         }
         host.tell?.(record);
         const isShown = host.shown(record);
@@ -1110,7 +1121,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 OBJID_WINDOW, thread) ?? 0;
         // What it showed is framed and erased before it returns, as Windows
         // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
-        const erased = andThen(flipped, ()=>(redrawn ? host.eraseShown?.(thread) ?? 1 : 1));
+        const erased = andThen(flipped, ()=>(redrawn && !nothing
+            ? host.eraseShown?.(thread) ?? 1 : 1));
         // A top-level window placed without SWP_NOACTIVATE is activated
         // before it hears WM_WINDOWPOSCHANGED; the active one hidden hands the
         // activation on after (msg.c WmShowOverlappedSeq,
@@ -1125,7 +1137,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // _4): an MDI child becomes the client's active one this way when its
         // program brings it to the top.
         // EVENT_OBJECT_LOCATIONCHANGE once it has heard where it went.
-        const located = andThen(andThen(activated, changed), ()=>(moved || sized
+        const located = andThen(andThen(activated, ()=>changed(restacked)), ()=>(moved || sized
             ? host.winEvent?.(EVENT_OBJECT_LOCATIONCHANGE, record.hwnd, OBJID_WINDOW, thread) ?? 0
             : 0));
         const told = andThen(located,
@@ -5495,13 +5507,36 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             },
         },
 
-        /** HWND SetActiveWindow(HWND hWnd) */
+        /**
+         * HWND SetActiveWindow(HWND hWnd)
+         *
+         * As win.c test_SetActiveWindow finds it: a handle that names no
+         * window is ERROR_INVALID_WINDOW_HANDLE; a child changes nothing and
+         * answers the active window; the desktop and another thread's window
+         * change nothing and answer NULL; and NULL, as Windows 10 answers it,
+         * changes nothing and answers NULL, the last error untouched (win.c
+         * test_SetActiveWindow_0_proc).
+         */
         SetActiveWindow: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
                 const previous = programs(host.active?.() ?? 0);
-                if (!live(hwnd))
+                if ((hwnd >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                if ((record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
+                {
+                    return previous;
+                }
+                if (host.isDesktop?.(record) || callerHolds(hwnd >>> 0) === 0)
                 {
                     return 0;
                 }
@@ -6088,6 +6123,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([hwnd])=>{
                 if ((hwnd >>> 0) !== 0 && !live(hwnd))
                 {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
                 return host.setFocus(hwnd >>> 0, host.callerThread?.());
