@@ -2718,6 +2718,32 @@ export function createWin32Module(){
                     handles,
                     folders,
                     registry: hive,
+                    // An HKEY for a key under HKEY_LOCAL_MACHINE from advapi32's
+                    // own table, so the program reads and closes what
+                    // SetupDiOpenClassRegKey and its kin hand out with the
+                    // registry calls it uses for any key.
+                    keyHandle: path=>{
+                        const units = path.length + 1;
+                        const block = heap.allocate(4 + units * 2);
+                        if (!block)
+                        {
+                            return 0;
+                        }
+                        const bytes = new Uint8Array(4 + units * 2);
+                        const view = new DataView(bytes.buffer);
+                        for (let at = 0; at < path.length; at++)
+                        {
+                            view.setUint16(4 + at * 2, path.charCodeAt(at), true);
+                        }
+                        writeMemory(block, bytes);
+                        const status = libraries['ADVAPI32.dll'].RegOpenKeyExW.handler(
+                            [0x80000002, block + 4, 0, 0xf003f, block]);
+                        const handle = status === 0
+                            ? new DataView(readMemory(block, 4).slice().buffer).getUint32(0, true)
+                            : 0;
+                        heap.free(block);
+                        return handle;
+                    },
                     divergence: config?.divergence,
                 }),
 

@@ -125,6 +125,7 @@ async function machine(){
         },
         folders: shellFolders(),
         registry: hive,
+        keyHandle: path=>(hive.open(/** @type {any} */ (hive.root(0x80000002)), path) ? 0x7700 : 0),
     });
 
     let argAt = ARG;
@@ -1216,4 +1217,114 @@ test('a file\'s source disk, the disk\'s details and a list\'s target are read f
         assert.equal(m.fns.SetupQueryInfFileInformationA.handler([information, 1, out, 260,
             needed]), 0, 'one INF in it');
         assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
+    });
+
+test('a device set makes phantoms, registers them, and enumerates devices and interfaces',
+    async()=>{
+        // Wine's setupapi test_device_info, test_device_iface and test_get_class_devs.
+        const ERROR_INVALID_DEVINST_NAME = 0xe0000205;
+        const ERROR_DEVINST_ALREADY_EXISTS = 0xe0000207;
+        const ERROR_NO_SUCH_DEVINST = 0xe000020b;
+        const ERROR_NO_MORE_ITEMS = 259;
+        const m = await machine();
+        const guid = m.buffer(16);
+        m.view.setUint32(guid, 0x6a55b5a4, true);
+        const set = m.fns.SetupDiCreateDeviceInfoList.handler([guid, 0]);
+        const device = m.buffer(28);
+        m.view.setUint32(device, 28, true);
+        assert.equal(m.fns.SetupDiCreateDeviceInfoA.handler([set, 0, guid, 0, 0, 0, device]), 0);
+        assert.equal(m.lastError(), ERROR_INVALID_DEVINST_NAME, 'the name is checked first');
+        assert.equal(m.fns.SetupDiCreateDeviceInfoA.handler([set, m.str('Root\\LEGACY_BOGUS\\0000'),
+            guid, 0, 0, 0, device]), 1);
+        assert.equal(m.fns.SetupDiCreateDeviceInfoA.handler([set, m.str('ROOT\\legacy_bogus\\0000'),
+            guid, 0, 0, 0, 0]), 0);
+        assert.equal(m.lastError(), ERROR_DEVINST_ALREADY_EXISTS);
+
+        const id = m.buffer(64);
+        const needed = m.buffer(4);
+        assert.equal(m.fns.SetupDiGetDeviceInstanceIdA.handler([set, device, 0, 0, needed]), 0);
+        assert.equal(m.u32(needed), 23, 'no buffer is too small a one');
+        assert.equal(m.fns.SetupDiGetDeviceInstanceIdA.handler([set, device, id, 64, 0]), 1);
+        assert.equal(m.readCString(id, 64), 'ROOT\\LEGACY_BOGUS\\0000');
+
+        const face = m.buffer(28);
+        m.view.setUint32(face, 28, true);
+        assert.equal(m.fns.SetupDiCreateDeviceInterfaceA.handler([set, device, guid,
+            m.str('Oogah'), 0, face]), 1);
+        const detail = m.buffer(200);
+        m.view.setUint32(detail, 5, true);
+        assert.equal(m.fns.SetupDiGetDeviceInterfaceDetailA.handler([set, face, detail, 200, needed,
+            0]), 1);
+        const path = '\\\\?\\root#legacy_bogus#0000#{6a55b5a4-0000-0000-0000-000000000000}\\oogah';
+        assert.equal(m.readCString(detail + 4, 196), path);
+        assert.equal(m.u32(needed), 4 + path.length + 1, 'cbSize, the path and its terminator');
+
+        const other = m.fns.SetupDiGetClassDevsA.handler([guid, 0, 0, 0]);
+        const listed = m.buffer(28);
+        m.view.setUint32(listed, 28, true);
+        assert.equal(m.fns.SetupDiEnumDeviceInfo.handler([other, 0, listed]), 0,
+            'a phantom is no other set\'s');
+        assert.equal(m.lastError(), ERROR_NO_MORE_ITEMS);
+        assert.equal(m.fns.SetupDiRegisterDeviceInfo.handler([set, device, 0, 0, 0, 0]), 1);
+        const again = m.fns.SetupDiGetClassDevsA.handler([guid, 0, 0, 0]);
+        assert.equal(m.fns.SetupDiEnumDeviceInfo.handler([again, 0, listed]), 1,
+            'a registered device is every set\'s');
+        assert.equal(m.u32(listed + 20), m.u32(device + 20), 'the same device node');
+
+        assert.equal(m.fns.SetupDiRemoveDevice.handler([set, device]), 1);
+        assert.equal(m.fns.SetupDiGetDeviceInstanceIdA.handler([set, device, id, 64, 0]), 0);
+        assert.equal(m.lastError(), ERROR_NO_SUCH_DEVINST, 'removed, it has no id');
+        assert.equal(m.fns.SetupDiEnumDeviceInterfaces.handler([set, 0, guid, 0, face]), 1);
+        assert.equal(m.u32(face + 20), 4, 'its interfaces marked removed');
+        for (const handle of [set, other, again])
+        {
+            assert.equal(m.fns.SetupDiDestroyDeviceInfoList.handler([handle]), 1);
+        }
+    });
+
+test('a class installs from an INF and describes itself, and an install section is decorated',
+    async()=>{
+        // Wine's setupapi test_install_class, test_open_class_key and test_get_actual_section.
+        const ERROR_INVALID_CLASS = 0xe0000206;
+        const m = await machine();
+        m.file('C:\\src\\class.inf', ['[Version]', 'Signature="$Chicago$"', 'Class=Bogus',
+            'ClassGUID={6a55b5a4-3f65-11db-b704-0011955c2bdb}', '[ClassInstall32]',
+            'AddReg=BogusClass.NT.AddReg', '[BogusClass.NT.AddReg]', 'HKR,,,,"Wine test devices"',
+            '[section2]', '[section2.nt]'].join('\r\n'));
+        const guid = m.buffer(16);
+        m.view.setUint32(guid, 0x6a55b5a4, true);
+        m.view.setUint16(guid + 4, 0x3f65, true);
+        m.view.setUint16(guid + 6, 0x11db, true);
+        [0xb7, 0x04, 0x00, 0x11, 0x95, 0x5c, 0x2b, 0xdb].forEach((byte, at)=>
+            m.view.setUint8(guid + 8 + at, byte));
+        const out = m.buffer(64);
+        const needed = m.buffer(4);
+        m.view.setUint32(needed, 123, true);
+        assert.equal(m.fns.SetupDiGetClassDescriptionA.handler([guid, out, 64, needed]), 0);
+        assert.equal(m.lastError(), ERROR_INVALID_CLASS);
+        assert.equal(m.u32(needed), 123, 'the size untouched');
+        assert.equal(m.fns.SetupDiOpenClassRegKeyExA.handler([guid, 0, 1, 0, 0]),
+            INVALID_HANDLE_VALUE);
+
+        assert.equal(m.fns.SetupDiInstallClassA.handler([0, m.str('C:\\src\\class.inf'), 8, 0]),
+            0, 'DI_NOVCP and no queue');
+        assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
+        assert.equal(await m.fns.SetupDiInstallClassA.handler([0, m.str('C:\\src\\class.inf'), 0,
+            0]), 1);
+        assert.equal(m.fns.SetupDiGetClassDescriptionA.handler([guid, out, 64, needed]), 1);
+        assert.equal(m.readCString(out, 64), 'Wine test devices');
+        assert.equal(m.u32(needed), 18);
+        assert.notEqual(m.fns.SetupDiOpenClassRegKeyExA.handler([guid, 0, 1, 0, 0]),
+            INVALID_HANDLE_VALUE, 'the class key is there now');
+
+        const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\class.inf'), 0,
+            INF_STYLE_WIN4, 0]);
+        const extension = m.buffer(4);
+        assert.equal(m.fns.SetupDiGetActualSectionToInstallA.handler([inf, m.str('section2'), out,
+            64, needed, extension]), 1);
+        assert.equal(m.readCString(out, 64), 'section2.NT');
+        assert.equal(m.u32(extension), out + 8, 'the decoration in the caller\'s buffer');
+        assert.equal(m.fns.SetupDiGetActualSectionToInstallA.handler([inf, m.str('other'), out,
+            64, needed, extension]), 1);
+        assert.equal(m.u32(extension), 0, 'none, no extension');
     });
