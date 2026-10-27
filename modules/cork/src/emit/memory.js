@@ -557,9 +557,15 @@ const SAVED_RBP = /** @type {import('../decode/decoder.js').Operand} */ ({
  *     store: boolean }} Place
  * @typedef {Map<number, { group: Growing, access: Access }[]>} Joined
  *     a block's accesses by instruction, each with the group it joined
- * @typedef {{ sym: number[], delta: number[], next: { n: number } }} Values
+ * @typedef {{ sym: number[], delta: number[], next: { n: number }, isym?: number[],
+ *     iscale?: number[], cuts?: Cut[] }} Values
  *     what each register holds: a value the planner cannot see into (`sym`),
- *     moved by a known amount (`delta`)
+ *     moved by a known amount (`delta`); in a long-mode loop's plan also
+ *     another such value times a scale (`isym`, -1 for none, `iscale`), and
+ *     the points where a dword write cut a value to its low half (`cuts`)
+ * @typedef {{ sym: number, isym: number, iscale: number, d: number }} Cut
+ *     a value a dword write took or made: the model holds it only while it
+ *     lies in [0, 2^32)
  */
 
 /**
@@ -1344,9 +1350,15 @@ function effect(ins, values, forward = false, word = 4){
     if (op === 'xchg' && reg32 >= 0 && from >= 0)
     {
         const [held, by] = [sym[reg32], delta[reg32]];
+        const [heldIndex, heldScale] = [values.isym?.[reg32] ?? -1, values.iscale?.[reg32] ?? 1];
         copyReg(values, reg32, from, 0);
         sym[from] = held;
         delta[from] = by;
+        if (values.isym && values.iscale)
+        {
+            values.isym[from] = heldIndex;
+            values.iscale[from] = heldScale;
+        }
         return;
     }
     if (op === 'lea' && reg32 >= 0)
@@ -1414,6 +1426,78 @@ function effect(ins, values, forward = false, word = 4){
 }
 
 /**
+ * Long mode's writes a loop's plan follows besides `effect`'s: a dword `add`,
+ * `sub`, `inc` or `dec` by a constant, a dword `mov` from a register and a
+ * `lea` of one or two registers (a quadword one too) keep the value they move,
+ * where `effect` gives a dword write a value of its own. A dword write cuts
+ * its value to the low half, which the model holds only while the values it
+ * took and made lie in [0, 2^32): each such value is a cut, tested before the
+ * turns with the streams (`emitStreamWindow`). False for any other write,
+ * left to `effect`.
+ *
+ * @param {import('../decode/decoder.js').Instruction} ins
+ * @param {Values} values  with `isym`, `iscale` and `cuts`
+ */
+function longWrite(ins, values){
+    const { op, operands } = ins;
+    const [dst, src] = operands;
+    const { sym, delta } = values;
+    const isym = /** @type {number[]} */ (values.isym);
+    const iscale = /** @type {number[]} */ (values.iscale);
+    const cuts = /** @type {Cut[]} */ (values.cuts);
+    if (dst?.kind !== 'reg' || (dst.size !== 4 && !(dst.size === 8 && op === 'lea')))
+    {
+        return false;
+    }
+    const r = /** @type {number} */ (dst.reg);
+    /** @param {number} at */
+    const cut = at=>cuts.push({ sym: sym[at], isym: isym[at], iscale: iscale[at], d: delta[at] });
+    if ((op === 'add' || op === 'sub') && src.kind === 'imm' || op === 'inc' || op === 'dec')
+    {
+        cut(r);
+        delta[r] += op === 'inc' ? 1 : op === 'dec' ? -1
+            : (op === 'add' ? 1 : -1) * /** @type {number} */ (src.value);
+        cut(r);
+        return true;
+    }
+    if (op === 'mov' && src.kind === 'reg' && src.size === 4)
+    {
+        cut(/** @type {number} */ (src.reg));
+        copyReg(values, r, /** @type {number} */ (src.reg), 0);
+        return true;
+    }
+    if (op !== 'lea' || src.addressSize === 32 || src.rip)
+    {
+        return false;
+    }
+    const base = src.base ?? -1;
+    const index = src.index ?? -1;
+    const scale = index < 0 ? 1 : src.scale ?? 1;
+    const disp = src.disp ?? 0;
+    if (base >= 0 && index < 0 || base < 0 && index >= 0 && scale === 1)
+    {
+        copyReg(values, r, base >= 0 ? base : index, disp);
+    }
+    else if (base >= 0 && index >= 0 && isym[base] < 0 && isym[index] < 0)
+    {
+        delta[r] = delta[base] + delta[index] * scale + disp;
+        isym[r] = sym[index];
+        iscale[r] = scale;
+        sym[r] = sym[base];
+    }
+    else
+    {
+        bumpReg(values, r);
+        return true;
+    }
+    if (dst.size === 4)
+    {
+        cut(r);
+    }
+    return true;
+}
+
+/**
  * A register given a value of its own.
  *
  * @param {Values} values @param {number} r
@@ -1421,6 +1505,10 @@ function effect(ins, values, forward = false, word = 4){
 function bumpReg(values, r){
     values.sym[r] = values.next.n++;
     values.delta[r] = 0;
+    if (values.isym)
+    {
+        values.isym[r] = -1;
+    }
 }
 
 /**
@@ -1431,6 +1519,11 @@ function bumpReg(values, r){
 function copyReg(values, r, from, by){
     values.sym[r] = values.sym[from];
     values.delta[r] = values.delta[from] + by;
+    if (values.isym && values.iscale)
+    {
+        values.isym[r] = values.isym[from];
+        values.iscale[r] = values.iscale[from];
+    }
 }
 
 /**
@@ -1588,6 +1681,10 @@ export function emitGroupChecks(e, checks, at = -1){
 /**
  * @typedef {{ base: number, index: number, scale: number, lo: number, hi: number,
  *     stride: number, store: boolean }} Stream
+ * @typedef {{ base: number, index: number, scale: number, lo: number, hi: number,
+ *     stride: number }} Range
+ *     the values a long-mode loop's dword writes cut (`longWrite`), off a base and an
+ *     index register as the turn found them: from `lo` to `hi` past them in a turn
  */
 
 /**
@@ -1599,7 +1696,8 @@ export function emitGroupChecks(e, checks, at = -1){
  * @param {import('../decode/decoder.js').Instruction[]} instructions
  * @param {boolean} [long]  long mode's: sixteen registers, quadword pointers
  * @returns {{ plan: Map<number, Planned>, streams: Stream[], turns: number,
- *     forward: boolean } | null}  `forward`: planned for DF clear
+ *     forward: boolean, ranges: Range[] } | null}  `forward`: planned for DF clear;
+ *     `ranges` the values the turns must keep in [0, 2^32) (long mode's dword writes)
  */
 export function planLoop(instructions, long = false){
     const word = long ? 8 : 4;
@@ -1610,6 +1708,34 @@ export function planLoop(instructions, long = false){
     const values = freshValues({ n: 0 }, long ? 16 : 8);
     const { sym: initial } = copyValues(values);
     const { delta } = values;
+    if (long)
+    {
+        values.isym = new Array(16).fill(-1);
+        values.iscale = new Array(16).fill(1);
+        values.cuts = [];
+    }
+    const isym = values.isym ?? [];
+    const iscale = values.iscale ?? [];
+    /**
+     * An access's registers as the turn found them: its base's and index's
+     * values, a base that is itself a sum (`isym`) taking the index's place.
+     *
+     * @param {number} base @param {number} index @param {number} scale
+     * @returns {{ base: number, index: number, scale: number } | null}
+     */
+    const rootsOf = (base, index, scale)=>{
+        if (base >= 0 && (isym[base] ?? -1) >= 0)
+        {
+            return index >= 0 ? null : { base: initial.indexOf(values.sym[base]),
+                index: initial.indexOf(isym[base]), scale: iscale[base] };
+        }
+        if (index >= 0 && (isym[index] ?? -1) >= 0)
+        {
+            return null;
+        }
+        return { base: base < 0 ? -1 : initial.indexOf(values.sym[base]),
+            index: index < 0 ? -1 : initial.indexOf(values.sym[index]), scale };
+    };
     /** @type {{ i: number, base: number, index: number, scale: number, off: number,
      *     size: number, store: boolean }[]} */
     const found = [];
@@ -1622,19 +1748,23 @@ export function planLoop(instructions, long = false){
         {
             // Off the values registers held as the turn found them, moved by
             // known amounts -- each by the register that held it then.
-            const from = base < 0 ? -1 : initial.indexOf(values.sym[base]);
-            const by = index < 0 ? -1 : initial.indexOf(values.sym[index]);
-            if ((base < 0 || from >= 0) && (index < 0 || by >= 0))
+            const roots = rootsOf(base, index, scale);
+            if (roots !== null && (base < 0 || roots.base >= 0)
+                && (index < 0 && (base < 0 || (isym[base] ?? -1) < 0) || roots.index >= 0))
             {
                 const off = disp + (base >= 0 ? delta[base] : 0)
                     + (index >= 0 ? delta[index] * scale : 0);
-                found.push({ i, base: from, index: by, scale, off, size, store });
+                found.push({ i, base: roots.base, index: roots.index, scale: roots.scale, off,
+                    size, store });
             }
         }
-        effect(ins, values, forward, word);
+        if (!long || !longWrite(ins, values))
+        {
+            effect(ins, values, forward, word);
+        }
     });
     /** A register holding its own value of the turn's start, moved by `delta`. @param {number} r */
-    const fixed = r=>r < 0 || values.sym[r] === initial[r];
+    const fixed = r=>r < 0 || values.sym[r] === initial[r] && (isym[r] ?? -1) < 0;
     /** @param {{ base: number, index: number, scale: number }} a */
     const keyOf = a=>`${a.base}.${a.index}.${a.scale}`;
     /** @type {Map<string, Stream>} */
@@ -1685,7 +1815,46 @@ export function planLoop(instructions, long = false){
     const widest = Math.max(...kept.map(stream=>Math.abs(stream.stride)));
     const turns = widest === 0 ? 1 << 16 : 1 + Math.floor(4096 / widest);
     const strings = forward && instructions.some(ins=>STRING_POINTERS.has(ins.op));
-    return { plan, streams: kept, turns, forward: strings };
+    return { plan, streams: kept, turns, forward: strings,
+        ranges: rangesOf(values.cuts ?? [], initial, fixed, delta) };
+}
+
+/**
+ * A loop's cuts (`longWrite`) by the registers their values go off as the
+ * turn found them: the span of the values each pair of registers takes in a
+ * turn, and how far they move a turn. A cut off a register the turn does not
+ * move by a stride is on no stream's way, and left out.
+ *
+ * @param {Cut[]} cuts @param {number[]} initial
+ * @param {(r: number)=>boolean} fixed @param {number[]} delta
+ * @returns {Range[]}
+ */
+function rangesOf(cuts, initial, fixed, delta){
+    /** @type {Map<string, Range>} */
+    const ranges = new Map();
+    for (const { sym, isym, iscale, d } of cuts)
+    {
+        const base = initial.indexOf(sym);
+        const index = isym < 0 ? -1 : initial.indexOf(isym);
+        if (base < 0 || isym >= 0 && index < 0 || !fixed(base) || !fixed(index))
+        {
+            continue;
+        }
+        const scale = index < 0 ? 1 : iscale;
+        const key = `${base}.${index}.${scale}`;
+        const range = ranges.get(key);
+        if (range === undefined)
+        {
+            ranges.set(key, { base, index, scale, lo: d, hi: d,
+                stride: delta[base] + (index < 0 ? 0 : delta[index] * scale) });
+        }
+        else
+        {
+            range.lo = Math.min(range.lo, d);
+            range.hi = Math.max(range.hi, d);
+        }
+    }
+    return [...ranges.values()];
 }
 
 /**
@@ -1723,8 +1892,10 @@ function loopAccessesOf(ins, forward, word = 4){
  * @param {E} e @param {Stream[]} streams @param {number} turns
  * @param {boolean} [forward]  the streams move as they do with DF clear: 0
  *     when it is set
+ * @param {Range[]} [ranges]  values the turns cut to 32 bits: 0 unless each
+ *     lies in [0, 2^32) through the turns
  */
-export function emitStreamWindow(e, streams, turns, forward = false){
+export function emitStreamWindow(e, streams, turns, forward = false, ranges = []){
     const { b } = e;
     const table = pageFlagsAt(e.layout);
     if (forward)
@@ -1816,6 +1987,19 @@ export function emitStreamWindow(e, streams, turns, forward = false){
         }
         // This stream's flagged pages, into the word under it.
         b.i32const(bits).op(I32.and).op(I32.or);
+    }
+    for (const range of ranges)
+    {
+        const span = (turns - 1) * range.stride;
+        b.localGet(registerLocal(e, range.base));
+        if (range.index >= 0)
+        {
+            b.localGet(registerLocal(e, range.index)).i64const(BigInt(range.scale))
+                .op(I64.mul).op(I64.add);
+        }
+        b.localTee(Local.t64).i64const(BigInt(range.lo + Math.min(0, span))).op(I64.add)
+            .localGet(Local.t64).i64const(BigInt(range.hi + Math.max(0, span))).op(I64.add)
+            .op(I64.or).i64const(32n).op(I64.shrU).op(I64.wrap).op(I32.or);
     }
     b.op(I32.eqz);
 }

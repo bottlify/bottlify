@@ -2342,14 +2342,21 @@ export class RegionEmitter {
 
     /**
      * Prepares for an eager write of some flags: the word is made whole and
-     * the bits named are cleared, so the caller ors its values in.
+     * the bits named are cleared, so the caller ors its values in. Whole only
+     * where a flag the instruction leaves as it was is read later: a `bt`
+     * before a `jc` folds no record. (No shift by cl nor repeated compare,
+     * which may write no flag at all, comes here.)
      *
      * @param {number} mask
      */
     eagerWrite(mask){
-        if ((mask & ARITH) === ARITH)
+        // Outside precise, an undefined flag is the emitter's to leave as it will.
+        const left = ARITH & ~mask
+            & (this.context.precise === true ? ARITH : ~this.current.flagsUndefined);
+        if ((mask & ARITH) === ARITH || (left & this.flagsAfter) === 0)
         {
-            // All six are written: nothing of the record survives to fold.
+            // All six are written, or the ones not are not read: nothing of
+            // the record survives to fold.
             this.b.i32const(0).localSet(Local.kind);
             this.pending = { kind: Kind.EAGER, width: 2 };
         }
@@ -2865,7 +2872,7 @@ export class RegionEmitter {
      * @param {import('../region.js').Block} block @param {number} index
      * @param {boolean[]} live
      * @param {{ plan: Map<number, any>, streams: import('./memory.js').Stream[],
-     *     turns: number, forward: boolean }} streams
+     *     turns: number, forward: boolean, ranges: import('./memory.js').Range[] }} streams
      */
     emitHoistedLoop(block, index, live, streams){
         const { b } = this;
@@ -2876,7 +2883,7 @@ export class RegionEmitter {
         this.loops++;
         this.open(`selfDone${index}`, EMPTY);
         this.openLoop(`self${index}`);
-        emitStreamWindow(this, streams.streams, streams.turns, streams.forward);
+        emitStreamWindow(this, streams.streams, streams.turns, streams.forward, streams.ranges);
         b.op(I32.eqz);
         this.openGuard('streamsFlagged');
         // The checked copy, to the loop's end.

@@ -600,6 +600,14 @@ export function flagsLeftUndefined(state, read){
  *             add [rdi + 4], ecx; lea rdi, [rdi + 32]; dec ecx; jnz 1b
  *             -- a loop of three blocks, each turn's stores one window the block
  *             after the first takes from it, rather than streams
+ *     dwords: mov r8, rdx; xor eax, eax; mov r10d, 200
+ *             1: mov esi, eax; movzx edi, byte [r8 + rsi]; lea esi, [r8 + rax]; add eax, 1
+ *             mov [rsi + 0x400], dil; cmp eax, r10d; jne 1b
+ *             -- dword registers a stream goes off, one a sum of two cut to 32 bits
+ *     cuts:   mov r8, rdx; mov r9, 1 << 32; sub r8, r9; mov eax, -100; mov ecx, 300
+ *             1: mov esi, eax; mov [r8 + rsi], cl; add eax, 1; dec ecx; jnz 1b
+ *             -- the store lands below rdx until eax wraps, then past the window: a
+ *             model that took esi past 2^32 would store at rdx on
  */
 export const LOOPS = Object.freeze({
     fill: '4889d7b92c01000048890f8947084883c70cffc975f2',
@@ -608,6 +616,8 @@ export const LOOPS = Object.freeze({
     pushes: '4989e04889d4b958020000516a07ffc975f94c89c4',
     index: '31c9894c8a10018c8a0004000048ffc14881f9fa00000075e9',
     groups: '4889d7b93200000048890f48894708f7c1010000007403894f1066894f14014f04488d7f20ffc975df',
+    dwords: '4989d031c041bac800000089c6410fb63c30418d340083c0014088be000400004439d075e6',
+    cuts: '4989d049b900000000010000004d29c8b89cffffffb92c01000089c641880c3083c001ffc975f3',
 });
 
 /**
