@@ -39,10 +39,43 @@ const WINRT_NAMESPACE = 'urn:schemas-microsoft-com:winrt.v1';
  */
 
 /**
+ * A COM class a manifest declares: a file's comClass, or the assembly's
+ * clrClass (`runtime` set), with its ProgIDs.
+ *
+ * @typedef {Object} ComClass
+ * @property {string} clsid
+ * @property {string | null} tlbid
+ * @property {string} threadingModel
+ * @property {string | null} progid  the class's own ProgID
+ * @property {string[]} progids  every ProgID it answers to, its own first
+ * @property {Record<string, string>} misc  miscStatus attributes, by name
+ * @property {string | null} [name]  a CLR class's name
+ * @property {string | null} [runtime]  a CLR class's runtime version
+ */
+
+/**
+ * An interface's proxy-stub a manifest declares: a file's comInterfaceProxyStub,
+ * or the assembly's comInterfaceExternalProxyStub.
+ *
+ * @typedef {Object} ProxyStub
+ * @property {string} iid
+ * @property {string | null} name
+ * @property {string | null} tlbid
+ * @property {string | null} numMethods
+ * @property {string | null} baseInterface
+ * @property {string | null} proxyStubClsid32
+ */
+
+/**
  * @typedef {Object} ManifestFile
  * @property {string} name
  * @property {string | null} loadFrom
  * @property {{ name: string, versioned: boolean }[]} windowClasses
+ * @property {ComClass[]} [comClasses]
+ * @property {ProxyStub[]} [proxyStubs]
+ * @property {{ tlbid: string, version: string, helpdir: string, resourceid: string | null,
+ *     flags: string }[]} [typelibs]
+ * @property {{ name: string, threadingModel: string }[]} [activatableClasses]
  */
 
 /**
@@ -58,6 +91,9 @@ const WINRT_NAMESPACE = 'urn:schemas-microsoft-com:winrt.v1';
  * @property {{ oldVersion: [number[], number[]], newVersion: number[] }[]} redirects
  *     A publisher policy's bindingRedirects, for the assembly it names.
  * @property {Identity | null} redirectsFor
+ * @property {ProxyStub[]} [externalProxyStubs]
+ * @property {{ clsid: string, name: string, runtime: string }[]} [clrSurrogates]
+ * @property {ComClass[]} [clrClasses]
  */
 
 /**
@@ -435,6 +471,21 @@ export function parseManifest(bytes){
                     }
                 }
                 break;
+            case 'comInterfaceExternalProxyStub':
+                (manifest.externalProxyStubs ??= []).push(proxyStubOf(child));
+                break;
+            case 'clrSurrogate':
+                (manifest.clrSurrogates ??= []).push({
+                    clsid: child.attributes.get('clsid') ?? '',
+                    name: child.attributes.get('name') ?? '',
+                    runtime: child.attributes.get('runtimeVersion') ?? '',
+                });
+                break;
+            case 'clrClass':
+                (manifest.clrClasses ??= []).push({ ...comClassOf(child),
+                    name: child.attributes.get('name') ?? null,
+                    runtime: child.attributes.get('runtimeVersion') ?? null });
+                break;
             case 'application':
                 for (const settings of child.children.filter(node=>node.name === 'windowsSettings'))
                 {
@@ -480,12 +531,77 @@ function fileOf(element){
             file.windowClasses.push({ name: className,
                 versioned: (child.attributes.get('versioned') ?? 'yes').toLowerCase() !== 'no' });
         }
-        else if (child.name === 'activatableClass' && child.namespace !== WINRT_NAMESPACE)
+        else if (child.name === 'activatableClass')
         {
-            return 'an activatable class outside the WinRT namespace';
+            if (child.namespace !== WINRT_NAMESPACE)
+            {
+                return 'an activatable class outside the WinRT namespace';
+            }
+            (file.activatableClasses ??= []).push({ name: child.attributes.get('name') ?? '',
+                threadingModel: child.attributes.get('threadingModel') ?? '' });
+        }
+        else if (child.name === 'comClass')
+        {
+            (file.comClasses ??= []).push(comClassOf(child));
+        }
+        else if (child.name === 'comInterfaceProxyStub')
+        {
+            (file.proxyStubs ??= []).push(proxyStubOf(child));
+        }
+        else if (child.name === 'typelib')
+        {
+            (file.typelibs ??= []).push({
+                tlbid: child.attributes.get('tlbid') ?? '',
+                version: child.attributes.get('version') ?? '',
+                helpdir: child.attributes.get('helpdir') ?? '',
+                resourceid: child.attributes.get('resourceid') ?? null,
+                flags: child.attributes.get('flags') ?? '',
+            });
         }
     }
     return file;
+}
+
+/**
+ * A comClass or clrClass element: the class, its threading model, its
+ * ProgIDs and its misc status.
+ *
+ * @param {XmlElement} element
+ * @returns {ComClass}
+ */
+function comClassOf(element){
+    const get = (/** @type {string} */ key)=>element.attributes.get(key) ?? null;
+    const progid = get('progid');
+    /** @type {Record<string, string>} */
+    const misc = {};
+    for (const key of ['miscStatus', 'miscStatusIcon', 'miscStatusContent',
+        'miscStatusThumbnail', 'miscStatusDocPrint'])
+    {
+        const value = get(key);
+        if (value !== null)
+        {
+            misc[key] = value;
+        }
+    }
+    return {
+        clsid: get('clsid') ?? '', tlbid: get('tlbid'), threadingModel: get('threadingModel') ?? '',
+        progid, misc,
+        progids: [...progid === null ? [] : [progid], ...element.children
+            .filter(node=>node.name === 'progid').map(node=>node.text.trim())],
+    };
+}
+
+/**
+ * A comInterfaceProxyStub or comInterfaceExternalProxyStub element.
+ *
+ * @param {XmlElement} element
+ * @returns {ProxyStub}
+ */
+function proxyStubOf(element){
+    const get = (/** @type {string} */ key)=>element.attributes.get(key) ?? null;
+    return { iid: get('iid') ?? '', name: get('name'), tlbid: get('tlbid'),
+        numMethods: get('numMethods'), baseInterface: get('baseInterface'),
+        proxyStubClsid32: get('proxyStubClsid32') };
 }
 
 /**

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MULDIV_CODE, createSystemFunctions, mulDiv } from './system.js';
+import { createActivationContexts } from './actctx.js';
 import { createProcessors } from './processor.js';
 import { KEPT, random, runCode } from '../../../../scripts/guest-code/equivalence.mjs';
 
@@ -909,19 +910,135 @@ test('SetThreadExecutionState answers the lasting request before the call', ()=>
     assert.equal(host.errors.at(-1), 87);
 });
 
-test('FindActCtxSectionString is absent, as no activation context is built', ()=>{
-    // Twice now a lookup answering "not found" stopped programs before their first
-    // instruction: the Visual C++ 2005 runtime (msvcr80, vcomp) finds the function through
-    // GetProcAddress, takes the answer for a load without its manifest and raises R6034 --
-    // Gothic 3 at vcomp.dll. Absent, the runtime takes the system for one without
-    // side-by-side support and goes on. Building activation contexts from manifests is
-    // what would let it be present.
-    const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
-    for (const name of ['FindActCtxSectionStringA', 'FindActCtxSectionStringW'])
+/**
+ * The load check of a Visual C++ 2005 or 2008 runtime's DllMain, as msvcr80.dll
+ * (8.0.50727.6195) and vcomp.dll make it: with FindActCtxSectionStringW present,
+ * a runtime loaded from the system directory, or one the active context does
+ * not redirect, stops with R6034; found, it runs from WinSxS or beside its
+ * assembly's manifest, and stops anywhere else.
+ *
+ * @param {any} functions  the activation context table
+ * @param {(path: string) => boolean} exists
+ * @param {{ dll: string, assembly: string }} runtime @param {string} loadedFrom
+ */
+function runtimeCheck(functions, exists, runtime, loadedFrom){
+    if (!functions.FindActCtxSectionStringW)
     {
-        assert.equal(fns[name], undefined, `${name} is not exported`);
+        return 'runs';
     }
-});
+    const directory = loadedFrom.slice(0, loadedFrom.lastIndexOf('\\') + 1).toLowerCase();
+    if (directory === 'c:\\windows\\system32\\')
+    {
+        return 'R6034';
+    }
+    const found = functions.FindActCtxSectionStringW.lookup(runtime.dll);
+    if (!found)
+    {
+        return 'R6034';
+    }
+    if (directory.startsWith('c:\\windows\\winsxs\\'))
+    {
+        return 'runs';
+    }
+    return exists(`${directory}${runtime.assembly}.manifest`) ? 'runs' : 'R6034';
+}
+
+test('a C runtime checking its own load runs where Windows runs it, and stops where it stops',
+    async()=>{
+        const runtime = { dll: 'msvcr90.dll', assembly: 'Microsoft.VC90.CRT' };
+        const asked = '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">'
+            + '<dependency><dependentAssembly><assemblyIdentity type="win32" '
+            + 'name="Microsoft.VC90.CRT" version="9.0.30729.6161" processorArchitecture="x86" '
+            + 'publicKeyToken="1fc8b3b9a1e18e3b"/></dependentAssembly></dependency></assembly>';
+        const own = '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">'
+            + '<noInheritable/><assemblyIdentity type="win32" name="Microsoft.VC90.CRT" '
+            + 'version="9.0.30729.6161" processorArchitecture="x86" '
+            + 'publicKeyToken="1fc8b3b9a1e18e3b"/><file name="msvcr90.dll"/></assembly>';
+        /**
+         * One layout: the files on the volume, the program's own manifest,
+         * and what the loader and the runtime then do.
+         *
+         * @param {Record<string, string>} volume @param {string | null} embedded
+         */
+        const run = async(volume, embedded)=>{
+            const files = new Map(Object.entries(volume).map(([path, text])=>[
+                path.toLowerCase(), new TextEncoder().encode(text)]));
+            const exists = (/** @type {string} */ path)=>files.has(path.toLowerCase());
+            const bytes = new Uint8Array(0x10000);
+            let next = 0x4000;
+            const { functions, loaderApi } = createActivationContexts({
+                readMemory: (address, length)=>bytes.slice(address, address + length),
+                writeMemory: (address, data)=>bytes.set(data, address),
+                readCString: ()=>'',
+                readWideString: address=>{
+                    let text = '';
+                    for (let at = address; bytes[at] | bytes[at + 1]; at += 2)
+                    {
+                        text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
+                    }
+                    return text;
+                },
+                setLastError: ()=>{},
+                allocate: size=>{
+                    const at = next;
+                    next += (size + 15) & ~15;
+                    return at;
+                },
+                teb: ()=>0x100,
+                readFile: path=>files.get(path.toLowerCase()) ?? null,
+                stat: path=>(exists(path) ? { exists: true, isDirectory: false } : null),
+                fullPath: path=>path,
+                imagePath: ()=>'C:\\app\\game.exe',
+                encodeAnsi: text=>new TextEncoder().encode(text),
+                decodeAnsi: data=>new TextDecoder().decode(data),
+            });
+            const failed = await loaderApi.processDefaultFrom(
+                embedded === null ? null : new TextEncoder().encode(embedded), 'C:\\app\\game.exe');
+            if (failed !== null)
+            {
+                return 'does not start';
+            }
+            // Where the loader takes it from: the context's assembly, else the
+            // search, beside the program first.
+            const redirected = loaderApi.redirect(runtime.dll);
+            const loadedFrom = redirected?.path ?? (['C:\\app\\', 'C:\\WINDOWS\\system32\\']
+                .map(place=>`${place}${runtime.dll}`).find(exists) ?? null);
+            if (loadedFrom === null)
+            {
+                return 'not found';
+            }
+            const table = /** @type {any} */ ({ ...functions });
+            table.FindActCtxSectionStringW = { lookup: (/** @type {string} */ name)=>{
+                const key = 0x8000;
+                [...`${name}\0`].forEach((unit, at)=>{
+                    bytes[key + at * 2] = unit.charCodeAt(0);
+                    bytes[key + at * 2 + 1] = 0;
+                });
+                new DataView(bytes.buffer).setUint32(0x9000, 0x40, true);
+                return functions.FindActCtxSectionStringW.handler([0, 0, 2, key, 0x9000]) === 1;
+            } };
+            return runtimeCheck(table, exists, runtime, loadedFrom);
+        };
+        const dll = 'MZ';
+        assert.equal(await run({ 'C:\\app\\msvcr90.dll': dll,
+            'C:\\app\\Microsoft.VC90.CRT.manifest': own }, asked), 'runs',
+        'its manifest named by the program\'s, the runtime and its manifest beside it');
+        assert.equal(await run({ 'C:\\app\\Microsoft.VC90.CRT\\msvcr90.dll': dll,
+            'C:\\app\\Microsoft.VC90.CRT\\Microsoft.VC90.CRT.manifest': own }, asked), 'runs',
+        'in its assembly\'s folder');
+        assert.equal(await run({ 'C:\\app\\msvcr90.dll': dll,
+            'C:\\app\\Microsoft.VC90.CRT.manifest': own, 'C:\\app\\game.exe.manifest': asked },
+        null), 'runs', 'an external manifest');
+        assert.equal(await run({ 'C:\\WINDOWS\\system32\\msvcr90.dll': dll }, asked), 'runs',
+            'installed: seen in the store, as the redistributable puts it');
+        assert.equal(await run({ 'C:\\app\\msvcr90.dll': dll,
+            'C:\\app\\Microsoft.VC90.CRT.manifest': own }, null), 'R6034',
+        'no manifest of the program\'s names it');
+        assert.equal(await run({ 'C:\\WINDOWS\\system32\\msvcr90.dll': dll }, null), 'R6034',
+            'in the system directory, named by nothing');
+        assert.equal(await run({}, asked), 'does not start',
+            'an assembly found nowhere: the side-by-side configuration is incorrect');
+    });
 
 test('win.ini is not kernel32\'s table to answer', ()=>{
     const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));

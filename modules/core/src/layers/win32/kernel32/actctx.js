@@ -29,6 +29,7 @@
  * a DLL a context redirects lives (`loaderApi`).
  */
 
+import { formatGuid, parseGuid } from '../ole32/guid.js';
 import {
     compareVersions, encodeIdentity, identityMatches, parseManifest,
 } from './manifest.js';
@@ -75,9 +76,18 @@ const RT_MANIFEST = 24;
 const CREATEPROCESS_MANIFEST_RESOURCE_ID = 1;
 const ISOLATIONAWARE_MANIFEST_RESOURCE_ID = 2;
 
-/** The sections FindActCtxSectionString looks in. */
+/** The sections FindActCtxSectionString and FindActCtxSectionGuid look in. */
 const SECTION_DLL_REDIRECTION = 2;
 const SECTION_WINDOW_CLASS_REDIRECTION = 3;
+const SECTION_COM_SERVER_REDIRECTION = 4;
+const SECTION_COM_INTERFACE_REDIRECTION = 5;
+const SECTION_COM_TYPE_LIBRARY_REDIRECTION = 6;
+const SECTION_COM_PROGID_REDIRECTION = 7;
+const SECTION_CLR_SURROGATES = 9;
+const SECTION_WINRT_ACTIVATABLE_CLASSES = 12;
+const GUID_SECTIONS = new Set([SECTION_COM_SERVER_REDIRECTION,
+    SECTION_COM_INTERFACE_REDIRECTION, SECTION_COM_TYPE_LIBRARY_REDIRECTION,
+    SECTION_CLR_SURROGATES]);
 /** The highest section number Windows defines; past it no context has the section. */
 const SECTION_LAST = 13;
 const FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX = 0x1;
@@ -94,9 +104,46 @@ const STRING_SECTION_MAGIC = 0x64487353;
 const STRING_SECTION_HEADER = 44;
 const STRING_INDEX_ENTRY = 24;
 /** DLL_REDIRECT_PATH_OMITS_ASSEMBLY_ROOT: the DLL is in its assembly's directory. */
+/** A GUID section: 'GsHd', then an index of GUIDs, the names and data. */
+const GUID_SECTION_MAGIC = 0x64487347;
+const GUID_SECTION_HEADER = 40;
+const GUID_INDEX_ENTRY = 28;
+const GUID_SIZE = 16;
+
 const DLL_REDIRECT_PATH_OMITS_ASSEMBLY_ROOT = 0x2;
 const DLL_REDIRECT_DATA = 20;
 const WNDCLASS_REDIRECT_DATA = 24;
+const COMCLASS_REDIRECT_DATA = 120;
+const CLRCLASS_DATA = 44;
+const IFACEPS_REDIRECT_DATA = 68;
+const TLIB_REDIRECT_DATA = 32;
+const PROGID_REDIRECT_DATA = 12;
+const CLRSURROGATE_DATA = 40;
+const ACTIVATABLE_CLASS_DATA = 20;
+/** What a CLR class's server is, in the two spellings Windows gives it. */
+const CLR_SERVER = 'MSCOREE.DLL';
+
+/** comClass threadingModel, by its manifest spelling. */
+const COM_THREADING = Object.freeze({ apartment: 1, free: 2, no: 3, both: 4, neutral: 5 });
+/** activatableClass threadingModel. */
+const WINRT_THREADING = Object.freeze({ both: 0, sta: 1, mta: 2 });
+/** The miscStatus attributes, and the bit of the class's flags each sets. */
+/** @type {readonly [string, number, number][]} */
+const MISC_FIELDS = Object.freeze([['miscStatus', 1, 100], ['miscStatusContent', 4, 104],
+    ['miscStatusThumbnail', 8, 108], ['miscStatusIcon', 2, 112], ['miscStatusDocPrint', 16, 116]]);
+/** OLEMISC, by the names a manifest's miscStatus lists. */
+const OLEMISC = Object.freeze({ recomposeonresize: 0x1, onlyiconic: 0x2, insertnotreplace: 0x4,
+    static: 0x8, cantlinkinside: 0x10, canlinkbyole1: 0x20, islinkobject: 0x40, insideout: 0x80,
+    activatewhenvisible: 0x100, renderingisdeviceindependent: 0x200, invisibleatruntime: 0x400,
+    alwaysrun: 0x800, actslikebutton: 0x1000, actslikelabel: 0x2000, nouiactivate: 0x4000,
+    alignable: 0x8000, simpleframe: 0x10000, setclientsitefirst: 0x20000, imemode: 0x40000,
+    ignoreactivatewhenvisible: 0x80000, wantstomenumerge: 0x100000,
+    supportsmultilevelundo: 0x200000 });
+/** LIBFLAGS, by the names a typelib's flags list. */
+const LIBFLAGS = Object.freeze({ restricted: 0x1, control: 0x2, hidden: 0x4, hasdiskimage: 0x8 });
+/** ifacepsredirect_data's mask: which optional attributes were given. */
+const IFACEPS_NUM_METHODS = 0x1;
+const IFACEPS_BASE_INTERFACE = 0x2;
 
 /** QueryActCtxW's flags and classes. */
 const QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX = 0x4;
@@ -156,8 +203,30 @@ const CONTEXT_MAGIC = 0xc07e3e11;
  * @property {Assembly[]} assemblies  the root first
  * @property {string} appDirectory  with a trailing separator
  * @property {string | null} rootManifestPath
- * @property {Map<number, { base: number, size: number,
- *     entries: Map<string, { offset: number, length: number, roster: number }> } | null>} sections
+ * @property {Map<number, Section | null>} sections
+ * @property {Map<object, Uint8Array>} aliases  the GUID each COM class is also found by
+ */
+
+/**
+ * A section of a context in guest memory, with where each key's data is.
+ *
+ * @typedef {Object} Section
+ * @property {number} base
+ * @property {number} size
+ * @property {number} global  the section's global data, from its base; 0 for none
+ * @property {number} globalLength
+ * @property {Map<string, { offset: number, length: number, roster: number }>} entries
+ */
+
+/**
+ * What one key of a section is: the data is built once the layout says
+ * where it goes (`at`, from the section's base) and where each string or
+ * GUID it puts in the section's global data is (`global`).
+ *
+ * @typedef {Object} SectionItem
+ * @property {string[]} keys  a string section's key, or the GUIDs a GUID section finds it by
+ * @property {number} roster
+ * @property {(at: number, global: (value: string | Uint8Array) => number) => Uint8Array} data
  */
 
 /**
@@ -188,9 +257,10 @@ const CONTEXT_MAGIC = 0xc07e3e11;
  * @property {() => string} imagePath  the running program's
  * @property {(base: number, type: number, id: number) => Uint8Array | null} [moduleResource]
  *     A loaded module's resource, by its base.
- * @property {(path: string, type: number, id: number)
+ * @property {(path: string, type: number, id: number | null)
  *     => Uint8Array | null | Promise<Uint8Array | null>} [fileResource]
- *     A resource of an image on the volume, read as data.
+ *     A resource of an image on the volume, read as data; a null id is the
+ *     type's lowest numbered one, in any language.
  * @property {(address: number) => number | null} [moduleAt]  the base of the module holding it
  * @property {(name: string) => boolean} [answers]  whether the engine's own table has a DLL
  * @property {(base: number) => string | null} [modulePath]
@@ -223,6 +293,204 @@ export const hashKey = key=>{
         hash = (Math.imul(hash, 65599) + unit.charCodeAt(0)) >>> 0;
     }
     return hash;
+};
+
+/**
+ * The last eight bytes of the GUID a COM class is given beside its own,
+ * after a count and the context; any GUID no class has would do.
+ */
+const ALIAS_TAIL = Uint8Array.of(0xac, 0x7c, 0x7e, 0x11, 0xa1, 0x1a, 0x5e, 0xd0);
+
+/** @param {string | null} text */
+const guidOrZero = text=>(text === null ? null : parseGuid(text)) ?? new Uint8Array(GUID_SIZE);
+
+/**
+ * A comma-separated list of flag names, OR-ed through a table; names are
+ * matched ignoring case and unknown ones add nothing.
+ *
+ * @param {string} text @param {Readonly<Record<string, number>>} table
+ */
+const flagsOf = (text, table)=>text.split(',').reduce((flags, name)=>
+    flags | (table[name.trim().toLowerCase()] ?? 0), 0);
+
+/** @param {Uint8Array} bytes */
+const viewOf = bytes=>new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+/** dllredirect_data for a DLL found in its assembly's directory. */
+const dllRedirectData = ()=>{
+    const bytes = new Uint8Array(DLL_REDIRECT_DATA);
+    const view = viewOf(bytes);
+    view.setUint32(0, DLL_REDIRECT_DATA, true);
+    view.setUint32(4, DLL_REDIRECT_PATH_OMITS_ASSEMBLY_ROOT, true);
+    return bytes;
+};
+
+/**
+ * wndclass_redirect_data: the versioned name follows the header, then the
+ * module's, whose offset is from the section's base.
+ *
+ * @param {number} at @param {string} versioned @param {string} module
+ */
+const wndclassData = (at, versioned, module)=>{
+    const name = wide(`${versioned}\0`);
+    const moduleName = wide(`${module}\0`);
+    const bytes = new Uint8Array(WNDCLASS_REDIRECT_DATA + name.length + moduleName.length);
+    const view = viewOf(bytes);
+    view.setUint32(0, WNDCLASS_REDIRECT_DATA, true);
+    view.setUint32(8, name.length - 2, true);
+    view.setUint32(12, WNDCLASS_REDIRECT_DATA, true);
+    view.setUint32(16, moduleName.length - 2, true);
+    view.setUint32(20, at + WNDCLASS_REDIRECT_DATA + name.length, true);
+    bytes.set(name, WNDCLASS_REDIRECT_DATA);
+    bytes.set(moduleName, WNDCLASS_REDIRECT_DATA + name.length);
+    return bytes;
+};
+
+/**
+ * comclassredirect_data, then a CLR class's clrclass_data with its name and
+ * runtime, then the class's ProgID. The server's name is in the section's
+ * global data; a CLR class's server is the runtime's, MSCOREE.DLL there and
+ * mscoree.dll in its clrclass_data.
+ *
+ * @param {import('./manifest.js').ComClass} comClass @param {Uint8Array} alias
+ * @param {string | null} file  null for a CLR class
+ * @param {(value: string | Uint8Array) => number} global
+ */
+const comClassData = (comClass, alias, file, global)=>{
+    let clr = new Uint8Array(0);
+    if (file === null)
+    {
+        const name = wide(`${comClass.name ?? ''}\0`);
+        const runtime = wide(`${comClass.runtime ?? ''}\0`);
+        clr = new Uint8Array(CLRCLASS_DATA + name.length + runtime.length);
+        const view = viewOf(clr);
+        const server = CLR_SERVER.toLowerCase();
+        view.setUint32(0, CLRCLASS_DATA, true);
+        view.setUint32(8, 2, true);
+        view.setUint32(12, server.length * 2, true);
+        view.setUint32(16, global(server), true);
+        view.setUint32(20, name.length - 2, true);
+        view.setUint32(24, CLRCLASS_DATA, true);
+        view.setUint32(28, runtime.length - 2, true);
+        view.setUint32(32, CLRCLASS_DATA + name.length, true);
+        clr.set(name, CLRCLASS_DATA);
+        clr.set(runtime, CLRCLASS_DATA + name.length);
+    }
+    const progid = comClass.progid === null ? null : wide(`${comClass.progid}\0`);
+    const bytes = new Uint8Array(COMCLASS_REDIRECT_DATA + clr.length + (progid?.length ?? 0));
+    const view = viewOf(bytes);
+    const server = file ?? CLR_SERVER;
+    let misc = 0;
+    for (const [field, bit, offset] of MISC_FIELDS)
+    {
+        const value = comClass.misc[field];
+        if (value !== undefined)
+        {
+            misc |= bit;
+            view.setUint32(offset, flagsOf(value, OLEMISC), true);
+        }
+    }
+    view.setUint32(0, COMCLASS_REDIRECT_DATA, true);
+    view.setUint32(4, misc << 8, true);
+    view.setUint32(8, COM_THREADING[/** @type {'both'} */ (comClass.threadingModel
+        .toLowerCase())] ?? 0, true);
+    bytes.set(guidOrZero(comClass.clsid), 12);
+    bytes.set(alias, 28);
+    bytes.set(guidOrZero(comClass.clsid), 44);
+    bytes.set(guidOrZero(comClass.tlbid), 60);
+    view.setUint32(76, server.length * 2, true);
+    view.setUint32(80, global(server), true);
+    if (clr.length > 0)
+    {
+        view.setUint32(92, clr.length, true);
+        view.setUint32(96, COMCLASS_REDIRECT_DATA, true);
+        bytes.set(clr, COMCLASS_REDIRECT_DATA);
+    }
+    if (progid)
+    {
+        view.setUint32(84, progid.length - 2, true);
+        view.setUint32(88, COMCLASS_REDIRECT_DATA + clr.length, true);
+        bytes.set(progid, COMCLASS_REDIRECT_DATA + clr.length);
+    }
+    return bytes;
+};
+
+/**
+ * ifacepsredirect_data and the interface's name. An external proxy-stub
+ * that names its proxy-stub class gives that class where the interface's
+ * IID would be.
+ *
+ * @param {import('./manifest.js').ProxyStub} stub @param {boolean} external
+ */
+const proxyStubData = (stub, external)=>{
+    const name = stub.name === null ? null : wide(`${stub.name}\0`);
+    const bytes = new Uint8Array(IFACEPS_REDIRECT_DATA + (name?.length ?? 0));
+    const view = viewOf(bytes);
+    view.setUint32(0, IFACEPS_REDIRECT_DATA, true);
+    view.setUint32(4, (stub.numMethods === null ? 0 : IFACEPS_NUM_METHODS)
+        | (stub.baseInterface === null ? 0 : IFACEPS_BASE_INTERFACE), true);
+    bytes.set(guidOrZero(external && stub.proxyStubClsid32 !== null
+        ? stub.proxyStubClsid32 : stub.iid), 8);
+    view.setUint32(24, stub.numMethods === null ? 0 : parseInt(stub.numMethods, 10) >>> 0, true);
+    bytes.set(guidOrZero(stub.tlbid), 28);
+    bytes.set(guidOrZero(stub.baseInterface), 44);
+    if (name)
+    {
+        view.setUint32(60, name.length - 2, true);
+        view.setUint32(64, IFACEPS_REDIRECT_DATA, true);
+        bytes.set(name, IFACEPS_REDIRECT_DATA);
+    }
+    return bytes;
+};
+
+/**
+ * tlibredirect_data and the help directory; the module's name is in the
+ * section's global data.
+ *
+ * @param {{ version: string, helpdir: string, resourceid: string | null, flags: string }} typelib
+ * @param {string} file @param {(value: string | Uint8Array) => number} global
+ */
+const typelibData = (typelib, file, global)=>{
+    const help = typelib.helpdir === '' ? null : wide(`${typelib.helpdir}\0`);
+    const bytes = new Uint8Array(TLIB_REDIRECT_DATA + (help?.length ?? 0));
+    const view = viewOf(bytes);
+    const [major = 0, minor = 0] = typelib.version.split('.').map(part=>parseInt(part, 10) || 0);
+    view.setUint32(0, TLIB_REDIRECT_DATA, true);
+    view.setUint32(8, file.length * 2, true);
+    view.setUint32(12, global(file), true);
+    view.setUint16(16, typelib.resourceid === null ? 0
+        : parseInt(typelib.resourceid, 16) & 0xffff || 0, true);
+    view.setUint16(18, flagsOf(typelib.flags, LIBFLAGS), true);
+    if (help)
+    {
+        view.setUint32(20, help.length - 2, true);
+        view.setUint32(24, TLIB_REDIRECT_DATA, true);
+        bytes.set(help, TLIB_REDIRECT_DATA);
+    }
+    view.setUint16(28, major, true);
+    view.setUint16(30, minor, true);
+    return bytes;
+};
+
+/**
+ * clrsurrogate_data, its runtime version, then its name.
+ *
+ * @param {{ clsid: string, name: string, runtime: string }} surrogate
+ */
+const surrogateData = surrogate=>{
+    const runtime = wide(`${surrogate.runtime}\0`);
+    const name = wide(`${surrogate.name}\0`);
+    const bytes = new Uint8Array(CLRSURROGATE_DATA + runtime.length + name.length);
+    const view = viewOf(bytes);
+    view.setUint32(0, CLRSURROGATE_DATA, true);
+    bytes.set(guidOrZero(surrogate.clsid), 8);
+    view.setUint32(24, CLRSURROGATE_DATA, true);
+    view.setUint32(28, runtime.length - 2, true);
+    view.setUint32(32, CLRSURROGATE_DATA + runtime.length, true);
+    view.setUint32(36, name.length - 2, true);
+    bytes.set(runtime, CLRSURROGATE_DATA);
+    bytes.set(name, CLRSURROGATE_DATA + runtime.length);
+    return bytes;
 };
 
 /** @param {string} path */
@@ -288,6 +556,7 @@ export function createActivationContexts(host){
     const contexts = new Map();
     /** @type {Context | null} */
     let processDefault = null;
+    let aliasCount = 0;
 
     /** @param {number} address */
     const readDword = address=>{
@@ -504,9 +773,9 @@ export function createActivationContexts(host){
                 {
                     continue;
                 }
+                // A DLL's manifest is its lowest numbered one, whatever its language.
                 const bytes = kind === 'dll'
-                    ? await host.fileResource?.(path, RT_MANIFEST,
-                        CREATEPROCESS_MANIFEST_RESOURCE_ID) ?? null
+                    ? await host.fileResource?.(path, RT_MANIFEST, null) ?? null
                     : await host.readFile(path);
                 const manifest = parsed(bytes);
                 if (manifest?.identity && identityMatches(wanted, manifest.identity))
@@ -579,7 +848,7 @@ export function createActivationContexts(host){
         writeDword(handle, CONTEXT_MAGIC);
         /** @type {Context} */
         const context = { handle, references: 1, assemblies, appDirectory: where.appDirectory,
-            rootManifestPath: where.manifestPath, sections: new Map() };
+            rootManifestPath: where.manifestPath, sections: new Map(), aliases: new Map() };
         contexts.set(handle, context);
         return context;
     };
@@ -614,116 +883,283 @@ export function createActivationContexts(host){
     // ----------------------------------------------------------------- sections
 
     /**
-     * A string section of a context, built the first time it is asked for
-     * and kept in guest memory while the context lives; null when no
-     * assembly of the context has an entry for it.
+     * The GUID a COM class is also found by, made for it in this context the
+     * first time it is needed: its ProgIDs point at it.
+     *
+     * @param {Context} context @param {object} comClass
+     */
+    const aliasOf = (context, comClass)=>{
+        let alias = context.aliases.get(comClass);
+        if (!alias)
+        {
+            alias = new Uint8Array(GUID_SIZE);
+            const view = new DataView(alias.buffer);
+            view.setUint32(0, ++aliasCount, true);
+            view.setUint32(4, context.handle, true);
+            alias.set(ALIAS_TAIL, 8);
+            context.aliases.set(comClass, alias);
+        }
+        return alias;
+    };
+
+    /**
+     * What each assembly of a context puts in a section, in roster order.
      *
      * @param {Context} context @param {number} id
+     * @returns {SectionItem[]}
+     */
+    const itemsOf = (context, id)=>{
+        /** @type {SectionItem[]} */
+        const items = [];
+        const seen = new Set();
+        /** @param {string[]} keys @param {number} roster @param {SectionItem['data']} data */
+        const add = (keys, roster, data)=>{
+            const fresh = keys.filter(key=>key !== '' && !seen.has(key.toUpperCase()));
+            fresh.forEach(key=>seen.add(key.toUpperCase()));
+            if (fresh.length > 0)
+            {
+                items.push({ keys: fresh, roster, data });
+            }
+        };
+        context.assemblies.forEach((assembly, index)=>{
+            const roster = index + 1;
+            const manifest = assembly.manifest;
+            /** @type {{ file: string | null, comClass: import('./manifest.js').ComClass }[]} */
+            const classes = [
+                ...manifest.files.flatMap(file=>(file.comClasses ?? []).map(comClass=>({
+                    file: file.name, comClass }))),
+                ...(manifest.clrClasses ?? []).map(comClass=>({ file: null, comClass })),
+            ];
+            switch (id)
+            {
+                case SECTION_DLL_REDIRECTION:
+                    for (const file of manifest.files)
+                    {
+                        add([file.name], roster, ()=>dllRedirectData());
+                    }
+                    break;
+                case SECTION_WINDOW_CLASS_REDIRECTION:
+                    for (const file of manifest.files)
+                    {
+                        for (const windowClass of file.windowClasses)
+                        {
+                            const versioned = windowClass.versioned && assembly.identity.version
+                                ? `${assembly.identity.version.join('.')}!${windowClass.name}`
+                                : windowClass.name;
+                            add([windowClass.name], roster, at=>wndclassData(at, versioned,
+                                file.name));
+                        }
+                    }
+                    break;
+                case SECTION_COM_SERVER_REDIRECTION:
+                    for (const { file, comClass } of classes)
+                    {
+                        const alias = aliasOf(context, comClass);
+                        add([comClass.clsid, formatGuid(alias)], roster, (at, global)=>
+                            comClassData(comClass, alias, file, global));
+                    }
+                    break;
+                case SECTION_COM_PROGID_REDIRECTION:
+                    for (const { comClass } of classes)
+                    {
+                        const alias = aliasOf(context, comClass);
+                        for (const progid of comClass.progids)
+                        {
+                            add([progid], roster, (at, global)=>{
+                                const bytes = new Uint8Array(PROGID_REDIRECT_DATA);
+                                const view = new DataView(bytes.buffer);
+                                view.setUint32(0, PROGID_REDIRECT_DATA, true);
+                                view.setUint32(8, global(alias), true);
+                                return bytes;
+                            });
+                        }
+                    }
+                    break;
+                case SECTION_COM_INTERFACE_REDIRECTION:
+                    for (const stub of [...manifest.files.flatMap(file=>file.proxyStubs ?? [])
+                        .map(proxyStub=>({ proxyStub, external: false })),
+                    ...(manifest.externalProxyStubs ?? []).map(proxyStub=>({ proxyStub,
+                        external: true }))])
+                    {
+                        add([stub.proxyStub.iid], roster, ()=>proxyStubData(stub.proxyStub,
+                            stub.external));
+                    }
+                    break;
+                case SECTION_COM_TYPE_LIBRARY_REDIRECTION:
+                    for (const file of manifest.files)
+                    {
+                        for (const typelib of file.typelibs ?? [])
+                        {
+                            add([typelib.tlbid], roster, (at, global)=>typelibData(typelib,
+                                file.name, global));
+                        }
+                    }
+                    break;
+                case SECTION_CLR_SURROGATES:
+                    for (const surrogate of manifest.clrSurrogates ?? [])
+                    {
+                        add([surrogate.clsid], roster, ()=>surrogateData(surrogate));
+                    }
+                    break;
+                case SECTION_WINRT_ACTIVATABLE_CLASSES:
+                    for (const file of manifest.files)
+                    {
+                        for (const activatable of file.activatableClasses ?? [])
+                        {
+                            add([activatable.name], roster, (at, global)=>{
+                                const bytes = new Uint8Array(ACTIVATABLE_CLASS_DATA);
+                                const view = new DataView(bytes.buffer);
+                                view.setUint32(0, ACTIVATABLE_CLASS_DATA, true);
+                                view.setUint32(8, file.name.length * 2, true);
+                                view.setUint32(12, global(file.name), true);
+                                view.setUint32(16, WINRT_THREADING[/** @type {'both'} */ (
+                                    activatable.threadingModel.toLowerCase())] ?? 0, true);
+                                return bytes;
+                            });
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+        });
+        return items;
+    };
+
+    /**
+     * A section of a context, built the first time it is asked for and kept
+     * in guest memory while the context lives; null when no assembly of the
+     * context has an entry for it.
+     *
+     * A string section is laid out header, index, key names, global data,
+     * then each key's data; a GUID section the same without the names. Its
+     * index is ordered by the key's hash, or by the GUID.
+     *
+     * @param {Context} context @param {number} id
+     * @returns {Section | null}
      */
     const sectionOf = (context, id)=>{
         if (context.sections.has(id))
         {
             return context.sections.get(id) ?? null;
         }
-        /** @type {{ key: string, roster: number, data: (at: number) => Uint8Array }[]} */
-        const items = [];
-        const seen = new Set();
-        context.assemblies.forEach((assembly, index)=>{
-            for (const file of assembly.manifest.files)
-            {
-                if (id === SECTION_DLL_REDIRECTION && !seen.has(file.name.toUpperCase()))
-                {
-                    seen.add(file.name.toUpperCase());
-                    items.push({ key: file.name, roster: index + 1, data: ()=>{
-                        const bytes = new Uint8Array(DLL_REDIRECT_DATA);
-                        const view = new DataView(bytes.buffer);
-                        view.setUint32(0, DLL_REDIRECT_DATA, true);
-                        view.setUint32(4, DLL_REDIRECT_PATH_OMITS_ASSEMBLY_ROOT, true);
-                        return bytes;
-                    } });
-                }
-                if (id !== SECTION_WINDOW_CLASS_REDIRECTION)
-                {
-                    continue;
-                }
-                for (const windowClass of file.windowClasses)
-                {
-                    if (seen.has(windowClass.name.toUpperCase()))
-                    {
-                        continue;
-                    }
-                    seen.add(windowClass.name.toUpperCase());
-                    const versioned = windowClass.versioned && assembly.identity.version
-                        ? `${assembly.identity.version.join('.')}!${windowClass.name}`
-                        : windowClass.name;
-                    items.push({ key: windowClass.name, roster: index + 1, data: at=>{
-                        // The versioned name follows the header, then the module's.
-                        const name = wide(`${versioned}\0`);
-                        const module = wide(`${file.name}\0`);
-                        const bytes = new Uint8Array(WNDCLASS_REDIRECT_DATA + name.length
-                            + module.length);
-                        const view = new DataView(bytes.buffer);
-                        view.setUint32(0, WNDCLASS_REDIRECT_DATA, true);
-                        view.setUint32(8, name.length - 2, true);
-                        view.setUint32(12, WNDCLASS_REDIRECT_DATA, true);
-                        view.setUint32(16, module.length - 2, true);
-                        view.setUint32(20, at + WNDCLASS_REDIRECT_DATA + name.length, true);
-                        bytes.set(name, WNDCLASS_REDIRECT_DATA);
-                        bytes.set(module, WNDCLASS_REDIRECT_DATA + name.length);
-                        return bytes;
-                    } });
-                }
-            }
-        });
-        if (items.length === 0)
+        const guids = GUID_SECTIONS.has(id);
+        const items = itemsOf(context, id);
+        /** @type {{ key: string, item: SectionItem, guid: Uint8Array | null }[]} */
+        const keys = items.flatMap(item=>item.keys.map(key=>({ key, item,
+            guid: guids ? parseGuid(key) : null })))
+            .filter(entry=>!guids || entry.guid !== null);
+        if (keys.length === 0)
         {
             context.sections.set(id, null);
             return null;
         }
-        items.sort((a, b)=>hashKey(a.key) - hashKey(b.key));
-        // Header, index, the names, then each entry's data.
-        let at = STRING_SECTION_HEADER + STRING_INDEX_ENTRY * items.length;
-        const names = items.map(item=>{
-            const bytes = wide(`${item.key}\0`);
+        if (guids)
+        {
+            const order = (/** @type {Uint8Array | null} */ guid)=>formatGuid(
+                /** @type {Uint8Array} */ (guid));
+            keys.sort((a, b)=>(order(a.guid) < order(b.guid) ? -1 : 1));
+        }
+        else
+        {
+            keys.sort((a, b)=>hashKey(a.key) - hashKey(b.key));
+        }
+        const header = guids ? GUID_SECTION_HEADER : STRING_SECTION_HEADER;
+        let at = header + (guids ? GUID_INDEX_ENTRY : STRING_INDEX_ENTRY) * keys.length;
+        /** @param {Uint8Array} bytes */
+        const place = bytes=>{
             const offset = at;
             at += (bytes.length + 3) & ~3;
             return { bytes, offset };
-        });
-        const datas = items.map(item=>{
-            const offset = at;
-            const bytes = item.data(offset);
-            at += (bytes.length + 3) & ~3;
-            return { bytes, offset };
-        });
+        };
+        const names = guids ? [] : keys.map(entry=>place(wide(`${entry.key}\0`)));
+        // The global data holds what the items share: module names, aliases.
+        /** @type {Map<string, { bytes: Uint8Array, offset: number }>} */
+        const pool = new Map();
+        /** @type {{ bytes: Uint8Array, offset: number }[]} */
+        const pooled = [];
+        /** @param {string | Uint8Array} value */
+        const intern = value=>{
+            const name = typeof value === 'string' ? `s${value}` : `g${formatGuid(value)}`;
+            if (!pool.has(name))
+            {
+                pool.set(name, { bytes: typeof value === 'string' ? wide(`${value}\0`) : value,
+                    offset: 0 });
+            }
+            return /** @type {{ bytes: Uint8Array, offset: number }} */ (pool.get(name));
+        };
+        // Data is built twice: once to learn what goes in the global data, then
+        // in place, now that each piece has its offset.
+        for (const item of items)
+        {
+            item.data(0, value=>{
+                intern(value);
+                return 0;
+            });
+        }
+        const global = at;
+        for (const piece of pool.values())
+        {
+            const placed = place(piece.bytes);
+            piece.offset = placed.offset;
+            pooled.push(placed);
+        }
+        const globalLength = at - global;
+        /** @type {Map<SectionItem, { bytes: Uint8Array, offset: number }>} */
+        const datas = new Map();
+        for (const item of items)
+        {
+            datas.set(item, place(item.data(at, value=>intern(value).offset)));
+        }
         const image = new Uint8Array(at);
         const view = new DataView(image.buffer);
-        view.setUint32(0, STRING_SECTION_MAGIC, true);
-        view.setUint32(4, STRING_SECTION_HEADER, true);
+        view.setUint32(0, guids ? GUID_SECTION_MAGIC : STRING_SECTION_MAGIC, true);
+        view.setUint32(4, header, true);
         view.setUint32(8, 1, true);
-        view.setUint32(20, items.length, true);
-        view.setUint32(24, STRING_SECTION_HEADER, true);
+        view.setUint32(20, keys.length, true);
+        view.setUint32(24, header, true);
+        view.setUint32(guids ? 32 : 36, globalLength === 0 ? 0 : global, true);
+        view.setUint32(guids ? 36 : 40, globalLength, true);
         /** @type {Map<string, { offset: number, length: number, roster: number }>} */
         const entries = new Map();
-        items.forEach((item, index)=>{
-            const entry = STRING_SECTION_HEADER + STRING_INDEX_ENTRY * index;
-            view.setUint32(entry, hashKey(item.key), true);
-            view.setUint32(entry + 4, names[index].offset, true);
-            view.setUint32(entry + 8, names[index].bytes.length - 2, true);
-            view.setUint32(entry + 12, datas[index].offset, true);
-            view.setUint32(entry + 16, datas[index].bytes.length, true);
-            view.setUint32(entry + 20, item.roster, true);
-            image.set(names[index].bytes, names[index].offset);
-            image.set(datas[index].bytes, datas[index].offset);
-            entries.set(item.key.toUpperCase(), { offset: datas[index].offset,
-                length: datas[index].bytes.length, roster: item.roster });
+        keys.forEach((entry, index)=>{
+            const data = /** @type {{ bytes: Uint8Array, offset: number }} */ (
+                datas.get(entry.item));
+            if (entry.guid)
+            {
+                const slot = header + GUID_INDEX_ENTRY * index;
+                image.set(entry.guid, slot);
+                view.setUint32(slot + 16, data.offset, true);
+                view.setUint32(slot + 20, data.bytes.length, true);
+                view.setUint32(slot + 24, entry.item.roster, true);
+            }
+            else
+            {
+                const slot = header + STRING_INDEX_ENTRY * index;
+                view.setUint32(slot, hashKey(entry.key), true);
+                view.setUint32(slot + 4, names[index].offset, true);
+                view.setUint32(slot + 8, names[index].bytes.length - 2, true);
+                view.setUint32(slot + 12, data.offset, true);
+                view.setUint32(slot + 16, data.bytes.length, true);
+                view.setUint32(slot + 20, entry.item.roster, true);
+                image.set(names[index].bytes, names[index].offset);
+            }
+            entries.set(entry.guid ? formatGuid(entry.guid) : entry.key.toUpperCase(),
+                { offset: data.offset, length: data.bytes.length, roster: entry.item.roster });
         });
+        for (const placed of [...pooled, ...datas.values()])
+        {
+            image.set(placed.bytes, placed.offset);
+        }
         const base = allocate(image.length);
         if (base === 0)
         {
             return null;
         }
         host.writeMemory(base, image);
-        const section = { base, size: image.length, entries };
+        /** @type {Section} */
+        const section = { base, size: image.length, global: globalLength === 0 ? 0 : global,
+            globalLength, entries };
         context.sections.set(id, section);
         return section;
     };
@@ -828,7 +1264,7 @@ export function createActivationContexts(host){
      * process default, or the status that says why not.
      *
      * @param {number} id @param {string} key
-     * @returns {{ context: Context, section: { base: number, size: number },
+     * @returns {{ context: Context, section: Section,
      *     entry: { offset: number, length: number, roster: number }, fallback: boolean }
      *     | { status: number }}
      */
@@ -873,6 +1309,8 @@ export function createActivationContexts(host){
         put(4, 1);
         put(8, found.section.base + found.entry.offset);
         put(12, found.entry.length);
+        put(16, found.section.global === 0 ? 0 : found.section.base + found.section.global);
+        put(20, found.section.globalLength);
         put(24, found.section.base);
         put(28, found.section.size);
         const returnContext = (flags & FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX) !== 0;
@@ -914,6 +1352,17 @@ export function createActivationContexts(host){
         }
         return STATUS_SUCCESS;
     };
+
+    /**
+     * RtlFindActivationContextSectionGuid's body: the GUID read from guest
+     * memory is the key, in the form the GUID sections index it by.
+     *
+     * @param {number} flags @param {number} extension @param {number} id
+     * @param {number} key @param {number} data
+     */
+    const findGuid = (flags, extension, id, key, data)=>(key === 0
+        ? STATUS_INVALID_PARAMETER
+        : findString(flags, extension, id, formatGuid(host.readMemory(key, GUID_SIZE)), data));
 
     /** @param {number} status */
     const errorOf = status=>({
@@ -1234,7 +1683,11 @@ export function createActivationContexts(host){
                 const parent = host.stat(directoryOf(path).replace(/\\$/, ''));
                 return { error: parent?.exists ? ERROR_FILE_NOT_FOUND : ERROR_PATH_NOT_FOUND };
             }
-            if (request.resource !== null)
+            bytes = await host.readFile(path);
+            // An image named as the source holds its manifest as a resource:
+            // the one named, or else its lowest numbered.
+            const image = bytes !== null && bytes[0] === 0x4d && bytes[1] === 0x5a;
+            if (request.resource !== null || image)
             {
                 bytes = await host.fileResource?.(path, RT_MANIFEST, request.resource) ?? null;
                 if (bytes === null)
@@ -1244,7 +1697,6 @@ export function createActivationContexts(host){
             }
             else
             {
-                bytes = await host.readFile(path);
                 manifestPath = path;
             }
             appDirectory = assemblyDirectory ?? directoryOf(path);
@@ -1445,6 +1897,16 @@ export function createActivationContexts(host){
             handler: ([flags, guid, id, key, data])=>findString(flags >>> 0, guid >>> 0, id >>> 0,
                 readUnicodeString(key >>> 0), data >>> 0),
         },
+        /**
+         * NTSTATUS RtlFindActivationContextSectionGuid(ULONG flags, const GUID *,
+         *     ULONG section, const GUID *, ACTCTX_SECTION_KEYED_DATA *)
+         */
+        RtlFindActivationContextSectionGuid: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([flags, guid, id, key, data])=>findGuid(flags >>> 0, guid >>> 0, id >>> 0,
+                key >>> 0, data >>> 0),
+        },
         /** NTSTATUS RtlQueryInformationActiveActivationContext(ULONG, PVOID, SIZE_T, SIZE_T *) */
         RtlQueryInformationActiveActivationContext: {
             argBytes: 16,
@@ -1602,17 +2064,28 @@ export function createActivationContexts(host){
         FindActCtxSectionStringW: findSectionString(readWide),
 
         /**
-         * BOOL FindActCtxSectionGuid(DWORD, const GUID *, ULONG, const GUID *,
-         *     PACTCTX_SECTION_KEYED_DATA)
+         * BOOL FindActCtxSectionGuid(DWORD dwFlags, const GUID *, ULONG ulSectionId,
+         *     const GUID *lpGuidToFind, PACTCTX_SECTION_KEYED_DATA ReturnedData)
          *
-         * No GUID section is kept -- COM classes, interfaces, type libraries
-         * -- so a key there is not found.
+         * COM classes (by CLSID or the GUID a ProgID points at), interfaces,
+         * type libraries and CLR surrogates.
          */
         FindActCtxSectionGuid: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([, , , key, data])=>((key >>> 0) === 0 || (data >>> 0) === 0
-                ? fail(ERROR_INVALID_PARAMETER) : fail(ERROR_SXS_SECTION_NOT_FOUND)),
+            handler: ([flags, guid, id, key, data])=>{
+                if ((data >>> 0) === 0 || (key >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const status = findGuid(flags >>> 0, guid >>> 0, id >>> 0, key >>> 0, data >>> 0);
+                if (status !== STATUS_SUCCESS)
+                {
+                    return fail(errorOf(status));
+                }
+                host.setLastError(0);
+                return 1;
+            },
         },
 
         /**

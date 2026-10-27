@@ -2507,10 +2507,12 @@ export function compatibilityOf(executable){
 }
 
 /**
- * One resource of an image's bytes, by type and numeric id, or null for a
+ * One resource of an image's bytes, by type and numeric id -- or, for a null
+ * id, the one of the type with the lowest numeric id, in whichever language,
+ * as the loader takes an assembly's manifest out of its DLL -- or null for a
  * file that is not an image or has none.
  *
- * @param {Uint8Array | null} file @param {number} type @param {number} id
+ * @param {Uint8Array | null} file @param {number} type @param {number | null} id
  * @returns {Uint8Array | null}
  */
 export function resourceOfImage(file, type, id){
@@ -2521,6 +2523,16 @@ export function resourceOfImage(file, type, id){
     try
     {
         const image = parsePe(file, { wide: true });
+        if (id === null)
+        {
+            const lowest = listResources(file, image)
+                .filter(entry=>entry.type === type && typeof entry.name === 'number')
+                .sort((a, b)=>Number(a.name) - Number(b.name))[0];
+            return lowest
+                ? file.slice(rvaToFileOffset(image, lowest.rva),
+                    rvaToFileOffset(image, lowest.rva) + lowest.size)
+                : null;
+        }
         const found = findResource(file, image, type, id);
         if (!found)
         {
@@ -4917,7 +4929,7 @@ async function buildApp(options){
             // assembly's manifest in a DLL that CreateActCtx and the private
             // assembly search read.
             fileResource: async(/** @type {string} */ path, /** @type {number} */ type,
-                /** @type {number} */ id)=>resourceOfImage(
+                /** @type {number | null} */ id)=>resourceOfImage(
                 await readWholeFile(core.api('filesystem'), blocks, path), type, id),
             directx: options.graphicsApi
                 ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,

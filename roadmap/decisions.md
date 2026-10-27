@@ -532,6 +532,38 @@ was opened, which is what a program comparing two handles asks, and different fo
 but for a hash collision. NTFS numbers files by their place in the MFT, which nothing here has; a
 rename gives a file another number here where NTFS keeps it. *2026-10-26, `08e7ceb`, `33a6087`.*
 
+**A57. The engine's side-by-side store holds the Visual C++ 8 and 9 runtimes and Common Controls
+6, each found where the bottle really has it.** A bottle carries no WinSxS, so an assembly a
+program's manifest names -- Microsoft.VC80/VC90 .CRT, .OpenMP, .ATL, .MFC, Common-Controls 6 --
+is answered by the engine's store when neither the bottle's own store nor the program's folder
+has it: its DLLs are the engine's own where it has them (msvcr80, msvcp80, comctl32) and the
+bottle's copy otherwise, from system32, the Windows folder or beside the program, and the
+loader maps that copy at the assembly's WinSxS directory, where the runtime's own check expects
+an installed runtime to be. A runtime the bottle has nowhere is no assembly, and the program does
+not start, as on a Windows without that redistributable. The store answers for the newest
+version of a major and minor version, as the runtimes' publisher policies do; a private assembly
+must match the version asked for exactly. *2026-10-27.*
+
+**A58. A manifest is refused only for what breaks its structure.** CreateActCtx and the loader
+refuse a manifest that is not XML, a root that is not an asm.v1, v2 or v3 `<assembly
+manifestVersion="1.0">`, anything after the root, a file without a name, UTF-16 without its byte
+order mark, and a run level given twice. Windows also refuses an element or attribute it does
+not know; that is not done here, as a refusal stops a program from starting while accepting
+costs only a check of a malformed manifest. A resource padded with NULs is read up to them.
+*2026-10-27.*
+
+**A59. A program whose activation context cannot be built does not start.** When the program's
+manifest names an assembly found nowhere (A57), the run ends before the first instruction with
+`the side-by-side configuration is incorrect` and the `activation-context-failed` event, as
+Windows ends it. A library loaded at run time whose own manifest cannot be satisfied is refused
+as one that is missing. *2026-10-27.*
+
+**A60. DeactivateActCtx refuses a cookie it cannot take off rather than raising.** Windows raises
+STATUS_SXS_EARLY_DEACTIVATION for a frame under others without
+DEACTIVATE_ACTCTX_FLAG_FORCE_EARLY_DEACTIVATION, and STATUS_SXS_INVALID_DEACTIVATION for a cookie
+that is no frame of the thread; here the call fails with the matching error and the stack stays
+as it was, so a program that gets a cookie wrong goes on. *2026-10-27.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
@@ -861,6 +893,24 @@ first instruction. Absent, the runtime treats the system as one without side-by-
 and runs. Removed on 2026-09-09 (16110a45), added back by an export audit on 2026-10-08
 (884102c9) and Gothic 3 met R6034 at vcomp.dll that day; kernel32's system.test.js now fails
 if the names come back. *2026-10-08.*
+
+**Reconsidered: FindActCtxSectionStringA/W are exported, activation contexts being built from
+manifests.** The condition the entry above names is met: a context is built from the program's
+manifest (its RT_MANIFEST 1 or `<program>.manifest`), a library's RT_MANIFEST 2 and CreateActCtx,
+its dependencies found as Windows finds them (A57), and the loader takes a DLL a context names
+from where the context puts it. The runtimes' check was read from Microsoft's binaries rather
+than guessed: msvcr80.dll and vcomp.dll (8.0.50727.6195) look themselves up as a DLL redirection
+of the active context, refuse a load from the system directory, and accept one from WinSxS or
+beside their assembly's manifest; msvcr90.dll makes the same check. `tools/vcredist-matrix.mjs`
+runs Microsoft's own vcomp.dll and msvcr90.dll in the engine through seven layouts each --
+the runtime and its manifest beside the program, in its assembly's folder, named by an embedded
+or an external manifest, loaded with LoadLibrary, installed (only in system32, presented by the
+store), and named by no manifest -- and each runs or stops with R6034 exactly where Windows does
+(2026-10-27, all 14 rows agree). msvcr80.dll is the engine's own (`runtimes()`), so a program
+importing it runs even with no manifest, where Windows stops it. kernel32's system.test.js now
+runs the check's logic over each layout instead of guarding the names. A Visual C++ 2005 title
+(Gothic 3, R6034 at vcomp.dll on 2026-10-08) must be checked before this reaches main.
+*2026-10-27.*
 
 **A periodic multimedia timer that has fallen more than a period behind fires once, not once per
 tick missed.** Its next due time moves to the first tick of the same grid still to come, and the

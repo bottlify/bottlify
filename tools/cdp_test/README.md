@@ -245,6 +245,15 @@ lists (Wine's spec files, fetched once into DIR by `--fetch-specs DIR` and not
 kept in the repository): a function a program looks up by name that this
 build does not export is a NULL it may call.
 
+[`tools/vcredist-matrix.mjs`](../vcredist-matrix.mjs) runs Microsoft's own Visual C++ runtimes
+in Node -- vcomp.dll (2005) and msvcr90.dll (2008), whose DllMain checks that it was loaded
+through an activation context -- in seven deployment layouts each, and says where each runs
+and where it stops with R6034, against what Windows does. `--fetch` downloads the two
+redistributables into `to_install/vcredist/` (never committed) and unpacks them with the
+engine's own cabinet and installer-database readers; without them every row is "not measured".
+The report is `to_install/vcredist/matrix/report.md`, or `--out DIR`. Run it after any change to
+activation contexts, the loader's search or a runtime the engine answers itself.
+
 `tools/arg-bytes-audit.mjs <spec directory>` checks the bytes every stdcall
 entry of the win32 layer pops against Wine's export spec files kept locally:
 one argument too many moves the caller's stack a call at a time, and the

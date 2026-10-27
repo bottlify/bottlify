@@ -232,23 +232,6 @@ const IMAGEHLP_EXPORTS = new Set([
 ]);
 
 /**
- * The activation context table without its section lookups --
- * FindActCtxSectionStringA/W and ntdll's RtlFindActivationContextSectionString
- * -- which stay unexported (decisions.md) until the real Visual C++ runtimes'
- * own checks have been run against them.
- *
- * @param {Record<string, any>} functions
- */
-function withoutLookups(functions){
-    const { FindActCtxSectionStringA, FindActCtxSectionStringW, ...rest } = functions;
-    void FindActCtxSectionStringA;
-    void FindActCtxSectionStringW;
-    const { RtlFindActivationContextSectionString, ...natives } = rest.CreateActCtxA.natives;
-    void RtlFindActivationContextSectionString;
-    return { ...rest, CreateActCtxA: { ...rest.CreateActCtxA, natives } };
-}
-
-/**
  * The DirectX a bottle's graphics choice names, by major version; undefined
  * for the default 9.0c, which a setup may still overwrite.
  *
@@ -1653,10 +1636,9 @@ export function createWin32Module(){
                 },
                 stat: path=>volume.stat(path),
                 list: (path, pattern)=>volume.list(path, pattern),
-                // A source named relative to the current directory, as the
-                // file calls resolve one.
-                fullPath: path=>(/^([A-Za-z]:|\\\\)/.test(path) ? path
-                    : `${filesystem.currentDirectory().replace(/\\+$/, '')}\\${path}`),
+                // A source resolved as the file calls resolve it: against the
+                // current directory, with `.` and `..` gone.
+                fullPath: path=>filesystem.resolve(path).path || path,
                 imagePath: ()=>modules.imagePath(),
                 moduleResource: (base, type, id)=>{
                     const entry = modules.findResource?.(base, type, id) ?? null;
@@ -2020,11 +2002,10 @@ export function createWin32Module(){
                         environment: startingEnvironment,
                         startup: ()=>config?.startup ?? null,
                     }),
-                    // Activation contexts (`actctx.js`). FindActCtxSectionStringA/W
-                    // and ntdll's lookup are held back (decisions.md): a C runtime
-                    // finding them checks its own load against the context, and
-                    // that has to be measured against the real runtimes first.
-                    ...withoutLookups(activation.functions),
+                    // Activation contexts (`actctx.js`), FindActCtxSectionString
+                    // with them: the Visual C++ runtimes check their own load
+                    // against it (decisions.md, tools/vcredist-matrix.mjs).
+                    ...activation.functions,
                     ...createSystemFunctions({
                         processors,
                         // TerminateProcess wakes whoever waits on the child it ends.
