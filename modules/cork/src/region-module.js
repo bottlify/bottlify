@@ -21,6 +21,7 @@ import { ModuleBuilder } from './wasm/encoder.js';
 import { features } from './wasm/features.js';
 import { emitRegion, finishModule, prepareModule } from './emit/region.js';
 import { ownLayout, PAGE } from './runtime/layout.js';
+import { MODE_64 } from './decode/decoder.js';
 
 /**
  * @param {{ code: ArrayLike<number>, at: number, entry?: number, precise?: boolean,
@@ -29,7 +30,7 @@ import { ownLayout, PAGE } from './runtime/layout.js';
  *     expansion?: import('./emit/region.js').ExpansionNote | null, wide?: boolean,
  *     checked?: boolean, processors?: number, markBlocks?: boolean, ramBase?: number,
  *     ordered?: boolean, hostFeatures?: Partial<import('./wasm/features.js').Features>,
- *     form?: Parameters<typeof formRegion>[2] }} what
+ *     form?: Parameters<typeof formRegion>[2], bits?: 32 | 64 }} what
  *     the bytes and the guest address they lie at; `entry` where the region starts (`at` by
  *     default); `precise`, `atomic`, `ordered`, `hash`, `callReturn`, `looseStacks`,
  *     `structure`: as the translator's configuration has them; `expansion` told each
@@ -43,12 +44,13 @@ import { ownLayout, PAGE } from './runtime/layout.js';
  *     has in place of this one's (`features`), the module emitted as that host emits it --
  *     an arm64 one's default NaN is positive, and its float arithmetic carries the fix-ups
  *     an x86 host emits no code for; `form` how the region is formed (`formRegion`'s
- *     options: `formDepth`, the leaves' limits)
+ *     options: `formDepth`, the leaves' limits); `bits` 64 the code long mode's, formed and
+ *     emitted as the long-mode runtime has it
  */
 export function regionModule({ code, at, entry = at, precise = false, atomic = false,
     ramSize = 16 << 20, hash = false, callReturn = false, looseStacks = false,
     structure = true, expansion = null, wide = false, checked = true, processors = 1,
-    markBlocks = false, ramBase = PAGE, ordered = false, hostFeatures = {}, form = {} })
+    markBlocks = false, ramBase = PAGE, ordered = false, hostFeatures = {}, form = {}, bits = 32 })
 {
     const bytes = Uint8Array.from(code);
     // Bytes past the code read as `hlt`, so a region never runs off into them.
@@ -56,10 +58,10 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
         const offset = address - at;
         return offset >= 0 && offset < bytes.length ? bytes[offset] : 0xf4;
     };
-    const region = formRegion(read, entry, form);
+    const region = formRegion(read, entry, bits === 64 ? { mode: MODE_64, ...form } : form);
     const m = new ModuleBuilder();
-    const context = prepareModule(m, ownLayout({ ramSize, processors, ramBase }),
-        { ...features(), ...hostFeatures }, {},
+    const layout = ownLayout({ ramSize, processors, ramBase, ...bits === 64 ? { bits: 64 } : {} });
+    const context = prepareModule(m, layout, { ...features(), ...hostFeatures }, {},
         { precise, atomic, ordered, hash, callReturn: hash && callReturn, looseStacks, structure,
             expansion, wide, markBlocks });
     const translation = emitRegion(context, region, { entryTop: 0, checked });

@@ -473,6 +473,23 @@ export const MASKED_SWITCHES = ''
     + '2000000000bdffffffc4ffffffcaffffffd1ffffffd1ffffffcaffffffc4ffffffbdffffff';
 
 /**
+ * A masked switch whose second entry is rewritten, after thirty rounds, to its case's
+ * address past the 4 GiB window: the next jump through it faults, as the interpreter's
+ * does, rather than taking the case the low half names.
+ *
+ *         lea rax, [rip + c0]; mov [0x10000040], rax; lea rax, [rip + c1]; mov [0x10000048], rax
+ *     1:  mov eax, esi; and eax, 1; jmp [rax*8 + 0x10000040]
+ *     c0: add qword [rbx], 1; jmp 2f
+ *     c1: add qword [rbx], 10
+ *     2:  inc esi; cmp esi, 30; jne 3f
+ *         lea rax, [rip + c1]; bts rax, 32; mov [0x10000048], rax
+ *     3:  cmp esi, 40; jb 1b
+ */
+export const FAR_SWITCH = ''
+    + '31f6488d05230000004889042540000010488d051a000000488904254800001089f083e001ff24c5400000'
+    + '1048830301eb044883030affc683fe1e7514488d05eeffffff480fbae820488904254800001083fe2872ca';
+
+/**
  * Programs of calls and returns (`long/runtime.test.js` gives each one's source):
  * recursion past the wasm call depth, a callee that returns elsewhere, calls whose
  * callees are formed in, indirect calls predicted and not, a callee that jumps out

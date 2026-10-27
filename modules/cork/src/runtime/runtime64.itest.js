@@ -15,7 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CALLS, CORPUS, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, flagsLeftUndefined, load,
+    CALLS, CORPUS, FAR_SWITCH, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare,
+    flagsLeftUndefined, load,
     loopCases, machine, nested, pool, program, run,
 } from '../testing/long-machine.js';
 import { createRuntimeRunner64 } from '../testing/runtime-runner64.js';
@@ -85,6 +86,18 @@ test('calls and returns, switches among them, run in the shared runtime as inter
             true, 0, false, runtime);
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.equal(exits, cases.length);
+        assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+    }
+});
+
+test('a switch whose entry is rewritten past the 4 GiB window faults as interpreted', ()=>{
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `far ${i}`, code: FAR_SWITCH }));
+    for (const budget of [7, 100000])
+    {
+        const { failures, stats } = compare(cases, budget, true, undefined, undefined, true, 0,
+            false, runtime);
+        assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
 });

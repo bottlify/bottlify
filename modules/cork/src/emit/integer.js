@@ -1044,9 +1044,22 @@ export function emitInstruction(e, instruction, flagsLive){
             }
             prepare(e, dst);
             readOp(e, dst);
-            nearTarget(e, instruction);
-            b.localSet(Local.eip);
-            switchCases(e);
+            if (isLong(e) && e.region.blocks[e.blockIndex].exit.table !== undefined)
+            {
+                // The cases matched on the whole target: one that names a case
+                // is near, so only a jump out pays the far test.
+                b.localSet(LONG_WIDE);
+                switchCases(e);
+                b.localGet(LONG_WIDE);
+                nearTarget(e, instruction);
+                b.localSet(Local.eip);
+            }
+            else
+            {
+                nearTarget(e, instruction);
+                b.localSet(Local.eip);
+                switchCases(e);
+            }
             e.exitDynamic(Exit.UNTRANSLATED);
             e.dead = true;
             return true;
@@ -3953,11 +3966,11 @@ function stringInstruction(e, instruction){
 }
 
 /**
- * A switch's jump (`SwitchTable`, the target already in `eip`): the index picks
- * its case by a `br_table`, and a case whose table entry still names the
- * target it was formed with is a jump inside the region. Anything else -- an
- * index past the table, an entry written since, a case the region did not
- * take in -- falls out to the jump's own exit.
+ * A switch's jump (`SwitchTable`, the target already in `eip`, long mode's whole
+ * in `LONG_WIDE`): the index picks its case by a `br_table`, and a case whose
+ * table entry still names the target it was formed with is a jump inside the
+ * region. Anything else -- an index past the table, an entry written since, a
+ * case the region did not take in -- falls out to the jump's own exit.
  *
  * @param {E} e
  */
@@ -3994,7 +4007,14 @@ function switchCases(e){
     for (let k = 0; k < cases.length; k++)
     {
         e.close();
-        b.localGet(Local.eip).i32const(cases[k]).op(I32.eq);
+        if (isLong(e))
+        {
+            b.localGet(LONG_WIDE).i64const(BigInt(cases[k])).op(I64.eq);
+        }
+        else
+        {
+            b.localGet(Local.eip).i32const(cases[k]).op(I32.eq);
+        }
         e.openIf('case');
         e.jumpTo(cases[k]);
         e.close();

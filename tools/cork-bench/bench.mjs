@@ -21,7 +21,7 @@
  *
  *   node tools/cork-bench/bench.mjs [name...] [--warm N] [--iters N] [--reps N]
  *       [--cork JSON] [--cores N] [--root DIR] [--json] [--bits 64]
- *       [--store fresh | --seed DIR | --capture DIR]
+ *       [--store fresh | --seed DIR | --capture DIR] [--blocks DIR]
  *
  * Each rep makes a fresh host, times its first iteration (`coldMs`: the
  * interpreter, the translator and the tier-up, what a new stretch of code
@@ -51,6 +51,11 @@
  * rows say `hits` in the first iteration and the seeding's `seedMs`), and
  * `--capture DIR` writes the first rep's store, once its iterations are done,
  * to `DIR/<name>.seed`.
+ *
+ * `--blocks DIR` counts every block the run executes (cork's `blockProfile`) and writes the
+ * first rep's counts to `DIR/<name>.blocks.json`, the form `tools/cork-asm.mjs --blocks`
+ * weighs a region's machine code by: what an executed guest instruction of the workload
+ * costs, and where.
  */
 
 import '../chromium-v8.mjs';
@@ -73,7 +78,12 @@ const only = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.star
 const seedDir = flag('--seed', '');
 const captureDir = flag('--capture', '');
 const withStore = flag('--store', '') === 'fresh' || seedDir !== '' || captureDir !== '';
+const blocksDir = flag('--blocks', '');
 
+if (blocksDir !== '')
+{
+    cork.blockProfile = true;
+}
 const { createCorkHost } = await import(
     new URL('modules/core/src/layers/cpu/internal/cork-host.js', root).href);
 const engine = await import(new URL('modules/cork/src/index.js', root).href);
@@ -188,6 +198,12 @@ for (const name of names)
             retired += await run(host);
         }
         steady.push((performance.now() - startedAt) * 1000 / iters);
+        if (blocksDir !== '' && rep === 0)
+        {
+            mkdirSync(blocksDir, { recursive: true });
+            writeFileSync(join(blocksDir, `${name}.blocks.json`),
+                JSON.stringify({ blocks: host.cork().diagnostics().blockCounts }));
+        }
         if (captureDir !== '' && rep === 0)
         {
             await host.cork().flush();

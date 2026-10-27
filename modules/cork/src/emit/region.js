@@ -2972,7 +2972,8 @@ export class RegionEmitter {
         this.marksMade ??= new Map();
         const copy = this.marksMade.get(index) ?? 0;
         this.marksMade.set(index, copy + 1);
-        // In the state page, past the state block and short of `nanFirst`.
+        // In the state page, short of `nanFirst` and in no field: past the 32-bit
+        // state block, in the 64-bit one's unused tail.
         atState(this.context, this.b).i32const(blockMark(index, copy))
             .store('i32', { offset: this.layout.regs + 1020 });
     }

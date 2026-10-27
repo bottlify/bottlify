@@ -16,6 +16,9 @@
  *     node tools/cork-asm.mjs --pe Cry3DEngine.dll --base 0x444d000 --entry 0x44e1460,0x4587299
  *
  *   --hex BYTES       the code, as hex bytes, lying at --at (default 0x1000)
+ *   --bin PATH        the code, a flat image's bytes, lying at --at (a cork-bench image:
+ *                     `--at 0x401000`, its block profile from `bench.mjs --blocks`)
+ *   --bits 64         the code long mode's, formed and emitted as the long-mode runtime has it
  *   --pe PATH         a PE image, its sections mapped at --base (default its own image base)
  *   --image PATH@BASE an image at the base a process mapped it at; repeated, the images
  *                     lie in one span, so a region's calls into another DLL are formed
@@ -188,7 +191,8 @@ function machineCode(wasm, index){
 
 const pePath = value('--pe');
 const hex = value('--hex');
-if (pePath === null && hex === null && !args.includes('--image'))
+const binPath = value('--bin');
+if (pePath === null && hex === null && binPath === null && !args.includes('--image'))
 {
     console.error('usage: node tools/cork-asm.mjs --hex BYTES [--at ADDRESS] | --pe PATH'
         + ' [--base ADDRESS] | --image PATH@BASE... [--entry LIST] [--hash] [--atomic]'
@@ -221,6 +225,11 @@ else if (pePath !== null)
     code = mapped.image;
     at = mapped.base;
 }
+else if (binPath !== null)
+{
+    code = readFileSync(binPath);
+    at = Number(value('--at') ?? 0x1000);
+}
 else
 {
     code = /** @type {string} */ (hex).trim().split(/[\s,]+/).map(byte=>Number.parseInt(byte, 16));
@@ -233,8 +242,9 @@ const formDepth = value('--form-depth') === null ? null : Number(value('--form-d
 // Guest RAM from the memory's start, as a Windows process's first executor has it
 // (`ownLayout`'s `ramBase` 0), unless `--ram-base` says one page in.
 const ramBase = Number(value('--ram-base') ?? 0);
+const bits = value('--bits') === '64' ? 64 : 32;
 /** Where a block's mark is stored: in the state page, short of `nanFirst`. */
-const markOffset = ownLayout({ ramSize, ramBase }).regs + 1020;
+const markOffset = ownLayout({ ramSize, ramBase, ...bits === 64 ? { bits: 64 } : {} }).regs + 1020;
 
 /**
  * The machine code of each block, by the marks a diagnostic build stores at
@@ -475,7 +485,7 @@ for (const entry of entries)
         atomic: args.includes('--atomic'), ordered: args.includes('--ordered'), checked: false,
         wide: true, looseStacks: true, hostFeatures,
         processors, markBlocks: profile !== null,
-        form: formDepth === null ? {} : { formDepth } });
+        form: formDepth === null ? {} : { formDepth }, bits });
     const x86 = made.blocks.reduce((sum, block)=>sum + block.instructions, 0);
     const lines = machineCode(made.wasm, exportedIndex(made.wasm, 'region'));
     const { code: byBlock, marks } = profile === null ? { code: new Map(), marks: new Set() }
