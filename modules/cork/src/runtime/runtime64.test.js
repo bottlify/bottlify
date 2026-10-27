@@ -15,14 +15,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CALLS, CORPUS, HOISTED_SWITCHES, SWITCHES, compare, nested, pool, program,
+    CALLS, CORPUS, HOISTED_SWITCHES, SWITCHES, compare, flagsLeftUndefined, load, machine, nested,
+    pool, program, run,
 } from '../testing/long-machine.js';
 import { createRuntimeRunner64 } from '../testing/runtime-runner64.js';
 
 /** @param {WebAssembly.Memory} memory @param {any} layout */
 const runtime = (memory, layout)=>createRuntimeRunner64({ memory, layout });
+/** The corpus's runs take 15 to 20 s alone: three times that beside the suite. */
+const LONG = { timeout: 180000 };
 
-test('the shared runtime runs long-mode code as the interpreter does on the corpus', ()=>{
+test('the shared runtime runs long-mode code as the interpreter does on the corpus', LONG, ()=>{
     const { failures, exits, stats } = compare(CORPUS.cases, 7, true, undefined, undefined,
         true, 0, false, runtime);
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
@@ -30,7 +33,32 @@ test('the shared runtime runs long-mode code as the interpreter does on the corp
     assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
 });
 
-test('seeded long programs run in the shared runtime as interpreted', ()=>{
+test('outside precise, as a program runs, the corpus\'s cases that run to their end run as'
+    + ' interpreted', LONG, ()=>{
+    // A read left untested reads RAM where a closed page or one past the window
+    // faults: the cases where the interpreter faults are another answer by design.
+    // The flags a case leaves undefined are the emitter's to leave as it will there.
+    const interpreter = machine();
+    const bytes = new Uint8Array(interpreter.memory.buffer);
+    const clean = CORPUS.cases.flatMap((/** @type {any} */ one)=>{
+        load(interpreter, one);
+        const undefinedFlags = flagsLeftUndefined(interpreter.state,
+            address=>bytes[interpreter.layout.ramBase + address]);
+        load(interpreter, one);
+        return undefinedFlags !== null && run(interpreter, false).fault === 'exit'
+            ? [{ ...one, undefinedFlags }] : [];
+    });
+    const loose = (/** @type {WebAssembly.Memory} */ memory, /** @type {any} */ layout)=>
+        createRuntimeRunner64({ memory, layout, config: { precise: false } });
+    const { failures, exits, stats } = compare(clean, 7, true, undefined, undefined, true, 0,
+        false, loose);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.equal(exits, clean.length);
+    assert.ok(clean.length > CORPUS.cases.length * 0.8, `${clean.length} cases`);
+    assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
+});
+
+test('seeded long programs run in the shared runtime as interpreted', LONG, ()=>{
     const instructions = pool();
     const straight = Array.from({ length: 200 },
         (_, i)=>program(instructions, 0x7eed + i, 20 + i % 60));

@@ -31,7 +31,7 @@ import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import {
-    checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess, windowAddress,
+    checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess, windowAddress, wrapsRead,
 } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
@@ -1583,7 +1583,7 @@ export function prepare(e, operand, options){
     {
         if (isLong(e))
         {
-            windowed(e, operand);
+            windowed(e, operand, options?.store === true);
         }
         else
         {
@@ -1600,9 +1600,12 @@ export function prepare(e, operand, options){
  * the access faults, inside it the address is a constant -- and any other
  * computed in i64 and tested against the window (`windowAddress`).
  *
- * @param {E} e @param {Operand} operand
+ * A read left untested (`wrapsRead`) takes the address's low 32 bits as it is,
+ * wrapped into RAM as a 32-bit one is, with no test of the window.
+ *
+ * @param {E} e @param {Operand} operand @param {boolean} store
  */
-function windowed(e, operand){
+function windowed(e, operand, store){
     const { b } = e;
     const size = Math.max(operand.size, 1);
     const moved = (operand.base ?? -1) >= 0 || (operand.index ?? -1) >= 0
@@ -1615,6 +1618,12 @@ function windowed(e, operand){
             e.exitBefore(e.current.eip, Exit.FAULT, 13);
         }
         b.i32const(disp | 0).localSet(Local.addr);
+        return;
+    }
+    if (wrapsRead(e, store))
+    {
+        emitAddress64(e, operand);
+        b.op(I64.wrap).localSet(Local.addr);
         return;
     }
     windowAddress(e, ()=>emitAddress64(e, operand), size);

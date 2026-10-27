@@ -83,6 +83,21 @@ export function wrapIntoRam(b, ramSize, addr = Local.addr){
 }
 
 /**
+ * Whether the current instruction's access goes untested, its address wrapped
+ * into RAM. Outside `precise` an instruction that only reads is not tested: the
+ * one page flag a read can find is INACCESSIBLE, which only the pages past RAM
+ * carry, so its address is wrapped into RAM instead (`wrapIntoRam`), in place of
+ * a shift, a load and a branch. A read past the end of guest memory then reads
+ * RAM where it raised #GP -- in long mode one past the 4 GiB window too, as a
+ * 32-bit address wraps at 4 GiB.
+ *
+ * @param {E} e @param {boolean} store
+ */
+export function wrapsRead(e, store){
+    return !store && readsWrapped(e.context) && e.layout.codePages < 0 && readsOnly(e.current);
+}
+
+/**
  * The flags of the page whose index is on the stack, as `type` loads them:
  * the table's address joined to the index by `or` where its low 20 bits are
  * clear, which an arm64 `orr` takes as an immediate, and as the load's offset
@@ -135,12 +150,7 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     {
         return;
     }
-    // Outside `precise` an instruction that only reads is not tested: the
-    // one page flag a read can find is INACCESSIBLE, which only the pages past
-    // RAM carry, so its address is wrapped into RAM instead (`wrapIntoRam`),
-    // in place of a shift, a load and a branch. A read past the end of
-    // guest memory then reads RAM where it raised #GP.
-    if (!store && readsWrapped(e.context) && e.layout.codePages < 0 && readsOnly(e.current))
+    if (wrapsRead(e, store))
     {
         wrapIntoRam(b, e.layout.ramSize);
         return;

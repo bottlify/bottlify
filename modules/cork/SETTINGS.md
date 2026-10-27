@@ -94,6 +94,7 @@ with a measurement beside it.
 | --- | --- | --- | --- |
 | `sharedMemory` | `true` where possible | Guest memory a `SharedArrayBuffer`, where the host has one and the page is cross-origin isolated (`createMachine`'s memory is never shared). | `false` keeps it private: no other executor can run on it, and the program runs on one. |
 | `wasmInterpreter` | `true` | The interpreter's integer, x87 and SSE instructions in wasm. | Off runs the JavaScript interpreter alone: slower. |
+| `long` | `'long'` | A 64-bit process's translator: the long runner (`'long'`), or the runtime and emitter 32-bit code runs on (`'shared'`). | `'shared'` until it is the default: its regions are judged by the same corpus and programs as the long runner's. |
 | `wasmInterpreterAfter`, `newTargetWork` | 8192, 128 | Work the JavaScript interpreter does before the wasm tier takes over, a new target counting as 128. | 0 starts the wasm tier at once. |
 | `feed` | `'frame'` | When candidates are formed: once a frame, or after every slice (`'slice'`). | `'slice'` for programs that never present. |
 | `yieldChunk` | 10000 | Instructions translated code runs at a time while a slice may end early (`createMachine`: 2^24). | Smaller reacts faster to other threads, at more crossings. |

@@ -27,6 +27,8 @@ export const CORPUS = JSON.parse(gunzipSync(readFileSync(new URL('../x64-corpus.
     import.meta.url))).toString('utf8'));
 /** CF, PF, AF, ZF, SF and OF. */
 export const STATUS = 0x8d5;
+/** The flags a case is compared on: the status flags and DF. */
+export const COMPARED = STATUS | 0x400;
 /** Where the runner's exit jump goes: a closed page, whose fetch ends the case. */
 export const EXIT = 0x1f000000;
 
@@ -395,6 +397,15 @@ export function compare(cases, budget = 7, transfers = true, checkReads = undefi
                 seen.flags = (Number.parseInt(seen.flags, 16) & ~STATUS).toString(16);
             }
         }
+        if (one.undefinedFlags)
+        {
+            // Flags the case leaves undefined, which a translation outside
+            // `precise` may leave otherwise (`flagsLeftUndefined`).
+            for (const seen of [translated, interpreted])
+            {
+                seen.flags = (Number.parseInt(seen.flags, 16) & ~one.undefinedFlags).toString(16);
+            }
+        }
         for (const key of /** @type {const} */ (['fault', 'rip', 'retired', 'flags', 'xmm',
             'x87', 'data']))
         {
@@ -475,3 +486,58 @@ export const CALLS = Object.freeze({
     + 'be02000000b90300000031c0e809000000480103ffce75edeb22e810000000ffc0ffc97409'
         + '488d1504000000ffe2c3c383c064488d15e5ffffffffe2',
 });
+
+/** The shift and rotate operations, which write no flag for a count of zero. */
+const SHIFTS = new Set(['shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'shld', 'shrd']);
+
+/**
+ * The flags a loaded case leaves undefined at its end, by the interpreter's run of
+ * it from the state's RIP (`ir64-corpus.test.js`'s rule): each instruction's
+ * undefined flags, less those a later one defines -- an instruction that writes
+ * none (a repeated string instruction run no times, a shift by zero) changing
+ * nothing -- or null where a later instruction reads one.
+ *
+ * @param {any} state  a `blockState64` over the case's machine, the case loaded
+ * @param {(address: number) => number} read  its memory, by guest address
+ * @returns {number | null}
+ */
+export function flagsLeftUndefined(state, read){
+    state.syncIn();
+    state.retired = 0;
+    let undefinedFlags = 0;
+    for (let step = 0; step < 10000; step++)
+    {
+        const instruction = decode(read, Number(state.rip), MODE_64);
+        if ('refused' in instruction || Number(state.rip) === EXIT)
+        {
+            break;
+        }
+        if ((instruction.flagsRead & undefinedFlags) !== 0)
+        {
+            return null;
+        }
+        const { op, operands, prefixes } = instruction;
+        let writes = !(['movs', 'stos', 'lods', 'cmps', 'scas'].includes(op)
+            && (prefixes.rep || prefixes.repne) && state.r[1] === 0n);
+        if (SHIFTS.has(op))
+        {
+            const last = operands[operands.length - 1];
+            const count = last.kind === 'imm' ? /** @type {number} */ (last.value)
+                : Number(state.r[1] & 0xffn);
+            writes = (count & (instruction.size === 8 ? 63 : 31)) !== 0;
+        }
+        try
+        {
+            interpret64(state, 1);
+        }
+        catch {
+            break;
+        }
+        if (writes)
+        {
+            const defined = instruction.flagsWritten & ~instruction.flagsUndefined;
+            undefinedFlags = (undefinedFlags & ~defined | instruction.flagsUndefined) & COMPARED;
+        }
+    }
+    return undefinedFlags;
+}

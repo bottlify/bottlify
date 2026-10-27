@@ -29,7 +29,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
-import { AF, CF, DF, OF, PF, SF, ZF } from './decode/table.js';
+import { ZF } from './decode/table.js';
 import { MODE_64, decode } from './decode/decoder.js';
 import { Fault } from './ir.js';
 import { blockState64, interpret64 } from './interp64.js';
@@ -37,12 +37,12 @@ import {
     HOT_SLOTS, WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, WasmExit, createWasmInterpreter,
 } from './interp-wasm.js';
 import { SOURCE_SHA256 } from './interp-wasm64.bytes.js';
+import { COMPARED, flagsLeftUndefined } from './testing/long-machine.js';
 import { Tables, ownLayout, pageFlagsAt, pagesFor, tablesSize } from './runtime/layout.js';
 import { PageFlag, createPageTable } from './runtime/pages.js';
 
 const CORPUS = JSON.parse(gunzipSync(readFileSync(new URL('./x64-corpus.json.gz', import.meta.url)))
     .toString('utf8'));
-const COMPARED = CF | PF | AF | ZF | SF | OF | DF;
 /** Where the runner's exit jump goes: a closed page, whose fetch ends the case. */
 const EXIT = 0x1f000000;
 const TRAP_PORT = 0xb077;
@@ -853,66 +853,6 @@ test('the module is built from the source beside it', ()=>{
         'interp-wasm.c changed: run scripts/build-interp-wasm.mjs');
 });
 
-/**
- * Whether a repeated string instruction runs no element: its count register
- * is zero, so it writes no flag.
- *
- * @param {import('./decode/decoder.js').Instruction} instruction @param {bigint} rcx
- */
-function repeatsNone(instruction, rcx){
-    const { prefixes, op } = instruction;
-    return ['movs', 'stos', 'lods', 'cmps', 'scas'].includes(op) && (prefixes.rep || prefixes.repne)
-        && rcx === 0n;
-}
-
-/**
- * The flags a case leaves undefined at its end, by the model's run of it
- * (`ir64-corpus.test.js`'s rule), or null where a later instruction reads one.
- *
- * @param {Machine} m @param {any} one
- */
-function flagsLeftUndefined(m, one){
-    const { state } = m;
-    load(m, one);
-    state.syncIn();
-    state.retired = 0;
-    let undefinedFlags = 0;
-    const shifts = new Set(['shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'shld',
-        'shrd']);
-    for (let step = 0; step < 10000; step++)
-    {
-        const instruction = decode(address=>m.bytes[address], Number(state.rip), MODE_64);
-        if ('refused' in instruction || Number(state.rip) === EXIT)
-        {
-            break;
-        }
-        if ((instruction.flagsRead & undefinedFlags) !== 0)
-        {
-            return null;
-        }
-        let writes = !repeatsNone(instruction, state.r[1]);
-        if (shifts.has(instruction.op))
-        {
-            const last = instruction.operands[instruction.operands.length - 1];
-            const count = last.kind === 'imm' ? /** @type {number} */ (last.value) : Number(state.r[1] & 0xffn);
-            writes = (count & (instruction.size === 8 ? 63 : 31)) !== 0;
-        }
-        try
-        {
-            interpret64(state, 1);
-        }
-        catch {
-            break;
-        }
-        if (writes)
-        {
-            const defined = instruction.flagsWritten & ~instruction.flagsUndefined;
-            undefinedFlags = (undefinedFlags & ~defined | instruction.flagsUndefined) & COMPARED;
-        }
-    }
-    return undefinedFlags;
-}
-
 test('the tier does what the processor did on every corpus case', t=>{
     const m = machine();
     const model = machine();
@@ -924,7 +864,8 @@ test('the tier does what the processor did on every corpus case', t=>{
     let handed = 0;
     for (const one of CORPUS.cases)
     {
-        const undefinedMask = flagsLeftUndefined(model, one);
+        load(model, one);
+        const undefinedMask = flagsLeftUndefined(model.state, address=>model.bytes[address]);
         if (undefinedMask === null)
         {
             skipped++;
