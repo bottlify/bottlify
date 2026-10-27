@@ -966,9 +966,13 @@ export function createOrdinalFunctions(host){
                 {
                     return -1;
                 }
-                for (let at = 0; at < (length | 0); at++)
+                // Read as the arrays they are: one past what is mapped faults
+                // at once, as Windows' walk would when it got there.
+                const count = Math.max(0, length | 0);
+                const list = new DataView(readBytes(keys >>> 0, count * 4).slice().buffer);
+                for (let at = 0; at < count; at++)
                 {
-                    if ((readU32(keys + at * 4) | 0) === (key | 0))
+                    if (list.getInt32(at * 4, true) === (key | 0))
                     {
                         return readU32(values + at * 4) | 0;
                     }

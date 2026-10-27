@@ -363,15 +363,22 @@ const PERMUTATION = (()=>{
  * @param {Uint8Array} input @param {number} size
  */
 export function hashData(input, size){
-    const out = new Uint8Array(size);
-    for (let at = 0; at < size; at++)
+    // An output byte depends on its place only through (input[0] + place) & 0xff:
+    // 256 of them at most are worked out, and the rest repeat them.
+    const distinct = new Uint8Array(Math.min(size, 256));
+    for (let at = 0; at < distinct.length; at++)
     {
         let hash = PERMUTATION[((input[0] ?? 0) + at) & 0xff];
         for (let next = 1; next < input.length; next++)
         {
             hash = PERMUTATION[hash ^ input[next]];
         }
-        out[at] = hash;
+        distinct[at] = hash;
+    }
+    const out = new Uint8Array(size);
+    for (let at = 0; at < size; at += distinct.length)
+    {
+        out.set(distinct.subarray(0, Math.min(distinct.length, size - at)), at);
     }
     return out;
 }
