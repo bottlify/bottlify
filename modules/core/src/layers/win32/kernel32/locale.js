@@ -8,6 +8,7 @@ import { UI_LANGUAGE } from '../../loader/internal/resources.js';
 import { createRefusals } from '../common/refusal.js';
 import { LOCALE_TAGS, verLanguageName } from './languages.js';
 import { STATUS } from '../ntdll/status.js';
+import { decodeUtf7, encodeUtf7 } from './utf7.js';
 
 /**
  * Code pages and the string conversions built on them.
@@ -839,6 +840,17 @@ export function createLocaleFunctions(host){
     };
 
     const compare = compareStrings;
+
+    /**
+     * A conversion's source length: every negative one, not only -1, means
+     * "up to and with the terminator".
+     *
+     * @param {number} declared
+     */
+    const anyNegative = declared=>((declared | 0) < 0 ? -1 : declared);
+
+    /** UTF-7 and the symbol page refuse every conversion flag. @param {number} page */
+    const takesNoFlags = page=>page === CP_UTF7 || page === CP_SYMBOL;
 
     /**
      * What EnumSystemLocales hands out for its flags: the locale's LCID as
@@ -2292,14 +2304,14 @@ export function createLocaleFunctions(host){
                 // size is refused with it, before anything is written: unlike
                 // the source's, it has no "up to the terminator" meaning.
                 const span = (source >>> 0) === 0
-                    ? { length: 0 } : sourceSpan(source >>> 0, sourceBytes, 1);
+                    ? { length: 0 } : sourceSpan(source >>> 0, anyNegative(sourceBytes), 1);
                 if (span.length === 0 || (destinationChars | 0) < 0
                     || ((destination >>> 0) === 0 && (destinationChars | 0) !== 0))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                if ((flags & ~MB_FLAGS) !== 0)
+                if ((flags & ~MB_FLAGS) !== 0 || (flags !== 0 && takesNoFlags(resolved)))
                 {
                     host.setLastError(ERROR_INVALID_FLAGS);
                     return 0;
@@ -2320,6 +2332,10 @@ export function createLocaleFunctions(host){
                         host.setLastError(ERROR_NO_UNICODE_TRANSLATION);
                         return 0;
                     }
+                }
+                else if (resolved === CP_UTF7)
+                {
+                    text = decodeUtf7(raw);
                 }
                 else
                 {
@@ -2361,7 +2377,7 @@ export function createLocaleFunctions(host){
                 const usedDefaultOut = args[7] >>> 0;
                 const resolved = resolvePage(page);
                 const span = (source >>> 0) === 0
-                    ? { length: 0 } : sourceSpan(source >>> 0, sourceChars, 2);
+                    ? { length: 0 } : sourceSpan(source >>> 0, anyNegative(sourceChars), 2);
                 // A destination of NULL is only the measuring call's, with a
                 // size of zero; UTF-7 and the symbol page have no default
                 // character to report or replace with.
@@ -2373,20 +2389,21 @@ export function createLocaleFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                if ((flags & ~WC_FLAGS) !== 0)
+                if ((flags & ~WC_FLAGS) !== 0 || (flags !== 0 && takesNoFlags(resolved)))
                 {
                     host.setLastError(ERROR_INVALID_FLAGS);
                     return 0;
                 }
                 const text = readWide(source >>> 0, span.length);
+                /** @type {{ bytes: Uint8Array, usedDefault?: boolean, fit?: (room: number) => number }} */
                 const encoded = resolved === CP_UTF8
                     ? { bytes: new TextEncoder().encode(text), usedDefault: false }
-                    : encodeSingleByte(text, resolved);
+                    : resolved === CP_UTF7 ? encodeUtf7(text) : encodeSingleByte(text, resolved);
 
                 if (usedDefaultOut !== 0)
                 {
                     host.writeMemory(usedDefaultOut,
-                        new Uint8Array([encoded.usedDefault ? 1 : 0, 0, 0, 0]));
+                        new Uint8Array([encoded.usedDefault === true ? 1 : 0, 0, 0, 0]));
                 }
                 if ((destinationBytes | 0) === 0)
                 {
@@ -2396,8 +2413,8 @@ export function createLocaleFunctions(host){
                 // gives.
                 if (encoded.bytes.length > (destinationBytes | 0))
                 {
-                    host.writeMemory(destination >>> 0,
-                        encoded.bytes.subarray(0, destinationBytes | 0));
+                    host.writeMemory(destination >>> 0, encoded.bytes.subarray(0,
+                        encoded.fit?.(destinationBytes | 0) ?? destinationBytes | 0));
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }

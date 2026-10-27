@@ -253,6 +253,42 @@ test('a source length of -1 carries the terminator into the result', ()=>{
     assert.equal(host.readWide(0x200, 4), 'abc\0');
 });
 
+test('every negative source length means up to and with the terminator', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x100, 'foobar');
+    host.plantWide(0x300, 'foobar');
+
+    assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0, 0x100, -2002, 0x400, 10]), 7);
+    assert.equal(host.readWide(0x400, 7), 'foobar\0');
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x300, -2002, 0x500, 10, 0, 0]), 7);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x500, 0x507)), 'foobar\0');
+    assert.deepEqual(host.errors, []);
+});
+
+test('CP_UTF7 converts both ways, takes no flags, and fills a short buffer by whole units', ()=>{
+    const CP_UTF7 = 65000;
+    const ERROR_INVALID_FLAGS = 1004;
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantWide(0x100, '\u4f60\u597d\u5417');
+    host.plantAnsi(0x200, '+T2BZfQ-');
+
+    assert.equal(fns.WideCharToMultiByte.handler([CP_UTF7, 0, 0x100, -1, 0, 0, 0, 0]), 11);
+    host.bytes.fill(0x23, 0x300, 0x310);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_UTF7, 0, 0x100, 1, 0x300, 4, 0, 0]), 0);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x300, 0x305)), '+T2##');
+    assert.deepEqual(host.errors, [ERROR_INSUFFICIENT_BUFFER]);
+
+    assert.equal(fns.MultiByteToWideChar.handler([CP_UTF7, 0, 0x200, -2, 0x400, 8]), 3);
+    assert.equal(host.readWide(0x400, 3), '\u4f60\u597d\0');
+
+    host.errors.length = 0;
+    assert.equal(fns.MultiByteToWideChar.handler([CP_UTF7, 1, 0x200, -1, 0x400, 8]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_UTF7, 0x400, 0x100, -1, 0x300, 16, 0, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_FLAGS, ERROR_INVALID_FLAGS]);
+});
+
 test('an exact source length carries no terminator of its own', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);
