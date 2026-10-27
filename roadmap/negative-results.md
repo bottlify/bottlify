@@ -1840,3 +1840,20 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   value live across the address computation in handlers already spilling.
 - **Machine.** A cloud container (Xeon, 4 vCPU), node 22.22, valgrind 3.22.
 - **Decision.** Not taken.
+
+### 2026-10-27: long mode's push and pop without the 4 GiB test under loose stacks
+
+- **Idea.** Under `looseStacks` a store through rsp alone tests no page; its 4 GiB window test
+  (`windowAddress` in `push` and `stackAccess`) could go the same way, the address taken as rsp's
+  low half.
+- **Workload.** cork-bench sort-x64, `--bits 64 --cork '{"long":"shared"}'`; machine instructions
+  an iteration under callgrind (node 22.22 `--no-liftoff`, 20 warm iterations, the run of
+  10 + K iterations less the run of 10, divided by K, K = 100), base 64751605, one run an arm.
+- **Values.** base 5.813 M an iteration (4.38 a guest instruction), without the test 5.885 M
+  (4.43): within the measure's run-to-run spread. lua-x64 base 67.4 M (10.84); its other arm was
+  not measured (the run hit the shell's time limit).
+- **Why.** Not attributed; the test is a few instructions a call and a return, and the hot
+  regions' cost is elsewhere (V8 spills: 2.0 machine instructions a guest one in sort-x64's main
+  region against 0.89 at 32 bits, `cork-asm --classes`).
+- **Machine.** A cloud container (Xeon @ 2.80 GHz, 4 vCPU), node 22.22, valgrind 3.22.
+- **Decision.** Not taken; the rsp-only window keeps its test.
