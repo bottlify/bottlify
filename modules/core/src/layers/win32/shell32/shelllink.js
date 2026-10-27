@@ -28,7 +28,8 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
 import {
-    CLSID_SHELL_LINK, SW_SHOWNORMAL, decodeShellLink, writeShellLink,
+    BLOCK_SIGNATURES, CLSID_SHELL_LINK, LINK_FLAGS, SW_SHOWNORMAL, darwinBlock, decodeShellLink,
+    writeShellLink,
 } from '../common/shell-link.js';
 import { listBytes, pathOfList } from './namespace.js';
 
@@ -37,11 +38,13 @@ export { CLSID_SHELL_LINK };
 export const IID_ISHELL_LINK_A = '{000214EE-0000-0000-C000-000000000046}';
 export const IID_ISHELL_LINK_W = '{000214F9-0000-0000-C000-000000000046}';
 export const IID_IPERSIST_FILE = '{0000010B-0000-0000-C000-000000000046}';
+export const IID_ISHELL_LINK_DATA_LIST = '{45E2B4AE-B1C3-11D0-B92F-00A0C90312E1}';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
 const E_FAIL = 0x80004005 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
+const E_OUTOFMEMORY = 0x8007000e | 0;
 const STG_E_FILENOTFOUND = 0x80030002 | 0;
 /** HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND): a save into a directory that is not there. */
 const E_PATH_NOT_FOUND = 0x80070003 | 0;
@@ -101,6 +104,21 @@ const IPERSIST_FILE_SLOTS = [
     ['GetCurFile', 1],
 ];
 
+/** IShellLinkDataList's slots after IUnknown's three. @type {[string, number][]} */
+const IDATA_LIST_SLOTS = [
+    ['AddDataBlock', 1],
+    ['CopyDataBlock', 2],
+    ['RemoveDataBlock', 1],
+    ['GetFlags', 1],
+    ['SetFlags', 1],
+];
+
+/**
+ * The target an advertised shortcut is given: the Darwin descriptor, set
+ * through SetPath behind the installer's CLSID (Wine's test_datalink).
+ */
+const DARWIN_TARGET = /^::\{9db1186e-40df-11d1-aa8c-00c04fb67863\}:(.*)::$/i;
+
 /**
  * @typedef {Object} ShellLinkState
  * @property {string} path
@@ -118,6 +136,8 @@ const IPERSIST_FILE_SLOTS = [
  *           Extra data a loaded link carried, saved back with it.
  * @property {string | null} curFile  The path Save or Load last named.
  * @property {boolean} dirty          Whether a Set* ran since the last save.
+ * @property {number} flags           SLDF_* as SetFlags left them; the
+ *           Darwin flag is the block's, and is added when it is there.
  */
 
 /** @returns {ShellLinkState} */
@@ -125,7 +145,7 @@ function newLinkState(){
     return {
         path: '', relativePath: '', arguments: '', description: '', workingDirectory: '',
         iconLocation: '', iconIndex: 0, showCmd: SW_SHOWNORMAL, hotkey: 0,
-        idList: null, blocks: [], curFile: null, dirty: false,
+        idList: null, blocks: [], curFile: null, dirty: false, flags: 0,
     };
 }
 
@@ -378,7 +398,19 @@ export function createShellLink(host){
                 {
                     return E_INVALIDARG;
                 }
-                state.path = cleanPath(reader.read(address >>> 0));
+                const target = reader.read(address >>> 0);
+                const darwin = DARWIN_TARGET.exec(target);
+                if (darwin)
+                {
+                    state.blocks = [...state.blocks.filter(block=>
+                        (block.signature >>> 0) !== BLOCK_SIGNATURES.DARWIN),
+                    darwinBlock(darwin[1])];
+                    state.path = '';
+                    state.idList = null;
+                    state.dirty = true;
+                    return S_OK;
+                }
+                state.path = cleanPath(target);
                 state.idList = null;
                 state.dirty = true;
                 return S_OK;
@@ -719,6 +751,73 @@ export function createShellLink(host){
         },
     };
 
+    /** @type {Record<string, (state: ShellLinkState, args: number[]) => number>} */
+    const dataList = {
+        /** HRESULT AddDataBlock(void *pDataBlock): the block as it is, its cbSize long. */
+        AddDataBlock: (state, [block])=>{
+            if ((block >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const header = host.readMemory(block >>> 0, 8);
+            const view = new DataView(header.slice().buffer);
+            const size = view.getUint32(0, true);
+            const signature = view.getUint32(4, true);
+            if (size < 8)
+            {
+                return E_INVALIDARG;
+            }
+            state.blocks = [...state.blocks.filter(known=>(known.signature >>> 0) !== signature),
+                { signature, bytes: host.readMemory(block >>> 0, size).slice() }];
+            state.dirty = true;
+            return S_OK;
+        },
+        /**
+         * HRESULT CopyDataBlock(DWORD dwSig, void **ppDataBlock)
+         *
+         * A copy the caller frees with LocalFree; E_FAIL and a null for a
+         * block the link has not.
+         */
+        CopyDataBlock: (state, [signature, out])=>{
+            const found = state.blocks.find(block=>(block.signature >>> 0) === (signature >>> 0));
+            const copy = found ? host.allocate(found.bytes.length) : 0;
+            if (copy !== 0 && found)
+            {
+                host.writeMemory(copy, found.bytes);
+            }
+            if ((out >>> 0) !== 0)
+            {
+                host.writeMemory(out >>> 0, dword(copy));
+            }
+            return found ? copy === 0 ? E_OUTOFMEMORY : S_OK : E_FAIL;
+        },
+        /** HRESULT RemoveDataBlock(DWORD dwSig) */
+        RemoveDataBlock: (state, [signature])=>{
+            const kept = state.blocks.filter(block=>(block.signature >>> 0) !== (signature >>> 0));
+            if (kept.length === state.blocks.length)
+            {
+                return E_FAIL;
+            }
+            state.blocks = kept;
+            state.dirty = true;
+            return S_OK;
+        },
+        /** HRESULT GetFlags(DWORD *pdwFlags) */
+        GetFlags: (state, [out])=>{
+            const darwin = state.blocks.some(block=>
+                (block.signature >>> 0) === BLOCK_SIGNATURES.DARWIN);
+            host.writeMemory(out >>> 0, dword((state.flags
+                | (darwin ? LINK_FLAGS.HAS_DARWIN_ID : 0)) >>> 0));
+            return S_OK;
+        },
+        /** HRESULT SetFlags(DWORD dwFlags) */
+        SetFlags: (state, [flags])=>{
+            state.flags = flags >>> 0;
+            state.dirty = true;
+            return S_OK;
+        },
+    };
+
     const ansi = { ...common, ...stringMethods(ansiReader(host), false) };
     const wide = { ...common, ...stringMethods(wideReader(host), true) };
 
@@ -728,6 +827,7 @@ export function createShellLink(host){
             describe(IID_ISHELL_LINK_A, ISHELL_LINK_SLOTS, ansi),
             describe(IID_ISHELL_LINK_W, ISHELL_LINK_SLOTS, wide),
             describe(IID_IPERSIST_FILE, IPERSIST_FILE_SLOTS, persistFile),
+            describe(IID_ISHELL_LINK_DATA_LIST, IDATA_LIST_SLOTS, dataList),
         ],
     });
 }
