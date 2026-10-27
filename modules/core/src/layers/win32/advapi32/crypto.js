@@ -26,6 +26,7 @@
 
 import { createMd5, createSha1, createSha256 } from '../crypto/digest.js';
 import { createRc4 } from '../crypto/rc4.js';
+import { createProviderRegistry } from './providers.js';
 import { bigIntToBe, bigIntToLe, beToBigInt, leToBigInt, modPow } from '../crypto/rsa.js';
 
 /** @typedef {import('../crypto/digest.js').Digest} Digest */
@@ -50,11 +51,6 @@ const writeU32LE = (b, o, v)=>{
 /* ------------------------------------------------------------------ *
  * Constants of the CryptoAPI contract.
  * ------------------------------------------------------------------ */
-
-/** Provider types this build answers. */
-const PROV_RSA_FULL = 1;
-const PROV_RSA_SIG = 2;
-const PROV_RSA_AES = 24;
 
 /** CryptAcquireContext flags. */
 const CRYPT_VERIFYCONTEXT = 0xf0000000;
@@ -96,8 +92,6 @@ const RSAPUBKEY_SIZE = 12;
 const RSA1_MAGIC = 0x31415352;
 
 /** The provider's error codes, reported through the last error. */
-const NTE_BAD_UID = 0x80090001;
-const NTE_BAD_HASH = 0x80090002;
 const NTE_BAD_KEY = 0x80090003;
 const NTE_BAD_LEN = 0x80090004;
 const NTE_BAD_DATA = 0x80090005;
@@ -113,11 +107,60 @@ const AT_SIGNATURE = 2;
 const NTE_BAD_HASH_STATE = 0x8009000c;
 const NTE_FAIL = 0x80090020;
 const NTE_BAD_KEYSET = 0x80090016;
-const NTE_BAD_PROV_TYPE = 0x80090017;
+const NTE_EXISTS = 0x8009000f;
+const NTE_BAD_PROV_TYPE = 0x80090014;
+const NTE_PROV_TYPE_NOT_DEF = 0x80090017;
+const NTE_KEYSET_NOT_DEF = 0x80090019;
+const NTE_PROV_TYPE_NO_MATCH = 0x8009001b;
 
 /** Win32 codes the provider also reports, for buffer and parameter faults. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_MORE_DATA = 234;
+const ERROR_NO_MORE_ITEMS = 259;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_NOACCESS = 998;
+
+/** CryptGetProvParam's and CryptSetProvParam's parameters. */
+const PP_ENUMALGS = 1;
+const PP_ENUMCONTAINERS = 2;
+const PP_IMPTYPE = 3;
+const PP_NAME = 4;
+const PP_VERSION = 5;
+const PP_CONTAINER = 6;
+const PP_KEYSET_SEC_DESCR = 8;
+const PP_PROVTYPE = 16;
+const PP_ENUMALGS_EX = 22;
+const PP_KEYSET_TYPE = 27;
+const PP_UNIQUE_CONTAINER = 36;
+const PP_KEYSPEC = 39;
+const CRYPT_FIRST = 1;
+const CRYPT_IMPL_SOFTWARE = 2;
+const CRYPT_MACHINE_KEYSET = 0x20;
+/** The version the Microsoft providers of XP answer: 2.0. */
+const PROVIDER_VERSION = 0x200;
+
+/** CryptGetKeyParam's and CryptSetKeyParam's parameters. */
+const KP_IV = 1;
+const KP_SALT = 2;
+const KP_PADDING = 3;
+const KP_MODE = 4;
+const KP_MODE_BITS = 5;
+const KP_PERMISSIONS = 6;
+const KP_ALGID = 7;
+const KP_BLOCKLEN = 8;
+const KP_KEYLEN = 9;
+const KP_SALT_EX = 10;
+const KP_EFFECTIVE_KEYLEN = 19;
+/** CRYPT_ENCRYPT, DECRYPT, READ, WRITE and MAC; CRYPT_EXPORT when it may leave. */
+const KEY_PERMISSIONS = 0x3b;
+const CRYPT_EXPORT = 0x4;
+
+/** The algorithms this provider answers for, as PP_ENUMALGS lists them. */
+const ALGORITHMS = [
+    [0x6801, 128, 40, 128, 'RC4'], [0x8003, 128, 128, 128, 'MD5'],
+    [0x8004, 160, 160, 160, 'SHA-1'], [0x2400, 1024, 384, 16384, 'RSA_SIGN'],
+    [0xa400, 1024, 384, 16384, 'RSA_KEYX'],
+];
 
 /** The default RC4 key length, in bits, when a caller does not name one. */
 const DEFAULT_RC4_BITS = 128;
@@ -144,6 +187,7 @@ const DIGEST_INFO = new Map([
  * @property {bigint} n
  * @property {bigint} e
  * @property {number} bitlen
+ * @property {bigint} [d]  The private exponent, when a private key was imported.
  */
 
 /**
@@ -153,6 +197,10 @@ const DIGEST_INFO = new Map([
  * @property {string} container
  * @property {boolean} verify
  * @property {Set<number>} children
+ * @property {string} name      The provider's name, as the registry lists it.
+ * @property {number} refs      CryptAcquireContext's one, and each CryptContextAddRef's.
+ * @property {number} [enumAt]       Where PP_ENUMALGS goes on from.
+ * @property {number} [containerAt]  Where PP_ENUMCONTAINERS goes on from.
  */
 
 /**
@@ -176,6 +224,8 @@ const DIGEST_INFO = new Map([
  * @property {boolean} exportable
  * @property {RsaPublicKey | null} rsa
  * @property {StreamCipher | null} stream
+ * @property {number} [permissions]  KP_PERMISSIONS, once set.
+ * @property {Uint8Array} [salt]
  */
 
 /** @typedef {ProviderObject | HashObject | KeyObject} CryptoObject */
@@ -204,6 +254,14 @@ function createDigest(algid){
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {ReturnType<typeof import('./registry-service.js').createRegistryService>} [hive]
+ *           Where the providers are listed. Without it every provider name
+ *           is taken as one of this provider's, and nothing is enumerated.
+ * @property {(bytes: number) => number} [allocate]
+ *           Guest memory a handle points into. Without it handles are small numbers.
+ * @property {(address: number, length: number) => boolean} [canWrite]
+ *           Whether the guest may write a range: what RtlGenRandom checks
+ *           before it fills one.
  */
 
 /**
@@ -218,10 +276,25 @@ export function createCryptoFunctions(host){
     const containers = new Set();
     let next = 4;
 
-    /** @param {CryptoObject} object @returns {number} */
+    /**
+     * A handle for an object: where the guest can allocate, a pointer to a
+     * block whose first word is not zero, as Windows' handles are pointers
+     * to the provider's own structures -- a program has been seen to read
+     * through one.
+     *
+     * @param {CryptoObject} object @returns {number}
+     */
     const alloc = object=>{
-        const handle = next;
-        next += 4;
+        let handle = next;
+        if (host.allocate)
+        {
+            handle = host.allocate(8) >>> 0;
+            writeDword(handle, handle);
+        }
+        else
+        {
+            next += 4;
+        }
         handles.set(handle, object);
         return handle;
     };
@@ -315,6 +388,38 @@ export function createCryptoFunctions(host){
         host.writeMemory(buffer >>> 0, data);
         writeDword(sizePointer, data.length);
         return 1;
+    };
+
+    /** @param {number} value */
+    const dwordBytes = value=>{
+        const bytes = new Uint8Array(4);
+        writeU32LE(bytes, 0, value >>> 0);
+        return bytes;
+    };
+
+    /**
+     * A key container's descriptor, self-relative, with the parts asked for:
+     * the system and the administrators own it, as a machine's are owned.
+     *
+     * @param {number} wanted @returns {Uint8Array}
+     */
+    const containerDescriptor = wanted=>{
+        const administrators = new Uint8Array([1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0]);
+        const parts = [(wanted & 1) !== 0 ? administrators : null,
+            (wanted & 2) !== 0 ? administrators : null];
+        const out = new Uint8Array(20 + parts.reduce((sum, part)=>sum + (part?.length ?? 0), 0));
+        out[0] = 1;
+        out[3] = 0x80;
+        let at = 20;
+        parts.forEach((part, index)=>{
+            if (part)
+            {
+                writeU32LE(out, 4 + index * 4, at);
+                out.set(part, at);
+                at += part.length;
+            }
+        });
+        return out;
     };
 
     /** @param {number} bytes */
@@ -466,31 +571,81 @@ export function createCryptoFunctions(host){
      * @param {string | null} container @param {number} provType
      * @param {number} flags @param {number} out
      */
-    const acquire = (container, provType, flags, out)=>{
+    const registry = host.hive ? createProviderRegistry({
+        readMemory: host.readMemory, writeMemory: host.writeMemory,
+        readCString: host.readCString, setLastError: host.setLastError, hive: host.hive,
+    }) : null;
+
+    /**
+     * CryptAcquireContext's body: the provider named -- or the type's default
+     * -- of that type, and its container.
+     *
+     * @param {string | null} container @param {string | null} providerName
+     * @param {number} provType @param {number} flags @param {number} out
+     */
+    const acquire = (container, providerName, provType, flags, out)=>{
+        if (provType === 0 || provType > 999)
+        {
+            return fail(NTE_BAD_PROV_TYPE);
+        }
+        let name = providerName ?? '';
+        if (registry)
+        {
+            if (name === '')
+            {
+                const fallback = registry.defaultOf(provType, true);
+                if (fallback === null)
+                {
+                    return fail(NTE_PROV_TYPE_NOT_DEF);
+                }
+                name = fallback;
+            }
+            const provider = registry.providerNamed(name);
+            if (provider === null)
+            {
+                return fail(NTE_KEYSET_NOT_DEF);
+            }
+            if (provider.type !== provType)
+            {
+                return fail(NTE_PROV_TYPE_NO_MATCH);
+            }
+            name = provider.name;
+        }
         if ((out >>> 0) === 0)
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        if (provType !== PROV_RSA_FULL && provType !== PROV_RSA_SIG
-            && provType !== PROV_RSA_AES)
-        {
-            return fail(NTE_BAD_PROV_TYPE);
-        }
         const verify = (flags & CRYPT_VERIFYCONTEXT) !== 0;
-        const name = container ?? 'DefaultKeyContainer';
+        // A machine's containers are not the user's.
+        const keyset = `${(flags & CRYPT_MACHINE_KEYSET) !== 0 ? 'machine' : 'user'}:${
+            container || 'DefaultKeyContainer'}`;
         if (!verify)
         {
+            if ((flags & CRYPT_DELETEKEYSET) !== 0)
+            {
+                if (!containers.delete(keyset))
+                {
+                    return fail(NTE_BAD_KEYSET);
+                }
+                writeDword(out, 0);
+                return 1;
+            }
             if ((flags & CRYPT_NEWKEYSET) !== 0)
             {
-                containers.add(name);
+                if (containers.has(keyset))
+                {
+                    return fail(NTE_EXISTS);
+                }
+                containers.add(keyset);
             }
-            else if (!containers.has(name))
+            else if (!containers.has(keyset))
             {
                 return fail(NTE_BAD_KEYSET);
             }
         }
-        writeDword(out, alloc({ kind: 'provider', type: provType, container: name,
-            verify, children: new Set() }));
+        writeDword(out, alloc({ kind: 'provider', type: provType, container: keyset,
+            verify, children: new Set(), name, refs: 1 }));
+        host.setLastError?.(0);
         return 1;
     };
 
@@ -508,7 +663,7 @@ export function createCryptoFunctions(host){
         handler: (/** @type {number[]} */ [hashHandle])=>{
             if (!asHash(hashHandle))
             {
-                return fail(NTE_BAD_HASH);
+                return fail(ERROR_INVALID_PARAMETER);
             }
             host.divergence?.(name, 'no private key is held here, so nothing can be signed');
             return fail(NTE_BAD_KEY);
@@ -528,9 +683,13 @@ export function createCryptoFunctions(host){
             const pub = asKey(pubKeyHandle);
             if (!hash)
             {
-                return fail(NTE_BAD_HASH);
+                return fail(ERROR_INVALID_PARAMETER);
             }
-            if (!pub || !pub.rsa)
+            if (!pub)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            if (!pub.rsa)
             {
                 return fail(NTE_BAD_KEY);
             }
@@ -568,18 +727,26 @@ export function createCryptoFunctions(host){
         CryptAcquireContextA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([out, container, , provType, flags])=>
-                acquire(readAnsi(container, 512), provType >>> 0, flags >>> 0, out),
+            handler: ([out, container, provider, provType, flags])=>
+                acquire(readAnsi(container, 512), readAnsi(provider, 512), provType >>> 0,
+                    flags >>> 0, out),
         },
 
         CryptAcquireContextW: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([out, container, , provType, flags])=>
-                acquire(readWide(container, 512), provType >>> 0, flags >>> 0, out),
+            handler: ([out, container, provider, provType, flags])=>
+                acquire(readWide(container, 512), readWide(provider, 512), provType >>> 0,
+                    flags >>> 0, out),
         },
 
-        /** BOOL CryptReleaseContext(HCRYPTPROV hProv, DWORD dwFlags) */
+        /**
+         * BOOL CryptReleaseContext(HCRYPTPROV hProv, DWORD dwFlags)
+         *
+         * One reference let go; the last takes the provider's hashes and keys
+         * with it. Flags are refused -- after the reference is let go, as
+         * Windows does.
+         */
         CryptReleaseContext: {
             argBytes: 8,
             /** @param {number[]} args */
@@ -587,18 +754,341 @@ export function createCryptoFunctions(host){
                 const prov = asProvider(handle);
                 if (!prov)
                 {
-                    return fail(NTE_BAD_UID);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((flags >>> 0 & CRYPT_DELETEKEYSET) !== 0)
+                prov.refs--;
+                if (prov.refs <= 0)
                 {
-                    containers.delete(prov.container);
+                    // Live hashes and keys die with their provider.
+                    for (const child of prov.children)
+                    {
+                        handles.delete(child);
+                    }
+                    handles.delete(handle >>> 0);
                 }
-                // Live hashes and keys die with their provider.
-                for (const child of prov.children)
+                return (flags >>> 0) === 0 ? 1 : fail(NTE_BAD_FLAGS);
+            },
+        },
+
+        /** BOOL CryptContextAddRef(HCRYPTPROV hProv, DWORD *pdwReserved, DWORD dwFlags) */
+        CryptContextAddRef: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, reserved, flags])=>{
+                const prov = asProvider(handle);
+                if (!prov || (reserved >>> 0) !== 0)
                 {
-                    handles.delete(child);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
-                handles.delete(handle >>> 0);
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(NTE_BAD_FLAGS);
+                }
+                prov.refs++;
+                return 1;
+            },
+        },
+
+        ...registry?.functions ?? {},
+
+        /**
+         * BOOL CryptGetProvParam(HCRYPTPROV hProv, DWORD dwParam, BYTE *pbData,
+         *   DWORD *pdwDataLen, DWORD dwFlags)
+         *
+         * The provider's name, type, version and implementation, its
+         * container's name, the algorithms one by one (CRYPT_FIRST starts
+         * over), and the container's descriptor -- which a size query answers
+         * TRUE with ERROR_INSUFFICIENT_BUFFER set, as Windows' does.
+         */
+        CryptGetProvParam: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([provHandle, param, buffer, size, flags])=>{
+                const prov = asProvider(provHandle);
+                if (!prov)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((size >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const text = (/** @type {string} */ words)=>
+                    new Uint8Array([...words].map(c=>c.charCodeAt(0) & 0xff).concat(0));
+                const container = prov.container.slice(prov.container.indexOf(':') + 1);
+                switch (param >>> 0)
+                {
+                    case PP_NAME:
+                        return copyOut(buffer, size, text(prov.name));
+                    case PP_CONTAINER:
+                    case PP_UNIQUE_CONTAINER:
+                        return copyOut(buffer, size, text(container));
+                    case PP_IMPTYPE:
+                        return copyOut(buffer, size, dwordBytes(CRYPT_IMPL_SOFTWARE));
+                    case PP_VERSION:
+                        return copyOut(buffer, size, dwordBytes(PROVIDER_VERSION));
+                    case PP_PROVTYPE:
+                        return copyOut(buffer, size, dwordBytes(prov.type));
+                    case PP_KEYSPEC:
+                        return copyOut(buffer, size, dwordBytes(AT_KEYEXCHANGE | AT_SIGNATURE));
+                    case PP_KEYSET_TYPE:
+                        return copyOut(buffer, size, dwordBytes(
+                            prov.container.startsWith('machine:') ? CRYPT_MACHINE_KEYSET : 0));
+                    case PP_ENUMALGS:
+                    case PP_ENUMALGS_EX:
+                    {
+                        const at = ((flags >>> 0) & CRYPT_FIRST) !== 0 ? 0 : prov.enumAt ?? 0;
+                        const entry = ALGORITHMS[at];
+                        if (!entry)
+                        {
+                            return fail(ERROR_NO_MORE_ITEMS);
+                        }
+                        const [algid, bits, min, max, name] = /** @type {[number, number, number,
+                            number, string]} */ (entry);
+                        const ex = (param >>> 0) === PP_ENUMALGS_EX;
+                        const out = new Uint8Array(ex ? 4 + 4 * 3 + 4 + 20 + 4 + 40 : 32);
+                        const view = new DataView(out.buffer);
+                        view.setUint32(0, algid, true);
+                        view.setUint32(4, bits, true);
+                        if (ex)
+                        {
+                            view.setUint32(8, min, true);
+                            view.setUint32(12, max, true);
+                            view.setUint32(20, name.length + 1, true);
+                            out.set(text(name), 24);
+                            view.setUint32(44, name.length + 1, true);
+                            out.set(text(name), 48);
+                        }
+                        else
+                        {
+                            view.setUint32(8, name.length + 1, true);
+                            out.set(text(name), 12);
+                        }
+                        const done = copyOut(buffer, size, out);
+                        if (done && (buffer >>> 0) !== 0)
+                        {
+                            prov.enumAt = at + 1;
+                        }
+                        return done;
+                    }
+                    case PP_ENUMCONTAINERS:
+                    {
+                        const prefix = prov.container.slice(0, prov.container.indexOf(':') + 1);
+                        const names = [...containers].filter(name=>name.startsWith(prefix))
+                            .map(name=>name.slice(prefix.length));
+                        const at = ((flags >>> 0) & CRYPT_FIRST) !== 0 ? 0
+                            : prov.containerAt ?? 0;
+                        if (at >= names.length)
+                        {
+                            return fail(ERROR_NO_MORE_ITEMS);
+                        }
+                        const done = copyOut(buffer, size, text(names[at]));
+                        if (done && (buffer >>> 0) !== 0)
+                        {
+                            prov.containerAt = at + 1;
+                        }
+                        return done;
+                    }
+                    case PP_KEYSET_SEC_DESCR:
+                    {
+                        const descriptor = containerDescriptor(flags >>> 0);
+                        if ((buffer >>> 0) === 0)
+                        {
+                            writeDword(size, descriptor.length);
+                            host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
+                            return 1;
+                        }
+                        return copyOut(buffer, size, descriptor);
+                    }
+                    default:
+                        return fail(NTE_BAD_TYPE);
+                }
+            },
+        },
+
+        /**
+         * BOOL CryptSetProvParam(HCRYPTPROV hProv, DWORD dwParam, const BYTE *pbData,
+         *   DWORD dwFlags)
+         *
+         * The container's descriptor is taken -- nobody else shares the
+         * container to be kept out -- and anything else is not a parameter
+         * that can be set.
+         */
+        CryptSetProvParam: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([provHandle, param, data])=>{
+                if (!asProvider(provHandle))
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((data >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                return (param >>> 0) === PP_KEYSET_SEC_DESCR ? 1 : fail(NTE_BAD_TYPE);
+            },
+        },
+
+        /**
+         * BOOL CryptGetKeyParam(HCRYPTKEY hKey, DWORD dwParam, BYTE *pbData,
+         *   DWORD *pdwDataLen, DWORD dwFlags)
+         *
+         * A key's algorithm, length in bits, block length (none for a stream
+         * cipher), permissions -- export among them only for an exportable
+         * key -- salt, and the mode, padding and IV a block cipher would use.
+         */
+        CryptGetKeyParam: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([keyHandle, param, buffer, size, flags])=>{
+                const key = asKey(keyHandle);
+                if (!key)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(NTE_BAD_FLAGS);
+                }
+                if ((size >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const stream = key.stream !== null || key.rsa !== null;
+                switch (param >>> 0)
+                {
+                    case KP_ALGID:
+                        return copyOut(buffer, size, dwordBytes(key.algid));
+                    case KP_KEYLEN:
+                    case KP_EFFECTIVE_KEYLEN:
+                        return copyOut(buffer, size, dwordBytes(key.keyLen * 8));
+                    case KP_BLOCKLEN:
+                        return copyOut(buffer, size, dwordBytes(0));
+                    case KP_PERMISSIONS:
+                        return copyOut(buffer, size, dwordBytes(key.permissions
+                            ?? (KEY_PERMISSIONS | (key.exportable ? CRYPT_EXPORT : 0))));
+                    case KP_SALT:
+                        return copyOut(buffer, size, key.salt ?? new Uint8Array(0));
+                    case KP_MODE:
+                    case KP_MODE_BITS:
+                    case KP_PADDING:
+                    case KP_IV:
+                        return stream ? fail(NTE_BAD_TYPE) : copyOut(buffer, size, dwordBytes(0));
+                    default:
+                        return fail(NTE_BAD_TYPE);
+                }
+            },
+        },
+
+        /**
+         * BOOL CryptSetKeyParam(HCRYPTKEY hKey, DWORD dwParam, const BYTE *pbData,
+         *   DWORD dwFlags)
+         *
+         * The salt and the permissions are a key's own; a stream cipher has no
+         * mode, padding or IV to set.
+         */
+        CryptSetKeyParam: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([keyHandle, param, data, flags])=>{
+                const key = asKey(keyHandle);
+                if (!key)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((data >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(NTE_BAD_FLAGS);
+                }
+                switch (param >>> 0)
+                {
+                    case KP_PERMISSIONS:
+                        key.permissions = readDword(data);
+                        return 1;
+                    case KP_SALT:
+                        key.salt = readBytes(data, 11);
+                        return 1;
+                    case KP_SALT_EX:
+                        // CRYPT_DATA_BLOB: the size, then the bytes' pointer.
+                        key.salt = readBytes(readDword(data + 4), readDword(data));
+                        return 1;
+                    default:
+                        return fail(NTE_BAD_TYPE);
+                }
+            },
+        },
+
+        /**
+         * BOOL CryptDuplicateKey(HCRYPTKEY hKey, DWORD *pdwReserved, DWORD dwFlags,
+         *   HCRYPTKEY *phKey)
+         *
+         * A second key of the same material, its own cipher state from here on.
+         */
+        CryptDuplicateKey: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([keyHandle, reserved, flags, out])=>{
+                const key = asKey(keyHandle);
+                if (!key)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((reserved >>> 0) !== 0 || (out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(NTE_BAD_FLAGS);
+                }
+                const prov = asProvider(key.prov);
+                // The duplicate's cipher starts over from the key, as a key
+                // just made does.
+                const copy = { ...key, stream: key.stream ? createRc4(key.value) : null };
+                writeDword(out, prov ? track(prov, copy) : alloc(copy));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL CryptHashSessionKey(HCRYPTHASH hHash, HCRYPTKEY hKey, DWORD dwFlags)
+         *
+         * The session key's material hashed in, as CryptHashData would hash it.
+         */
+        CryptHashSessionKey: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hashHandle, keyHandle, flags])=>{
+                const hash = asHash(hashHandle);
+                if (!hash)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const key = asKey(keyHandle);
+                if (!key)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (key.rsa !== null)
+                {
+                    return fail(NTE_BAD_KEY);
+                }
+                if (((flags >>> 0) & ~1) !== 0)
+                {
+                    return fail(NTE_BAD_FLAGS);
+                }
+                if (hash.value !== null)
+                {
+                    return fail(NTE_BAD_HASH_STATE);
+                }
+                // CRYPT_LITTLE_ENDIAN hashes the bytes as they are; without it
+                // the provider hashes them reversed.
+                hash.digest.update((flags >>> 0) === 1 ? key.value : key.value.slice().reverse());
                 return 1;
             },
         },
@@ -617,7 +1107,7 @@ export function createCryptoFunctions(host){
                 const prov = asProvider(provHandle);
                 if (!prov)
                 {
-                    return fail(NTE_BAD_UID);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if ((out >>> 0) === 0)
                 {
@@ -649,7 +1139,7 @@ export function createCryptoFunctions(host){
                 const hash = asHash(hashHandle);
                 if (!hash)
                 {
-                    return fail(NTE_BAD_HASH);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if ((flags >>> 0) !== 0)
                 {
@@ -679,7 +1169,7 @@ export function createCryptoFunctions(host){
                 const hash = asHash(hashHandle);
                 if (!hash)
                 {
-                    return fail(NTE_BAD_HASH);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if ((flags >>> 0) !== 0 || sizePointer === 0)
                 {
@@ -720,7 +1210,7 @@ export function createCryptoFunctions(host){
                 const hash = asHash(hashHandle);
                 if (!hash)
                 {
-                    return fail(NTE_BAD_HASH);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if ((flags >>> 0) !== 0)
                 {
@@ -747,7 +1237,7 @@ export function createCryptoFunctions(host){
                 const hash = asHash(hashHandle);
                 if (!hash)
                 {
-                    return fail(NTE_BAD_HASH);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 handles.delete(hashHandle >>> 0);
                 asProvider(hash.prov)?.children.delete(hashHandle >>> 0);
@@ -767,7 +1257,7 @@ export function createCryptoFunctions(host){
                 const prov = hash ? asProvider(hash.prov) : null;
                 if (!hash || !prov)
                 {
-                    return fail(NTE_BAD_HASH);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if ((flags >>> 0) !== 0 || (out >>> 0) === 0)
                 {
@@ -792,11 +1282,11 @@ export function createCryptoFunctions(host){
                 const hash = asHash(hashHandle);
                 if (!prov)
                 {
-                    return fail(NTE_BAD_UID);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if (!hash)
                 {
-                    return fail(NTE_BAD_HASH);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if ((out >>> 0) === 0)
                 {
@@ -836,7 +1326,7 @@ export function createCryptoFunctions(host){
                 const prov = asProvider(provHandle);
                 if (!prov)
                 {
-                    return fail(NTE_BAD_UID);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if ((out >>> 0) === 0)
                 {
@@ -878,7 +1368,7 @@ export function createCryptoFunctions(host){
             handler: ([provHandle, spec, out])=>{
                 if (!asProvider(provHandle))
                 {
-                    return fail(NTE_BAD_UID);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if ((out >>> 0) === 0)
                 {
@@ -900,7 +1390,7 @@ export function createCryptoFunctions(host){
                 const key = asKey(keyHandle);
                 if (!key)
                 {
-                    return fail(NTE_BAD_KEY);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 handles.delete(keyHandle >>> 0);
                 asProvider(key.prov)?.children.delete(keyHandle >>> 0);
@@ -923,7 +1413,7 @@ export function createCryptoFunctions(host){
                 const key = asKey(keyHandle);
                 if (!key)
                 {
-                    return fail(NTE_BAD_KEY);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if (!key.stream)
                 {
@@ -946,7 +1436,7 @@ export function createCryptoFunctions(host){
                     const hash = asHash(hashHandle);
                     if (!hash)
                     {
-                        return fail(NTE_BAD_HASH);
+                        return fail(ERROR_INVALID_PARAMETER);
                     }
                     if (hash.value !== null)
                     {
@@ -981,7 +1471,7 @@ export function createCryptoFunctions(host){
                 const key = asKey(keyHandle);
                 if (!key)
                 {
-                    return fail(NTE_BAD_KEY);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if (!key.stream)
                 {
@@ -994,6 +1484,12 @@ export function createCryptoFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const len = readDword(sizePointer);
+                // A final block of nothing is a length error: there is no
+                // padding to take off an empty buffer.
+                if (len === 0 && (final >>> 0) !== 0)
+                {
+                    return fail(NTE_BAD_LEN);
+                }
                 if (len > 0)
                 {
                     const plain = key.stream.transform(readBytes(data, len));
@@ -1003,7 +1499,7 @@ export function createCryptoFunctions(host){
                         const hash = asHash(hashHandle);
                         if (!hash)
                         {
-                            return fail(NTE_BAD_HASH);
+                            return fail(ERROR_INVALID_PARAMETER);
                         }
                         if (hash.value !== null)
                         {
@@ -1036,8 +1532,12 @@ export function createCryptoFunctions(host){
                 {
                     return 1;
                 }
-                if ((buffer >>> 0) === 0)
+                // The whole range is checked before a byte is drawn: a length
+                // the buffer does not have fails at once, rather than after
+                // drawing gigabytes for nowhere.
+                if ((buffer >>> 0) === 0 || host.canWrite?.(buffer >>> 0, len) === false)
                 {
+                    host.setLastError?.(ERROR_NOACCESS);
                     return 0;
                 }
                 host.writeMemory(buffer >>> 0, randomBytes(len));
@@ -1052,7 +1552,7 @@ export function createCryptoFunctions(host){
             handler: ([provHandle, length, buffer])=>{
                 if (!asProvider(provHandle))
                 {
-                    return fail(NTE_BAD_UID);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 const len = length >>> 0;
                 if (len === 0 || (buffer >>> 0) === 0)
@@ -1080,7 +1580,7 @@ export function createCryptoFunctions(host){
                 const prov = asProvider(provHandle);
                 if (!prov)
                 {
-                    return fail(NTE_BAD_UID);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if ((out >>> 0) === 0 || (data >>> 0) === 0)
                 {
@@ -1159,8 +1659,40 @@ export function createCryptoFunctions(host){
                 }
                 if (type === PRIVATEKEYBLOB)
                 {
-                    host.divergence?.('CryptImportKey', 'private-key blobs are not held here');
-                    return fail(NTE_BAD_KEY);
+                    // RSA2: the public modulus and exponent, then the private
+                    // halves. The public part is kept so the key verifies a
+                    // signature and exports its public blob; the private
+                    // exponent is kept too, for signing.
+                    if (len < BLOBHEADER_SIZE + RSAPUBKEY_SIZE)
+                    {
+                        return fail(NTE_BAD_DATA);
+                    }
+                    const magic = readU32LE(blob, 8);
+                    const bitlen = readU32LE(blob, 12);
+                    const pubexp = readU32LE(blob, 16);
+                    const modBytes = bitlen >>> 3;
+                    const RSA2_MAGIC = 0x32415352;
+                    // header, pubkey, modulus, prime1, prime2, exp1, exp2,
+                    // coefficient (each a half), then the private exponent.
+                    const privAt = BLOBHEADER_SIZE + RSAPUBKEY_SIZE + modBytes + modBytes / 2 * 5;
+                    if (magic !== RSA2_MAGIC || (bitlen & 15) !== 0
+                        || len < privAt + modBytes)
+                    {
+                        return fail(NTE_BAD_DATA);
+                    }
+                    const at = BLOBHEADER_SIZE + RSAPUBKEY_SIZE;
+                    const modulus = blob.subarray(at, at + modBytes);
+                    const key = { kind: /** @type {const} */ ('key'), prov: 0, algid: aiKeyAlg,
+                        role: /** @type {'data' | 'signature' | 'keyexchange'} */
+                        (keyRole(aiKeyAlg) ?? 'signature'),
+                        keyLen: modBytes, value: new Uint8Array(0),
+                        exportable: (flags >>> 0 & CRYPT_EXPORTABLE) !== 0, stream: null,
+                        rsa: { n: leToBigInt(modulus), e: BigInt(pubexp), bitlen,
+                            d: leToBigInt(blob.subarray(privAt, privAt + modBytes)) } };
+                    const handle = track(prov, key);
+                    key.prov = provHandle >>> 0;
+                    writeDword(out, handle);
+                    return 1;
                 }
                 return fail(NTE_BAD_TYPE);
             },
@@ -1180,7 +1712,7 @@ export function createCryptoFunctions(host){
                 const key = asKey(keyHandle);
                 if (!key)
                 {
-                    return fail(NTE_BAD_KEY);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 if (sizePointer === 0)
                 {
@@ -1252,7 +1784,7 @@ export function createCryptoFunctions(host){
                     whole.set(cipher, BLOBHEADER_SIZE + 4);
                     return copyOut(data, sizePointer, whole);
                 }
-                return fail(NTE_BAD_TYPE);
+                return fail(type === 0 ? ERROR_INVALID_PARAMETER : NTE_BAD_TYPE);
             },
         },
 

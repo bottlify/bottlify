@@ -440,6 +440,32 @@ const BUILT_IN_SERVICES = Object.freeze([
         DisplayName: 'Windows Management Instrumentation', ObjectName: 'LocalSystem' } },
 ]);
 
+/**
+ * The cryptographic providers Windows XP SP3 has, by name and type, and each
+ * type's name and default provider, as its setup registers them: what
+ * CryptAcquireContext, CryptEnumProviders and CryptGetDefaultProvider read.
+ */
+const CRYPTO_PROVIDERS = Object.freeze([
+    ['Microsoft Base Cryptographic Provider v1.0', 1, 'rsaenh.dll'],
+    ['Microsoft Base DSS and Diffie-Hellman Cryptographic Provider', 13, 'dssenh.dll'],
+    ['Microsoft Base DSS Cryptographic Provider', 3, 'dssenh.dll'],
+    ['Microsoft DH SChannel Cryptographic Provider', 18, 'dssenh.dll'],
+    ['Microsoft Enhanced Cryptographic Provider v1.0', 1, 'rsaenh.dll'],
+    ['Microsoft Enhanced DSS and Diffie-Hellman Cryptographic Provider', 13, 'dssenh.dll'],
+    ['Microsoft Enhanced RSA and AES Cryptographic Provider', 24, 'rsaenh.dll'],
+    ['Microsoft RSA SChannel Cryptographic Provider', 12, 'rsaenh.dll'],
+    ['Microsoft Strong Cryptographic Provider', 1, 'rsaenh.dll'],
+]);
+const CRYPTO_PROVIDER_TYPES = Object.freeze([
+    [1, 'RSA Full (Signature and Key Exchange)', 'Microsoft Strong Cryptographic Provider'],
+    [3, 'DSS Signature', 'Microsoft Base DSS Cryptographic Provider'],
+    [12, 'RSA SChannel', 'Microsoft RSA SChannel Cryptographic Provider'],
+    [13, 'DSS Signature with Diffie-Hellman Key Exchange',
+        'Microsoft Enhanced DSS and Diffie-Hellman Cryptographic Provider'],
+    [18, 'Diffie-Hellman SChannel', 'Microsoft DH SChannel Cryptographic Provider'],
+    [24, 'RSA Full and AES', 'Microsoft Enhanced RSA and AES Cryptographic Provider'],
+]);
+
 /** The in-process COM classes the system libraries serve, by CLSID. */
 const IN_PROCESS_CLASSES = Object.freeze([
     { clsid: '{47D4D946-62E8-11CF-93BC-444553540000}', library: 'dsound.dll' }, // DirectSound
@@ -549,6 +575,13 @@ const machineKeys = (windows, directx, processors)=>{
         // its log.
         ...BUILT_IN_SERVICES.map(({ name, values })=>({ root: HKEY_LOCAL_MACHINE,
             path: `SYSTEM\\CurrentControlSet\\Services\\${name}`, values })),
+        ...CRYPTO_PROVIDERS.map(([name, type, image])=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider\\${name}`,
+            values: { Type: type, 'Image Path': image } })),
+        ...CRYPTO_PROVIDER_TYPES.map(([type, typeName, name])=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider Types\\Type ${
+                String(type).padStart(3, '0')}`,
+            values: { Name: name, TypeName: typeName } })),
         ...['Application', 'System', 'Security'].map(log=>({ root: HKEY_LOCAL_MACHINE,
             path: `SYSTEM\\CurrentControlSet\\Services\\Eventlog\\${log}`,
             values: { File: `%SystemRoot%\\system32\\config\\${log.slice(0, 6)}.Evt` } })),
