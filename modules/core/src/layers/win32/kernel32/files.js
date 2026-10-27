@@ -1160,6 +1160,11 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_ACCESS_DENIED);
         }
+        // The file an image section maps is the program's: it stays.
+        if (files.mappedAs?.(path) === 'image')
+        {
+            return fail(ERROR_ACCESS_DENIED);
+        }
         // An open that does not share deletion keeps the name.
         if (files.removalRefused?.(path) === 'SHARING_VIOLATION')
         {
@@ -1796,6 +1801,17 @@ export function createFileFunctions(host){
         {
             return ERROR_INVALID_NAME;
         }
+        // A colon past the drive's own is no name -- C:c:\windows -- and a
+        // name in the device namespace that is no device is not found.
+        if (!raw.startsWith('\\\\') && /:/.test(raw.slice(2)))
+        {
+            return ERROR_INVALID_NAME;
+        }
+        if (/^\\\\\.\\[^\\/:]+$/.test(raw)
+            && !/^\\\\\.\\(Volume\{|PhysicalDrive|CdRom|Harddisk)/i.test(raw))
+        {
+            return ERROR_FILE_NOT_FOUND;
+        }
         if (!/[\\/]$/.test(raw) || /^[A-Za-z]:[\\/]$/.test(raw))
         {
             return 0;
@@ -1846,7 +1862,9 @@ export function createFileFunctions(host){
         const write = (rights
             & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA)) !== 0;
         const deleteOnClose = ((flags >>> 0) & FILE_FLAG_DELETE_ON_CLOSE) !== 0;
-        if (disposition === TRUNCATE_EXISTING && !write)
+        // Emptying an existing file is asked with GENERIC_WRITE itself:
+        // FILE_WRITE_DATA alone does not do.
+        if (disposition === TRUNCATE_EXISTING && (rights & GENERIC_WRITE) === 0)
         {
             return { error: ERROR_INVALID_PARAMETER };
         }
@@ -2184,20 +2202,17 @@ export function createFileFunctions(host){
     const qword = (lowPart, highPart)=>(BigInt(highPart >>> 0) << 32n) | BigInt(lowPart >>> 0);
 
     /**
-     * Whether two ranges touch. A lock of no bytes is a point: it collides
-     * with a range that covers it, and with nothing else.
+     * Whether a lock asked for over `start` and `length` collides with one
+     * held. A lock of no bytes asked for is taken whatever is held; one held
+     * is a point that a range covering it collides with.
      *
      * @param {bigint} start @param {bigint} length @param {bigint} otherStart
      * @param {bigint} otherLength
      */
     const overlaps = (start, length, otherStart, otherLength)=>{
-        if (length === 0n && otherLength === 0n)
-        {
-            return false;
-        }
         if (length === 0n)
         {
-            return otherStart <= start && start < otherStart + otherLength;
+            return false;
         }
         if (otherLength === 0n)
         {

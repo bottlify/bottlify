@@ -2804,3 +2804,38 @@ test('NUL opens anywhere, reads as its end, swallows writes, and is found as its
     assert.equal(fns.FindNextFileA.handler([found, FIND_DATA]), 0);
     assert.equal(error.code, ERROR_NO_MORE_FILES);
 });
+
+test('a lock of no bytes is taken over held ones, and blocks a range that covers it', ()=>{
+    const { files, error, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'x'.repeat(300));
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    assert.equal(fns.LockFile.handler([handle, 100, 0, 100, 0]), 1);
+    assert.equal(fns.LockFile.handler([handle, 150, 0, 10, 0]), 0, 'exclusive over its own');
+    assert.equal(fns.LockFile.handler([handle, 120, 0, 0, 0]), 1, 'no bytes: taken all the same');
+    assert.equal(fns.UnlockFile.handler([handle, 100, 0, 100, 0]), 1);
+    assert.equal(fns.LockFile.handler([handle, 118, 0, 4, 0]), 0, 'it covers the point');
+    assert.equal(error.code, 33, 'ERROR_LOCK_VIOLATION');
+    assert.equal(fns.LockFile.handler([handle, 110, 0, 10, 0]), 1, 'up to it, not over it');
+    assert.equal(fns.UnlockFile.handler([handle, 120, 0, 0, 0]), 1);
+});
+
+test('names and dispositions Windows refuses before it looks for the file', ()=>{
+    const { files, error, fns, at } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    const FILE_WRITE_DATA = 0x2;
+    const TRUNCATE = 5;
+    assert.equal(fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\SAVE.DAT'), FILE_WRITE_DATA, 0, 0,
+        TRUNCATE, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_INVALID_PARAMETER, 'emptying asks GENERIC_WRITE itself');
+    assert.equal(fns.CreateFileA.handler([at(NAME, '\\\\.\\Bogus'), GENERIC_READ, 0, 0,
+        OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND, 'no such device');
+    assert.equal(fns.CreateFileA.handler([at(NAME, 'C:c:\\windows'), GENERIC_READ, 0, 0,
+        OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, 123, 'ERROR_INVALID_NAME: a colon past the drive');
+
+    /** @type {any} */ (files).mappedAs = ()=>'image';
+    assert.equal(fns.DeleteFileA.handler([at(NAME, 'C:\\GAME\\SAVE.DAT')]), 0);
+    assert.equal(error.code, ERROR_ACCESS_DENIED, 'an image section keeps its file');
+    assert.equal(files.stat('C:\\GAME\\SAVE.DAT')?.exists, true);
+});
