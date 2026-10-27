@@ -12,6 +12,7 @@ import {
 } from './queue.js';
 import { standardDirids } from './dirids.js';
 import { createStringTableFunctions } from './stringtable.js';
+import { createDiskSpaceFunctions } from './diskspace.js';
 import {
     CLASS_KEY, DEVICE_CLASSES_KEY, GUID_NULL, SPINT, createDeviceStore, interfacePath,
 } from './devices.js';
@@ -1182,6 +1183,31 @@ export function createSetupapiFunctions(host){
         /** @type {unknown} */ ({ [`${name}A`]: make(false), [`${name}W`]: make(true) }));
 
     return {
+        ...createDiskSpaceFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            text: textOf,
+            encode: encodeIn,
+            // A drive's path is the list's to read, whether or not the drive
+            // is there: only its drive letter and its name matter to it.
+            fullPath: name=>(/^[A-Za-z]:/.test(name)
+                ? `${name.slice(0, 2)}\\${name.slice(2).replace(/^[\\/]+/, '')}`
+                : pathOf(name)),
+            sizeOf: path=>{
+                try
+                {
+                    const stat = host.files.stat(path);
+                    return stat && !stat.isDirectory ? stat.size : null;
+                }
+                catch {
+                    return null;
+                }
+            },
+            setLastError: host.setLastError,
+            open: (type, object)=>host.handles.open(type, object),
+            resolve: (handle, type)=>host.handles.resolve(handle, type),
+            close: handle=>host.handles.close(handle),
+        }),
         ...host.readWideString ? createStringTableFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
