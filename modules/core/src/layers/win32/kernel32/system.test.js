@@ -19,6 +19,7 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 const FILE_TYPE_UNKNOWN = 0x0000;
 const FILE_TYPE_DISK = 0x0001;
 const FILE_TYPE_CHAR = 0x0002;
+const FILE_TYPE_PIPE = 0x0003;
 
 const STILL_ACTIVE = 259;
 const CURRENT_PROCESS = 0xffffffff;
@@ -387,6 +388,28 @@ test('a console is a character device and a file is not', ()=>{
 
     assert.equal(fns.GetFileType.handler([0x10]), FILE_TYPE_CHAR);
     assert.equal(fns.GetFileType.handler([0x14]), FILE_TYPE_DISK);
+});
+
+test('a pipe is a pipe, a mailslot unknown, and an object that is no file a bad handle', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    const fns = createSystemFunctions(host);
+    /** @type {Record<number, string>} */
+    const types = { 0x10: 'pipe-read', 0x14: 'pipe-write', 0x18: 'mailslot', 0x1c: 'event',
+        0x20: 'mapping', 0x24: 'file' };
+    for (const handle of Object.keys(types))
+    {
+        host.handles.set(Number(handle), {});
+    }
+    host.handleType = (/** @type {number} */ handle)=>types[handle] ?? null;
+    assert.deepEqual([0x10, 0x14, 0x24].map(handle=>fns.GetFileType.handler([handle])),
+        [FILE_TYPE_PIPE, FILE_TYPE_PIPE, FILE_TYPE_DISK]);
+    assert.equal(fns.GetFileType.handler([0x18]), FILE_TYPE_UNKNOWN);
+    assert.equal(host.errors.at(-1), 0, 'no error: a file object of no type here');
+    for (const handle of [0x1c, 0x20])
+    {
+        assert.equal(fns.GetFileType.handler([handle]), FILE_TYPE_UNKNOWN);
+        assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+    }
 });
 
 test('an unknown handle is a reported failure, not a guess', ()=>{

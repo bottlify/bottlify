@@ -35,6 +35,7 @@ import {
 /** Error codes this file can produce. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
 /** TerminateProcess on a process that has already ended. */
 const ERROR_ACCESS_DENIED = 5;
@@ -254,6 +255,7 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  * @property {() => number} systemTimeMs   Guest wall clock, milliseconds since 1970.
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, type?: string) => any} resolveHandle
+ * @property {(handle: number) => string | null} [handleType]  what kind of object a handle is
  * @property {() => any} currentThread
  * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
  *           A call made in a child, for the exit code of one of its threads.
@@ -1249,14 +1251,29 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return FILE_TYPE_UNKNOWN;
                 }
-                switch (target.kind ?? target.type)
+                if ((target.kind ?? target.type) === 'console')
                 {
-                    case 'console':
-                        return FILE_TYPE_CHAR;
-                    case 'pipe':
-                        return FILE_TYPE_PIPE;
-                    default:
+                    return FILE_TYPE_CHAR;
+                }
+                switch (host.handleType?.(handle >>> 0) ?? 'file')
+                {
+                    case 'file':
+                    case 'directory':
                         return FILE_TYPE_DISK;
+                    case 'pipe':
+                    case 'pipe-read':
+                    case 'pipe-write':
+                        return FILE_TYPE_PIPE;
+                    case 'mailslot':
+                    case 'mailslot-client':
+                    case 'device':
+                        // A file object of no type of these: unknown, and no error.
+                        host.setLastError(ERROR_SUCCESS);
+                        return FILE_TYPE_UNKNOWN;
+                    default:
+                        // An event, a mutex, a mapping, a process: no file at all.
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return FILE_TYPE_UNKNOWN;
                 }
             },
         },

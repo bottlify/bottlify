@@ -2092,6 +2092,8 @@ export function createWin32Module(){
                         /** @param {number} bytes */
                         allocate: bytes=>allocator.allocate(bytes),
                         park: ()=>bridge.park(),
+                        handleType: (/** @type {number} */ handle)=>
+                            kernel.handles.typeOf?.(handle) ?? null,
                         resolveHandle: (/** @type {number} */ handle,
                             /** @type {string | undefined} */ type)=>
                             kernel.handles.resolve(handle, type),
