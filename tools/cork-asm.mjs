@@ -38,9 +38,9 @@
  *   --runner COMMAND  the node that compiles, with what runs it: another
  *                     architecture's node under an emulator, e.g.
  *                     'qemu-aarch64-static -L /usr/aarch64-linux-gnu node-arm64/bin/node';
- *                     one that names arm64 (aarch64) gets the module an arm64 host emits,
- *                     whose default NaN is positive: its float arithmetic carries the
- *                     fix-ups for x86's negative one, which an x86 host emits no code for
+ *                     one that names arm64 (aarch64) gets the module an arm64 host emits
+ *   --exact-nan       with an arm64 runner, the float arithmetic fixing up the host's
+ *                     positive default NaN to x86's negative one (the runtime's `exactNaN`)
  *   --count REGEX     a column of the machine instructions the pattern matches
  *   --blocks FILE     a game's block profile (`game-<stamp>-blocks.json`): each block's
  *                     code found by the mark a diagnostic build stores at its start
@@ -463,9 +463,14 @@ function callPartsOf(lines){
 }
 
 const processors = Number(value('--processors') ?? 3);
-/** The module as the runner's own host emits it: an arm64 one's default NaN is positive. */
-const hostFeatures = /aarch64|arm64/.test(value('--runner') ?? process.arch)
-    ? { defaultNaNNegative: false } : { defaultNaNNegative: true };
+/**
+ * The module as the runner's own host emits it: an arm64 one's default NaN is positive, which
+ * only `--exact-nan` (the runtime's `exactNaN`) has the float arithmetic fix up for x86's.
+ */
+const armRunner = /aarch64|arm64/.test(value('--runner') ?? process.arch);
+const hostFeatures = !armRunner ? { defaultNaNNegative: true }
+    : args.includes('--exact-nan') ? { defaultNaNNegative: false }
+        : { defaultNaNNegative: true, armHost: true };
 console.log(`emitted for a host whose default NaN is ${hostFeatures.defaultNaNNegative
     ? 'negative (x86)' : 'positive (arm64)'}`);
 const counted = value('--count') === null ? null : new RegExp(/** @type {string} */ (value('--count')));

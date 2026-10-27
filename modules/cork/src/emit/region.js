@@ -277,7 +277,8 @@ const recordFieldsOf = layout=>{
  * @property {number} [stateBase]  under the process's shared layout, the global holding where
  *     the executor's state block is (`bases.js`)
  * @property {number} [tablesBase]  and the one holding where its tables are
- * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean }} features
  * @property {number} [undo]           the undo helper's function index, in a differential build
  * @property {boolean} [callReturn] a call out of a region is a wasm call the matching `ret`
  *     returns from (`CallStack`), where the region goes on after it
@@ -358,7 +359,8 @@ const recordFieldsOf = layout=>{
  *
  * @param {import('../wasm/encoder.js').ModuleBuilder} m
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,

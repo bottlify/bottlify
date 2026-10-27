@@ -1857,3 +1857,22 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   region against 0.89 at 32 bits, `cork-asm --classes`).
 - **Machine.** A cloud container (Xeon @ 2.80 GHz, 4 vCPU), node 22.22, valgrind 3.22.
 - **Decision.** Not taken; the rsp-only window keeps its test.
+
+### 2026-10-27: callee-saved registers kept across a guest call
+
+- **Idea.** After a guest call made as a wasm call returns, read back only eax, ecx, edx and esp
+  from the state block; ebx, ebp, esi and edi keep the caller's locals, as the i386 calling
+  conventions promise.
+- **Workload.** cork-bench vcall, game, tree, sort, str and lua (x87 images), `pair.mjs` in one
+  node 26.12 process (V8 14.6, `--no-liftoff`), arms off, on, off again, warm 200, 40 rounds of 10.
+- **Values.** Ratio to the first arm, median [quartiles]: vcall on 0.993 [0.975 1.025], game 0.989
+  [0.945 1.032] (off again 0.988), tree 0.999, sort 1.025 [1.003 1.053], str 0.999, lua 1.015
+  [0.967 1.089] (off again 1.048). Static machine code of vcall's call blocks (`cork-asm --calls`,
+  x64 V8 14.6): 20.30 against 19.76 a guest instruction, -2.7 %.
+- **Why.** The reads back are loads of a line the callee just wrote, off the critical path; the
+  call's cost is the return stack, the entry hash's probe and the indirect call.
+- **Noted on the way.** In one process the third and fourth host of the same configuration ran
+  vcall at 196-205 us an iteration against 102-109 for the first two, with six times the
+  untranslated exits; hosts made but not run first did not do it. Not explained yet.
+- **Machine.** A cloud container (Xeon @ 2.10 GHz, 4 vCPU).
+- **Decision.** Not taken.

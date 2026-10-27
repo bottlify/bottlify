@@ -28,7 +28,7 @@
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 103;
+export const CACHE_VERSION = 104;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 
@@ -37,15 +37,17 @@ const MAGIC = 0x4b524f43; // 'CORK'
  * the host's features and the settings that change the code it emits -- a
  * store taken with other ones must not answer.
  *
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean }} features
  * @param {string} variant  the emitting settings, as the runtime names them
  */
 const flagsOf = (features, variant)=>(features.simd ? 's' : '-') + (features.tailCalls ? 't' : '-')
-    + (features.defaultNaNNegative ? 'n' : '-') + variant;
+    + (features.defaultNaNNegative ? 'n' : '-') + (features.armHost ? 'a' : '') + variant;
 
 /**
  * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
- *     defaultNaNNegative?: boolean }, variant?: string, layoutId: string, bundleId: string,
+ *     defaultNaNNegative?: boolean,
+ *     armHost?: boolean }, variant?: string, layoutId: string, bundleId: string,
  *     entry: number, kept: string }} of  kept: what the region is kept under at its entry
  */
 export function cacheKey({ version, features, variant = '', layoutId, bundleId, entry, kept }){
@@ -79,7 +81,8 @@ export function moduleDigest(bytes){
  * other regions later never takes a record's name.
  *
  * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
- *     defaultNaNNegative?: boolean }, variant?: string, layoutId: string, bundleId: string }} of
+ *     defaultNaNNegative?: boolean,
+ *     armHost?: boolean }, variant?: string, layoutId: string, bundleId: string }} of
  * @param {Uint8Array} bytes
  * @param {string} [digest]  `moduleDigest` of the bytes, where it was taken already (a
  *     translation worker takes it: over a module of megabytes it held the engine thread)

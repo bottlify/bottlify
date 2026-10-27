@@ -31,7 +31,8 @@ import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import {
-    checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess, windowAddress, wrapsRead,
+    checkAccess, emitStaleExit, looseStackStore, noteStore, readsOnly, stackAccess, windowAddress,
+    wrapsRead,
 } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
@@ -252,13 +253,14 @@ function countApart(e){
  * written back and no transfer called. A target held further along the probe
  * goes through the transfer, which returns from it as well (`finishModule`).
  *
- * A direct call's target is known here, and so is the first slot of the entry
- * hash its address takes (`slotOf`): where that slot holds the target for the
- * machine's top and not a function that does nothing -- what the transfer
- * would take at its first look and call the same way -- its function is called
- * from here, with the slot's label, and the transfer's hashing and probe are
- * not run (`linkedCall`, unless `linkedCalls` is off). Anything else goes
- * through the transfer as before.
+ * Every call reads the first slot of the entry hash its target's address takes
+ * -- a direct call's known here (`slotOf`), an indirect one's hashed as the
+ * transfer hashes it: where that slot holds the target for the machine's top
+ * and not a function that does nothing -- what the transfer would take at its
+ * first look and call the same way -- its function is called from here, with
+ * the slot's label, and the transfer's own call, probe and checks are not run
+ * (`linkedCall`, unless `linkedCalls` is off). Anything else goes through the
+ * transfer as before.
  *
  * @param {import('./region.js').RegionEmitter} e
  * @param {number} next  the return address, a block of the region
@@ -342,7 +344,7 @@ function callAndReturn(e, next, target, mechanism){
     e.storeUncarriedState(call);
     // An empty slot's key is 0 and a removed one's all ones: a call to either
     // address would take such a slot for its own.
-    if (target !== null && target !== 0 && target >>> 0 !== 0xffffffff
+    if (target !== 0 && (target ?? 0) >>> 0 !== 0xffffffff
         && context.placed === undefined && context.linkedCalls !== false)
     {
         linkedCall(e, target);
@@ -379,8 +381,9 @@ function callAndReturn(e, next, target, mechanism){
 }
 
 /**
- * A direct call's wasm call, the parameters and the state block as the
- * transfer takes them: the first slot of the target's address read, and where
+ * A call's wasm call, the parameters and the state block as the transfer
+ * takes them: the first slot of the target's address read -- a direct call's
+ * known here, an indirect one's hashed from the address in `eip` -- and where
  * it holds the target compiled for any top or for the one the machine has,
  * and not as a function that does nothing, the slot's function called through
  * the table with the slot's label, as the transfer would call it at its first
@@ -389,21 +392,43 @@ function callAndReturn(e, next, target, mechanism){
  * transfer, out of the way, which looks further and answers each of those as
  * before. Leaves the call's answer on the stack.
  *
- * @param {E} e @param {number} target
+ * @param {E} e @param {number | null} target  a direct call's, null for the one in `eip`
  */
 function linkedCall(e, target){
     const { b, layout, context } = e;
-    const slot = layout.tables + Tables.HASH
-        + slotOf(target, layout.hashShift ?? 16) * Tables.HASH_SLOT;
+    const hash = layout.tables + Tables.HASH;
+    if (target === null)
+    {
+        // The slot the transfer looks at first, as it hashes the address.
+        b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul)
+            .i32const(layout.hashShift ?? 16).op(I32.shrU).i32const(Tables.HASH_SLOT).op(I32.mul)
+            .i32const(hash).op(I32.add);
+    }
+    else
+    {
+        b.i32const(hash + slotOf(target, layout.hashShift ?? 16) * Tables.HASH_SLOT);
+    }
     // The index, the label, the top and the empty code in one word, the call
     // taking two of them: with an empty code of 0 the top two bytes are the top.
-    intoTables(context, b.i32const(slot)).localTee(Local.t2)
+    intoTables(context, b).localTee(Local.t2)
         .load('i64', { offset: 4, align: 2 }).localTee(Local.t64)
         .i64const(48n).op(I64.shrU).op(I64.wrap).localTee(Local.t0);
     b.i32const(ANY_TOP).op(I32.eq).localGet(Local.t0);
     atState(context, b).load('i32_8u', { offset: layout.x87Top });
     b.op(I32.eq).op(I32.or);
-    b.localGet(Local.t2).load('i32').i32const(target | 0).op(I32.eq).op(I32.and).op(I32.eqz);
+    b.localGet(Local.t2).load('i32');
+    if (target === null)
+    {
+        // An empty slot's key is 0 and a removed one's all ones: a call to
+        // either address goes through the transfer, which faults it.
+        b.localGet(Local.eip).op(I32.eq).op(I32.and)
+            .localGet(Local.eip).i32const(1).op(I32.add).i32const(1).op(I32.gtU).op(I32.and);
+    }
+    else
+    {
+        b.i32const(target | 0).op(I32.eq).op(I32.and);
+    }
+    b.op(I32.eqz);
     e.openGuard('unlinked', ValType.i32);
     b.localGet(Local.eip);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
@@ -1624,6 +1649,10 @@ export function prepare(e, operand, options){
         {
             windowed(e, operand, options?.store === true);
         }
+        else if (wrappedFirst(e, operand, options?.store === true))
+        {
+            return;
+        }
         else
         {
             emitAddress(e, operand, true);
@@ -1631,6 +1660,36 @@ export function prepare(e, operand, options){
         }
         checkAccess(e, operand.size, options);
     }
+}
+
+/**
+ * A read left untested (`wrapsRead`) whose displacement is small and positive,
+ * under a RAM that is a power of two: its registers' sum wrapped into RAM and the
+ * displacement added after, not the whole address wrapped. The wrapped sum is
+ * the same for every read off the same registers, which the host's compiler
+ * computes once for all of them -- a float loaded from each field of a struct,
+ * a matrix's twelve -- where wrapping each address took an `and` a read. An
+ * address past RAM by the displacement reads the engine's tables, which begin
+ * where RAM ends and run past any such displacement; it read the start of RAM
+ * before, and #GP on the processor either way.
+ *
+ * @param {E} e @param {Operand} operand @param {boolean} store
+ * @returns {boolean}  whether the address is in `addr`, the read's test made
+ */
+function wrappedFirst(e, operand, store){
+    const disp = operand.disp ?? 0;
+    const { ramSize } = e.layout;
+    if (disp <= 0 || disp >= WRAPPED_DISPLACEMENT || (ramSize & ramSize - 1) !== 0
+        || operand.addressSize === 16 || (operand.base ?? -1) < 0 && (operand.index ?? -1) < 0
+        || e.memPlan?.access != null || !wrapsRead(e, store)
+        || (fieldsRead(e).get(registersOf(operand))?.size ?? 0) < 2)
+    {
+        return false;
+    }
+    const { b } = e;
+    emitAddress(e, { ...operand, disp: 0 }, true);
+    b.i32const(ramSize - 1).op(I32.and).i32const(disp).op(I32.add).localSet(Local.addr);
+    return true;
 }
 
 /**
@@ -1782,6 +1841,62 @@ export function emitAddress(e, operand, withSegment){
             .op(I32.add);
     }
 }
+
+/** The registers an operand's address sums, as a key. @param {Operand} operand */
+const registersOf = operand=>`${operand.base ?? -1},${operand.index ?? -1},${operand.scale ?? 1},`
+    + `${operand.segment ?? -1}`;
+
+/** By block, its memory operands' displacements by the registers they add to. @type {WeakMap<object, Map<string, Set<number>>>} */
+const fieldsByBlock = new WeakMap();
+
+/**
+ * The current block's reads' displacements, by the registers each adds them to
+ * (`registersOf`): the reads off one pointer a wrapped sum serves
+ * (`wrappedFirst`). Where a block reads one address twice and nothing else off
+ * its registers, or also writes through them, the whole address wrapped is the
+ * one the host computes once for all of those accesses.
+ *
+ * @param {E} e @returns {Map<string, Set<number>>}
+ */
+function fieldsRead(e){
+    const block = e.region.blocks[e.blockIndex];
+    let fields = fieldsByBlock.get(block);
+    if (fields === undefined)
+    {
+        fields = new Map();
+        /** Registers some access other than a plain read goes through. */
+        const written = new Set();
+        for (const instruction of block.instructions)
+        {
+            const reads = readsOnly(instruction);
+            for (const operand of instruction.operands)
+            {
+                if (operand.kind !== 'mem')
+                {
+                    continue;
+                }
+                const key = registersOf(operand);
+                if (!reads)
+                {
+                    written.add(key);
+                    continue;
+                }
+                const disps = fields.get(key) ?? new Set();
+                disps.add(operand.disp ?? 0);
+                fields.set(key, disps);
+            }
+        }
+        for (const key of written)
+        {
+            fields.delete(key);
+        }
+        fieldsByBlock.set(block, fields);
+    }
+    return fields;
+}
+
+/** How far past RAM a read's displacement may take a wrapped sum: the engine's tables there. */
+const WRAPPED_DISPLACEMENT = 0x10000;
 
 /** The load kind for a zero-extended read of `size` bytes. @param {number} size */
 const loadKind = size=>(size === 1 ? 'i32_8u' : size === 2 ? 'i32_16u' : 'i32');

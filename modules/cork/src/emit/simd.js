@@ -1249,7 +1249,7 @@ function pushLow(e, operand, double, again = false){
  *
  * @param {E} e
  */
-const scalarsApart = e=>!e.context.features.defaultNaNNegative;
+const scalarsApart = e=>e.context.features.armHost ?? !e.context.features.defaultNaNNegative;
 
 /**
  * The scalar form of a float arithmetic instruction (`addss` to `divsd`,

@@ -298,6 +298,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // a region seen under both tests at every such operation (false: every
         // region tests from the start).
         wideFirst: true,
+        // A NaN a float operation makes carries the sign the host gives it, not
+        // x86's: on an arm64 host x86's sign took a compare and a branch after
+        // every operation, and programs do not read a NaN's sign (true: every
+        // NaN made as x86 makes it).
+        exactNaN: false,
         // A region compiled for single precision computes its x87 arithmetic
         // on floats in f32 where the operands are floats (`Singles` in
         // emit/x87.js): the 24-bit result in one operation, where rounding a
@@ -576,7 +581,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         throw new Error(`cork: the memory ends at ${memory.buffer.byteLength}, before the tables`
             + ` at ${layout.tables} + ${tablesSize(layout)}`);
     }
-    const found = features ?? probeFeatures();
+    const probed = features ?? probeFeatures();
+    // An arm64 host is known by its default NaN, whatever NaN the emitter makes for it.
+    const found = probed.defaultNaNNegative || settings.exactNaN === true ? probed
+        : { ...probed, defaultNaNNegative: true, armHost: true };
     // The layout translations are made for: the process's shared one where it
     // has several executors, whose bytes every executor instantiates over its
     // own state block and tables, given as the instance's bases -- so a

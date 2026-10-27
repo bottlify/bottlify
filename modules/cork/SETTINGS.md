@@ -75,6 +75,7 @@ with a measurement beside it.
 
 | Setting | Default | What it does | When to change it, and the risk |
 | --- | --- | --- | --- |
+| `exactNaN` | `false` | A NaN a float operation makes carries x86's sign on every host; on an arm64 host each x87 and SSE operation is then followed by a compare and a branch that set it. Off, a NaN carries the host's sign. | On only for a program that reads a NaN's sign bit; it costs every float operation on arm64 (a quarter of an x87 matrix loop's machine code). |
 | `wideFirst` | `true` | Each region compiled for the precision control it runs under, tested once a block; one seen under both tests at every rounding operation. | Off tests precision on every operation. |
 | `floatSingles` | `true` | A region compiled for single precision computes its arithmetic, square roots and loads in f32 where the operands are floats, each result the processor's 24-bit one; a result past a float's range, or a product under its smallest normal, leaves for the host to compute, and an entry that keeps leaving is compiled again rounding doubles. | Off rounds every result from a double; no other effect. |
 | `x87Shapes` | `true` | Regions compiled for the stack's shape at their entries. | Off checks every register access. |

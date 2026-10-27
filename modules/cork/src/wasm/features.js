@@ -60,6 +60,8 @@ function defaultNaNBits(){
  * @property {boolean} tailCalls
  * @property {boolean} sharedMemory
  * @property {boolean} defaultNaNNegative  the host's default NaN has its sign set, as x86's
+ * @property {boolean} [armHost]  an arm64 host's code made with x86's NaN all the same (the
+ *     runtime's `exactNaN` off): what else differs between the two hosts follows this
  */
 
 /** @returns {Features} */

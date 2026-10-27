@@ -5,9 +5,10 @@
  */
 
 /**
- * A direct call that calls the function its target's first slot of the entry
- * hash names (`linkedCall` in emit/integer.js) beside one that goes through the
- * transfer (`linkedCalls: false`): every program run both ways, and the two
+ * A call that calls the function its target's first slot of the entry hash
+ * names (`linkedCall` in emit/integer.js) -- a direct one's slot known as it is
+ * emitted, an indirect one's hashed from the address it calls -- beside one that
+ * goes through the transfer (`linkedCalls: false`): every program run both ways, and the two
  * must leave the same memory, registers and instruction count. The programs
  * are generated to meet every answer the slot can give: a function compiled for
  * any top, one compiled for the top its caller holds and for another, a

@@ -785,6 +785,23 @@ one. There a NaN operand's payload may come out as that host's rule chooses it. 
 processor's choice after every float operation cost the long-mode translator three vector
 operations an operand: a float loop ran 2.3 times slower. *2026-10-26.*
 
+**A NaN an x87 or SSE operation makes carries the host's sign.** An invalid operation (0/0,
+inf - inf, the root of a negative) gives x86's default NaN its sign bit set; an arm64 host's
+default NaN has it clear. Setting x86's took a compare and a branch after every float operation
+on such a host, a quarter of the machine code of an x87 matrix-vector loop (134 instructions of
+arm64 for 37 of x86, 97 without it; V8 14.6). Programs compare a NaN, they do not read its sign,
+so the translator no longer sets it unless asked (`exactNaN`). Everything else that differs
+between the hosts' code, which SSE form a scalar operation takes among it, still follows the host
+itself. *2026-10-27.*
+
+**A read past RAM by a small displacement reads the engine's tables.** An untested read wraps
+its address into RAM; where a block reads several fields off the same registers and writes none
+through them, the registers' sum is wrapped and the displacement (positive, under 64 KiB) added
+after, so the host's compiler wraps once for all the fields where it wrapped every address before
+(an x87 matrix-vector loop on arm64: 97 machine instructions to 89; x64 fmath 5 % faster). Such a
+read off a pointer within 64 KiB of RAM's end now reads the tables that follow RAM, where it read
+RAM's start before; the processor would have raised #GP either way. *2026-10-27.*
+
 ## C. Process model and porting
 
 **Process replacement, not two processes in one address space or two machines.** `CreateProcess`

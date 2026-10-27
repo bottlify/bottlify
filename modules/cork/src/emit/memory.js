@@ -658,7 +658,7 @@ function accessOf(ins, word = 4){
  *
  * @param {import('../decode/decoder.js').Instruction} ins
  */
-function readsOnly(ins){
+export function readsOnly(ins){
     if (accessOf(ins)?.store === false)
     {
         return true;

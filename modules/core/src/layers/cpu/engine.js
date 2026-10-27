@@ -319,6 +319,9 @@ export function engineContractProblem(engineModule, url){
  * @property {boolean} [linkedCalls]  A direct call out of a region reads its target's first slot
  *     and, where the entry there is the one the transfer would take at its first look, calls
  *     its function itself, without the transfer's hashing and probe. Default true.
+ * @property {boolean} [exactNaN]  A NaN a float operation makes carries x86's sign on every
+ *     host: on an arm64 one each x87 and SSE operation is followed by a compare and a branch
+ *     that set it. Default false: the host's own NaN, which programs do not read.
  * @property {boolean} [wideFirst]  Each x87 region compiled for the precision control it runs
  *     under, tested once a block; one seen under both tests at every rounding operation.
  *     Default true.

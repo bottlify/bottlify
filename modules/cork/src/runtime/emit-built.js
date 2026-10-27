@@ -186,13 +186,15 @@ export function arenaEmitCache(buffer){
  * indices `prepareModule` hands out follow from these alone.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean }} features
  * @param {NonNullable<Parameters<typeof emitBatch>[3]>} options
  * @param {Set<string>} leaveOut
  */
 function contextKey(layout, features, options, leaveOut){
     return JSON.stringify([layout.id ?? layout, features.simd, features.tailCalls,
-        features.defaultNaNNegative === true, options.undoLog === true, options.hash === true,
+        features.defaultNaNNegative === true, features.armHost === true, options.undoLog === true,
+        options.hash === true,
         options.trapPort ?? null, options.countTransfers === true, options.blockProfile === true,
         options.wide === true, options.narrow === true, options.structure !== false,
         options.precise === true, options.place === true, options.profileCalls === true,
@@ -297,7 +299,8 @@ function sameShape(kept, shape){
  *     control its x87 is compiled for, the options' wide and narrow when not given; floats:
  *     compiled for single, its arithmetic on floats (`emitRegion`)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
@@ -451,7 +454,8 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  *         helpers?: boolean } }} relink   `pages` copies of every page forming read,
  *     `formable` the ones a region may span (all of `pages` when absent)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean }} features
  * @param {Parameters<typeof emitBatch>[3]} [options]
  * @param {EmitCache} [cache]
  * @returns {BuiltBatch}
@@ -508,7 +512,8 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
  * @param {import('../region.js').Region} region
  * @param {number} entryTop
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number,
  *     leaveOut?: Set<string> | string[] }} [options]
  * @returns {BuiltRegion}
