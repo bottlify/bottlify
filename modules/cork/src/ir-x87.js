@@ -139,7 +139,7 @@ let made = 0;
 /**
  * The stack-fault check: t1 is set when a source ST(i) is empty or a push
  * finds its register held, and IE and SF are raised. A push that overflowed
- * also sets C1.
+ * also sets C1; an underflow otherwise clears it.
  *
  * @param {import('./ir.js').EvalState} state
  * @param {number[]} sources @param {boolean} pushes
@@ -159,6 +159,7 @@ function guard(state, sources, pushes){
     if (t1)
     {
         state.status |= Status.IE | Status.SF;
+        state.status &= ~Status.C1;
     }
     if (pushes)
     {
@@ -751,9 +752,16 @@ function stepX87(instruction, state, address){
     const { op, operands } = instruction;
     /** ST(i). @param {number} i */
     const st = i=>state.f80[(state.top + i) & 7];
-    /** @param {number} i @param {number} value */
+    /**
+     * Writes ST(i), which is held after it: an instruction whose source was
+     * empty writes the indefinite there, and the register is held, as the
+     * processor tags it.
+     *
+     * @param {number} i @param {number} value
+     */
     const setSt = (i, value)=>{
         state.f80[(state.top + i) & 7] = value;
+        state.empty &= ~(1 << ((state.top + i) & 7));
     };
     const [dst, src] = operands;
     /** @param {number} times */
@@ -846,7 +854,6 @@ function stepX87(instruction, state, address){
             if (dst.kind === 'x87')
             {
                 setSt(Number(dst.reg), value);
-                state.empty &= ~(1 << ((state.top + Number(dst.reg)) & 7));
                 if (t1 === 0)
                 {
                     copyExact(state.top, (state.top + Number(dst.reg)) & 7);
@@ -888,9 +895,21 @@ function stepX87(instruction, state, address){
         case 'fxch':
         {
             const i = Number(src.reg);
-            guard(state, [0, i], false);
             const a = state.top;
             const c = (state.top + i) & 7;
+            if (guard(state, [0, i], false) !== 0)
+            {
+                // Each empty one of the two becomes the indefinite, then they
+                // are exchanged.
+                for (const k of [a, c])
+                {
+                    if ((state.empty >>> k & 1) !== 0)
+                    {
+                        state.f80[k] = INDEFINITE;
+                        state.empty &= ~(1 << k);
+                    }
+                }
+            }
             const swap = state.f80[a];
             state.f80[a] = state.f80[c];
             state.f80[c] = swap;
@@ -930,7 +949,7 @@ function stepX87(instruction, state, address){
         case 'fsqrt':
         {
             const t1 = guard(state, [0], false);
-            if (st(0) < 0)
+            if (st(0) < 0 && t1 === 0)
             {
                 state.status |= Status.IE;
             }
@@ -977,7 +996,8 @@ function stepX87(instruction, state, address){
             let significand;
             if (value === 0)
             {
-                state.status |= Status.ZE;
+                // What an empty register still holds is no operand.
+                state.status |= t1 === 0 ? Status.ZE : 0;
                 exponent = -Infinity;
                 significand = original;
             }
@@ -1045,7 +1065,7 @@ function stepX87(instruction, state, address){
             let result;
             if (op === 'fyl2x')
             {
-                if (st(0) === 0 && Math.abs(st(1)) < Infinity && st(1) !== 0)
+                if (st(0) === 0 && Math.abs(st(1)) < Infinity && st(1) !== 0 && t1 === 0)
                 {
                     state.status |= Status.ZE;
                 }
@@ -1214,12 +1234,13 @@ function stepX87(instruction, state, address){
         }
         case 'fcmovb': case 'fcmove': case 'fcmovbe': case 'fcmovu':
         case 'fcmovnb': case 'fcmovne': case 'fcmovnbe': case 'fcmovnu':
-            guard(state, [0, Number(src.reg)], false);
-            if (condition(/** @type {number} */ (instruction.cc), state.eflags))
-            {
-                setSt(0, st(Number(src.reg)));
-            }
+        {
+            // A fault writes the indefinite into ST0 whatever the condition.
+            const t1 = guard(state, [0, Number(src.reg)], false);
+            const moves = condition(/** @type {number} */ (instruction.cc), state.eflags);
+            setSt(0, orIndefinite(moves ? st(Number(src.reg)) : st(0), t1));
             return true;
+        }
         case 'fxam':
         {
             const value = st(0);
