@@ -181,6 +181,12 @@ export const TIER_ENTRY = 8;
  */
 export const MMX_HELD = 1;
 export const MMX_TOP = 2;
+/**
+ * Past them, from this bit, the mm registers the run wrote, one bit each:
+ * what its exit stores as MMX's -- a register a region writes on another path
+ * than the one taken keeps its x87 view, its exact quadword included.
+ */
+export const MMX_WRITTEN_SHIFT = 8;
 
 /** Local indices every region function shares. */
 export const Local = Object.freeze({
@@ -1779,19 +1785,26 @@ export class RegionEmitter {
         }
         if (this.mmWritten.size > 0)
         {
-            const mask = [...this.mmWritten].reduce((bits, index)=>bits | 1 << index, 0);
-            x87DropExact(this, ()=>this.b.i32const(mask));
+            // What this run wrote, of the registers the region writes.
+            x87DropExact(this, ()=>this.b.localGet(Local.mmxTouched)
+                .i32const(MMX_WRITTEN_SHIFT).op(I32.shrU));
         }
         for (const index of this.mmWritten)
         {
+            // A register the region writes on another path than the one this run
+            // took holds what it was given: its bytes go back as they came.
             atState(this.context, b).localGet(this.mmLocal(index))
                 .store('i64', { offset: layout.x87 + index * 16 });
             if (layout.x87Format === 'tagged80')
             {
                 // An MMX write leaves the register's exponent all ones, as the
                 // processor does, so the emulator sees it as it would its own.
+                b.localGet(Local.mmxTouched).i32const(1 << MMX_WRITTEN_SHIFT + index)
+                    .op(I32.and);
+                this.openIf(`mmTag${index}`, EMPTY);
                 atState(this.context, b).i32const(0xffff)
                     .store('i32_16', { offset: layout.x87 + index * 16 + 8 });
+                this.close();
             }
         }
         if (this.x87.active)
@@ -1982,20 +1995,23 @@ export class RegionEmitter {
     storeMixedRegisters(){
         const { b, layout } = this;
         const x = this.x87;
-        const mmMask = [...this.mmWritten].reduce((bits, index)=>bits | 1 << index, 0);
-        x87DropExact(this, ()=>b.localGet(Local.x87Dirty).i32const(mmMask).op(I32.or));
+        x87DropExact(this, ()=>b.localGet(Local.x87Dirty).localGet(Local.mmxTouched)
+            .i32const(MMX_WRITTEN_SHIFT).op(I32.shrU).op(I32.or));
         for (let p = 0; p < 8; p++)
         {
             const at = layout.x87 + p * 16;
             const mm = /** @type {number} */ (this.mmLocals.get(p));
-            // An MMX write is unconditional (its local is the mantissa); an x87
-            // one is under the dirty mask, which the register's own writes set.
-            const unconditional = this.mmWritten.has(p);
-            if (!unconditional)
+            // Stored where the run wrote it, by either class: an MMX write marks
+            // the run's MMX mark (its local is the mantissa), an x87 one the
+            // dirty mask.
+            b.localGet(Local.x87Dirty);
+            if (this.mmWritten.has(p))
             {
-                b.localGet(Local.x87Dirty).i32const(1 << p).op(I32.and);
-                this.openIf(`mixed${p}`, EMPTY);
+                b.localGet(Local.mmxTouched).i32const(MMX_WRITTEN_SHIFT).op(I32.shrU)
+                    .op(I32.or);
             }
+            b.i32const(1 << p).op(I32.and);
+            this.openIf(`mixed${p}`, EMPTY);
             atState(this.context, b).localGet(mm).store('i64', { offset: at });
             if (layout.x87Format === 'tagged80')
             {
@@ -2006,10 +2022,7 @@ export class RegionEmitter {
                 b.select();
                 b.store('i32_16', { offset: at + 8 });
             }
-            if (!unconditional)
-            {
-                this.close();
-            }
+            this.close();
         }
     }
 

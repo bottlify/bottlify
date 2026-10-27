@@ -1037,3 +1037,20 @@ test('a 64-bit state block without a flag record or SIMD is refused, not run as 
         /needs a flag record and SIMD/);
     prepareModule(new ModuleBuilder(), layout, host, {});
 });
+
+test('a region writes back as MMX only the mm registers the path it ran wrote', ()=>{
+    // test eax, eax; jz L; movq mm1, mm0; L: hlt -- with eax zero the movq is
+    // jumped over: register 1 keeps its x87 view, the mark of the exact quadword
+    // a fild left there included; with eax one the movq writes it as MMX.
+    for (const eax of [0, 1])
+    {
+        const m = createTestMachine();
+        m.write(CODE, [0x85, 0xc0, 0x74, 0x03, 0x0f, 0x6f, 0xc8, 0xf4]);
+        m.setReg('eax', eax);
+        const exact = /** @type {number} */ (m.layout.x87Exact);
+        new Uint8Array(m.memory.buffer)[exact] = 0b10;
+        assert.equal(m.translate(CODE).run(CODE, 1000).kind, Exit.HALT);
+        assert.equal(new Uint8Array(m.memory.buffer)[exact], eax === 0 ? 0b10 : 0,
+            `exact marks with eax ${eax}`);
+    }
+});

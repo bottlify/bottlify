@@ -28,7 +28,7 @@ import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
-import { Exit, Local, MMX_HELD, MMX_TOP } from './region.js';
+import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT } from './region.js';
 import { prepare, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
@@ -1102,6 +1102,9 @@ function writeM(e, operand, pushValue){
         const mm = e.mmLocal(physical, true);
         pushValue?.();
         b.localSet(mm);
+        // Which registers this run wrote, for the exit (`MMX_WRITTEN_SHIFT`).
+        b.localGet(e.mmxTouchedLocal()).i32const(1 << MMX_WRITTEN_SHIFT + physical).op(I32.or)
+            .localSet(e.mmxTouchedLocal());
         // The register's x87 view follows its MMX view, so the two agree where
         // they meet again later in the region (see `x87FromMmx`).
         x87FromMmx(e, physical, mm);
