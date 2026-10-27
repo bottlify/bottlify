@@ -45,7 +45,7 @@ export const HELPER_NAMES = Object.freeze([
  * @param {boolean} [shared]  whether the memory is shared
  */
 export function defineHelpers(m, layout, shared = false){
-    const materialise = addMaterialiseHelper(m);
+    const materialise = addMaterialiseHelper(m, layout.bits === 64);
     const { f80ToF64, f64ToF80 } = addF80Helpers(m);
     const round = addRoundHelper(m);
     const codeHit = addCodeHitHelper(m, layout, shared);
@@ -83,15 +83,17 @@ export function buildHelpersModule(layout, memory = {}){
  * emitter calls through. The signatures mirror `defineHelpers`'.
  *
  * @param {ModuleBuilder} m
+ * @param {boolean} [wide]  long mode's: the flag record's result and operands are i64
  * @returns {{ materialise: number, f80ToF64: number, f64ToF80: number,
  *     round: number, codeHit: number, f64ToBcd: number, x87Invalid: number,
  *     remainder: number, spanHit: number, windowHit: number }}
  */
-export function importHelpers(m){
+export function importHelpers(m, wide = false){
     const i32 = ValType.i32;
     const f64 = ValType.f64;
+    const value = wide ? ValType.i64 : i32;
     const materialise = m.importFunction('env', 'materialise',
-        m.type({ params: [i32, i32, i32, i32, i32, i32], results: [i32] }));
+        m.type({ params: [i32, value, value, value, i32, i32], results: [i32] }));
     const f80ToF64 = m.importFunction('env', 'f80ToF64',
         m.type({ params: [i32], results: [f64] }));
     const f64ToF80 = m.importFunction('env', 'f64ToF80',

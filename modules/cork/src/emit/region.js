@@ -48,7 +48,8 @@
 import { CF, DF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import {
-    ARITH, CARRY_IN_WORD, I32, Kind, eagerFlagsOf, emitCondition, emitFlag, kindOf, widthCode,
+    ARITH, CARRY_IN_WORD, I32, Kind, eagerFlagsOf, emitCondition, emitFlag, kindOf,
+    recordOffsets, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
 import {
@@ -56,6 +57,7 @@ import {
     planLoop, planRegion, readsWrapped,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
+import { WIDTH_32, widthOf } from './width.js';
 import { atState, atTables, importBases, intoState, intoTables } from './bases.js';
 import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt,
     pageFlagsAt, transferTargetAt }
@@ -99,6 +101,13 @@ export function enterRegion(fn, label, budget, view, layout){
     if ((layout.origin ?? -1) >= 0)
     {
         view.setInt32(/** @type {number} */ (layout.origin), budget, true);
+    }
+    if (layout.bits === 64)
+    {
+        // Long mode's carried registers: rcx, rdx, r8, r9 (`WIDTH_64`).
+        return fn(label, budget,
+            view.getBigInt64(regs + 8, true), view.getBigInt64(regs + 16, true),
+            view.getBigInt64(regs + 64, true), view.getBigInt64(regs + 72, true));
     }
     return fn(label, budget,
         view.getInt32(regs, true), view.getInt32(regs + 4, true),
@@ -185,8 +194,6 @@ export const Local = Object.freeze({
     // and mm locals a region uses follow, then the x87 locals, per region.
     vec: 37,
 });
-/** The record's locals in the order the layout's `flagRecord` keeps them. */
-const RECORD_LOCALS = [Local.kind, Local.res, Local.op1, Local.op2, Local.cin];
 /**
  * The function's parameters, locals 0..5: the label and the budget, then the
  * registers a transfer between regions carries rather than writing them to the
@@ -216,18 +223,24 @@ export const BLOCK_MARK_END = 0xfff;
 export const blockMark = (index, copy)=>(0x6b5a0000 | (copy & 0xf) << 12 | index & 0xfff) >>> 0;
 /** The registers among the parameters: eax, ecx, edx, ebx. */
 export const CARRIED_REGS = STATE_PARAMS - 2;
-const LOCAL_TYPES = [
-    // esp, ebp, esi, edi, the record, the flags word and the run's budget: the
-    // parameters they once were, locals of the function now.
-    ...new Array(Local.eip - STATE_PARAMS).fill(ValType.i32),
-    ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, // eip..addr
-    ValType.i64, ValType.i64,
-    ValType.i32, // count
-    ValType.f32, ValType.f32, ValType.f64, ValType.f64, // f0 f1 d0 d1
-    ValType.i32, // mmxTouched
-    ValType.i32, ValType.i32, // pflags stale
-    ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, // x87Top..x87Dirty
-];
+/**
+ * A region's record fields as the state block keeps them between regions:
+ * each local, its offset in the record (`recordOffsets`) and whether long
+ * mode's i64.
+ *
+ * @param {{ bits?: 32 | 64 }} layout
+ */
+const recordFieldsOf = layout=>{
+    const offsets = recordOffsets(layout);
+    const wide = layout.bits === 64;
+    return [
+        { local: Local.kind, offset: offsets.kind, wide: false },
+        { local: Local.res, offset: offsets.res, wide },
+        { local: Local.op1, offset: offsets.op1, wide },
+        { local: Local.op2, offset: offsets.op2, wide },
+        { local: Local.cin, offset: offsets.cin, wide: false },
+    ];
+};
 
 /**
  * What a diagnostic run is told of each instruction emitted: the instruction,
@@ -247,6 +260,7 @@ const LOCAL_TYPES = [
  *
  * @typedef {Object} ModuleContext
  * @property {import('../wasm/encoder.js').ModuleBuilder} m
+ * @property {import('./width.js').Width} width  the registers' (`width.js`)
  * @property {number} regionType       the function type (`STATE_PARAMS` × i32) → i32
  * @property {number} materialise      the flag helper's function index
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
@@ -377,12 +391,13 @@ export function prepareModule(m, layout, features, memory = {},
         checkReads = false, expansion = null, markBlocks = false, crossTailCalls = true,
         callDepth = CallStack.LIMIT } = {})
 {
-    // A 64-bit state block has no flag record or interrupt word where this
-    // emitter reads them: it would translate long-mode code as 32-bit code
-    // with the record's paths quietly off.
-    if (layout.bits === 64)
+    const width = widthOf(layout);
+    // Long mode's emitter keeps the record between regions and the vector
+    // scratch before its upper registers: without either it would translate
+    // long-mode code with the record's paths quietly off.
+    if (width.bits === 64 && ((layout.flagRecord ?? -1) < 0 || !features.simd))
     {
-        throw new Error('the 32-bit emitter serves no 64-bit layout');
+        throw new Error('emit: a 64-bit layout needs a flag record and SIMD');
     }
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -422,7 +437,8 @@ export function prepareModule(m, layout, features, memory = {},
         math[name] = m.importFunction('env', name, types[name] ?? unary);
     }
     const regionType = m.type({
-        params: new Array(STATE_PARAMS).fill(ValType.i32), results: [ValType.i32],
+        params: [ValType.i32, ValType.i32, ...width.carried.map(()=>width.regType)],
+        results: [ValType.i32],
     });
     // The helpers are one shared module every region imports, rather than a
     // copy in each; the host instantiates it once with the same memory (they
@@ -430,10 +446,10 @@ export function prepareModule(m, layout, features, memory = {},
     const {
         materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder, spanHit,
         windowHit,
-    } = importHelpers(m);
+    } = importHelpers(m, width.bits === 64);
     /** @type {ModuleContext} */
     const context = {
-        m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
+        m, width, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
         hash: hashed, codeHit, spanHit, windowHit, f64ToBcd, x87Invalid, remainder, rdtsc,
         leaveOut, ...bases,
     };
@@ -455,7 +471,9 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.callReturn = true;
         context.callDepth = Math.max(1, Math.min(CallStack.LIMIT, Math.trunc(callDepth)));
-        if (emptySites)
+        // A long-mode `ret` pops a quadword, which the transfer's empty return
+        // (`emptyReturn`) does not read yet.
+        if (emptySites && width.bits === 32)
         {
             context.emptySites = true;
         }
@@ -521,7 +539,8 @@ export function prepareModule(m, layout, features, memory = {},
         // The transfer's index is taken before any region's, which call it;
         // its body waits for the module's last region (`finishModule`).
         context.transfer = m.function(regionType, [], new Uint8Array([0x00, 0x0b]));
-        if (resume && (layout.flagRecord ?? -1) >= 0)
+        // Long mode has no interpreter tier in wasm yet to resume on.
+        if (resume && (layout.flagRecord ?? -1) >= 0 && width.bits === 32)
         {
             context.resume = addResume(m, layout, bases, materialise, context.transfer);
         }
@@ -662,11 +681,11 @@ export function finishModule(context, functions){
         // word the region left in the block -- EIP and the count, the run's
         // budget restarting from here for a resume that goes on.
         const origin = /** @type {number} */ (layout.origin);
-        for (let r = 0; r < CARRIED_REGS; r++)
-        {
-            atState(context, b).localGet(Local.reg + r)
-                .store('i32', { offset: layout.regs + r * 4 });
-        }
+        const { width } = context;
+        width.carried.forEach((r, i)=>{
+            atState(context, b).localGet(Local.reg + i)
+                .store(width.bits === 64 ? 'i64' : 'i32', { offset: layout.regs + r * width.slot });
+        });
         if (layout.flagsChanged >= 0)
         {
             atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
@@ -991,8 +1010,12 @@ export class RegionEmitter {
         this.floats = this.narrow && floats;
         this.copyFunction = copyFunction;
         this.layout = context.layout;
+        /** The registers' width (`width.js`). */
+        this.width = context.width ?? WIDTH_32;
         /** Where the layout keeps the flag record between regions, or -1. */
         this.flagRecord = context.layout.flagRecord ?? -1;
+        /** The record's fields there. */
+        this.recordFields = recordFieldsOf(context.layout);
         /** What the function of the region's copies takes of this one's planning. */
         this.planned = planned;
         /** By ret block: the return addresses it jumps to rather than leaves by. */
@@ -1193,7 +1216,7 @@ export class RegionEmitter {
         /** The control depth at the start of the block being emitted. */
         this.blockDepth = 0;
         /** @type {number[]} */
-        this.localTypes = [...LOCAL_TYPES];
+        this.localTypes = [...this.width.locals];
         /** The ordered variant's store value (`orderedLocal`), -1 until made. */
         this.orderedValue = -1;
         this.entryTop = entryTop;
@@ -1206,7 +1229,7 @@ export class RegionEmitter {
         const mixed = context.features.simd && this.x87Plan !== null && this.x87Plan.hasMmx;
         if (context.features.simd)
         {
-            this.localTypes.push(ValType.v128, ValType.v128, ValType.v128);
+            this.localTypes.push(ValType.v128, ValType.v128, ValType.v128, ...this.width.upper);
             for (const block of region.blocks)
             {
                 for (const instruction of block.instructions)
@@ -1306,7 +1329,7 @@ export class RegionEmitter {
     get flagLocals(){
         return {
             kind: Local.kind, res: Local.res, op1: Local.op1, op2: Local.op2, cin: Local.cin,
-            flags: Local.flags,
+            flags: Local.flags, ...this.width.bits === 64 ? { wide: true } : {},
         };
     }
 
@@ -1470,9 +1493,9 @@ export class RegionEmitter {
         {
             // The record the last region left, as it left it: its kind is not
             // known here, and a read folds it only when it must.
-            for (const [i, local] of RECORD_LOCALS.entries())
+            for (const { local, offset, wide } of this.recordFields)
             {
-                atState(context, b).load('i32', { offset: this.flagRecord + i * 4 })
+                atState(context, b).load(wide ? 'i64' : 'i32', { offset: this.flagRecord + offset })
                     .localSet(local);
             }
             this.pending = null;
@@ -1580,11 +1603,7 @@ export class RegionEmitter {
             // The record goes as it is: the helper at every exit would be a
             // fifth of a call-heavy loop, and the next region mostly writes the
             // flags before it reads them. Whoever reads the word folds it.
-            for (const [i, local] of RECORD_LOCALS.entries())
-            {
-                atState(context, b).localGet(local)
-                    .store('i32', { offset: this.flagRecord + i * 4 });
-            }
+            this.storeRecord(b);
         }
         else
         {
@@ -1660,11 +1679,24 @@ export class RegionEmitter {
         {
             return;
         }
-        for (const [i, local] of RECORD_LOCALS.entries())
-        {
-            atState(context, b).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
-        }
+        this.storeRecord(b);
         atState(context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
+    }
+
+    /**
+     * The record's locals into the state block, those `due` says.
+     *
+     * @param {Body} b @param {(local: number) => boolean} [due]
+     */
+    storeRecord(b, due = ()=>true){
+        for (const { local, offset, wide } of this.recordFields)
+        {
+            if (due(local))
+            {
+                atState(this.context, b).localGet(local)
+                    .store(wide ? 'i64' : 'i32', { offset: this.flagRecord + offset });
+            }
+        }
     }
 
     /**
@@ -1685,11 +1717,7 @@ export class RegionEmitter {
         }
         this.storeMemoryState();
         this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
-        for (const [i, local] of RECORD_LOCALS.entries())
-        {
-            atState(this.context, b).localGet(local)
-                .store('i32', { offset: this.flagRecord + i * 4 });
-        }
+        this.storeRecord(b);
         atState(this.context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
         atState(this.context, b).localGet(Local.budget)
             .store('i32', { offset: layout.regs + CallStack.BUDGET });
@@ -1782,7 +1810,9 @@ export class RegionEmitter {
         // the host, and a reload (after a trap's handler) takes each back --
         // the next transfer passes them whether the region names them or not.
         // The others are, as every register is under the emulator's layout.
-        const carried = this.flagRecord >= 0 ? CARRIED_REGS : 0;
+        const { width } = this;
+        const carried = this.flagRecord >= 0 ? width.carried : [];
+        const kind64 = width.bits === 64 ? 'i64' : 'i32';
         const onEntry = this.deferred.some(one=>one.site !== undefined)
             ? this.writtenOnEntry() : [];
         /** @type {{ at: number, body: Body }[]} */
@@ -1796,22 +1826,22 @@ export class RegionEmitter {
             /** @param {number} local */
             const due = local=>site === undefined || site.written.has(local)
                 || entered?.has(local) === true;
-            for (let r = 0; r < (regs === 'none' ? 0 : 8); r++)
+            for (let r = 0; r < (regs === 'none' ? 0 : width.regs); r++)
             {
-                const offset = layout.regs + r * 4;
-                const always = r < carried && regs === 'all';
-                if (regs === 'uncarried' && r < carried)
+                const offset = layout.regs + r * width.slot;
+                const local = width.regLocal[r];
+                const always = carried.includes(r) && regs === 'all';
+                if (regs === 'uncarried' && carried.includes(r))
                 {
                     continue;
                 }
-                if (kind === 'load' && (always || main.uses(Local.reg + r)))
+                if (kind === 'load' && (always || main.uses(local)))
                 {
-                    atState(this.context, b).load('i32', { offset }).localSet(Local.reg + r);
+                    atState(this.context, b).load(kind64, { offset }).localSet(local);
                 }
-                if (kind === 'store' && (always || main.writes(Local.reg + r))
-                    && due(Local.reg + r))
+                if (kind === 'store' && (always || main.writes(local)) && due(local))
                 {
-                    atState(this.context, b).localGet(Local.reg + r).store('i32', { offset });
+                    atState(this.context, b).localGet(local).store(kind64, { offset });
                 }
             }
             if (x87 && this.x87.active && !this.x87.hasMmx)
@@ -1841,14 +1871,7 @@ export class RegionEmitter {
             if (site !== undefined && regs === 'uncarried')
             {
                 // `storeUncarriedState`'s record and flags word.
-                for (const [i, local] of RECORD_LOCALS.entries())
-                {
-                    if (due(local))
-                    {
-                        atState(this.context, b).localGet(local)
-                            .store('i32', { offset: this.flagRecord + i * 4 });
-                    }
-                }
+                this.storeRecord(b, due);
                 if (due(Local.flags))
                 {
                     atState(this.context, b).localGet(Local.flags)
