@@ -27,6 +27,8 @@ import {
     validType,
 } from './devprops.js';
 import { writeShellLink } from '../common/shell-link.js';
+import { msToFileTime } from '../kernel32/filetime.js';
+import { bestDriver, driversOf } from './drivers.js';
 import { CATALOG_STORE } from '../sfc/functions.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_CLASSES_ROOT, HKEY_USERS } from '../advapi32/registry.js';
@@ -105,6 +107,17 @@ const ERROR_DEVICE_INTERFACE_REMOVED = 0xe000021c;
 /** SP_DEVINSTALL_PARAMS: cbSize and the eight DWORDs after it, before the path. */
 const INSTALL_PARAMS_WORDS = 8;
 const INSTALL_PARAMS_FIELDS = 4 + INSTALL_PARAMS_WORDS * 4;
+
+/** Driver list types, and the install flag that names one INF rather than a directory. */
+const SPDIT_CLASSDRIVER = 1;
+const SPDIT_COMPATDRIVER = 2;
+const DI_ENUMSINGLEINF = 0x10000;
+/** A driver's strings: description, manufacturer, provider, section. */
+const LINE_LEN = 256;
+/** SP_DRVINFO_DETAIL_DATA: cbSize, InfDate, CompatIDsOffset and -Length, Reserved, then the strings. */
+const DETAIL = Object.freeze({ INF_DATE: 4, COMPAT_OFFSET: 12, COMPAT_LENGTH: 16, SECTION: 24 });
+const ERROR_NO_DRIVER_SELECTED = 0xe0000203;
+const ERROR_NO_COMPAT_DRIVERS = 0xe0000228;
 /** CONFIGRET codes, cfgmgr32.h. */
 const CR_SUCCESS = 0x00;
 const CR_INVALID_POINTER = 0x03;
@@ -1676,6 +1689,169 @@ export function createSetupapiFunctions(host){
         }
         return { held };
     };
+
+    /**
+     * Each device's driver lists, and each set's class list: the lists by
+     * type, and the driver selected.
+     *
+     * @type {WeakMap<object, { lists: Map<number, import('./drivers.js').Driver[]>,
+     *     selected: { type: number, index: number } | null }>}
+     */
+    const driverLists = new WeakMap();
+
+    /**
+     * Whose driver list a call names, or its error: a device's, or with no
+     * device the set's -- which has a class list only.
+     *
+     * @param {number} handle @param {number} data @param {number | null} type  null for any.
+     * @returns {{ owner: object, set: import('./devices.js').DeviceSet,
+     *     device: import('./devices.js').Device | null } | { error: number }}
+     */
+    const driverOwner = (handle, data, type)=>{
+        const set = deviceSet(handle);
+        if (!set)
+        {
+            return { error: ERROR_INVALID_HANDLE };
+        }
+        if (type !== null && (type >>> 0) !== SPDIT_CLASSDRIVER
+            && (type >>> 0) !== SPDIT_COMPATDRIVER)
+        {
+            return { error: ERROR_INVALID_PARAMETER };
+        }
+        if ((data >>> 0) === 0)
+        {
+            return type !== null && (type >>> 0) === SPDIT_COMPATDRIVER
+                ? { error: ERROR_INVALID_PARAMETER } : { owner: set, set, device: null };
+        }
+        const device = deviceIn(set, data);
+        return device ? { owner: device, set, device } : { error: ERROR_INVALID_PARAMETER };
+    };
+
+    /** A MULTI_SZ registry value's strings, none for none. @param {any} key @param {string} name */
+    const multiSzOf = (key, name)=>{
+        const value = key && host.registry ? host.registry.getValue(key, name) : null;
+        return value ? decodeAnsi(value.data).split('\0').filter(Boolean) : [];
+    };
+
+    /** A file's last write time as a FILETIME, 0n for none. @param {string} path */
+    const fileDate = path=>{
+        try
+        {
+            const stat = host.files.stat(path);
+            return stat ? msToFileTime(stat.modified ?? 0) : 0n;
+        }
+        catch {
+            return 0n;
+        }
+    };
+
+    /**
+     * Builds a device's or a set's driver list of a type from the INFs its
+     * install parameters point at.
+     *
+     * @param {object} owner @param {import('./devices.js').DeviceSet} set
+     * @param {import('./devices.js').Device | null} device @param {number} type
+     */
+    const buildDrivers = async(owner, set, device, type)=>{
+        const params = installParams.get(owner);
+        const flags = params?.words[0] ?? 0;
+        const given = params?.driverPath ?? '';
+        const target = pathOf(given === '' ? `${windows}\\inf` : given);
+        /** @type {string[]} */
+        let paths = [];
+        if (target !== null && (flags & DI_ENUMSINGLEINF) !== 0)
+        {
+            paths = [target];
+        }
+        else if (target !== null)
+        {
+            paths = host.files.list(target, '*.inf').filter(entry=>!entry.isDirectory)
+                .map(entry=>joinPath(target, entry.name));
+        }
+        const key = device ? devices?.instanceKey(device.id) ?? null : null;
+        const ids = type !== SPDIT_COMPATDRIVER ? null
+            : { hardware: multiSzOf(key, 'HardwareID'),
+                compatible: multiSzOf(key, 'CompatibleIDs') };
+        const classGuid = device ? devices?.classOf(device.id) ?? GUID_NULL : set.classGuid;
+        /** @type {import('./drivers.js').Driver[]} */
+        const list = [];
+        for (const path of paths)
+        {
+            const loaded = await loadInf(path);
+            if ('error' in loaded || loaded.open.inf.style !== INF_STYLE_WIN4)
+            {
+                continue;
+            }
+            const { open } = loaded;
+            if (type === SPDIT_CLASSDRIVER && (open.inf.value('Version', 'ClassGUID') ?? '')
+                .toLowerCase() !== classGuid)
+            {
+                continue;
+            }
+            list.push(...driversOf(open.inf, path, ids, value=>expand(open, value),
+                msToFileTime));
+        }
+        let held = driverLists.get(owner);
+        if (!held)
+        {
+            held = { lists: new Map(), selected: null };
+            driverLists.set(owner, held);
+        }
+        held.lists.set(type, list);
+    };
+
+    /**
+     * The driver SP_DRVINFO_DATA names: its type, and its Reserved, the
+     * driver's place in that list plus one.
+     *
+     * @param {object} owner @param {number} info
+     */
+    const driverOf = (owner, info)=>{
+        if ((info >>> 0) === 0)
+        {
+            return null;
+        }
+        const type = readU32((info >>> 0) + 4);
+        return driverLists.get(owner)?.lists.get(type)?.[readU32((info >>> 0) + 8) - 1] ?? null;
+    };
+
+    /**
+     * SP_DRVINFO_DATA for a driver: the V2 structure, or the V1 one (with
+     * no date and version) when that is the size given.
+     *
+     * @param {number} out @param {number} type @param {number} index
+     * @param {import('./drivers.js').Driver} driver @param {boolean} wide
+     */
+    const answerDriver = (out, type, index, driver, wide)=>{
+        const unit = wide ? 2 : 1;
+        const v1 = 12 + LINE_LEN * 3 * unit;
+        const size = (out >>> 0) === 0 ? 0 : readU32(out);
+        if (size !== v1 && size !== v1 + 16)
+        {
+            return fail(ERROR_INVALID_USER_BUFFER);
+        }
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, size, true);
+        view.setUint32(4, type, true);
+        view.setUint32(8, index + 1, true);
+        [driver.description, driver.manufacturer, driver.provider].forEach((value, at)=>
+            bytes.set(encodeIn(value.slice(0, LINE_LEN - 1), wide), 12 + at * LINE_LEN * unit));
+        if (size > v1)
+        {
+            view.setBigUint64(v1, driver.date, true);
+            view.setBigUint64(v1 + 8, driver.version, true);
+        }
+        host.writeMemory(out >>> 0, bytes);
+        return fail(ERROR_SUCCESS, 1);
+    };
+
+    /**
+     * SP_DRVINFO_DETAIL_DATA's fixed part, up to its HardwareID list.
+     *
+     * @param {boolean} wide
+     */
+    const detailFixed = wide=>DETAIL.SECTION + (LINE_LEN * 2 + MAX_PATH) * (wide ? 2 : 1);
 
     /** An instance's Device Parameters key. @param {string} id */
     const parametersPath = id=>`${ENUM_KEY}\\${id}\\Device Parameters`;
@@ -5587,6 +5763,248 @@ export function createSetupapiFunctions(host){
                 return fail(ERROR_SUCCESS, 1);
             },
         })),
+
+        /**
+         * BOOL SetupDiBuildDriverInfoList(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DWORD DriverType)
+         *
+         * The drivers the INFs offer: the one the install parameters' driver
+         * path names with DI_ENUMSINGLEINF, else every INF in that directory,
+         * the INF directory when it names none. SPDIT_COMPATDRIVER keeps
+         * those matching the device's hardware and compatible IDs, ranked;
+         * SPDIT_CLASSDRIVER every driver of the device's -- or the set's --
+         * class.
+         */
+        SetupDiBuildDriverInfoList: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, data, type])=>{
+                const found = driverOwner(handle, data, type);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const thread = host.callerThread();
+                return buildDrivers(found.owner, found.set, found.device, type >>> 0).then(()=>{
+                    host.setLastErrorFor(thread, ERROR_SUCCESS);
+                    return 1;
+                });
+            },
+        },
+
+        /**
+         * BOOL SetupDiEnumDriverInfoA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     DWORD DriverType, DWORD MemberIndex, PSP_DRVINFO_DATA_A DriverInfoData),
+         *     and the W form -- a list not built has none
+         */
+        ...bothWidths('SetupDiEnumDriverInfo', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, type, index, out])=>{
+                const found = driverOwner(handle, data, type);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const list = driverLists.get(found.owner)?.lists.get(type >>> 0) ?? [];
+                if ((index >>> 0) >= list.length)
+                {
+                    return fail(ERROR_NO_MORE_ITEMS);
+                }
+                return answerDriver(out, type >>> 0, index >>> 0, list[index >>> 0], wide);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiGetDriverInfoDetailA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, PSP_DRVINFO_DATA_A DriverInfoData,
+         *     PSP_DRVINFO_DETAIL_DATA_A DriverInfoDetailData, DWORD DriverInfoDetailDataSize,
+         *     PDWORD RequiredSize), and the W form
+         *
+         * The driver's INF, its date, its install section and description,
+         * then its hardware ID and its compatible IDs as one list, the
+         * compatible ones' offset and length in characters (0 for none).
+         * A structure smaller than its own fixed part is
+         * ERROR_INVALID_USER_BUFFER, nothing written; one too small for the
+         * list ERROR_INSUFFICIENT_BUFFER, the fixed part and an empty list
+         * written.
+         */
+        ...bothWidths('SetupDiGetDriverInfoDetail', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, info, detail, size, required])=>{
+                const found = driverOwner(handle, data, null);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const driver = driverOf(found.owner, info);
+                if (!driver)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const unit = wide ? 2 : 1;
+                const fixed = detailFixed(wide);
+                const ids = [driver.hardwareId, ...driver.compatibleIds];
+                const list = `${ids.map(id=>`${id}\0`).join('')}\0`;
+                const needed = fixed + list.length * unit;
+                // setupapi.h packs its structures to a byte on x86: the size
+                // is the fixed part and one character, unrounded.
+                const whole = fixed + unit;
+                if ((detail >>> 0) === 0)
+                {
+                    if ((size >>> 0) !== 0)
+                    {
+                        return fail(ERROR_INVALID_USER_BUFFER);
+                    }
+                    if ((required >>> 0) !== 0)
+                    {
+                        writeU32(required, needed);
+                    }
+                    return fail(ERROR_SUCCESS, 1);
+                }
+                if ((size >>> 0) < whole || readU32(detail) !== whole)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, needed);
+                }
+                const bytes = new Uint8Array(fixed + unit);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, whole, true);
+                const date = fileDate(driver.infPath);
+                view.setBigUint64(DETAIL.INF_DATE, date, true);
+                const compat = driver.compatibleIds.length === 0 ? 0
+                    : driver.hardwareId.length + 1;
+                const compatLength = driver.compatibleIds.length === 0 ? 0
+                    : driver.compatibleIds.reduce((sum, id)=>sum + id.length + 1, 1);
+                view.setUint32(DETAIL.COMPAT_OFFSET, compat, true);
+                view.setUint32(DETAIL.COMPAT_LENGTH, compatLength, true);
+                const field = (/** @type {string} */ value, /** @type {number} */ at,
+                    /** @type {number} */ chars)=>bytes.set(encodeIn(value.slice(0, chars - 1),
+                    wide), at);
+                field(driver.section, DETAIL.SECTION, LINE_LEN);
+                field(driver.infPath, DETAIL.SECTION + LINE_LEN * unit, MAX_PATH);
+                field(driver.description, DETAIL.SECTION + (LINE_LEN + MAX_PATH) * unit, LINE_LEN);
+                host.writeMemory(detail >>> 0, bytes);
+                if ((size >>> 0) < needed)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory((detail >>> 0) + fixed, encodeIn(list.slice(0, -1), wide));
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiSelectBestCompatDrv(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData)
+         *
+         * The compatible list's best driver selected: its lowest rank, then
+         * its newest, then its highest version.
+         */
+        SetupDiSelectBestCompatDrv: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, data])=>{
+                const found = driverOwner(handle, data, SPDIT_COMPATDRIVER);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const held = driverLists.get(found.owner);
+                const list = held?.lists.get(SPDIT_COMPATDRIVER) ?? [];
+                const best = bestDriver(list);
+                if (!held || best < 0)
+                {
+                    return fail(ERROR_NO_COMPAT_DRIVERS);
+                }
+                held.selected = { type: SPDIT_COMPATDRIVER, index: best };
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiGetSelectedDriverA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     PSP_DRVINFO_DATA_A DriverInfoData), and the W form
+         */
+        ...bothWidths('SetupDiGetSelectedDriver', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, out])=>{
+                const found = driverOwner(handle, data, null);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const held = driverLists.get(found.owner);
+                const selected = held?.selected ?? null;
+                const driver = selected ? held?.lists.get(selected.type)?.[selected.index] : null;
+                if (!selected || !driver)
+                {
+                    return fail(ERROR_NO_DRIVER_SELECTED);
+                }
+                return answerDriver(out, selected.type, selected.index, driver, wide);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiSetSelectedDriverA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     PSP_DRVINFO_DATA_A DriverInfoData), and the W form -- no driver
+         *     data selects none
+         */
+        ...bothWidths('SetupDiSetSelectedDriver', ()=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, info])=>{
+                const found = driverOwner(handle, data, null);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const held = driverLists.get(found.owner);
+                if ((info >>> 0) === 0)
+                {
+                    if (held)
+                    {
+                        held.selected = null;
+                    }
+                    return fail(ERROR_SUCCESS, 1);
+                }
+                const type = readU32((info >>> 0) + 4);
+                const index = readU32((info >>> 0) + 8) - 1;
+                if (!held || !held.lists.get(type)?.[index])
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                held.selected = { type, index };
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiDestroyDriverInfoList(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DWORD DriverType)
+         */
+        SetupDiDestroyDriverInfoList: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, data, type])=>{
+                const found = driverOwner(handle, data, type);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const held = driverLists.get(found.owner);
+                held?.lists.delete(type >>> 0);
+                if (held?.selected?.type === (type >>> 0))
+                {
+                    held.selected = null;
+                }
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
 
         /**
          * HKEY SetupDiCreateDevRegKeyA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,

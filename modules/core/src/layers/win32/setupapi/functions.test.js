@@ -2219,3 +2219,79 @@ test('install parameters are a device\'s or its set\'s, zero to begin with, size
         assert.equal(m.fns.SetupDiGetDeviceInstallParamsW.handler([set, 0, wide]), 1);
         assert.equal(m.u32(wide + 4), 0, 'the set\'s own');
     });
+
+test('a compatible driver list: the models matching the device\'s IDs, ranked, in detail',
+    async()=>{
+        // Wine's setupapi test_driver_list.
+        const ERROR_NO_MORE_ITEMS = 259;
+        const ERROR_NO_DRIVER_SELECTED = 0xe0000203;
+        const [SPDIT_COMPATDRIVER, DI_ENUMSINGLEINF] = [2, 0x10000];
+        const m = await machine();
+        m.file('C:\\src\\drivers.inf', ['[Version]', 'Signature="$Chicago$"',
+            'ClassGuid={6a55b5a4-3f65-11db-b704-0011955c2bdb}',
+            '[Manufacturer]', 'mfg1=mfg1_key,NTx86', 'mfg2=mfg2_key,NTx86',
+            'mfg1_wow=mfg1_key,NTamd64', 'mfg3=mfg3_key,NTarm',
+            '[mfg1_key.ntx86]', 'desc0=,other_hardware_id,bogus_compat_id',
+            'desc1=install1,bogus_hardware_id', 'desc3=,wrong_hardware_id',
+            'desc4=,wrong_hardware_id,bogus_compat_id',
+            '[mfg1_key.ntamd64]', 'desc9=,bogus_hardware_id',
+            '[mfg2_key.ntx86]', 'desc5=,bogus_hardware_id',
+            '[mfg3_key.ntarm]', 'desc6=,bogus_hardware_id', ''].join('\r\n'));
+        const set = m.fns.SetupDiCreateDeviceInfoList.handler([0, 0]);
+        const device = m.buffer(28);
+        m.view.setUint32(device, 28, true);
+        m.fns.SetupDiCreateDeviceInfoA.handler([set, m.str('Root\\BOGUS\\0000'), m.buffer(16), 0,
+            0, 0, device]);
+        const hardware = m.str('bogus_hardware_id\0other_hardware_id\0');
+        m.fns.SetupDiSetDeviceRegistryPropertyA.handler([set, device, 1, hardware, 37]);
+        m.fns.SetupDiSetDeviceRegistryPropertyA.handler([set, device, 2,
+            m.str('bogus_compat_id\0'), 17]);
+        const driver = m.buffer(796);
+        m.view.setUint32(driver, 796, true);
+        assert.equal(m.fns.SetupDiEnumDriverInfoA.handler([set, device, SPDIT_COMPATDRIVER, 0,
+            driver]), 0);
+        assert.equal(m.lastError(), ERROR_NO_MORE_ITEMS, 'no list built');
+        const params = m.buffer(296);
+        m.view.setUint32(params, 296, true);
+        m.view.setUint32(params + 4, DI_ENUMSINGLEINF, true);
+        [...'C:\\src\\drivers.inf\0'].forEach((c, index)=>m.view.setUint8(params + 36 + index,
+            c.charCodeAt(0)));
+        m.fns.SetupDiSetDeviceInstallParamsA.handler([set, device, params]);
+        assert.equal(await m.fns.SetupDiBuildDriverInfoList.handler([set, device,
+            SPDIT_COMPATDRIVER]), 1);
+        /** @type {string[][]} */
+        const found = [];
+        for (let index = 0; m.fns.SetupDiEnumDriverInfoA.handler([set, device,
+            SPDIT_COMPATDRIVER, index, driver]); index++)
+        {
+            found.push([m.readCString(driver + 12, 256), m.readCString(driver + 268, 256)]);
+        }
+        assert.deepEqual(found, [['desc0', 'mfg1'], ['desc1', 'mfg1'], ['desc4', 'mfg1'],
+            ['desc5', 'mfg2']], 'this platform\'s models, those with an ID of the device\'s');
+
+        m.fns.SetupDiEnumDriverInfoA.handler([set, device, SPDIT_COMPATDRIVER, 2, driver]);
+        const required = m.buffer(4);
+        assert.equal(m.fns.SetupDiGetDriverInfoDetailA.handler([set, device, driver, 0, 0,
+            required]), 1);
+        assert.equal(m.u32(required), 796 + 'wrong_hardware_id bogus_compat_id  '.length);
+        const detail = m.buffer(1000);
+        m.view.setUint32(detail, 797, true);
+        assert.equal(m.fns.SetupDiGetDriverInfoDetailA.handler([set, device, driver, detail, 796,
+            0]), 0);
+        assert.equal(m.lastError(), ERROR_INVALID_USER_BUFFER, 'smaller than the structure');
+        assert.equal(m.fns.SetupDiGetDriverInfoDetailA.handler([set, device, driver, detail, 1000,
+            0]), 1);
+        assert.equal(m.readCString(detail + 280, 260), 'C:\\src\\drivers.inf');
+        assert.equal(m.readCString(detail + 540, 256), 'desc4');
+        assert.deepEqual([m.u32(detail + 12), m.u32(detail + 16)], [18, 17],
+            'the compatible IDs after the hardware ID');
+
+        const selected = m.buffer(796);
+        m.view.setUint32(selected, 796, true);
+        assert.equal(m.fns.SetupDiGetSelectedDriverA.handler([set, device, selected]), 0);
+        assert.equal(m.lastError(), ERROR_NO_DRIVER_SELECTED);
+        assert.equal(m.fns.SetupDiSelectBestCompatDrv.handler([set, device]), 1);
+        assert.equal(m.fns.SetupDiGetSelectedDriverA.handler([set, device, selected]), 1);
+        assert.equal(m.readCString(selected + 12, 256), 'desc1',
+            'the device\'s first hardware ID on the driver\'s');
+    });
