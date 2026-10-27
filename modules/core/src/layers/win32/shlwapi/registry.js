@@ -24,6 +24,11 @@ const REG_SZ = 1;
 const REG_EXPAND_SZ = 2;
 const REG_BINARY = 3;
 const REG_DWORD = 4;
+const ERROR_MORE_DATA = 234;
+const ERROR_OUTOFMEMORY = 14;
+const ERROR_CALL_NOT_IMPLEMENTED = 120;
+/** How long an expanded value may grow, in characters: as far as a registry string goes. */
+const EXPAND_ROOM = 0x8000;
 
 /** The modes a stream may be opened in that write; reading is STGM_READ, 0. */
 const STGM_WRITE = 0x1;
@@ -257,7 +262,165 @@ export function createRegistryHelpers(host){
         },
     });
 
+    /**
+     * SHQueryValueEx for either spelling: RegQueryValueEx, but a REG_EXPAND_SZ
+     * value is answered expanded, as REG_SZ, and counted as the larger of
+     * what it is stored as and what it expands to (Wine's test_SHQueryValueEx).
+     *
+     * @param {'A' | 'W'} width @param {number[]} args
+     */
+    const queryValue = async(width, [key, value, , typeOut, data, sizeOut])=>{
+        const unit = width === 'W' ? 2 : 1;
+        const call = async(/** @type {string} */ name, /** @type {number[]} */ args)=>
+            /** @type {number} */ (await host.advapi32?.()[name].handler(args)) >>> 0;
+        if (!host.allocate || !host.readMemory)
+        {
+            return ERROR_CALL_NOT_IMPLEMENTED;
+        }
+        const read = /** @type {(address: number, length: number) => Uint8Array} */ (
+            host.readMemory);
+        const room = (sizeOut >>> 0) === 0 ? 0 : u32(read(sizeOut >>> 0, 4));
+        const scratch = host.allocate(8);
+        if (!scratch)
+        {
+            return ERROR_OUTOFMEMORY;
+        }
+        try
+        {
+            host.writeMemory(scratch, dword(0));
+            host.writeMemory(scratch + 4, dword(0));
+            let status = await call(`RegQueryValueEx${width}`, [key, value, 0, scratch, 0,
+                scratch + 4]);
+            const type = u32(read(scratch, 4));
+            const stored = u32(read(scratch + 4, 4));
+            if (status !== ERROR_SUCCESS || type !== REG_EXPAND_SZ)
+            {
+                return await call(`RegQueryValueEx${width}`, [key, value, 0, typeOut, data,
+                    sizeOut]);
+            }
+            const raw = host.allocate(stored + unit);
+            const expanded = host.allocate(EXPAND_ROOM * unit);
+            try
+            {
+                if (!raw || !expanded)
+                {
+                    return ERROR_OUTOFMEMORY;
+                }
+                host.writeMemory(raw + stored, new Uint8Array(unit));
+                status = await call(`RegQueryValueEx${width}`, [key, value, 0, scratch, raw,
+                    scratch + 4]);
+                const expand = host.library?.('KERNEL32.dll')?.[`ExpandEnvironmentStrings${width}`];
+                const length = status === ERROR_SUCCESS && expand
+                    ? /** @type {number} */ (await expand.handler([raw, expanded, EXPAND_ROOM]))
+                        >>> 0
+                    : 0;
+                if (length === 0)
+                {
+                    return status === ERROR_SUCCESS ? ERROR_CALL_NOT_IMPLEMENTED : status;
+                }
+                const needed = Math.max(stored, length * unit);
+                if ((typeOut >>> 0) !== 0)
+                {
+                    host.writeMemory(typeOut >>> 0, dword(REG_SZ));
+                }
+                if ((sizeOut >>> 0) !== 0)
+                {
+                    host.writeMemory(sizeOut >>> 0, dword(needed));
+                }
+                if ((data >>> 0) === 0)
+                {
+                    return ERROR_SUCCESS;
+                }
+                if (length * unit > room)
+                {
+                    // Room for what is stored but not for its expansion: what
+                    // was read is taken back, an empty string left.
+                    if (room >= stored)
+                    {
+                        host.writeMemory(data >>> 0, new Uint8Array(unit));
+                    }
+                    return ERROR_MORE_DATA;
+                }
+                host.writeMemory(data >>> 0, read(expanded, length * unit).slice());
+                return ERROR_SUCCESS;
+            }
+            finally
+            {
+                [raw, expanded].filter(Boolean).forEach(at=>host.free?.(at));
+            }
+        }
+        finally
+        {
+            host.free?.(scratch);
+        }
+    };
+
+    /**
+     * SHGetValue for either spelling: SHQueryValueEx on the subkey, opened
+     * for the call.
+     *
+     * @param {'A' | 'W'} width
+     */
+    const getValue = width=>({
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: async([key, subKey, value, typeOut, data, sizeOut])=>{
+            if (!host.allocate || !host.readMemory || !host.advapi32)
+            {
+                return ERROR_CALL_NOT_IMPLEMENTED;
+            }
+            const out = host.allocate(4);
+            if (!out)
+            {
+                return ERROR_OUTOFMEMORY;
+            }
+            try
+            {
+                const open = host.advapi32()[`RegOpenKeyEx${width}`];
+                const status = /** @type {number} */ (await open.handler([key, subKey, 0,
+                    KEY_READ, out])) >>> 0;
+                if (status !== ERROR_SUCCESS)
+                {
+                    return status;
+                }
+                const handle = u32(host.readMemory(out, 4));
+                try
+                {
+                    return await queryValue(width, [handle, value, 0, typeOut, data, sizeOut]);
+                }
+                finally
+                {
+                    await host.advapi32().RegCloseKey.handler([handle]);
+                }
+            }
+            finally
+            {
+                host.free?.(out);
+            }
+        },
+    });
+
     return {
+        /**
+         * DWORD SHQueryValueExA(HKEY hkey, LPCSTR pszValue, DWORD *pdwReserved,
+         *                       DWORD *pdwType, void *pvData, DWORD *pcbData)
+         */
+        SHQueryValueExA: {
+            argBytes: 24,
+            handler: (/** @type {number[]} */ args)=>queryValue('A', args),
+        },
+        SHQueryValueExW: {
+            argBytes: 24,
+            handler: (/** @type {number[]} */ args)=>queryValue('W', args),
+        },
+
+        /**
+         * DWORD SHGetValueA(HKEY hkey, LPCSTR pszSubKey, LPCSTR pszValue, DWORD *pdwType,
+         *                   void *pvData, DWORD *pcbData)
+         */
+        SHGetValueA: getValue('A'),
+        SHGetValueW: getValue('W'),
+
         /**
          * BOOL SHRegGetBoolUSValueA(LPCSTR pszSubKey, LPCSTR pszValue,
          *                           BOOL fIgnoreHKCU, BOOL fDefault)

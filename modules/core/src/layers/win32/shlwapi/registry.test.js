@@ -37,9 +37,18 @@ function registryMachine(){
             return 0;
         } },
     };
+    // %X% expands to a longer string, as an environment variable would.
+    const kernel32 = {
+        ExpandEnvironmentStringsA: { handler: (/** @type {number[]} */ [from, to])=>{
+            const text = m.base.readCString(from, 0x1000).replace('%X%', 'expanded');
+            m.memory.set(new TextEncoder().encode(`${text}\0`), to);
+            return text.length + 1;
+        } },
+    };
     m = shlwapiMachine({
         advapi32: ()=>registry,
-        library: name=>(name === 'ole32.dll' ? ole32 : undefined),
+        library: name=>(name === 'ole32.dll' ? ole32 : name === 'KERNEL32.dll' ? kernel32
+            : undefined),
     });
     registry = createRegistryFunctions({ ...m.base, hive: createRegistryService(createHive()) });
     /**
@@ -130,4 +139,38 @@ test('SHAutoComplete leaves the edit control as it is and says so once', ()=>{
     assert.equal(m.divergences.length, 1);
     assert.equal(m.fns.SHAutoComplete.handler([0, 0]) >>> 0, E_INVALIDARG, 'no window');
     assert.equal(m.fns.SHAutoComplete.argBytes, 8);
+});
+
+test('SHQueryValueEx and SHGetValue answer an expandable string expanded, as REG_SZ', async()=>{
+    // Wine's test_SHGetValue and test_SHQueryValueEx.
+    const REG_EXPAND_SZ = 2;
+    const { m, set } = registryMachine();
+    set(0x80000001, 'Software\\Wine\\Test', 'Test1', REG_EXPAND_SZ,
+        new TextEncoder().encode('a%X%b\0'));
+    set(0x80000001, 'Software\\Wine\\Test', 'Test2', REG_SZ, new TextEncoder().encode('plain\0'));
+    const get = m.fns.SHGetValueA.handler;
+    const key = m.put('Software\\Wine\\Test');
+    const type = m.count(0xffffffff);
+    const buffer = m.put('0123456789', false, 64);
+    let size = m.count(64);
+    assert.equal(await get([0x80000001, key, m.put('Test1'), type, buffer, size]), 0);
+    assert.equal(m.read(buffer), 'aexpandedb');
+    assert.equal(m.dwordAt(type), REG_SZ, 'expanded, it is a plain string');
+    assert.equal(m.dwordAt(size), 11, 'the larger of the two lengths');
+    assert.equal(await get([0x80000001, key, m.put('Test2'), type, buffer, m.count(64)]), 0);
+    assert.equal(m.read(buffer), 'plain');
+    m.memory.set(new TextEncoder().encode('0123456789\0'), buffer);
+    size = m.count(3);
+    assert.equal(await get([0x80000001, key, m.put('Test1'), type, buffer, size]), 234,
+        'ERROR_MORE_DATA');
+    assert.equal(m.read(buffer), '0123456789', 'no room for what is stored: untouched');
+    assert.equal(m.dwordAt(size), 11);
+    size = m.count(7);
+    assert.equal(await get([0x80000001, key, m.put('Test1'), type, buffer, size]), 234);
+    assert.equal(m.read(buffer), '', 'room for what is stored, not for its expansion: empty');
+    size = m.count(3);
+    assert.equal(await get([0x80000001, key, m.put('Test1'), type, 0, size]), 0);
+    assert.equal(m.dwordAt(size), 11, 'no buffer: the size it needs');
+    assert.equal(await get([0x80000001, m.put('Software\\None'), m.put('Test1'), type, buffer,
+        m.count(64)]), 2, 'no such key');
 });
