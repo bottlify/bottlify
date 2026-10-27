@@ -33,7 +33,7 @@ import { ValType } from '../wasm/encoder.js';
  * @property {readonly number[]} locals   the region function's locals past its parameters,
  *     as every region has them, before the vector scratch
  * @property {readonly number[]} upper    locals past the vector scratch every region has:
- *     long mode's registers that do not fit before the flag record
+ *     long mode's registers that do not fit before the flag record, and its scratch
  * @property {number} recordType  the flag record's result and operands
  */
 
@@ -76,12 +76,25 @@ export const WIDTH_64 = Object.freeze({
         ValType.i32, ValType.i32, // flags, origin
         ...LOCALS_32.slice(11),
     ]),
-    upper: Object.freeze(new Array(8).fill(ValType.i64)),
+    upper: Object.freeze([...new Array(8).fill(ValType.i64), ValType.i32]),
     recordType: ValType.i64,
 });
+
+/**
+ * Long mode's i32 scratch past its upper registers: a dword result `record`
+ * leaves on the stack while it keeps it zero-extended in the record.
+ */
+export const LONG_SCRATCH = 48;
 
 /**
  * @param {{ bits?: 32 | 64 }} layout
  * @returns {Width}
  */
 export const widthOf = layout=>(layout.bits === 64 ? WIDTH_64 : WIDTH_32);
+
+/**
+ * The local a guest register lives in, in the region being emitted.
+ *
+ * @param {{ width: Width }} e @param {number} r
+ */
+export const registerLocal = (e, r)=>e.width.regLocal[r];

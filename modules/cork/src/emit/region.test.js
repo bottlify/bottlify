@@ -1010,8 +1010,12 @@ test('a call made as a wasm call has its rare ways out hinted unlikely', ()=>{
     assert.ok(hinted(true) >= hinted(false) + 2, `${hinted(true)} hints, ${hinted(false)} without`);
 });
 
-test('a 64-bit state block without a flag record is refused rather than translated as 32-bit', ()=>{
+test('a 64-bit state block without a flag record or SIMD is refused, not run as 32-bit', ()=>{
     const host = { simd: true, tailCalls: true, defaultNaNNegative: false };
     const layout = ownLayout({ ramSize: 1 << 24, bits: 64 });
-    assert.throws(()=>prepareModule(new ModuleBuilder(), layout, host, {}), /needs a flag record/);
+    assert.throws(()=>prepareModule(new ModuleBuilder(), { ...layout, flagRecord: -1 }, host, {}),
+        /needs a flag record/);
+    assert.throws(()=>prepareModule(new ModuleBuilder(), layout, { ...host, simd: false }, {}),
+        /needs a flag record and SIMD/);
+    prepareModule(new ModuleBuilder(), layout, host, {});
 });

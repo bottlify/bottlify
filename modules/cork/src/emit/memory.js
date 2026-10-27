@@ -18,12 +18,13 @@
  * or per window of accesses (see the groups below).
  */
 
+import { registerLocal } from './width.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { DF } from '../decode/table.js';
 import { isX87Opcode } from '../decode/decoder.js';
 import { Tables, codeRangesAt, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
-import { I32 } from './flags.js';
+import { I32, I64 } from './flags.js';
 import { Exit, Local } from './region.js';
 import { atTables } from './bases.js';
 
@@ -1468,7 +1469,7 @@ export function emitGroupChecks(e, checks, at = -1){
         // value moved by what the block did to them since.
         if (group.base >= 0)
         {
-            b.localGet(Local.reg + group.base);
+            b.localGet(registerLocal(e, group.base));
         }
         else
         {
@@ -1476,7 +1477,7 @@ export function emitGroupChecks(e, checks, at = -1){
         }
         if (group.index >= 0)
         {
-            b.localGet(Local.reg + group.index).i32const(group.scale).op(I32.mul).op(I32.add);
+            b.localGet(registerLocal(e, group.index)).i32const(group.scale).op(I32.mul).op(I32.add);
         }
         b.i32const((group.lo - group.db - group.di * group.scale) | 0).op(I32.add)
             .localSet(Local.addr);
@@ -1685,7 +1686,7 @@ export function emitStreamWindow(e, streams, turns, forward = false){
         const width = stream.hi - stream.lo + Math.abs(span);
         if (stream.base >= 0)
         {
-            b.localGet(Local.reg + stream.base);
+            b.localGet(registerLocal(e, stream.base));
         }
         else
         {
@@ -1693,7 +1694,8 @@ export function emitStreamWindow(e, streams, turns, forward = false){
         }
         if (stream.index >= 0)
         {
-            b.localGet(Local.reg + stream.index).i32const(stream.scale).op(I32.mul).op(I32.add);
+            b.localGet(registerLocal(e, stream.index)).i32const(stream.scale).op(I32.mul)
+                .op(I32.add);
         }
         b.i32const(from | 0).op(I32.add).localSet(Local.addr);
         const bits = PageFlag.INACCESSIBLE | (stream.store ? PageFlag.HAS_CODE : 0);
@@ -1765,13 +1767,39 @@ function planned(e, size, store){
  * @param {E} e @param {number} size
  */
 export function stackAccess(e, size){
-    e.b.localGet(Local.reg + 4).localSet(Local.addr);
+    if (e.width.bits === 64)
+    {
+        windowAddress(e, ()=>e.b.localGet(registerLocal(e, 4)), size);
+    }
+    else
+    {
+        e.b.localGet(registerLocal(e, 4)).localSet(Local.addr);
+    }
     if (e.context.looseStacks === true)
     {
         planned(e, size, false);
         return;
     }
     checkAccess(e, size);
+}
+
+/**
+ * Long mode's address of a `size`-byte access, the i64 `pushAddress` pushes,
+ * into `addr` as the window's 32 bits -- the access faulting (#GP) where any of
+ * its bytes lies past the 4 GiB window, as the processor faults on an address
+ * no page maps there.
+ *
+ * @param {E} e @param {() => void} pushAddress @param {number} size
+ */
+export function windowAddress(e, pushAddress, size){
+    const { b } = e;
+    pushAddress();
+    b.localTee(Local.t64).localGet(Local.t64).i64const(BigInt(size - 1)).op(I64.add).op(I64.or)
+        .i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
+    e.openGuard('window', EMPTY);
+    e.exitBefore(e.current.eip, Exit.FAULT, 13);
+    e.close();
+    b.localGet(Local.t64).op(I64.wrap).localSet(Local.addr);
 }
 
 /**

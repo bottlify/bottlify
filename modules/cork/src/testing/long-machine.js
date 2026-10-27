@@ -59,13 +59,15 @@ export function fill(seed, size){
  * @param {number} [trapPort]
  * @param {boolean} [tiered]  what no region holds runs on the interpreter tier in wasm
  *     (`createWasmInterpreter`), `interp64.js` taking what it hands back
+ * @param {((memory: WebAssembly.Memory, layout: any) => any) | null} [makeRunner]  a
+ *     runner of another translator in the long runner's place (`shared-runner64.js`)
  *
  * Its regions are gathered into one module every three (`packRegions`), so every case
  * runs packed regions beside fresh ones.
  */
 export function machine(transfers = true, checkReads = undefined, looseStacks = undefined,
     defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0,
-    /** @type {number | undefined} */ trapPort = undefined, tiered = false)
+    /** @type {number | undefined} */ trapPort = undefined, tiered = false, makeRunner = null)
 {
     const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
@@ -82,7 +84,8 @@ export function machine(transfers = true, checkReads = undefined, looseStacks = 
         area: layout.tables + tablesSize(layout),
         statics: layout.regs + WASM_INTERPRETER_STATICS_AT, hotThreshold: 1, trapPort,
         parkBase: 0 }) : null;
-    const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads,
+    const runner = makeRunner !== null ? makeRunner(memory, layout) : createLongRunner({
+        memory, layout, pages, hot: 1, transfers, checkReads,
         looseStacks, leafCalls, volatileWindowMs, callTargets: true, packRegions: 3, tier,
         ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }),
         ...(trapPort === undefined ? {} : { trapPort }) });
@@ -359,12 +362,15 @@ export function run(m, translated, budget = 7){
  * @param {boolean} [defaultNaNNegative]  its float code as for that host (`machine`)
  * @param {boolean} [leafCalls]  its small callees formed into their callers (`machine`)
  * @param {number} [volatileWindowMs]  its runner's (`machine`)
+ * @param {boolean} [tiered]  its runner's (`machine`)
+ * @param {((memory: WebAssembly.Memory, layout: any) => any) | null} [makeRunner]  (`machine`)
  */
 export function compare(cases, budget = 7, transfers = true, checkReads = undefined,
-    defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0, tiered = false)
+    defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0, tiered = false,
+    makeRunner = null)
 {
     const translatedMachine = machine(transfers, checkReads, undefined, defaultNaNNegative,
-        leafCalls, volatileWindowMs, undefined, tiered);
+        leafCalls, volatileWindowMs, undefined, tiered, makeRunner);
     const interpretedMachine = machine();
     /** @type {string[]} */
     const failures = [];

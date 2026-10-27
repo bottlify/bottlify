@@ -23,6 +23,7 @@
  * register held), which the region's exit writes out when one ran.
  */
 
+import { registerLocal } from './width.js';
 import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
@@ -383,7 +384,7 @@ function emitForm(e, instruction, flagsLive){
                 return false;
             }
             const whole = op === 'maskmovdqu';
-            b.localGet(Local.reg + 7).localSet(Local.addr);
+            b.localGet(registerLocal(e, 7)).localSet(Local.addr);
             checkAccess(e, whole ? 16 : 8);
             noteStore(e, whole ? 16 : 8);
             b.localGet(Local.addr);

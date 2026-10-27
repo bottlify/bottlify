@@ -29,6 +29,7 @@
  * atomic too (`readOp` in `integer.js`).
  */
 
+import { registerLocal } from './width.js';
 import { CF, ZF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind } from './flags.js';
@@ -357,7 +358,7 @@ export function emitLocked(e, instruction, flagsLive){
         case 'cmpxchg':
         {
             addressOf(e, dst, size);
-            b.localGet(Local.reg);
+            b.localGet(registerLocal(e, 0));
             mask(e, size);
             b.localSet(Local.op1);
             readOp(e, src);
@@ -385,8 +386,8 @@ export function emitLocked(e, instruction, flagsLive){
         {
             addressOf(e, dst, 8);
             // edx:eax, the value expected, and ecx:ebx, the one stored.
-            b.localGet(Local.reg + 2).op(I64.extendU).i64const(32n).op(I64.shl);
-            b.localGet(Local.reg).op(I64.extendU).op(I64.or).localSet(Local.t64b);
+            b.localGet(registerLocal(e, 2)).op(I64.extendU).i64const(32n).op(I64.shl);
+            b.localGet(registerLocal(e, 0)).op(I64.extendU).op(I64.or).localSet(Local.t64b);
             b.localGet(Local.addr).i32const(7).op(I32.and);
             e.openGuard('splitLock', EMPTY);
             // Across two qwords: a plain read and, if it matched, a plain write.
@@ -394,14 +395,14 @@ export function emitLocked(e, instruction, flagsLive){
             b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
             e.openIf('plainEqual', EMPTY);
             b.localGet(Local.addr);
-            b.localGet(Local.reg + 1).op(I64.extendU).i64const(32n).op(I64.shl);
-            b.localGet(Local.reg + 3).op(I64.extendU).op(I64.or);
+            b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
+            b.localGet(registerLocal(e, 3)).op(I64.extendU).op(I64.or);
             b.store('i64', { offset });
             e.close();
             b.op(ELSE);
             b.localGet(Local.addr).localGet(Local.t64b);
-            b.localGet(Local.reg + 1).op(I64.extendU).i64const(32n).op(I64.shl);
-            b.localGet(Local.reg + 3).op(I64.extendU).op(I64.or);
+            b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
+            b.localGet(registerLocal(e, 3)).op(I64.extendU).op(I64.or);
             b.atomic('cmpxchg_i64', { offset }).localSet(Local.t64);
             e.close();
             if (flagsLive)
@@ -415,8 +416,9 @@ export function emitLocked(e, instruction, flagsLive){
                 b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
             }
             b.op(ELSE);
-            b.localGet(Local.t64).op(I64.wrap).localSet(Local.reg);
-            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).localSet(Local.reg + 2);
+            b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
+            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap)
+                .localSet(registerLocal(e, 2));
             e.close();
             return true;
         }

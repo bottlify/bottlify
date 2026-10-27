@@ -57,7 +57,7 @@ import {
     planLoop, planRegion, readsWrapped,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
-import { WIDTH_32, widthOf } from './width.js';
+import { LONG_SCRATCH, WIDTH_32, widthOf } from './width.js';
 import { atState, atTables, importBases, intoState, intoTables } from './bases.js';
 import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt,
     pageFlagsAt, transferTargetAt }
@@ -67,6 +67,10 @@ import { ANY_TOP } from '../runtime/entries.js';
 
 /** `i64.add`, the one 64-bit operation a profiling run's counts take. */
 const I64_ADD = 0x7c;
+const I64_EXTEND_U = 0xad;
+const I64_LT_U = 0x54;
+const I64_EQ = 0x51;
+const I64_NE = 0x52;
 import { callsOut, inlineReturns } from '../region.js';
 import {
     analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
@@ -467,7 +471,9 @@ export function prepareModule(m, layout, features, memory = {},
         context.undo = addUndoHelper(m, layout);
     }
     // A production bundle emits no diagnostic count, whatever it is asked.
-    if (callReturn && hashed && !undoLog && (layout.flagRecord ?? -1) >= 0)
+    // Long mode's calls and returns are a push and a jump through the exits
+    // until its call stack is (`callAndReturn`).
+    if (callReturn && hashed && !undoLog && (layout.flagRecord ?? -1) >= 0 && width.bits === 32)
     {
         context.callReturn = true;
         context.callDepth = Math.max(1, Math.min(CallStack.LIMIT, Math.trunc(callDepth)));
@@ -506,7 +512,7 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.checkReads = true;
     }
-    if (atomic)
+    if (atomic && width.bits === 32)
     {
         context.atomic = true;
         if (ordered)
@@ -690,11 +696,7 @@ export function finishModule(context, functions){
         {
             atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
         }
-        atState(context, b).localGet(eip).store('i32', { offset: layout.eip });
-        if (layout.previousIp >= 0)
-        {
-            atState(context, b).localGet(eip).store('i32', { offset: layout.previousIp });
-        }
+        storeIp(context, b, ()=>b.localGet(eip));
         atState(context, b);
         atState(context, b).load('i32', { offset: layout.counter });
         atState(context, b).load('i32', { offset: origin }).op(I32.add)
@@ -785,6 +787,30 @@ export function finishModule(context, functions){
         locals: [ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32],
         body: b.toBytes(), hints: b.hints,
     };
+}
+
+/**
+ * EIP into the state block, and as the previous one where the layout keeps
+ * it: long mode's RIP a quadword, the window's address zero-extended.
+ *
+ * @param {ModuleContext} context @param {Body} b @param {() => void} pushEip
+ */
+function storeIp(context, b, pushEip){
+    const { layout } = context;
+    const long = context.width.bits === 64;
+    for (const offset of layout.previousIp >= 0 ? [layout.eip, layout.previousIp] : [layout.eip])
+    {
+        atState(context, b);
+        pushEip();
+        if (long)
+        {
+            b.op(I64_EXTEND_U).store('i64', { offset });
+        }
+        else
+        {
+            b.store('i32', { offset });
+        }
+    }
 }
 
 /**
@@ -1346,7 +1372,9 @@ export class RegionEmitter {
         // jump back carries windows only through the flat dispatch; a block
         // the x87 plan cuts runs nothing to take them for.
         const memoryPlan = planned !== null ? planned.memoryPlan
-            : this.layout.codePages < 0
+            // Long mode's accesses are tested one by one until the planner
+            // knows its sixteen registers and the window.
+            : this.layout.codePages < 0 && this.width.bits === 32
                 ? planRegion(blocks, { entry: this.region.entry, backward: flat,
                     heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
                     returns: this.returns, masked: readsWrapped(this.context) })
@@ -1615,11 +1643,7 @@ export class RegionEmitter {
         {
             atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
         }
-        atState(context, b).localGet(Local.eip).store('i32', { offset: layout.eip });
-        if (layout.previousIp >= 0)
-        {
-            atState(context, b).localGet(Local.eip).store('i32', { offset: layout.previousIp });
-        }
+        storeIp(context, b, ()=>b.localGet(Local.eip));
         atState(context, b);
         atState(context, b).load('i32', { offset: layout.counter });
         this.pushOrigin();
@@ -2078,21 +2102,34 @@ export class RegionEmitter {
             this.openIf('carry', EMPTY);
             b.localGet(Local.flags).i32const(~CF).op(I32.and);
             // SUB/SBB: op1 < op2, or equal with a borrow in (SBB).
+            // Long mode's record is i64, its operands zero-extended: the same compares.
+            const wide = this.width.bits === 64;
+            const ltU = wide ? I64_LT_U : I32.ltU;
+            const eq = wide ? I64_EQ : I32.eq;
             b.localGet(k).i32const(Kind.SUB).op(I32.sub).i32const(2).op(I32.ltU);
-            b.localGet(Local.op1).localGet(Local.op2).op(I32.ltU);
-            b.localGet(Local.op1).localGet(Local.op2).op(I32.eq).localGet(Local.cin).op(I32.and)
+            b.localGet(Local.op1).localGet(Local.op2).op(ltU);
+            b.localGet(Local.op1).localGet(Local.op2).op(eq).localGet(Local.cin).op(I32.and)
                 .localGet(k).i32const(Kind.SBB).op(I32.eq).op(I32.and);
             b.op(I32.or).op(I32.and);
             // ADD/ADC: the sum wrapped below op1, or equal with a carry in (ADC).
             b.localGet(k).i32const(Kind.ADD).op(I32.sub).i32const(2).op(I32.ltU);
-            b.localGet(Local.res).localGet(Local.op1).op(I32.ltU);
-            b.localGet(Local.res).localGet(Local.op1).op(I32.eq).localGet(Local.cin).op(I32.and)
+            b.localGet(Local.res).localGet(Local.op1).op(ltU);
+            b.localGet(Local.res).localGet(Local.op1).op(eq).localGet(Local.cin).op(I32.and)
                 .localGet(k).i32const(Kind.ADC).op(I32.eq).op(I32.and);
             b.op(I32.or).op(I32.and);
             b.op(I32.or);
             // NEG: op2 was not zero. LOGIC: none of the three, 0.
             b.localGet(k).i32const(Kind.NEG).op(I32.eq);
-            b.localGet(Local.op2).i32const(0).op(I32.ne).op(I32.and);
+            b.localGet(Local.op2);
+            if (wide)
+            {
+                b.i64const(0n).op(I64_NE);
+            }
+            else
+            {
+                b.i32const(0).op(I32.ne);
+            }
+            b.op(I32.and);
             b.op(I32.or);
             b.op(I32.or).localSet(Local.flags);
             this.close();
@@ -2243,7 +2280,17 @@ export class RegionEmitter {
      * @param {number} size
      */
     record(kind, size){
-        this.b.localTee(Local.res);
+        if (this.width.bits === 64 && size < 8)
+        {
+            // A narrower result goes on as the i32 it is, into the i64 record
+            // zero-extended.
+            this.b.localTee(LONG_SCRATCH).localGet(LONG_SCRATCH).op(I64_EXTEND_U)
+                .localSet(Local.res);
+        }
+        else
+        {
+            this.b.localTee(Local.res);
+        }
         this.b.i32const(kindOf(kind, size)).localSet(Local.kind);
         this.pending = { kind, width: widthCode(size) };
     }

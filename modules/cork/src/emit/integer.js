@@ -22,12 +22,15 @@
  * the other executor to run.
  */
 
+import { registerLocal } from './width.js';
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
-import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
+import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
-import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
+import {
+    checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess, windowAddress,
+} from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
@@ -36,12 +39,6 @@ import { ANY_TOP, slotOf } from '../runtime/entries.js';
 import { emitLocked, isLocked } from './locked.js';
 import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
-/** i64 opcodes. */
-const I64 = Object.freeze({
-    eqz: 0x50, eq: 0x51, ne: 0x52, ltS: 0x53, ltU: 0x54, gtS: 0x55, gtU: 0x56, add: 0x7c, sub: 0x7d,
-    mul: 0x7e, divS: 0x7f, divU: 0x80, remS: 0x81, remU: 0x82, and: 0x83, or: 0x84, xor: 0x85,
-    shl: 0x86, shrS: 0x87, shrU: 0x88, wrap: 0xa7, extendS: 0xac, extendU: 0xad,
-});
 const I32_EXTRA = Object.freeze({
     clz: 0x67, ctz: 0x68, mul: 0x6c, divS: 0x6d, divU: 0x6e, remS: 0x6f, remU: 0x70,
     rotl: 0x77, rotr: 0x78, extend8s: 0xc0, extend16s: 0xc1,
@@ -49,6 +46,63 @@ const I32_EXTRA = Object.freeze({
 
 /** Every arithmetic flag. */
 const ARITH_ALL = CF | PF | AF | ZF | SF | OF;
+
+/**
+ * Whether the region is long mode's: its registers i64 locals, its record's
+ * result and operands i64 (`width.js`).
+ *
+ * @param {E} e
+ */
+const isLong = e=>e.width.bits === 64;
+
+/** A quadword immediate's value. @param {Operand} operand */
+const quadOf = operand=>BigInt.asIntN(64, BigInt(operand.upper ?? 0) << 32n
+    | BigInt(/** @type {number} */ (operand.value) >>> 0));
+
+/** The opcodes of an operation of `size` bytes: a quadword's i64, the rest i32. @param {number} size */
+const opsOf = size=>(size === 8 ? I64 : I32);
+
+/**
+ * Sets a record operand from the value on the stack, of an operation of
+ * `size` bytes: in long mode's i64 record a narrower one zero-extended.
+ *
+ * @param {E} e @param {number} local @param {number} size
+ */
+function setOperand(e, local, size){
+    if (isLong(e) && size < 8)
+    {
+        e.b.op(I64.extendU);
+    }
+    e.b.localSet(local);
+}
+
+/**
+ * Pushes a record operand as an operation of `size` bytes reads it.
+ *
+ * @param {E} e @param {number} local @param {number} size
+ */
+function getOperand(e, local, size){
+    e.b.localGet(local);
+    if (isLong(e) && size < 8)
+    {
+        e.b.op(I64.wrap);
+    }
+}
+
+/**
+ * Moves the stack pointer by `delta` bytes.
+ *
+ * @param {E} e @param {number} delta
+ */
+function addStack(e, delta){
+    const esp = registerLocal(e, 4);
+    if (isLong(e))
+    {
+        e.b.localGet(esp).i64const(BigInt(delta)).op(I64.add).localSet(esp);
+        return;
+    }
+    e.b.localGet(esp).i32const(delta).op(I32.add).localSet(esp);
+}
 
 /** The selector values the flat segments carry, by segment index. */
 const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
@@ -58,6 +112,35 @@ const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
  * @typedef {import('../decode/decoder.js').Instruction} Instruction
  * @typedef {import('../decode/decoder.js').Operand} Operand
  */
+
+/** The long-mode instructions this emitter translates so far, by mnemonic. */
+const LONG_OPS = new Set([
+    'nop', 'mov', 'movzx', 'movsx', 'movsxd', 'lea', 'add', 'adc', 'sub', 'sbb', 'cmp', 'and',
+    'or', 'xor', 'test', 'inc', 'dec', 'neg', 'not', 'push', 'pop', 'jmp', 'call', 'ret', 'hlt',
+]);
+
+/**
+ * Whether the emitter translates a long-mode instruction: its operation one
+ * it has a quadword's case for, its operands general registers, immediates,
+ * memory addressed at 64 bits and direct targets. Forming ends a block before
+ * any other (`formRegion`'s `translates`), which the interpreter runs.
+ *
+ * @param {Instruction} instruction
+ */
+export function translatesLong(instruction){
+    const { op, operands, prefixes, cc } = instruction;
+    if (prefixes.lock || (op === 'jmp' || op === 'call') && operands[0].kind !== 'rel')
+    {
+        return false;
+    }
+    if (!LONG_OPS.has(op) && !(cc !== undefined && op.startsWith('j') && op !== 'jecxz'))
+    {
+        return false;
+    }
+    return operands.every(operand=>(operand.kind === 'reg' && operand.size > 0)
+        || operand.kind === 'imm' || operand.kind === 'rel'
+        || (operand.kind === 'mem' && operand.addressSize === 64));
+}
 
 /**
  * After the host's handler, which answered 2 (`TRAP_END_TURN`): the region
@@ -234,8 +317,8 @@ function callAndReturn(e, next, target, mechanism){
         e.openIf('empty');
         e.countMechanism(Mechanism.EMPTY_SITE);
         // The low six bits are the dwords popped plus one, the top two the jumps before the `ret`.
-        b.localGet(Local.reg + 4).localGet(Local.t1).i32const(63).op(I32.and).i32const(2)
-            .op(I32.shl).op(I32.add).localSet(Local.reg + 4);
+        b.localGet(registerLocal(e, 4)).localGet(Local.t1).i32const(63).op(I32.and).i32const(2)
+            .op(I32.shl).op(I32.add).localSet(registerLocal(e, 4));
         b.localGet(Local.budget).localGet(Local.t1).i32const(6).op(I32.shrU).i32const(1)
             .op(I32.add).op(I32.sub).localSet(Local.budget);
         b.else();
@@ -475,17 +558,17 @@ export function emitInstruction(e, instruction, flagsLive){
             // AL = [EBX + AL], through DS unless an fs: override says
             // otherwise (the address-size form is refused above, as every
             // 16-bit memory form is).
-            b.localGet(Local.reg + 3);
-            b.localGet(Local.reg).i32const(0xff).op(I32.and).op(I32.add);
+            b.localGet(registerLocal(e, 3));
+            b.localGet(registerLocal(e, 0)).i32const(0xff).op(I32.and).op(I32.add);
             if (instruction.operands[0].segment === 4)
             {
                 atState(e.context, b).load('i32', { offset: e.layout.fsBase }).op(I32.add);
             }
             b.localSet(Local.addr);
             checkAccess(e, 1);
-            b.localGet(Local.reg).i32const(0xffffff00).op(I32.and);
+            b.localGet(registerLocal(e, 0)).i32const(0xffffff00).op(I32.and);
             b.localGet(Local.addr).load('i32_8u', { offset: e.layout.ramBase }).op(I32.or);
-            b.localSet(Local.reg);
+            b.localSet(registerLocal(e, 0));
             return true;
         }
         case 'cpuid':
@@ -502,11 +585,11 @@ export function emitInstruction(e, instruction, flagsLive){
             // layout it is -- and a leaf with no entry answers four zeros. The
             // leaf in eax and the subleaf in ecx are saved before the four
             // registers are cleared and the known ones set.
-            b.localGet(Local.reg).localSet(Local.t1);
-            b.localGet(Local.reg + 1).localSet(Local.t2);
+            b.localGet(registerLocal(e, 0)).localSet(Local.t1);
+            b.localGet(registerLocal(e, 1)).localSet(Local.t2);
             for (let index = 0; index < 4; index++)
             {
-                b.i32const(0).localSet(Local.reg + index);
+                b.i32const(0).localSet(registerLocal(e, index));
             }
             for (const [leaf, entry] of Object.entries(cpuidLeaves(topologyOf(e.layout))))
             {
@@ -522,10 +605,10 @@ export function emitInstruction(e, instruction, flagsLive){
                         b.localGet(Local.t2).i32const(Number(subleaf)).op(I32.eq).op(I32.and);
                     }
                     e.openIf('cpuid', EMPTY);
-                    b.i32const(answer.eax).localSet(Local.reg);
-                    b.i32const(answer.ecx).localSet(Local.reg + 1);
-                    b.i32const(answer.edx).localSet(Local.reg + 2);
-                    b.i32const(answer.ebx).localSet(Local.reg + 3);
+                    b.i32const(answer.eax).localSet(registerLocal(e, 0));
+                    b.i32const(answer.ecx).localSet(registerLocal(e, 1));
+                    b.i32const(answer.edx).localSet(registerLocal(e, 2));
+                    b.i32const(answer.ebx).localSet(registerLocal(e, 3));
                     e.close();
                 }
             }
@@ -560,9 +643,9 @@ export function emitInstruction(e, instruction, flagsLive){
             // word to eax, the high word to edx.
             e.countMechanism(Mechanism.RDTSC);
             b.call(e.context.rdtsc).localSet(Local.t64);
-            b.localGet(Local.t64).op(I64.wrap).localSet(Local.reg);
+            b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
             b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap)
-                .localSet(Local.reg + 2);
+                .localSet(registerLocal(e, 2));
             return true;
         case 'mov':
             if (dst.kind === 'seg')
@@ -595,17 +678,45 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'movzx':
             prepare(e, src);
-            writeOp(e, dst, ()=>readOp(e, src), true);
+            writeOp(e, dst, ()=>{
+                readOp(e, src);
+                if (dst.size === 8)
+                {
+                    b.op(I64.extendU);
+                }
+            }, true);
             return true;
         case 'movsx':
             prepare(e, src);
             writeOp(e, dst, ()=>{
                 readOp(e, src);
                 b.op(src.size === 1 ? I32_EXTRA.extend8s : I32_EXTRA.extend16s);
+                if (dst.size === 8)
+                {
+                    b.op(I64.extendS);
+                }
             });
             return true;
+        case 'movsxd':
+            // A dword sign-extended into a quadword; into a dword (no REX.W) a move.
+            prepare(e, src);
+            writeOp(e, dst, ()=>{
+                readOp(e, src);
+                if (dst.size === 8)
+                {
+                    b.op(I64.extendS);
+                }
+            }, true);
+            return true;
         case 'lea':
-            writeOp(e, dst, ()=>emitAddress(e, src, false));
+            writeOp(e, dst, ()=>{
+                if (dst.size === 8)
+                {
+                    emitAddress64(e, { ...src, segment: 3 });
+                    return;
+                }
+                emitAddress(e, src, false);
+            });
             return true;
         case 'xchg':
             prepare(e, dst.kind === 'mem' ? dst : src);
@@ -635,9 +746,35 @@ export function emitInstruction(e, instruction, flagsLive){
             }
             prepare(e, dst);
             readOp(e, dst);
-            b.localSet(value);
+            if (value === Local.op1)
+            {
+                setOperand(e, value, size);
+            }
+            else if (size === 8)
+            {
+                b.localSet(Local.t64b);
+            }
+            else
+            {
+                b.localSet(value);
+            }
             writeOp(e, dst, ()=>{
-                b.localGet(value).i32const(1).op(op === 'inc' ? I32.add : I32.sub);
+                if (value === Local.op1)
+                {
+                    getOperand(e, value, size);
+                }
+                else
+                {
+                    b.localGet(size === 8 ? Local.t64b : value);
+                }
+                if (size === 8)
+                {
+                    b.i64const(1n).op(op === 'inc' ? I64.add : I64.sub);
+                }
+                else
+                {
+                    b.i32const(1).op(op === 'inc' ? I32.add : I32.sub);
+                }
                 mask(e, size);
                 if (flagsLive)
                 {
@@ -649,9 +786,18 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'neg':
             prepare(e, dst);
             readOp(e, dst);
-            b.localSet(Local.op2);
+            setOperand(e, Local.op2, size);
             writeOp(e, dst, ()=>{
-                b.i32const(0).localGet(Local.op2).op(I32.sub);
+                if (size === 8)
+                {
+                    b.i64const(0n).localGet(Local.op2).op(I64.sub);
+                }
+                else
+                {
+                    b.i32const(0);
+                    getOperand(e, Local.op2, size);
+                    b.op(I32.sub);
+                }
                 mask(e, size);
                 if (flagsLive)
                 {
@@ -663,7 +809,14 @@ export function emitInstruction(e, instruction, flagsLive){
             prepare(e, dst);
             writeOp(e, dst, ()=>{
                 readOp(e, dst);
-                b.i32const(-1).op(I32.xor);
+                if (size === 8)
+                {
+                    b.i64const(-1n).op(I64.xor);
+                }
+                else
+                {
+                    b.i32const(-1).op(I32.xor);
+                }
                 mask(e, size);
             });
             return true;
@@ -698,24 +851,26 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'cwde':
             if (size === 2)
             {
-                b.localGet(Local.reg).op(I32_EXTRA.extend8s).i32const(0xffff).op(I32.and);
+                b.localGet(registerLocal(e, 0)).op(I32_EXTRA.extend8s).i32const(0xffff).op(I32.and);
                 writeReg(e, 0, 2, false);
             }
             else
             {
-                b.localGet(Local.reg).op(I32_EXTRA.extend16s).localSet(Local.reg);
+                b.localGet(registerLocal(e, 0)).op(I32_EXTRA.extend16s)
+                    .localSet(registerLocal(e, 0));
             }
             return true;
         case 'cdq':
             if (size === 2)
             {
-                b.localGet(Local.reg).op(I32_EXTRA.extend16s).i32const(31).op(I32.shrS)
+                b.localGet(registerLocal(e, 0)).op(I32_EXTRA.extend16s).i32const(31).op(I32.shrS)
                     .i32const(0xffff).op(I32.and);
                 writeReg(e, 2, 2, false);
             }
             else
             {
-                b.localGet(Local.reg).i32const(31).op(I32.shrS).localSet(Local.reg + 2);
+                b.localGet(registerLocal(e, 0)).i32const(31).op(I32.shrS)
+                    .localSet(registerLocal(e, 2));
             }
             return true;
         case 'push':
@@ -736,7 +891,8 @@ export function emitInstruction(e, instruction, flagsLive){
             if (dst.kind === 'seg')
             {
                 // As `mov` to a segment register: the value goes nowhere.
-                b.localGet(Local.reg + 4).i32const(size).op(I32.add).localSet(Local.reg + 4);
+                b.localGet(registerLocal(e, 4)).i32const(size).op(I32.add)
+                    .localSet(registerLocal(e, 4));
                 return true;
             }
             // The value is read before the increment, and the write comes
@@ -745,31 +901,35 @@ export function emitInstruction(e, instruction, flagsLive){
             // displacement, so the destination is checked before esp moves
             // and a fault on it leaves the pop undone.
             stackAccess(e, dst.size);
-            b.localGet(Local.addr)
-                .load(dst.size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
-                .localSet(Local.t1);
-            if (dst.kind === 'mem')
             {
-                prepare(e, dst.base === 4 ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 }
-                    : dst, { store: true });
-                writeOp(e, dst, ()=>b.localGet(Local.t1));
-                b.localGet(Local.reg + 4).i32const(dst.size).op(I32.add).localSet(Local.reg + 4);
-                return true;
+                const popped = dst.size === 8 ? Local.t64b : Local.t1;
+                b.localGet(Local.addr).load(dst.size === 8 ? 'i64'
+                    : dst.size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
+                    .localSet(popped);
+                if (dst.kind === 'mem')
+                {
+                    prepare(e, dst.base === 4
+                        ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 } : dst,
+                    { store: true });
+                    writeOp(e, dst, ()=>b.localGet(popped));
+                    addStack(e, dst.size);
+                    return true;
+                }
+                addStack(e, dst.size);
+                writeOp(e, dst, ()=>b.localGet(popped));
             }
-            b.localGet(Local.reg + 4).i32const(dst.size).op(I32.add).localSet(Local.reg + 4);
-            writeOp(e, dst, ()=>b.localGet(Local.t1));
             return true;
         case 'pushad':
         {
             // The original esp is pushed in its slot; `push` scratches t2, so it
             // is kept in t1. With a 66 prefix the eight are words. The whole
             // span is checked first so a fault leaves nothing pushed.
-            b.localGet(Local.reg + 4).localSet(Local.t1);
-            b.localGet(Local.reg + 4).i32const(8 * size).op(I32.sub).localSet(Local.addr);
+            b.localGet(registerLocal(e, 4)).localSet(Local.t1);
+            b.localGet(registerLocal(e, 4)).i32const(8 * size).op(I32.sub).localSet(Local.addr);
             checkAccess(e, 8 * size);
             for (let r = 0; r < 8; r++)
             {
-                push(e, size, ()=>b.localGet(r === 4 ? Local.t1 : Local.reg + r));
+                push(e, size, ()=>b.localGet(r === 4 ? Local.t1 : registerLocal(e, r)));
             }
             return true;
         }
@@ -778,7 +938,7 @@ export function emitInstruction(e, instruction, flagsLive){
             stackAccess(e, 8 * size);
             for (let r = 7; r >= 0; r--)
             {
-                b.localGet(Local.reg + 4)
+                b.localGet(registerLocal(e, 4))
                     .load(size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase });
                 if (r === 4)
                 {
@@ -790,9 +950,10 @@ export function emitInstruction(e, instruction, flagsLive){
                 }
                 else
                 {
-                    b.localSet(Local.reg + r);
+                    b.localSet(registerLocal(e, r));
                 }
-                b.localGet(Local.reg + 4).i32const(size).op(I32.add).localSet(Local.reg + 4);
+                b.localGet(registerLocal(e, 4)).i32const(size).op(I32.add)
+                    .localSet(registerLocal(e, 4));
             }
             return true;
         case 'pushf':
@@ -813,7 +974,8 @@ export function emitInstruction(e, instruction, flagsLive){
             b.localGet(Local.flags).i32const(~writable).op(I32.and).op(I32.or)
                 .i32const(2).op(I32.or);
             b.localSet(Local.flags);
-            b.localGet(Local.reg + 4).i32const(size).op(I32.add).localSet(Local.reg + 4);
+            b.localGet(registerLocal(e, 4)).i32const(size).op(I32.add)
+                .localSet(registerLocal(e, 4));
             return true;
         }
         case 'lahf':
@@ -829,7 +991,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 return true;
             }
             e.eagerWrite(0xd5);
-            b.localGet(Local.reg).i32const(8).op(I32.shrU).i32const(0xd5).op(I32.and)
+            b.localGet(registerLocal(e, 0)).i32const(8).op(I32.shrU).i32const(0xd5).op(I32.and)
                 .localGet(Local.flags).op(I32.or).localSet(Local.flags);
             return true;
         case 'clc':
@@ -882,7 +1044,14 @@ export function emitInstruction(e, instruction, flagsLive){
                 readOp(e, dst);
                 b.localSet(Local.count);
             }
-            push(e, 4, ()=>b.i32const(next));
+            if (isLong(e))
+            {
+                push(e, 8, ()=>b.i64const(BigInt(next)));
+            }
+            else
+            {
+                push(e, 4, ()=>b.i32const(next));
+            }
             if (dst.kind === 'rel' && dst.target === next && !instruction.prefixes.operand)
             {
                 // `call $+5`: the push, and the block goes on (`exitOf`).
@@ -933,10 +1102,27 @@ export function emitInstruction(e, instruction, flagsLive){
             e.dead = true;
             return true;
         case 'ret':
-            stackAccess(e, 4);
-            b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase }).localSet(Local.eip);
-            b.localGet(Local.reg + 4).i32const(4 + (dst ? /** @type {number} */ (dst.value) : 0))
-                .op(I32.add).localSet(Local.reg + 4);
+            if (isLong(e))
+            {
+                // A return past the window faults where the interpreter takes it.
+                stackAccess(e, 8);
+                b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase })
+                    .localTee(Local.t64b).i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
+                e.openGuard('farReturn', EMPTY);
+                e.exitBefore(instruction.eip, Exit.FAULT, 13);
+                e.close();
+                b.localGet(Local.t64b).op(I64.wrap).localSet(Local.eip);
+                addStack(e, 8 + (dst ? /** @type {number} */ (dst.value) : 0));
+            }
+            else
+            {
+                stackAccess(e, 4);
+                b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase })
+                    .localSet(Local.eip);
+                b.localGet(registerLocal(e, 4))
+                    .i32const(4 + (dst ? /** @type {number} */ (dst.value) : 0))
+                    .op(I32.add).localSet(registerLocal(e, 4));
+            }
             // Back to a call of this region whose callee it formed in: a jump.
             // Charged once, here at the block's depth, for every way out below:
             // a charge inside the `if` left the block's count standing, and the
@@ -962,9 +1148,9 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'leave':
             // esp <- ebp, then bp or ebp popped: a word pop merges into ebp.
             // The pop's access is checked before esp moves.
-            b.localGet(Local.reg + 5).localSet(Local.addr);
+            b.localGet(registerLocal(e, 5)).localSet(Local.addr);
             checkAccess(e, size);
-            b.localGet(Local.addr).i32const(size).op(I32.add).localSet(Local.reg + 4);
+            b.localGet(Local.addr).i32const(size).op(I32.add).localSet(registerLocal(e, 4));
             b.localGet(Local.addr)
                 .load(size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase });
             writeReg(e, 5, size, false);
@@ -978,22 +1164,24 @@ export function emitInstruction(e, instruction, flagsLive){
             // With a 66 prefix: bp is pushed as a word and only bp is written.
             // (The instruction's own size is its imm16's; the prefix decides.)
             const width = instruction.prefixes.operand ? 2 : 4;
-            push(e, width, ()=>b.localGet(Local.reg + 5));
-            b.localGet(Local.reg + 4);
+            push(e, width, ()=>b.localGet(registerLocal(e, 5)));
+            b.localGet(registerLocal(e, 4));
             writeReg(e, 5, width, false);
-            b.localGet(Local.reg + 4).i32const(/** @type {number} */ (dst.value)).op(I32.sub)
-                .localSet(Local.reg + 4);
+            b.localGet(registerLocal(e, 4)).i32const(/** @type {number} */ (dst.value)).op(I32.sub)
+                .localSet(registerLocal(e, 4));
             return true;
         }
         case 'loop': case 'loope': case 'loopne':
             if (instruction.prefixes.address)
             {
-                b.localGet(Local.reg + 1).i32const(1).op(I32.sub).i32const(0xffff).op(I32.and);
+                b.localGet(registerLocal(e, 1)).i32const(1).op(I32.sub).i32const(0xffff)
+                    .op(I32.and);
                 writeReg(e, 1, 2, false);
             }
             else
             {
-                b.localGet(Local.reg + 1).i32const(1).op(I32.sub).localSet(Local.reg + 1);
+                b.localGet(registerLocal(e, 1)).i32const(1).op(I32.sub)
+                    .localSet(registerLocal(e, 1));
             }
             return true;
         case 'jecxz':
@@ -1032,17 +1220,17 @@ export function emitInstruction(e, instruction, flagsLive){
             e.close();
             return true;
         case 'bswap':
-            b.localGet(Local.reg + /** @type {number} */ (dst.reg));
+            b.localGet(registerLocal(e, /** @type {number} */ (dst.reg)));
             b.localSet(Local.t1);
             b.localGet(Local.t1).i32const(24).op(I32.shrU);
             b.localGet(Local.t1).i32const(8).op(I32.shrU).i32const(0xff00).op(I32.and).op(I32.or);
             b.localGet(Local.t1).i32const(8).op(I32.shl).i32const(0xff0000).op(I32.and).op(I32.or);
             b.localGet(Local.t1).i32const(24).op(I32.shl).op(I32.or);
-            b.localSet(Local.reg + /** @type {number} */ (dst.reg));
+            b.localSet(registerLocal(e, /** @type {number} */ (dst.reg)));
             return true;
         case 'cmpxchg':
             prepare(e, dst);
-            b.localGet(Local.reg);
+            b.localGet(registerLocal(e, 0));
             mask(e, size);
             b.localSet(Local.op1);
             readOp(e, dst);
@@ -1068,7 +1256,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 // the handler the port write would have reached, and the
                 // program resumes past the instruction -- or wherever the
                 // handler put EIP. Any other port is the other executor's.
-                b.localGet(Local.reg + 2).i32const(0xffff).op(I32.and)
+                b.localGet(registerLocal(e, 2)).i32const(0xffff).op(I32.and)
                     .i32const(e.context.trapPort).op(I32.ne);
                 e.openIf('port');
                 e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
@@ -1098,7 +1286,7 @@ export function emitInstruction(e, instruction, flagsLive){
                     x87Normalise(e);
                     e.storeState();
                     e.resetRun();
-                    b.localGet(Local.reg).call(e.context.trap).localSet(Local.t1);
+                    b.localGet(registerLocal(e, 0)).call(e.context.trap).localSet(Local.t1);
                     e.loadState();
                     x87Reloaded(e);
                     atState(e.context, b).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
@@ -1116,7 +1304,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 b.i32const(next).localSet(Local.eip);
                 e.storeState();
                 e.resetRun();
-                b.localGet(Local.reg).call(e.context.trap).localTee(Local.t1);
+                b.localGet(registerLocal(e, 0)).call(e.context.trap).localTee(Local.t1);
                 e.openGuard('moved');
                 e.loadState();
                 atState(e.context, b).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
@@ -1219,9 +1407,92 @@ export function emitInstruction(e, instruction, flagsLive){
 export function prepare(e, operand, options){
     if (operand.kind === 'mem')
     {
-        emitAddress(e, operand, true);
-        e.b.localSet(Local.addr);
+        if (isLong(e))
+        {
+            windowed(e, operand);
+        }
+        else
+        {
+            emitAddress(e, operand, true);
+            e.b.localSet(Local.addr);
+        }
         checkAccess(e, operand.size, options);
+    }
+}
+
+/**
+ * Long mode's address of a memory operand into `addr`: one no register moves
+ * (a RIP-relative one, an absolute one) decided here -- past the 4 GiB window
+ * the access faults, inside it the address is a constant -- and any other
+ * computed in i64 and tested against the window (`windowAddress`).
+ *
+ * @param {E} e @param {Operand} operand
+ */
+function windowed(e, operand){
+    const { b } = e;
+    const size = Math.max(operand.size, 1);
+    const moved = (operand.base ?? -1) >= 0 || (operand.index ?? -1) >= 0
+        || operand.segment === 4 || operand.segment === 5;
+    if (!moved)
+    {
+        const disp = operand.disp ?? 0;
+        if (disp < 0 || disp + size > 2 ** 32)
+        {
+            e.exitBefore(e.current.eip, Exit.FAULT, 13);
+        }
+        b.i32const(disp | 0).localSet(Local.addr);
+        return;
+    }
+    windowAddress(e, ()=>emitAddress64(e, operand), size);
+}
+
+/**
+ * Pushes long mode's full address of a memory operand, an i64: the
+ * registers', the displacement and the segment's base, wrapped to 32 bits
+ * under an address-size prefix (the base past it).
+ *
+ * @param {E} e @param {Operand} operand
+ */
+function emitAddress64(e, operand){
+    const { b } = e;
+    let pushed = false;
+    if ((operand.base ?? -1) >= 0)
+    {
+        b.localGet(registerLocal(e, /** @type {number} */ (operand.base)));
+        pushed = true;
+    }
+    if ((operand.index ?? -1) >= 0)
+    {
+        b.localGet(registerLocal(e, /** @type {number} */ (operand.index)));
+        const scale = operand.scale ?? 1;
+        if (scale > 1)
+        {
+            b.i64const(BigInt(Math.log2(scale))).op(I64.shl);
+        }
+        if (pushed)
+        {
+            b.op(I64.add);
+        }
+        pushed = true;
+    }
+    const disp = operand.disp ?? 0;
+    if (disp !== 0 || !pushed)
+    {
+        b.i64const(BigInt(disp));
+        if (pushed)
+        {
+            b.op(I64.add);
+        }
+    }
+    if (operand.addressSize === 32)
+    {
+        b.i64const(0xffffffffn).op(I64.and);
+    }
+    if (operand.segment === 4 || operand.segment === 5)
+    {
+        atState(e.context, b).load('i64',
+            { offset: operand.segment === 4 ? e.layout.fsBase : /** @type {number} */ (e.layout.gsBase) })
+            .op(I64.add);
     }
 }
 
@@ -1234,14 +1505,23 @@ export function prepare(e, operand, options){
 export function emitAddress(e, operand, withSegment){
     const { b } = e;
     let pushed = false;
+    const wrap = isLong(e);
     if ((operand.base ?? -1) >= 0)
     {
-        b.localGet(Local.reg + /** @type {number} */ (operand.base));
+        b.localGet(registerLocal(e, /** @type {number} */ (operand.base)));
+        if (wrap)
+        {
+            b.op(I64.wrap);
+        }
         pushed = true;
     }
     if ((operand.index ?? -1) >= 0)
     {
-        b.localGet(Local.reg + /** @type {number} */ (operand.index));
+        b.localGet(registerLocal(e, /** @type {number} */ (operand.index)));
+        if (wrap)
+        {
+            b.op(I64.wrap);
+        }
         const scale = operand.scale ?? 1;
         if (scale > 1)
         {
@@ -1267,10 +1547,16 @@ export function emitAddress(e, operand, withSegment){
         b.i32const(0xffff).op(I32.and);
     }
     // Only fs has a base, the thread block's; gs adds none, as in the
-    // interpreter: nothing here gives it one.
+    // interpreter: nothing here gives it one. Long mode's gs is the thread
+    // block's there.
     if (withSegment && operand.segment === 4)
     {
         atState(e.context, b).load('i32', { offset: e.layout.fsBase }).op(I32.add);
+    }
+    else if (withSegment && wrap && operand.segment === 5)
+    {
+        atState(e.context, b).load('i32', { offset: /** @type {number} */ (e.layout.gsBase) })
+            .op(I32.add);
     }
 }
 
@@ -1361,7 +1647,15 @@ export function readOp(e, operand){
         case 'reg':
         {
             const reg = /** @type {number} */ (operand.reg);
-            b.localGet(Local.reg + reg);
+            b.localGet(registerLocal(e, reg));
+            if (isLong(e))
+            {
+                if (operand.size === 8)
+                {
+                    return;
+                }
+                b.op(I64.wrap);
+            }
             if (operand.size === 1)
             {
                 if (operand.high)
@@ -1377,9 +1671,19 @@ export function readOp(e, operand){
             return;
         }
         case 'imm':
+            if (operand.size === 8)
+            {
+                b.i64const(quadOf(operand));
+                return;
+            }
             b.i32const(/** @type {number} */ (operand.value));
             return;
         case 'mem':
+            if (operand.size === 8)
+            {
+                b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase });
+                return;
+            }
             if (ordered(e, operand))
             {
                 orderedLoad(e, operand.size);
@@ -1410,6 +1714,13 @@ export function writeOp(e, operand, pushValue, exact = false){
             return;
         case 'mem':
             noteStore(e, operand.size);
+            if (operand.size === 8)
+            {
+                b.localGet(Local.addr);
+                pushValue();
+                b.store('i64', { offset: e.layout.ramBase });
+                return;
+            }
             if (ordered(e, operand))
             {
                 orderedStore(e, operand.size, pushValue);
@@ -1435,7 +1746,12 @@ export function writeOp(e, operand, pushValue, exact = false){
  */
 export function writeReg(e, reg, size, high, exact = false){
     const { b } = e;
-    const local = Local.reg + reg;
+    const local = registerLocal(e, reg);
+    if (isLong(e))
+    {
+        writeLongReg(e, local, size, high, exact);
+        return;
+    }
     if (size === 4)
     {
         b.localSet(local);
@@ -1457,6 +1773,41 @@ export function writeReg(e, reg, size, high, exact = false){
 }
 
 /**
+ * `writeReg` over long mode's i64 register: a quadword as it is, a dword
+ * zero-extended (the processor clears the high half), a word or a byte
+ * merged into the quadword.
+ *
+ * @param {E} e @param {number} local @param {number} size @param {boolean} high
+ * @param {boolean} exact
+ */
+function writeLongReg(e, local, size, high, exact){
+    const { b } = e;
+    if (size === 8)
+    {
+        b.localSet(local);
+        return;
+    }
+    if (size === 4)
+    {
+        b.op(I64.extendU).localSet(local);
+        return;
+    }
+    b.localSet(Local.t0);
+    b.localGet(local);
+    b.i64const(size === 2 ? ~0xffffn : high ? ~0xff00n : ~0xffn).op(I64.and);
+    b.localGet(Local.t0);
+    if (!exact)
+    {
+        b.i32const(size === 2 ? 0xffff : 0xff).op(I32.and);
+    }
+    if (size === 1 && high)
+    {
+        b.i32const(8).op(I32.shl);
+    }
+    b.op(I64.extendU).op(I64.or).localSet(local);
+}
+
+/**
  * Masks the value on the stack to `size` bytes (nothing for a dword).
  * @param {E} e @param {number} size
  */
@@ -1474,11 +1825,27 @@ export function mask(e, size){
  */
 export function push(e, size, pushValue){
     const { b } = e;
+    if (isLong(e))
+    {
+        const rsp = registerLocal(e, 4);
+        pushValue();
+        b.localSet(size === 8 ? Local.t64b : Local.t2);
+        windowAddress(e, ()=>b.localGet(rsp).i64const(BigInt(size)).op(I64.sub), size);
+        if (!looseStackStore(e, size))
+        {
+            checkAccess(e, size, { store: true });
+            noteStore(e, size);
+        }
+        b.localGet(Local.addr).localGet(size === 8 ? Local.t64b : Local.t2)
+            .store(size === 8 ? 'i64' : storeKind(size), { offset: e.layout.ramBase });
+        addStack(e, -size);
+        return;
+    }
     // The value first: `push esp` pushes the value before the decrement,
     // which itself waits for the access check so a fault leaves esp as it was.
     pushValue();
     b.localSet(Local.t2);
-    b.localGet(Local.reg + 4).i32const(size).op(I32.sub).localSet(Local.addr);
+    b.localGet(registerLocal(e, 4)).i32const(size).op(I32.sub).localSet(Local.addr);
     if (!looseStackStore(e, size))
     {
         checkAccess(e, size, { store: true });
@@ -1486,7 +1853,7 @@ export function push(e, size, pushValue){
     }
     b.localGet(Local.addr).localGet(Local.t2)
         .store(storeKind(size), { offset: e.layout.ramBase });
-    b.localGet(Local.addr).localSet(Local.reg + 4);
+    b.localGet(Local.addr).localSet(registerLocal(e, 4));
 }
 
 // --- arithmetic ---
@@ -1501,6 +1868,7 @@ function arithmetic(e, instruction, flagsLive){
     const { op, operands, size } = instruction;
     const [dst, src] = operands;
     const withCarry = op === 'adc' || op === 'sbb';
+    const ops = opsOf(size);
     if (withCarry)
     {
         e.pushFlag(CF);
@@ -1508,15 +1876,21 @@ function arithmetic(e, instruction, flagsLive){
     }
     prepare(e, dst.kind === 'mem' ? dst : src);
     readOp(e, dst);
-    b.localSet(Local.op1);
+    setOperand(e, Local.op1, size);
     readOp(e, src);
-    b.localSet(Local.op2);
+    setOperand(e, Local.op2, size);
     const compute = ()=>{
-        b.localGet(Local.op1).localGet(Local.op2);
-        b.op(op === 'add' || op === 'adc' || op === 'xadd' ? I32.add : I32.sub);
+        getOperand(e, Local.op1, size);
+        getOperand(e, Local.op2, size);
+        b.op(op === 'add' || op === 'adc' || op === 'xadd' ? ops.add : ops.sub);
         if (withCarry)
         {
-            b.localGet(Local.cin).op(op === 'adc' ? I32.add : I32.sub);
+            b.localGet(Local.cin);
+            if (size === 8)
+            {
+                b.op(I64.extendU);
+            }
+            b.op(op === 'adc' ? ops.add : ops.sub);
         }
         mask(e, size);
         if (flagsLive || op === 'cmp')
@@ -1534,7 +1908,7 @@ function arithmetic(e, instruction, flagsLive){
     }
     if (op === 'xadd')
     {
-        writeOp(e, src, ()=>b.localGet(Local.op1));
+        writeOp(e, src, ()=>getOperand(e, Local.op1, size));
     }
     writeOp(e, dst, compute);
 }
@@ -1552,7 +1926,8 @@ function logic(e, instruction, flagsLive){
     const compute = ()=>{
         readOp(e, dst);
         readOp(e, src);
-        b.op(op === 'and' || op === 'test' ? I32.and : op === 'or' ? I32.or : I32.xor);
+        const ops = opsOf(size);
+        b.op(op === 'and' || op === 'test' ? ops.and : op === 'or' ? ops.or : ops.xor);
         if (flagsLive || op === 'test')
         {
             e.record(Kind.LOGIC, size);
@@ -1981,7 +2356,7 @@ function imul(e, instruction, flagsLive){
             // Signed al * r/m8 -> ax, ax * r/m16 -> dx:ax; CF and OF say the
             // product does not fit its low half.
             prepare(e, operands[0]);
-            b.localGet(Local.reg);
+            b.localGet(registerLocal(e, 0));
             b.op(size === 1 ? I32_EXTRA.extend8s : I32_EXTRA.extend16s);
             readSigned(operands[0]);
             b.op(I32_EXTRA.mul).localSet(Local.t1);
@@ -2000,16 +2375,16 @@ function imul(e, instruction, flagsLive){
             return true;
         }
         prepare(e, operands[0]);
-        b.localGet(Local.reg).op(I64.extendS);
+        b.localGet(registerLocal(e, 0)).op(I64.extendS);
         readSigned(operands[0]);
         b.op(I64.extendS).op(I64.mul).localSet(Local.t64);
-        b.localGet(Local.t64).op(I64.wrap).localSet(Local.reg);
-        b.localGet(Local.t64).i64const(32n).op(I64.shrS).op(I64.wrap).localSet(Local.reg + 2);
+        b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
+        b.localGet(Local.t64).i64const(32n).op(I64.shrS).op(I64.wrap).localSet(registerLocal(e, 2));
         if (flagsLive)
         {
             e.eagerWrite(CF | OF);
             // Fits when the high half is the sign extension of the low half.
-            b.localGet(Local.t64).localGet(Local.reg).op(I64.extendS).op(I64.ne);
+            b.localGet(Local.t64).localGet(registerLocal(e, 0)).op(I64.extendS).op(I64.ne);
             b.localSet(Local.t1);
             b.localGet(Local.t1);
             e.orFlag(CF);
@@ -2055,7 +2430,7 @@ function mul(e, instruction, flagsLive){
     {
         // al * r/m8 -> ax; ax * r/m16 -> dx:ax. The product fits an i32.
         prepare(e, operands[0]);
-        b.localGet(Local.reg).i32const(MASKS[widthCode(size)]).op(I32.and);
+        b.localGet(registerLocal(e, 0)).i32const(MASKS[widthCode(size)]).op(I32.and);
         readOp(e, operands[0]);
         b.op(I32_EXTRA.mul).localSet(Local.t1);
         wideResult(e, size, ()=>b.localGet(Local.t1));
@@ -2072,15 +2447,15 @@ function mul(e, instruction, flagsLive){
         return true;
     }
     prepare(e, operands[0]);
-    b.localGet(Local.reg).op(I64.extendU);
+    b.localGet(registerLocal(e, 0)).op(I64.extendU);
     readOp(e, operands[0]);
     b.op(I64.extendU).op(I64.mul).localSet(Local.t64);
-    b.localGet(Local.t64).op(I64.wrap).localSet(Local.reg);
-    b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).localSet(Local.reg + 2);
+    b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
+    b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).localSet(registerLocal(e, 2));
     if (flagsLive)
     {
         e.eagerWrite(CF | OF);
-        b.localGet(Local.reg + 2).i32const(0).op(I32.ne).localSet(Local.t1);
+        b.localGet(registerLocal(e, 2)).i32const(0).op(I32.ne).localSet(Local.t1);
         b.localGet(Local.t1);
         e.orFlag(CF);
         b.localGet(Local.t1);
@@ -2110,8 +2485,8 @@ function divide(e, instruction){
     {
         return divideNarrow(e, instruction);
     }
-    b.localGet(Local.reg + 2).op(I64.extendU).i64const(32n).op(I64.shl)
-        .localGet(Local.reg).op(I64.extendU).op(I64.or).localSet(Local.t64);
+    b.localGet(registerLocal(e, 2)).op(I64.extendU).i64const(32n).op(I64.shl)
+        .localGet(registerLocal(e, 0)).op(I64.extendU).op(I64.or).localSet(Local.t64);
     if (op === 'div')
     {
         b.localGet(Local.t64).localGet(Local.t1).op(I64.extendU).op(I64.divU).localSet(Local.t64b);
@@ -2121,7 +2496,7 @@ function divide(e, instruction){
         e.exitBefore(instruction.eip, Exit.FAULT, 0);
         e.close();
         b.localGet(Local.t64).localGet(Local.t1).op(I64.extendU).op(I64.remU).op(I64.wrap)
-            .localSet(Local.reg + 2);
+            .localSet(registerLocal(e, 2));
     }
     else
     {
@@ -2138,9 +2513,9 @@ function divide(e, instruction){
         e.exitBefore(instruction.eip, Exit.FAULT, 0);
         e.close();
         b.localGet(Local.t64).localGet(Local.t1).op(I64.extendS).op(I64.remS).op(I64.wrap)
-            .localSet(Local.reg + 2);
+            .localSet(registerLocal(e, 2));
     }
-    b.localGet(Local.t64b).op(I64.wrap).localSet(Local.reg);
+    b.localGet(Local.t64b).op(I64.wrap).localSet(registerLocal(e, 0));
     return true;
 }
 
@@ -2161,7 +2536,7 @@ function divideNarrow(e, instruction){
     // The dividend.
     if (size === 1)
     {
-        b.localGet(Local.reg).i32const(0xffff).op(I32.and);
+        b.localGet(registerLocal(e, 0)).i32const(0xffff).op(I32.and);
         if (signed)
         {
             b.op(I32_EXTRA.extend16s);
@@ -2169,8 +2544,8 @@ function divideNarrow(e, instruction){
     }
     else
     {
-        b.localGet(Local.reg + 2).i32const(16).op(I32.shl)
-            .localGet(Local.reg).i32const(0xffff).op(I32.and).op(I32.or);
+        b.localGet(registerLocal(e, 2)).i32const(16).op(I32.shl)
+            .localGet(registerLocal(e, 0)).i32const(0xffff).op(I32.and).op(I32.or);
     }
     b.localSet(Local.t2);
     if (signed)
@@ -2312,20 +2687,21 @@ function cmpxchg8b(e, instruction, flagsLive){
     {
         e.eagerWrite(ZF);
     }
-    b.localGet(Local.t1).localGet(Local.reg).op(I32.eq);
-    b.localGet(Local.t2).localGet(Local.reg + 2).op(I32.eq);
+    b.localGet(Local.t1).localGet(registerLocal(e, 0)).op(I32.eq);
+    b.localGet(Local.t2).localGet(registerLocal(e, 2)).op(I32.eq);
     b.op(I32.and);
     e.openIf('equal', EMPTY);
     noteStore(e, 8);
-    b.localGet(Local.addr).localGet(Local.reg + 3).store('i32', { offset: e.layout.ramBase });
-    b.localGet(Local.addr).localGet(Local.reg + 1).store('i32', { offset: e.layout.ramBase + 4 });
+    b.localGet(Local.addr).localGet(registerLocal(e, 3)).store('i32', { offset: e.layout.ramBase });
+    b.localGet(Local.addr).localGet(registerLocal(e, 1))
+        .store('i32', { offset: e.layout.ramBase + 4 });
     if (flagsLive)
     {
         b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
     }
     b.op(0x05); // else
-    b.localGet(Local.t1).localSet(Local.reg);
-    b.localGet(Local.t2).localSet(Local.reg + 2);
+    b.localGet(Local.t1).localSet(registerLocal(e, 0));
+    b.localGet(Local.t2).localSet(registerLocal(e, 2));
     e.close();
     return true;
 }
@@ -2341,13 +2717,14 @@ function cmpxchg8b(e, instruction, flagsLive){
 function decimal(e, instruction){
     const { b } = e;
     const { op, operands } = instruction;
-    const al = ()=>b.localGet(Local.reg).i32const(0xff).op(I32.and);
-    const ah = ()=>b.localGet(Local.reg).i32const(8).op(I32.shrU).i32const(0xff).op(I32.and);
+    const al = ()=>b.localGet(registerLocal(e, 0)).i32const(0xff).op(I32.and);
+    const ah = ()=>b.localGet(registerLocal(e, 0)).i32const(8).op(I32.shrU).i32const(0xff)
+        .op(I32.and);
     /** Writes t1 into AL, or t1 into AX when wide. @param {boolean} wide */
     const setLow = wide=>{
-        b.localGet(Local.reg).i32const(wide ? ~0xffff : ~0xff).op(I32.and);
+        b.localGet(registerLocal(e, 0)).i32const(wide ? ~0xffff : ~0xff).op(I32.and);
         b.localGet(Local.t1).i32const(wide ? 0xffff : 0xff).op(I32.and).op(I32.or);
-        b.localSet(Local.reg);
+        b.localSet(registerLocal(e, 0));
     };
     if (op === 'aam' || op === 'aad')
     {
@@ -2434,7 +2811,7 @@ function decimal(e, instruction){
         // aaa / aas: on a low digit above 9 or AF, AX += 0x106 / AX -= 6 and
         // AH -= 1, with AF and CF set; AL keeps its low digit either way.
         const add = op === 'aaa';
-        b.localGet(Local.reg).i32const(0xffff).op(I32.and).localSet(Local.t1);
+        b.localGet(registerLocal(e, 0)).i32const(0xffff).op(I32.and).localSet(Local.t1);
         al();
         b.i32const(0xf).op(I32.and).i32const(9).op(I32.gtU);
         b.localGet(Local.op1).op(I32.or);
@@ -2502,7 +2879,7 @@ function bulkTurn(e, size){
     return {
         /** @param {number[]} pointers */
         run(pointers){
-            b.localGet(Local.reg + 1).localSet(Local.t0);
+            b.localGet(registerLocal(e, 1)).localSet(Local.t0);
             // The elements the budget pays for, the budget taken at a page's
             // worth at most so the shift cannot overflow.
             const page = 4096 >> BULK_UNIT_SHIFT;
@@ -2551,9 +2928,9 @@ function bulkString(e, instruction){
     const { op, size } = instruction;
     const elementShift = Math.log2(size);
     const ramBase = e.layout.ramBase;
-    const ecx = Local.reg + 1;
-    const esi = Local.reg + 6;
-    const edi = Local.reg + 7;
+    const ecx = registerLocal(e, 1);
+    const esi = registerLocal(e, 6);
+    const edi = registerLocal(e, 7);
     const movs = op === 'movs';
     const up = ()=>b.localGet(Local.t2).i32const(size).op(I32.eq);
     const turn = bulkTurn(e, size);
@@ -2598,13 +2975,13 @@ function bulkString(e, instruction){
         // A value of one byte repeated is a fill; any other is stored a word
         // at a time, still with no test between.
         const lanes = size === 1 ? 1 : size === 2 ? 0x0101 : 0x01010101;
-        b.localGet(Local.reg).i32const(0xff).op(I32.and).i32const(lanes).op(I32.mul)
-            .localGet(Local.reg);
+        b.localGet(registerLocal(e, 0)).i32const(0xff).op(I32.and).i32const(lanes).op(I32.mul)
+            .localGet(registerLocal(e, 0));
         mask(e, size);
         b.op(I32.eq);
         e.openIf('fill', EMPTY);
         lowest(edi);
-        b.localGet(Local.reg).localGet(Local.t1).op(0xfc, [0x0b, 0x00]); // memory.fill
+        b.localGet(registerLocal(e, 0)).localGet(Local.t1).op(0xfc, [0x0b, 0x00]); // memory.fill
         b.else();
         lowest(edi);
         b.localTee(Local.addr);
@@ -2612,7 +2989,7 @@ function bulkString(e, instruction){
         // until the loop is done, and the next check sets it afresh.
         b.localGet(Local.t1).op(I32.add).localSet(Local.pflags);
         e.openLoop('words');
-        b.localGet(Local.addr).localGet(Local.reg);
+        b.localGet(Local.addr).localGet(registerLocal(e, 0));
         b.store(storeKind(size), { offset: 0 });
         b.localGet(Local.addr).i32const(size).op(I32.add).localTee(Local.addr)
             .localGet(Local.pflags).op(I32.ne);
@@ -2660,9 +3037,9 @@ function bulkScan(e, instruction){
     const { op, size, prefixes } = instruction;
     const elementShift = Math.log2(size);
     const ramBase = e.layout.ramBase;
-    const ecx = Local.reg + 1;
-    const esi = Local.reg + 6;
-    const edi = Local.reg + 7;
+    const ecx = registerLocal(e, 1);
+    const esi = registerLocal(e, 6);
+    const edi = registerLocal(e, 7);
     const cmps = op === 'cmps';
     const turn = bulkTurn(e, size);
     b.localGet(Local.budget).i32const(0).op(I32.gtS);
@@ -2688,7 +3065,7 @@ function bulkScan(e, instruction){
     }
     else
     {
-        b.localGet(Local.reg);
+        b.localGet(registerLocal(e, 0));
         mask(e, size);
         b.localSet(Local.count);
     }
@@ -2749,9 +3126,9 @@ function stringInstruction(e, instruction){
     b.i32const(-size).i32const(size);
     b.localGet(Local.flags).i32const(DF).op(I32.and).i32const(0).op(I32.ne);
     b.op(0x1b).localSet(Local.t2);
-    const esi = Local.reg + 6;
-    const edi = Local.reg + 7;
-    const ecx = Local.reg + 1;
+    const esi = registerLocal(e, 6);
+    const edi = registerLocal(e, 7);
+    const ecx = registerLocal(e, 1);
     /** @param {number} local */
     const advance = local=>b.localGet(local).localGet(Local.t2).op(I32.add).localSet(local);
     const compare = op === 'cmps' || op === 'scas';
@@ -2821,7 +3198,7 @@ function stringInstruction(e, instruction){
             break;
         case 'stos':
             checkedStore(edi, ()=>{
-                b.localGet(Local.reg);
+                b.localGet(registerLocal(e, 0));
                 mask(e, size);
             });
             advance(edi);
@@ -2847,7 +3224,7 @@ function stringInstruction(e, instruction){
             advance(edi);
             break;
         default: // scas
-            b.localGet(Local.reg);
+            b.localGet(registerLocal(e, 0));
             mask(e, size);
             b.localSet(Local.op1);
             checkedLoad(edi);
@@ -2915,7 +3292,7 @@ function switchCases(e){
     {
         e.open(`case${k}`, EMPTY);
     }
-    b.localGet(Local.reg + table.index);
+    b.localGet(registerLocal(e, table.index));
     b.brTable(table.entries.map(target=>{
         const k = cases.indexOf(target);
         return k < 0 ? e.depthOf('switchOut') : e.depthOf(`case${k}`);
