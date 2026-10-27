@@ -155,7 +155,9 @@ export function oleProcess(options = {}){
             {
                 const [iidAt, outAt] = args;
                 const found = record.object.queryInterface(guidAt(iidAt));
-                put(outAt, found ? vtables.publish(found.object, found.id) : 0);
+                // As the bridge does: an interface that shares another's
+                // pointer is handed out as that one.
+                put(outAt, found ? vtables.publish(found.object, found.sharedWith ?? found.id) : 0);
                 return found ? S_OK : E_NOINTERFACE;
             }
             if (method.builtin === 'addRef')
@@ -369,7 +371,7 @@ export function oleProcess(options = {}){
     /** The definition `makeObject` is making. @type {any} */
     let making = null;
 
-    /** @type {import('./oleutil.js').OleEnv} */
+    /** @type {import('./ole2.js').Ole2Env} */
     const env = {
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),

@@ -972,6 +972,8 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         StgCreatePropSetStg: 12,
         StgCreatePropStg: 24,
         StgOpenPropStg: 20,
+        OleCreateDefaultHandler: 16,
+        OleCreateEmbeddingHelper: 24,
         OleMetafilePictFromIconAndLabel: 16,
         OleSetAutoConvert: 8,
         ProgIDFromCLSID: 8,

@@ -12,12 +12,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatGuid, parseGuid } from './guid.js';
 import { createOle2Functions, decodeCompObj, encodeCompObj } from './ole2.js';
+import { createOleUtil } from './oleutil.js';
+import { createDataCaches } from './datacache.js';
+import { createDefaultHandlers } from './defhandler.js';
 import {
     E_INVALIDARG, IID_IUNKNOWN, REGDB_E_CLASSNOTREG, S_FALSE, S_OK, oleProcess,
 } from './ole2.fixture.js';
 
 const E_NOINTERFACE = 0x80004002 | 0;
-const E_OUTOFMEMORY = 0x8007000e | 0;
 const REGDB_E_KEYMISSING = 0x80040152 | 0;
 const CO_E_NOTINITIALIZED = 0x800401f0 | 0;
 const OLEOBJ_E_NOVERBS = 0x80040180 | 0;
@@ -140,8 +142,15 @@ function dataObject(p, formats){
 /** @param {{ system?: boolean }} [options] */
 function setup(options){
     const p = oleProcess(options);
+    // The data cache and the default handler, as ole32 gives them to these.
+    const util = createOleUtil(p.env);
+    p.env.dataCaches = createDataCaches({ ole: p.env, util });
     const fns = /** @type {Record<string, { argBytes: number, handler: Function }>} */ (
         createOle2Functions(p.env));
+    p.env.defaultHandlers = createDefaultHandlers({ ole: p.env, util,
+        caches: p.env.dataCaches,
+        callExport: async(name, guids, args)=>(await fns[name].handler(
+            args(guids.map(guid=>p.guid(guid))))) | 0 });
     /** @param {string} name @param {number[]} args */
     const run = async(name, args)=>(await fns[name].handler(args)) | 0;
     return { p, fns, run };
@@ -366,9 +375,14 @@ test('OleLoad makes the storage\'s class and loads it, the site around the load'
 
     const other = p.docfile();
     assert.equal(p.storage.WriteClassStg.handler([other, p.guid(CLSID_NONE)]), S_OK);
-    assert.equal(await run('OleLoad', [other, p.guid(IID_IUNKNOWN), 0, out]),
-        REGDB_E_CLASSNOTREG);
-    assert.equal(p.u32(out), 0);
+    // A class with no server here is the default handler's to stand for
+    // (ole2.c test_OleLoad's presentations of an unregistered class).
+    assert.equal(await run('OleLoad', [other, p.guid(IID_IUNKNOWN), 0, out]), S_OK);
+    assert.notEqual(p.u32(out), 0);
+    const runnable = p.out();
+    assert.equal(await p.callMethod(p.u32(out), 0, [p.guid(IID_IRUNNABLEOBJECT), runnable]),
+        S_OK, 'a handler, not the object');
+    assert.equal(await p.callMethod(p.u32(runnable), 5, []), 0, 'which is not running');
     assert.equal(await run('OleLoad', [0, p.guid(IID_IUNKNOWN), 0, out]), E_INVALIDARG);
 });
 
@@ -669,9 +683,22 @@ test('what a data object can be made into is read from its formats', async()=>{
         E_INVALIDARG);
 });
 
-test('OleCreateStaticFromData checks as ole2.c does, and makes no picture object', async()=>{
+test('OleCreateStaticFromData checks as ole2.c does, and makes a static picture', async()=>{
     const { p, run } = setup();
-    const data = dataObject(p, [CF_DIB]);
+    // A data object whose GetData hands out a 1x1 DIB.
+    const data = composite(p, { [IID_IDATAOBJECT]: {
+        3: ['GetData', ([, medium])=>{
+            const dib = p.heap.allocate(44);
+            p.bytes.fill(0, dib, dib + 44);
+            [40, 1, 1].forEach((word, index)=>p.put(dib + index * 4, word));
+            p.bytes[dib + 12] = 1;
+            p.bytes[dib + 14] = 32;
+            p.put(medium, 1);
+            p.put(medium + 4, dib);
+            p.put(medium + 8, 0);
+            return S_OK;
+        }],
+    } });
     const storage = p.docfile();
     const out = p.out();
     const iid = p.guid(IID_IOLEOBJECT);
@@ -685,9 +712,28 @@ test('OleCreateStaticFromData checks as ole2.c does, and makes no picture object
     assert.equal(await run('OleCreateStaticFromData',
         [data.unknown, iid, 2, format, 0, storage, out]), DV_E_CLIPFORMAT);
     p.put(format, CF_DIB);
+    [1, -1, 1].forEach((word, index)=>p.put(format + 8 + index * 4, word));
     assert.equal(await run('OleCreateStaticFromData',
-        [data.unknown, iid, 2, format, 0, storage, out]), REGDB_E_CLASSNOTREG);
-    assert.equal(p.u32(out), 0);
+        [data.parts[IID_IDATAOBJECT].pointer, iid, 2, format, 0, storage, out]), S_OK);
+    assert.notEqual(p.u32(out), 0);
+    // ole2.c test_OleCreateStaticFromData: the storage is the static class's,
+    // with \1Ole, \1CompObj and the picture in CONTENTS behind its file header.
+    const clsid = p.out(0, 16);
+    assert.equal(p.storage.ReadClassStg.handler([storage, clsid]), S_OK);
+    assert.equal(p.guidAt(clsid), '{00000316-0000-0000-C000-000000000046}');
+    for (const name of ['\x01Ole', '\x01CompObj', 'CONTENTS'])
+    {
+        const stream = p.out();
+        assert.equal(await p.callMethod(storage, 4, [p.wide(name), 0, 0x10, 0, stream]), S_OK,
+            name);
+        if (name === 'CONTENTS')
+        {
+            const head = p.out(0, 2);
+            await p.callMethod(p.u32(stream), 3, [head, 2, 0]);
+            assert.equal(p.u16(head), 0x4d42, 'BM');
+        }
+        await p.callMethod(p.u32(stream), 2, []);
+    }
 });
 
 test('OleDuplicateData copies a global block and a metafile picture, not a GDI object',
@@ -721,7 +767,6 @@ test('the creation calls with no server here are refused as an unregistered clas
         OleCreateFromFile: [32, 7, REGDB_E_CLASSNOTREG],
         OleCreateLinkToFile: [28, 6, REGDB_E_CLASSNOTREG],
         OleCreateLink: [28, 6, REGDB_E_CLASSNOTREG],
-        CreateDataCache: [16, 3, E_OUTOFMEMORY],
     };
     for (const [name, [argBytes, outAt, answer]] of Object.entries(expected))
     {
@@ -737,9 +782,9 @@ test('the creation calls with no server here are refused as an unregistered clas
         CONVERT10_E_STG_NO_STD_STREAM);
     assert.equal(await run('OleConvertOLESTREAMToIStorage', [0x1000, 0x1000, 0]),
         CONVERT10_E_OLESTREAM_FMT);
-    assert.equal(p.reported.length, 7, 'each named once');
-    await run('CreateDataCache', [0, 0, 0, 0]);
-    assert.equal(p.reported.length, 7);
+    assert.equal(p.reported.length, 6, 'each named once');
+    await run('OleCreateFromFile', new Array(8).fill(0x1000));
+    assert.equal(p.reported.length, 6);
 });
 
 test('without user32, accelerators and registered formats are not reached, and that is said',

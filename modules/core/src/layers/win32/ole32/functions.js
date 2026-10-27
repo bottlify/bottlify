@@ -37,6 +37,9 @@ import { createUserMarshalFunctions } from './usrmarshal.js';
 import { createPropVariantFunctions } from './propvariant.js';
 import { createPropertySetFunctions } from './propset.js';
 import { registerComponentCategories } from './comcat.js';
+import { createDataCaches } from './datacache.js';
+import { createDefaultHandlers } from './defhandler.js';
+import { createOleUtil } from './oleutil.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createClassTable, createRemoting } from './remote.js';
 import { createProxyStubs } from './proxy-stubs.js';
@@ -2863,7 +2866,7 @@ export function createOleFunctions(host){
      * The OLE half: what the helpers, the advise holders and the clipboard
      * reach of the rest of COM, all as this layer's own exports answer.
      *
-     * @type {import('./oleutil.js').OleEnv}
+     * @type {import('./ole2.js').Ole2Env}
      */
     const oleEnv = {
         readMemory: host.readMemory,
@@ -2885,6 +2888,20 @@ export function createOleFunctions(host){
         divergence: host.divergence,
     };
     const clipboard = createClipboardFunctions(oleEnv);
+    // OLE's data cache and default handler, which the creation calls, OleLoad
+    // and an InprocHandler32 of ole32.dll hand out.
+    const oleUtil = createOleUtil(oleEnv);
+    const dataCaches = createDataCaches({ ole: oleEnv, util: oleUtil,
+        callFunction: host.call
+            ? (entry, args, thread)=>/** @type {NonNullable<OleHost['call']>} */ (host.call)(
+                entry, args, thread)
+            : undefined });
+    oleEnv.dataCaches = dataCaches;
+    oleEnv.defaultHandlers = createDefaultHandlers({ ole: oleEnv, util: oleUtil,
+        caches: dataCaches,
+        callExport: (name, guids, args)=>(guids.length > 0 ? callWithGuids(name, guids, args)
+            : Promise.resolve(/** @type {Record<string, any>} */ (functions)[name]
+                .handler(args([]))).then(hr=>hr | 0)) });
     registerComponentCategories({ ...oleEnv, registry: host.registry, hive: host.hive });
     // Property sets, which a storage of ours answers IPropertySetStorage for.
     const { storageMethods: propertySetMethods, ...propertySetFunctions } =

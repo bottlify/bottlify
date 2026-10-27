@@ -26,7 +26,12 @@ import { HKEY_CLASSES_ROOT, REG_SZ } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 import { publishEnumerator } from './enumerator.js';
-import { CF, DVASPECT_CONTENT, FORMATETC_SIZE, SLOT, createOleUtil } from './oleutil.js';
+import {
+    CF, DVASPECT_CONTENT, FORMATETC_SIZE, SLOT, STGMEDIUM_SIZE, createOleUtil,
+} from './oleutil.js';
+import {
+    CLSID_PICTURE_DIB, CLSID_PICTURE_ENHMETAFILE, CLSID_PICTURE_METAFILE,
+} from './datacache.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -73,6 +78,7 @@ const OLEOBJECT_SET_CLIENT_SITE = 3;
 const OLEOBJECT_GET_MISC_STATUS = 22;
 const PERSIST = Object.freeze({ GET_CLASS_ID: 3, INIT_NEW: 5, LOAD: 6, SAVE: 7 });
 const OLECACHE_CACHE = 3;
+const OLECACHE_SET_DATA = 7;
 const VIEWOBJECT_DRAW = 3;
 /** IOleInPlaceFrame::TranslateAccelerator, after IOleWindow's and IOleInPlaceUIWindow's. */
 const FRAME_TRANSLATE_ACCELERATOR = 14;
@@ -301,9 +307,19 @@ export function decodeCompObj(bytes){
 }
 
 /**
+ * OleEnv with the objects made after ole2's table: declared here, not in
+ * oleutil.js, which the cache and the handler import.
+ *
+ * @typedef {import('./oleutil.js').OleEnv & {
+ *     dataCaches?: ReturnType<typeof import('./datacache.js').createDataCaches>,
+ *     defaultHandlers?: ReturnType<typeof import('./defhandler.js').createDefaultHandlers>,
+ * }} Ole2Env
+ */
+
+/**
  * Builds the table: name -> { argBytes, handler }.
  *
- * @param {import('./oleutil.js').OleEnv} env
+ * @param {Ole2Env} env
  */
 export function createOle2Functions(env){
     const util = createOleUtil(env);
@@ -557,9 +573,9 @@ export function createOle2Functions(env){
      * @param {string} clsid @param {string} api
      * @returns {Promise<{ hr: number, unknown: number }>}
      */
-    const makeObject = async(clsid, api)=>(await withScratch(4, async block=>{
+    const makeObject = async(clsid, api, quiet = false)=>(await withScratch(4, async block=>{
         const hr = (await env.createInstance(clsid, 0, CLSCTX_INPROC, IID_IUNKNOWN, block)) | 0;
-        if (hr === REGDB_E_CLASSNOTREG)
+        if (hr === REGDB_E_CLASSNOTREG && !quiet)
         {
             util.sayOnce(api, `class ${clsid} has no server in this process`);
         }
@@ -608,7 +624,151 @@ export function createOle2Functions(env){
 
     /** The formats a static object can be made of. */
     /** @type {Set<number>} */
+    /** The static picture class of each format a static object is made of. */
+    /** @type {Set<number>} */
     const STATIC_FORMATS = new Set([CF.METAFILEPICT, CF.BITMAP, CF.DIB, CF.ENHMETAFILE]);
+    /** @type {Map<number, string>} */
+    const STATIC_CLASSES = new Map([[CF.DIB, CLSID_PICTURE_DIB], [CF.BITMAP, CLSID_PICTURE_DIB],
+        [CF.METAFILEPICT, CLSID_PICTURE_METAFILE], [CF.ENHMETAFILE, CLSID_PICTURE_ENHMETAFILE]]);
+
+    /**
+     * A static picture's CONTENTS: a DIB behind a file header, a metafile
+     * behind its placeable header, an enhanced metafile behind the size of
+     * its header and a copy of it (ole2.c get_stgdef).
+     *
+     * @param {number} cf @param {Uint8Array} bytes @param {{ x: number, y: number }} extent
+     */
+    const contentsOf = (cf, bytes, extent)=>{
+        if (cf === CF.DIB || cf === CF.BITMAP)
+        {
+            const view = new DataView(bytes.buffer, bytes.byteOffset);
+            const headerSize = bytes.length >= 40 ? view.getUint32(0, true) : 40;
+            const bits = bytes.length >= 40 ? view.getUint16(14, true) : 0;
+            const used = bytes.length >= 40 ? view.getUint32(32, true) : 0;
+            const colours = used || (bits <= 8 && bits > 0 ? 1 << bits : 0);
+            const header = new Uint8Array(14);
+            const head = new DataView(header.buffer);
+            head.setUint16(0, 0x4d42, true);
+            head.setUint32(2, 14 + bytes.length, true);
+            head.setUint32(10, 14 + headerSize + colours * 4, true);
+            return concatBytes(header, bytes);
+        }
+        if (cf === CF.ENHMETAFILE)
+        {
+            const headerSize = bytes.length >= 8 ? new DataView(bytes.buffer, bytes.byteOffset)
+                .getUint32(4, true) : 0;
+            const size = new Uint8Array(4);
+            new DataView(size.buffer).setUint32(0, headerSize, true);
+            return concatBytes(size, bytes.slice(0, headerSize), bytes);
+        }
+        // The placeable header: its key, no handle, the picture's box in
+        // 576ths of an inch from its HIMETRIC extent, the units, and the
+        // checksum of the words before it.
+        const placeable = new Uint8Array(22);
+        const view = new DataView(placeable.buffer);
+        view.setUint32(0, 0x9ac6cdd7, true);
+        view.setInt16(10, Math.round(extent.x * 576 / 2540), true);
+        view.setInt16(12, Math.round(extent.y * 576 / 2540), true);
+        view.setUint16(14, 576, true);
+        let sum = 0;
+        for (let at = 0; at < 20; at += 2)
+        {
+            sum ^= view.getUint16(at, true);
+        }
+        view.setUint16(20, sum, true);
+        return concatBytes(placeable, bytes);
+    };
+
+    /** @param {...Uint8Array} parts */
+    const concatBytes = (...parts)=>{
+        const whole = new Uint8Array(parts.reduce((sum, part)=>sum + part.length, 0));
+        let at = 0;
+        for (const part of parts)
+        {
+            whole.set(part, at);
+            at += part.length;
+        }
+        return whole;
+    };
+
+    /**
+     * OleCreateStaticFromData's work: the picture asked of the data object
+     * kept by a default handler of its static class, the storage made that
+     * class's with \1Ole, \1CompObj and CONTENTS.
+     *
+     * @param {number} data @param {number} cf @param {string} clsid @param {number} formatEtc
+     * @param {number} storage @param {number} riid @param {number} out
+     */
+    const makeStatic = async(data, cf, clsid, formatEtc, storage, riid, out)=>{
+        const thread = env.callerThread();
+        const handlers = /** @type {NonNullable<typeof env.defaultHandlers>} */ (env.defaultHandlers);
+        return await withScratch(STGMEDIUM_SIZE + 8 + 16, async block=>{
+            const medium = block;
+            env.writeMemory(medium, new Uint8Array(STGMEDIUM_SIZE));
+            const got = (await env.callMethod(data, SLOT.DATA_GET, [formatEtc, medium],
+                thread)) | 0;
+            if (got !== S_OK)
+            {
+                return got < 0 ? got : DV_E_FORMATETC;
+            }
+            const classAt = block + STGMEDIUM_SIZE + 8;
+            writeGuid(classAt, clsid);
+            await env.callMethod(storage, SLOT.STORAGE_SET_CLASS, [classAt], thread);
+            const slot = block + STGMEDIUM_SIZE;
+            let hr = await handlers.create(clsid, 0, 0, 0, IID_IUNKNOWN, slot, thread);
+            const unknown = hr < 0 ? 0 : readU32(slot);
+            if (unknown !== 0)
+            {
+                const persist = await env.queryPointer(unknown, IID_IPERSISTSTORAGE, thread);
+                hr = persist === 0 ? E_NOINTERFACE
+                    : (await env.callMethod(persist, PERSIST.INIT_NEW, [storage], thread)) | 0;
+                if (persist !== 0)
+                {
+                    await release(persist, thread);
+                }
+            }
+            if (hr >= 0)
+            {
+                hr = (await table.WriteFmtUserTypeStg.handler([storage, cf, 0])) | 0;
+            }
+            if (hr >= 0)
+            {
+                const cache = await env.queryPointer(unknown, IID_IOLECACHE, thread);
+                if (cache !== 0)
+                {
+                    await env.callMethod(cache, OLECACHE_SET_DATA, [formatEtc, medium, 0], thread);
+                    await release(cache, thread);
+                }
+                hr = await writeContents(cf, medium, storage, thread);
+            }
+            await env.releaseMedium(medium);
+            return unknown === 0 ? hr : handOut(unknown, riid, out, hr, thread);
+        }) ?? E_OUTOFMEMORY;
+    };
+
+    /**
+     * The CONTENTS stream of a static object, from the picture it was made of.
+     *
+     * @param {number} cf @param {number} medium @param {number} storage @param {unknown} thread
+     */
+    const writeContents = async(cf, medium, storage, thread)=>{
+        const caches = env.dataCaches;
+        const picture = caches ? await caches.pictureIn(cf, medium, thread) : null;
+        if (!picture)
+        {
+            return E_OUTOFMEMORY;
+        }
+        const opened = await util.openStream(storage, 'CONTENTS',
+            STGM_CREATE | STGM_SHARE_EXCLUSIVE | STGM_READWRITE, true, thread);
+        if (opened.hr < 0)
+        {
+            return opened.hr;
+        }
+        const hr = await util.writeStream(opened.stream, contentsOf(cf, picture.data,
+            picture.extent), thread);
+        await release(opened.stream, thread);
+        return hr < 0 ? hr : S_OK;
+    };
 
     /**
      * OleQueryCreateFromData's answer: S_OK for data an embedding comes
@@ -922,7 +1082,19 @@ export function createOle2Functions(env){
                 {
                     return stat.hr;
                 }
-                const made = await makeObject(formatGuid(stat.clsid), 'OleLoad');
+                const clsid = formatGuid(stat.clsid);
+                let made = await makeObject(clsid, 'OleLoad', true);
+                if (made.hr === REGDB_E_CLASSNOTREG && env.defaultHandlers)
+                {
+                    // No server in process: the default handler stands for
+                    // the object, drawn from the storage's presentations.
+                    made = await withScratch(4, async block=>{
+                        const hr = await /** @type {NonNullable<typeof env.defaultHandlers>} */ (
+                            env.defaultHandlers).create(clsid, 0, 0, 0, IID_IUNKNOWN, block,
+                            thread);
+                        return { hr, unknown: hr < 0 ? 0 : readU32(block) };
+                    }) ?? { hr: E_OUTOFMEMORY, unknown: 0 };
+                }
                 if (made.hr < 0)
                 {
                     return made.hr;
@@ -1545,28 +1717,30 @@ export function createOle2Functions(env){
         OleCreateStaticFromData: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([data, , renderopt, formatEtc, , storage, out])=>{
+            handler: async([data, riid, renderopt, formatEtc, , storage, out])=>{
                 if ((out >>> 0) !== 0)
                 {
                     writeU32(out, 0);
                 }
-                if ((out >>> 0) === 0 || (storage >>> 0) === 0 || (data >>> 0) === 0)
+                if ((out >>> 0) === 0 || (storage >>> 0) === 0 || (data >>> 0) === 0
+                    || (riid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if ((renderopt >>> 0) === OLERENDER.FORMAT)
+                if ((renderopt >>> 0) !== OLERENDER.FORMAT || (formatEtc >>> 0) === 0)
                 {
-                    if ((formatEtc >>> 0) === 0)
-                    {
-                        return E_INVALIDARG;
-                    }
-                    if (!STATIC_FORMATS.has(util.readU16(formatEtc >>> 0)))
-                    {
-                        return DV_E_CLIPFORMAT;
-                    }
+                    util.sayOnce('OleCreateStaticFromData',
+                        'only a picture of the format named is made');
+                    return (formatEtc >>> 0) === 0 ? E_INVALIDARG : DV_E_FORMATETC;
                 }
-                util.sayOnce('OleCreateStaticFromData', 'no static picture object is made here');
-                return REGDB_E_CLASSNOTREG;
+                const cf = util.readU16(formatEtc >>> 0);
+                const clsid = STATIC_CLASSES.get(cf);
+                if (!clsid || !env.defaultHandlers)
+                {
+                    return DV_E_CLIPFORMAT;
+                }
+                return makeStatic(data >>> 0, cf, clsid, formatEtc >>> 0, storage >>> 0,
+                    riid >>> 0, out >>> 0);
             },
         },
 
@@ -1595,10 +1769,89 @@ export function createOle2Functions(env){
         //   LPSTORAGE, LPVOID *)
         OleCreateLink: refuseWithOut('OleCreateLink', 28, 6, REGDB_E_CLASSNOTREG,
             'a linked object needs its source\'s server'),
-        // HRESULT CreateDataCache(LPUNKNOWN, REFCLSID, REFIID, LPVOID *): OLE's
-        // presentation cache, which this layer does not have.
-        CreateDataCache: refuseWithOut('CreateDataCache', 16, 3, E_OUTOFMEMORY,
-            'OLE\'s data cache is not here'),
+        /**
+         * HRESULT CreateDataCache(LPUNKNOWN pUnkOuter, REFCLSID rclsid, REFIID iid, LPVOID *ppv)
+         *
+         * An aggregated cache is handed out as its inner IUnknown and nothing
+         * else (ole2.c test_data_cache).
+         */
+        CreateDataCache: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([outer, rclsid, riid, out])=>{
+                if ((out >>> 0) === 0 || (riid >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                const iid = guidAt(riid);
+                if ((outer >>> 0) !== 0 && iid !== IID_IUNKNOWN)
+                {
+                    return E_INVALIDARG;
+                }
+                const caches = env.dataCaches;
+                const object = caches?.create(outer >>> 0,
+                    (rclsid >>> 0) === 0 ? GUID_NULL : guidAt(rclsid));
+                if (!caches || !object)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                if (!object.interfaceFor(iid))
+                {
+                    object.release();
+                    return E_NOINTERFACE;
+                }
+                writeU32(out, env.publish(object, caches.primary(object, iid)) >>> 0);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT OleCreateDefaultHandler(REFCLSID clsid, LPUNKNOWN pUnkOuter, REFIID riid,
+         *                                 LPVOID *lplpObj)
+         */
+        OleCreateDefaultHandler: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: async([rclsid, outer, riid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || !env.defaultHandlers)
+                {
+                    return E_INVALIDARG;
+                }
+                return env.defaultHandlers.create(guidAt(rclsid), outer >>> 0, 0, 0, guidAt(riid),
+                    out >>> 0, env.callerThread());
+            },
+        },
+
+        /**
+         * HRESULT OleCreateEmbeddingHelper(REFCLSID clsid, LPUNKNOWN pUnkOuter, DWORD flags,
+         *                                  LPCLASSFACTORY pCF, REFIID riid, LPVOID *ppvObj)
+         *
+         * The default handler over a server's own class factory: an
+         * in-process server made at once unless the flags put it off.
+         */
+        OleCreateEmbeddingHelper: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: async([rclsid, outer, flags, factory, riid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || !env.defaultHandlers)
+                {
+                    return E_INVALIDARG;
+                }
+                return env.defaultHandlers.create(guidAt(rclsid), outer >>> 0, flags >>> 0,
+                    factory >>> 0, guidAt(riid), out >>> 0, env.callerThread());
+            },
+        },
         // HGLOBAL OleGetIconOfClass(REFCLSID, LPOLESTR, BOOL): NULL on failure.
         OleGetIconOfClass: refuse('OleGetIconOfClass', { argBytes: 12,
             why: 'no metafile of a class\'s icon is drawn here' }),
