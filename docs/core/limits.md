@@ -76,9 +76,20 @@ differently raises a `divergence` event naming the API.
   thread (`SuspendThread`, `ResumeThread`, `GetThreadContext`), and a thread it makes there with
   `CreateRemoteThread`, which it waits on and reads the exit code of -- either way. A wait on a
   child's thread is answered within a few milliseconds of its end, asked of the child until
-  then. Not yet: `SetThreadContext`, `OpenThread` of a child's thread the parent was not told of,
-  and reading another process's TEB or PEB.
-- In `compatible` mode a child is silent: its sound has no output to go to beside its parent's.
+  then. `NtQueryInformationProcess` on a child's handle is answered by the child; once it has
+  ended, its id, parent and exit status remain and its PEB address does not. Not yet:
+  `SetThreadContext` (refused for every thread: one stopped inside a call into the system would
+  have the registers put in its place overwritten as the call returns), `OpenThread` of a child's
+  thread the parent was not told of, and reading another process's TEB or PEB. A call made in a
+  child in a worker of its own takes about 1.4 ms when the child is busy or suspended and about
+  15 ms when every thread of the child waits, measured in Node.
+- A mutex, event, semaphore or waitable timer opened by name carries the rights it was granted: no
+  rights at all, or rights the kind does not have, are refused, and a handle without SYNCHRONIZE
+  cannot be waited on, nor one without the modify right set, reset or released. Handles a process
+  creates, and every other kind, have every right. Not exported, as on Windows 7: the
+  synchronization barrier, `GetProcessInformation` and job objects.
+- In `compatible` mode a child's sound is mixed into its parent's output (the engine's mixer has
+  no arena to lend it a table on), and goes on after a parent that exits first.
 - With `concurrency` 2 or 4 a process's own journal (its calls, phase profile and frames) stays in
   its worker: the run's log holds the events every process reports and what the engine's thread
   writes. A process in a worker takes its translations from the run's one store, which the

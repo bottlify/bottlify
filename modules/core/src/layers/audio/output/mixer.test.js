@@ -733,3 +733,50 @@ test('a mixer beside another on one table leaves the other\'s slots open, plays 
     parent.takeBack(span, lent);
     assert.equal(parent.diagnostics().arenaFree, free + lent, 'the span is the parent\'s again');
 });
+
+test('a process beside another borrows its engine output: both heard, each closing its own', ()=>{
+    // In compatible mode a child's own ring reached no speaker: it borrows
+    // its parent's, and its tracks are mixed with the parent's.
+    /** @type {string[]} */
+    const fills = [];
+    const parent = createMixer({ fill: ()=>fills.push('parent') });
+    const child = parent.borrow({ fill: ()=>fills.push('child') });
+    assert.equal(parent.lent(), true);
+    const music = parent.open(DIRECT);
+    const voice = child.open(DIRECT);
+    music.write(pcm16([8192, 8192]));
+    voice.write(pcm16([4096, 4096]));
+    assert.equal(child.pump(1), 1, 'either may pump');
+    assert.deepEqual(fills, ['parent', 'child'], 'each reads its buffers out before the mix');
+    assert.deepEqual(drain(parent, 1), [0.375, 0.375], 'both are heard');
+
+    child.close();
+    assert.equal(parent.diagnostics().tracks, 1, 'the child\'s exit leaves the parent\'s track');
+    assert.equal(parent.lent(), false);
+    music.write(pcm16([8192, 8192]));
+    parent.pump(1);
+    assert.deepEqual(drain(parent, 1), [0.25, 0.25]);
+
+    // A launcher that goes leaves its game sounding.
+    const game = parent.borrow({ fill: ()=>fills.push('game') });
+    const theme = game.open(DIRECT);
+    parent.retire();
+    fills.length = 0;
+    theme.write(pcm16([4096, 4096]));
+    assert.equal(game.pump(1), 1);
+    assert.deepEqual(fills, ['game'], 'the launcher\'s buffers are read no more');
+    assert.deepEqual(drain(parent, 1), [0.125, 0.125]);
+    assert.equal(parent.diagnostics().tracks, 1, 'and only the game\'s track is open');
+});
+
+test('a mixer nobody borrows pumps as before: its own fill, once a mix', ()=>{
+    let fills = 0;
+    const mixer = createMixer({ fill: ()=>{
+        fills++;
+    } });
+    assert.equal(mixer.lent(), false);
+    mixer.open(DIRECT).write(pcm16([1, 2]));
+    mixer.pump();
+    mixer.pump();
+    assert.equal(fills, 2);
+});

@@ -8288,6 +8288,13 @@ async function buildApp(options){
             lend: bytes=>core.api('audio').output().lend?.(bytes) ?? -1,
             /** @param {number} offset @param {number} bytes */
             takeBack: (offset, bytes)=>core.api('audio').output().takeBack?.(offset, bytes),
+            /**
+             * The output for a process beside this one where it has no arena
+             * to lend (`mixer.js` borrow); null where it cannot be borrowed.
+             *
+             * @param {{ fill?: () => void }} asked
+             */
+            borrow: asked=>core.api('audio').output().borrow?.(asked) ?? null,
             ring: ()=>core.api('audio').output().ring,
             table: ()=>core.api('audio').output().table,
             memory: ()=>core.api('audio').output().memory,
@@ -10051,6 +10058,20 @@ export async function createApp(options){
         };
     };
 
+    /**
+     * The sound of a process beside another whose output has no arena to
+     * lend: the parent's output, borrowed, the child's tracks mixed with its
+     * own; the child's audio closes them as it goes.
+     *
+     * @param {any} parent
+     */
+    const borrowSound = parent=>({
+        options: { ...options.audio, memory: undefined, beside: undefined,
+            borrow: (/** @type {{ fill?: () => void }} */ asked)=>parent.audio.borrow(asked) },
+        announce(){},
+        giveBack(){},
+    });
+
     /** The tables `ownSound` has named to the page so far. */
     let soundTables = 0;
     /**
@@ -10856,7 +10877,10 @@ export async function createApp(options){
         const running = (async()=>{
             /** @type {any} */
             let child = null;
-            const sound = ownSound();
+            // Where the run's output has nothing to lend -- the engine's own
+            // mixer, in `compatible` mode -- a table of the child's own would
+            // reach no speaker: it mixes onto its parent's output instead.
+            const sound = !shared && parent.audio?.borrow ? borrowSound(parent) : ownSound();
             try
             {
                 const image = request.image ?? await parent.readImage(request.imagePath);
