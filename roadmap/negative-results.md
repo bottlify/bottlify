@@ -1876,3 +1876,24 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   untranslated exits; hosts made but not run first did not do it. Not explained yet.
 - **Machine.** A cloud container (Xeon @ 2.10 GHz, 4 vCPU).
 - **Decision.** Not taken.
+
+### 2026-10-27: a byte copy loop done at once
+
+- **Idea.** A block that is the whole of `movs` (or `stos`) of one element, `cmp` of the pointer
+  with a register the loop does not write, and `jne` back to itself (gcc's freestanding memcpy
+  and memset) does every element but the last at once before the loop runs: a page at a time,
+  `memory.copy` or `memory.fill` for a run over 256 bytes and eight-byte moves in wasm for a
+  shorter one, the loop running the last element so its flags and count come out of its own code.
+  Gated against the interpreter on seeded programs (copies and fills, either compare order,
+  overlaps both ways, the code's own page, the direction flag, small budgets); both mutations
+  tried (budget charge, overlap test) failed the gate.
+- **Workload.** cork-bench sort (its record swaps copy 12 bytes a call through such a loop, 37 %
+  of its guest instructions by the block profile); valgrind callgrind, node 26.12 (V8 14.6) x64,
+  `--no-liftoff`, 300 + 100 iterations less 300, divided by 100.
+- **Values.** base 5.140 M machine instructions an iteration; with `memory.copy` alone 5.161 M;
+  with the short runs in wasm 5.138 M. Native wasm: 1.368 M.
+- **Why.** Twelve bytes are eleven turns of the loop saved, and the test before them (each
+  pointer's page, its flags, the overlap, the budget) costs about as much. MSVC, which the
+  games are built with, copies with `rep movs`, which already has a run path.
+- **Machine.** A cloud container (Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22.
+- **Decision.** Not taken; the patch and its gate are kept outside the tree.

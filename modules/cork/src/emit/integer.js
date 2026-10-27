@@ -3203,6 +3203,10 @@ function divide(e, instruction){
     {
         return divideNarrow(e, instruction);
     }
+    if (widenedJustBefore(e, instruction))
+    {
+        return divideWord(e, instruction);
+    }
     getReg32(e, 2);
     b.op(I64.extendU).i64const(32n).op(I64.shl);
     getReg32(e, 0);
@@ -3236,6 +3240,59 @@ function divide(e, instruction){
         writeReg(e, 2, 4, false);
     }
     b.localGet(Local.t64b).op(I64.wrap);
+    writeReg(e, 0, 4, false);
+    return true;
+}
+
+/**
+ * Whether the instruction just before a dword `div` or `idiv` made edx eax's
+ * widening: `cdq` before `idiv`, `xor edx, edx` (or `sub edx, edx`) before `div`,
+ * the pairs compilers make of a 32-bit division. Its dividend is then eax's
+ * value alone.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function widenedJustBefore(e, instruction){
+    const { instructions } = e.region.blocks[e.blockIndex];
+    const before = instructions[instructions.indexOf(instruction) - 1];
+    if (before === undefined)
+    {
+        return false;
+    }
+    if (instruction.op === 'idiv')
+    {
+        return before.op === 'cdq' && before.size === 4;
+    }
+    const [a, c] = before.operands;
+    return (before.op === 'xor' || before.op === 'sub') && a?.kind === 'reg' && c?.kind === 'reg'
+        && a.reg === 2 && c.reg === 2 && a.size === 4 && c.size === 4;
+}
+
+/**
+ * A dword `div` or `idiv` whose dividend is eax widened (`widenedJustBefore`):
+ * divided in 32 bits, which gives the quotient and remainder the 64-bit
+ * division gives, the divisor already known not to be zero (in t1). Only
+ * INT_MIN / -1 does not fit, a fault on the processor.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function divideWord(e, instruction){
+    const { b } = e;
+    const signed = instruction.op === 'idiv';
+    if (signed)
+    {
+        b.localGet(Local.t1).i32const(-1).op(I32.eq);
+        getReg32(e, 0);
+        b.i32const(-0x80000000).op(I32.eq).op(I32.and);
+        e.openGuard('overflow', EMPTY);
+        e.exitBefore(instruction.eip, Exit.FAULT, 0);
+        e.close();
+    }
+    getReg32(e, 0);
+    b.localSet(Local.t2);
+    b.localGet(Local.t2).localGet(Local.t1).op(signed ? I32_EXTRA.remS : I32_EXTRA.remU);
+    writeReg(e, 2, 4, false);
+    b.localGet(Local.t2).localGet(Local.t1).op(signed ? I32_EXTRA.divS : I32_EXTRA.divU);
     writeReg(e, 0, 4, false);
     return true;
 }
