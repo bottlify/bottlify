@@ -370,6 +370,12 @@ the name cannot be opened: what it holds is the engine's, not bytes; GetFileVers
 such a library already (A39). The system programs stay as A38 has them. Revisit if a program
 reads a system library's bytes or enumerates the folder to find one. *2026-10-08.*
 
+Planned to change (status: plan, no code; 2026-10-27): with a file explorer, the system programs
+of A38 and these libraries become read-only entries the volume serves from their synthesised
+images, carrying icon resources of the project's own drawing, so a search by path finds them and
+ExtractIcon, SHGetStockIconInfo and a shortcut's icon read real ones. Until then Wine's checks of
+those files and icons (shell32:shelllink, about 165) are counted as divergences under A38 and A41.
+
 **A42. A thread's stack is at least a megabyte, whatever SizeOfStackReserve says.** The first
 thread and every thread created with the image's default get `max(SizeOfStackReserve, 1 MiB)`.
 A program linked for 64 KiB (the Call of Duty 2 demo) was measured reaching 70 KiB down its first
