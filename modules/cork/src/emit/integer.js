@@ -142,8 +142,8 @@ const LONG_OPS = new Set([
  */
 const LONG_SIMD_LEFT = new Set(['maskmovq', 'maskmovdqu']);
 
-/** The SIMD operations whose general operand, register or memory, is an integer's. */
-const LONG_SIMD_INTEGER = new Set(['movd', 'cvtsi2ss', 'cvtsi2sd', 'cvttss2si', 'cvtss2si',
+/** The SIMD operations whose general operand may be a quadword register. */
+const LONG_SIMD_QUAD = new Set(['movd', 'cvtsi2ss', 'cvtsi2sd', 'cvttss2si', 'cvtss2si',
     'cvttsd2si', 'cvtsd2si']);
 
 /**
@@ -164,9 +164,9 @@ export function translatesLong(instruction){
     const simd = operands.some(operand=>operand.kind === 'xmm' || operand.kind === 'mm');
     if (simd)
     {
-        // A general register a SIMD operation reads or writes as a dword only, so far.
+        // A general register other SIMD operations read or write as a dword only.
         if (LONG_SIMD_LEFT.has(op) || operands.some(operand=>operand.kind === 'reg'
-            && operand.size === 8 || LONG_SIMD_INTEGER.has(op) && operand.size === 8))
+            && operand.size === 8 && !LONG_SIMD_QUAD.has(op)))
         {
             return false;
         }

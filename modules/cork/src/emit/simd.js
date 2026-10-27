@@ -206,6 +206,12 @@ function emitForm(e, instruction, flagsLive){
             return true;
         }
         case 'movd':
+            if (dst.size === 8 && dst.kind !== 'mm' || src.size === 8 && src.kind !== 'mm')
+            {
+                // Long mode's movq to or from a general register or a quadword of memory.
+                moveQuad(e, dst, src);
+                return true;
+            }
             prepareAddress(e, src);
             if (dst.kind === 'xmm')
             {
@@ -602,7 +608,14 @@ function emitForm(e, instruction, flagsLive){
             prepareAddress(e, src);
             readV(e, dst, 16);
             readOp(e, src);
-            b.op(double ? F64.convertI32S : F32.convertI32S);
+            if (src.size === 8)
+            {
+                b.op(double ? 0xb9 : 0xb4); // f64/f32.convert_i64_s
+            }
+            else
+            {
+                b.op(double ? F64.convertI32S : F32.convertI32S);
+            }
             b.op(0xfd, [double ? SIMD.f64x2ReplaceLane : SIMD.f32x4ReplaceLane, 0]);
             writeV(e, dst, null);
             return true;
@@ -619,6 +632,12 @@ function emitForm(e, instruction, flagsLive){
             {
                 roundByMxcsr(e, double ? Local.d0 : Local.f0, double ? F64_ROUND : F32_ROUND,
                     false);
+            }
+            if (dst.size === 8)
+            {
+                scalarToQuad(e, double);
+                writeReg(e, /** @type {number} */ (dst.reg), 8, false);
+                return true;
             }
             scalarToInt(e, double);
             writeReg(e, /** @type {number} */ (dst.reg), 4, false);
@@ -1672,6 +1691,79 @@ function scalarToInt(e, double){
     }
     b.op(I32.or);
     b.op(0x1b); // select(indefinite, sat, bad)
+}
+
+/**
+ * As `scalarToInt`, to a quadword: the indefinite (2^63's bit alone) where
+ * the value is a NaN or out of the i64 range.
+ *
+ * @param {E} e @param {boolean} double
+ */
+function scalarToQuad(e, double){
+    const { b } = e;
+    const local = double ? Local.d0 : Local.f0;
+    b.i64const(-0x8000000000000000n);
+    b.localGet(local);
+    b.op(0xfc, [double ? 0x06 : 0x04]); // i64.trunc_sat_f64_s / f32_s
+    b.localGet(local).localGet(local).op(double ? 0x62 : F32.ne);
+    b.localGet(local);
+    if (double)
+    {
+        b.f64const(9223372036854775808).op(0x66); // f64.ge
+    }
+    else
+    {
+        b.f32const(9223372036854775808).op(F32.ge);
+    }
+    b.op(I32.or);
+    b.localGet(local);
+    if (double)
+    {
+        b.f64const(-9223372036854775808).op(0x63); // f64.lt
+    }
+    else
+    {
+        b.f32const(-9223372036854775808).op(F32.lt);
+    }
+    b.op(I32.or);
+    b.op(0x1b); // select(indefinite, sat, bad)
+}
+
+/**
+ * Long mode's movq between an xmm or mm register and a general register or a
+ * quadword of memory: into an xmm the high quadword cleared.
+ *
+ * @param {E} e @param {Operand} dst @param {Operand} src
+ */
+function moveQuad(e, dst, src){
+    const { b } = e;
+    if (dst.kind === 'xmm' || dst.kind === 'mm')
+    {
+        prepareAddress(e, src);
+        if (dst.kind === 'mm')
+        {
+            readOp(e, src);
+            writeM(e, dst, null);
+            return;
+        }
+        b.v128const(new Array(16).fill(0));
+        readOp(e, src);
+        b.op(0xfd, [SIMD.i64x2ReplaceLane, 0]);
+        writeV(e, dst, null);
+        return;
+    }
+    prepareAddress(e, dst);
+    writeOp(e, dst, ()=>{
+        if (src.kind === 'xmm')
+        {
+            readV(e, src, 16);
+            b.op(0xfd, [SIMD.i64x2ExtractLane, 0]);
+        }
+        else
+        {
+            readM(e, src);
+        }
+    });
 }
 
 /**

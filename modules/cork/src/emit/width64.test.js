@@ -136,6 +136,23 @@ test('leave and indirect jumps and calls run in the shared emitter\'s regions as
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
 
+test('SIMD moves and conversions of quadword general operands run in the shared emitter\'s'
+    + ' regions as interpreted', ()=>{
+    const cases = edges([
+        '66480f6ec1', '66490f6ec1', '480f6ec1', // movq xmm0/xmm0/mm0 <- rcx/r9/rcx
+        '66480f7ec8', '66490f7ec0', '480f7ec8', // movq rax/r8/rax <- xmm1/xmm0/mm1
+        '66480f6e0424', '66480f7e0424', // movq xmm0 <- [rsp], [rsp] <- xmm0
+        'f2480f2ac1', 'f3480f2ac1', 'f2480f2a0424', // cvtsi2sd/ss xmm0, rcx; cvtsi2sd [rsp]
+        'f2480f2cc0', 'f2480f2dc0', 'f3480f2cc0', 'f3480f2dc0', // cvt(t)sd/ss2si rax, xmm0
+        'f20f2cc0', 'f30f2dc0', // the dword forms
+    ], [0, 1, -1, 0x7fffffff, 0x80000000, 0x7fffffffffffffffn, -0x8000000000000000n, 12345678901n],
+    ['', 'f2480f2ac1', 'f3480f2ac1', '66480f6ec1', '48b800000000000000c3', '48b80000000000f04743']);
+    const { failures, stats } = compare(cases, 7, true, undefined, undefined, true, 0, false,
+        shared);
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
+
 test('seeded long programs run in the shared emitter\'s regions as interpreted', ()=>{
     const instructions = pool();
     const straight = Array.from({ length: 600 },
