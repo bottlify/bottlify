@@ -9,6 +9,7 @@ import { createRefusals } from '../common/refusal.js';
 import { LOCALE_TAGS, verLanguageName } from './languages.js';
 import { STATUS } from '../ntdll/status.js';
 import { decodeUtf7, encodeUtf7 } from './utf7.js';
+import { bestFit, codePage } from './codepages.js';
 
 /**
  * Code pages and the string conversions built on them.
@@ -56,6 +57,7 @@ const MB_FLAGS = 0x0f;
  * WC_COMPOSITECHECK, WC_NO_BEST_FIT_CHARS: any other bit is refused.
  */
 const WC_FLAGS = 0x6f0;
+const WC_NO_BEST_FIT_CHARS = 0x400;
 const ERROR_NO_UNICODE_TRANSLATION = 1113;
 const ERROR_GEN_FAILURE = 31;
 
@@ -243,6 +245,7 @@ const PAGE_NAMES = Object.freeze({
     1252: '1252  (ANSI - Latin I)',
     437: '437   (OEM - United States)',
     65001: '65001 (UTF-8)',
+    65000: '65000 (UTF-7)',
 });
 /** Where CodePageName starts in CPINFOEXA and CPINFOEXW, and its characters. */
 const CPINFOEX_NAME = 24;
@@ -336,7 +339,7 @@ const fold = (text, flags)=>{
 };
 
 /** The pages this build can actually convert; IsValidCodePage answers from it. */
-const KNOWN_PAGES = [CP_WINDOWS_1252, CP_OEM_437, CP_UTF8];
+const KNOWN_PAGES = [CP_WINDOWS_1252, CP_OEM_437, CP_UTF8, CP_UTF7];
 
 const MONTHS = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -576,50 +579,66 @@ const decodeSingleByte = (bytes, page)=>{
 };
 
 /**
+ * A character's byte in a single-byte page, or -1 where it has none.
+ *
+ * @param {number} code @param {number[]} high
+ */
+const singleByteOf = (code, high)=>{
+    if (code < 0x80)
+    {
+        return code;
+    }
+    const found = high.indexOf(code);
+    if (found !== -1)
+    {
+        return 0x80 + found;
+    }
+    // A position the page leaves undefined decodes as its own code point,
+    // and goes back as its own byte.
+    if (code < 0x80 + high.length && high[code - 0x80] === 0)
+    {
+        return code;
+    }
+    // A table that stops short of the top of the page leaves the rest of
+    // it Latin-1, exactly as decoding reads it: an accented letter is a
+    // byte of its own there, not the default character.
+    return code >= 0x80 + high.length && code <= 0xff ? code : -1;
+};
+
+/**
  * Text encoded into a single-byte page. Anything the page cannot hold becomes
  * the default character, which is what Windows does and what a caller asking
- * for lpUsedDefaultChar is trying to find out.
+ * for lpUsedDefaultChar is trying to find out -- or, when `fit` allows it,
+ * the page's letter it is an accented or compatibility form of.
  *
  * @param {string} text @param {number} page
- * @returns {{ bytes: Uint8Array, usedDefault: boolean }}
+ * @param {number} [substitute] The default character's byte.
+ * @param {boolean} [fit]
+ * @returns {{ bytes: Uint8Array, usedDefault: boolean, firstDefault: number }}
  */
-const encodeSingleByte = (text, page)=>{
+const encodeSingleByte = (text, page, substitute = DEFAULT_CHAR, fit = false)=>{
     const high = highHalf(page);
     const bytes = new Uint8Array(text.length);
-    let usedDefault = false;
+    let firstDefault = -1;
     for (let at = 0; at < text.length; at++)
     {
         const code = text.charCodeAt(at);
-        if (code < 0x80)
+        let byte = code < 0x80 ? code : singleByteOf(code, high);
+        if (byte === -1 && fit)
         {
-            bytes[at] = code;
-            continue;
+            byte = bestFit(text[at], unit=>singleByteOf(unit, high)) ?? -1;
         }
-        const found = high.indexOf(code);
-        if (found !== -1)
+        if (byte === -1)
         {
-            bytes[at] = 0x80 + found;
-            continue;
+            byte = substitute;
+            if (firstDefault === -1)
+            {
+                firstDefault = at;
+            }
         }
-        // A position the page leaves undefined decodes as its own code point,
-        // and goes back as its own byte.
-        if (code < 0x80 + high.length && high[code - 0x80] === 0)
-        {
-            bytes[at] = code;
-            continue;
-        }
-        // A table that stops short of the top of the page leaves the rest of
-        // it Latin-1, exactly as decoding reads it: an accented letter is a
-        // byte of its own there, not the default character.
-        if (code >= 0x80 + high.length && code <= 0xff)
-        {
-            bytes[at] = code;
-            continue;
-        }
-        bytes[at] = DEFAULT_CHAR;
-        usedDefault = true;
+        bytes[at] = byte;
     }
-    return { bytes, usedDefault };
+    return { bytes, usedDefault: firstDefault !== -1, firstDefault };
 };
 
 /**
@@ -848,6 +867,48 @@ export function createLocaleFunctions(host){
      * @param {number} declared
      */
     const anyNegative = declared=>((declared | 0) < 0 ? -1 : declared);
+
+    /**
+     * Text in a page, as WideCharToMultiByte writes it: with the caller's
+     * default character when it gives one, and how much of it a short
+     * buffer takes.
+     *
+     * @param {number} page @param {string} text @param {number} flags
+     * @param {number} defaultChar  The caller's default character, or 0.
+     * @returns {{ bytes: Uint8Array, fit: (room: number) => number,
+     *             usedDefault: (written: number) => boolean }}
+     */
+    const encodeIn = (page, text, flags, defaultChar)=>{
+        const whole = (/** @type {number} */ room)=>room;
+        if (page === CP_UTF8)
+        {
+            return { bytes: new TextEncoder().encode(text), fit: whole, usedDefault: ()=>false };
+        }
+        if (page === CP_UTF7)
+        {
+            return { ...encodeUtf7(text), usedDefault: ()=>false };
+        }
+        const given = defaultChar === 0 ? null : Array.from(host.readMemory(defaultChar, 2));
+        const bestFits = (flags & WC_NO_BEST_FIT_CHARS) === 0;
+        const table = codePage(page);
+        if (table !== null)
+        {
+            const fallback = given === null ? null
+                : table.isLead(given[0]) && given[1] !== 0 ? given : [given[0]];
+            return table.encode(text, flags, fallback);
+        }
+        const { bytes, firstDefault } = encodeSingleByte(text, page,
+            given?.[0] ?? DEFAULT_CHAR, bestFits);
+        return { bytes, fit: whole,
+            usedDefault: written=>firstDefault !== -1 && firstDefault < written };
+    };
+
+    /**
+     * Whether this machine converts a page.
+     *
+     * @param {number} page
+     */
+    const isCarried = page=>KNOWN_PAGES.includes(page) || codePage(page) !== null;
 
     /** UTF-7 and the symbol page refuse every conversion flag. @param {number} page */
     const takesNoFlags = page=>page === CP_UTF7 || page === CP_SYMBOL;
@@ -1689,16 +1750,20 @@ export function createLocaleFunctions(host){
      */
     const pageInfo = (page, info, wide)=>{
         const resolved = resolvePage(page);
-        if (!KNOWN_PAGES.includes(resolved))
+        if (!isCarried(resolved))
         {
             return refuse(ERROR_INVALID_PARAMETER);
         }
-        const name = PAGE_NAMES[/** @type {keyof typeof PAGE_NAMES} */ (resolved)];
+        const table = codePage(resolved);
+        const name = table?.name ?? PAGE_NAMES[/** @type {keyof typeof PAGE_NAMES} */ (resolved)];
         const bytes = new Uint8Array(wide === null ? CPINFO_SIZE
             : CPINFOEX_NAME + MAX_PATH * (wide ? 2 : 1));
         const view = new DataView(bytes.buffer);
-        view.setUint32(0, resolved === CP_UTF8 ? 4 : 1, true);
+        view.setUint32(0, resolved === CP_UTF8 ? 4 : resolved === CP_UTF7 ? 5
+            : table?.maxCharSize ?? 1, true);
         bytes[4] = DEFAULT_CHAR;
+        // LeadByte: up to five ranges, the sixth pair left zero to end them.
+        bytes.set((table?.leadRanges ?? []).slice(0, 10), 6);
         if (wide !== null)
         {
             view.setUint16(CPINFO_SIZE, 0xfffd, true);
@@ -2089,7 +2154,7 @@ export function createLocaleFunctions(host){
         IsValidCodePage: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([page])=>KNOWN_PAGES.includes(resolvePage(page)) ? 1 : 0,
+            handler: ([page])=>(isCarried(resolvePage(page)) ? 1 : 0),
         },
 
         /**
@@ -2107,13 +2172,13 @@ export function createLocaleFunctions(host){
         /**
          * BOOL IsDBCSLeadByteEx(UINT CodePage, BYTE TestChar)
          *
-         * Never. Both pages this build carries are single-byte, so no byte
-         * begins a two-byte character -- and a caller that believed otherwise
-         * would skip the byte after it.
+         * Only in a double-byte page; never in the machine's own two, which
+         * are single-byte -- a caller told otherwise would skip the byte after.
          */
         IsDBCSLeadByteEx: {
             argBytes: 8,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([page, byte])=>(codePage(resolvePage(page))?.isLead(byte) ? 1 : 0),
         },
 
         /**
@@ -2305,7 +2370,7 @@ export function createLocaleFunctions(host){
                 // the source's, it has no "up to the terminator" meaning.
                 const span = (source >>> 0) === 0
                     ? { length: 0 } : sourceSpan(source >>> 0, anyNegative(sourceBytes), 1);
-                if (span.length === 0 || (destinationChars | 0) < 0
+                if (span.length === 0 || (destinationChars | 0) < 0 || resolved > 0xffff
                     || ((destination >>> 0) === 0 && (destinationChars | 0) !== 0))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -2339,7 +2404,15 @@ export function createLocaleFunctions(host){
                 }
                 else
                 {
-                    text = decodeSingleByte(raw, resolved);
+                    const carried = codePage(resolved);
+                    const decoded = carried === null ? decodeSingleByte(raw, resolved)
+                        : carried.decode(raw, (flags & MB_ERR_INVALID_CHARS) !== 0);
+                    if (decoded === null)
+                    {
+                        host.setLastError(ERROR_NO_UNICODE_TRANSLATION);
+                        return 0;
+                    }
+                    text = decoded;
                 }
 
                 // Zero is the measuring call, and it must not write.
@@ -2381,7 +2454,7 @@ export function createLocaleFunctions(host){
                 // A destination of NULL is only the measuring call's, with a
                 // size of zero; UTF-7 and the symbol page have no default
                 // character to report or replace with.
-                if (span.length === 0 || (destinationBytes | 0) < 0
+                if (span.length === 0 || (destinationBytes | 0) < 0 || resolved > 0xffff
                     || ((destination >>> 0) === 0 && (destinationBytes | 0) !== 0)
                     || ((resolved === CP_UTF7 || resolved === CP_SYMBOL)
                         && ((args[6] >>> 0) !== 0 || usedDefaultOut !== 0)))
@@ -2395,26 +2468,27 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 const text = readWide(source >>> 0, span.length);
-                /** @type {{ bytes: Uint8Array, usedDefault?: boolean, fit?: (room: number) => number }} */
-                const encoded = resolved === CP_UTF8
-                    ? { bytes: new TextEncoder().encode(text), usedDefault: false }
-                    : resolved === CP_UTF7 ? encodeUtf7(text) : encodeSingleByte(text, resolved);
+                const encoded = encodeIn(resolved, text, flags, args[6] >>> 0);
+                const room = destinationBytes | 0;
+                const short = room !== 0 && encoded.bytes.length > room;
+                const written = short ? encoded.fit(room) : encoded.bytes.length;
 
+                // What was written is what the answer is about: a buffer that
+                // ends before the character the page lacks never used it.
                 if (usedDefaultOut !== 0)
                 {
                     host.writeMemory(usedDefaultOut,
-                        new Uint8Array([encoded.usedDefault === true ? 1 : 0, 0, 0, 0]));
+                        new Uint8Array([encoded.usedDefault(written) ? 1 : 0, 0, 0, 0]));
                 }
-                if ((destinationBytes | 0) === 0)
+                if (room === 0)
                 {
                     return encoded.bytes.length;
                 }
                 // Filled as far as it goes, for the reason MultiByteToWideChar
-                // gives.
-                if (encoded.bytes.length > (destinationBytes | 0))
+                // gives -- but never with half a character.
+                if (short)
                 {
-                    host.writeMemory(destination >>> 0, encoded.bytes.subarray(0,
-                        encoded.fit?.(destinationBytes | 0) ?? destinationBytes | 0));
+                    host.writeMemory(destination >>> 0, encoded.bytes.subarray(0, written));
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }

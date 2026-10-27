@@ -68,6 +68,7 @@
     "src/layers/win32/advapi32/registry.js",
     "src/layers/win32/common/refusal.js",
     "src/layers/win32/dsetup/functions.js",
+    "src/layers/win32/kernel32/codepages.js",
     "src/layers/win32/kernel32/languages.js",
     "src/layers/win32/kernel32/locale.js",
     "src/layers/win32/kernel32/processor.js",

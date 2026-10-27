@@ -289,6 +289,45 @@ test('CP_UTF7 converts both ways, takes no flags, and fills a short buffer by wh
     assert.deepEqual(host.errors, [ERROR_INVALID_FLAGS, ERROR_INVALID_FLAGS]);
 });
 
+test('other pages convert, a double-byte one has lead bytes, a number past 0xffff is none', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    assert.equal(fns.IsValidCodePage.handler([1251]), 1);
+    assert.equal(fns.IsValidCodePage.handler([932]), 1);
+    assert.equal(fns.IsValidCodePage.handler([65000]), 1);
+    assert.equal(fns.IsDBCSLeadByteEx.handler([932, 0x81]), 1);
+    assert.equal(fns.IsDBCSLeadByteEx.handler([932, 0xa0]), 0);
+
+    assert.equal(fns.GetCPInfo.handler([932, 0x400]), 1);
+    assert.deepEqual([...host.bytes.subarray(0x400, 0x412)],
+        [2, 0, 0, 0, 0x3f, 0, 0x81, 0x9f, 0xe0, 0xfc, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+    host.plantWide(0x100, 'Th\u0440i');
+    assert.equal(fns.WideCharToMultiByte.handler([1251, 0, 0x100, -1, 0x200, 16, 0, 0]), 5);
+    assert.deepEqual([...host.bytes.subarray(0x200, 0x205)], [0x54, 0x68, 0xf0, 0x69, 0]);
+    host.bytes.set([0xe0, 0], 0x300);
+    assert.equal(fns.MultiByteToWideChar.handler([1251, 0, 0x300, -1, 0x400, 4]), 2);
+    assert.equal(host.readWide(0x400, 1), '\u0430');
+
+    assert.equal(fns.MultiByteToWideChar.handler([0xdeadbeef, 0x10, 0x300, 2, 0x400, 4]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER]);
+});
+
+test('lpUsedDefaultChar is about what was written, and lpDefaultChar replaces "?"', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantWide(0x100, 'Th\u0440i');
+    host.plantAnsi(0x300, '*');
+
+    const convert = (/** @type {number} */ room, /** @type {number} */ given)=>
+        fns.WideCharToMultiByte.handler([CP_WINDOWS_1252, 0, 0x100, -1, 0x200, room, given, 0x500]);
+    assert.equal(convert(1, 0), 0);
+    assert.equal(host.bytes[0x500], 0, 'the one byte written is "T"');
+    assert.equal(convert(16, 0x300), 5);
+    assert.equal(host.bytes[0x500], 1);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x200, 0x204)), 'Th*i');
+});
+
 test('an exact source length carries no terminator of its own', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);
