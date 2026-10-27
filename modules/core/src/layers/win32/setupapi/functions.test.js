@@ -18,6 +18,7 @@ import { createVolume } from '../kernel32/vfs.js';
 import { createHive, shellFolders } from '../advapi32/registry.js';
 import { FILEOP, SPFILENOTIFY, createSetupapiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { decodeShellLink } from '../common/shell-link.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -1444,4 +1445,399 @@ test('DIRID 0 is empty, an unknown standard one the system directory\'s unknown'
     assert.equal(dirid(0), '');
     assert.equal(dirid(99), 'C:\\WINDOWS\\system32\\unknown');
     assert.equal(dirid(0x8000), null, 'a user DIRID is the INF\'s own');
+});
+
+const SP_COPY_WARNIFSKIP = 0x4000;
+const SP_COPY_REPLACEONLY = 0x2;
+const SPINST_REGSVR = 0x40;
+const SPINST_UNREGSVR = 0x80;
+const SPINST_PROFILEITEMS = 0x100;
+
+/**
+ * A program's commit callback that writes down every NEEDMEDIA and
+ * COPYERROR, answering each with what `answer` says -- a FILEOP and the
+ * path it leaves -- or the default callback's answer when it says nothing.
+ *
+ * @param {Awaited<ReturnType<typeof machine>>} m
+ * @param {(kind: 'media' | 'error', count: number) => [number, string] | null} answer
+ */
+function mediaCallback(m, answer){
+    /** @type {any[]} */
+    const media = [];
+    let errors = 0;
+    const entry = m.callback(([context, message, param1, param2])=>{
+        /** @param {number} address */
+        const at = address=>(address === 0 ? null : m.readCString(address, 260));
+        let given = null;
+        if (message === SPFILENOTIFY.NEEDMEDIA)
+        {
+            media.push({ tagfile: at(m.u32(param1 + 4)), description: at(m.u32(param1 + 8)),
+                path: at(m.u32(param1 + 12)), file: at(m.u32(param1 + 16)),
+                flags: m.u32(param1 + 20) });
+            given = answer('media', media.length);
+        }
+        else if (message === SPFILENOTIFY.COPYERROR)
+        {
+            given = answer('error', ++errors);
+        }
+        if (given)
+        {
+            [...given[1], '\0'].forEach((c, index)=>m.view.setUint8(param2 + index,
+                c.charCodeAt(0)));
+            return given[0];
+        }
+        return m.fns.SetupDefaultQueueCallbackA.handler([context, message, param1, param2]);
+    });
+    return { entry, media, errors: ()=>errors };
+}
+
+/** @param {Awaited<ReturnType<typeof machine>>} m */
+function sources(m){
+    for (const directory of ['C:\\src\\alpha', 'C:\\src\\beta'])
+    {
+        m.volume.mkdir(directory);
+    }
+    m.file('C:\\src\\one.txt', 'one');
+    m.file('C:\\src\\beta\\two.txt', 'two');
+    m.file('C:\\src\\alpha\\three.txt', 'three');
+    m.file('C:\\src\\alpha\\six.txt', 'six');
+}
+
+test('NEEDMEDIA comes once a media, its path as the program gave it, and its own flags only',
+    async()=>{
+        // Wine's setupapi install test_need_media.
+        const m = await machine();
+        sources(m);
+        const queue = m.fns.SetupOpenFileQueue.handler();
+        /** @param {...any} args */
+        const copy = (...args)=>m.fns.SetupQueueCopyA.handler([queue, ...args]);
+        copy(m.str('src'), 0, m.str('one.txt'), 0, 0, m.str('dst'), 0,
+            SP_COPY_WARNIFSKIP | SP_COPY_REPLACEONLY);
+        copy(m.str('src'), m.str('beta'), m.str('two.txt'), 0, 0, m.str('dst'), 0, 0);
+        copy(m.str('src/alpha'), 0, m.str('three.txt'), 0, 0, m.str('dst'), 0, 0);
+        copy(m.str('src'), m.str('beta'), m.str('two.txt'), 0, 0, m.str('dst'), 0, 0);
+        const heard = mediaCallback(m, ()=>null);
+        assert.equal(await m.fns.SetupCommitFileQueueA.handler([0, queue, heard.entry, 0]), 1);
+        assert.deepEqual(heard.media.map(media=>[media.path, media.file, media.flags]), [
+            ['src', 'one.txt', SP_COPY_WARNIFSKIP], ['src/alpha', 'three.txt', 0]],
+        'the subdirectory is not part of the media; REPLACEONLY is not a media flag');
+        assert.equal(m.contents('C:\\dst\\one.txt'), null, 'replace-only, nothing to replace');
+        assert.equal(m.contents('C:\\dst\\two.txt'), 'two');
+        assert.equal(m.contents('C:\\dst\\three.txt'), 'three');
+    });
+
+test('a path given for the media is the first file\'s directory and roots the files after it',
+    async()=>{
+        const m = await machine();
+        sources(m);
+        /** @param {(kind: 'media' | 'error', count: number) => [number, string] | null} answer @param {string[][]} copies */
+        const run = async(answer, copies)=>{
+            const queue = m.fns.SetupOpenFileQueue.handler();
+            for (const [root, path, file] of copies)
+            {
+                m.fns.SetupQueueCopyA.handler([queue, m.str(root), path ? m.str(path) : 0,
+                    m.str(file), 0, 0, m.str('dst'), 0, 0]);
+            }
+            const heard = mediaCallback(m, answer);
+            assert.equal(await m.fns.SetupCommitFileQueueA.handler([0, queue, heard.entry, 0]), 1);
+            return heard;
+        };
+        // The subdirectory taken off the path's end when it is its last element.
+        let heard = await run(()=>[FILEOP.NEWPATH, 'src\\alpha'],
+            [['fake', 'alpha', 'three.txt'], ['fake', 'beta', 'two.txt']]);
+        assert.equal(heard.media.length, 1);
+        assert.equal(heard.errors(), 0);
+        assert.equal(m.contents('C:\\dst\\two.txt'), 'two');
+        // Kept whole when it is not exactly that.
+        heard = await run(()=>[FILEOP.NEWPATH, 'src\\alpha'],
+            [['fake', 'alpha\\', 'three.txt'], ['fake', '', 'six.txt']]);
+        assert.equal(heard.errors(), 0);
+        assert.equal(m.contents('C:\\dst\\six.txt'), 'six');
+        // Asked again until the file is there; a skip passes one file and
+        // asks again for the next.
+        heard = await run((_, count)=>[FILEOP.NEWPATH, count === 1 ? 'src\\alpha' : 'src'],
+            [['fake', '', 'one.txt'], ['fake', 'alpha', 'three.txt']]);
+        assert.deepEqual(heard.media.map(media=>media.path), ['fake', 'src\\alpha']);
+        m.volume.remove('C:\\dst\\one.txt');
+        heard = await run((_, count)=>(count === 1 ? [FILEOP.SKIP, ''] : [FILEOP.NEWPATH,
+            'src\\alpha']), [['fake', '', 'one.txt'], ['fake', 'alpha', 'three.txt']]);
+        assert.deepEqual(heard.media.map(media=>media.path), ['fake', 'fake\\alpha']);
+        assert.equal(m.contents('C:\\dst\\one.txt'), null);
+        // A path given for a copy error roots the files after it too.
+        heard = await run((kind, count)=>(kind === 'media' ? [FILEOP.NEWPATH, 'src']
+            : [FILEOP.NEWPATH, count === 1 ? 'fake2' : 'src\\alpha']),
+        [['fake', '', 'one.txt'], ['fake', '', 'three.txt'], ['fake', '', 'six.txt']]);
+        assert.equal(heard.media.length, 1);
+        assert.equal(heard.errors(), 2, 'asked again until it copies');
+    });
+
+test('a copy queued twice is done once, and an abort leaves the callback\'s own last error',
+    async()=>{
+        // Wine's setupapi install test_start_copy.
+        const m = await machine();
+        sources(m);
+        const queue = m.fns.SetupOpenFileQueue.handler();
+        for (const file of ['one.txt', 'one.txt', 'six.txt'])
+        {
+            m.fns.SetupQueueCopyA.handler([queue, m.str(file === 'six.txt' ? 'src\\alpha' : 'src'),
+                0, m.str(file), 0, 0, m.str('dst'), 0, 0]);
+        }
+        let starts = 0;
+        const abort = m.callback(([context, message, param1, param2])=>{
+            if (message === SPFILENOTIFY.STARTCOPY && ++starts === 2)
+            {
+                return FILEOP.ABORT;
+            }
+            return m.fns.SetupDefaultQueueCallbackA.handler([context, message, param1, param2]);
+        });
+        const before = m.errors.length;
+        assert.equal(await m.fns.SetupCommitFileQueueA.handler([0, queue, abort, 0]), 0);
+        assert.equal(starts, 2, 'one.txt once, then six.txt');
+        assert.equal(m.errors.length, before, 'no last error of its own');
+        assert.equal(m.contents('C:\\dst\\six.txt'), null);
+    });
+
+test('renames move a file within or across directories before the copies; deletes go first',
+    async()=>{
+        // Wine's setupapi install test_rename.
+        const m = await machine();
+        for (const directory of ['C:\\a', 'C:\\b'])
+        {
+            m.volume.mkdir(directory);
+        }
+        m.file('C:\\a\\one.txt', '1');
+        m.file('C:\\b\\three.txt', '3');
+        m.file('C:\\b\\gone.txt', 'x');
+        const queue = m.fns.SetupOpenFileQueue.handler();
+        m.fns.SetupQueueCopyA.handler([queue, m.str('b'), 0, m.str('one.txt'), 0, 0, m.str('b'),
+            m.str('two.txt'), 0]);
+        assert.equal(m.fns.SetupQueueRenameA.handler([queue, m.str('a'), m.str('one.txt'),
+            m.str('b'), m.str('one.txt')]), 1);
+        assert.equal(m.fns.SetupQueueRenameW.handler([queue, m.wstr('b'), m.wstr('three.txt'), 0,
+            m.wstr('four.txt')]), 1);
+        assert.equal(m.fns.SetupQueueDeleteA.handler([queue, m.str('b'), m.str('gone.txt')]), 1);
+        const heard = mediaCallback(m, ()=>null);
+        assert.equal(await m.fns.SetupCommitFileQueueA.handler([0, queue, heard.entry, 0]), 1);
+        assert.equal(m.contents('C:\\a\\one.txt'), null);
+        assert.equal(m.contents('C:\\b\\one.txt'), '1');
+        assert.equal(m.contents('C:\\b\\two.txt'), '1', 'copied from the renamed file');
+        assert.equal(m.contents('C:\\b\\four.txt'), '3', 'no target path: renamed in place');
+        assert.equal(m.contents('C:\\b\\gone.txt'), null);
+    });
+
+const MEDIA_INF = [
+    '[Version]', 'Signature="$Chicago$"',
+    '[section1]', 'one.txt', '[section3]', 'three.txt',
+    '[install]', 'CopyFiles=section1',
+    '[SourceDisksNames]', '1=heis', '2=duo,,,alpha',
+    '[SourceDisksFiles]', 'one.txt=1', 'two.txt=1,beta', 'three.txt=2',
+    '[DestinationDirs]', 'DefaultDestDir=-1,C:\\dst', '',
+].join('\r\n');
+
+test('an INF\'s files queue by section, by install section and one by one, media from the INF',
+    async()=>{
+        const m = await machine();
+        sources(m);
+        m.file('C:\\src\\media.inf', MEDIA_INF);
+        const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\media.inf'), 0,
+            INF_STYLE_WIN4, 0]);
+        const queue = m.fns.SetupOpenFileQueue.handler();
+        assert.equal(m.fns.SetupQueueCopySectionA.handler([queue, m.str('src'), inf, 0,
+            m.str('section3'), 0]), 1);
+        assert.equal(m.fns.SetupInstallFilesFromInfSectionW.handler([inf, 0, queue,
+            m.wstr('install'), m.wstr('src'), 0]), 1);
+        assert.equal(m.fns.SetupQueueDefaultCopyA.handler([queue, inf, m.str('src'), 0,
+            m.str('one.txt'), 0]), 0);
+        assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'no source name');
+        assert.equal(m.fns.SetupQueueDefaultCopyA.handler([queue, inf, m.str('src'),
+            m.str('two.txt'), m.str('deux.txt'), 0]), 1);
+        const heard = mediaCallback(m, ()=>null);
+        assert.equal(await m.fns.SetupCommitFileQueueA.handler([0, queue, heard.entry, 0]), 1);
+        assert.deepEqual(heard.media.map(media=>[media.description, media.path, media.file]), [
+            ['duo', 'src\\alpha', 'three.txt'], ['heis', 'src', 'one.txt']],
+        'the disk\'s path is the media\'s, the file\'s own subdirectory is not');
+        assert.equal(m.contents('C:\\dst\\deux.txt'), 'two');
+        assert.equal(m.contents('C:\\dst\\three.txt'), 'three');
+    });
+
+test('SetupQueueCopyIndirect takes SetupQueueCopy\'s arguments in a 44- or 48-byte structure',
+    async()=>{
+        const m = await machine();
+        sources(m);
+        const queue = m.fns.SetupOpenFileQueue.handler();
+        const params = m.buffer(48);
+        /** @param {number} size @param {number} layout */
+        const fill = (size, layout)=>{
+            [size, queue, m.str('src'), 0, m.str('one.txt'), 0, 0, m.str('dst'), 0, 0, layout]
+                .forEach((value, index)=>m.view.setUint32(params + index * 4, value, true));
+            return m.fns.SetupQueueCopyIndirectA.handler([params]);
+        };
+        assert.equal(fill(40, 0), 0);
+        assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
+        assert.equal(fill(48, 0x1234), 0, 'a LayoutInf, as Windows 8 and later refuse it');
+        assert.equal(fill(44, 0), 1);
+        const heard = mediaCallback(m, ()=>null);
+        assert.equal(await m.fns.SetupCommitFileQueueA.handler([0, queue, heard.entry, 0]), 1);
+        assert.equal(m.contents('C:\\dst\\one.txt'), 'one');
+    });
+
+test('SetupInstallFile copies one file now: the context\'s line, its own subdirectory only',
+    async()=>{
+        // Wine's setupapi install test_install_file.
+        const m = await machine();
+        sources(m);
+        m.file('C:\\src\\media.inf', MEDIA_INF.replace('[section3]', 'two.txt\r\n[section3]'));
+        const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\media.inf'), 0,
+            INF_STYLE_WIN4, 0]);
+        const context = m.buffer(16);
+        /** @param {string} name @param {string} root @param {number} style */
+        const install = async(name, root, style)=>{
+            assert.equal(m.fns.SetupFindFirstLineA.handler([inf, m.str('section1'), m.str(name),
+                context]), 1, name);
+            return m.fns.SetupInstallFileA.handler([inf, context, m.str(name), m.str(root),
+                m.str(name), style, 0, 0]);
+        };
+        assert.equal(await install('one.txt', 'src', SP_COPY_REPLACEONLY), 0);
+        assert.equal(m.lastError(), 0, 'nothing to replace: not copied, no error');
+        assert.equal(await install('one.txt', 'src', 0), 1);
+        assert.equal(m.contents('C:\\dst\\one.txt'), 'one');
+        assert.equal(await install('two.txt', 'src', 0), 1);
+        assert.equal(m.contents('C:\\dst\\two.txt'), 'two');
+        m.fns.SetupFindFirstLineA.handler([inf, m.str('section3'), m.str('three.txt'), context]);
+        assert.equal(await m.fns.SetupInstallFileA.handler([inf, context, 0, m.str('src'), 0, 0, 0,
+            0]), 0);
+        assert.equal(m.lastError(), ERROR_FILE_NOT_FOUND, 'the disk\'s path is not looked in');
+        assert.equal(await m.fns.SetupInstallFileA.handler([0, 0, m.str('six.txt'),
+            m.str('src\\alpha'), m.str('C:\\dst\\6.txt'), 0, 0, 0]), 1);
+        assert.equal(m.contents('C:\\dst\\6.txt'), 'six');
+    });
+
+test('SetupGetInfFileList lists a directory\'s INFs of the styles asked', async()=>{
+    // Wine's setupapi install test_inffilelist.
+    const m = await machine();
+    m.volume.mkdir('C:\\infs');
+    m.file('C:\\infs\\a.inf', '[Version]\r\nSignature="$CHICAGO$"\r\n');
+    m.file('C:\\infs\\b.inf', '[Version]\r\nSignature="$Windows NT$"\r\n');
+    m.file('C:\\infs\\old.inf', 'This content does not match the inf file format');
+    m.file('C:\\infs\\c.txt', '[Version]\r\nSignature="$Chicago$"\r\n');
+    const required = m.buffer(4);
+    /** @param {string} directory @param {number} style @param {number} buffer @param {number} size */
+    const list = (directory, style, buffer, size)=>m.fns.SetupGetInfFileListW.handler([
+        m.wstr(directory), style, buffer, size, required]);
+    const out = m.buffer(200);
+    assert.equal(await list('C:\\infs', INF_STYLE_WIN4, out, 100), 1);
+    assert.equal(m.u32(required), 'a.inf b.inf '.length + 1);
+    assert.deepEqual(m.readWideString(out, 200).split(','), ['a.inf']);
+    assert.equal(await list('C:\\infs', 1, out, 100), 1, 'INF_STYLE_OLDNT');
+    assert.equal(m.u32(required), 'old.inf '.length + 1);
+    assert.equal(await list('C:\\infs', 3, 0, 0), 1);
+    assert.equal(m.u32(required), 'a.inf b.inf old.inf '.length + 1);
+    assert.equal(await list('C:\\infs', 3, out, 5), 0);
+    assert.equal(m.lastError(), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(await list('C:\\infs\\missing', 2, 0, 0), 1);
+    assert.equal(m.u32(required), 1);
+    assert.equal(m.lastError(), 3, 'ERROR_PATH_NOT_FOUND, and no files');
+    assert.equal(await list('C:\\infs\\a.inf\\', 2, 0, 0), 0);
+    assert.equal(m.lastError(), 267, 'ERROR_DIRECTORY');
+});
+
+test('appending to a value of another type fails the install with ERROR_INVALID_DATA', async()=>{
+    // Wine's setupapi install test_append_reg.
+    const m = await machine();
+    m.file('C:\\src\\append.inf', ['[Version]', 'Signature="$Chicago$"',
+        '[DefaultInstall]', 'AddReg=reg', '[reg]',
+        'HKCU,Software\\winetest,value,0x10008,"data"', ''].join('\r\n'));
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\append.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    const key = m.hive.create(/** @type {any} */ (m.hive.root(0x80000001)), 'Software\\winetest').key;
+    m.hive.setValue(key, 'value', 1, Uint8Array.of(0x73, 0));
+    assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, inf, m.str('DefaultInstall'),
+        SPINST_REGISTRY, 0, 0, 0, 0, 0, 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_DATA);
+    assert.deepEqual([...(m.hive.getValue(key, 'value')?.data ?? [])], [0x73, 0], 'untouched');
+});
+
+test('Include and Needs are carried out by InstallHinfSection only', async()=>{
+    // Wine's setupapi install test_include and test_needs.
+    const m = await machine();
+    m.file('C:\\test.inf', ['[Version]', 'Signature="$Chicago$"',
+        '[DefaultInstall]', 'AddReg=r1', 'Include=.\\test2.inf', 'Needs=other',
+        '[r1]', 'HKCU,Software\\winetest,val1,,"data1"', ''].join('\r\n'));
+    m.file('C:\\test2.inf', ['[Version]', 'Signature="$Chicago$"', '[other]', 'AddReg=r2',
+        '[r2]', 'HKCU,Software\\winetest,val2,,"data2"', ''].join('\r\n'));
+    const values = ()=>{
+        const key = m.hive.open(/** @type {any} */ (m.hive.root(0x80000001)), 'Software\\winetest');
+        return ['val1', 'val2'].filter(name=>key && m.hive.getValue(key, name));
+    };
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\test.inf'), 0, INF_STYLE_WIN4,
+        0]);
+    assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, inf,
+        m.str('DefaultInstall'), SPINST_REGISTRY, 0, 0, 0, 0, 0, 0, 0]), 1);
+    assert.deepEqual(values(), ['val1']);
+    m.hive.remove(/** @type {any} */ (m.hive.root(0x80000001)), 'Software\\winetest');
+    await m.fns.InstallHinfSectionW.handler([0, 0, m.wstr('DefaultInstall 128 .\\test.inf'), 0]);
+    assert.deepEqual(values(), ['val1', 'val2']);
+});
+
+test('ProfileItems make Start menu folders and links, and take them away', async()=>{
+    const m = await machine();
+    m.file('C:\\src\\items.inf', ['[Version]', 'Signature="$Chicago$"',
+        '[DefaultInstall]', 'ProfileItems=Item,Group',
+        '[Item]', 'Name=Notes', 'CmdLine=11,,notepad.exe', 'SubDir=Tools',
+        '[Group]', 'Name=Games,4',
+        '[Remove]', 'ProfileItems=Gone', '[Gone]', 'Name=Notes,2', 'SubDir=Tools', '']
+        .join('\r\n'));
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\items.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, inf,
+        m.str('DefaultInstall'), SPINST_PROFILEITEMS, 0, 0, 0, 0, 0, 0, 0]), 1);
+    const programs = shellFolders()['Common Programs'];
+    assert.ok(m.volume.stat(`${programs}\\Games`)?.isDirectory, 'a group is a folder');
+    const link = m.contents(`${programs}\\Tools\\Notes.lnk`);
+    assert.ok(link, 'a link');
+    assert.equal(decodeShellLink(Uint8Array.from(link, c=>c.charCodeAt(0)))?.idListPath,
+        'C:\\WINDOWS\\system32\\notepad.exe');
+    await m.fns.SetupInstallFromInfSectionA.handler([0, inf, m.str('Remove'), SPINST_PROFILEITEMS,
+        0, 0, 0, 0, 0, 0, 0]);
+    assert.equal(m.contents(`${programs}\\Tools\\Notes.lnk`), null);
+});
+
+test('RegisterDlls loads each DLL and calls its entries inside a COM apartment', async()=>{
+    /** @type {string[]} */
+    const heard = [];
+    /** @type {Map<string, number>} */
+    const entries = new Map();
+    let m = /** @type {Awaited<ReturnType<typeof machine>>} */ (/** @type {unknown} */ (null));
+    m = await machine({ libraries: {
+        loadAnsi: (/** @type {number} */ name)=>{
+            heard.push(`load ${m.readCString(name, 260)}`);
+            return 0x10000;
+        },
+        procAddress: (/** @type {number} */ _, /** @type {number} */ name)=>
+            entries.get(m.readCString(name, 260)) ?? 0,
+        free: ()=>heard.push('free'),
+    } });
+    for (const name of ['CoInitialize', 'CoUninitialize', 'DllRegisterServer',
+        'DllUnregisterServer', 'DllInstall'])
+    {
+        entries.set(name, m.callback(args=>{
+            heard.push(name === 'DllInstall'
+                ? `${name} ${args[0]} ${m.readWideString(args[1], 100)}` : name);
+            return 0;
+        }));
+    }
+    m.file('C:\\src\\reg.inf', ['[Version]', 'Signature="$Chicago$"',
+        '[DefaultInstall]', 'RegisterDlls=dlls', 'UnregisterDlls=dlls',
+        '[dlls]', '11,,one.dll,1', '11,sub,two.dll,2,,args', ''].join('\r\n'));
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\reg.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, inf,
+        m.str('DefaultInstall'), SPINST_REGSVR, 0, 0, 0, 0, 0, 0, 0]), 1);
+    assert.deepEqual(heard.splice(0), ['load ole32.dll', 'CoInitialize',
+        'load C:\\WINDOWS\\system32\\one.dll', 'DllRegisterServer', 'free',
+        'load C:\\WINDOWS\\system32\\sub\\two.dll', 'DllInstall 1 args', 'free',
+        'CoUninitialize']);
+    assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, inf,
+        m.str('DefaultInstall'), SPINST_UNREGSVR, 0, 0, 0, 0, 0, 0, 0]), 1);
+    assert.ok(heard.includes('DllUnregisterServer') && heard.includes('DllInstall 0 args'));
 });

@@ -8,7 +8,8 @@ import { INF_STYLE_OLDNT, INF_STYLE_WIN4, infText, parseInf } from './inf.js';
 import { decodeFolder, folderOf, readCabinet } from '../cabinet/cabinet.js';
 import { expand as expandLz, readHeader as lzHeader } from '../lz32/expand.js';
 import {
-    commitQueue, lookup, queueInstallSection, targetDirectory as listTarget,
+    commitQueue, lookup, pushCopy, queueFileList, queueInfCopy, queueInstallSection,
+    targetDirectory as listTarget,
 } from './queue.js';
 import { standardDirids } from './dirids.js';
 import { createStringTableFunctions } from './stringtable.js';
@@ -16,7 +17,8 @@ import { createDiskSpaceFunctions } from './diskspace.js';
 import {
     CLASS_KEY, DEVICE_CLASSES_KEY, GUID_NULL, SPINT, createDeviceStore, interfacePath,
 } from './devices.js';
-import { installRegistry } from './registry.js';
+import { infNumber, installRegistry } from './registry.js';
+import { writeShellLink } from '../common/shell-link.js';
 import { CATALOG_STORE } from '../sfc/functions.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_CLASSES_ROOT, HKEY_USERS } from '../advapi32/registry.js';
@@ -49,6 +51,7 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_INVALID_USER_BUFFER = 1784;
 const ERROR_FILE_EXISTS = 80;
+const ERROR_DIRECTORY = 267;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NO_SUCH_DEVINST = 0xe000020b;
 export const ERROR_SECTION_NOT_FOUND = 0xe0000101;
@@ -143,6 +146,22 @@ const ERROR_FILE_INVALID = 1006;
 /** SetupInstallFromInfSection's flags. */
 const SPINST_REGISTRY = 0x04;
 const SPINST_FILES = 0x10;
+const SPINST_UNREGSVR = 0x80;
+const SPINST_REGSVR = 0x40;
+const SPINST_PROFILEITEMS = 0x100;
+
+/** The directives an install section's carrying out answers for. */
+const CARRIED_OUT = new Set(['copyfiles', 'delfiles', 'renfiles', 'addreg', 'delreg', 'include',
+    'needs', 'registerdlls', 'unregisterdlls', 'profileitems']);
+
+/** A RegisterDlls line's flags: call DllRegisterServer, call DllInstall. */
+const FLG_REGSVR_DLLREGISTER = 0x1;
+const FLG_REGSVR_DLLINSTALL = 0x2;
+
+/** A profile item's flags: the user's menu, delete it, a group (a folder). */
+const FLG_PROFITEM_CURRENTUSER = 0x1;
+const FLG_PROFITEM_DELETE = 0x2;
+const FLG_PROFITEM_GROUP = 0x4;
 const SPINST_ALL = 0x3ff;
 
 /** SetupGetInfInformation's search controls. */
@@ -186,6 +205,11 @@ const SOURCE_MEDIA_SIZE = 24;
  * @property {(service: { name: string, displayName: string, binary: string, type: number,
  *     start: number, errorControl: number, startName: string | null }) => number} [createService]
  *           A service made through the service control manager: the error, 0 for none.
+ * @property {{ loadAnsi: (name: number) => number | Promise<number>,
+ *     procAddress: (module: number, name: number) => number | Promise<number>,
+ *     free: (module: number) => unknown }} [libraries]
+ *           kernel32's LoadLibraryA, GetProcAddress and FreeLibrary, for the
+ *           DLLs an INF registers; names are guest ANSI strings.
  * @property {(handle: number) => any} [keyOf]
  *           The hive's key a registry handle the program holds is open on;
  *           null for one that is none.
@@ -774,10 +798,29 @@ export function createSetupapiFunctions(host){
             const media = memory.block(SOURCE_MEDIA_SIZE);
             const newPath = memory.block(MAX_PATH * 2);
             return await commitQueue(queue, {
-                files: host.files,
-                readWhole,
-                writeWhole,
-                makeDirectories,
+                exists: path=>exists(pathOf(path)),
+                remove: path=>{
+                    const full = pathOf(path);
+                    if (full !== null && exists(full))
+                    {
+                        host.files.remove(full);
+                    }
+                },
+                rename: (from, to)=>{
+                    const source = pathOf(from);
+                    const target = pathOf(to);
+                    return source !== null && target !== null && exists(source)
+                        && Boolean(host.files.rename(source, target));
+                },
+                readWhole: path=>readWhole(pathOf(path)),
+                writeWhole: (path, bytes)=>writeWhole(pathOf(path), bytes),
+                makeDirectories: directory=>{
+                    const full = pathOf(directory);
+                    if (full !== null)
+                    {
+                        makeDirectories(full);
+                    }
+                },
                 /**
                  * @param {number} message
                  * @param {{ kind: 'paths', target: string | null, source: string | null,
@@ -791,43 +834,54 @@ export function createSetupapiFunctions(host){
                     {
                         return callback(message, first);
                     }
-                    let param1;
-                    let param2 = second;
-                    if (first.kind === 'paths')
+                    // A notification's strings live while the callback has them:
+                    // a callback that keeps answering NEEDMEDIA with a path is
+                    // asked again for as long as it does.
+                    const strings = scratch();
+                    try
                     {
-                        const view = new DataView(new ArrayBuffer(FILEPATHS_SIZE));
-                        view.setUint32(0, memory.string(first.target, wide), true);
-                        view.setUint32(4, memory.string(first.source, wide), true);
-                        view.setUint32(8, first.error ?? 0, true);
-                        host.writeMemory(paths, new Uint8Array(view.buffer));
-                        param1 = paths;
-                        if (message === SPFILENOTIFY.COPYERROR)
+                        let param1;
+                        let param2 = second;
+                        if (first.kind === 'paths')
                         {
+                            const view = new DataView(new ArrayBuffer(FILEPATHS_SIZE));
+                            view.setUint32(0, strings.string(first.target, wide), true);
+                            view.setUint32(4, strings.string(first.source, wide), true);
+                            view.setUint32(8, first.error ?? 0, true);
+                            host.writeMemory(paths, new Uint8Array(view.buffer));
+                            param1 = paths;
+                            if (message === SPFILENOTIFY.COPYERROR)
+                            {
+                                host.writeMemory(newPath, new Uint8Array(MAX_PATH * 2));
+                                param2 = newPath;
+                            }
+                        }
+                        else if (first.kind === 'media')
+                        {
+                            const view = new DataView(new ArrayBuffer(SOURCE_MEDIA_SIZE));
+                            view.setUint32(4, strings.string(first.tagfile, wide), true);
+                            view.setUint32(8, strings.string(first.description, wide), true);
+                            view.setUint32(12, strings.string(first.path, wide), true);
+                            view.setUint32(16, strings.string(first.file, wide), true);
+                            view.setUint32(20, first.flags, true);
+                            host.writeMemory(media, new Uint8Array(view.buffer));
                             host.writeMemory(newPath, new Uint8Array(MAX_PATH * 2));
+                            param1 = media;
                             param2 = newPath;
                         }
+                        else
+                        {
+                            param1 = first.value;
+                        }
+                        const answer = (await host.call(callback >>> 0,
+                            [context >>> 0, message, param1 >>> 0, param2 >>> 0], thread)) >>> 0;
+                        const path = param2 === newPath ? textOf(newPath, wide) ?? '' : '';
+                        return { answer, path };
                     }
-                    else if (first.kind === 'media')
+                    finally
                     {
-                        const view = new DataView(new ArrayBuffer(SOURCE_MEDIA_SIZE));
-                        view.setUint32(4, memory.string(first.tagfile, wide), true);
-                        view.setUint32(8, memory.string(first.description, wide), true);
-                        view.setUint32(12, memory.string(first.path, wide), true);
-                        view.setUint32(16, memory.string(first.file, wide), true);
-                        view.setUint32(20, first.flags, true);
-                        host.writeMemory(media, new Uint8Array(view.buffer));
-                        host.writeMemory(newPath, new Uint8Array(MAX_PATH * 2));
-                        param1 = media;
-                        param2 = newPath;
+                        strings.release();
                     }
-                    else
-                    {
-                        param1 = first.value;
-                    }
-                    const answer = (await host.call(callback >>> 0,
-                        [context >>> 0, message, param1 >>> 0, param2 >>> 0], thread)) >>> 0;
-                    const path = param2 === newPath ? textOf(newPath, wide) ?? '' : '';
-                    return { answer, path };
                 },
             });
         }
@@ -1235,21 +1289,22 @@ export function createSetupapiFunctions(host){
      * DelFiles and RenFiles and commits them through the callback, sources
      * found from the root by SourceDisksNames and SourceDisksFiles;
      * SPINST_REGISTRY then carries out its DelReg and AddReg, HKR the key
-     * given. The other directives are reported as not carried out. The
-     * error, 0 for none.
+     * given; SPINST_PROFILEITEMS its ProfileItems; SPINST_UNREGSVR and
+     * SPINST_REGSVR last its UnregisterDlls and RegisterDlls. The other
+     * directives are reported as not carried out. The error, 0 for none.
      *
      * @param {OpenInf} open @param {import('./inf.js').InfSection} section
      * @param {{ wanted: number, relative: any, root: string, copyFlags: number,
      *     callback: QueueCallback, context: number, thread: any, wide: boolean, api: string }} how
      *     `relative` is the key HKR stands for.
-     * @returns {number | Promise<number>}
+     * @returns {number | Promise<number | null>}
      */
     const installSection = (open, section, how)=>{
         const { wanted, relative, root, copyFlags, callback, context, thread, wide, api } = how;
         for (const line of section.lines)
         {
             const directive = line.key?.toLowerCase() ?? '';
-            if (!['copyfiles', 'delfiles', 'renfiles', 'addreg', 'delreg'].includes(directive)
+            if (!CARRIED_OUT.has(directive)
                 && directive !== '' && wanted & ~(SPINST_FILES | SPINST_REGISTRY))
             {
                 host.divergence?.(api, `the ${line.key} directive is not carried out`);
@@ -1258,7 +1313,7 @@ export function createSetupapiFunctions(host){
         const registry = ()=>{
             if ((wanted & SPINST_REGISTRY) !== 0 && host.registry)
             {
-                installRegistry(host.registry, open.inf, section, {
+                return installRegistry(host.registry, open.inf, section, {
                     relativeRoot: relative,
                     expand: value=>expand(open, value),
                     divergence: detail=>host.divergence?.(api, detail),
@@ -1266,16 +1321,249 @@ export function createSetupapiFunctions(host){
             }
             return ERROR_SUCCESS;
         };
+        /** @param {number} code  The registry's. @returns {number | Promise<number>} */
+        const after = code=>{
+            if (code !== ERROR_SUCCESS)
+            {
+                return code;
+            }
+            if ((wanted & SPINST_PROFILEITEMS) !== 0)
+            {
+                profileItems(open, section, api);
+            }
+            return (wanted & (SPINST_UNREGSVR | SPINST_REGSVR)) === 0 ? ERROR_SUCCESS
+                : registerDlls(open, section, wanted, thread, api);
+        };
         if ((wanted & SPINST_FILES) === 0)
         {
-            return registry();
+            return after(registry());
         }
         const queue = newQueue();
         queueInstallSection(queue, open.inf, section, {
             root, copyFlags, dirid: diridOf(open),
         });
         return commit(queue, callback, context, thread, wide)
-            .then(code=>(code === ERROR_SUCCESS ? registry() : code));
+            .then(code=>(code === ERROR_SUCCESS ? after(registry()) : code));
+    };
+
+    /**
+     * A line's fields with its key among them, for the lines whose first
+     * comma comes before any `=`: a key there is the line's first field.
+     *
+     * @param {import('./inf.js').InfLine} line
+     */
+    const allFields = line=>(line.key === null
+        || (line.fields.length === 1 && line.fields[0] === line.key)
+        ? line.fields : [line.key, ...line.fields]);
+
+    /**
+     * The sections an install section's directive names, across its lines.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section @param {string} key
+     */
+    const namedBy = (open, section, key)=>section.lines
+        .filter(line=>line.key?.toLowerCase() === key)
+        .flatMap(line=>line.fields).filter(name=>name !== '')
+        .map(name=>open.inf.section(name)).filter(found=>found !== null);
+
+    /**
+     * A file a line names as a DIRID, a subdirectory and a name.
+     *
+     * @param {OpenInf} open @param {string[]} fields
+     */
+    const diridPath = (open, fields)=>joinPath(
+        diridOf(open)(Number.parseInt(fields[0] ?? '', 10)) ?? '', fields[1] ?? '',
+        fields[2] ?? '');
+
+    /**
+     * An install section's UnregisterDlls and then its RegisterDlls, as
+     * asked: each line a DLL by DIRID, subdirectory and name, then flags --
+     * FLG_REGSVR_DLLREGISTER for DllRegisterServer (DllUnregisterServer to
+     * unregister), FLG_REGSVR_DLLINSTALL for DllInstall with the line's
+     * arguments -- each loaded, called on the installing thread and freed.
+     * A DLL that does not load or lacks the entry is passed over.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section
+     * @param {number} wanted @param {any} thread @param {string} api
+     */
+    const registerDlls = async(open, section, wanted, thread, api)=>{
+        const libraries = host.libraries;
+        // A registration runs in a COM apartment the installer enters, as
+        // Windows' does -- an ATL DLL reaches its registrar through COM --
+        // and leaves when it entered it; a thread already in the other
+        // model keeps its own.
+        const leave = libraries ? await enterCom(libraries, thread) : null;
+        try
+        {
+            await registerEach(open, section, wanted, thread, api);
+        }
+        finally
+        {
+            await leave?.();
+        }
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * Enters a single-threaded apartment on the thread through ole32's
+     * CoInitialize, called as the thread calls it; what leaves it again,
+     * null when it was not entered.
+     *
+     * @param {NonNullable<SetupapiHost['libraries']>} libraries @param {any} thread
+     * @returns {Promise<(() => unknown) | null>}
+     */
+    const enterCom = async(libraries, thread)=>{
+        const memory = scratch();
+        try
+        {
+            const ole32 = (await libraries.loadAnsi(memory.string('ole32.dll'))) >>> 0;
+            const initialize = ole32 === 0 ? 0
+                : (await libraries.procAddress(ole32, memory.string('CoInitialize'))) >>> 0;
+            const uninitialize = ole32 === 0 ? 0
+                : (await libraries.procAddress(ole32, memory.string('CoUninitialize'))) >>> 0;
+            if (initialize === 0 || uninitialize === 0
+                || ((await host.call(initialize, [0], thread)) | 0) < 0)
+            {
+                return null;
+            }
+            return ()=>host.call(uninitialize, [], thread);
+        }
+        finally
+        {
+            memory.release();
+        }
+    };
+
+    /**
+     * registerDlls' walk over the sections, in an apartment or not.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section
+     * @param {number} wanted @param {any} thread @param {string} api
+     */
+    const registerEach = async(open, section, wanted, thread, api)=>{
+        const libraries = host.libraries;
+        for (const [flag, key, unregister] of /** @type {const} */ ([
+            [SPINST_UNREGSVR, 'unregisterdlls', true], [SPINST_REGSVR, 'registerdlls', false]]))
+        {
+            if ((wanted & flag) === 0)
+            {
+                continue;
+            }
+            for (const named of namedBy(open, section, key))
+            {
+                for (const line of /** @type {import('./inf.js').InfSection} */ (named).lines)
+                {
+                    const fields = allFields(line).map(field=>expand(open, field));
+                    const flags = infNumber(fields[3] ?? '');
+                    if (!libraries)
+                    {
+                        host.divergence?.(api, `${fields[2] ?? ''} is not registered: no`
+                            + ' library loader');
+                        continue;
+                    }
+                    const memory = scratch();
+                    try
+                    {
+                        const module = (await libraries.loadAnsi(
+                            memory.string(diridPath(open, fields)))) >>> 0;
+                        if (module === 0)
+                        {
+                            continue;
+                        }
+                        /** @param {string} name @param {number[]} args */
+                        const call = async(name, args)=>{
+                            const entry = (await libraries.procAddress(module,
+                                memory.string(name))) >>> 0;
+                            if (entry !== 0)
+                            {
+                                await host.call(entry, args, thread);
+                            }
+                        };
+                        if ((flags & FLG_REGSVR_DLLREGISTER) !== 0)
+                        {
+                            await call(unregister ? 'DllUnregisterServer' : 'DllRegisterServer',
+                                []);
+                        }
+                        if ((flags & FLG_REGSVR_DLLINSTALL) !== 0)
+                        {
+                            await call('DllInstall', [unregister ? 0 : 1,
+                                memory.string(fields[5] ?? '', true)]);
+                        }
+                        await libraries.free(module);
+                    }
+                    finally
+                    {
+                        memory.release();
+                    }
+                }
+            }
+        }
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * An install section's ProfileItems: each section a Start menu entry
+     * under the common Programs folder (the user's with
+     * FLG_PROFITEM_CURRENTUSER) and its SubDir -- a folder named Name for
+     * FLG_PROFITEM_GROUP, else a link Name.lnk to its CmdLine with its
+     * WorkingDir, IconPath, IconIndex, HotKey and InfoTip; with
+     * FLG_PROFITEM_DELETE, the entry taken away instead.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section @param {string} api
+     */
+    const profileItems = (open, section, api)=>{
+        for (const item of namedBy(open, section, 'profileitems'))
+        {
+            /** @param {string} key */
+            const value = key=>{
+                const line = /** @type {import('./inf.js').InfSection} */ (item).lines
+                    .find(candidate=>candidate.key?.toLowerCase() === key.toLowerCase());
+                return line ? line.fields.map(field=>expand(open, field)) : null;
+            };
+            const [name = '', flagText = ''] = value('Name') ?? [];
+            if (name === '')
+            {
+                continue;
+            }
+            const flags = infNumber(flagText);
+            const base = (flags & FLG_PROFITEM_CURRENTUSER) !== 0 ? host.folders.Programs
+                : host.folders['Common Programs'];
+            const directory = pathOf(joinPath(base, value('SubDir')?.[0] ?? ''));
+            if (directory === null)
+            {
+                continue;
+            }
+            const path = joinPath(directory,
+                (flags & FLG_PROFITEM_GROUP) !== 0 ? name : `${name}.lnk`);
+            if ((flags & FLG_PROFITEM_DELETE) !== 0)
+            {
+                if (exists(path))
+                {
+                    host.files.remove(path);
+                }
+                continue;
+            }
+            if ((flags & FLG_PROFITEM_GROUP) !== 0)
+            {
+                makeDirectories(path);
+                continue;
+            }
+            makeDirectories(directory);
+            const command = value('CmdLine');
+            const working = value('WorkingDir');
+            const icon = value('IconPath');
+            if (!writeShellLink(host.files, path, {
+                target: command ? diridPath(open, command) : '',
+                workingDirectory: working ? diridPath(open, [...working.slice(0, 2), '']) : '',
+                iconLocation: icon ? diridPath(open, icon) : '',
+                iconIndex: infNumber(value('IconIndex')?.[0] ?? ''),
+                hotkey: infNumber(value('HotKey')?.[0] ?? '') & 0xffff,
+                description: value('InfoTip')?.[0] ?? '',
+            }))
+            {
+                host.divergence?.(api, `the profile item ${name} could not be written`);
+            }
+        }
     };
 
     /**
@@ -1350,6 +1638,150 @@ export function createSetupapiFunctions(host){
             }
         }
         return ERROR_SUCCESS;
+    };
+
+    /**
+     * SetupQueueCopy's body, for it and SetupQueueCopyIndirect.
+     *
+     * @param {number} handle
+     * @param {{ root: string | null, subdirectory: string | null, file: string | null,
+     *     description: string | null, tagfile: string | null, directory: string | null,
+     *     target: string | null, flags: number }} copy
+     */
+    const queueCopy = (handle, copy)=>{
+        const queue = fileQueue(handle);
+        if (!queue)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (!copy.file || !copy.directory)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const sourceRoot = copy.root ?? '';
+        const subdirectory = copy.subdirectory ?? '';
+        pushCopy(queue, {
+            sourceRoot,
+            subdirectory,
+            sourcePath: joinPath(sourceRoot, subdirectory),
+            sourceFile: copy.file,
+            description: copy.description || null,
+            tagfile: copy.tagfile || null,
+            targetDirectory: pathOf(copy.directory) ?? copy.directory,
+            targetFile: copy.target || copy.file,
+            flags: copy.flags,
+        });
+        return fail(ERROR_SUCCESS, 1);
+    };
+
+    /**
+     * Queues a file list section of an INF's: SetupQueueCopySection,
+     * SetupQueueDeleteSection and SetupQueueRenameSection.
+     *
+     * @param {number} queueHandle @param {number} handle  The INF with the source disks.
+     * @param {number} listHandle  The INF with the list, when not that one.
+     * @param {string | null} name @param {'copyfiles' | 'delfiles' | 'renfiles'} directive
+     * @param {string} root @param {number} copyFlags
+     */
+    const queueList = (queueHandle, handle, listHandle, name, directive, root, copyFlags)=>{
+        const queue = fileQueue(queueHandle);
+        const open = openInf(handle);
+        const list = (listHandle >>> 0) === 0 ? open : openInf(listHandle);
+        if (!queue || !open || !list)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (name === null || !list.inf.section(name))
+        {
+            return fail(ERROR_SECTION_NOT_FOUND);
+        }
+        queueFileList(queue, list.inf, name, directive, { root, copyFlags, dirid: diridOf(list),
+            layout: open.inf });
+        return fail(ERROR_SUCCESS, 1);
+    };
+
+    /**
+     * SetupInstallFile's body: one file copied now, not queued.
+     *
+     * With an INF, the context is the file's line in a CopyFiles list: its
+     * target is the list's DestinationDirs directory, under DestinationName
+     * when given, else the line's name, and its source is that line's under
+     * the root, in the subdirectory its [SourceDisksFiles] line gives -- the
+     * disk's own path is not looked in. Without one, SourceFile is under the
+     * root and DestinationName is the whole target path.
+     *
+     * A copy SP_COPY_REPLACEONLY or SP_COPY_NOOVERWRITE leaves undone is
+     * FALSE with ERROR_SUCCESS, as for a copy found unnecessary.
+     *
+     * @param {number} handle @param {number} context @param {string | null} named  SourceFile.
+     * @param {string | null} root @param {string | null} destination @param {number} style
+     * @param {number} callback @param {number} inUse @param {string} api
+     */
+    const installFile = (handle, context, named, root, destination, style, callback, inUse, api)=>{
+        let source;
+        let target;
+        if ((handle >>> 0) !== 0)
+        {
+            const open = openInf(handle);
+            if (!open)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if ((context >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const at = readContext(context);
+            const holder = openInf(at.handle);
+            const section = holder?.list[at.section];
+            const line = section?.lines[at.line];
+            if (!holder || !section || !line)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const name = line.fields[0] || line.key || '';
+            const file = line.fields[1] || name;
+            const disk = lookup(open.inf, 'SourceDisksFiles', file);
+            source = joinPath(root ?? '', disk?.fields[1] ?? '', file);
+            target = joinPath(listTarget(holder.inf, section.name, diridOf(holder)),
+                destination || name);
+        }
+        else
+        {
+            if (!named || !destination)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            source = joinPath(root ?? '', named);
+            target = destination;
+        }
+        if ((callback >>> 0) !== 0)
+        {
+            host.divergence?.(api, 'the copy is not reported to CopyMsgHandler');
+        }
+        if ((inUse >>> 0) !== 0)
+        {
+            writeU32(inUse, 0);
+        }
+        const targetPath = pathOf(target);
+        const there = exists(targetPath);
+        if ((there && (style & SP_COPY_NOOVERWRITE)) || (!there && (style & SP_COPY_REPLACEONLY)))
+        {
+            return fail(ERROR_SUCCESS);
+        }
+        const bytes = readWhole(pathOf(source));
+        if (bytes === null)
+        {
+            return fail(ERROR_FILE_NOT_FOUND);
+        }
+        const thread = host.callerThread();
+        /** @param {Uint8Array} data */
+        const place = data=>{
+            const code = writeWhole(targetPath, data);
+            host.setLastErrorFor(thread, code);
+            return code === ERROR_SUCCESS ? 1 : 0;
+        };
+        return bytes instanceof Uint8Array ? place(bytes) : bytes.then(place);
     };
 
     /**
@@ -2591,56 +3023,332 @@ export function createSetupapiFunctions(host){
          * BOOL SetupQueueCopyA(HSPFILEQ QueueHandle, PCSTR SourceRootPath,
          *     PCSTR SourcePath, PCSTR SourceFilename, PCSTR SourceDescription,
          *     PCSTR SourceTagfile, PCSTR TargetDirectory, PCSTR TargetFilename,
-         *     DWORD CopyStyle)
+         *     DWORD CopyStyle), and the W form
          *
-         * The file is looked for under the root joined with SourcePath, and
-         * the tag file at the root. No target name means the source's; no
-         * source name or no target directory is ERROR_INVALID_PARAMETER.
+         * The root and the description and tag file are the media the file
+         * comes from, SourcePath its directory under the root; the media's
+         * path is told to the callback as the program gave it. No target
+         * name means the source's; no source name or no target directory is
+         * ERROR_INVALID_PARAMETER.
          */
-        SetupQueueCopyA: {
+        ...bothWidths('SetupQueueCopy', wide=>({
             argBytes: 36,
             /** @param {number[]} args */
-            handler: ([handle, rootPointer, pathPointer, filePointer, descriptionPointer,
-                tagPointer, directoryPointer, targetPointer, style])=>{
-                const queue = fileQueue(handle);
+            handler: (/** @type {number[]} */ [handle, rootPointer, pathPointer, filePointer,
+                descriptionPointer, tagPointer, directoryPointer, targetPointer, style])=>
+                queueCopy(handle, {
+                    root: textOf(rootPointer, wide), subdirectory: textOf(pathPointer, wide),
+                    file: textOf(filePointer, wide), description: textOf(descriptionPointer, wide),
+                    tagfile: textOf(tagPointer, wide), directory: textOf(directoryPointer, wide),
+                    target: textOf(targetPointer, wide), flags: style >>> 0,
+                }),
+        })),
+
+        /**
+         * BOOL SetupQueueCopyIndirectA(PSP_FILE_COPY_PARAMS_A CopyParams), and the W form
+         *
+         * SetupQueueCopy's arguments in a structure: cbSize, QueueHandle,
+         * SourceRootPath, SourcePath, SourceFilename, SourceDescription,
+         * SourceTagfile, TargetDirectory, TargetFilename, CopyStyle,
+         * LayoutInf, and since Windows XP SecurityDescriptor -- cbSize 44 or
+         * 48. A LayoutInf is refused with ERROR_INVALID_PARAMETER, as Windows
+         * 8 and later refuse it.
+         */
+        ...bothWidths('SetupQueueCopyIndirect', wide=>({
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [params])=>{
+                if ((params >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const view = new DataView(host.readMemory(params >>> 0, 44).slice().buffer);
+                /** @param {number} index */
+                const field = index=>view.getUint32(index * 4, true);
+                if ((field(0) !== 44 && field(0) !== 48) || field(10) !== 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                return queueCopy(field(1), {
+                    root: textOf(field(2), wide), subdirectory: textOf(field(3), wide),
+                    file: textOf(field(4), wide), description: textOf(field(5), wide),
+                    tagfile: textOf(field(6), wide), directory: textOf(field(7), wide),
+                    target: textOf(field(8), wide), flags: field(9),
+                });
+            },
+        })),
+
+        /**
+         * BOOL SetupQueueDefaultCopyA(HSPFILEQ QueueHandle, HINF InfHandle,
+         *     PCSTR SourceRootPath, PCSTR SourceFilename, PCSTR TargetFilename,
+         *     DWORD CopyStyle), and the W form
+         *
+         * One file to the INF's DefaultDestDir, its media from the INF's
+         * source disks. No source name is ERROR_INVALID_PARAMETER.
+         */
+        ...bothWidths('SetupQueueDefaultCopy', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, handle, rootPointer, filePointer,
+                targetPointer, style])=>{
+                const queue = fileQueue(queueHandle);
+                const open = openInf(handle);
+                if (!queue || !open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const source = textOf(filePointer, wide);
+                if (!source)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                queueInfCopy(queue, open.inf, { root: textOf(rootPointer, wide) ?? '', source,
+                    targetDirectory: listTarget(open.inf, 'DefaultDestDir', diridOf(open)),
+                    targetFile: textOf(targetPointer, wide) || source, flags: style >>> 0 });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupQueueCopySectionA(HSPFILEQ QueueHandle, PCSTR SourceRootPath,
+         *     HINF InfHandle, HINF ListInfHandle, PCSTR Section, DWORD CopyStyle),
+         *     and the W form
+         *
+         * A CopyFiles list's files: the list in ListInfHandle's INF when one
+         * is given, the source disks in InfHandle's.
+         */
+        ...bothWidths('SetupQueueCopySection', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, rootPointer, handle, listHandle,
+                sectionPointer, style])=>queueList(queueHandle, handle, listHandle,
+                textOf(sectionPointer, wide), 'copyfiles', textOf(rootPointer, wide) ?? '',
+                style >>> 0),
+        })),
+
+        /**
+         * BOOL SetupQueueDeleteSectionA(HSPFILEQ QueueHandle, HINF InfHandle,
+         *     HINF ListInfHandle, PCSTR Section), and the W form
+         */
+        ...bothWidths('SetupQueueDeleteSection', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, handle, listHandle, sectionPointer])=>
+                queueList(queueHandle, handle, listHandle, textOf(sectionPointer, wide),
+                    'delfiles', '', 0),
+        })),
+
+        /**
+         * BOOL SetupQueueRenameSectionA(HSPFILEQ QueueHandle, HINF InfHandle,
+         *     HINF ListInfHandle, PCSTR Section), and the W form
+         */
+        ...bothWidths('SetupQueueRenameSection', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, handle, listHandle, sectionPointer])=>
+                queueList(queueHandle, handle, listHandle, textOf(sectionPointer, wide),
+                    'renfiles', '', 0),
+        })),
+
+        /**
+         * BOOL SetupQueueDeleteA(HSPFILEQ QueueHandle, PCSTR PathPart1, PCSTR PathPart2),
+         * and the W form -- the file the two parts make joined.
+         */
+        ...bothWidths('SetupQueueDelete', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, firstPointer, secondPointer])=>{
+                const queue = fileQueue(queueHandle);
                 if (!queue)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const sourceFile = text(filePointer);
-                const targetDirectory = text(directoryPointer);
-                if (!sourceFile || !targetDirectory)
+                const first = textOf(firstPointer, wide);
+                if (first === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const root = text(rootPointer) ?? '';
-                const where = joinPath(root, text(pathPointer) ?? '');
-                const sourcePath = where === '' ? '' : host.fullPath(where);
-                queue.copies.push({
-                    sourceRoot: root === '' ? sourcePath : host.fullPath(root),
-                    sourcePath,
-                    sourceFile,
-                    description: text(descriptionPointer) || null,
-                    tagfile: text(tagPointer) || null,
-                    targetDirectory: host.fullPath(targetDirectory),
-                    targetFile: text(targetPointer) || sourceFile,
-                    flags: style >>> 0,
+                queue.deletes.push({ targetDirectory: first,
+                    targetFile: textOf(secondPointer, wide) ?? '' });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupQueueRenameA(HSPFILEQ QueueHandle, PCSTR SourcePath,
+         *     PCSTR SourceFilename, PCSTR TargetPath, PCSTR TargetFilename),
+         *     and the W form
+         *
+         * No target path is the source's: a rename in place. A rename into
+         * another directory moves the file.
+         */
+        ...bothWidths('SetupQueueRename', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, sourcePathPointer, sourcePointer,
+                targetPathPointer, targetPointer])=>{
+                const queue = fileQueue(queueHandle);
+                if (!queue)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const sourceDirectory = textOf(sourcePathPointer, wide);
+                const sourceFile = textOf(sourcePointer, wide);
+                const targetFile = textOf(targetPointer, wide);
+                if (sourceDirectory === null || !sourceFile || !targetFile)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                queue.renames.push({ sourceDirectory, sourceFile,
+                    targetDirectory: textOf(targetPathPointer, wide) ?? sourceDirectory,
+                    targetFile });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupInstallFilesFromInfSectionA(HINF InfHandle, HINF LayoutInfHandle,
+         *     HSPFILEQ FileQueue, PCSTR SectionName, PCSTR SourceRootPath, UINT CopyFlags),
+         *     and the W form
+         *
+         * Queues an install section's CopyFiles, DelFiles and RenFiles; the
+         * source disks are the layout INF's when one is given. No root is the
+         * INF's own directory.
+         */
+        ...bothWidths('SetupInstallFilesFromInfSection', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, layoutHandle, queueHandle, sectionPointer,
+                rootPointer, copyFlags])=>{
+                const queue = fileQueue(queueHandle);
+                const open = openInf(handle);
+                const layout = (layoutHandle >>> 0) === 0 ? open : openInf(layoutHandle);
+                if (!queue || !open || !layout)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const section = open.inf.section(textOf(sectionPointer, wide) ?? '');
+                if (!section)
+                {
+                    return fail(ERROR_SECTION_NOT_FOUND);
+                }
+                queueInstallSection(queue, open.inf, section, {
+                    root: textOf(rootPointer, wide) || directoryOf(open.path).replace(/\\$/, ''),
+                    copyFlags: copyFlags >>> 0, dirid: diridOf(open), layout: layout.inf,
                 });
                 return fail(ERROR_SUCCESS, 1);
             },
-        },
+        })),
+
+        /**
+         * BOOL SetupInstallFileA(HINF InfHandle, PINFCONTEXT InfContext, PCSTR SourceFile,
+         *     PCSTR SourcePathRoot, PCSTR DestinationName, DWORD CopyStyle,
+         *     PSP_FILE_CALLBACK_A CopyMsgHandler, PVOID Context), and the W form
+         */
+        ...bothWidths('SetupInstallFile', wide=>({
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, context, sourcePointer, rootPointer,
+                destinationPointer, style, callback])=>installFile(handle, context,
+                textOf(sourcePointer, wide), textOf(rootPointer, wide),
+                textOf(destinationPointer, wide), style >>> 0, callback >>> 0, 0,
+                `SetupInstallFile${wide ? 'W' : 'A'}`),
+        })),
+
+        /**
+         * BOOL SetupInstallFileExA(HINF InfHandle, PINFCONTEXT InfContext, PCSTR SourceFile,
+         *     PCSTR SourcePathRoot, PCSTR DestinationName, DWORD CopyStyle,
+         *     PSP_FILE_CALLBACK_A CopyMsgHandler, PVOID Context, PBOOL FileWasInUse),
+         *     and the W form -- a file is never in use here.
+         */
+        ...bothWidths('SetupInstallFileEx', wide=>({
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, context, sourcePointer, rootPointer,
+                destinationPointer, style, callback, , inUse])=>installFile(handle, context,
+                textOf(sourcePointer, wide), textOf(rootPointer, wide),
+                textOf(destinationPointer, wide), style >>> 0, callback >>> 0, inUse >>> 0,
+                `SetupInstallFileEx${wide ? 'W' : 'A'}`),
+        })),
+
+        /**
+         * BOOL SetupGetInfFileListA(PCSTR DirectoryPath, DWORD InfStyle, PSTR ReturnBuffer,
+         *     DWORD ReturnBufferSize, PDWORD RequiredSize), and the W form
+         *
+         * The .inf files of a directory -- the INF directory for none -- whose
+         * style is one asked for, each name terminated and an empty one after
+         * the last; a [Version] Signature of $Chicago$, $Windows NT$ or
+         * $Windows 95$ is INF_STYLE_WIN4, any other file INF_STYLE_OLDNT. A
+         * directory that is not there has no files, TRUE with
+         * ERROR_PATH_NOT_FOUND; a file in its place is ERROR_DIRECTORY.
+         */
+        ...bothWidths('SetupGetInfFileList', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [directoryPointer, style, buffer, size,
+                required])=>{
+                const given = textOf(directoryPointer, wide);
+                const directory = given === null ? `${windows}\\inf`
+                    : pathOf(given.replace(/[\\/]+$/, '') || given);
+                if (directory === null)
+                {
+                    return fail(ERROR_PATH_NOT_FOUND);
+                }
+                let stat;
+                try
+                {
+                    stat = host.files.stat(directory);
+                }
+                catch {
+                    stat = null;
+                }
+                if (stat && !stat.isDirectory)
+                {
+                    return fail(ERROR_DIRECTORY);
+                }
+                const thread = host.callerThread();
+                return (async()=>{
+                    /** @type {string[]} */
+                    const names = [];
+                    for (const entry of stat ? host.files.list(directory, '*.inf') : [])
+                    {
+                        const bytes = entry.isDirectory ? null
+                            : await readWhole(joinPath(directory, entry.name));
+                        if (bytes === null)
+                        {
+                            continue;
+                        }
+                        const parsed = parseInf(infText(bytes), { dirid });
+                        const found = 'inf' in parsed ? parsed.inf.style : INF_STYLE_OLDNT;
+                        if ((found & style) !== 0)
+                        {
+                            names.push(entry.name);
+                        }
+                    }
+                    const list = names.map(name=>`${name}\0`).join('');
+                    if (!answerText(list, buffer, size, required, wide))
+                    {
+                        return 0;
+                    }
+                    host.setLastErrorFor(thread, stat ? ERROR_SUCCESS : ERROR_PATH_NOT_FOUND);
+                    return 1;
+                })();
+            },
+        })),
 
         /**
          * BOOL SetupCommitFileQueueA(HWND Owner, HSPFILEQ QueueHandle,
-         *                            PSP_FILE_CALLBACK_A MsgHandler, PVOID Context)
+         *     PSP_FILE_CALLBACK_A MsgHandler, PVOID Context), and the W form
          *
          * The queue's operations, through MsgHandler, in SetupCommitFileQueue's
-         * order; FALSE with the error that ended it when it did not finish.
+         * order; FALSE with the error that ended it when it did not finish,
+         * and with the last error the handler left when it was the handler
+         * that ended it.
          */
-        SetupCommitFileQueueA: {
+        ...bothWidths('SetupCommitFileQueue', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, handle, callback, context])=>{
+            handler: (/** @type {number[]} */ [, handle, callback, context])=>{
                 const queue = fileQueue(handle);
                 if (!queue)
                 {
@@ -2651,12 +3359,15 @@ export function createSetupapiFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const thread = host.callerThread();
-                return commit(queue, callback, context, thread).then(code=>{
-                    host.setLastErrorFor(thread, code);
+                return commit(queue, callback, context, thread, wide).then(code=>{
+                    if (code !== null)
+                    {
+                        host.setLastErrorFor(thread, code);
+                    }
                     return code === ERROR_SUCCESS ? 1 : 0;
                 });
             },
-        },
+        })),
 
         /**
          * BOOL SetupInstallFromInfSectionA(HWND Owner, HINF InfHandle, PCSTR SectionName,
@@ -2701,9 +3412,12 @@ export function createSetupapiFunctions(host){
                 const done = installSection(open, section, { wanted, relative, root,
                     copyFlags: copyFlags >>> 0, callback: callback >>> 0, context: context >>> 0,
                     thread, wide, api });
-                /** @param {number} code */
+                /** @param {number | null} code  null: the callback's own last error stands. */
                 const answer = code=>{
-                    host.setLastErrorFor(thread, code);
+                    if (code !== null)
+                    {
+                        host.setLastErrorFor(thread, code);
+                    }
                     return code === ERROR_SUCCESS ? 1 : 0;
                 };
                 return typeof done === 'number' ? answer(done) : done.then(answer);
@@ -2745,7 +3459,10 @@ export function createSetupapiFunctions(host){
          * The command line is a section, a reboot mode, and the INF's path --
          * the rest of the line, spaces and all, taken as it is (quoted, it
          * names no file). The section is installed whole, files through the
-         * default callback, and its .Services section after it.
+         * default callback, and its .Services section after it. Its Include
+         * INFs are appended first and the sections its Needs names installed
+         * before it -- directives only this call carries out, not
+         * SetupInstallFromInfSection.
          */
         ...bothWidths('InstallHinfSection', wide=>({
             argBytes: 16,
@@ -2759,37 +3476,56 @@ export function createSetupapiFunctions(host){
                     return 0;
                 }
                 const [, name, , path] = match;
-                const loaded = loadInf(pathOf(path) ?? undefined);
                 const thread = host.callerThread();
-                /** @param {{ open: OpenInf } | { error: number, line: number }} result */
-                const install = result=>{
-                    if ('error' in result)
+                return (async()=>{
+                    const loaded = await loadInf(pathOf(path) ?? undefined);
+                    if ('error' in loaded)
                     {
                         return 0;
                     }
-                    const actual = ['.NTx86', '.NT', ''].map(suffix=>name + suffix)
-                        .find(candidate=>result.open.inf.section(candidate)) ?? name;
-                    const section = result.open.inf.section(actual);
+                    const { open } = loaded;
+                    /** @param {string} wanted */
+                    const decorated = wanted=>['.NTx86', '.NT', ''].map(suffix=>wanted + suffix)
+                        .find(candidate=>open.inf.section(candidate)) ?? wanted;
+                    const actual = decorated(name);
+                    const section = open.inf.section(actual);
                     if (!section)
                     {
                         return 0;
                     }
-                    const root = directoryOf(result.open.path).replace(/\\$/, '');
-                    const done = installSection(result.open, section, { wanted: SPINST_ALL,
-                        relative: null, root, copyFlags: 0, callback: defaultAnswer, context: 0,
-                        thread, wide, api });
-                    /** @param {number} code */
-                    const services = code=>{
-                        const extra = result.open.inf.section(`${actual}.Services`);
-                        if (code === ERROR_SUCCESS && extra)
+                    /** @param {string} key */
+                    const listed = key=>section.lines
+                        .filter(line=>line.key?.toLowerCase() === key)
+                        .flatMap(line=>line.fields).filter(field=>field !== '');
+                    for (const included of listed('include'))
+                    {
+                        const more = await loadInf(pathOf(included) ?? undefined);
+                        if (!('error' in more))
                         {
-                            installServices(result.open, extra, api);
+                            appendInf(open, more.open.inf);
                         }
-                        return 0;
-                    };
-                    return typeof done === 'number' ? services(done) : done.then(services);
-                };
-                return 'then' in loaded ? loaded.then(install) : install(loaded);
+                    }
+                    const root = directoryOf(open.path).replace(/\\$/, '');
+                    // The sections Needs names first, then the section itself.
+                    for (const wanted of [...listed('needs').map(decorated), actual])
+                    {
+                        const part = open.inf.section(wanted);
+                        const code = part ? await installSection(open, part, {
+                            wanted: SPINST_ALL, relative: null, root, copyFlags: 0,
+                            callback: defaultAnswer, context: 0, thread, wide, api,
+                        }) : ERROR_SUCCESS;
+                        if (code !== ERROR_SUCCESS)
+                        {
+                            return 0;
+                        }
+                    }
+                    const extra = open.inf.section(`${actual}.Services`);
+                    if (extra)
+                    {
+                        installServices(open, extra, api);
+                    }
+                    return 0;
+                })();
             },
         })),
 

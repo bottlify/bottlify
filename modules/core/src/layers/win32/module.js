@@ -2803,6 +2803,16 @@ export function createWin32Module(){
                     handles,
                     folders,
                     registry: hive,
+                    // The DLLs an INF registers, loaded as the program loads its own.
+                    libraries: {
+                        /** @param {number} name */
+                        loadAnsi: name=>libraries['KERNEL32.dll'].LoadLibraryA.handler([name]),
+                        /** @param {number} module @param {number} name */
+                        procAddress: (module, name)=>
+                            libraries['KERNEL32.dll'].GetProcAddress.handler([module, name]),
+                        /** @param {number} module */
+                        free: module=>libraries['KERNEL32.dll'].FreeLibrary.handler([module]),
+                    },
                     // A service an INF installs, made by advapi32's own CreateService
                     // so the manager's database has the one way in. The error, 0
                     // for none.

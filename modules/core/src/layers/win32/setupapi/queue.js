@@ -13,15 +13,16 @@ import { decodeFolder, folderOf, readCabinet } from '../cabinet/cabinet.js';
  * Committing is SetupCommitFileQueue's sequence: STARTQUEUE, then for the
  * deletions, the renames and the copies in that order a STARTSUBQUEUE,
  * each operation's START, error and END notifications, and an ENDSUBQUEUE,
- * then ENDQUEUE. A copy's source media is announced with NEEDMEDIA before
- * the first file taken from it. A source whose disk has a cabinet for its tag
- * file is found inside that cabinet when it is not beside it.
+ * then ENDQUEUE. A copy's source media -- its root, description and tag
+ * file -- is announced with NEEDMEDIA before the first file taken from it;
+ * a path the callback answers with places the media for the files after.
+ * A source whose disk has a cabinet for its tag file is found inside that
+ * cabinet when it is not beside it.
  */
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_DATA = 13;
-const ERROR_CANCELLED = 1223;
 
 const SPFILENOTIFY_STARTQUEUE = 0x01;
 const SPFILENOTIFY_ENDQUEUE = 0x02;
@@ -46,11 +47,30 @@ const FILEOP_DOIT = 1;
 const FILEOP_SKIP = 2;
 const FILEOP_NEWPATH = 4;
 
-/** CopyFiles line flags, and the copy flags a caller passes. */
-const COPYFLG_NO_OVERWRITE = 0x10;
-const COPYFLG_REPLACEONLY = 0x400;
+/** The copy flags a caller passes. */
 const SP_COPY_REPLACEONLY = 0x2;
 const SP_COPY_NOOVERWRITE = 0x8;
+const SP_COPY_NODECOMP = 0x10;
+const SP_COPY_FORCE_IN_USE = 0x200;
+const SP_COPY_NOSKIP = 0x400;
+const SP_COPY_WARNIFSKIP = 0x4000;
+
+/** The copy flags a NEEDMEDIA notification's SOURCE_MEDIA carries: those about the media. */
+const MEDIA_FLAGS = SP_COPY_NOSKIP | 0x800 /* SP_FLAG_CABINETCONTINUATION */
+    | SP_COPY_WARNIFSKIP | 0x8000 /* SP_COPY_NOBROWSE */;
+
+/**
+ * A CopyFiles line's flags as the copy flags they stand for: the two sets
+ * share bits that mean different things.
+ */
+const LINE_FLAGS = Object.freeze([
+    [0x1, SP_COPY_WARNIFSKIP], [0x2, SP_COPY_NOSKIP], [0x8, SP_COPY_FORCE_IN_USE],
+    [0x10, SP_COPY_NOOVERWRITE], [0x400, SP_COPY_REPLACEONLY], [0x800, SP_COPY_NODECOMP],
+]);
+
+/** @param {number} line  A CopyFiles line's flags. */
+const copyFlagsOf = line=>LINE_FLAGS.reduce((flags, [from, to])=>(
+    (line & from) !== 0 ? flags | to : flags), 0);
 
 /** The platform decoration this machine's sections may carry. */
 const PLATFORM = '.x86';
@@ -61,14 +81,16 @@ const DIRID_DEFAULT = 11;
 /**
  * @typedef {Object} CopyEntry
  * @property {string} sourceRoot     The root plus the disk's path: where its tag file is.
- * @property {string} sourcePath     Where the file itself is expected.
+ * @property {string} subdirectory   The file's own directory under the root.
+ * @property {string} sourcePath     Where the file itself is expected: the two joined.
  * @property {string} sourceFile
  * @property {string | null} description @property {string | null} tagfile
  * @property {string} targetDirectory @property {string} targetFile
  * @property {number} flags
  *
  * @typedef {{ targetDirectory: string, targetFile: string }} DeleteEntry
- * @typedef {{ targetDirectory: string, sourceFile: string, targetFile: string }} RenameEntry
+ * @typedef {{ sourceDirectory: string, sourceFile: string, targetDirectory: string,
+ *     targetFile: string }} RenameEntry
  *
  * @typedef {{ copies: CopyEntry[], deletes: DeleteEntry[], renames: RenameEntry[] }} FileQueue
  */
@@ -117,79 +139,120 @@ export function targetDirectory(inf, list, dirid){
 }
 
 /**
- * Queues an install section's CopyFiles, DelFiles and RenFiles.
+ * Adds a copy to a queue, unless the queue has the same one: the same file
+ * from the same place to the same place is copied once.
+ *
+ * @param {FileQueue} queue @param {CopyEntry} entry
+ */
+export function pushCopy(queue, entry){
+    /** @param {CopyEntry} copy */
+    const key = copy=>[copy.sourcePath, copy.sourceFile, copy.targetDirectory, copy.targetFile]
+        .join('|').toLowerCase();
+    const wanted = key(entry);
+    if (!queue.copies.some(copy=>key(copy) === wanted))
+    {
+        queue.copies.push(entry);
+    }
+}
+
+/**
+ * Queues one file of an INF's, from where its [SourceDisksFiles] and
+ * [SourceDisksNames] lines say under the root: the disk's path is part of
+ * the media's root, the file's own subdirectory is not.
+ *
+ * @param {FileQueue} queue @param {import('./inf.js').Inf} layout  The INF with the source disks.
+ * @param {{ root: string, source: string, targetDirectory: string, targetFile: string,
+ *     flags: number }} copy
+ */
+export function queueInfCopy(queue, layout, copy){
+    const disk = lookup(layout, 'SourceDisksFiles', copy.source);
+    const media = disk ? lookup(layout, 'SourceDisksNames', disk.fields[0]) : null;
+    const sourceRoot = join(copy.root, media?.fields[3] ?? '');
+    const subdirectory = disk?.fields[1] ?? '';
+    pushCopy(queue, {
+        sourceRoot,
+        subdirectory,
+        sourcePath: join(sourceRoot, subdirectory),
+        sourceFile: copy.source,
+        description: media?.fields[0] || null,
+        tagfile: media?.fields[1] || null,
+        targetDirectory: copy.targetDirectory,
+        targetFile: copy.targetFile,
+        flags: copy.flags,
+    });
+}
+
+/**
+ * @typedef {Object} QueueHow
+ * @property {string} root  Where the sources are.
+ * @property {number} copyFlags
+ * @property {(id: number) => string | null} dirid
+ * @property {import('./inf.js').Inf} [layout]  The INF with the source disks, if not the list's.
+ */
+
+/**
+ * Queues a file list section: a CopyFiles list's copies, a DelFiles list's
+ * deletes or a RenFiles list's renames, each to the directory
+ * DestinationDirs gives the list.
+ *
+ * @param {FileQueue} queue @param {import('./inf.js').Inf} inf  The INF the list is in.
+ * @param {string} list @param {'copyfiles' | 'delfiles' | 'renfiles'} directive
+ * @param {QueueHow} how
+ */
+export function queueFileList(queue, inf, list, directive, how){
+    const directory = targetDirectory(inf, list, how.dirid);
+    for (const entry of inf.section(list)?.lines ?? [])
+    {
+        const [target = '', source = ''] = entry.fields;
+        if (directive === 'copyfiles')
+        {
+            const flags = Number.parseInt(entry.fields[3] ?? '', 0) || 0;
+            queueInfCopy(queue, how.layout ?? inf, { root: how.root, source: source || target,
+                targetDirectory: directory, targetFile: target,
+                flags: how.copyFlags | copyFlagsOf(flags) });
+        }
+        else if (directive === 'delfiles')
+        {
+            queue.deletes.push({ targetDirectory: directory, targetFile: target });
+        }
+        else
+        {
+            queue.renames.push({ sourceDirectory: directory, sourceFile: source,
+                targetDirectory: directory, targetFile: target });
+        }
+    }
+}
+
+/**
+ * Queues an install section's CopyFiles, DelFiles and RenFiles: each a
+ * list section, or for CopyFiles a single file its name after an at sign.
  *
  * @param {FileQueue} queue @param {import('./inf.js').Inf} inf
- * @param {import('./inf.js').InfSection} section
- * @param {{ root: string, copyFlags: number, dirid: (id: number) => string | null }} how
+ * @param {import('./inf.js').InfSection} section @param {QueueHow} how
  */
 export function queueInstallSection(queue, inf, section, how){
-    /** @param {string} list  The file list's section, which DestinationDirs is keyed by. */
-    const destination = list=>targetDirectory(inf, list, how.dirid);
-
-    /**
-     * @param {string} name  Its name where it goes.
-     * @param {string} source  Its name where it comes from.
-     * @param {string} list @param {number} lineFlags
-     */
-    const copy = (name, source, list, lineFlags)=>{
-        const disk = lookup(inf, 'SourceDisksFiles', source);
-        const media = disk ? lookup(inf, 'SourceDisksNames', disk.fields[0]) : null;
-        const sourceRoot = join(how.root, media?.fields[3] ?? '');
-        queue.copies.push({
-            sourceRoot,
-            sourcePath: join(sourceRoot, disk?.fields[1] ?? ''),
-            sourceFile: source,
-            description: media?.fields[0] || null,
-            tagfile: media?.fields[1] || null,
-            targetDirectory: destination(list),
-            targetFile: name,
-            flags: how.copyFlags | lineFlags,
-        });
-    };
-
     for (const line of section.lines)
     {
         const directive = line.key?.toLowerCase();
+        if (directive !== 'copyfiles' && directive !== 'delfiles' && directive !== 'renfiles')
+        {
+            continue;
+        }
         for (const value of line.fields)
         {
             if (value === '')
             {
                 continue;
             }
-            if (directive === 'copyfiles')
+            if (directive === 'copyfiles' && value.startsWith('@'))
             {
-                if (value.startsWith('@'))
-                {
-                    copy(value.slice(1), value.slice(1), section.name, 0);
-                    continue;
-                }
-                for (const entry of inf.section(value)?.lines ?? [])
-                {
-                    const [target, source] = entry.fields;
-                    const flags = Number.parseInt(entry.fields[3] ?? '', 0) || 0;
-                    copy(target, source || target, value, flags);
-                }
+                const name = value.slice(1);
+                queueInfCopy(queue, how.layout ?? inf, { root: how.root, source: name,
+                    targetDirectory: targetDirectory(inf, section.name, how.dirid),
+                    targetFile: name, flags: how.copyFlags });
+                continue;
             }
-            else if (directive === 'delfiles')
-            {
-                for (const entry of inf.section(value)?.lines ?? [])
-                {
-                    queue.deletes.push({
-                        targetDirectory: destination(value), targetFile: entry.fields[0],
-                    });
-                }
-            }
-            else if (directive === 'renfiles')
-            {
-                for (const entry of inf.section(value)?.lines ?? [])
-                {
-                    queue.renames.push({
-                        targetDirectory: destination(value),
-                        targetFile: entry.fields[0], sourceFile: entry.fields[1] ?? '',
-                    });
-                }
-            }
+            queueFileList(queue, inf, value, directive, how);
         }
     }
 }
@@ -200,8 +263,10 @@ export function queueInstallSection(queue, inf, section, how){
  *         file: string, flags: number }
  *     | { kind: 'value', value: number }} Notice
  *
- * @typedef {Object} CommitHost
- * @property {import('../kernel32/files.js').FileSystem} files
+ * @typedef {Object} CommitHost  Paths as the queue has them, relative ones too.
+ * @property {(path: string) => boolean} exists
+ * @property {(path: string) => void} remove  Nothing to remove is no error.
+ * @property {(from: string, to: string) => boolean} rename
  * @property {(path: string) => Uint8Array | Promise<Uint8Array> | null} readWhole
  * @property {(path: string, bytes: Uint8Array) => number} writeWhole
  * @property {(directory: string) => void} makeDirectories
@@ -212,16 +277,28 @@ export function queueInstallSection(queue, inf, section, how){
  */
 
 /**
- * The bytes of one queued copy: the file where the queue expects it, or
- * else inside the cabinet its disk's tag file names.
+ * A media's root from the directory a callback gave for a file in it: that
+ * directory with the file's subdirectory taken off its end, when its last
+ * element is the subdirectory exactly, else the directory itself.
  *
- * @param {CommitHost} host @param {CopyEntry} entry @param {string | null} override
- *        A path the callback gave for the media, in place of the queue's.
+ * @param {string} directory @param {string} subdirectory
+ */
+const rootOf = (directory, subdirectory)=>{
+    const last = directory.split(/[\\/]/).at(-1);
+    return subdirectory !== '' && last === subdirectory
+        ? directory.slice(0, -subdirectory.length).replace(/[\\/]$/, '') : directory;
+};
+
+/**
+ * The bytes of one queued copy: the file in its directory, or else inside
+ * the cabinet its disk's tag file names, in the media's root.
+ *
+ * @param {CommitHost} host @param {CopyEntry} entry
+ * @param {string} directory @param {string} root
  * @returns {Promise<Uint8Array | number>} the bytes, or the error
  */
-async function sourceBytes(host, entry, override){
-    const sourcePath = override ?? entry.sourcePath;
-    const plain = host.readWhole(join(sourcePath, entry.sourceFile));
+async function sourceBytes(host, entry, directory, root){
+    const plain = host.readWhole(join(directory, entry.sourceFile));
     if (plain !== null)
     {
         return await plain;
@@ -230,7 +307,7 @@ async function sourceBytes(host, entry, override){
     {
         return ERROR_FILE_NOT_FOUND;
     }
-    const packed = host.readWhole(join(override ?? entry.sourceRoot, entry.tagfile));
+    const packed = host.readWhole(join(root, entry.tagfile));
     if (packed === null)
     {
         return ERROR_FILE_NOT_FOUND;
@@ -254,10 +331,11 @@ async function sourceBytes(host, entry, override){
 }
 
 /**
- * Commits a queue, answering ERROR_SUCCESS or the error that ended it.
+ * Commits a queue, answering ERROR_SUCCESS or the error that ended it --
+ * null when the callback ended it, the last error then the callback's own.
  *
  * @param {FileQueue} queue @param {CommitHost} host
- * @returns {Promise<number>}
+ * @returns {Promise<number | null>}
  */
 export async function commitQueue(queue, host){
     /** @param {number} message @param {Notice} first @param {number} [second] */
@@ -268,10 +346,10 @@ export async function commitQueue(queue, host){
     if ((await say(SPFILENOTIFY_STARTQUEUE, value(0))).answer === 0)
     {
         await say(SPFILENOTIFY_ENDQUEUE, value(0));
-        return ERROR_CANCELLED;
+        return null;
     }
 
-    /** @param {number} code */
+    /** @param {number | null} code */
     const abort = async code=>{
         await say(SPFILENOTIFY_ENDQUEUE, value(0));
         return code;
@@ -282,7 +360,7 @@ export async function commitQueue(queue, host){
         if ((await say(SPFILENOTIFY_STARTSUBQUEUE, value(FILEOP_DELETE),
             queue.deletes.length)).answer === 0)
         {
-            return abort(ERROR_CANCELLED);
+            return abort(null);
         }
         for (const entry of queue.deletes)
         {
@@ -291,14 +369,14 @@ export async function commitQueue(queue, host){
                 { kind: 'paths', target, source: null }, FILEOP_DELETE)).answer;
             if (start === FILEOP_ABORT)
             {
-                return abort(ERROR_CANCELLED);
+                return abort(null);
             }
             if (start !== FILEOP_DOIT)
             {
                 continue;
             }
             // A file that is not there to delete is already gone.
-            host.files.remove(target);
+            host.remove(target);
             const end = (await say(SPFILENOTIFY_ENDDELETE,
                 { kind: 'paths', target, source: null, error: ERROR_SUCCESS })).answer;
             if (end !== ERROR_SUCCESS)
@@ -314,23 +392,23 @@ export async function commitQueue(queue, host){
         if ((await say(SPFILENOTIFY_STARTSUBQUEUE, value(FILEOP_RENAME),
             queue.renames.length)).answer === 0)
         {
-            return abort(ERROR_CANCELLED);
+            return abort(null);
         }
         for (const entry of queue.renames)
         {
-            const source = join(entry.targetDirectory, entry.sourceFile);
+            const source = join(entry.sourceDirectory, entry.sourceFile);
             const target = join(entry.targetDirectory, entry.targetFile);
             const start = (await say(SPFILENOTIFY_STARTRENAME,
                 { kind: 'paths', target, source }, FILEOP_RENAME)).answer;
             if (start === FILEOP_ABORT)
             {
-                return abort(ERROR_CANCELLED);
+                return abort(null);
             }
             if (start !== FILEOP_DOIT)
             {
                 continue;
             }
-            let error = host.files.rename(source, target) ? ERROR_SUCCESS : ERROR_FILE_NOT_FOUND;
+            let error = host.rename(source, target) ? ERROR_SUCCESS : ERROR_FILE_NOT_FOUND;
             if (error !== ERROR_SUCCESS)
             {
                 const decision = (await say(SPFILENOTIFY_RENAMEERROR,
@@ -343,7 +421,7 @@ export async function commitQueue(queue, host){
                 {
                     continue;
                 }
-                error = host.files.rename(source, target) ? ERROR_SUCCESS : ERROR_FILE_NOT_FOUND;
+                error = host.rename(source, target) ? ERROR_SUCCESS : ERROR_FILE_NOT_FOUND;
             }
             const end = (await say(SPFILENOTIFY_ENDRENAME,
                 { kind: 'paths', target, source, error })).answer;
@@ -360,52 +438,78 @@ export async function commitQueue(queue, host){
         if ((await say(SPFILENOTIFY_STARTSUBQUEUE, value(FILEOP_COPY),
             queue.copies.length)).answer === 0)
         {
-            return abort(ERROR_CANCELLED);
+            return abort(null);
         }
-        /** @type {Map<string, { skip: boolean, path: string | null }>} */
+        /**
+         * Each media's root once the callback has placed it: the files after
+         * the first are found under it.
+         *
+         * @type {Map<string, string>}
+         */
         const media = new Map();
         for (const entry of queue.copies)
         {
-            const mediaKey = `${entry.description}|${entry.tagfile}|${entry.sourcePath}`
+            const mediaKey = `${entry.description}|${entry.tagfile}|${entry.sourceRoot}`
                 .toLowerCase();
-            let known = media.get(mediaKey);
-            if (!known)
+            /** @type {Uint8Array | number | null} */
+            let bytes = null;
+            const placed = media.get(mediaKey);
+            let directory = placed === undefined ? entry.sourcePath
+                : join(placed, entry.subdirectory);
+            let root = placed ?? entry.sourceRoot;
+            if (placed === undefined)
             {
-                const asked = await say(SPFILENOTIFY_NEEDMEDIA, {
-                    kind: 'media', tagfile: entry.tagfile, description: entry.description,
-                    path: entry.sourcePath, file: entry.sourceFile, flags: entry.flags,
-                }, 0);
-                if (asked.answer === FILEOP_ABORT)
+                // A path the callback gives is the first file's directory,
+                // the media's root that with the file's subdirectory taken
+                // off its end; it is asked again until the file is there. A
+                // skip passes this file and asks again for the next.
+                let answer;
+                for (;;)
                 {
-                    return abort(ERROR_CANCELLED);
+                    const asked = await say(SPFILENOTIFY_NEEDMEDIA, {
+                        kind: 'media', tagfile: entry.tagfile, description: entry.description,
+                        path: directory, file: entry.sourceFile, flags: entry.flags & MEDIA_FLAGS,
+                    }, 0);
+                    answer = asked.answer;
+                    if (answer !== FILEOP_NEWPATH)
+                    {
+                        break;
+                    }
+                    directory = asked.path;
+                    root = asked.path;
+                    bytes = await sourceBytes(host, entry, directory, root);
+                    if (bytes !== ERROR_FILE_NOT_FOUND)
+                    {
+                        root = rootOf(directory, entry.subdirectory);
+                        break;
+                    }
                 }
-                known = {
-                    skip: asked.answer === FILEOP_SKIP,
-                    path: asked.answer === FILEOP_NEWPATH ? asked.path : null,
-                };
-                media.set(mediaKey, known);
-            }
-            if (known.skip)
-            {
-                continue;
+                if (answer === FILEOP_ABORT)
+                {
+                    return abort(null);
+                }
+                if (answer === FILEOP_SKIP)
+                {
+                    continue;
+                }
+                media.set(mediaKey, root);
             }
             const target = join(entry.targetDirectory, entry.targetFile);
-            const exists = host.files.stat(target)?.exists ?? false;
-            if (exists && (entry.flags & (COPYFLG_NO_OVERWRITE | SP_COPY_NOOVERWRITE)))
+            const exists = host.exists(target);
+            if (exists && (entry.flags & SP_COPY_NOOVERWRITE))
             {
                 continue;
             }
-            if (!exists && (entry.flags & (COPYFLG_REPLACEONLY | SP_COPY_REPLACEONLY)))
+            if (!exists && (entry.flags & SP_COPY_REPLACEONLY))
             {
                 continue;
             }
-            let path = known.path;
-            const source = join(path ?? entry.sourcePath, entry.sourceFile);
+            const source = join(directory, entry.sourceFile);
             const start = (await say(SPFILENOTIFY_STARTCOPY,
                 { kind: 'paths', target, source }, FILEOP_COPY)).answer;
             if (start === FILEOP_ABORT)
             {
-                return abort(ERROR_CANCELLED);
+                return abort(null);
             }
             if (start !== FILEOP_DOIT)
             {
@@ -415,7 +519,7 @@ export async function commitQueue(queue, host){
             let skipped = false;
             for (;;)
             {
-                const bytes = await sourceBytes(host, entry, path);
+                bytes ??= await sourceBytes(host, entry, directory, root);
                 if (bytes instanceof Uint8Array)
                 {
                     host.makeDirectories(entry.targetDirectory);
@@ -430,15 +534,19 @@ export async function commitQueue(queue, host){
                     break;
                 }
                 const decision = await say(SPFILENOTIFY_COPYERROR,
-                    { kind: 'paths', target, source: join(path ?? entry.sourcePath,
-                        entry.sourceFile), error }, 0);
+                    { kind: 'paths', target, source: join(directory, entry.sourceFile), error },
+                    0);
                 if (decision.answer === FILEOP_ABORT)
                 {
                     return abort(error);
                 }
                 if (decision.answer === FILEOP_NEWPATH)
                 {
-                    path = decision.path;
+                    // The new path stands for the media's root from here on.
+                    directory = decision.path;
+                    root = decision.path;
+                    media.set(mediaKey, rootOf(decision.path, entry.subdirectory));
+                    bytes = null;
                     continue;
                 }
                 if (decision.answer !== FILEOP_DOIT)
@@ -446,6 +554,7 @@ export async function commitQueue(queue, host){
                     skipped = true;
                     break;
                 }
+                bytes = null;
             }
             if (skipped)
             {
