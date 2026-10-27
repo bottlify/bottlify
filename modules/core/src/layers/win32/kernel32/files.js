@@ -36,6 +36,7 @@ import { createResourceUpdates } from './resource-update.js';
 import { readToTerminator } from '../common/scan-windows.js';
 import { mountPointsOf, onVolume } from './drives.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
+import { isMailslotName } from './mailslots.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -360,6 +361,13 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
 /**
  * @typedef {Object} FileHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {{ read: (handle: number, buffer: number, length: number, read: number) => any,
+ *     write: (handle: number, buffer: number, length: number, written: number) => any }[]}
+ *     [streams]
+ *           Handles ReadFile and WriteFile hand on before taking them for files:
+ *           each answers the call, or null for a handle that is not its own.
+ * @property {{ open: (name: string, access: number) => { handle: number } | { error: number } }}
+ *     [mailslots]  Opens a client of the mailslot CreateFile is given the name of.
  * @property {(address: number, length: number) => Uint8Array} [windowMemory]
  *           The guest's own bytes, not a copy, valid until the guest runs again:
  *           what a write hands a volume that keeps a copy of what it is given.
@@ -1769,6 +1777,17 @@ export function createFileFunctions(host){
             host.setLastError(ERROR_SUCCESS);
             return host.handles.open('device', { device: 'mountmgr' });
         }
+        // A mailslot's name opens its client end.
+        if (name !== 0 && host.mailslots && isMailslotName(text.raw(name)))
+        {
+            const client = host.mailslots.open(text.raw(name), access);
+            if ('error' in client)
+            {
+                return fail(client.error, INVALID_HANDLE_VALUE);
+            }
+            host.setLastError(ERROR_SUCCESS);
+            return client.handle;
+        }
         const refusal = nameRefusal(text.raw(name), text.path(name),
             disposition !== OPEN_EXISTING && disposition !== TRUNCATE_EXISTING, flags);
         if (refusal !== 0)
@@ -2639,10 +2658,20 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, buffer, length, read, overlapped])=>{
+                // Zeroed before anything is checked, as Windows documents: a
+                // caller that reads the count after a failure reads 0.
+                writeDwordIf(read >>> 0, 0);
                 if (isStandardHandle(handle >>> 0))
                 {
-                    writeDwordIf(read >>> 0, 0);
                     return 1;
+                }
+                for (const stream of host.streams ?? [])
+                {
+                    const answer = stream.read(handle, buffer, length, read);
+                    if (answer !== null)
+                    {
+                        return answer;
+                    }
                 }
                 const file = object(handle, 'file');
                 if (!file)
@@ -2720,12 +2749,21 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, buffer, length, written, overlapped])=>{
                 const count = length >>> 0;
+                writeDwordIf(written >>> 0, 0);
                 if (isStandardHandle(handle >>> 0))
                 {
                     const bytes = host.readMemory(buffer >>> 0, count);
                     host.writeConsole(handle >>> 0, decodeAnsi(bytes));
                     writeDwordIf(written >>> 0, count);
                     return 1;
+                }
+                for (const stream of host.streams ?? [])
+                {
+                    const answer = stream.write(handle, buffer, length, written);
+                    if (answer !== null)
+                    {
+                        return answer;
+                    }
                 }
                 const file = object(handle, 'file');
                 if (!file)

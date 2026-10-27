@@ -559,8 +559,8 @@ test('a write whose file is still being fetched parks, then reports its count', 
 
     const answer = /** @type {any} */ (fns.WriteFile.handler([handle, BUFFER, 2, OUT_COUNT, 0]));
     assert.equal(typeof answer?.then, 'function', 'the call is parked, not answered');
-    assert.equal(memory.dword(OUT_COUNT), 0xdeadbeef,
-        'nothing is reported before the write is done');
+    assert.equal(memory.dword(OUT_COUNT), 0,
+        'nothing is reported before the write is done: the count zeroed, as Windows does first');
     assert.equal(await answer, 1);
     assert.equal(memory.dword(OUT_COUNT), 2);
 });

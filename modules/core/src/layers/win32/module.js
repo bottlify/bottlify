@@ -45,6 +45,7 @@ import { createResourceFunctions } from './kernel32/resources.js';
 import { createProfileFunctions } from './kernel32/profile.js';
 import { createDriveFunctions } from './kernel32/drives.js';
 import { createMappingFunctions } from './kernel32/mapping.js';
+import { createMailslots } from './kernel32/mailslots.js';
 import { createIoCompletionPorts } from './kernel32/iocp.js';
 import { createFileTimeFunctions } from './kernel32/filetime.js';
 import { createConsoleIoFunctions } from './kernel32/consoleio.js';
@@ -789,6 +790,21 @@ export function createWin32Module(){
                 },
                 /** @param {string} text */
                 trace: text=>trace(text),
+            });
+
+            // Mailslots: their own calls, and ReadFile, WriteFile and
+            // CreateFile hand their handles and names on to them.
+            const mailslots = createMailslots({
+                kernel,
+                handles,
+                readMemory,
+                writeMemory,
+                readCString,
+                readWideString,
+                setLastError: setError,
+                setLastErrorFor: setErrorOn,
+                currentThread: ()=>kernel.currentThread(),
+                park: ()=>bridge.park(),
             });
 
             /**
@@ -2009,6 +2025,7 @@ export function createWin32Module(){
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
                     }),
+                    ...mailslots.functions,
                     ...ports.table,
                     ...createFileTimeFunctions({
                         readMemory,
@@ -2199,6 +2216,8 @@ export function createWin32Module(){
                         directories: shellFolderDirectories(windows),
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,
+                        streams: [mailslots],
+                        mailslots,
                         writeConsole: (handle, text)=>sink(handle, text),
                         // As the ports' signalEvent: a stale hEvent is the
                         // program's mistake, and starting the I/O does not fault on it.

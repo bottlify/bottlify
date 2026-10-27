@@ -865,29 +865,6 @@ export function createMappingFunctions(host){
         },
 
         /**
-         * HANDLE CreateMailslotA(LPCSTR lpName, DWORD nMaxMessageSize,
-         *   DWORD lReadTimeout, LPSECURITY_ATTRIBUTES lpSecurityAttributes)
-         * HANDLE CreateMailslotW(LPCWSTR, ...): the same in wide text
-         *
-         * No other process could open the slot to write to it, so it is
-         * refused as a pipe is, and the refusal reported.
-         */
-        CreateMailslotA: {
-            argBytes: 16,
-            handler: ()=>{
-                host.divergence?.('CreateMailslotA', 'there are no mailslots; refused');
-                return fail(ERROR_CALL_NOT_IMPLEMENTED, INVALID_HANDLE_VALUE);
-            },
-        },
-        CreateMailslotW: {
-            argBytes: 16,
-            handler: ()=>{
-                host.divergence?.('CreateMailslotW', 'there are no mailslots; refused');
-                return fail(ERROR_CALL_NOT_IMPLEMENTED, INVALID_HANDLE_VALUE);
-            },
-        },
-
-        /**
          * BOOL PeekNamedPipe(HANDLE hNamedPipe, LPVOID lpBuffer, DWORD nBufferSize,
          *   LPDWORD lpBytesRead, LPDWORD lpTotalBytesAvail, LPDWORD lpBytesLeftThisMessage)
          *

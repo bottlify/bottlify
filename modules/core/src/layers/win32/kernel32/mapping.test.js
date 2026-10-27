@@ -391,17 +391,6 @@ test('the other named-pipe calls are refused the same way, each popping its own 
     }
 });
 
-test('CreateMailslot is refused, and says so', ()=>{
-    const { fns, errors, said } = setup();
-    for (const entry of [fns.CreateMailslotA, fns.CreateMailslotW])
-    {
-        assert.equal(entry.argBytes, 16);
-        assert.equal(entry.handler() >>> 0, 0xffffffff);
-        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
-    }
-    assert.match(said[1], /^CreateMailslotW: /);
-});
-
 const SEC_FILE = 0x800000;
 const SEC_IMAGE = 0x1000000;
 const SEC_RESERVE = 0x4000000;
