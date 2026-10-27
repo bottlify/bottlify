@@ -228,6 +228,47 @@ test('names and strings are kept in the ANSI page, whichever form set them', ()=
     assert.deepEqual([...memory.bytes.subarray(OUT_DATA, OUT_DATA + 5)], [...text, 0]);
 });
 
+test('a key keeps the class RegCreateKeyEx gave it, read back by RegQueryInfoKey', ()=>{
+    const { memory, fns } = setup();
+    const CLASS_IN = 0x300;
+    const CLASS_OUT = 0x340;
+    const CLASS_SIZE = 0x380;
+    const MAX_CLASS = 0x384;
+    memory.putString(SUBKEY, 'Software\\Classy');
+    memory.putString(CLASS_IN, 'subkey class');
+    assert.equal(fns.RegCreateKeyExA.handler(
+        [HKEY_LOCAL_MACHINE, SUBKEY, 0, CLASS_IN, 0, 0, 0, OUT_HANDLE, 0]), ERROR_SUCCESS);
+    const key = memory.dword(OUT_HANDLE);
+
+    // A class buffer with no length pointer is refused, and left untouched.
+    memory.bytes[CLASS_OUT] = 0x55;
+    assert.equal(fns.RegQueryInfoKeyA.handler(
+        [key, CLASS_OUT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(memory.bytes[CLASS_OUT], 0x55, 'the buffer is left alone');
+
+    // Its length alone, with no buffer.
+    memory.putDword(CLASS_SIZE, 0);
+    assert.equal(fns.RegQueryInfoKeyA.handler(
+        [key, 0, CLASS_SIZE, 0, 0, 0, 0, 0, 0, 0, 0, 0]), ERROR_SUCCESS);
+    assert.equal(memory.dword(CLASS_SIZE), 'subkey class'.length, 'the class length');
+
+    // The class into a buffer that fits, with its length.
+    memory.putDword(CLASS_SIZE, 0x40);
+    assert.equal(fns.RegQueryInfoKeyA.handler(
+        [key, CLASS_OUT, CLASS_SIZE, 0, 0, 0, 0, 0, 0, 0, 0, 0]), ERROR_SUCCESS);
+    assert.equal(memory.string(CLASS_OUT), 'subkey class');
+    assert.equal(memory.dword(CLASS_SIZE), 'subkey class'.length);
+
+    // A subkey with a longer class: the parent reports it as the most room.
+    memory.putString(SUBKEY, 'subsubkey');
+    memory.putString(CLASS_IN, 'subsubkey class');
+    assert.equal(fns.RegCreateKeyExA.handler(
+        [key, SUBKEY, 0, CLASS_IN, 0, 0, 0, OUT_HANDLE, 0]), ERROR_SUCCESS);
+    assert.equal(fns.RegQueryInfoKeyA.handler(
+        [key, 0, 0, 0, 0, 0, MAX_CLASS, 0, 0, 0, 0, 0]), ERROR_SUCCESS);
+    assert.equal(memory.dword(MAX_CLASS), 'subsubkey class'.length, 'the longest subkey class');
+});
+
 test('a key is created, reopened whatever its case, and read back', ()=>{
     const { memory, fns, create, setString } = setup();
     const created = create('Software\\Vendor\\Product');
@@ -1009,6 +1050,26 @@ test('a class the machine registers is found under the classes root, both ways',
     createUnder(HKEY_CLASSES_ROOT, 'CLSID\\{00000000-0000-0000-0000-00000000C0DE}\\InprocServer32');
     assert.ok(open(HKEY_LOCAL_MACHINE,
         'SOFTWARE\\Classes\\CLSID\\{00000000-0000-0000-0000-00000000C0DE}\\InprocServer32') > 0);
+});
+
+test('RegDeleteKey with an empty subkey deletes the classes-root key the handle names', ()=>{
+    // ole_server.c's unregister_server opens a CLSID through HKEY_CLASSES_ROOT
+    // and deletes it with RegDeleteKey(key, ""). The empty subkey means the
+    // key itself, and the delete has to reach the real key the merged view
+    // names -- not stop at the view, which answered ERROR_FILE_NOT_FOUND.
+    const machine = setup();
+    const { createUnder, open, remove } = classes(machine);
+    const clsid = 'CLSID\\{00000000-0000-0000-0000-00000000DEAD}';
+
+    const made = createUnder(HKEY_CLASSES_ROOT, clsid);
+    assert.ok(made > 0, 'the class is created through the classes root');
+    assert.equal(remove(made, ''), ERROR_SUCCESS, 'deleting the key itself succeeds');
+    assert.equal(open(HKEY_CLASSES_ROOT, clsid), -2, 'and it is gone (ERROR_FILE_NOT_FOUND)');
+
+    // The same under HKLM, which already worked, still does.
+    const hklm = createUnder(HKEY_LOCAL_MACHINE, 'Software\\DeadKeyTest');
+    assert.equal(remove(hklm, ''), ERROR_SUCCESS);
+    assert.equal(open(HKEY_LOCAL_MACHINE, 'Software\\DeadKeyTest'), -2);
 });
 
 test('the user\'s classes lie over the machine\'s under the classes root', ()=>{

@@ -239,8 +239,8 @@ export function createRegistryFunctions(host){
      */
     const hive = {
         ...host.hive,
-        /** @param {any} key @param {string | null} [path] */
-        create(key, path){
+        /** @param {any} key @param {string | null} [path] @param {string} [keyClass] */
+        create(key, path, keyClass = ''){
             let parent = key;
             for (const part of typeof path === 'string' ? path.split('\\').filter(Boolean) : [])
             {
@@ -251,7 +251,7 @@ export function createRegistryFunctions(host){
                 }
                 parent = next;
             }
-            const made = host.hive.create(key, path);
+            const made = host.hive.create(key, path, keyClass);
             if (made.created)
             {
                 notify(parent, REG_NOTIFY_CHANGE_NAME);
@@ -870,14 +870,14 @@ export function createRegistryFunctions(host){
      */
     /**
      * @param {any} key @param {string | null} subKey
-     * @param {number} result @param {number} disposition
+     * @param {number} result @param {number} disposition @param {string} [keyClass]
      */
-    const createKey = (key, subKey, result, disposition)=>{
+    const createKey = (key, subKey, result, disposition, keyClass = '')=>{
         if (result === 0)
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const made = hive.create(key, subKey);
+        const made = hive.create(key, subKey, keyClass);
         writeDword(result, allocate(made.key));
         writeDwordIf(disposition,
             made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
@@ -885,8 +885,8 @@ export function createRegistryFunctions(host){
     };
     const createKeyEx = {
         argBytes: 36,
-        handler: onKey((key, [, subKey, , , , , , result, disposition])=>
-            createKey(key, readText(subKey), result, disposition)),
+        handler: onKey((key, [, subKey, , keyClass, , , , result, disposition])=>
+            createKey(key, readText(subKey), result, disposition, readText(keyClass) ?? '')),
     };
 
     /**
@@ -1197,6 +1197,47 @@ export function createRegistryFunctions(host){
     });
 
     /**
+     * RegQueryInfoKey's class out-parameters, and the status they decide. With
+     * a length pointer but no buffer, only the class length (in characters) is
+     * reported. With a buffer, an empty one (size zero) is left untouched; a
+     * buffer too small for the class and its terminator is a short read -- the
+     * ANSI form writes what fits and a terminator and answers ERROR_MORE_DATA,
+     * the wide form writes nothing and answers ERROR_INSUFFICIENT_BUFFER, as
+     * NtQueryKey hands each back -- and a buffer that fits takes the class.
+     *
+     * @param {TextForm} text @param {number} buffer @param {number} sizePointer
+     * @param {string} className
+     */
+    const writeClass = (text, buffer, sizePointer, className)=>{
+        if (sizePointer === 0 || buffer === 0)
+        {
+            writeDwordIf(sizePointer, className.length);
+            return ERROR_SUCCESS;
+        }
+        const room = readDword(sizePointer);
+        if (room === 0)
+        {
+            writeDword(sizePointer, 0);
+            return ERROR_SUCCESS;
+        }
+        if (room <= className.length)
+        {
+            if (text.unit === 2)
+            {
+                writeDword(sizePointer, className.length);
+                return ERROR_INSUFFICIENT_BUFFER;
+            }
+            const fit = room - 1;
+            text.write(buffer, className.slice(0, fit));
+            writeDword(sizePointer, fit);
+            return ERROR_MORE_DATA;
+        }
+        text.write(buffer, className);
+        writeDword(sizePointer, className.length);
+        return ERROR_SUCCESS;
+    };
+
+    /**
      * RegQueryInfoKey in either width. The longest data is counted in the
      * bytes the caller's width answers it in.
      *
@@ -1207,22 +1248,25 @@ export function createRegistryFunctions(host){
         handler: onKey((key, args)=>{
             const [, keyClass, classSize, , subKeys, maxSubKeyLen, maxClassLen, valueCount,
                 maxValueNameLen, maxValueLen, securitySize, fileTime] = args;
+            // A class buffer with nowhere to say how long it is is refused, and
+            // nothing is written to it.
+            if (keyClass !== 0 && classSize === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
             const names = hive.subkeys(key);
             const values = hive.values(key);
-            if (keyClass !== 0)
-            {
-                text.write(keyClass, '');
-            }
-            writeDwordIf(classSize, 0);
+            const className = hive.classOf(key);
+            const classStatus = writeClass(text, keyClass, classSize, className);
             writeDwordIf(subKeys, names.length);
             writeDwordIf(maxSubKeyLen, largest(names.map(name=>name.length)));
-            writeDwordIf(maxClassLen, 0);
+            writeDwordIf(maxClassLen, hive.maxSubkeyClassLength(key));
             writeDwordIf(valueCount, values.length);
             writeDwordIf(maxValueNameLen, largest(values.map(value=>value.name.length)));
             writeDwordIf(maxValueLen, largest(values.map(value=>text.answer(value).length)));
             writeDwordIf(securitySize, 0);
             writeFileTime(fileTime);
-            return ERROR_SUCCESS;
+            return classStatus;
         }),
     });
 
@@ -1775,8 +1819,9 @@ export function createRegistryFunctions(host){
          */
         RegCreateKeyExW: {
             argBytes: 36,
-            handler: onKey((key, [, subKey, , , , , , result, disposition])=>
-                createKey(key, readWideText(subKey), result, disposition)),
+            handler: onKey((key, [, subKey, , keyClass, , , , result, disposition])=>
+                createKey(key, readWideText(subKey), result, disposition,
+                    readWideText(keyClass) ?? '')),
         },
 
         /**

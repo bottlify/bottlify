@@ -71,6 +71,7 @@ const USER_CLASSES = 'Software\\Classes';
  * @property {string} name
  * @property {Map<string, RegistryNode>} keys      Keyed by folded name.
  * @property {Map<string, RegistryValue>} values  Keyed by folded name.
+ * @property {string} keyClass  The class string RegCreateKeyEx was given, "" for none.
  */
 
 /**
@@ -110,7 +111,7 @@ const fold = name=>name.toLowerCase();
 
 /** @param {string} name @returns {RegistryNode} */
 function makeKey(name){
-    return { name, keys: new Map(), values: new Map() };
+    return { name, keys: new Map(), values: new Map(), keyClass: '' };
 }
 
 /**
@@ -168,6 +169,7 @@ function terminate(type, data){
 function keyToJSON(key){
     return {
         name: key.name,
+        ...key.keyClass ? { keyClass: key.keyClass } : {},
         values: [...key.values.values()].map(value=>({
             name: value.name,
             type: value.type,
@@ -180,6 +182,7 @@ function keyToJSON(key){
 /** @param {any} stored @returns {RegistryNode} */
 function keyFromJSON(stored){
     const key = makeKey(stored?.name ?? '');
+    key.keyClass = stored?.keyClass ?? '';
     for (const value of stored?.values ?? [])
     {
         const name = value?.name ?? '';
@@ -879,7 +882,7 @@ export function createHive(
      * @param {RegistryNode} key @param {string | null} [path]
      * @returns {{ key: RegistryNode, created: boolean }}
      */
-    const createNode = (key, path)=>{
+    const createNode = (key, path, keyClass = '')=>{
         let node = key;
         let created = false;
         for (const part of segments(path))
@@ -892,6 +895,12 @@ export function createHive(
                 created = true;
             }
             node = next;
+        }
+        // The class is the key's, set when it is first made; Windows keeps the
+        // one an existing key already has and ignores a later create's.
+        if (created && keyClass)
+        {
+            node.keyClass = keyClass;
         }
         if (created)
         {
@@ -1010,10 +1019,10 @@ export function createHive(
          * @param {RegistryKey} key @param {string | null} [path]
          * @returns {{ key: RegistryKey, created: boolean }}
          */
-        create(key, path){
+        create(key, path, keyClass = ''){
             if (!isClasses(key))
             {
-                return createNode(key, path);
+                return createNode(key, path, keyClass);
             }
             const parts = segments(path);
             if (parts.length === 0)
@@ -1048,11 +1057,14 @@ export function createHive(
                 return removeNode(key, path);
             }
             const parts = segments(path);
-            if (parts.length === 0)
+            // An empty subkey names the key itself, as RegDeleteKey(hKey, "")
+            // asks: the delete reaches the real key the handle names, on the
+            // user side or the machine's, not this merged view.
+            const doomed = parts.length === 0 ? key : classesKey([...key.path, ...parts]);
+            if (doomed.path.length === 0)
             {
                 return 'missing';
             }
-            const doomed = classesKey([...key.path, ...parts]);
             const { user, machine } = sidesOf(doomed);
             const base = user
                 ? walk(roots.get(HKEY_CURRENT_USER), segments(USER_CLASSES))
@@ -1067,6 +1079,27 @@ export function createHive(
         subkeys(key){
             return (isClasses(key) ? merged(key, node=>node.keys) : [...key.keys.values()])
                 .map(child=>child.name);
+        },
+
+        /**
+         * A key's class string, the one RegCreateKeyEx was given. A key seen
+         * through the classes root carries none of its own.
+         *
+         * @param {RegistryKey} key @returns {string}
+         */
+        classOf(key){
+            return isClasses(key) ? '' : key.keyClass;
+        },
+
+        /**
+         * The longest class string among a key's immediate subkeys, what
+         * RegQueryInfoKey reports as the most room a class read could need.
+         *
+         * @param {RegistryKey} key @returns {number}
+         */
+        maxSubkeyClassLength(key){
+            const children = isClasses(key) ? merged(key, node=>node.keys) : [...key.keys.values()];
+            return children.reduce((most, child)=>Math.max(most, child.keyClass.length), 0);
         },
 
         /**
