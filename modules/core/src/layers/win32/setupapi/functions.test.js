@@ -2506,3 +2506,28 @@ test('the system folder has the libraries this build implements, as kernel32 sho
         length]), 0, 'DPROMPT_SUCCESS');
     assert.equal(m.readCString(buffer, 64), 'C:\\WINDOWS\\system32');
 });
+
+test('a media\'s cabinet is where its first file was sought, for the files after it too',
+    async()=>{
+        // Wine's setupapi install test_need_media, testmode 15.
+        const { writeCabinet } = await import('../cabinet/fci.js');
+        const m = await machine();
+        m.volume.mkdir('C:\\src\\alpha');
+        /** @param {string} value */
+        const bytes = value=>Uint8Array.from(value, c=>c.charCodeAt(0));
+        m.file('C:\\src\\alpha\\tessares.cab', await writeCabinet({ setID: 1, iCabinet: 0,
+            folders: [{ compression: 1, files: [
+                { name: 'seven.txt', data: bytes('7'), date: 0, time: 0, attribs: 0 },
+                { name: 'eight.txt', data: bytes('8'), date: 0, time: 0, attribs: 0 }] }] }));
+        const queue = m.fns.SetupOpenFileQueue.handler();
+        m.fns.SetupQueueCopyA.handler([queue, m.str('src'), m.str('alpha'), m.str('seven.txt'),
+            m.str('desc'), m.str('tessares.cab'), m.str('dst'), 0, 0]);
+        m.fns.SetupQueueCopyA.handler([queue, m.str('src'), 0, m.str('eight.txt'), m.str('desc'),
+            m.str('tessares.cab'), m.str('dst'), 0, 0]);
+        const heard = mediaCallback(m, ()=>null);
+        assert.equal(await m.fns.SetupCommitFileQueueA.handler([0, queue, heard.entry, 0]), 1);
+        assert.deepEqual(heard.media.map(media=>media.path), ['src\\alpha'], 'one media');
+        assert.equal(heard.errors(), 0);
+        assert.equal(m.contents('C:\\dst\\seven.txt'), '7');
+        assert.equal(m.contents('C:\\dst\\eight.txt'), '8', 'from the same cabinet');
+    });

@@ -6,7 +6,8 @@
 
 /**
  * cabinet.dll: the File Decompression Interface, how a setup unpacks a
- * cabinet it carries.
+ * cabinet it carries, and beside it the File Compression Interface (fci.js),
+ * how a program makes one.
  *
  * The program supplies every service the library needs -- memory, and the
  * opening, reading, writing, seeking in and closing of files, all as
@@ -22,6 +23,7 @@
 
 import { CabinetError, COMPRESSION } from './cabinet.js';
 import { extractCabinet, readCabinetHead } from './stream.js';
+import { createFciFunctions } from './fci.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 
 /**
@@ -162,6 +164,8 @@ export function createCabinetFunctions(host){
     };
 
     return {
+        ...createFciFunctions(host),
+
         /**
          * HFDI FDICreate(PFNALLOC pfnalloc, PFNFREE pfnfree, PFNOPEN pfnopen,
          *   PFNREAD pfnread, PFNWRITE pfnwrite, PFNCLOSE pfnclose, PFNSEEK pfnseek,

@@ -291,13 +291,13 @@ const rootOf = (directory, subdirectory)=>{
 
 /**
  * The bytes of one queued copy: the file in its directory, or else inside
- * the cabinet its disk's tag file names, in the media's root.
+ * the cabinet its disk's tag file names, where the media's cabinet is.
  *
  * @param {CommitHost} host @param {CopyEntry} entry
- * @param {string} directory @param {string} root
+ * @param {string} directory @param {string} cabinetDirectory
  * @returns {Promise<Uint8Array | number>} the bytes, or the error
  */
-async function sourceBytes(host, entry, directory, root){
+async function sourceBytes(host, entry, directory, cabinetDirectory){
     const plain = host.readWhole(join(directory, entry.sourceFile));
     if (plain !== null)
     {
@@ -307,7 +307,7 @@ async function sourceBytes(host, entry, directory, root){
     {
         return ERROR_FILE_NOT_FOUND;
     }
-    const packed = host.readWhole(join(root, entry.tagfile));
+    const packed = host.readWhole(join(cabinetDirectory, entry.tagfile));
     if (packed === null)
     {
         return ERROR_FILE_NOT_FOUND;
@@ -441,10 +441,11 @@ export async function commitQueue(queue, host){
             return abort(null);
         }
         /**
-         * Each media's root once the callback has placed it: the files after
-         * the first are found under it.
+         * Each media once placed: its root, the files after the first found
+         * under it, and where its cabinet is -- the first file's directory,
+         * whatever the later files' own subdirectories.
          *
-         * @type {Map<string, string>}
+         * @type {Map<string, { root: string, cabinet: string }>}
          */
         const media = new Map();
         for (const entry of queue.copies)
@@ -455,8 +456,9 @@ export async function commitQueue(queue, host){
             let bytes = null;
             const placed = media.get(mediaKey);
             let directory = placed === undefined ? entry.sourcePath
-                : join(placed, entry.subdirectory);
-            let root = placed ?? entry.sourceRoot;
+                : join(placed.root, entry.subdirectory);
+            let root = placed?.root ?? entry.sourceRoot;
+            let cabinet = placed?.cabinet ?? directory;
             if (placed === undefined)
             {
                 // A path the callback gives is the first file's directory,
@@ -476,8 +478,8 @@ export async function commitQueue(queue, host){
                         break;
                     }
                     directory = asked.path;
-                    root = asked.path;
-                    bytes = await sourceBytes(host, entry, directory, root);
+                    cabinet = asked.path;
+                    bytes = await sourceBytes(host, entry, directory, cabinet);
                     if (bytes !== ERROR_FILE_NOT_FOUND)
                     {
                         root = rootOf(directory, entry.subdirectory);
@@ -492,7 +494,7 @@ export async function commitQueue(queue, host){
                 {
                     continue;
                 }
-                media.set(mediaKey, root);
+                media.set(mediaKey, { root, cabinet });
             }
             const target = join(entry.targetDirectory, entry.targetFile);
             const exists = host.exists(target);
@@ -519,7 +521,7 @@ export async function commitQueue(queue, host){
             let skipped = false;
             for (;;)
             {
-                bytes ??= await sourceBytes(host, entry, directory, root);
+                bytes ??= await sourceBytes(host, entry, directory, cabinet);
                 if (bytes instanceof Uint8Array)
                 {
                     host.makeDirectories(entry.targetDirectory);
@@ -544,8 +546,9 @@ export async function commitQueue(queue, host){
                 {
                     // The new path stands for the media's root from here on.
                     directory = decision.path;
-                    root = decision.path;
-                    media.set(mediaKey, rootOf(decision.path, entry.subdirectory));
+                    cabinet = decision.path;
+                    media.set(mediaKey, { root: rootOf(decision.path, entry.subdirectory),
+                        cabinet });
                     bytes = null;
                     continue;
                 }
