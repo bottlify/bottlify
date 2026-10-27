@@ -43,6 +43,8 @@ export const IID_ISHELL_LINK_DATA_LIST = '{45E2B4AE-B1C3-11D0-B92F-00A0C90312E1}
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
 const E_FAIL = 0x80004005 | 0;
+/** HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION) */
+const E_SHARING_VIOLATION = 0x80070020 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 const STG_E_FILENOTFOUND = 0x80030002 | 0;
@@ -176,7 +178,10 @@ function newLinkState(){
  *           from here rather than from storage this file keeps.
  * @property {import('../common/shell-link.js').LinkVolume & {
  *     read: (node: any, offset: number, length: number)
- *         => Uint8Array | Promise<Uint8Array> }} [files]
+ *         => Uint8Array | Promise<Uint8Array>,
+ *     open: (path: string, mode: { read?: boolean, write?: boolean, create?: boolean,
+ *         truncate?: boolean, shareRead?: boolean, shareWrite?: boolean }) => unknown,
+ *     openRefusal?: () => string | null }} [files]
  *           The volume a link is saved on and loaded from. Absent, Save cannot
  *           leave a file and says so rather than answering success.
  * @property {(text: string) => string} [expand]
@@ -304,12 +309,22 @@ function readList(host, list){
  */
 function cleanPath(text){
     const unquoted = /^"[^"]*"$/.test(text) ? text.slice(1, -1) : text;
-    return /^[A-Za-z]:\\?$/.test(unquoted)
-        ? `${unquoted.slice(0, 2)}\\` : unquoted.replace(/\\+$/, '');
+    // The drive is named in upper case, however it was spelled (Wine's
+    // test_get_set, against Windows).
+    const named = /^[a-z]:/.test(unquoted) ? `${unquoted[0].toUpperCase()}${unquoted.slice(1)}`
+        : unquoted;
+    return /^[A-Za-z]:\\?$/.test(named)
+        ? `${named.slice(0, 2)}\\` : named.replace(/\\+$/, '');
 }
 
 /** @param {string} path */
 const isDrivePath = path=>/^[A-Za-z]:\\/.test(path);
+
+/**
+ * The extensions a target named without one is tried with, in the order
+ * PathFileExistsDefExt documents.
+ */
+const PROGRAM_EXTENSIONS = Object.freeze(['.pif', '.com', '.exe', '.bat', '.lnk', '.cmd']);
 
 /** @param {number} value */
 const dword = value=>new Uint8Array([
@@ -352,6 +367,31 @@ function describe(id, slots, implemented = {}){
 export function createShellLink(host){
     /** @param {string} api @param {string} detail */
     const diverge = (api, detail)=>host.divergence?.(api, detail);
+
+    /** Whether the volume refused the last open for another open's terms. */
+    const refusedBySharing = ()=>host.files?.openRefusal?.() === 'SHARING_VIOLATION';
+
+    /**
+     * A full path that names no file, but does with a program's extension
+     * after it: the target SetPath keeps (Wine's test_get_set, "absolute
+     * path without .exe"). Any other path as it is.
+     *
+     * @param {string} path
+     */
+    const withProgramExtension = path=>{
+        const name = path.slice(path.lastIndexOf('\\') + 1);
+        const files = host.files;
+        /** @param {string} candidate */
+        const there = candidate=>{
+            const entry = files?.stat(candidate);
+            return Boolean(entry) && entry?.exists !== false;
+        };
+        if (!files || !isDrivePath(path) || name.includes('.') || there(path))
+        {
+            return path;
+        }
+        return PROGRAM_EXTENSIONS.map(extension=>`${path}${extension}`).find(there) ?? path;
+    };
 
     /**
      * The string setters and getters, built once per spelling. `read` decodes
@@ -410,7 +450,7 @@ export function createShellLink(host){
                     state.dirty = true;
                     return S_OK;
                 }
-                state.path = cleanPath(target);
+                state.path = withProgramExtension(cleanPath(target));
                 state.idList = null;
                 state.dirty = true;
                 return S_OK;
@@ -638,10 +678,12 @@ export function createShellLink(host){
             {
                 return STG_E_FILENOTFOUND;
             }
-            const node = files.open(path, { read: true });
+            // Read as Windows reads a link: sharing reading and writing with
+            // the opens already there, so only one that shares nothing bars it.
+            const node = files.open(path, { read: true, shareRead: true, shareWrite: true });
             if (!node)
             {
-                return STG_E_FILENOTFOUND;
+                return refusedBySharing() ? E_SHARING_VIOLATION : STG_E_FILENOTFOUND;
             }
             /** @param {Uint8Array} bytes */
             const finish = bytes=>{
@@ -694,8 +736,22 @@ export function createShellLink(host){
                     `no volume to save ${path} on; the link is not written`);
                 return E_FAIL;
             }
-            if (!writeShellLink(host.files, path, fieldsOf(state)))
+            const files = host.files;
+            // Written sharing reading, so a reader already there keeps it and
+            // an open that refuses writers refuses the save.
+            const sharing = {
+                stat: files.stat.bind(files),
+                /** @param {string} at @param {Record<string, boolean>} mode */
+                open: (at, mode)=>files.open(at, { ...mode, shareRead: true }),
+                write: files.write.bind(files),
+                close: files.close.bind(files),
+            };
+            if (!writeShellLink(sharing, path, fieldsOf(state)))
             {
+                if (refusedBySharing())
+                {
+                    return E_SHARING_VIOLATION;
+                }
                 const parent = path.slice(0, path.lastIndexOf('\\'));
                 return host.files.stat(parent)?.isDirectory ? E_FAIL : E_PATH_NOT_FOUND;
             }

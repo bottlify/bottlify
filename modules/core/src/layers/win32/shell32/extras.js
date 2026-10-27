@@ -41,8 +41,11 @@ const fromWin32 = code=>((code & 0xffff) | 0x80070000) | 0;
 const CABINETSTATE_SIZE = 12;
 const CABINETSTATE_VERSION = 2;
 
-/** SHIL_*: the system image lists by index, and the icon size of each. */
-const IMAGE_SIZES = Object.freeze([32, 16, 16, 48, 256]);
+/**
+ * SHIL_*: the system image lists by index -- large, small, extra large,
+ * the system's small, jumbo -- and the icon size of each.
+ */
+const IMAGE_SIZES = Object.freeze([32, 16, 48, 16, 256]);
 
 /** The known folders this build has, as the CSIDL each is. */
 const KNOWN_FOLDERS = Object.freeze({
@@ -67,6 +70,12 @@ const KNOWN_FOLDERS = Object.freeze({
 });
 
 const IID_IIMAGELIST = '{46EB5926-582E-4017-9FDF-E8998DAA0950}';
+
+/** SHSTOCKICONINFO: cbSize, hIcon, iSysImageIndex, iIcon, then szPath[MAX_PATH]. */
+const SHSTOCKICONINFO_SIZE = 16 + MAX_PATH * 2;
+/** SIID_MAX_ICONS: the stock icons are numbered from 0 to one below it. */
+const SIID_MAX_ICONS = 181;
+const SHGSI_ICON = 0x100;
 const IID_IIMAGELIST2 = '{192B9D83-50FC-457B-90A0-2B82A8B5DAE1}';
 
 /**
@@ -264,28 +273,42 @@ export function createShellExtras(host, parts){
             'GetIcon', 'GetImageInfo', 'Copy', 'Merge', 'Clone', 'GetImageRect']
             .map(name=>({ name, argBytes: 4, invoke: ()=>E_NOTIMPL })),
         /** HRESULT GetIconSize(int *cx, int *cy) */
-        { name: 'GetIconSize', argBytes: 12, invoke: (/** @type {any} */ object, /** @type {number[]} */ [cx, cy])=>{
-            writeU32(cx, object.state.size);
-            writeU32(cy, object.state.size);
-            return S_OK;
-        } },
+        { name: 'GetIconSize', argBytes: 12,
+            invoke: (/** @type {any} */ object, /** @type {number[]} */ [cx, cy])=>{
+                writeU32(cx, object.state.size);
+                writeU32(cy, object.state.size);
+                return S_OK;
+            } },
         ...['SetIconSize', 'GetImageCount', 'SetImageCount', 'SetBkColor', 'GetBkColor',
             'BeginDrag', 'EndDrag', 'DragEnter', 'DragLeave', 'DragMove', 'SetDragCursorImage',
             'DragShowNolock', 'GetDragImage', 'GetItemFlags', 'GetOverlayImage']
             .map(name=>({ name, argBytes: 4, invoke: ()=>E_NOTIMPL })),
     ]);
-    /** @type {number[]} The system image lists, made the first time one is asked for. */
+    /**
+     * @type {{ pointer: number, adapter: { addRef: () => number } }[]}
+     * The system image lists, made the first time one is asked for.
+     */
     const imageLists = [];
-    /** @param {number} index */
-    const imageList = index=>{
+    /**
+     * A system image list, and a reference for the caller when it is to own
+     * one: SHGetImageList hands one out, Shell_GetImageLists does not.
+     *
+     * @param {number} index @param {boolean} [owned]
+     */
+    const imageList = (index, owned = false)=>{
         if (imageLists[index] === undefined && host.publish)
         {
             const adapter = createAdapter({ size: IMAGE_SIZES[index] },
                 { [IID_IIMAGELIST]: imageListMethods, [IID_IIMAGELIST2]: imageListMethods });
             // The lists are the process's: one reference kept for as long as it runs.
-            imageLists[index] = host.publish(adapter, IID_IIMAGELIST) >>> 0;
+            imageLists[index] = { pointer: host.publish(adapter, IID_IIMAGELIST) >>> 0, adapter };
         }
-        return imageLists[index] ?? 0;
+        const list = imageLists[index];
+        if (list && owned)
+        {
+            list.adapter.addRef();
+        }
+        return list?.pointer ?? 0;
     };
     let toldImageLists = false;
 
@@ -497,6 +520,46 @@ export function createShellExtras(host, parts){
          * each time. It answers its size; holding no icons, it draws
          * nothing, and a HIMAGELIST call on it is not comctl32's list.
          */
+        /**
+         * HRESULT SHGetStockIconInfo(SHSTOCKICONID siid, UINT uFlags, SHSTOCKICONINFO *psii)
+         *
+         * Where a stock icon is: in the shell's library, at the id's own
+         * number, that library holding no icons here to number otherwise. No
+         * handle and no system image index -- -1 -- for there is no picture;
+         * an id out of range is E_INVALIDARG with both indexes -1, as is a
+         * structure of any other size (Wine's test_SHGetStockIconInfo).
+         */
+        SHGetStockIconInfo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: async([id, flags, info])=>{
+                if ((info >>> 0) === 0 || readU32(info) !== SHSTOCKICONINFO_SIZE)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(info + 4, 0);
+                writeU32(info + 8, -1);
+                writeU32(info + 12, -1);
+                if ((id | 0) < 0 || (id | 0) >= SIID_MAX_ICONS)
+                {
+                    return E_INVALIDARG;
+                }
+                if (((flags >>> 0) & SHGSI_ICON) !== 0)
+                {
+                    host.divergence?.('SHGetStockIconInfo',
+                        'the shell\'s library holds no icons: no handle');
+                }
+                const system = await scratch(MAX_PATH * 2, async at=>{
+                    const length = await kernel32('GetSystemDirectoryW', [at, MAX_PATH]);
+                    return length > 0 && length < MAX_PATH ? wide(at) : null;
+                }, null);
+                const path = system === null ? 'shell32.dll' : `${system}\\shell32.dll`;
+                host.writeMemory(info + 16, utf16z(path.slice(0, MAX_PATH - 1)));
+                writeU32(info + 12, id | 0);
+                return S_OK;
+            },
+        },
+
         SHGetImageList: {
             argBytes: 12,
             /** @param {number[]} args */
@@ -515,7 +578,7 @@ export function createShellExtras(host, parts){
                 {
                     return E_NOINTERFACE;
                 }
-                const list = imageList(index >>> 0);
+                const list = imageList(index >>> 0, true);
                 if (!list)
                 {
                     return E_OUTOFMEMORY;

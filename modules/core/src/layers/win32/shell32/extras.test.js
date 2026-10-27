@@ -49,6 +49,10 @@ function machine(paths = [], table = {}){
         return at;
     };
     const kernel32 = {
+        GetSystemDirectoryW: { handler: (/** @type {number[]} */ [to])=>{
+            put('C:\\WINDOWS\\system32', true, to);
+            return 'C:\\WINDOWS\\system32'.length;
+        } },
         ExpandEnvironmentStringsA: { handler: (/** @type {number[]} */ [from, to])=>{
             const text = narrow(from).replace('%X%', 'yyy');
             put(text, false, to);
@@ -179,8 +183,46 @@ test('the cabinet state, the image lists and the notifications answer as default
     assert.equal(m.u32(0x3004), large);
     const sizes = m.published.map(object=>object.state.size);
     assert.deepEqual(sizes, [32, 16]);
+    for (const index of [2, 3, 4])
+    {
+        assert.equal(m.extras.SHGetImageList.handler([index, iid, 0x3000]), 0);
+    }
+    assert.deepEqual(m.published.map(object=>object.state.size), [32, 16, 48, 16, 256],
+        'large, small, extra large, the system\'s small, jumbo');
+    // Ours, then one per SHGetImageList; Shell_GetImageLists hands out none.
+    assert.equal(m.published[0].addRef(), 4);
     const id = m.extras.SHChangeNotifyRegister.handler([0x40, 0, 0, 0x400, 1, 0x2000]);
     assert.notEqual(id, 0);
     assert.equal(m.extras.SHChangeNotifyDeregister.handler([id]), 1);
     assert.equal(m.extras.SHChangeNotifyDeregister.handler([id]), 0);
+});
+
+test('a stock icon is in the shell\'s library, and an id out of range is no icon', async()=>{
+    const m = machine();
+    const info = 0x5000;
+    /** @param {number} size */
+    const sized = size=>{
+        m.memory.fill(0x23, info, info + 0x240);
+        m.memory.set([size & 0xff, size >>> 8, 0, 0], info);
+    };
+    sized(536);
+    assert.equal(await m.extras.SHGetStockIconInfo.handler([3, 0, info]), 0);
+    assert.equal(m.u32(info + 4), 0, 'no handle without SHGSI_ICON');
+    assert.equal(m.u32(info + 8) | 0, -1, 'no system image index');
+    assert.equal(m.u32(info + 12), 3);
+    assert.equal(m.wide(info + 16), 'C:\\WINDOWS\\system32\\shell32.dll');
+    for (const id of [-1, 181, 205])
+    {
+        sized(536);
+        assert.equal(await m.extras.SHGetStockIconInfo.handler([id, 0, info]), 0x80070057 | 0);
+        assert.equal(m.u32(info + 8) | 0, -1);
+        assert.equal(m.u32(info + 12) | 0, -1);
+    }
+    for (const size of [534, 535, 537, 538])
+    {
+        sized(size);
+        assert.equal(await m.extras.SHGetStockIconInfo.handler([3, 0, info]), 0x80070057 | 0,
+            `cbSize ${size}`);
+    }
+    assert.equal(await m.extras.SHGetStockIconInfo.handler([3, 0, 0]), 0x80070057 | 0);
 });

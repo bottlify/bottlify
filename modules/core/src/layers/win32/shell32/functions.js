@@ -33,7 +33,9 @@
  * is there to copy, move, rename and delete on (`fileop.js`).
  */
 
-import { MY_COMPUTER, createShellNamespace, listBytes, pathOfList } from './namespace.js';
+import {
+    CONTROL_PANEL, MY_COMPUTER, createShellNamespace, listBytes, pathOfList,
+} from './namespace.js';
 import { createDirectoryPath, runFileOperation } from './fileop.js';
 import { readFileIcons } from './icons.js';
 import { splitCommandLine } from './commandline.js';
@@ -177,6 +179,7 @@ const E_FAIL = 0x80004005 | 0;
 
 /** The computer: a folder with no path, whose children are the drives. */
 const CSIDL_DRIVES = 0x11;
+const CSIDL_CONTROLS = 0x03;
 /** The user's documents, "My Documents". */
 const CSIDL_PERSONAL = 0x05;
 
@@ -1863,8 +1866,9 @@ export function createShellFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, csidl, out])=>{
-                const folder = ((csidl | 0) & ~CSIDL_FLAG_MASK) === CSIDL_DRIVES
-                    ? MY_COMPUTER : folderOf(csidl | 0);
+                const virtual = ((csidl | 0) & ~CSIDL_FLAG_MASK);
+                const folder = virtual === CSIDL_DRIVES ? MY_COMPUTER
+                    : virtual === CSIDL_CONTROLS ? CONTROL_PANEL : folderOf(csidl | 0);
                 if (folder === null)
                 {
                     host.writeMemory(out >>> 0, dword(0));
