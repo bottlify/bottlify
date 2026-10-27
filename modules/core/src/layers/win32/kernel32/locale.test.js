@@ -1383,3 +1383,36 @@ test('the thread\'s locale picks CP_THREAD_ACP; SetLocaleInfo takes only the use
     assert.equal(fns.SetLocaleInfoW.handler([0x0400, 0x5c, 0x100]), 0, 'SNAME is the locale\'s');
     assert.equal(host.errors.at(-1), 1004);
 });
+
+test('GetNumberFormat groups by a NUMBERFMT\'s number or the locale\'s SGROUPING', ()=>{
+    // Wine's locale.c test_GetNumberFormatA, its grouping table among it.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x80, '.');
+    host.plantAnsi(0x84, ',');
+    host.plantAnsi(0x100, '123456789');
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} grouping */
+    const byNumber = grouping=>{
+        [1, 0, grouping, 0x80, 0x84, 0].forEach((value, at)=>
+            view.setUint32(0x40 + at * 4, value, true));
+        const length = fns.GetNumberFormatA.handler([0x409, 0, 0x100, 0x40, 0x200, 64]);
+        return String.fromCharCode(...host.bytes.subarray(0x200, 0x200 + length - 1));
+    };
+    assert.equal(byNumber(23), '1,234,567,89.0');
+    assert.equal(byNumber(230), '1234,567,89.0');
+    assert.equal(byNumber(203), '1,234,567,,89.0');
+    assert.equal(byNumber(1200), '123456,,78,9.0');
+
+    host.plantAnsi(0x100, '1234567890.54321');
+    for (const [grouping, expected] of [['3;0', '1,234,567,890.54'], ['2;3', '12345,678,90.54'],
+        ['0;1', '123456789,0.54'], ['2;0;0;0', '12345678,,90.54'],
+        ['1;3;2;0', '12,34,56,789,0.54']])
+    {
+        host.plantAnsi(0x300, grouping);
+        assert.equal(fns.SetLocaleInfoA.handler([0x400, 0x10, 0x300]), 1);
+        const length = fns.GetNumberFormatA.handler([0x400, 0, 0x100, 0, 0x200, 64]);
+        const text = String.fromCharCode(...host.bytes.subarray(0x200, 0x200 + length - 1));
+        assert.equal(text, expected, grouping);
+    }
+});

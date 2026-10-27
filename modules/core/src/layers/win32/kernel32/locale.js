@@ -203,37 +203,54 @@ const TIME_FLAGS = 0x0f | 0x80000000 | 0x40000000;
 const SYSTEMTIME_SIZE = 16;
 
 /**
+ * How the integer digits are grouped, from the point leftwards: each size
+ * in turn, a size of 0 an empty group, and the last one again and again when
+ * `repeat` says so.
+ *
+ * @typedef {{ sizes: number[], repeat: boolean }} Grouping
+ */
+
+/**
+ * The grouping a NUMBERFMT's number says: its decimal digits are the sizes,
+ * the last repeated unless it is 0 (3 is 1,234,567; 32 is 12,34,567; 30 is
+ * 1234,567).
+ *
+ * @param {number} grouping @returns {Grouping}
+ */
+const groupingOfNumber = grouping=>{
+    const sizes = [...String(grouping >>> 0)].map(Number);
+    const repeat = sizes[sizes.length - 1] !== 0;
+    return repeatless({ sizes: repeat ? sizes : sizes.slice(0, -1), repeat });
+};
+
+/**
+ * The grouping an SGROUPING string says: its sizes between semicolons, a
+ * last 0 making the size before it repeat ("3;0" is 1,234,567, "3" is
+ * 1234,567).
+ *
+ * @param {string} text @returns {Grouping}
+ */
+const groupingOfText = text=>{
+    const sizes = text.split(';').map(part=>Number(part) || 0);
+    const repeat = sizes.length > 1 && sizes[sizes.length - 1] === 0;
+    return repeatless({ sizes: repeat ? sizes.slice(0, -1) : sizes, repeat });
+};
+
+/** A 0 repeated is no more groups at all. @param {Grouping} grouping @returns {Grouping} */
+const repeatless = grouping=>(grouping.repeat && grouping.sizes[grouping.sizes.length - 1] === 0
+    ? { sizes: grouping.sizes.slice(0, -1), repeat: false } : grouping);
+
+/**
  * @typedef {Object} NumberPicture   A NUMBERFMT, read or defaulted.
  * @property {number} digits         Decimal places.
  * @property {number} leadingZero    Whether 0.5 is written with its zero.
- * @property {number} grouping       Digits to a group, 0 for none.
+ * @property {Grouping} grouping
  * @property {string} decimal
  * @property {string} thousand
  * @property {number} negativeOrder  Where the sign goes, 0..4 (0..15 for money).
  * @property {number} [positiveOrder] Where a currency symbol goes, 0..3.
  * @property {string} [symbol]       The currency's.
  */
-
-/**
- * How GetNumberFormat writes a number when handed no NUMBERFMT of its own:
- * the locale's own picture, which for this one is two decimals, a leading
- * zero, groups of three, and a minus sign in front.
- *
- * @type {Readonly<NumberPicture>}
- */
-const NUMBER_DEFAULTS = Object.freeze({
-    digits: 2, leadingZero: 1, grouping: 3, decimal: '.', thousand: ',', negativeOrder: 1,
-});
-
-/**
- * GetCurrencyFormat's picture when handed none: the number's, with a dollar
- * sign in front and a negative amount in parentheses.
- *
- * @type {Readonly<NumberPicture>}
- */
-const CURRENCY_DEFAULTS = Object.freeze({
-    ...NUMBER_DEFAULTS, negativeOrder: 0, positiveOrder: 0, symbol: '$',
-});
 
 /** sizeof(NUMBERFMTA): six DWORD-sized fields, two of them pointers. */
 const NUMBERFMTA_SIZE = 24;
@@ -1039,12 +1056,26 @@ export function createLocaleFunctions(host){
      * picture when the caller passed none.
      *
      * @param {number} address @param {boolean} wide @param {boolean} currency
+     * @param {import("./locales.js").Locale} record @param {number} flags
      * @returns {Readonly<NumberPicture> | null} null for a picture Windows refuses
      */
-    const numberPicture = (address, wide, currency)=>{
+    const numberPicture = (address, wide, currency, record, flags)=>{
         if (address === 0)
         {
-            return currency ? CURRENCY_DEFAULTS : NUMBER_DEFAULTS;
+            const own = flags & LOCALE_NOUSEROVERRIDE;
+            const text = (/** @type {number} */ type)=>String(valueOf(record, own | type) ?? '');
+            const number = (/** @type {number} */ type)=>Number(valueOf(record, own | type) ?? 0);
+            return currency ? {
+                digits: number(LCTYPE.ICURRDIGITS), leadingZero: number(LCTYPE.ILZERO),
+                grouping: groupingOfText(text(LCTYPE.SMONGROUPING)),
+                decimal: text(LCTYPE.SMONDECIMALSEP), thousand: text(LCTYPE.SMONTHOUSANDSEP),
+                negativeOrder: number(LCTYPE.INEGCURR), positiveOrder: number(LCTYPE.ICURRENCY),
+                symbol: text(LCTYPE.SCURRENCY),
+            } : {
+                digits: number(LCTYPE.IDIGITS), leadingZero: number(LCTYPE.ILZERO),
+                grouping: groupingOfText(text(LCTYPE.SGROUPING)), decimal: text(LCTYPE.SDECIMAL),
+                thousand: text(LCTYPE.STHOUSAND), negativeOrder: number(LCTYPE.INEGNUMBER),
+            };
         }
         const view = new DataView(host.readMemory(address,
             currency ? CURRENCYFMTA_SIZE : NUMBERFMTA_SIZE).slice().buffer);
@@ -1062,36 +1093,33 @@ export function createLocaleFunctions(host){
         return {
             digits: view.getUint32(0, true),
             leadingZero: view.getUint32(4, true),
-            grouping: view.getUint32(8, true),
+            grouping: groupingOfNumber(view.getUint32(8, true)),
             decimal, thousand, negativeOrder, positiveOrder, symbol,
         };
     };
 
     /**
-     * The integer digits in groups, as a Grouping number says: its decimal
-     * digits are the group sizes from the point leftwards, the last repeated
-     * -- unless it is 0, which leaves the rest in one run (3 is 1,234,567;
-     * 32 is 12,34,567; 30 is 1234,567).
+     * The integer digits in groups, as a grouping says: a group of 0 at the
+     * start is none, one further on an empty group; the digits left when the
+     * sizes run out are the last group.
      *
-     * @param {string} whole @param {number} grouping @param {string} separator
+     * @param {string} whole @param {Grouping} grouping @param {string} separator
      */
     const group = (whole, grouping, separator)=>{
-        const text = String(grouping);
-        const repeats = !text.endsWith('0');
-        const sizes = [...(repeats ? text : text.slice(0, -1))].map(Number);
+        const { sizes, repeat } = grouping;
         const parts = [];
         let rest = whole;
-        for (let at = 0; rest.length > 0; at++)
+        for (let at = sizes[0] === 0 ? 1 : 0; rest.length > 0; at++)
         {
-            const size = sizes[Math.min(at, sizes.length - 1)] ?? 0;
-            if (size === 0 || (!repeats && at >= sizes.length) || rest.length <= size)
+            const size = at < sizes.length ? sizes[at] : repeat ? sizes[sizes.length - 1] : -1;
+            if (size < 0 || rest.length <= size)
             {
-                parts.unshift(rest);
                 break;
             }
             parts.unshift(rest.slice(rest.length - size));
             rest = rest.slice(0, rest.length - size);
         }
+        parts.unshift(rest);
         return parts.join(separator);
     };
 
@@ -1889,7 +1917,8 @@ export function createLocaleFunctions(host){
         argBytes: 24,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [locale, flags, value, format, buffer, count])=>{
-            if (!isOurLocale(locale >>> 0) || ((buffer >>> 0) === 0 && (count | 0) !== 0))
+            const record = localeOf(locale >>> 0);
+            if (record === null || ((buffer >>> 0) === 0 && (count | 0) !== 0))
             {
                 return refuse(ERROR_INVALID_PARAMETER);
             }
@@ -1897,11 +1926,11 @@ export function createLocaleFunctions(host){
             {
                 return refuse(ERROR_INVALID_FLAGS);
             }
-            const picture = numberPicture(format >>> 0, wide, currency);
+            const picture = numberPicture(format >>> 0, wide, currency, record, flags >>> 0);
             const text = picture && formatNumber(
                 (wide ? readWideSpan : readAnsiSpan)(value >>> 0, -1), picture, currency);
             return text === null ? refuse(ERROR_INVALID_PARAMETER)
-                : writeAnswer(text, buffer >>> 0, count | 0, wide);
+                : writeAnswer(text, buffer >>> 0, count | 0, wide, record.ansi || ANSI_CODE_PAGE);
         },
     });
 
