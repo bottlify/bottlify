@@ -31,6 +31,8 @@ import {
 import { STATUS } from '../ntdll/status.js';
 import { USER_NAME } from './tokens.js';
 import { createNamedSecurityFunctions } from './named-security.js';
+import { createSecurityFunctions } from './security.js';
+import { createLsaFunctions } from './lsa.js';
 import { isTextUnicode } from './text.js';
 
 const ERROR_SUCCESS = 0;
@@ -39,6 +41,7 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_MORE_DATA = 234;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_SID = 1337;
@@ -1778,6 +1781,7 @@ export function createRegistryFunctions(host){
                 if ((buffer >>> 0) === 0 || readDword(size >>> 0) < needed)
                 {
                     writeDword(size >>> 0, needed);
+                    host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
                 writeText(buffer >>> 0, USER_NAME);
@@ -1799,6 +1803,7 @@ export function createRegistryFunctions(host){
                 if ((buffer >>> 0) === 0 || readDword(size >>> 0) < needed)
                 {
                     writeDword(size >>> 0, needed);
+                    host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
                 host.writeMemory(buffer >>> 0, widened(encodeAnsi(`${USER_NAME}\0`)));
@@ -2324,6 +2329,10 @@ export function createRegistryFunctions(host){
         // Named by a path or a key's name, an object's security needs the
         // volume and the hive this library already holds.
         ...createNamedSecurityFunctions(host),
+        // The descriptor and SDDL calls hand out LocalAlloc blocks.
+        ...host.allocate ? createSecurityFunctions({ ...host, allocate: host.allocate,
+            setLastError: host.setLastError ?? (()=>{}) }) : {},
+        ...host.allocate ? createLsaFunctions({ ...host, allocate: host.allocate }) : {},
 
         [UNLOAD_KEY]: unload,
         [REGISTRY_NATIVES]: nativeRegistry(),

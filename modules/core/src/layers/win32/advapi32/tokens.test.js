@@ -1017,3 +1017,114 @@ test('ConvertStringSecurityDescriptorToSecurityDescriptor lays out the descripto
         assert.equal(convert([putWide(bytes, 0x300, 'D:(A;;GA;;;WD)'), 2, OUT, 0]), 0);
         assert.deepEqual(errors.filter(code=>code !== 0), [87, 1305]);
     });
+
+test('an ACL takes the highest revision an ACE was added with; one past the last stops it', ()=>{
+    const { bytes, errors, fns } = setup();
+    const acl = 0x300;
+    bytes.set([1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], SID); // S-1-1-0
+    assert.equal(fns.InitializeAcl.handler([acl, 256, 3]), 1, 'revision 3 is one');
+    assert.equal(fns.InitializeAcl.handler([acl, 256, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAceEx.handler([acl, 4, 0x4, 0x10, SID]), 1);
+    assert.equal(bytes[acl], 4);
+    assert.equal(bytes[acl + 8 + 1], 0x4, 'the ACE keeps its flags');
+    const ace = bytes.slice(acl + 8, acl + 8 + 20);
+    bytes.set(ace, 0x500);
+    assert.equal(fns.AddAce.handler([acl, 5, 0xffffffff, 0x500, 20]), 1);
+    assert.equal(bytes[acl], 5, 'written as given');
+    assert.equal(fns.AddAce.handler([acl, 2, 0xffffffff, 0x500, 20]), 0);
+    assert.equal(errors.at(-1), 87);
+});
+
+test('AddMandatoryAce takes only the three policies, as a label ACE', ()=>{
+    const { bytes, errors, fns } = setup();
+    const acl = 0x300;
+    bytes.set([1, 1, 0, 0, 0, 0, 0, 16, 0, 0x10, 0, 0], SID); // S-1-16-4096
+    fns.InitializeAcl.handler([acl, 256, 2]);
+    assert.equal(fns.AddMandatoryAce.handler([acl, 2, 0, 0x1234, SID]), 0);
+    assert.equal(errors.at(-1), 87);
+    assert.equal(fns.AddMandatoryAce.handler([acl, 2, 0, 1, SID]), 1);
+    assert.deepEqual([...bytes.subarray(acl + 8, acl + 12)], [0x11, 0, 20, 0]);
+});
+
+test('DuplicateTokenEx makes a primary token or an impersonation one, as asked', ()=>{
+    const { errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 2, 2, OUT]), 1);
+    assert.equal(fns.GetTokenInformation.handler([dword(OUT), 9, BUFFER, 4, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 2, 'SecurityImpersonation');
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 2, 1, OUT]), 1);
+    assert.equal(fns.GetTokenInformation.handler([dword(OUT), 9, BUFFER, 4, NEEDED]), 0,
+        'a primary token has no impersonation level');
+    assert.equal(errors.at(-1), 87);
+});
+
+test('TokenPrivileges lists the held privileges, change-notify enabled', ()=>{
+    const { errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    assert.equal(fns.GetTokenInformation.handler([token, 3, 0, 0, NEEDED]), 0);
+    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    const count = (dword(NEEDED) - 4) / 12;
+    errors.length = 0;
+    assert.equal(fns.GetTokenInformation.handler([token, 3, BUFFER, dword(NEEDED), NEEDED]), 1);
+    assert.equal(errors.length, 0, 'a success leaves the last error alone');
+    assert.equal(dword(BUFFER), count);
+    const changeNotify = Array.from({ length: count }, (_, at)=>BUFFER + 4 + at * 12)
+        .find(at=>dword(at) === 23);
+    assert.ok(changeNotify !== undefined);
+    assert.equal(dword(changeNotify + 8), 3);
+});
+
+test('the default DACL can be set to none, and is answered so', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    assert.equal(fns.SetTokenInformation.handler([token, 6, 0, 0]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(fns.SetTokenInformation.handler([token, 6, 0, 4]), 0);
+    assert.equal(errors.at(-1), 998, 'ERROR_NOACCESS');
+    bytes.fill(0, BUFFER, BUFFER + 4);
+    assert.equal(fns.SetTokenInformation.handler([token, 6, BUFFER, 4]), 1);
+    assert.equal(fns.GetTokenInformation.handler([token, 6, BUFFER, 64, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 0);
+    assert.equal(dword(NEEDED), 4);
+});
+
+test('AccessCheck reads a self-relative descriptor; a null DACL grants the mapping\'s all', ()=>{
+    const { bytes, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    const { bytes: descriptor } = selfRelativeDescriptor({ dacl: null });
+    bytes.set(descriptor, BUFFER);
+    const mapping = 0x500;
+    [0x120001, 0x120002, 0x120004, 0x1f0001]
+        .forEach((value, at)=>new DataView(bytes.buffer).setUint32(mapping + at * 4, value, true));
+    new DataView(bytes.buffer).setUint32(NEEDED, 64, true);
+    assert.equal(fns.IsValidSecurityDescriptor.handler([BUFFER]), 1);
+    assert.equal(fns.AccessCheck.handler([BUFFER, token, 0x02000000, mapping, 0x580, NEEDED,
+        0x5c0, 0x5c4]), 1);
+    assert.equal(dword(0x5c4), 1);
+    assert.equal(dword(0x5c0), 0x1f0001);
+});
+
+test('LookupAccountName finds a service account by the name without its space', ()=>{
+    const { bytes, fns, dword } = setup();
+    bytes.set([...'LocalService'].map(c=>c.charCodeAt(0)).concat(0), 0x300);
+    new DataView(bytes.buffer).setUint32(NEEDED, 64, true);
+    new DataView(bytes.buffer).setUint32(0x5f0, 64, true);
+    assert.equal(fns.LookupAccountNameA.handler([0, 0x300, SID, NEEDED, 0x400, 0x5f0, 0x5f4]), 1);
+    assert.deepEqual([...bytes.subarray(SID, SID + 12)], [1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0]);
+    assert.equal(dword(0x5f4), 5, 'SidTypeWellKnownGroup');
+});
+
+test('ConvertStringSidToSid reads hex anywhere, and wants a sub-authority', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    bytes.set([...'S-0x1-0XC-0x1a'].map(c=>c.charCodeAt(0)).concat(0), 0x300);
+    assert.equal(fns.ConvertStringSidToSidA.handler([0x300, OUT]), 1);
+    assert.deepEqual([...bytes.subarray(dword(OUT), dword(OUT) + 12)],
+        [1, 1, 0, 0, 0, 0, 0, 12, 26, 0, 0, 0]);
+    bytes.set([...'S-1-5'].map(c=>c.charCodeAt(0)).concat(0), 0x300);
+    assert.equal(fns.ConvertStringSidToSidA.handler([0x300, OUT]), 0);
+    assert.equal(errors.at(-1), 1337);
+});

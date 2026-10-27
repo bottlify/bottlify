@@ -692,6 +692,22 @@ test('too small a buffer is refused, and the size needed is written back', ()=>{
         'and the size it asked for is enough');
 });
 
+test('the refusal says ERROR_INSUFFICIENT_BUFFER, as a caller sizing its buffer checks', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createRegistryService(createHive()),
+        setLastError: code=>errors.push(code),
+    });
+    memory.putDword(OUT_SIZE, 0);
+    assert.equal(fns.GetUserNameW.handler([0, OUT_SIZE]), 0);
+    assert.deepEqual(errors, [122]);
+});
+
 test('no size pointer at all is a refusal rather than a write to address zero', ()=>{
     const { fns } = setup();
     assert.equal(fns.GetUserNameA.handler([OUT_NAME, 0]), 0);
