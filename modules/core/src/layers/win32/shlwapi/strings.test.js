@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shlwapiMachine } from './memory.fixture.js';
 import { createLocaleFunctions } from '../kernel32/locale.js';
-import { timeInterval } from './strings.js';
+import { byteSize, kbSize, timeInterval } from './strings.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005;
@@ -342,4 +342,89 @@ test('StrFromTimeInterval rounds to the second and cuts to the digits asked', ()
         assert.equal(m.fns[`StrFromTimeInterval${suffix}`].handler([buffer, 5, 1000000, 3]), 4);
         assert.equal(m.read(buffer, wide), ' 16 ', 'cut to the buffer');
     }
+});
+
+test('a size is shown in bytes or three digits of its unit, and in kilobytes rounded up', ()=>{
+    // Wine's StrFormatSize_results, against Windows.
+    for (const [size, bytes, kb] of /** @type {[bigint, string, string][]} */ ([
+        [-1023n, '-1023 bytes', '0 KB'], [309n, '309 bytes', '1 KB'], [10191n, '9.95 KB', '10 KB'],
+        [100353n, '98.0 KB', '99 KB'], [1022286n, '998 KB', '999 KB'],
+        [1046862n, '0.99 MB', '1,023 KB'], [1048574619n, '999 MB', '1,023,999 KB'],
+        [1073741775n, '0.99 GB', '1,048,576 KB'],
+        [0x0fffffffn << 32n | 0xfffffa9bn, '0.99 EB', '1,125,899,906,842,623 KB'],
+    ]))
+    {
+        assert.equal(byteSize(size), bytes, `${size}`);
+        assert.equal(kbSize(size), kb, `${size}`);
+    }
+    assert.equal(byteSize(2147483647n, true), '2.00 GB', 'rounded');
+    assert.equal(byteSize(2147483647n), '1.99 GB', 'or cut');
+    const m = shlwapiMachine();
+    const out = m.put('', false, 0x40);
+    assert.equal(m.fns.StrFormatByteSize64A.handler([10191, 0, out, 0x40]), out);
+    assert.equal(m.read(out, false), '9.95 KB');
+    assert.equal(m.fns.StrFormatKBSizeW.handler([1046862, 0, out, 0x20]), out);
+    assert.equal(m.read(out, true), '1,023 KB');
+    assert.equal(m.fns.StrFormatByteSizeEx.handler([0x7fffffff, 0, 1, out, 0x20]), S_OK);
+    assert.equal(m.read(out, true), '2.00 GB');
+    assert.equal(m.fns.StrFormatByteSizeEx.handler([1, 0, 10, out, 0x20]), 0x80070057 | 0);
+    assert.equal(m.fns.StrFormatByteSizeEx.handler([1, 0, 2, out, 0]), 0x80070057 | 0);
+});
+
+test('the counted searches, the chained copy and the copies that say where they end', ()=>{
+    // Wine's test_StrStrNW, test_StrStrNIW, test_StrCatChainW, test_StrCpyNXA, test_SHAnsiToAnsi.
+    const m = shlwapiMachine();
+    const text = m.put('DeAdBeEf', true);
+    const beef = m.put('BeEf', true);
+    assert.equal(m.fns.StrStrNW.handler([text, beef, 4]), 0, 'it must start within the count');
+    assert.equal(m.fns.StrStrNW.handler([text, beef, 5]), text + 8);
+    assert.equal(m.fns.StrStrNW.handler([text, m.put('beef', true), 9]), 0);
+    assert.equal(m.fns.StrStrNIW.handler([text, m.put('beef', true), 9]), text + 8);
+    assert.equal(m.fns.StrStrNIW.handler([text, m.put('', true), 9]), 0);
+    assert.equal(m.fns.StrChrNW.handler([m.put('Testing String', true), 'r'.charCodeAt(0), 10]),
+        0, 'not within the first ten');
+    const buffer = m.put('', true, 0x40);
+    m.memory.fill(0x11, buffer, buffer + 0x40);
+    assert.equal(m.fns.StrCatChainW.handler([buffer, 4, 0, m.put('DeAd', true)]), 3);
+    assert.equal(m.read(buffer, true), 'DeA');
+    assert.equal(m.fns.StrCatChainW.handler([buffer, 4, 1, beef]), 3);
+    assert.equal(m.read(buffer, true), 'DBe');
+    assert.equal(m.view.getUint16(buffer + 8, true), 0x1111, 'nothing past the buffer');
+    assert.equal(m.fns.StrCatChainW.handler([buffer, 32, -1, beef]), 7);
+    assert.equal(m.read(buffer, true), 'DBeBeEf');
+    assert.equal(m.fns.StrCatChainW.handler([buffer, 9, 10, beef]), 10, 'past the buffer');
+    assert.equal(m.fns.StrCatChainW.handler([0, 0, 0, beef]), 0);
+    const narrow = m.put('', false, 0x10);
+    m.memory.fill(10, narrow, narrow + 8);
+    assert.equal(m.fns.StrCpyNXA.handler([narrow, m.put('hello', false), 8]), narrow + 5);
+    assert.deepEqual([...m.memory.slice(narrow, narrow + 8)], [...Buffer.from('hello'), 0, 10, 10]);
+    assert.equal(m.fns.SHAnsiToAnsi.handler([m.put('hello', false), narrow, 8]), 6);
+    assert.equal(m.fns.SHUnicodeToUnicode.handler([m.put('hello', true), buffer, 8]), 6);
+    assert.equal(m.read(buffer, true), 'hello');
+    assert.equal(m.fns.ChrCmpIA.handler([0x61, 0x41]), 0);
+    assert.notEqual(m.fns.ChrCmpIW.handler([0x61, 0x42]), 0);
+    assert.equal(m.fns.StrPBrkW.handler([text, m.put('xyB', true)]), text + 8);
+});
+
+test('wnsprintf formats as the C runtime does, and says when it did not fit', ()=>{
+    // Wine's test_StrXXX_overflows.
+    const m = shlwapiMachine();
+    const buffer = m.put('', false, 0x40);
+    const long = m.put('0123456789'.repeat(3), false);
+    m.memory.fill(0xbf, buffer, buffer + 0x40);
+    assert.equal(m.fns.wnsprintfA.handler([buffer, 10, m.put('%s', false), long]), -1);
+    assert.equal(m.read(buffer, false), '012345678');
+    assert.equal(m.memory[buffer + 10], 0xbf);
+    assert.equal(m.fns.wnsprintfA.handler([buffer, 0x40, m.put('%d-%x', false), 42, 255]), 5);
+    assert.equal(m.read(buffer, false), '42-ff');
+    m.memory.fill(0xbf, buffer, buffer + 0x40);
+    assert.equal(m.fns.wnsprintfA.handler([buffer + 1, 0, m.put('%s', false), long]), -1);
+    assert.equal(m.memory[buffer + 1], 0xbf, 'no room, nothing written');
+    assert.equal(m.fns.wnsprintfA.handler([buffer + 1, -1, m.put('%s', false), long]), -1);
+    assert.deepEqual([m.memory[buffer], m.memory[buffer + 1], m.memory[buffer + 2]],
+        [0xbf, 0, 0xbf], 'a negative size takes the terminator');
+    const wide = m.put('', true, 0x40);
+    assert.equal(m.fns.wnsprintfW.handler([wide, 0x20, m.put('%s!', true), m.put('hi', true)]), 3);
+    assert.equal(m.read(wide, true), 'hi!');
+    assert.equal(/** @type {any} */ (m.fns.wnsprintfW).convention, 'cdecl');
 });
