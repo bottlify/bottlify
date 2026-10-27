@@ -48,6 +48,10 @@ const READ = 1;
 const WRITE = 2;
 const SHARE_READ = 4;
 const SHARE_WRITE = 8;
+const DELETE = 16;
+const SHARE_DELETE = 32;
+/** The bits that are access, as against sharing: an open with none refuses nothing. */
+const ACCESS = READ | WRITE | DELETE;
 
 /** The memory of a run's sharing, handed to every thread that opens files. */
 export function createSharingMemory(){
@@ -66,7 +70,8 @@ const hashOf = (key, seed)=>{
 
 /** @param {import('./handles.js').OpenTerms} terms */
 const bitsOf = terms=>(terms.access.read ? READ : 0) | (terms.access.write ? WRITE : 0)
-    | (terms.share.read ? SHARE_READ : 0) | (terms.share.write ? SHARE_WRITE : 0);
+    | (terms.access.delete ? DELETE : 0) | (terms.share.read ? SHARE_READ : 0)
+    | (terms.share.write ? SHARE_WRITE : 0) | (terms.share.delete ? SHARE_DELETE : 0);
 
 /**
  * Whether one open refuses the other: either's access not shared by the
@@ -74,10 +79,13 @@ const bitsOf = terms=>(terms.access.read ? READ : 0) | (terms.access.write ? WRI
  *
  * @param {number} mine @param {number} theirs
  */
-const refuses = (mine, theirs)=>((mine & READ) !== 0 && (theirs & SHARE_READ) === 0)
+const refuses = (mine, theirs)=>(mine & ACCESS) !== 0 && (theirs & ACCESS) !== 0
+    && (((mine & READ) !== 0 && (theirs & SHARE_READ) === 0)
     || ((mine & WRITE) !== 0 && (theirs & SHARE_WRITE) === 0)
+    || ((mine & DELETE) !== 0 && (theirs & SHARE_DELETE) === 0)
     || ((theirs & READ) !== 0 && (mine & SHARE_READ) === 0)
-    || ((theirs & WRITE) !== 0 && (mine & SHARE_WRITE) === 0);
+    || ((theirs & WRITE) !== 0 && (mine & SHARE_WRITE) === 0)
+    || ((theirs & DELETE) !== 0 && (mine & SHARE_DELETE) === 0));
 
 /**
  * The run's sharing over `memory`, from any thread.

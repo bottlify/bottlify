@@ -293,3 +293,29 @@ test('a hard link is one file: bytes, attributes, count and identity shared', as
     assert.deepEqual([vol.stat('C:\\B.DAT')?.links, vol.stat('C:\\B.DAT')?.size], [undefined, 3],
         'one name left: an ordinary file');
 });
+
+test('a file is renamed or deleted only while every open with access shares deletion', async()=>{
+    const { volume: vol, fs } = await volume();
+    const made = vol.open('C:\\F.DAT', { read: true, write: true, create: true });
+    vol.close(made);
+
+    const holding = vol.open('C:\\F.DAT', { read: true, delete: true });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), 'SHARING_VIOLATION');
+    assert.throws(()=>fs.rename('C:\\F.DAT', 'C:\\G.DAT'), { code: 'SHARING_VIOLATION' });
+    assert.throws(()=>fs.deleteFile('C:\\F.DAT'), { code: 'SHARING_VIOLATION' });
+    assert.equal(vol.isOpen('C:\\F.DAT'), true);
+    vol.close(holding);
+
+    // Sharing deletion, or holding no access at all, keeps nobody out.
+    const sharing = vol.open('C:\\F.DAT', { read: true, shareDelete: true });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), null);
+    vol.close(sharing);
+    const attributesOnly = fs.open('C:\\F.DAT', { read: false, shareRead: false });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), null);
+    const second = fs.open('C:\\F.DAT', { read: true, write: true });
+    assert.notEqual(second, null, 'an open with no access refuses nothing, nor is refused');
+    fs.close(second);
+    fs.close(attributesOnly);
+    assert.equal(vol.rename('C:\\F.DAT', 'C:\\G.DAT'), true);
+    assert.equal(vol.isOpen('C:\\G.DAT'), false);
+});

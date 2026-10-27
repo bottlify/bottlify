@@ -709,9 +709,30 @@ export function createFilesystemModule(){
                     {
                         return;
                     }
-                    const { tree, components } = locate(path);
+                    const { tree, components, key } = locate(path);
+                    if (tree.stat(components))
+                    {
+                        state.files.mayRemove(key, path);
+                    }
                     tree.removeFile(components);
                 },
+
+                /**
+                 * Whether the file at `path` may be renamed or deleted as its
+                 * opens stand: SHARING_VIOLATION thrown when one that holds
+                 * access does not share deletion.
+                 *
+                 * @param {string} path
+                 */
+                mayRemove(path){
+                    if (live())
+                    {
+                        state.files.mayRemove(locate(path).key, path);
+                    }
+                },
+
+                /** @param {string} path @returns {boolean} whether any process holds it open */
+                isOpen: path=>live() && state.files.isOpen(locate(path).key),
 
                 /**
                  * Gives the file at `existing` the further name `name`, a hard
@@ -798,6 +819,8 @@ export function createFilesystemModule(){
                  * @param {boolean} [options.write]
                  * @param {boolean} [options.shareRead]
                  * @param {boolean} [options.shareWrite]
+                 * @param {boolean} [options.delete]  DELETE access.
+                 * @param {boolean} [options.shareDelete]  FILE_SHARE_DELETE.
                  * @param {string} [options.disposition]  One of Disposition.
                  * @param {boolean} [options.inherited]  A handle another process
                  *     opened and handed on: the same open file, its terms agreed.
@@ -812,10 +835,12 @@ export function createFilesystemModule(){
                         tree,
                         key,
                         components,
-                        access: { read: options.read !== false, write: options.write === true },
+                        access: { read: options.read !== false, write: options.write === true,
+                            delete: options.delete === true },
                         share: {
                             read: options.shareRead !== false,
                             write: options.shareWrite === true,
+                            delete: options.shareDelete === true,
                         },
                         disposition: options.disposition ?? Disposition.OPEN_EXISTING,
                         inherited: options.inherited === true,
@@ -883,6 +908,10 @@ export function createFilesystemModule(){
                     if (this.stat(to))
                     {
                         throw fsError(ErrorCode.ALREADY_EXISTS, `${to} already exists`);
+                    }
+                    if (!entry.directory)
+                    {
+                        state.files.mayRemove(locate(from).key, from);
                     }
 
                     if (entry.directory)

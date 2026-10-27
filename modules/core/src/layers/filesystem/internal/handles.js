@@ -46,6 +46,8 @@ export const SeekFrom = {
  * @typedef {Object} AccessFlags
  * @property {boolean} read
  * @property {boolean} write
+ * @property {boolean} [delete]  DELETE access, or FILE_SHARE_DELETE: what a
+ *           rename or a deletion of the file needs every open to allow.
  */
 
 /**
@@ -90,6 +92,27 @@ export const SeekFrom = {
  */
 
 /**
+ * Whether an open takes part in sharing at all: one that reads, writes or
+ * deletes does; one opened for none of them -- to ask a file's attributes,
+ * its times -- is settled against nothing and refuses nothing.
+ *
+ * @param {OpenTerms} terms
+ */
+export const holdsAccess = terms=>Boolean(terms.access.read || terms.access.write
+    || terms.access.delete);
+
+/**
+ * What renaming or deleting a file asks of its opens: DELETE access, every
+ * other kind shared. Refused when an open that holds access does not share
+ * deletion.
+ *
+ * @param {string} key @param {string} path
+ * @returns {OpenTerms}
+ */
+export const removal = (key, path)=>({ key, path, access: { read: false, write: false,
+    delete: true }, share: { read: true, write: true, delete: true } });
+
+/**
  * The sharing of a volume kept here, for the processes on this thread.
  *
  * @returns {Sharing}
@@ -108,10 +131,13 @@ export function createSharing(){
                     {
                         continue;
                     }
-                    const denied = (terms.access.read && !other.share.read)
+                    const denied = holdsAccess(terms) && holdsAccess(other)
+                        && ((terms.access.read && !other.share.read)
                         || (terms.access.write && !other.share.write)
+                        || (terms.access.delete && !other.share.delete)
                         || (other.access.read && !terms.share.read)
-                        || (other.access.write && !terms.share.write);
+                        || (other.access.write && !terms.share.write)
+                        || (other.access.delete && !terms.share.delete));
                     if (denied)
                     {
                         throw fsError(ErrorCode.SHARING_VIOLATION,
@@ -226,8 +252,8 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
             // opens a save file for writing and then again for reading relies
             // on the second.
             const token = sharing.admit({ key, path: existing?.path ?? components.join('\\'),
-                access: { read: !!access.read, write: !!access.write },
-                share: { read: !!share.read, write: !!share.write },
+                access: { read: !!access.read, write: !!access.write, delete: !!access.delete },
+                share: { read: !!share.read, write: !!share.write, delete: !!share.delete },
                 inherited: request.inherited === true });
             /** @type {any} */
             let entry;
@@ -260,8 +286,8 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
                 path: entry.path,
                 components,
                 tree,
-                access: { read: !!access.read, write: !!access.write },
-                share: { read: !!share.read, write: !!share.write },
+                access: { read: !!access.read, write: !!access.write, delete: !!access.delete },
+                share: { read: !!share.read, write: !!share.write, delete: !!share.delete },
                 position: 0,
                 closed: false,
                 token,
@@ -398,6 +424,17 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
          * @param {string} key
          */
         isOpen: key=>sharing.isOpen(key),
+
+        /**
+         * Whether the file may be renamed or deleted as its opens stand:
+         * SHARING_VIOLATION thrown when one that holds access does not
+         * share deletion, across every process on the volume.
+         *
+         * @param {string} key @param {string} path
+         */
+        mayRemove(key, path){
+            sharing.release(sharing.admit(removal(key, path)));
+        },
 
         /** @returns {FileHandle[]} */
         list(){

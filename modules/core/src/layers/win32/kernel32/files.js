@@ -49,6 +49,7 @@ const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ACCESS_DENIED = 5;
 /** CreateFile's dwShareMode bit that lets another handle write the file too. */
 const FILE_SHARE_WRITE = 0x2;
+const FILE_SHARE_DELETE = 0x4;
 /** A buffer the call cannot read from, as NT answers a null one. */
 const ERROR_INVALID_USER_BUFFER = 1784;
 /** What NT answers a read into a null buffer. */
@@ -328,6 +329,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  * @property {boolean} [truncate]      Discard whatever it already holds.
  * @property {boolean} [failIfExists]  Refuse rather than open an existing file.
  * @property {boolean} [shareWrite]    Another handle may write the file while this one is open.
+ * @property {boolean} [delete]        DELETE access: it may be renamed or deleted through it.
+ * @property {boolean} [shareDelete]   Another may rename or delete the file while it is open.
  */
 
 /**
@@ -336,6 +339,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *
  * @typedef {Object} FileSystem
  * @property {(path: string) => FileStat | null} stat
+ * @property {(path: string) => string | null} [removalRefused]
+ *           Why the file may not be renamed or deleted as its opens stand, or null.
+ * @property {(path: string) => boolean} [isOpen]  whether any process holds the file open
  * @property {(path: string, existing: string) => string | null} [link]
  *           Gives a file one more name: null, or the volume's code for why not.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
@@ -1096,6 +1102,11 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_ACCESS_DENIED);
         }
+        // An open that does not share deletion keeps the name.
+        if (files.removalRefused?.(path) === 'SHARING_VIOLATION')
+        {
+            return fail(ERROR_SHARING_VIOLATION);
+        }
         return files.remove(path) ? 1 : fail(denied(path));
     });
 
@@ -1105,16 +1116,28 @@ export function createFileFunctions(host){
      * @param {string} source @param {string} destination @param {boolean} replace
      */
     const renamePath = (source, destination, replace)=>{
-        if (!files.stat(source)?.exists)
+        const moving = files.stat(source);
+        if (!moving?.exists)
         {
             return fail(missing(source));
         }
         const present = files.stat(destination);
+        if (present?.exists && !replace)
+        {
+            return fail(ERROR_ALREADY_EXISTS);
+        }
+        // A file is renamed as it is deleted: an open that does not share
+        // deletion keeps its name.
+        if (!moving.isDirectory && files.removalRefused?.(source) === 'SHARING_VIOLATION')
+        {
+            return fail(ERROR_SHARING_VIOLATION);
+        }
         if (present?.exists)
         {
-            if (!replace)
+            // What is replaced must be a file nobody holds open.
+            if (present.isDirectory || files.isOpen?.(destination))
             {
-                return fail(ERROR_ALREADY_EXISTS);
+                return fail(ERROR_ACCESS_DENIED);
             }
             if (readOnlyFile(present) || !files.remove(destination))
             {
@@ -1777,6 +1800,8 @@ export function createFileFunctions(host){
 
         const node = files.open(path, {
             read, write, ...mode, shareWrite: ((share >>> 0) & FILE_SHARE_WRITE) !== 0,
+            delete: deleteOnClose || (rights & (DELETE | GENERIC_ALL)) !== 0,
+            shareDelete: ((share >>> 0) & FILE_SHARE_DELETE) !== 0,
         });
         if (!node)
         {

@@ -372,6 +372,8 @@ export function createVolume(fs, fetchBlocks = null){
                 read: mode.read !== false,
                 write: Boolean(mode.write),
                 shareWrite: mode.shareWrite === true,
+                delete: mode.delete === true,
+                shareDelete: mode.shareDelete === true,
                 disposition: dispositionOf(mode),
                 inherited: mode.inherited === true,
             }), null);
@@ -531,6 +533,33 @@ export function createVolume(fs, fetchBlocks = null){
                 return true;
             }, false);
         },
+
+        /**
+         * Why the file at `path` may not be renamed or deleted as its opens
+         * stand -- SHARING_VIOLATION, an open that does not share deletion --
+         * or null when it may.
+         *
+         * @param {string} path
+         * @returns {string | null}
+         */
+        removalRefused(path){
+            try
+            {
+                fs.mayRemove?.(path);
+                return null;
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return error.code;
+            }
+        },
+
+        /** @param {string} path @returns {boolean} whether any process holds the file open */
+        isOpen: path=>attempt(()=>fs.isOpen?.(path) ?? false, false),
 
         /** @param {string} path @returns {boolean} */
         mkdir: path=>{
