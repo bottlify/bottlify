@@ -74,6 +74,7 @@ const ERROR_REQUEST_ABORTED = 1235;
 const ERROR_DIRECTORY = 267;
 const ERROR_IO_DEVICE = 1117;
 const ERROR_HANDLE_EOF = 38;
+const ERROR_FILENAME_EXCED_RANGE = 206;
 
 /** Where an OVERLAPPED keeps its status, its count and its starting offset. */
 const OVERLAPPED_INTERNAL = 0;
@@ -617,7 +618,8 @@ export function createFileFunctions(host){
 
     /**
      * A name longer than MAX_PATH is still a name: it is read to its end,
-     * and then found or not as any other is.
+     * and then found or not as any other is. The calls that convert one name
+     * through the static buffer refuse it instead (`oneName`).
      *
      * @param {number} pointer
      */
@@ -1009,7 +1011,57 @@ export function createFileFunctions(host){
         wide: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, WIDE) },
     });
 
-    const deleteFile = bothForms(4, ([name], text)=>{
+    /** What ANSI_ONE_NAME throws for a name its buffer cannot hold. */
+    const NAME_TOO_LONG = Symbol('name too long');
+
+    /**
+     * The name of an ANSI call that takes one: Windows converts it into the
+     * thread's static Unicode buffer, MAX_PATH characters and a terminator,
+     * and a longer one is refused with ERROR_FILENAME_EXCED_RANGE rather than
+     * cut. A call taking two names converts them into buffers of their own
+     * and has no such limit.
+     *
+     * @param {number} pointer
+     */
+    const oneAnsiName = pointer=>{
+        const name = pointer === 0 ? '' : readName(pointer >>> 0, MAX_PATH_LIST);
+        if (name.length > MAX_PATH)
+        {
+            throw NAME_TOO_LONG;
+        }
+        return name;
+    };
+
+    /** @type {TextForm} */
+    const ANSI_ONE_NAME = { ...ANSI, path: pointer=>fullPath(oneAnsiName(pointer)),
+        raw: oneAnsiName };
+
+    /**
+     * An operation on one name, both spellings: the ANSI one refuses a name
+     * too long for the static buffer, failing with what the operation fails with.
+     *
+     * @param {number} argBytes
+     * @param {(args: number[], text: TextForm) => any} body
+     * @param {number} [failed]  what the function returns when it fails
+     */
+    const oneName = (argBytes, body, failed = 0)=>({
+        ansi: { argBytes, handler: (/** @type {number[]} */ args)=>{
+            try
+            {
+                return body(args, ANSI_ONE_NAME);
+            }
+            catch (e){
+                if (e !== NAME_TOO_LONG)
+                {
+                    throw e;
+                }
+                return fail(ERROR_FILENAME_EXCED_RANGE, failed);
+            }
+        } },
+        wide: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, WIDE) },
+    });
+
+    const deleteFile = oneName(4, ([name], text)=>{
         const path = text.path(name);
         const entry = files.stat(path);
         if (!entry || !entry.exists)
@@ -1370,7 +1422,7 @@ export function createFileFunctions(host){
     };
     const searchPath = bothForms(24, searchPathBody);
 
-    const createDirectory = bothForms(8, ([name], text)=>{
+    const createDirectory = oneName(8, ([name], text)=>{
         const path = text.path(name);
         if (files.stat(path)?.exists)
         {
@@ -1382,7 +1434,7 @@ export function createFileFunctions(host){
             ? 1 : fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_PATH_NOT_FOUND);
     });
 
-    const removeDirectory = bothForms(4, ([name], text)=>{
+    const removeDirectory = oneName(4, ([name], text)=>{
         const path = text.path(name);
         const entry = files.stat(path);
         if (!entry || !entry.exists)
@@ -1397,7 +1449,7 @@ export function createFileFunctions(host){
             ? 1 : fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_DIR_NOT_EMPTY);
     });
 
-    const getFileAttributes = bothForms(4, ([name], text)=>{
+    const getFileAttributes = oneName(4, ([name], text)=>{
         const path = text.path(name);
         const entry = files.stat(path);
         if (!entry || !entry.exists)
@@ -1405,10 +1457,10 @@ export function createFileFunctions(host){
             return fail(missing(path), INVALID_FILE_ATTRIBUTES);
         }
         return attributesOf(entry);
-    });
+    }, INVALID_FILE_ATTRIBUTES);
 
     /** WIN32_FILE_ATTRIBUTE_DATA is the head of a WIN32_FIND_DATA. */
-    const getFileAttributesEx = bothForms(12, ([name, level, out], text)=>{
+    const getFileAttributesEx = oneName(12, ([name, level, out], text)=>{
         if ((level >>> 0) !== GET_FILE_EX_INFO_STANDARD)
         {
             return fail(ERROR_INVALID_PARAMETER);
@@ -1424,7 +1476,7 @@ export function createFileFunctions(host){
         return 1;
     });
 
-    const setFileAttributes = bothForms(8, ([name, attributes], text)=>{
+    const setFileAttributes = oneName(8, ([name, attributes], text)=>{
         const path = text.path(name);
         if (!files.stat(path)?.exists)
         {
@@ -1438,7 +1490,7 @@ export function createFileFunctions(host){
         return 1;
     });
 
-    const setCurrentDirectory = bothForms(4, ([name], text)=>{
+    const setCurrentDirectory = oneName(4, ([name], text)=>{
         const path = text.path(name);
         const entry = files.stat(path);
         if (!entry || !entry.exists || !entry.isDirectory)
@@ -1452,7 +1504,7 @@ export function createFileFunctions(host){
     const getCurrentDirectory = bothForms(8, ([size, buffer], text)=>
         text.write(buffer >>> 0, size, files.currentDirectory()));
 
-    const getFullPathName = bothForms(16, ([name, size, buffer, filePart], text)=>{
+    const getFullPathName = oneName(16, ([name, size, buffer, filePart], text)=>{
         const asked = text.raw(name);
         if (asked === '')
         {
@@ -1499,7 +1551,7 @@ export function createFileFunctions(host){
      * every path is already its long form. Windows still requires the path to
      * exist, and a caller uses the failure to test exactly that.
      */
-    const getLongPathName = bothForms(12, ([name, buffer, size], text)=>{
+    const getLongPathName = oneName(12, ([name, buffer, size], text)=>{
         const path = text.path(name);
         if (!files.stat(path)?.exists)
         {
@@ -1508,7 +1560,7 @@ export function createFileFunctions(host){
         return text.write(buffer >>> 0, size, path);
     });
 
-    const findFirstFile = bothForms(8, ([name, data], text)=>{
+    const findFirstFile = oneName(8, ([name, data], text)=>{
         const path = text.path(name);
         if (path === '')
         {
@@ -1538,7 +1590,7 @@ export function createFileFunctions(host){
         text.findData(data >>> 0, entries[0]);
         host.setLastError(ERROR_SUCCESS);
         return host.handles.open('find', { entries, index: 1 });
-    });
+    }, INVALID_HANDLE_VALUE);
 
     /**
      * FindFirstFileEx: the same search, with the level of detail, a search
@@ -1548,7 +1600,7 @@ export function createFileFunctions(host){
      * flags ask for case-sensitive matching or larger reads, neither of which
      * changes what is found. Anything else is refused.
      */
-    const findFirstFileEx = bothForms(24, ([name, level, data, operation, filter, flags], text)=>{
+    const findFirstFileEx = oneName(24, ([name, level, data, operation, filter, flags], text)=>{
         if ((level >>> 0) > FIND_EX_INFO_BASIC
             || (operation >>> 0) > FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES
             || filter !== 0
@@ -1557,7 +1609,7 @@ export function createFileFunctions(host){
             return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
         }
         return (text === WIDE ? findFirstFile.wide : findFirstFile.ansi).handler([name, data]);
-    });
+    }, INVALID_HANDLE_VALUE);
 
     /**
      * What is wrong with a name a file is opened by, before anything is
@@ -1710,7 +1762,7 @@ export function createFileFunctions(host){
      * open agreed to share with gets in; reading is always shared, so an open
      * Windows would refuse for want of FILE_SHARE_READ still succeeds here.
      */
-    const createFile = bothForms(28, ([name, access, share, , disposition, flags], text)=>{
+    const createFile = oneName(28, ([name, access, share, , disposition, flags], text)=>{
         // The one device opened by name: the mount manager, whatever was asked of it.
         if (name !== 0 && text.raw(name).toLowerCase() === MOUNT_MANAGER.toLowerCase())
         {
@@ -1735,7 +1787,7 @@ export function createFileFunctions(host){
         const either = disposition === CREATE_ALWAYS || disposition === OPEN_ALWAYS;
         host.setLastError(opened.existed && either ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
         return opened.handle;
-    });
+    }, INVALID_HANDLE_VALUE);
 
     /**
      * An object name as the native calls take it -- `\??\C:\dir\file`, or

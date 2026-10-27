@@ -21,6 +21,7 @@ const ERROR_FILE_EXISTS = 80;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_ALREADY_EXISTS = 183;
+const ERROR_FILENAME_EXCED_RANGE = 206;
 const ERROR_NOT_SUPPORTED = 50;
 
 /** What the old file family answers with when it fails. */
@@ -837,6 +838,49 @@ test('attributes say what a path is, and 0xffffffff says it is not there', ()=>{
 
     assert.equal(fns.SetFileAttributesA.handler([at(NAME, 'C:\\GAME\\SAVE.DAT'), 1]), 1);
     assert.equal(fns.SetFileAttributesA.handler([at(NAME, 'C:\\GAME\\GONE.DAT'), 1]), 0);
+});
+
+test('an ANSI name longer than MAX_PATH is refused by a call that takes one name', ()=>{
+    const { error, files, fns, at, memory } = setup();
+    const LONG = 0xa00;
+    const tooLong = `C:\\GAME\\${'a'.repeat(253)}`;
+    const fits = `C:\\GAME\\${'b'.repeat(252)}`;
+    assert.equal(tooLong.length, 261);
+    assert.equal(fits.length, 260);
+
+    /** @type {[keyof typeof fns, number[], number][]} */
+    const calls = [
+        ['GetFileAttributesA', [LONG], 0xffffffff],
+        ['CreateFileA', [LONG, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0], INVALID_HANDLE_VALUE],
+        ['FindFirstFileA', [LONG, FIND_DATA], INVALID_HANDLE_VALUE],
+        ['DeleteFileA', [LONG], 0],
+        ['CreateDirectoryA', [LONG, 0], 0],
+        ['SetCurrentDirectoryA', [LONG], 0],
+        ['GetFullPathNameA', [LONG, 0x100, OUT_PATH, 0], 0],
+    ];
+    for (const [name, args, failed] of calls)
+    {
+        at(LONG, tooLong);
+        error.code = ERROR_SUCCESS;
+        assert.equal(fns[name].handler(args), failed, name);
+        assert.equal(error.code, ERROR_FILENAME_EXCED_RANGE, name);
+    }
+    assert.equal(files.stat(tooLong)?.exists ?? false, false, 'nothing made under the name');
+
+    // MAX_PATH characters fit: the name is looked for as any other.
+    at(LONG, fits);
+    assert.equal(fns.GetFileAttributesA.handler([LONG]), 0xffffffff);
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND);
+    files.put(fits, 'x');
+    assert.equal(fns.GetFileAttributesA.handler([LONG]), 0x20);
+
+    // The wide spelling and a call with two names have no such buffer.
+    putWide(memory, 0xc00, tooLong);
+    assert.equal(fns.GetFileAttributesW.handler([0xc00]), 0xffffffff);
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND);
+    at(LONG, tooLong);
+    assert.equal(fns.MoveFileA.handler([LONG, at(NAME2, 'C:\\GAME\\B.DAT')]), 0);
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND);
 });
 
 test('GetFullPathNameA resolves textually and points at the last component', ()=>{
