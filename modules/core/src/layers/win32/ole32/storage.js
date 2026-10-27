@@ -61,6 +61,33 @@ const STGM_CONVERT = 0x20000;
 const STGM_CREATE = 0x1000;
 const STGM_DELETEONRELEASE = 0x4000000;
 const STGM_PRIORITY = 0x40000;
+const STGM_SIMPLE = 0x8000000;
+const STGM_DIRECT_SWMR = 0x400000;
+const STGM_SHARE_DENY_NONE = 0x40;
+const IID_IDIRECTWRITERLOCK = '{0E6D4D92-6738-11CF-9608-00AA00680DB4}';
+
+/** ILockBytes' slots, called on one a program implemented. */
+const SLOT_LOCKBYTES = Object.freeze({
+    ADD_REF: 1, RELEASE: 2, READ_AT: 3, WRITE_AT: 4, SET_SIZE: 6, LOCK_REGION: 7, STAT: 9,
+});
+const STATSTG_BYTES = 72;
+const LOCK_WRITE = 1;
+const LOCK_EXCLUSIVE = 2;
+const LOCK_ONLYONCE = 4;
+/** The range a docfile's opener locks in its array: the top of the first 2 GiB. */
+const DOCFILE_LOCK_OFFSET = 0x7fffff00;
+const DOCFILE_LOCK_LENGTH = 0x100;
+/** The compound file's signature, which a committed header starts with. */
+const SIGNATURE_BYTES = 8;
+/** The largest docfile read whole out of a program's ILockBytes. */
+const MAX_GUEST_DOCFILE = 1 << 28;
+const STG_E_INVALIDHEADER = 0x800300fb | 0;
+/**
+ * The smallest stream a simple-mode docfile writes: it keeps no mini
+ * stream, so a smaller one takes a 4096-byte run of its own (storage32.c
+ * test_simple).
+ */
+const SIMPLE_MINIMUM_STREAM = 4096;
 /**
  * Every STGM bit there is: the access, the sharing, STGM_CREATE,
  * STGM_TRANSACTED, STGM_CONVERT, STGM_PRIORITY, STGM_NOSCRATCH,
@@ -96,6 +123,7 @@ const STATSTG = Object.freeze({
 });
 
 export const IID_ISTORAGE = '{0000000B-0000-0000-C000-000000000046}';
+const IID_IPROPERTYSETSTORAGE = '{0000013A-0000-0000-C000-000000000046}';
 export const IID_ISTREAM = '{0000000C-0000-0000-C000-000000000046}';
 export const IID_ISEQUENTIALSTREAM = '{0C733A30-2A1C-11CE-ADE5-00AA0044773D}';
 export const IID_IENUMSTATSTG = '{0000000D-0000-0000-C000-000000000046}';
@@ -159,6 +187,10 @@ const MAX_PATH = 260;
  *           the first has been awaited is made from nobody's turn, and the
  *           bridge has to be told whose stack to build the frame on.
  * @property {() => unknown} [callerThread]  Whose call is being handled.
+ * @property {import('./objects.js').ComMethod[]} [propertySetMethods]
+ *           IPropertySetStorage over a storage of ours, the property sets
+ *           being its streams (propset.js). Absent, a storage answers no
+ *           such interface.
  */
 
 /**
@@ -169,10 +201,17 @@ const MAX_PATH = 260;
  * @property {import('./cfb.js').CfbEntry} root
  * @property {string | null} path   Null for a tree with no file behind it.
  * @property {boolean} deleteOnRelease
+ * @property {boolean} [simple]  Opened STGM_SIMPLE: streams only, each made once.
+ * @property {boolean} [writer]
+ *           Opened STGM_DIRECT_SWMR to write: the one writer among readers,
+ *           whose root answers IDirectWriterLock.
  * @property {number} objects
  * @property {StreamBacking} [lockBytes]  The byte array of an ILockBytes it
  *           lives in instead of a file, held until the last object goes.
  * @property {() => void} [done]  Told when the last object goes.
+ * @property {(thread: unknown) => Promise<number>} [push]
+ *           Writes the tree out to an ILockBytes the program implemented,
+ *           through its methods; `lockBytes` is then the copy written into.
  */
 
 /**
@@ -199,6 +238,10 @@ const MAX_PATH = 260;
  * @property {number} mode
  * @property {number} position
  * @property {Document | null} document
+ * @property {boolean} [simple]
+ *           Made by CreateStream in a simple-mode docfile: Stat reports the
+ *           position as its size while it is written, and it is padded to
+ *           the simple mode's smallest stream when it goes.
  */
 
 /**
@@ -708,7 +751,8 @@ export function createStorageFunctions(host){
                 return STG_E_INVALIDPOINTER;
             }
             return writeStat(pstatstg >>> 0, {
-                name: state.backing.name, type: STGTY_STREAM, size: state.backing.size(),
+                name: state.backing.name, type: STGTY_STREAM,
+                size: state.simple ? state.position : state.backing.size(),
                 mode: state.mode, entry: state.backing.entry,
             }, flags >>> 0);
         } },
@@ -741,6 +785,10 @@ export function createStorageFunctions(host){
                 { id: IID_ISEQUENTIALSTREAM, methods: methods.slice(0, 2) },
             ],
             destroy: ()=>{
+                if (state.simple && state.backing.size() < SIMPLE_MINIMUM_STREAM)
+                {
+                    state.backing.resize(SIMPLE_MINIMUM_STREAM);
+                }
                 detach?.();
                 release?.();
             },
@@ -876,6 +924,11 @@ export function createStorageFunctions(host){
             {
                 return STG_E_ACCESSDENIED;
             }
+            const simple = state.document.simple === true;
+            if (simple && (mode & STGM_CREATE) !== 0)
+            {
+                return STG_E_INVALIDFLAG;
+            }
             const existing = state.entry.children.get(nameKey(name));
             if (existing && ((mode & STGM_CREATE) === 0 || existing.kind !== 'stream'))
             {
@@ -884,7 +937,7 @@ export function createStorageFunctions(host){
             const entry = createEntry(name, 'stream');
             state.entry.children.set(nameKey(name), entry);
             return publishStream({
-                backing: entryBacking(entry), mode, position: 0, document: state.document,
+                backing: entryBacking(entry), mode, position: 0, document: state.document, simple,
             }, out);
         } },
         { name: 'OpenStream', argBytes: 24, invoke: (object, [pwcsName, , grfMode, , ppstm])=>{
@@ -925,6 +978,11 @@ export function createStorageFunctions(host){
                 return STG_E_INVALIDPOINTER;
             }
             writeU32(out, 0);
+            // A simple-mode docfile holds streams alone.
+            if (state.document.simple)
+            {
+                return STG_E_INVALIDFUNCTION;
+            }
             const name = elementName(pwcsName >>> 0);
             if (name === null)
             {
@@ -959,6 +1017,10 @@ export function createStorageFunctions(host){
                     return STG_E_INVALIDPOINTER;
                 }
                 writeU32(out, 0);
+                if (state.document.simple)
+                {
+                    return STG_E_INVALIDFUNCTION;
+                }
                 const name = elementName(pwcsName >>> 0);
                 if (name === null)
                 {
@@ -1050,6 +1112,10 @@ export function createStorageFunctions(host){
             if (state.entry === state.document.root)
             {
                 flush(state.document);
+                if (state.document.push)
+                {
+                    return state.document.push(host.callerThread?.());
+                }
             }
             return S_OK;
         } },
@@ -1178,6 +1244,18 @@ export function createStorageFunctions(host){
     ];
 
     /**
+     * IDirectWriterLock of the single writer: with no other process here to
+     * write the file, the writer always has the access it waits for.
+     *
+     * @type {import('./objects.js').ComMethod[]}
+     */
+    const WRITER_LOCK_METHODS = [
+        { name: 'WaitForWriteAccess', argBytes: 8, invoke: ()=>S_OK },
+        { name: 'ReleaseWriteAccess', argBytes: 4, invoke: ()=>S_OK },
+        { name: 'HaveWriteAccess', argBytes: 4, invoke: ()=>S_OK },
+    ];
+
+    /**
      * @param {StorageState} state
      * @param {number} out
      * @returns {number} an HRESULT
@@ -1186,7 +1264,22 @@ export function createStorageFunctions(host){
         const detach = attach(state.document);
         return publish(CLSID_STORAGE, {
             state,
-            interfaces: [{ id: IID_ISTORAGE, methods: storageMethods() }],
+            // The last object over a docfile in a program's ILockBytes
+            // writes it there inside the Release, which the program waits on.
+            lastRelease: state.document.push ? async()=>{
+                const document = state.document;
+                if (document.objects === 1 && document.push && !document.deleteOnRelease)
+                {
+                    flush(document);
+                    await document.push(host.callerThread?.());
+                    document.push = undefined;
+                }
+            } : undefined,
+            interfaces: [{ id: IID_ISTORAGE, methods: storageMethods() },
+                ...(host.propertySetMethods
+                    ? [{ id: IID_IPROPERTYSETSTORAGE, methods: host.propertySetMethods }] : []),
+                ...(state.document.writer && state.entry === state.document.root
+                    ? [{ id: IID_IDIRECTWRITERLOCK, methods: WRITER_LOCK_METHODS }] : [])],
             destroy: detach,
         }, IID_ISTORAGE, out);
     };
@@ -1276,7 +1369,10 @@ export function createStorageFunctions(host){
             diverge(api, 'STGM_TRANSACTED was asked for and the docfile is opened in direct '
                 + 'mode: writes go through as they are made, and Revert takes nothing back');
         }
-        else if (share !== STGM_SHARE_EXCLUSIVE && share !== STGM_SHARE_DENY_WRITE)
+        else if (share !== STGM_SHARE_EXCLUSIVE && share !== STGM_SHARE_DENY_WRITE
+            // A reader beside the single writer shares with everyone.
+            && !((mode & STGM_DIRECT_SWMR) !== 0 && share === STGM_SHARE_DENY_NONE
+                && !writable(mode)))
         {
             return STG_E_INVALIDFLAG;
         }
@@ -1549,6 +1645,168 @@ export function createStorageFunctions(host){
         return publishStorage({ document, entry: root, mode, name: null }, out);
     };
 
+    /**
+     * A method of the program's object, on the thread whose call this is.
+     *
+     * @param {number} pointer @param {number} slot @param {number[]} args @param {unknown} thread
+     */
+    const callGuest = async(pointer, slot, args, thread)=>(await /** @type {NonNullable<StorageHost['call']>} */ (
+        host.call)(readU32(readU32(pointer) + slot * WORD), [pointer, ...args], thread)) | 0;
+
+    /**
+     * A docfile in an ILockBytes the program implemented. The tree is read
+     * from it whole through ReadAt when it is opened, and written back
+     * whole through SetSize and WriteAt on Commit and the last Release.
+     * One that says it can lock is locked as ole32 locks one, and a commit
+     * finds its header still there before writing: what the test array
+     * of storage32.c test_custom_lockbytes has Windows answer.
+     *
+     * @param {number} pointer @param {boolean} create @param {number} mode @param {number} out
+     * @returns {Promise<number>}
+     */
+    const docfileOnGuest = async(pointer, create, mode, out)=>{
+        const thread = host.callerThread?.();
+        const block = host.heap.allocate(STATSTG_BYTES + WORD);
+        if (block === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(block, new Uint8Array(STATSTG_BYTES + WORD));
+        try
+        {
+            const stated = await callGuest(pointer, SLOT_LOCKBYTES.STAT, [block, STATFLAG_NONAME],
+                thread);
+            if (stated < 0)
+            {
+                return stated;
+            }
+            const size = create ? 0 : Math.min(readU32(block + 8), MAX_GUEST_DOCFILE);
+            const locks = readU32(block + 44);
+            if ((locks & (LOCK_WRITE | LOCK_EXCLUSIVE | LOCK_ONLYONCE)) !== 0)
+            {
+                const locked = await callGuest(pointer, SLOT_LOCKBYTES.LOCK_REGION,
+                    [DOCFILE_LOCK_OFFSET, 0, DOCFILE_LOCK_LENGTH, 0, LOCK_ONLYONCE], thread);
+                if (locked < 0)
+                {
+                    return locked;
+                }
+            }
+            let contents = new Uint8Array(0);
+            if (size > 0)
+            {
+                const buffer = host.heap.allocate(size + WORD);
+                if (buffer === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                writeU32(buffer + size, 0);
+                const read = await callGuest(pointer, SLOT_LOCKBYTES.READ_AT,
+                    [0, 0, buffer, size, buffer + size], thread);
+                contents = read < 0 ? contents
+                    : host.readMemory(buffer, readU32(buffer + size)).slice();
+                host.heap.free(buffer);
+            }
+            const root = create ? createRoot() : parseCompoundFile(contents);
+            if (!root)
+            {
+                return STG_E_FILEALREADYEXISTS;
+            }
+            await callGuest(pointer, SLOT_LOCKBYTES.ADD_REF, [], thread);
+            /** A copy the tree is serialized into, and the program's array behind it. */
+            let copy = contents;
+            /** @type {StreamBacking} */
+            const backing = {
+                name: null, entry: null, size: ()=>copy.length,
+                read: (offset, length)=>copy.slice(offset, offset + length),
+                write: (offset, bytes)=>{
+                    if (offset + bytes.length > copy.length)
+                    {
+                        const grown = new Uint8Array(offset + bytes.length);
+                        grown.set(copy);
+                        copy = grown;
+                    }
+                    copy.set(bytes, offset);
+                    return true;
+                },
+                resize: length=>{
+                    const resized = new Uint8Array(length);
+                    resized.set(copy.subarray(0, Math.min(length, copy.length)));
+                    copy = resized;
+                    return true;
+                },
+            };
+            let written = false;
+            /** @type {Document} */
+            const document = {
+                root, path: null, lockBytes: backing, deleteOnRelease: false, objects: 0,
+                push: caller=>pushToGuest(pointer, copy, written && locks !== 0, caller)
+                    .then(hr=>{
+                        written ||= hr >= 0;
+                        return hr;
+                    }),
+                done: ()=>{
+                    void callGuest(pointer, SLOT_LOCKBYTES.RELEASE, [], host.callerThread?.());
+                },
+            };
+            flush(document);
+            const pushed = await /** @type {NonNullable<Document['push']>} */ (document.push)(thread);
+            if (pushed < 0)
+            {
+                await callGuest(pointer, SLOT_LOCKBYTES.RELEASE, [], thread);
+                return pushed;
+            }
+            return publishStorage({ document, entry: root, mode, name: null }, out);
+        }
+        finally
+        {
+            host.heap.free(block);
+        }
+    };
+
+    /**
+     * The serialized tree written over the program's array. A locked array
+     * written before is read back first: one whose header someone else
+     * wrote over is not overwritten.
+     *
+     * @param {number} pointer @param {Uint8Array} bytes @param {boolean} check
+     * @param {unknown} thread
+     */
+    const pushToGuest = async(pointer, bytes, check, thread)=>{
+        const buffer = host.heap.allocate(bytes.length + WORD);
+        if (buffer === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        try
+        {
+            if (check)
+            {
+                writeU32(buffer + SIGNATURE_BYTES, 0);
+                await callGuest(pointer, SLOT_LOCKBYTES.READ_AT,
+                    [0, 0, buffer, SIGNATURE_BYTES, buffer + SIGNATURE_BYTES], thread);
+                if (!isCompoundFile(host.readMemory(buffer, SIGNATURE_BYTES).slice()))
+                {
+                    return STG_E_INVALIDHEADER;
+                }
+            }
+            const sized = await callGuest(pointer, SLOT_LOCKBYTES.SET_SIZE, [bytes.length, 0],
+                thread);
+            if (sized < 0)
+            {
+                return sized;
+            }
+            host.writeMemory(buffer, bytes);
+            writeU32(buffer + bytes.length, 0);
+            const hr = await callGuest(pointer, SLOT_LOCKBYTES.WRITE_AT,
+                [0, 0, buffer, bytes.length, buffer + bytes.length], thread);
+            return hr < 0 ? hr : S_OK;
+        }
+        finally
+        {
+            host.heap.free(buffer);
+        }
+    };
+
     let temporaries = 0;
 
     /**
@@ -1629,6 +1887,7 @@ export function createStorageFunctions(host){
                 const document = {
                     root: createRoot(), path,
                     deleteOnRelease: (mode & STGM_DELETEONRELEASE) !== 0, objects: 0,
+                    simple: (mode & STGM_SIMPLE) !== 0,
                 };
                 flush(document);
                 if (!host.files.stat(path)?.exists)
@@ -1685,7 +1944,8 @@ export function createStorageFunctions(host){
                     /** @type {Document} */
                     const document = {
                         root, path, deleteOnRelease: (mode & STGM_DELETEONRELEASE) !== 0,
-                        objects: 0,
+                        objects: 0, simple: (mode & STGM_SIMPLE) !== 0,
+                        writer: (mode & STGM_DIRECT_SWMR) !== 0 && writable(mode),
                     };
                     return publishStorage({ document, entry: root, mode, name: path }, out);
                 };
@@ -1729,7 +1989,7 @@ export function createStorageFunctions(host){
             /** @param {number[]} args */
             handler: ([plkbyt, grfMode, , out])=>{
                 const lockBytes = lockBytesAt(plkbyt >>> 0);
-                if (!lockBytes)
+                if (!lockBytes && ((plkbyt >>> 0) === 0 || !host.call))
                 {
                     return refuse('StgCreateDocfileOnILockBytes', out >>> 0);
                 }
@@ -1739,8 +1999,13 @@ export function createStorageFunctions(host){
                 }
                 writeU32(out >>> 0, 0);
                 const refused = checkCreateMode('StgCreateDocfileOnILockBytes', grfMode >>> 0);
-                return refused !== S_OK ? refused
-                    : publishDocfileOn(lockBytes, createRoot(), grfMode >>> 0, out >>> 0);
+                if (refused !== S_OK)
+                {
+                    return refused;
+                }
+                return lockBytes
+                    ? publishDocfileOn(lockBytes, createRoot(), grfMode >>> 0, out >>> 0)
+                    : docfileOnGuest(plkbyt >>> 0, true, grfMode >>> 0, out >>> 0);
             },
         },
         StgOpenStorageOnILockBytes: {
@@ -1748,7 +2013,7 @@ export function createStorageFunctions(host){
             /** @param {number[]} args */
             handler: ([plkbyt, , grfMode, , , out])=>{
                 const lockBytes = lockBytesAt(plkbyt >>> 0);
-                if (!lockBytes)
+                if (!lockBytes && ((plkbyt >>> 0) === 0 || !host.call))
                 {
                     return refuse('StgOpenStorageOnILockBytes', out >>> 0);
                 }
@@ -1761,6 +2026,10 @@ export function createStorageFunctions(host){
                 if (refused !== S_OK)
                 {
                     return refused;
+                }
+                if (!lockBytes)
+                {
+                    return docfileOnGuest(plkbyt >>> 0, false, grfMode >>> 0, out >>> 0);
                 }
                 const root = parseCompoundFile(lockBytes.read(0, lockBytes.size()));
                 return root ? publishDocfileOn(lockBytes, root, grfMode >>> 0, out >>> 0)

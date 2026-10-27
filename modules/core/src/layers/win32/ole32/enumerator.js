@@ -41,6 +41,10 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @property {string} clsid
  * @property {string} iid
  * @property {number} size
+ * @property {boolean} [skipNothingEnds]
+ *           Skip(0) answers S_FALSE and leaves nothing to enumerate, as
+ *           Windows' property set enumerator does (stg_prop.c
+ *           test_propertyset_storage_enum).
  */
 
 /**
@@ -124,7 +128,8 @@ function publishOver(env, kind, shared, start, out){
                 {
                     name: 'Skip', argBytes: 8,
                     invoke: (_self, [celt])=>{
-                        if ((celt >>> 0) > items.length - position)
+                        if ((celt >>> 0) > items.length - position
+                            || ((celt >>> 0) === 0 && kind.skipNothingEnds))
                         {
                             position = items.length;
                             return S_FALSE;

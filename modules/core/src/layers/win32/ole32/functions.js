@@ -2845,6 +2845,10 @@ export function createOleFunctions(host){
         divergence: host.divergence,
     };
     const clipboard = createClipboardFunctions(oleEnv);
+    // Property sets, which a storage of ours answers IPropertySetStorage for.
+    const { storageMethods: propertySetMethods, ...propertySetFunctions } =
+        createPropertySetFunctions({ ...oleEnv,
+            allocateBstr: bytes=>host.strings?.allocate?.(bytes) ?? 0 });
 
     const functions = {
         /** HRESULT CoInitialize(LPVOID pvReserved) */
@@ -4185,11 +4189,11 @@ export function createOleFunctions(host){
 
         // Structured storage: the docfile, its objects and the entry points
         // that hand them out, over the same heap, registry and vtables.
-        ...createStorageFunctions(host),
+        ...createStorageFunctions({ ...host, propertySetMethods }),
 
         // The property value, whose copy owns what it points at in task memory.
         ...createPropVariantFunctions(host),
-        ...createPropertySetFunctions(host),
+        ...propertySetFunctions,
 
         // What a MIDL proxy or stub calls to carry a handle, a block of
         // memory, a storage medium or an interface pointer to another process.
