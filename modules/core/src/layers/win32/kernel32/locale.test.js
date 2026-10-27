@@ -1217,6 +1217,28 @@ test('GetCalendarInfo answers the Gregorian calendar, a number in lpValue when a
         ERROR_INSUFFICIENT_BUFFER]);
 });
 
+test('every calendar answers its two-digit year limit; the Gregorian one its era too', ()=>{
+    // time.c test_GetCalendarInfo's walk of CAL_GREGORIAN..CAL_UMALQURA.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const CAL_ITWODIGITYEARMAX = 0x30;
+    for (const [calendar, year] of /** @type {[number, string][]} */ ([[1, '2049'], [3, '99'],
+        [8, '5810'], [23, '1451']]))
+    {
+        assert.equal(fns.GetCalendarInfoW.handler([0x0409, calendar, CAL_ITWODIGITYEARMAX,
+            0x200, 20, 0]), year.length + 1, `calendar ${calendar}`);
+        assert.equal(host.readWide(0x200, year.length), year);
+    }
+    assert.equal(fns.GetCalendarInfoW.handler([0x0409, 24, CAL_ITWODIGITYEARMAX, 0x200, 20, 0]), 0);
+    for (const [type, text] of /** @type {[number, string][]} */ ([[3, '0'], [4, 'A.D.'],
+        [0x39, 'AD']]))
+    {
+        assert.equal(fns.GetCalendarInfoW.handler([0x0409, 1, type, 0x200, 20, 0]),
+            text.length + 1);
+        assert.equal(host.readWide(0x200, text.length), text);
+    }
+});
+
 test('GetGeoInfo answers for the machine\'s own location, by the types Windows XP has', ()=>{
     // locale.c test_GetGeoInfo's protocol, on the United States (244).
     /** @type {string[]} */

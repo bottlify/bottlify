@@ -95,7 +95,7 @@ const SYSTEMTIME_SIZE = 16;
  * @param {Uint8Array} bytes
  * @returns {number | null}
  */
-function systemTimeToMs(bytes){
+export function systemTimeToMs(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, SYSTEMTIME_SIZE);
     const [year, month, , day, hour, minute, second, millisecond] =
         Array.from({ length: 8 }, (_, at)=>view.getUint16(at * 2, true));

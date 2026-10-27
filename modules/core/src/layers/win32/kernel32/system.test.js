@@ -170,6 +170,47 @@ test('GetLogicalProcessorInformation lists a core and its caches for each proces
     }
 });
 
+test('QueryIdleProcessorCycleTime: a ULONG64 a processor, without a buffer only a measure', ()=>{
+    // time.c test_processor_idle_cycle_time.
+    const LENGTH = 0x1fc;
+    const host = fakeHost();
+    const fns = createSystemFunctions({ ...host,
+        processors: createProcessors({ processors: ()=>4 }) });
+    host.view.setUint32(LENGTH, 0, true);
+    assert.equal(fns.QueryIdleProcessorCycleTime.handler([LENGTH, 0]), 1);
+    assert.equal(host.view.getUint32(LENGTH, true), 32);
+    host.view.setUint32(LENGTH, 4, true);
+    assert.equal(fns.QueryIdleProcessorCycleTime.handler([LENGTH, 0]), 1);
+    assert.equal(host.view.getUint32(LENGTH, true), 4, 'a length given stays');
+    host.view.setUint32(LENGTH, 64, true);
+    host.bytes.fill(0xcc, 0x200, 0x240);
+    assert.equal(fns.QueryIdleProcessorCycleTimeEx.handler([0, LENGTH, 0x200]), 1);
+    assert.equal(host.view.getUint32(LENGTH, true), 32);
+    assert.deepEqual([...host.bytes.subarray(0x200, 0x220)], new Array(32).fill(0));
+    assert.equal(host.bytes[0x220], 0xcc);
+    assert.deepEqual(host.errors, []);
+});
+
+test('SystemTimeToFileTime refuses a time that is none, FileTimeToSystemTime one past 2^63', ()=>{
+    // time.c test_conversions, test_invalid_arg and test_FileTimeToSystemTime.
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    const plant = (/** @type {number[]} */ words)=>words.forEach((word, at)=>
+        host.view.setUint16(0x240 + at * 2, word, true));
+    for (const words of [[1600, 12, 0, 31, 23, 59, 59, 999], [1980, 0, 0, 1, 0, 0, 0, 0],
+        [1980, 1, 0, 1, 24, 0, 0, 0], [1980, 1, 0, 1, 0, 60, 0, 0], [2001, 2, 0, 29, 0, 0, 0, 0]])
+    {
+        plant(words);
+        assert.equal(fns.SystemTimeToFileTime.handler([0x240, 0x260]), 0, words.join(' '));
+    }
+    plant([1601, 1, 0, 1, 0, 0, 0, 0]);
+    assert.equal(fns.SystemTimeToFileTime.handler([0x240, 0x260]), 1);
+    assert.equal(host.view.getBigUint64(0x260, true), 0n);
+    host.view.setBigUint64(0x260, 0xffffffffffffffffn, true);
+    assert.equal(fns.FileTimeToSystemTime.handler([0x260, 0x240]), 0);
+    assert.deepEqual(host.errors, new Array(6).fill(ERROR_INVALID_PARAMETER));
+});
+
 test('GetLogicalProcessorInformation says what it needs of a buffer too small, '
     + 'and needs a length', ()=>{
     // Wine's kernelbase, and the two calls every caller makes: ask with

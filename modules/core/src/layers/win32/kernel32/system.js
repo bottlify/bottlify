@@ -27,6 +27,7 @@ import { assemble } from '../msvcrt/guest-code.js';
 import { createWin9xFunctions } from './win9x.js';
 import { askChild, isChildThread, threadArg } from './cross-process.js';
 import { TEB } from './teb.js';
+import { systemTimeToMs } from './filetime.js';
 import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
 import {
     PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION, createProcessors,
@@ -430,6 +431,38 @@ export function createSystemFunctions(host){
     };
 
     /**
+     * The idle cycle counts' answer: the length a processor's ULONG64 each
+     * takes, then the counts when there is room for them.
+     *
+     * @param {number} length @param {number} buffer
+     */
+    const idleCycleTime = (length, buffer)=>{
+        if (length === 0)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const needed = processors.count() * 8;
+        if (buffer === 0)
+        {
+            if (readDword(length) === 0)
+            {
+                writeDword(length, needed);
+            }
+            return 1;
+        }
+        const room = readDword(length);
+        writeDword(length, needed);
+        if (room < needed)
+        {
+            host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        host.writeMemory(buffer, new Uint8Array(needed));
+        return 1;
+    };
+
+    /**
      * What SetThreadExecutionState holds for each thread, by its record; a
      * call with no thread to name is the process's own, under this map.
      *
@@ -808,15 +841,16 @@ export function createSystemFunctions(host){
         host.writeMemory(address, bytes);
     };
 
-    /** @param {number} address The SYSTEMTIME to read. */
+    /**
+     * The FILETIME of the SYSTEMTIME at an address, or null when it names no
+     * moment: a year before 1601, a month, day or time of day out of range.
+     *
+     * @param {number} address
+     */
     const filetimeFrom = address=>{
-        const bytes = host.readMemory(address, SYSTEMTIME_SIZE);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, SYSTEMTIME_SIZE);
-        const milliseconds = Date.UTC(
-            view.getUint16(0, true), view.getUint16(2, true) - 1, view.getUint16(6, true),
-            view.getUint16(8, true), view.getUint16(10, true), view.getUint16(12, true),
-            view.getUint16(14, true));
-        return BigInt(milliseconds) * 10_000n + FILETIME_AT_UNIX_EPOCH;
+        const milliseconds = systemTimeToMs(host.readMemory(address, SYSTEMTIME_SIZE));
+        return milliseconds === null ? null
+            : BigInt(milliseconds) * 10_000n + FILETIME_AT_UNIX_EPOCH;
     };
 
     /** GetSystemInfo, and GetNativeSystemInfo, which on a 32-bit system is the same. */
@@ -1012,6 +1046,31 @@ export function createSystemFunctions(host){
         GetNativeSystemInfo: systemInfo,
 
         /**
+         * BOOL QueryIdleProcessorCycleTime(PULONG BufferLength,
+         *                                  PULONG64 ProcessorIdleCycleTime)
+         *
+         * A ULONG64 of idle cycles for each processor. Nothing here counts the
+         * cycles a processor spends idle -- an executor waiting is not one
+         * sleeping -- so each is zero. Without a buffer the call only measures,
+         * and a length already given is left as it was (Wine's time.c
+         * test_processor_idle_cycle_time pins both).
+         */
+        QueryIdleProcessorCycleTime: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([length, buffer])=>idleCycleTime(length >>> 0, buffer >>> 0),
+        },
+
+        /** BOOL QueryIdleProcessorCycleTimeEx(USHORT Group, PULONG, PULONG64): group 0 is all. */
+        QueryIdleProcessorCycleTimeEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([group, length, buffer])=>((group & 0xffff) !== 0
+                ? (host.setLastError(ERROR_INVALID_PARAMETER), 0)
+                : idleCycleTime(length >>> 0, buffer >>> 0)),
+        },
+
+        /**
          * BOOL GetLogicalProcessorInformation(
          *     PSYSTEM_LOGICAL_PROCESSOR_INFORMATION Buffer, PDWORD ReturnedLength)
          *
@@ -1203,7 +1262,13 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([systemTime, fileTime])=>{
-                writeFileTime(fileTime >>> 0, filetimeFrom(systemTime >>> 0));
+                const value = filetimeFrom(systemTime >>> 0);
+                if (value === null)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeFileTime(fileTime >>> 0, value);
                 return 1;
             },
         },
@@ -1213,7 +1278,15 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([fileTime, systemTime])=>{
-                host.writeMemory(systemTime >>> 0, systemTimeFrom(readFileTime(fileTime >>> 0)));
+                // A FILETIME is a signed count: one with the top bit set is
+                // before 1601, and no SYSTEMTIME holds it.
+                const value = readFileTime(fileTime >>> 0);
+                if (value >= 1n << 63n)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                host.writeMemory(systemTime >>> 0, systemTimeFrom(value));
                 return 1;
             },
         },

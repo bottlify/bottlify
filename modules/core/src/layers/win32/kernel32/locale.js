@@ -438,6 +438,21 @@ function localeTagOf(locale, neutral){
 /** CAL_RETURN_NUMBER, and the CALTYPEs that are numbers: ICALINTVALUE, ITWODIGITYEARMAX. */
 const CAL_RETURN_NUMBER = 0x20000000;
 const CALENDAR_NUMBERS = [1, 48];
+const CAL_ITWODIGITYEARMAX = 48;
+
+/**
+ * The year a two-digit year stops before, by CALID, as Windows defaults it:
+ * a Gregorian one's, then the Japanese and Taiwanese eras', the Korean
+ * Tangun, Hijri, Thai Buddhist and Hebrew years', and Um al-Qura's.
+ *
+ * @type {ReadonlyMap<number, string>}
+ */
+const TWO_DIGIT_YEAR_MAX = new Map([
+    [1, '2049'], [2, '2049'], [3, '99'], [4, '99'], [5, '4382'], [6, '1451'], [7, '2572'],
+    [8, '5810'], [9, '2049'], [10, '2049'], [11, '2049'], [12, '2049'], [13, '2049'],
+    [14, '2049'], [15, '2049'], [16, '2049'], [17, '2049'], [18, '2049'], [19, '2049'],
+    [20, '2049'], [21, '2049'], [22, '2049'], [23, '1451'],
+]);
 
 /** The GEOTYPEs Windows XP answers. */
 const GEO_NATION = 1;
@@ -470,14 +485,15 @@ const CAL_FLAGS = 0x80000000 | 0x40000000 | 0x20000000;
 
 /**
  * The Gregorian calendar's answers by CALTYPE (winnls.h): its number and
- * name, its date pictures, its day names -- Monday first, as CAL_SDAYNAME1
- * is -- and month names, and the year a two-digit year stops before.
+ * name, its era -- A.D., the year as it stands -- its date pictures, its day
+ * names, Monday first as CAL_SDAYNAME1 is, and month names, and the year a
+ * two-digit year stops before.
  *
  * @type {Readonly<Record<number, string>>}
  */
 const CALENDAR_INFO = Object.freeze({
-    1: '1', 2: 'Gregorian Calendar', 5: SHORT_DATE, 6: LONG_DATE, 47: YEAR_MONTH, 48: '2049',
-    56: 'MMMM d', 33: '', 46: '',
+    1: '1', 2: 'Gregorian Calendar', 3: '0', 4: 'A.D.', 5: SHORT_DATE, 6: LONG_DATE,
+    47: YEAR_MONTH, 48: '2049', 56: 'MMMM d', 57: 'AD', 33: '', 46: '',
     ...Object.fromEntries([1, 2, 3, 4, 5, 6, 0].flatMap((day, at)=>[
         [7 + at, DAYS[day]], [14 + at, DAYS[day].slice(0, 3)], [49 + at, DAYS[day].slice(0, 2)],
     ])),
@@ -1583,12 +1599,18 @@ export function createLocaleFunctions(host){
         argBytes: 24,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [locale, calendar, type, buffer, count, value])=>{
-            if (!isOurLocale(locale >>> 0) || (calendar >>> 0) !== CAL_GREGORIAN)
+            const kind = (type >>> 0) & ~CAL_FLAGS;
+            // Every calendar Windows has answers its two-digit-year limit,
+            // whatever calendars the locale uses; anything else only the
+            // locale's own does.
+            const limit = kind === CAL_ITWODIGITYEARMAX
+                ? TWO_DIGIT_YEAR_MAX.get(calendar >>> 0) : undefined;
+            if (!isOurLocale(locale >>> 0)
+                || ((calendar >>> 0) !== CAL_GREGORIAN && limit === undefined))
             {
                 return refuse(ERROR_INVALID_PARAMETER);
             }
-            const kind = (type >>> 0) & ~CAL_FLAGS;
-            const text = CALENDAR_INFO[kind];
+            const text = limit ?? CALENDAR_INFO[kind];
             if (text === undefined)
             {
                 return refuse(ERROR_INVALID_FLAGS);
