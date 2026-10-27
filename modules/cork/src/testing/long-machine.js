@@ -608,6 +608,10 @@ export function flagsLeftUndefined(state, read){
  *             1: mov esi, eax; mov [r8 + rsi], cl; add eax, 1; dec ecx; jnz 1b
  *             -- the store lands below rdx until eax wraps, then past the window: a
  *             model that took esi past 2^32 would store at rdx on
+ *     sxd:    mov r8, rdx; xor ecx, ecx; xor eax, eax
+ *             1: movsxd rax, [r8 + rcx*4]; mov [r8 + rcx*4 + 0x400], eax; movsxd rax, ecx
+ *             mov [r8 + rax*8 + 0x1400], rcx; inc ecx; cmp ecx, 400; jne 1b
+ *             -- movsxd writes rax: no stream goes off it
  */
 export const LOOPS = Object.freeze({
     fill: '4889d7b92c01000048890f8947084883c70cffc975f2',
@@ -618,6 +622,7 @@ export const LOOPS = Object.freeze({
     groups: '4889d7b93200000048890f48894708f7c1010000007403894f1066894f14014f04488d7f20ffc975df',
     dwords: '4989d031c041bac800000089c6410fb63c30418d340083c0014088be000400004439d075e6',
     cuts: '4989d049b900000000010000004d29c8b89cffffffb92c01000089c641880c3083c001ffc975f3',
+    sxd: '4989d031c931c04963048841898488000400004863c149898cc000140000ffc181f99001000075df',
 });
 
 /**

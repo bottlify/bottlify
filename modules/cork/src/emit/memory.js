@@ -494,12 +494,12 @@ const INT_RW = new Set([
 ]);
 /** Integer operations whose memory source is read. */
 const INT_READ = new Set([
-    'mov', 'movzx', 'movsx', 'add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'cmp', 'test',
-    'imul', 'bsf', 'bsr', 'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si',
+    'mov', 'movzx', 'movsx', 'movsxd', 'add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'cmp',
+    'test', 'imul', 'bsf', 'bsr', 'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si',
 ]);
 /** Integer operations that write their first operand and no other register. */
 const INT_WRITE_DST = new Set([
-    ...INT_RW, 'mov', 'movzx', 'movsx', 'imul', 'bsf', 'bsr', 'bswap',
+    ...INT_RW, 'mov', 'movzx', 'movsx', 'movsxd', 'imul', 'bsf', 'bsr', 'bswap',
     'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si', 'movmskps', 'movmskpd', 'pmovmskb',
 ]);
 /** Integer operations that write no register. */
