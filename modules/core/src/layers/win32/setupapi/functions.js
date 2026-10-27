@@ -103,6 +103,10 @@ const DIOCR_INTERFACE = 0x2;
 /** SP_DEVINSTALL_PARAMS' flags: no file queue of the installer's own. */
 const DI_NOVCP = 0x8;
 
+/** SetupPromptForDisk: look for the file before asking, and what it answers. */
+const IDF_CHECKFIRST = 0x100;
+const DPROMPT = Object.freeze({ SUCCESS: 0, CANCEL: 1, SKIPFILE: 2, BUFFERTOOSMALL: 3 });
+
 /** SP_DEVINFO_LIST_DETAIL_DATA's sizes: a GUID, a handle and 263 characters. */
 const LIST_DETAIL_A_SIZE = 288;
 const LIST_DETAIL_W_SIZE = 552;
@@ -258,6 +262,26 @@ export function createSetupapiFunctions(host){
         }
         catch {
             return null;
+        }
+    };
+
+    /**
+     * Whether a path names something on the volume; a path it refuses names
+     * nothing.
+     *
+     * @param {string | null} path
+     */
+    const exists = path=>{
+        if (path === null)
+        {
+            return false;
+        }
+        try
+        {
+            return Boolean(host.files.stat(path));
+        }
+        catch {
+            return false;
         }
     };
 
@@ -2773,6 +2797,50 @@ export function createSetupapiFunctions(host){
                     return fail(ERROR_INVALID_MACHINENAME, INVALID_HANDLE_VALUE);
                 }
                 return classKey(guidAt(classGuid), flags >>> 0);
+            },
+        })),
+
+        /**
+         * UINT SetupPromptForDiskA(HWND hwndParent, PCSTR DialogTitle, PCSTR DiskName,
+         *     PCSTR PathToSource, PCSTR FileSought, PCSTR TagFile, DWORD DiskPromptStyle,
+         *     PSTR PathBuffer, DWORD PathBufferSize, PDWORD PathRequiredSize), and the
+         *     W form
+         *
+         * With IDF_CHECKFIRST and the file already where it is sought, the
+         * path, no dialog shown: DPROMPT_SUCCESS, or DPROMPT_BUFFERTOOSMALL
+         * for a buffer it does not fit, its size reported either way.
+         * Anything else would ask the user for the disk, and no one is there
+         * to answer: DPROMPT_CANCEL, as a user who declines.
+         */
+        ...bothWidths('SetupPromptForDisk', wide=>({
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [, , , sourcePointer, filePointer, tagPointer,
+                style, buffer, size, required])=>{
+                const source = textOf(sourcePointer, wide) ?? '';
+                const sought = textOf(tagPointer, wide) || textOf(filePointer, wide) || '';
+                const found = exists(pathOf(joinPath(source, sought)));
+                if (((style >>> 0) & IDF_CHECKFIRST) === 0 || !found)
+                {
+                    host.divergence?.(`SetupPromptForDisk${wide ? 'W' : 'A'}`,
+                        'no one to ask for the disk: answered as cancelled');
+                    return DPROMPT.CANCEL;
+                }
+                const characters = source.length + 1;
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, characters);
+                }
+                if ((buffer >>> 0) === 0)
+                {
+                    return DPROMPT.SUCCESS;
+                }
+                if ((size >>> 0) < characters)
+                {
+                    return DPROMPT.BUFFERTOOSMALL;
+                }
+                host.writeMemory(buffer >>> 0, encodeIn(source, wide));
+                return DPROMPT.SUCCESS;
             },
         })),
 

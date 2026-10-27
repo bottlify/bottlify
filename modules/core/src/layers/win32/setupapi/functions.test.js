@@ -1357,3 +1357,22 @@ test('SetupIterateCabinetW hands its callback the W structures: wide names, a WC
         assert.deepEqual(seen, ['info C:\\src\\', 'file tristram', 'done C:\\dst\\wide.out']);
         assert.equal(m.contents('C:\\dst\\wide.out'), 'tristram\n');
     });
+
+test('SetupPromptForDisk answers with the path when the file is already there, and asks no one',
+    async()=>{
+        // Wine's setupapi dialog tests.
+        const m = await machine();
+        m.file('C:\\src\\needed.dll', 'x');
+        const IDF_CHECKFIRST = 0x100;
+        const out = m.buffer(64);
+        const length = m.buffer(4);
+        /** @param {number} buffer @param {number} size @param {number} style */
+        const prompt = (buffer, size, style = IDF_CHECKFIRST)=>m.fns.SetupPromptForDiskA.handler([
+            0, 0, 0, m.str('C:\\src'), m.str('needed.dll'), 0, style, buffer, size, length]);
+        assert.equal(prompt(out, 63), 0, 'DPROMPT_SUCCESS');
+        assert.equal(m.readCString(out, 64), 'C:\\src');
+        assert.equal(m.u32(length), 7);
+        assert.equal(prompt(0, 0), 0, 'no buffer: the size alone');
+        assert.equal(prompt(out, 6), 3, 'DPROMPT_BUFFERTOOSMALL');
+        assert.equal(prompt(out, 63, 0), 1, 'asked for the disk: no one answers, cancelled');
+    });
