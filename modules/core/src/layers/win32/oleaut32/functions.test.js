@@ -684,7 +684,8 @@ test('VariantCopy of an array reference is a reference, and clearing it destroys
     assert.equal(call('VariantCopy', [VARIANT_B, VARIANT_A]), S_OK);
     assert.equal(host.u32(VARIANT_B + 8), SLOT, 'the copy points where the source did');
     assert.equal(call('VariantClear', [VARIANT_B]), S_OK);
-    assert.equal(host.live.has(original), true, 'the array is the owner of the reference\'s');
+    assert.equal(host.live.has(original - 16), true,
+        'the array, its block behind the descriptor, is the owner of the reference\'s');
 });
 
 test('VariantClear leaves a locked array in its variant and says so', ()=>{
@@ -1270,7 +1271,8 @@ test('a SAFEARRAY is read off its descriptor, locked, and copied whole', ()=>{
     assert.deepEqual([...Array(6)].map((_, i)=>host.u32(data + i * 4)),
         [100, 101, 102, 103, 104, 105]);
     assert.deepEqual([host.u32(copy + 16), host.u32(copy + 24)], [2, 3]);
-    assert.equal(call('SafeArrayCopy', [0, SLOT]) | 0, 0x80070057 | 0);
+    host.putU32(SLOT, 0xdeadbeef);
+    assert.equal(call('SafeArrayCopy', [0, SLOT]), S_OK, 'no array copies as none');
     assert.equal(host.u32(SLOT), 0);
 });
 
@@ -2091,4 +2093,60 @@ test('VariantClear, VariantCopy and VariantCopyInd refuse a VARTYPE no variant h
     assert.equal(call('VariantCopyInd', [VARIANT_A, VARIANT_A]), S_OK);
     assert.equal(host.u16(VARIANT_A), VT_BSTR);
     assert.notEqual(host.u32(VARIANT_A + 8), host.u32(VALUE), 'a string is copied, not shared');
+});
+
+test('a SAFEARRAY keeps its VARTYPE or IID in front of its descriptor, as Windows does', ()=>{
+    setUp();
+    const OUT = 0x3000;
+    const BOUND = 0x3100;
+    assert.equal(call('SafeArrayAllocDescriptor', [0, OUT]), E_INVALIDARG);
+    assert.equal(call('SafeArrayAllocDescriptor', [0x10000, OUT]), E_INVALIDARG);
+    assert.equal(call('SafeArrayAllocDescriptor', [1, 0]), 0x80004003, 'E_POINTER');
+    assert.equal(call('SafeArrayAllocDescriptorEx', [VT_BSTR, 1, OUT]), S_OK);
+    const strings = host.u32(OUT);
+    assert.deepEqual([host.u16(strings + 2), host.u32(strings - 4)], [0x80, VT_BSTR],
+        'FADF_HAVEVARTYPE and the type at -4; FADF_BSTR is SafeArrayCreate\'s');
+    assert.equal(call('SafeArrayGetVartype', [strings, OUT]), S_OK);
+    assert.equal(host.u16(OUT), VT_BSTR);
+    assert.equal(call('SafeArrayGetIID', [strings, OUT]), E_INVALIDARG);
+    assert.equal(call('SafeArrayDestroyDescriptor', [strings]), S_OK);
+
+    host.putU32(BOUND, 3);
+    host.putU32(BOUND + 4, 0);
+    const objects = call('SafeArrayCreate', [9, 1, BOUND]);
+    assert.equal(host.u16(objects + 2), 0x440, 'FADF_DISPATCH | FADF_HAVEIID');
+    assert.equal(host.u32(objects - 16), 0x00020400, 'IID_IDispatch at -16');
+    assert.equal(call('SafeArrayGetVartype', [objects, OUT]), S_OK);
+    assert.equal(host.u16(OUT), 9);
+
+    const vector = call('SafeArrayCreateVector', [VT_I4, 0, 10]);
+    assert.equal(host.u16(vector + 2), 0x2080, 'FADF_CREATEVECTOR | FADF_HAVEVARTYPE');
+    assert.equal(host.u32(vector + 12), vector + 24, 'its data in the same block');
+    assert.equal(call('SafeArrayDestroyData', [vector]), S_OK);
+    assert.deepEqual([host.u16(vector + 2), host.u32(vector + 12)], [0x80, 0]);
+    assert.equal(call('SafeArrayDestroy', [vector]), S_OK);
+
+    for (let lock = 0; lock < 0xffff; lock++)
+    {
+        call('SafeArrayLock', [objects]);
+    }
+    assert.equal(call('SafeArrayLock', [objects]), 0x8000ffff, 'E_UNEXPECTED past 65535');
+    host.putU32(objects + 8, 0);
+    host.putU16(objects + 2, host.u16(objects + 2) | 0x10);
+    assert.equal(call('SafeArrayRedim', [objects, BOUND]), 0x8002000d,
+        'a fixed-size array is refused as a locked one');
+});
+
+test('VariantChangeType turns an array of bytes into a string of them and back', ()=>{
+    setUp();
+    const bytes = call('SafeArrayCreateVector', [VT_UI1, 0, 4]);
+    host.bytes.set([0x48, 0x65, 0x6c, 0x6c], host.u32(bytes + 12));
+    host.putVariant(VARIANT_A, 0x2000 | VT_UI1, bytes);
+    host.putVariant(VARIANT_B, VT_EMPTY, 0);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_BSTR]), S_OK);
+    assert.equal(host.u16(host.u32(VARIANT_B + 8)), 0x6548, '"He" in one character');
+    assert.equal(call('VariantChangeType', [VARIANT_A, VARIANT_B, 0, 0x2000 | VT_UI1]), S_OK);
+    assert.equal(host.u16(VARIANT_A), 0x2000 | VT_UI1);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, 0x2000 | 16]),
+        DISP_E_TYPEMISMATCH, 'not into an array of another type');
 });

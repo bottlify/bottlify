@@ -27,7 +27,7 @@
  */
 
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
-import { readGuid } from '../ole32/guid.js';
+import { readGuid, writeGuid } from '../ole32/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
 import { TKIND_DISPATCH, TKIND_INTERFACE } from './typelib.js';
@@ -78,6 +78,25 @@ const VARIANT_VALUE = 8;
  * its elements own.
  */
 const SAFEARRAY_BOUNDS = 16;
+const FADF_AUTO = 0x1;
+const FADF_STATIC = 0x2;
+const FADF_EMBEDDED = 0x4;
+const FADF_FIXEDSIZE = 0x10;
+const FADF_RECORD = 0x20;
+const FADF_HAVEIID = 0x40;
+const FADF_HAVEVARTYPE = 0x80;
+const FADF_CREATEVECTOR = 0x2000;
+/**
+ * The bytes Windows keeps in front of a descriptor it allocates: an IID at
+ * -16 for FADF_HAVEIID, and at -4 the VARTYPE for FADF_HAVEVARTYPE or the
+ * IRecordInfo for FADF_RECORD.
+ */
+const DESCRIPTOR_PREFIX = 16;
+/** Element sizes a SAFEARRAY takes beside what a variant holds by reference. */
+/** @type {Readonly<Record<number, number>>} */
+const ARRAY_ELEMENT_BYTES = Object.freeze({ 37: 4, 38: 4 });
+const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
+const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
 const FADF_BSTR = 0x100;
 const FADF_UNKNOWN = 0x200;
 const FADF_DISPATCH = 0x400;
@@ -116,6 +135,8 @@ const E_UNEXPECTED = 0x8000ffff | 0;
 const DISPID_VALUE = 0;
 /** IRecordInfo::RecordClear's place in the vtable. */
 const RECORDINFO_RECORDCLEAR = 4;
+/** IRecordInfo::GetSize's place in the vtable. */
+const RECORDINFO_GETSIZE = 8;
 const DISPATCH_PROPERTYGET = 2;
 
 /**
@@ -237,6 +258,7 @@ const VARCMP_NULL = 3;
  * @property {number[]} addRef
  * @property {number[]} release
  * @property {[number, number][]} recordClear  IRecordInfo and the record it empties
+ * @property {[number, number, number][]} recordCopy  IRecordInfo, a record and where it is copied
  */
 
 /**
@@ -647,7 +669,7 @@ export function createAutomationFunctions(host){
         : answer.then(then));
 
     /** @returns {Owed} */
-    const nothingOwed = ()=>({ addRef: [], release: [], recordClear: [] });
+    const nothingOwed = ()=>({ addRef: [], release: [], recordClear: [], recordCopy: [] });
 
     /**
      * Takes and gives back the references a call owes, one call into the
@@ -661,6 +683,8 @@ export function createAutomationFunctions(host){
     const settle = (owed, thread, hr)=>{
         // The object, its vtable slot and the arguments after it.
         const calls = /** @type {[number, number, number[]][]} */ ([...owed.addRef.map(object=>[object, 1, []]),
+            ...owed.recordCopy.map(([info, from, to])=>[info, RECORDINFO_RECORDCLEAR + 1,
+                [from, to]]),
             ...owed.recordClear.map(([info, record])=>[info, RECORDINFO_RECORDCLEAR, [record]]),
             ...owed.release.map(object=>[object, 2, []])]);
         if (calls.length === 0)
@@ -858,6 +882,22 @@ export function createAutomationFunctions(host){
         if (!isOperandType(type) || (vt & ~(VT_TYPEMASK | VT_BYREF | VT_ARRAY)) !== 0)
         {
             return DISP_E_BADVARTYPE;
+        }
+        const bytes = bytesConversion(dest, src, vt, owed);
+        if (bytes !== null)
+        {
+            return bytes;
+        }
+        // An array converts to nothing but an array of its own type, which
+        // is a copy; a source no variant holds is a bad type.
+        const declared = readU16(src);
+        if (!isVariantType(declared))
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        if ((declared & VT_ARRAY) !== 0 || (vt & VT_ARRAY) !== 0)
+        {
+            return declared === vt ? copyVariant(dest, src, owed) : DISP_E_TYPEMISMATCH;
         }
         // A reference to nothing is refused before a reference is as a target.
         const value = load(src, true);
@@ -1119,6 +1159,55 @@ export function createAutomationFunctions(host){
         }
         return l === VT_ERROR || r === VT_ERROR || l === VT_VARIANT
             || r === VT_VARIANT && CATENATED.has(l) ? DISP_E_TYPEMISMATCH : DISP_E_BADVARTYPE;
+    };
+
+    /**
+     * A one-dimensional array of bytes and a string of the same bytes, in
+     * either direction, as VariantChangeType converts them; null for any
+     * other pair.
+     *
+     * @param {number} dest @param {number} src @param {number} vt @param {Owed} owed
+     * @returns {number | null}
+     */
+    const bytesConversion = (dest, src, vt, owed)=>{
+        const declared = readU16(src);
+        if (declared === (VT_ARRAY | VT_UI1) && vt === VT_BSTR)
+        {
+            const array = safeArrayAt(readU32(src + VARIANT_VALUE));
+            if (!array || array.dims !== 1)
+            {
+                return DISP_E_TYPEMISMATCH;
+            }
+            const data = array.data === 0 ? new Uint8Array(0)
+                : host.readMemory(array.data, array.bounds[0].elements).slice();
+            const bstr = allocateBstr(data);
+            if (bstr === 0)
+            {
+                return E_OUTOFMEMORY;
+            }
+            clear(dest, owed);
+            writeU16(dest, VT_BSTR);
+            writeU32(dest + VARIANT_VALUE, bstr);
+            return S_OK;
+        }
+        if (declared === VT_BSTR && vt === (VT_ARRAY | VT_UI1))
+        {
+            const bstr = readU32(src + VARIANT_VALUE);
+            const data = bstr === 0 ? new Uint8Array(0)
+                : host.readMemory(bstr, byteLengthOf(bstr)).slice();
+            const psa = /** @type {number} */ (createArray(VT_UI1, 1, 0, 0,
+                { lower: 0, elements: data.length }));
+            if (psa === 0)
+            {
+                return E_OUTOFMEMORY;
+            }
+            host.writeMemory(readU32(psa + 12), data);
+            clear(dest, owed);
+            writeU16(dest, VT_ARRAY | VT_UI1);
+            writeU32(dest + VARIANT_VALUE, psa);
+            return S_OK;
+        }
+        return null;
     };
 
     /**
@@ -1421,11 +1510,13 @@ export function createAutomationFunctions(host){
             return null;
         }
         const dims = readU16(psa);
+        // One read for every bound: a descriptor may have 65535 of them.
+        const view = peek(psa + SAFEARRAY_BOUNDS, dims * 8);
         const bounds = [];
         for (let index = 0; index < dims; index++)
         {
-            const at = psa + SAFEARRAY_BOUNDS + index * 8;
-            bounds.push({ elements: readU32(at), lower: readU32(at + 4) | 0 });
+            bounds.push({ elements: view.getUint32(index * 8, true),
+                lower: view.getInt32(index * 8 + 4, true) });
         }
         return {
             dims,
@@ -1490,33 +1581,176 @@ export function createAutomationFunctions(host){
     };
 
     /**
-     * Gives an array back, as SafeArrayDestroy does: what its elements own
-     * first, then its data and its descriptor. A locked array is its locker's
-     * still.
+     * An array's elements emptied as SafeArrayDestroyData empties them, and
+     * its data freed unless the array does not own it -- FADF_AUTO,
+     * FADF_STATIC or FADF_EMBEDDED, or a vector whose data shares its
+     * descriptor's block. A locked array is its locker's still.
      *
      * @param {number} psa @param {Owed} owed
      * @returns {number} an HRESULT
      */
-    const destroyArray = (psa, owed)=>{
+    const destroyData = (psa, owed)=>{
         const array = safeArrayAt(psa);
         if (!array)
         {
-            return S_OK;
+            return E_INVALIDARG;
         }
         if (array.locks !== 0)
         {
             return DISP_E_ARRAYISLOCKED;
         }
-        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
-        if (array.data !== 0)
+        if (array.data === 0)
         {
-            for (let index = 0; index < elements; index++)
-            {
-                releaseElement(array.features, array.data + index * array.elementBytes, owed);
-            }
-            host.heap.free(array.data);
+            return S_OK;
         }
-        host.heap.free(psa);
+        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
+        const record = (array.features & FADF_RECORD) !== 0 ? readU32(psa - 4) : 0;
+        for (let index = 0; index < elements; index++)
+        {
+            const address = array.data + index * array.elementBytes;
+            if (record !== 0)
+            {
+                owed.recordClear.push([record, address]);
+            }
+            else
+            {
+                releaseElement(array.features, address, owed);
+            }
+        }
+        if ((array.features & FADF_CREATEVECTOR) !== 0)
+        {
+            // A vector's data is its descriptor's block: the array lets go
+            // of it and is an ordinary array from then on.
+            writeU16(psa + 2, array.features & ~FADF_CREATEVECTOR);
+            writeU32(psa + 12, 0);
+        }
+        else if ((array.features & (FADF_AUTO | FADF_STATIC | FADF_EMBEDDED)) === 0)
+        {
+            host.heap.free(array.data);
+            writeU32(psa + 12, 0);
+        }
+        else
+        {
+            // Memory the array does not own stays, emptied.
+            host.fillMemory(array.data, 0, elements * array.elementBytes);
+        }
+        return S_OK;
+    };
+
+    /**
+     * A descriptor given back as SafeArrayDestroyDescriptor gives it: the
+     * record information it held let go of, then the block it heads.
+     *
+     * @param {number} psa @param {Owed} owed
+     * @returns {number} an HRESULT
+     */
+    const destroyDescriptor = (psa, owed)=>{
+        const array = safeArrayAt(psa);
+        if (!array)
+        {
+            return E_INVALIDARG;
+        }
+        if (array.locks !== 0)
+        {
+            return DISP_E_ARRAYISLOCKED;
+        }
+        if ((array.features & FADF_RECORD) !== 0 && readU32(psa - 4) !== 0)
+        {
+            owed.release.push(readU32(psa - 4));
+        }
+        if ((array.features & (FADF_AUTO | FADF_STATIC | FADF_EMBEDDED)) === 0)
+        {
+            host.heap.free(psa - DESCRIPTOR_PREFIX);
+        }
+        return S_OK;
+    };
+
+    /**
+     * Gives an array back, as SafeArrayDestroy does: what its elements own
+     * first, then its data and its descriptor. No array is nothing to do.
+     *
+     * @param {number} psa @param {Owed} owed
+     * @returns {number} an HRESULT
+     */
+    const destroyArray = (psa, owed)=>{
+        if (psa === 0)
+        {
+            return S_OK;
+        }
+        const data = destroyData(psa, owed);
+        return data !== S_OK ? data : destroyDescriptor(psa, owed);
+    };
+
+    /**
+     * A zeroed descriptor of `dims` dimensions with Windows' prefix in front
+     * of it; 0 when nothing fits.
+     *
+     * @param {number} dims @param {number} [extra]  bytes after the bounds, for a vector's data
+     */
+    const allocateDescriptor = (dims, extra = 0)=>{
+        const bytes = DESCRIPTOR_PREFIX + SAFEARRAY_BOUNDS + dims * 8 + extra;
+        const block = host.heap.allocate(bytes);
+        if (block === 0)
+        {
+            return 0;
+        }
+        host.fillMemory(block, 0, bytes);
+        writeU16(block + DESCRIPTOR_PREFIX, dims);
+        return block + DESCRIPTOR_PREFIX;
+    };
+
+    /**
+     * What SafeArrayAllocDescriptorEx records of a type: FADF_HAVEIID with
+     * the interface's IID, FADF_RECORD, or FADF_HAVEVARTYPE with the type,
+     * in the prefix, and its element size -- 0 for a type no array holds, a
+     * record's left for its IRecordInfo to say. What the elements own is
+     * SafeArrayCreate's to flag.
+     *
+     * @param {number} psa @param {number} vt
+     */
+    const describeElements = (psa, vt)=>{
+        const type = vt & 0xffff;
+        let features = FADF_HAVEVARTYPE;
+        if (type === VT_UNKNOWN || type === VT_DISPATCH)
+        {
+            features = FADF_HAVEIID;
+            writeGuid(host, psa - DESCRIPTOR_PREFIX,
+                type === VT_UNKNOWN ? IID_IUNKNOWN : IID_IDISPATCH);
+        }
+        else if (type === VT_RECORD)
+        {
+            features = FADF_RECORD;
+        }
+        if ((features & FADF_HAVEVARTYPE) !== 0)
+        {
+            writeU32(psa - 4, type);
+        }
+        writeU16(psa + 2, features);
+        writeU32(psa + 4, ELEMENT_BYTES[type] ?? ARRAY_ELEMENT_BYTES[type] ?? 0);
+    };
+
+    /**
+     * The data for a described array, zeroed: every dimension's elements
+     * times the element size.
+     *
+     * @param {number} psa
+     * @returns {number} an HRESULT
+     */
+    const allocateData = psa=>{
+        const array = safeArrayAt(psa);
+        if (!array)
+        {
+            return E_INVALIDARG;
+        }
+        const bytes = array.bounds.reduce((total, bound)=>total * bound.elements, 1)
+            * array.elementBytes;
+        const data = host.heap.allocate(Math.max(bytes, 1));
+        if (data === 0)
+        {
+            return E_UNEXPECTED;
+        }
+        host.fillMemory(data, 0, Math.max(bytes, 1));
+        writeU32(psa + 12, data);
         return S_OK;
     };
 
@@ -1538,56 +1772,99 @@ export function createAutomationFunctions(host){
         const descriptorBytes = SAFEARRAY_BOUNDS + array.dims * 8;
         const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
         const dataBytes = elements * array.elementBytes;
-        const descriptor = host.heap.allocate(descriptorBytes);
-        const data = dataBytes === 0 ? 0 : host.heap.allocate(dataBytes);
-        if (descriptor === 0 || (dataBytes !== 0 && data === 0))
+        const descriptor = allocateDescriptor(array.dims);
+        const data = dataBytes === 0 || array.data === 0 ? 0 : host.heap.allocate(dataBytes);
+        if (descriptor === 0 || (dataBytes !== 0 && array.data !== 0 && data === 0))
         {
-            host.heap.free(descriptor);
+            host.heap.free(descriptor - DESCRIPTOR_PREFIX);
             host.heap.free(data);
             return { hr: E_OUTOFMEMORY, descriptor: 0 };
         }
+        // The copy is the copier's own: whatever storage flags the original
+        // had for its own memory do not come with it, and its IID, VARTYPE
+        // or record information does.
         const header = host.readMemory(psa, descriptorBytes).slice();
         host.writeMemory(descriptor, header);
+        writeU16(descriptor + 2, array.features
+            & ~(FADF_AUTO | FADF_STATIC | FADF_EMBEDDED | FADF_FIXEDSIZE | FADF_CREATEVECTOR));
+        if ((array.features & (FADF_HAVEIID | FADF_HAVEVARTYPE | FADF_RECORD)) !== 0)
+        {
+            host.writeMemory(descriptor - DESCRIPTOR_PREFIX,
+                host.readMemory(psa - DESCRIPTOR_PREFIX, DESCRIPTOR_PREFIX).slice());
+        }
+        if ((array.features & FADF_RECORD) !== 0 && readU32(psa - 4) !== 0)
+        {
+            owed.addRef.push(readU32(psa - 4));
+        }
         writeU32(descriptor + 8, 0);
         writeU32(descriptor + 12, data);
-        if (dataBytes !== 0)
+        if (data === 0)
         {
-            if ((array.features & FADF_VARIANT) !== 0)
+            return { hr: S_OK, descriptor };
+        }
+        const copied = copyElements(array, data, owed, psa);
+        return { hr: copied, descriptor };
+    };
+
+    /**
+     * An array's elements copied into `data`, which holds as many: each the
+     * way its type is copied -- a string duplicated, a variant through
+     * VariantCopy, an interface with a reference of its own and a record by
+     * its IRecordInfo::RecordCopy, put in `owed`.
+     *
+     * @param {NonNullable<ReturnType<typeof safeArrayAt>>} array
+     * @param {number} data @param {Owed} owed @param {number} psa
+     * @returns {number} an HRESULT
+     */
+    const copyElements = (array, data, owed, psa)=>{
+        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
+        const dataBytes = elements * array.elementBytes;
+        if ((array.features & FADF_RECORD) !== 0)
+        {
+            const info = readU32(psa - 4);
+            host.fillMemory(data, 0, dataBytes);
+            for (let index = 0; index < elements; index++)
             {
-                host.fillMemory(data, 0, dataBytes);
+                const offset = index * array.elementBytes;
+                owed.recordCopy.push([info, array.data + offset, data + offset]);
+            }
+            return S_OK;
+        }
+        if ((array.features & FADF_VARIANT) !== 0)
+        {
+            host.fillMemory(data, 0, dataBytes);
+            for (let index = 0; index < elements; index++)
+            {
+                copyVariant(data + index * VARIANT_BYTES, array.data + index * VARIANT_BYTES,
+                    owed);
+            }
+        }
+        else
+        {
+            host.writeMemory(data, host.readMemory(array.data, dataBytes).slice());
+            if ((array.features & FADF_BSTR) !== 0)
+            {
                 for (let index = 0; index < elements; index++)
                 {
-                    copyVariant(data + index * VARIANT_BYTES, array.data + index * VARIANT_BYTES,
-                        owed);
+                    const source = readU32(array.data + index * 4);
+                    const copy = source === 0 ? 0 : allocateBstr(
+                        host.readMemory(source, byteLengthOf(source)).slice());
+                    writeU32(data + index * 4, copy);
                 }
             }
-            else
+            else if ((array.features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
             {
-                host.writeMemory(data, host.readMemory(array.data, dataBytes).slice());
-                if ((array.features & FADF_BSTR) !== 0)
+                for (let index = 0; index < elements; index++)
                 {
-                    for (let index = 0; index < elements; index++)
+                    const pointer = readU32(array.data + index * 4);
+                    if (pointer !== 0)
                     {
-                        const source = readU32(array.data + index * 4);
-                        const copy = source === 0 ? 0 : allocateBstr(
-                            host.readMemory(source, byteLengthOf(source)).slice());
-                        writeU32(data + index * 4, copy);
-                    }
-                }
-                else if ((array.features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
-                {
-                    for (let index = 0; index < elements; index++)
-                    {
-                        const pointer = readU32(array.data + index * 4);
-                        if (pointer !== 0)
-                        {
-                            owed.addRef.push(pointer);
-                        }
+                        owed.addRef.push(pointer);
                     }
                 }
             }
         }
-        return { hr: S_OK, descriptor };
+        return S_OK;
     };
 
     const registerTypeLib = {
@@ -2360,6 +2637,383 @@ export function createAutomationFunctions(host){
             });
         }
     }
+
+    /**
+     * SafeArrayCreate, SafeArrayCreateEx and the vectors: a descriptor with
+     * Windows' prefix, the bounds given rightmost first as the descriptor
+     * keeps them, and zeroed data -- in the descriptor's own block for a
+     * vector. `extra` is an IID for an array of interfaces, or the
+     * IRecordInfo whose GetSize sets a record array's element size and to
+     * which the array holds a reference. 0 for a type no array holds.
+     *
+     * @param {number} type @param {number} dims @param {number} rgsabound
+     * @param {number} extra @param {{ lower: number, elements: number }} [vector]
+     * @returns {number | Promise<number>}
+     */
+    const createArray = (type, dims, rgsabound, extra, vector = undefined)=>{
+        const size = ELEMENT_BYTES[type] ?? ARRAY_ELEMENT_BYTES[type] ?? 0;
+        if (dims === 0 || dims > 0xffff || (!vector && rgsabound === 0)
+            || (size === 0 && type !== VT_RECORD)
+            || (type === VT_RECORD && extra === 0))
+        {
+            return 0;
+        }
+        const psa = allocateDescriptor(dims, vector ? size * vector.elements : 0);
+        if (psa === 0)
+        {
+            return 0;
+        }
+        describeElements(psa, type);
+        const owning = type === VT_BSTR ? FADF_BSTR : type === VT_VARIANT ? FADF_VARIANT
+            : type === VT_UNKNOWN ? FADF_UNKNOWN : type === VT_DISPATCH ? FADF_DISPATCH : 0;
+        writeU16(psa + 2, readU16(psa + 2) | owning);
+        if (vector)
+        {
+            writeU16(psa + 2, readU16(psa + 2) | FADF_CREATEVECTOR);
+            writeU32(psa + SAFEARRAY_BOUNDS, vector.elements);
+            writeU32(psa + SAFEARRAY_BOUNDS + 4, vector.lower);
+        }
+        else
+        {
+            for (let index = 0; index < dims; index++)
+            {
+                host.writeMemory(psa + SAFEARRAY_BOUNDS + (dims - 1 - index) * 8,
+                    host.readMemory(rgsabound + index * 8, 8).slice());
+            }
+        }
+        if ((type === VT_UNKNOWN || type === VT_DISPATCH) && extra !== 0)
+        {
+            host.writeMemory(psa - DESCRIPTOR_PREFIX, host.readMemory(extra, 16).slice());
+        }
+        /** @returns {number} */
+        const finish = ()=>{
+            if (vector)
+            {
+                writeU32(psa + 12, psa + SAFEARRAY_BOUNDS + 8);
+                return psa;
+            }
+            if (allocateData(psa) !== S_OK)
+            {
+                host.heap.free(psa - DESCRIPTOR_PREFIX);
+                return 0;
+            }
+            return psa;
+        };
+        if (type !== VT_RECORD)
+        {
+            return finish();
+        }
+        return recordSize(extra).then(bytes=>{
+            if (bytes === null)
+            {
+                host.heap.free(psa - DESCRIPTOR_PREFIX);
+                return 0;
+            }
+            writeU32(psa - 4, extra);
+            writeU32(psa + 4, bytes);
+            if (vector)
+            {
+                // A vector of records keeps its data apart: its size was not
+                // known when the descriptor's block was made.
+                writeU16(psa + 2, readU16(psa + 2) & ~FADF_CREATEVECTOR);
+                if (allocateData(psa) !== S_OK)
+                {
+                    host.heap.free(psa - DESCRIPTOR_PREFIX);
+                    return 0;
+                }
+                return addRefOf(extra).then(()=>psa);
+            }
+            const made = finish();
+            return made === 0 ? 0 : addRefOf(extra).then(()=>made);
+        });
+    };
+
+    /**
+     * What IRecordInfo::GetSize puts in its out parameter -- whatever it
+     * answers, as Windows takes it -- or null when it cannot be asked.
+     *
+     * @param {number} info
+     * @returns {Promise<number | null>}
+     */
+    const recordSize = info=>{
+        const call = host.call;
+        const slot = host.heap.allocate(4);
+        if (!call || slot === 0)
+        {
+            return Promise.resolve(null);
+        }
+        writeU32(slot, 0);
+        return call(readU32(readU32(info) + RECORDINFO_GETSIZE * 4), [info, slot],
+            host.callerThread?.()).then(()=>readU32(slot))
+            .finally(()=>host.heap.free(slot));
+    };
+
+    /** @param {number} object @returns {Promise<unknown>} */
+    const addRefOf = object=>(host.call
+        ? host.call(readU32(readU32(object) + 4), [object], host.callerThread?.())
+        : Promise.resolve(0));
+
+    /**
+     * An array's elements emptied where they are, as SafeArrayCopyData
+     * empties its target before it copies -- all but records, which
+     * IRecordInfo::RecordCopy copies over without a clear first.
+     *
+     * @param {number} psa @param {Owed} owed
+     */
+    const clearElements = (psa, owed)=>{
+        const array = /** @type {NonNullable<ReturnType<typeof safeArrayAt>>} */ (safeArrayAt(psa));
+        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
+        for (let index = 0; index < elements; index++)
+        {
+            releaseElement(array.features, array.data + index * array.elementBytes, owed);
+        }
+    };
+
+    Object.assign(conversions, {
+        /** HRESULT SafeArrayAllocDescriptor(UINT cDims, SAFEARRAY **ppsaOut) */
+        SafeArrayAllocDescriptor: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([cDims, out])=>{
+                const dims = cDims >>> 0;
+                if (dims === 0 || dims > 0xffff)
+                {
+                    return E_INVALIDARG;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const psa = allocateDescriptor(dims);
+                writeU32(out >>> 0, psa);
+                return psa === 0 ? E_UNEXPECTED : S_OK;
+            },
+        },
+
+        /**
+         * HRESULT SafeArrayAllocDescriptorEx(VARTYPE vt, UINT cDims, SAFEARRAY **ppsaOut)
+         *
+         * As SafeArrayAllocDescriptor, with the type's features and element
+         * size recorded; a type no array holds is described with no size.
+         */
+        SafeArrayAllocDescriptorEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([vt, cDims, out])=>{
+                const dims = cDims >>> 0;
+                if (dims === 0 || dims > 0xffff)
+                {
+                    return E_INVALIDARG;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const psa = allocateDescriptor(dims);
+                writeU32(out >>> 0, psa);
+                if (psa === 0)
+                {
+                    return E_UNEXPECTED;
+                }
+                describeElements(psa, vt & 0xffff);
+                return S_OK;
+            },
+        },
+
+        /** HRESULT SafeArrayAllocData(SAFEARRAY *psa) */
+        SafeArrayAllocData: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([psa])=>allocateData(psa >>> 0),
+        },
+
+        /** HRESULT SafeArrayDestroyData(SAFEARRAY *psa) */
+        SafeArrayDestroyData: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([psa])=>{
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                const hr = destroyData(psa >>> 0, owed);
+                return hr !== S_OK ? hr : settle(owed, thread, S_OK);
+            },
+        },
+
+        /** HRESULT SafeArrayDestroyDescriptor(SAFEARRAY *psa) */
+        SafeArrayDestroyDescriptor: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([psa])=>{
+                if ((psa >>> 0) === 0)
+                {
+                    return S_OK;
+                }
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                const hr = destroyDescriptor(psa >>> 0, owed);
+                return hr !== S_OK ? hr : settle(owed, thread, S_OK);
+            },
+        },
+
+        /**
+         * SAFEARRAY *SafeArrayCreateEx(VARTYPE vt, UINT cDims, SAFEARRAYBOUND *rgsabound,
+         *                              void *pvExtra)
+         */
+        SafeArrayCreateEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([vt, cDims, rgsabound, extra])=>createArray(vt & 0xffff, cDims >>> 0,
+                rgsabound >>> 0, extra >>> 0),
+        },
+
+        /** SAFEARRAY *SafeArrayCreateVector(VARTYPE vt, LONG lLbound, ULONG cElements) */
+        SafeArrayCreateVector: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([vt, lower, elements])=>createArray(vt & 0xffff, 1, 0, 0,
+                { lower: lower | 0, elements: elements >>> 0 }),
+        },
+
+        /**
+         * SAFEARRAY *SafeArrayCreateVectorEx(VARTYPE vt, LONG lLbound, ULONG cElements,
+         *                                    void *pvExtra)
+         */
+        SafeArrayCreateVectorEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([vt, lower, elements, extra])=>createArray(vt & 0xffff, 1, 0,
+                extra >>> 0, { lower: lower | 0, elements: elements >>> 0 }),
+        },
+
+        /**
+         * HRESULT SafeArrayCopyData(SAFEARRAY *psaSource, SAFEARRAY *psaTarget)
+         *
+         * Into an array of the same shape: what the target held is emptied,
+         * then each element copied as SafeArrayCopy copies it.
+         */
+        SafeArrayCopyData: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psaSource, psaTarget])=>{
+                const source = safeArrayAt(psaSource >>> 0);
+                const target = safeArrayAt(psaTarget >>> 0);
+                if (!source || !target || source.dims !== target.dims
+                    || source.elementBytes !== target.elementBytes || target.data === 0
+                    || source.bounds.some((bound, index)=>
+                        bound.elements !== target.bounds[index].elements))
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                clearElements(psaTarget >>> 0, owed);
+                const hr = source.data === 0 ? S_OK
+                    : copyElements(source, target.data, owed, psaSource >>> 0);
+                return settle(owed, thread, hr);
+            },
+        },
+
+        /** HRESULT SafeArrayGetIID(SAFEARRAY *psa, GUID *pguid) */
+        SafeArrayGetIID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, guid])=>{
+                const array = safeArrayAt(psa >>> 0);
+                if (!array || (guid >>> 0) === 0 || (array.features & FADF_HAVEIID) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                host.writeMemory(guid >>> 0,
+                    host.readMemory((psa >>> 0) - DESCRIPTOR_PREFIX, 16).slice());
+                return S_OK;
+            },
+        },
+
+        /** HRESULT SafeArraySetIID(SAFEARRAY *psa, REFGUID guid) */
+        SafeArraySetIID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, guid])=>{
+                const array = safeArrayAt(psa >>> 0);
+                if (!array || (guid >>> 0) === 0 || (array.features & FADF_HAVEIID) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                host.writeMemory((psa >>> 0) - DESCRIPTOR_PREFIX,
+                    host.readMemory(guid >>> 0, 16).slice());
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT SafeArrayGetVartype(SAFEARRAY *psa, VARTYPE *pvt)
+         *
+         * The VARTYPE the prefix keeps, VT_RECORD for a record array, or the
+         * one its features name; E_INVALIDARG when none says.
+         */
+        SafeArrayGetVartype: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, pvt])=>{
+                const array = safeArrayAt(psa >>> 0);
+                if (!array || (pvt >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const features = array.features;
+                // A descriptor with an IID but no FADF_DISPATCH -- one
+                // SafeArrayAllocDescriptorEx made for IDispatch -- answers
+                // VT_UNKNOWN, as Windows answers.
+                const type = (features & FADF_RECORD) !== 0 ? VT_RECORD
+                    : (features & FADF_HAVEVARTYPE) !== 0 ? readU32((psa >>> 0) - 4) & 0xffff
+                        : (features & FADF_DISPATCH) !== 0 ? VT_DISPATCH
+                            : (features & (FADF_HAVEIID | FADF_UNKNOWN)) !== 0 ? VT_UNKNOWN
+                                : (features & FADF_BSTR) !== 0 ? VT_BSTR
+                                    : (features & FADF_VARIANT) !== 0 ? VT_VARIANT : -1;
+                if (type < 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU16(pvt >>> 0, type);
+                return S_OK;
+            },
+        },
+
+        /** HRESULT SafeArraySetRecordInfo(SAFEARRAY *psa, IRecordInfo *prinfo) */
+        SafeArraySetRecordInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, info])=>{
+                const array = safeArrayAt(psa >>> 0);
+                if (!array || (array.features & FADF_RECORD) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const held = readU32((psa >>> 0) - 4);
+                writeU32((psa >>> 0) - 4, info >>> 0);
+                return settle({ addRef: (info >>> 0) !== 0 ? [info >>> 0] : [],
+                    release: held !== 0 ? [held] : [], recordClear: [], recordCopy: [] },
+                host.callerThread?.(), S_OK);
+            },
+        },
+
+        /** HRESULT SafeArrayGetRecordInfo(SAFEARRAY *psa, IRecordInfo **prinfo) */
+        SafeArrayGetRecordInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, out])=>{
+                const array = safeArrayAt(psa >>> 0);
+                if (!array || (out >>> 0) === 0 || (array.features & FADF_RECORD) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const info = readU32((psa >>> 0) - 4);
+                writeU32(out >>> 0, info);
+                return settle({ addRef: info !== 0 ? [info] : [], release: [], recordClear: [],
+                    recordCopy: [] }, host.callerThread?.(), S_OK);
+            },
+        },
+    });
 
     const table = {
         ...conversions,
@@ -3330,7 +3984,8 @@ export function createAutomationFunctions(host){
                     heldErrorInfo.set(thread, given);
                 }
                 return settle({ addRef: given !== 0 ? [given] : [],
-                    release: held !== 0 ? [held] : [], recordClear: [] }, thread, S_OK);
+                    release: held !== 0 ? [held] : [], recordClear: [], recordCopy: [] }, thread,
+                S_OK);
             },
         },
 
@@ -3503,45 +4158,8 @@ export function createAutomationFunctions(host){
         SafeArrayCreate: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([vt, cDims, rgsabound])=>{
-                const type = vt & 0xffff;
-                const dims = cDims >>> 0;
-                const elementBytes = ELEMENT_BYTES[type];
-                if (elementBytes === undefined || dims === 0 || (rgsabound >>> 0) === 0)
-                {
-                    return 0;
-                }
-                let elements = 1;
-                for (let index = 0; index < dims; index++)
-                {
-                    elements *= readU32((rgsabound >>> 0) + index * 8);
-                }
-                const dataBytes = Math.max(1, elements * elementBytes);
-                const descriptor = host.heap.allocate(SAFEARRAY_BOUNDS + dims * 8);
-                const data = host.heap.allocate(dataBytes);
-                if (descriptor === 0 || data === 0)
-                {
-                    host.heap.free(descriptor);
-                    host.heap.free(data);
-                    return 0;
-                }
-                const features = type === VT_BSTR ? FADF_BSTR
-                    : type === VT_UNKNOWN ? FADF_UNKNOWN
-                        : type === VT_DISPATCH ? FADF_DISPATCH
-                            : type === VT_VARIANT ? FADF_VARIANT : 0;
-                writeU16(descriptor, dims);
-                writeU16(descriptor + 2, features);
-                writeU32(descriptor + 4, elementBytes);
-                writeU32(descriptor + 8, 0);
-                writeU32(descriptor + 12, data);
-                for (let index = 0; index < dims; index++)
-                {
-                    host.writeMemory(descriptor + SAFEARRAY_BOUNDS + (dims - 1 - index) * 8,
-                        host.readMemory((rgsabound >>> 0) + index * 8, 8).slice());
-                }
-                host.fillMemory(data, 0, dataBytes);
-                return descriptor;
-            },
+            handler: ([vt, cDims, rgsabound])=>createArray(vt & 0xffff, cDims >>> 0,
+                rgsabound >>> 0, 0),
         },
 
         /**
@@ -3574,11 +4192,12 @@ export function createAutomationFunctions(host){
             /** @param {number[]} args */
             handler: ([psa, psaboundNew])=>{
                 const array = safeArrayAt(psa >>> 0);
-                if (!array || (psaboundNew >>> 0) === 0)
+                if (!array || array.dims === 0 || (psaboundNew >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if (array.locks !== 0)
+                // A fixed-size array is refused as a locked one is.
+                if (array.locks !== 0 || (array.features & FADF_FIXEDSIZE) !== 0)
                 {
                     return DISP_E_ARRAYISLOCKED;
                 }
@@ -3653,6 +4272,12 @@ export function createAutomationFunctions(host){
                 }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
+                if ((features & FADF_RECORD) !== 0)
+                {
+                    // A record is copied by its own IRecordInfo.
+                    owed.recordCopy.push([readU32((psa >>> 0) - 4), at.address, pv >>> 0]);
+                    return settle(owed, thread, S_OK);
+                }
                 if ((features & FADF_VARIANT) !== 0)
                 {
                     host.writeMemory(pv >>> 0, new Uint8Array(VARIANT_BYTES));
@@ -3709,6 +4334,11 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
+                if ((features & FADF_RECORD) !== 0)
+                {
+                    owed.recordCopy.push([readU32((psa >>> 0) - 4), pv >>> 0, at.address]);
+                    return settle(owed, thread, S_OK);
+                }
                 if ((features & FADF_VARIANT) !== 0)
                 {
                     return settle(owed, thread, copyVariant(at.address, pv >>> 0, owed));
@@ -3757,6 +4387,10 @@ export function createAutomationFunctions(host){
                 if (!array || (out >>> 0) === 0)
                 {
                     return E_INVALIDARG;
+                }
+                if (array.locks >= 0xffff)
+                {
+                    return E_UNEXPECTED;
                 }
                 writeU32((psa >>> 0) + 8, array.locks + 1);
                 writeU32(out >>> 0, array.data);
@@ -3855,6 +4489,11 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
+                // The count stops at 65535 locks, refused past it.
+                if (array.locks >= 0xffff)
+                {
+                    return E_UNEXPECTED;
+                }
                 writeU32((psa >>> 0) + 8, array.locks + 1);
                 return S_OK;
             },
@@ -3894,6 +4533,16 @@ export function createAutomationFunctions(host){
                     return E_INVALIDARG;
                 }
                 writeU32(out >>> 0, 0);
+                // No array copies as none; one with no element size, as
+                // nothing to copy.
+                if ((psa >>> 0) === 0)
+                {
+                    return S_OK;
+                }
+                if (readU32((psa >>> 0) + 4) === 0)
+                {
+                    return E_INVALIDARG;
+                }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
                 const copy = copyArray(psa >>> 0, owed);
