@@ -110,6 +110,19 @@ const REG_EXPAND_SZ = 2;
 const REG_BINARY = 3;
 const REG_MULTI_SZ = 7;
 
+/**
+ * The three performance-data predefined keys. RegQueryValueEx on them answers
+ * a PERF_DATA_BLOCK for any counter name and the "Counter"/"Help" index lists;
+ * nothing else treats them as keys, so opening or setting one fails.
+ */
+const HKEY_PERFORMANCE_DATA = 0x80000004;
+const HKEY_PERFORMANCE_TEXT = 0x80000050;
+const HKEY_PERFORMANCE_NLSTEXT = 0x80000060;
+const PERFORMANCE_KEYS = new Set([
+    HKEY_PERFORMANCE_DATA, HKEY_PERFORMANCE_TEXT, HKEY_PERFORMANCE_NLSTEXT]);
+/** PERF_DATA_BLOCK's fixed part: the header before the system name. */
+const PERF_BLOCK_SIZE = 88;
+
 /** RegGetValue's errors for a value it found and will not answer as asked. */
 const ERROR_DATATYPE_MISMATCH = 1629;
 const ERROR_UNSUPPORTED_TYPE = 1630;
@@ -174,6 +187,10 @@ export { USER_NAME };
  * @property {{ set: (handle: number) => boolean, reset: (handle: number) => boolean }} [events]
  *           The kernel's events, which a change notification signals. Without
  *           them an asynchronous RegNotifyChangeKeyValue finds no event.
+ * @property {(library: string, name: string, args: number[]) => number} [system]
+ *           Another library's export, called as the program would call it:
+ *           the performance-data block reads kernel32's clocks through it.
+ * @property {string} [computerName]  This machine's name, in the perf block.
  */
 
 /** @param {number[]} numbers */
@@ -906,37 +923,139 @@ export function createRegistryFunctions(host){
      *
      * @param {boolean} wide
      */
-    const queryValueEx = wide=>({
-        argBytes: 24,
-        handler: onKey((key, [, name, , type, data, size])=>{
-            const value = hive.getValue(key, (wide ? readWideText(name) : readText(name)) ?? '');
-            if (!value)
+    /** The computer name, wide and null-terminated, for the perf block. */
+    const systemNameBytes = ()=>widened(encodeAnsi(`${host.computerName ?? 'COMPUTER'}\0`));
+
+    /** The whole length of the PERF_DATA_BLOCK, its header rounded up to eight. */
+    const perfDataLength = ()=>(PERF_BLOCK_SIZE + systemNameBytes().length + 7) & ~7;
+
+    /**
+     * A PERF_DATA_BLOCK and the computer name after it, written at `data` and
+     * stamped with the clocks the program reads itself: there are no object
+     * types, so the whole block is its header. Returns the length written.
+     *
+     * @param {number} data
+     */
+    const writePerfData = data=>{
+        const name = systemNameBytes();
+        const total = (PERF_BLOCK_SIZE + name.length + 7) & ~7;
+        const block = new Uint8Array(total);
+        const view = new DataView(block.buffer);
+        [...'PERF'].forEach((character, at)=>view.setUint16(at * 2, character.charCodeAt(0), true));
+        view.setUint32(8, 1, true);                  // LittleEndian
+        view.setUint32(12, 1, true);                 // Version
+        view.setUint32(16, 1, true);                 // Revision
+        view.setUint32(20, total, true);             // TotalByteLength
+        view.setUint32(24, total, true);             // HeaderLength
+        view.setUint32(28, 0, true);                 // NumObjectTypes
+        view.setInt32(32, 238, true);                // DefaultObject
+        view.setUint32(80, name.length, true);       // SystemNameLength
+        view.setUint32(84, PERF_BLOCK_SIZE, true);   // SystemNameOffset
+        block.set(name, PERF_BLOCK_SIZE);
+        host.writeMemory(data, block);
+        // The three clocks and the time as the program reads them: the QPC
+        // value at +56, its frequency at +64, a file time at +72, and the
+        // SYSTEMTIME at +36 made from that file time.
+        host.system?.('KERNEL32.dll', 'QueryPerformanceCounter', [data + 56]);
+        host.system?.('KERNEL32.dll', 'QueryPerformanceFrequency', [data + 64]);
+        host.system?.('KERNEL32.dll', 'GetSystemTimeAsFileTime', [data + 72]);
+        host.system?.('KERNEL32.dll', 'FileTimeToSystemTime', [data + 72, data + 36]);
+        return total;
+    };
+
+    /**
+     * The "Counter" or "Help" index list, a REG_MULTI_SZ of index/name pairs.
+     * Counter's first pair is index 1 naming the last index; both end with the
+     * End Marker Windows closes them with. Bottlify defines no counters of its
+     * own, so the list is that frame alone.
+     *
+     * @param {boolean} help
+     */
+    const perfIndexList = help=>encodeAnsi(
+        `${(help ? ['1', '1847', '1847', 'End Marker'] : ['1', '1847', '1846', 'End Marker'])
+            .join('\0')}\0\0`);
+
+    /**
+     * RegQueryValueEx on a performance-data key. A counter name (anything but
+     * Counter/Help, a language suffix ignored) answers a PERF_DATA_BLOCK as
+     * REG_BINARY; "Counter"/"Help" answer the index lists as REG_MULTI_SZ. The
+     * block never reports its size on a sizing call -- the interface cannot --
+     * so too small a buffer is ERROR_MORE_DATA with the size left alone; the
+     * index lists report their size as an ordinary value does.
+     *
+     * @param {boolean} wide @param {number} namePointer
+     * @param {number} type @param {number} data @param {number} size
+     */
+    const queryPerformance = (wide, namePointer, type, data, size)=>{
+        if (size === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const read = wide ? readWideText(namePointer) : readText(namePointer);
+        const name = (read ?? '').toLowerCase();
+        if (name.startsWith('counter') || name.startsWith('help'))
+        {
+            const bytes = perfIndexList(name.startsWith('help'));
+            const answer = wide ? widened(bytes) : bytes;
+            writeDwordIf(type, REG_MULTI_SZ);
+            if (data !== 0 && readDword(size) < answer.length)
             {
-                return ERROR_FILE_NOT_FOUND;
-            }
-            writeDwordIf(type, value.type);
-            if (size === 0)
-            {
-                // Asking for data without saying how much room there is is
-                // the one combination Windows rejects outright.
-                return data === 0 ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER;
-            }
-            const bytes = wide && STRING_TYPES.has(value.type) ? widened(value.data) : value.data;
-            const required = bytes.length;
-            if (data === 0)
-            {
-                writeDword(size, required);
-                return ERROR_SUCCESS;
-            }
-            if (readDword(size) < required)
-            {
-                writeDword(size, required);
+                writeDword(size, answer.length);
                 return ERROR_MORE_DATA;
             }
-            host.writeMemory(data, bytes);
-            writeDword(size, required);
+            if (data !== 0)
+            {
+                host.writeMemory(data, answer);
+            }
+            writeDword(size, answer.length);
             return ERROR_SUCCESS;
-        }),
+        }
+        writeDwordIf(type, REG_BINARY);
+        if (data === 0 || readDword(size) < perfDataLength())
+        {
+            return ERROR_MORE_DATA;
+        }
+        writeDword(size, writePerfData(data));
+        return ERROR_SUCCESS;
+    };
+
+    /** @param {boolean} wide */
+    const queryValueEx = wide=>({
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: args=>((PERFORMANCE_KEYS.has(args[0] >>> 0))
+            ? queryPerformance(wide, args[1], args[3], args[4], args[5])
+            : onKey((key, [, name, , type, data, size])=>{
+                const value = hive.getValue(key,
+                    (wide ? readWideText(name) : readText(name)) ?? '');
+                if (!value)
+                {
+                    return ERROR_FILE_NOT_FOUND;
+                }
+                writeDwordIf(type, value.type);
+                if (size === 0)
+                {
+                    // Asking for data without saying how much room there is is
+                    // the one combination Windows rejects outright.
+                    return data === 0 ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER;
+                }
+                const bytes = wide && STRING_TYPES.has(value.type)
+                    ? widened(value.data) : value.data;
+                const required = bytes.length;
+                if (data === 0)
+                {
+                    writeDword(size, required);
+                    return ERROR_SUCCESS;
+                }
+                if (readDword(size) < required)
+                {
+                    writeDword(size, required);
+                    return ERROR_MORE_DATA;
+                }
+                host.writeMemory(data, bytes);
+                writeDword(size, required);
+                return ERROR_SUCCESS;
+            })(args)),
     });
 
     /**

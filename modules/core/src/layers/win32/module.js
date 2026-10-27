@@ -3377,6 +3377,11 @@ export function createWin32Module(){
                         readCString,
                         hive,
                         setLastError: setError,
+                        // The performance-data keys stamp their block with the
+                        // clocks the program reads itself, and name this machine.
+                        /** @param {string} library @param {string} name @param {number[]} args */
+                        system: (library, name, args)=>libraries[library]?.[name]?.handler(args),
+                        computerName: COMPUTER_NAME,
                         // Where RegSaveKey writes a hive and RegLoadKey reads one.
                         files: volume,
                         // The run's file-security store, and how a path is made

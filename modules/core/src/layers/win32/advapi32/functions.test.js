@@ -18,6 +18,7 @@ import {
     HKEY_LOCAL_MACHINE,
     REG_BINARY,
     REG_DWORD,
+    REG_MULTI_SZ,
     REG_SZ,
 } from './registry.js';
 
@@ -300,6 +301,112 @@ test('a query with no buffer reports the size, and does not need one', ()=>{
         ERROR_SUCCESS);
     assert.equal(memory.string(OUT_DATA), 'abcd');
     assert.equal(memory.dword(OUT_SIZE), 5);
+});
+
+// The clocks a program reads itself: the perf block is stamped from the same
+// calls, so a stub that writes known marks is enough to see them land.
+/** @param {ReturnType<typeof fakeMemory>} memory */
+const perfClockStub = memory=>(/** @type {string} */ library,
+    /** @type {string} */ name, /** @type {number[]} */ args)=>
+{
+    const marks = { QueryPerformanceCounter: 0x11112222, QueryPerformanceFrequency: 10000000,
+        GetSystemTimeAsFileTime: 0xaaaabbbb };
+    if (name in marks)
+    {
+        memory.putDword(args[0], marks[/** @type {keyof typeof marks} */ (name)]);
+    }
+    else if (name === 'FileTimeToSystemTime')
+    {
+        memory.putDword(args[1], 2026);
+    }
+    return 0;
+};
+
+test('a performance key answers a PERF_DATA_BLOCK, stamped with the clocks it reads', ()=>{
+    const memory = fakeMemory(0x200000);
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createRegistryService(createHive()),
+        system: perfClockStub(memory),
+        computerName: 'BOTTLIFY',
+    });
+    const PERF = 0x80000004;
+    const BIG = 0x100000;
+    const OUT = 0x1000;
+
+    // The sizing calls: the block never reports its size, so both a null
+    // buffer and a short one are ERROR_MORE_DATA, and the size is left alone.
+    memory.putDword(OUT_SIZE, 0);
+    assert.equal(fns.RegQueryValueExA.handler([PERF, 0, 0, OUT_TYPE, 0, OUT_SIZE]),
+        234, 'ERROR_MORE_DATA with no buffer');
+    assert.equal(memory.dword(OUT_SIZE), 0, 'the size is left as it was');
+    memory.putDword(OUT_SIZE, 10);
+    assert.equal(fns.RegQueryValueExA.handler([PERF, 0, 0, 0, OUT, OUT_SIZE]), 234);
+    assert.equal(memory.dword(OUT_SIZE), 10, 'and a short buffer leaves it too');
+
+    // The whole block, into a big enough buffer.
+    memory.putDword(OUT_SIZE, BIG);
+    assert.equal(fns.RegQueryValueExA.handler([PERF, 0, 0, OUT_TYPE, OUT, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_TYPE), REG_BINARY);
+    const size = memory.dword(OUT_SIZE);
+    assert.equal(size, (88 + ('BOTTLIFY'.length + 1) * 2 + 7) & ~7, 'header rounded up to eight');
+    assert.equal(String.fromCharCode(memory.bytes[OUT], memory.bytes[OUT + 2],
+        memory.bytes[OUT + 4], memory.bytes[OUT + 6]), 'PERF', 'the signature');
+    assert.deepEqual([memory.dword(OUT + 8), memory.dword(OUT + 12), memory.dword(OUT + 16)],
+        [1, 1, 1], 'little-endian, version and revision');
+    assert.equal(memory.dword(OUT + 20), size, 'TotalByteLength');
+    assert.equal(memory.dword(OUT + 24), size, 'HeaderLength -- no object types');
+    assert.equal(memory.dword(OUT + 56), 0x11112222, 'PerfTime, the counter it read');
+    assert.equal(memory.dword(OUT + 64), 10000000, 'PerfFreq');
+    assert.equal(memory.dword(OUT + 72), 0xaaaabbbb, 'PerfTime100nSec, the file time');
+    assert.equal(memory.dword(OUT + 36), 2026, 'the SYSTEMTIME, from that file time');
+    assert.equal(memory.dword(OUT + 80), ('BOTTLIFY'.length + 1) * 2, 'SystemNameLength');
+    assert.equal(memory.dword(OUT + 84), 88, 'SystemNameOffset');
+    let computerName = '';
+    for (let at = OUT + 88; memory.bytes[at] !== 0 || memory.bytes[at + 1] !== 0; at += 2)
+    {
+        computerName += String.fromCharCode(memory.bytes[at] | memory.bytes[at + 1] << 8);
+    }
+    assert.equal(computerName, 'BOTTLIFY', 'the computer name, wide');
+});
+
+test('a performance key answers the Counter and Help index lists as REG_MULTI_SZ', ()=>{
+    const memory = fakeMemory(0x10000);
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createRegistryService(createHive()),
+        computerName: 'BOTTLIFY',
+    });
+    const HKEY_PERFORMANCE_DATA = 0x80000004;
+    const OUT = 0x1000;
+    // Any language suffix on the name is ignored: "Counterwine" is "Counter".
+    memory.putString(NAME, 'cOuNtErwine');
+    memory.putDword(OUT_SIZE, 0x1000);
+    assert.equal(fns.RegQueryValueExA.handler([HKEY_PERFORMANCE_DATA, NAME, 0, OUT_TYPE, OUT,
+        OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_TYPE), REG_MULTI_SZ);
+    // Index/name pairs: the first index, its last-index name, then the pair
+    // the conformance test looks up -- 1846 is the End Marker.
+    const strings = [];
+    let at = OUT;
+    while (memory.bytes[at] !== 0)
+    {
+        const s = memory.string(at);
+        strings.push(s);
+        at += s.length + 1;
+    }
+    assert.deepEqual(strings, ['1', '1847', '1846', 'End Marker']);
+
+    memory.putString(NAME, 'hElP');
+    memory.putDword(OUT_SIZE, 0x1000);
+    assert.equal(fns.RegQueryValueExA.handler([HKEY_PERFORMANCE_DATA, NAME, 0, 0, OUT, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.string(OUT), '1', 'Help is a pair list too');
 });
 
 test('a buffer one byte short is ERROR_MORE_DATA with the size that would fit', ()=>{
