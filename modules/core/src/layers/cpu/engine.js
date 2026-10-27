@@ -7,14 +7,13 @@
 /**
  * The executor contract: what an execution engine gives the cpu layer.
  *
- * The layer runs a program on one of two engines -- a translator package such
- * as `@bottlify/cork`, loaded at `boot()` by the module URL in the layer's
- * configuration, or the v86 emulator a caller brings, adapted by
- * `internal/v86-host.js`. This file is the whole of what the layer and a
- * translator package agree on: the package implements these names, and the
- * layer's host (`internal/cork-host.js`) composes a runtime with the layer's
- * own contexts, traps and faults. Typedefs, and the contract's version; the
- * layer never imports an engine package.
+ * The layer runs a program on a translator package such as `@bottlify/cork`,
+ * loaded at `boot()` by the module URL in the layer's configuration. This
+ * file is the whole of what the layer and a translator package agree on: the
+ * package implements these names, and the layer's host (`internal/cork-host.js`)
+ * composes a runtime with the layer's own contexts, traps and faults.
+ * Typedefs, and the contract's version; the layer never imports an engine
+ * package.
  *
  * Every field is sized for 32-bit code today and named so that a 64-bit engine
  * implements the same contract with `bits: 64` rather than a second one.

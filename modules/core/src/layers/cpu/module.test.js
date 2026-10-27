@@ -86,7 +86,7 @@ test('a disposed cpu answers harmlessly rather than throwing', async()=>{
 test('an engine a launch may select is named, and one that is not is refused', async()=>{
     await assert.rejects(cpuModule.create({ engine: 'x' }, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},
-    })), { message: 'cpu: unknown engine "x" (emulator, cork)' });
+    })), { message: 'cpu: unknown engine "x" (cork)' });
 
     await cpuModule.create({ engine: 'cork' }, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},
@@ -97,16 +97,6 @@ test('an engine a launch may select is named, and one that is not is refused', a
 
     await open();
     assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork', 'the default');
-    await cpuModule.dispose();
-});
-
-test('the emulator says it is not installed when the launch passes none', async()=>{
-    // The package carries no emulator: a launch that selects it is told so
-    // rather than failing deeper on an absent file.
-    const api = await cpuModule.create({ engine: 'emulator' }, /** @type {any} */ ({
-        requireApi: ()=>({}), provide: ()=>{},
-    }));
-    await assert.rejects(api.boot(), { message: /^cpu: the emulator is not installed/ });
     await cpuModule.dispose();
 });
 

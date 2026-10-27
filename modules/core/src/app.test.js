@@ -19,7 +19,7 @@ import {
     PAGE_YIELD_MS,
     PENDING_YIELD_MS,
     retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, emulatorOf,
+    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound,
     heapSizeFor,
     spaceAbove,
     placeMainStack,
@@ -32,7 +32,6 @@ import {
     createKernelGl,
     resolveOpenglEntry,
     describeEvent,
-    chooseZstdDecoder,
     answeredByEngine,
     mapShippedLibraries,
     placeLibrary,
@@ -57,7 +56,6 @@ import { filesystemModule } from './layers/filesystem/module.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { parsePe } from './layers/loader/internal/pe.js';
-import { decompressZstd } from './zstd.js';
 import { createAccessors } from './layers/memory/internal/accessors.js';
 import { Access, RegionKind, createRegionMap } from './layers/memory/internal/regions.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
@@ -1311,21 +1309,6 @@ test('the guest clock is credited with all the wall time between credits, capped
     assert.deepEqual(advanced, [3, 4, 0, 250, 2000]);
 });
 
-test('the emulator is the caller\'s: named without one, it is refused as not installed', ()=>{
-    // The package carries no emulator, so `engine: 'emulator'` needs both
-    // halves handed in, and cork -- the default -- needs neither.
-    const bytes = new ArrayBuffer(4);
-    assert.equal(emulatorOf({}), null, 'the default engine is cork');
-    assert.equal(emulatorOf({ engine: 'cork', v86: { moduleUrl: 'x', wasmBytes: bytes } }), null,
-        'cork ignores an emulator it was handed');
-    assert.deepEqual(emulatorOf({ engine: 'emulator', v86: { moduleUrl: 'x', wasmBytes: bytes } }),
-        { moduleUrl: 'x', wasmBytes: bytes });
-    for (const v86 of [undefined, { moduleUrl: 'x' }, { wasmBytes: bytes }])
-    {
-        assert.throws(()=>emulatorOf({ engine: 'emulator', v86 }), /emulator is not installed/);
-    }
-});
-
 test('the space above the program moves up past an image too large for the fixed layout', ()=>{
     // A self-extracting installer maps its whole payload as a section: a
     // 346 MiB image at 0x400000 ends far above where the modules, the stack
@@ -1655,21 +1638,6 @@ test('an event line names a picture by its size, never by its pixels', ()=>{
         'width=32 height=32 hotSpot={"x":1,"y":2} bgra=<4096 bytes> shown=true names=[a b]');
 });
 
-test('the bundle zstd decoder follows the engine: the emulator while it is loaded, ours for cork',
-    ()=>{
-        const calls = [];
-        const cpu = { decompressZstd: (/** @type {Uint8Array} */ packed, /** @type {number} */ length)=>{
-            calls.push([packed, length]);
-            return new Uint8Array([1, 2, 3]);
-        } };
-        const theirs = chooseZstdDecoder('emulator', cpu);
-        assert.deepEqual([...theirs(new Uint8Array([9]), 4)], [1, 2, 3]);
-        assert.equal(calls.length, 1, 'the emulator decoder answered');
-        // Under cork the api has no emulator decoder: the project's own decoder
-        // is the choice, by identity.
-        assert.equal(chooseZstdDecoder('cork', /** @type {any} */ ({})), decompressZstd);
-    });
-
 test('a file\'s version block is read without reading the file', ()=>{
     // An installer asks after every file it puts down, a gigabyte archive
     // among them: the headers, the resource directory and the block are read,
@@ -1881,7 +1849,6 @@ test('a run that names no cores gets one fewer than a browser host\'s processors
     assert.equal(withCpuSetup({ mode: 'compatible' }, browser).executors, undefined);
     assert.equal(withCpuSetup({ cork: { config: { sharedMemory: false } } }, browser).executors,
         undefined);
-    assert.equal(withCpuSetup({ engine: 'emulator' }, browser).executors, undefined);
     assert.equal(withCpuSetup({ cpu: { cores: 1 } }, browser).executors, 1, 'named, as named');
     assert.equal(withCpuSetup({ executors: 2 }, browser).executors, 2, 'executors, as named');
     const node = { node: true, processors: 4, shareable: true };
@@ -2009,7 +1976,6 @@ test('an iPhone translates without wasm tail calls; phones and Safari run on one
     const off = withoutFaultingTailCalls({ cork: { config: { worker: false } } }, true);
     assert.deepEqual(off.cork.config,
         { crossTailCalls: false, dispatch: true, callDepth: 64, gatherAfter: 0, worker: false });
-    assert.deepEqual(off.jit, { 6: 0 }, 'the emulator chains no modules');
     assert.equal(withoutFaultingTailCalls({ cork: { config: { crossTailCalls: true } } }, true)
         .cork.config.crossTailCalls, true, 'the caller\'s own setting wins');
     const options = { engine: 'cork' };

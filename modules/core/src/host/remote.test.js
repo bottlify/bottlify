@@ -374,7 +374,6 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
         canvas,
         options: {
             executable: Uint8Array.of(0x4d, 0x5a),
-            v86: { moduleUrl: 'v86.mjs', wasmBytes: new ArrayBuffer(4) },
             imagePath: 'C:\\App\\a.exe',
             bundle: { url: 'http://bundle/b.btl', id: 'b', store: null },
             ...options,
@@ -919,7 +918,6 @@ test('a second program starts in the same worker with the canvas it already has'
     await remote.dispose();
     const again = await createRemoteApp({ worker, options: {
         executable: Uint8Array.of(0x4d, 0x5a),
-        v86: { moduleUrl: 'v86.mjs', wasmBytes: new ArrayBuffer(4) },
     } });
     assert.equal(typeof built().device.onFrame, 'function');
     assert.equal(again.frames(), 0);

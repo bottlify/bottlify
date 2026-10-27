@@ -4,7 +4,6 @@
  * See LICENSE for details
  */
 
-import { createV86Host } from './internal/v86-host.js';
 import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { gcNudgeOf, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
@@ -13,10 +12,8 @@ import { createWriteClock } from './internal/write-clock.js';
 import { engineContractProblem } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
-import {
-    FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, THREAD_DESCRIPTOR, VECTORS,
-} from './internal/boot-rom.js';
-import { readFault, describeFault, hostFault } from './internal/faults.js';
+import { THREAD_DESCRIPTOR } from './internal/boot-rom.js';
+import { describeFault, hostFault } from './internal/faults.js';
 import {
     captureContext, clearGeneralRegisters, freshThreadFpu, restoreContext, setContextEflags,
     setThreadBase,
@@ -44,10 +41,9 @@ export const TRANSLATION_ZONE_BYTES = 256 * 1024 * 1024;
 
 /**
  * The execution engines a launch may select (`engine.js` for the contract):
- * `cork`, the translator, and `emulator`, v86 -- which the package does not
- * carry, so only a caller that brings it can boot it.
+ * `cork`, the translator, alone.
  */
-export const ENGINES = Object.freeze(['emulator', 'cork']);
+export const ENGINES = Object.freeze(['cork']);
 
 /** The engine a launch that names none runs: the translator. */
 export const DEFAULT_ENGINE = 'cork';
@@ -78,7 +74,7 @@ export const memoryShareable = sharedMemory=>sharedMemory !== false
  * @returns {number}
  */
 export function processorsFor(config){
-    return (config?.engine ?? DEFAULT_ENGINE) === 'cork' && memoryShareable(config?.sharedMemory)
+    return memoryShareable(config?.sharedMemory)
         ? Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)) : 1;
 }
 
@@ -147,10 +143,6 @@ const translationHeld = figures=>(typeof figures?.heldBytes === 'number'
  * @param {any} cork  the process's own runtime's diagnostics, or null
  */
 const bytesHeldOf = (instance, cork)=>{
-    if (instance.engine !== 'cork')
-    {
-        return {};
-    }
     /** @type {Record<string, number | string>} */
     const translation = {
         tables: instance.host?.engineBytes?.() ?? NOT_MEASURED,
@@ -478,12 +470,6 @@ export function createCpuModule(){
                 // for -- which is unbounded in principle and in the low thousands
                 // in practice.
                 thunkCapacity: config?.thunkCapacity ?? DEFAULT_THUNK_CAPACITY,
-                // The emulator's compiler budgets, by index, for a caller that
-                // wants to A/B them: 1 is how many pages one compiled module may
-                // span, 3 how many extra basic blocks discovery may follow. The
-                // defaults are small, and a program that leaves generated code
-                // every few dozen instructions pays the dispatch walk each time.
-                jit: config?.jit,
                 // Executors of the process: the process's own thread, and each
                 // past the first a worker running its threads at once with the
                 // others (`internal/executor.js`); under cork, and with the atomic
@@ -654,8 +640,8 @@ export function createCpuModule(){
                     // cannot name that address calls the engine's own code
                     // unmapped -- which is the one place a reader should not be
                     // sent to look for a guest's bug. Cork has no ROM.
-                    romBase: engine === 'cork' ? -1 : ROM_BASE,
-                    romSize: engine === 'cork' ? 0 : ROM_SIZE,
+                    romBase: -1,
+                    romSize: 0,
                 },
 
                 /**
@@ -671,160 +657,141 @@ export function createCpuModule(){
                  * retiring, say -- has no bearing on this one: each keeps its own
                  * machine, and only its own.
                  *
-                 * Under `cork` the translator module named by `engineUrl` supplies the
-                 * host's own memory and runtime, and `artifacts` is not read; under
-                 * `emulator` it is the v86 the caller brought.
-                 *
-                 * @param {Object} [artifacts]
-                 * @param {string} [artifacts.moduleUrl]
-                 * @param {ArrayBuffer} [artifacts.wasmBytes]
+                 * The translator module named by `engineUrl` supplies the host's own
+                 * memory and runtime.
                  */
-                async boot(artifacts = {}){
+                async boot(){
                     if (state.host)
                     {
                         throw new Error('cpu: already booted');
                     }
                     state.lastFault = null;
-                    if (engine === 'cork')
+                    if (!settings.engineUrl)
                     {
-                        if (!settings.engineUrl)
-                        {
-                            throw new Error('cpu: engine "cork" needs an engineUrl');
-                        }
-                        const engineModule = await import(settings.engineUrl);
-                        const problem = engineContractProblem(engineModule, settings.engineUrl);
-                        if (problem)
-                        {
-                            throw new Error(problem);
-                        }
-                        const several = settings.executors > 1;
-                        // Only when the run asks: the ordered variant makes every
-                        // integer access an atomic one, a price a program pays for
-                        // nothing unless it hands data to another thread through
-                        // plain stores alone on a host that reorders them (arm64).
-                        const ordered = several && settings.cork?.ordered === true;
-                        state.ordered = several ? ordered : null;
-                        const nudging = gcNudgeOf(config?.gcNudge, undefined, settings.memorySize);
-                        const hostConfig = {
-                            memorySize: settings.memorySize,
-                            trapPort: settings.trapPort,
-                            entryVector: settings.entryVector,
-                            initialStack: settings.initialStack,
-                            thunkBase: settings.thunkBase,
-                            // Several executors share one arena, as they share one layout
-                            // for their translations (`sharedLayout`): what any of them
-                            // emitted, every other takes rather than emitting again.
-                            // The translator stops forming while another executor
-                            // waits for this one's answer (`awaitedBy`).
-                            cork: several ? { ...settings.cork, atomic: true, ordered,
-                                awaited: ()=>state.awaited?.() === true,
-                                ...(typeof engineModule.createArena === 'function'
-                                    && typeof SharedArrayBuffer === 'function'
-                                    && settings.cork?.arenaBytes !== 0
-                                    ? { arena: engineModule.createArena(settings.cork?.arenaBytes) }
-                                    : {}) } : settings.cork,
-                            closedBelow: settings.closedBelow,
-                            noExecuteBelow: settings.noExecuteBelow,
-                            executors: settings.executors,
-                            // One time-stamp counter for every executor (`useGuestClock`).
-                            ...(several ? { tsc: createTsc() } : {}),
-                            // Settled here, once, for every executor of the process:
-                            // each thread that holds the guest's memory is nudged.
-                            gcNudge: nudging ?? /** @type {false} */ (false),
-                            translationZone: TRANSLATION_ZONE_BYTES,
-                            bits: settings.bits,
-                        };
-                        state.host = createCorkHost({ ...hostConfig, engine: engineModule,
-                            reused: settings.reused });
-                        state.nudge?.stop();
-                        state.nudge = nudging ? startGcNudge(nudging) : null;
-                        if (several)
-                        {
-                            // What crosses to a worker is data: the translation store
-                            // stays with the process's own executor, and another one's
-                            // translator asks it through here (`createRemoteExecutor`),
-                            // so a warm start is warm on every executor; anything else
-                            // callable stays. The doorbell is the process's link's, rung
-                            // for the process's own batches. A run's pool lends
-                            // translators to the process's own executor alone
-                            // (`translators: 0`): another one waiting for a lend would
-                            // interpret all but what it emits inline while it loads, so it
-                            // opens a translator of its own.
-                            const cork = Object.fromEntries(Object.entries(hostConfig.cork)
-                                .filter(([key, value])=>key !== 'store' && key !== 'doorbell'
-                                    && typeof value !== 'function'));
-                            if (cork.translators === 0)
-                            {
-                                cork.translators = 1;
-                            }
-                            const bell = createBell(settings.cork?.spinMs);
-                            state.bell = bell;
-                            const host = state.host;
-                            state.openExecutor = index=>createRemoteExecutor({ host, index,
-                                engineUrl: settings.engineUrl, bell,
-                                unbroken: state.unbroken.buffer,
-                                store: hostConfig.cork?.store ?? null,
-                                config: { ...hostConfig, cork } });
-                            const store = hostConfig.cork?.store ?? null;
-                            if (config?.eagerExecutors === true)
-                            {
-                                wantExecutors(settings.executors - 1);
-                                await Promise.all(state.opening.values());
-                            }
-                            else if (store !== null)
-                            {
-                                // As many as the bundle's threads opened in an earlier
-                                // run, opened now, during the start: one opened when a
-                                // thread first wants it comes some tens of milliseconds
-                                // late, a stall in the middle of a game, and one no
-                                // thread wants this time only sleeps. Counted from the
-                                // record's answer on, so an executor opened before it
-                                // cannot write a smaller count over it.
-                                Promise.resolve(store.get(EXECUTORS_OPENED_KEY))
-                                    .catch(()=>null).then(bytes=>{
-                                        const had = bytes?.[0] ?? 0;
-                                        if (state.disposed || state.openExecutor === null)
-                                        {
-                                            return;
-                                        }
-                                        state.learned = { store,
-                                            opened: Math.max(had, state.remotes.length) };
-                                        if (state.learned.opened > had)
-                                        {
-                                            Promise.resolve(store.put(EXECUTORS_OPENED_KEY,
-                                                Uint8Array.of(state.learned.opened)))
-                                                .catch(()=>{});
-                                        }
-                                        wantExecutors(Math.min(had, settings.executors - 1));
-                                    });
-                            }
-                        }
-                        state.cork = state.host.cork();
-                        for (const adapter of state.lent.splice(0))
-                        {
-                            state.cork?.attachTranslator?.(adapter);
-                        }
-                        for (const [base, size] of state.stacks)
-                        {
-                            state.host.noteStack(base, size);
-                        }
-                        if (state.guestClock !== null)
-                        {
-                            state.host.useGuestClock(state.guestClock);
-                        }
-                        state.host.setYieldCheck(state.yieldCheck);
+                        throw new Error('cpu: engine "cork" needs an engineUrl');
                     }
-                    else
+                    const engineModule = await import(settings.engineUrl);
+                    const problem = engineContractProblem(engineModule, settings.engineUrl);
+                    if (problem)
                     {
-                        const { moduleUrl, wasmBytes } = artifacts;
-                        if (!moduleUrl || !wasmBytes)
-                        {
-                            throw new Error('cpu: the emulator is not installed -- engine'
-                                + ' "emulator" needs the caller\'s v86 (moduleUrl, wasmBytes)');
-                        }
-                        const emulator = await createV86Host({ ...settings, moduleUrl, wasmBytes });
-                        state.host = emulator;
+                        throw new Error(problem);
                     }
+                    const several = settings.executors > 1;
+                    // Only when the run asks: the ordered variant makes every
+                    // integer access an atomic one, a price a program pays for
+                    // nothing unless it hands data to another thread through
+                    // plain stores alone on a host that reorders them (arm64).
+                    const ordered = several && settings.cork?.ordered === true;
+                    state.ordered = several ? ordered : null;
+                    const nudging = gcNudgeOf(config?.gcNudge, undefined, settings.memorySize);
+                    const hostConfig = {
+                        memorySize: settings.memorySize,
+                        trapPort: settings.trapPort,
+                        entryVector: settings.entryVector,
+                        initialStack: settings.initialStack,
+                        thunkBase: settings.thunkBase,
+                        // Several executors share one arena, as they share one layout
+                        // for their translations (`sharedLayout`): what any of them
+                        // emitted, every other takes rather than emitting again.
+                        // The translator stops forming while another executor
+                        // waits for this one's answer (`awaitedBy`).
+                        cork: several ? { ...settings.cork, atomic: true, ordered,
+                            awaited: ()=>state.awaited?.() === true,
+                            ...(typeof engineModule.createArena === 'function'
+                                && typeof SharedArrayBuffer === 'function'
+                                && settings.cork?.arenaBytes !== 0
+                                ? { arena: engineModule.createArena(settings.cork?.arenaBytes) }
+                                : {}) } : settings.cork,
+                        closedBelow: settings.closedBelow,
+                        noExecuteBelow: settings.noExecuteBelow,
+                        executors: settings.executors,
+                        // One time-stamp counter for every executor (`useGuestClock`).
+                        ...(several ? { tsc: createTsc() } : {}),
+                        // Settled here, once, for every executor of the process:
+                        // each thread that holds the guest's memory is nudged.
+                        gcNudge: nudging ?? /** @type {false} */ (false),
+                        translationZone: TRANSLATION_ZONE_BYTES,
+                        bits: settings.bits,
+                    };
+                    state.host = createCorkHost({ ...hostConfig, engine: engineModule,
+                        reused: settings.reused });
+                    state.nudge?.stop();
+                    state.nudge = nudging ? startGcNudge(nudging) : null;
+                    if (several)
+                    {
+                        // What crosses to a worker is data: the translation store
+                        // stays with the process's own executor, and another one's
+                        // translator asks it through here (`createRemoteExecutor`),
+                        // so a warm start is warm on every executor; anything else
+                        // callable stays. The doorbell is the process's link's, rung
+                        // for the process's own batches. A run's pool lends
+                        // translators to the process's own executor alone
+                        // (`translators: 0`): another one waiting for a lend would
+                        // interpret all but what it emits inline while it loads, so it
+                        // opens a translator of its own.
+                        const cork = Object.fromEntries(Object.entries(hostConfig.cork)
+                            .filter(([key, value])=>key !== 'store' && key !== 'doorbell'
+                                && typeof value !== 'function'));
+                        if (cork.translators === 0)
+                        {
+                            cork.translators = 1;
+                        }
+                        const bell = createBell(settings.cork?.spinMs);
+                        state.bell = bell;
+                        const host = state.host;
+                        state.openExecutor = index=>createRemoteExecutor({ host, index,
+                            engineUrl: settings.engineUrl, bell,
+                            unbroken: state.unbroken.buffer,
+                            store: hostConfig.cork?.store ?? null,
+                            config: { ...hostConfig, cork } });
+                        const store = hostConfig.cork?.store ?? null;
+                        if (config?.eagerExecutors === true)
+                        {
+                            wantExecutors(settings.executors - 1);
+                            await Promise.all(state.opening.values());
+                        }
+                        else if (store !== null)
+                        {
+                            // As many as the bundle's threads opened in an earlier
+                            // run, opened now, during the start: one opened when a
+                            // thread first wants it comes some tens of milliseconds
+                            // late, a stall in the middle of a game, and one no
+                            // thread wants this time only sleeps. Counted from the
+                            // record's answer on, so an executor opened before it
+                            // cannot write a smaller count over it.
+                            Promise.resolve(store.get(EXECUTORS_OPENED_KEY))
+                                .catch(()=>null).then(bytes=>{
+                                    const had = bytes?.[0] ?? 0;
+                                    if (state.disposed || state.openExecutor === null)
+                                    {
+                                        return;
+                                    }
+                                    state.learned = { store,
+                                        opened: Math.max(had, state.remotes.length) };
+                                    if (state.learned.opened > had)
+                                    {
+                                        Promise.resolve(store.put(EXECUTORS_OPENED_KEY,
+                                            Uint8Array.of(state.learned.opened)))
+                                            .catch(()=>{});
+                                    }
+                                    wantExecutors(Math.min(had, settings.executors - 1));
+                                });
+                        }
+                    }
+                    state.cork = state.host.cork();
+                    for (const adapter of state.lent.splice(0))
+                    {
+                        state.cork?.attachTranslator?.(adapter);
+                    }
+                    for (const [base, size] of state.stacks)
+                    {
+                        state.host.noteStack(base, size);
+                    }
+                    if (state.guestClock !== null)
+                    {
+                        state.host.useGuestClock(state.guestClock);
+                    }
+                    state.host.setYieldCheck(state.yieldCheck);
                     state.thunks = createThunkTable({
                         base: settings.thunkBase,
                         port: settings.trapPort,
@@ -840,44 +807,6 @@ export function createCpuModule(){
                     state.host.onInterrupt?.(()=>state.beforeTrap?.(false));
                     state.host.onTrap((/** @type {number} */ id)=>{
                         state.beforeTrap?.(true);
-                        // A processor exception arrives as a trap like any other,
-                        // from a stub the ROM put behind its vector. Answered here
-                        // rather than passed on, because the layer that owns the
-                        // interrupt table is the one that knows what the numbers
-                        // mean, and because a fault handed to the call dispatcher
-                        // would come back as "trap has no implementation" -- true,
-                        // and the wrong thing to have been told.
-                        const vector = id - FAULT_TRAP_BASE;
-                        if (engine !== 'cork' && vector >= 0 && vector < VECTORS)
-                        {
-                            const fault = readFault(
-                                vector,
-                                state.host.readReg32('esp'),
-                                (/** @type {number} */ address)=>{
-                                    const bytes = state.host.readPhysical(address, 4);
-                                    return bytes[0] | bytes[1] << 8
-                                        | bytes[2] << 16 | bytes[3] << 24;
-                                },
-                            );
-                            // Offered first to whoever can deliver it to the
-                            // program: a guest that faults on purpose -- probing
-                            // a pointer, catching its own divide by zero -- has a
-                            // handler for it, and one that claims the fault has
-                            // also decided where the thread goes next.
-                            if (state.faultHandler?.(fault) === true)
-                            {
-                                return 0;
-                            }
-                            // Recorded and the machine stopped, never thrown. This
-                            // runs inside the emulator's port write, and an
-                            // exception raised there does not come back out -- it
-                            // is lost crossing into wasm, and what is seen
-                            // afterwards is a machine sitting in the stub's halt,
-                            // which reads as a hang rather than as a fault.
-                            state.lastFault = fault;
-                            state.host.stop();
-                            return 0;
-                        }
                         if (state.trapTimed === null)
                         {
                             return dispatch(id);
@@ -887,9 +816,8 @@ export function createCpuModule(){
                         state.trapTimed(performance.now() - began);
                         return answer;
                     });
-                    // Cork has no interrupt table and no ROM to trap from: its
-                    // tiers build the fault record themselves, and offer it here
-                    // the way the ROM's stub offers one above.
+                    // Cork's tiers build a processor exception's record themselves
+                    // and offer it here.
                     state.host.onFault?.((/** @type {any} */ fault)=>state.faultHandler?.(fault) === true);
                 },
 
@@ -948,14 +876,13 @@ export function createCpuModule(){
 
                 /**
                  * A translation worker a pool lends this machine's translator:
-                 * taken once the translator is up, or at once if it is. False
-                 * where the engine takes none (the emulator).
+                 * taken once the translator is up, or at once if it is.
                  *
                  * @param {import('./engine.js').TranslatorPort} adapter
                  * @returns {boolean}
                  */
                 attachTranslator(adapter){
-                    if (state.disposed || engine !== 'cork')
+                    if (state.disposed)
                     {
                         return false;
                     }
@@ -1580,17 +1507,6 @@ export function createCpuModule(){
                 compiledModules: ()=>started().compiledModules(),
                 interpretedSteps: ()=>started().interpretedSteps(),
                 hostWrittenBytes: ()=>started().hostWrittenBytes(),
-                /**
-                 * The emulator's own zstd decoder, which a bundle read can use
-                 * while the emulator is loaded: it answers synchronously, as a
-                 * guest read needs, and is several times faster than this project's
-                 * own. Under `cork` there is none -- the host has no such member --
-                 * so the caller falls back to `modules/core/src/zstd.js`.
-                 *
-                 * @param {Uint8Array} packed @param {number} expectedLength
-                 */
-                decompressZstd: (packed, expectedLength)=>
-                    started().decompressZstd(packed, expectedLength),
                 /**
                  * The emulator's account of where the guest ran, by address and
                  * weighted by instructions. Kept only between start and stop, and

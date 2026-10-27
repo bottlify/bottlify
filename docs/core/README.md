@@ -107,15 +107,6 @@ the same engine contract (its `contract` export); one that does not is refused a
 no clip can be played. Every option, the controller and the events:
 [`docs/core/api.md`](api.md).
 
-### Without cork: v86
-
-```js
-const app = await createApp({ executable, engine: 'emulator',
-    v86: { moduleUrl: '/v86/libv86.mjs', wasmBytes: await (await fetch('/v86/v86.wasm')).arrayBuffer() } });
-```
-
-The package carries no v86; `engine: 'emulator'` without a build is refused.
-
 ### In Node
 
 The same `createApp` runs headless in Node, with no canvas and the engine on the calling thread.

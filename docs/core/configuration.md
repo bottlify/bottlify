@@ -32,7 +32,7 @@ publishing). The tables list only the settings that are data; `memory` and `load
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `engine` | `'cork'` | `'cork'`, or `'emulator'` with a v86 build the caller brings. |
+| `engine` | `'cork'` | `'cork'`, the only engine. |
 | `memorySize` | 1 GiB | Guest RAM: an address space; what the program holds of it is counted in the guest's zone (see [Memory zones](#memory-zones)). |
 | `sampling` | `true` | Sample the guest's instruction pointer at every turn. |
 | `noExecuteBelow` | 0 (`createApp`: `0x10000`) | Code below this address faults when run. |

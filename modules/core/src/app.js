@@ -18,7 +18,6 @@ import {
     DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY, MAX_EXECUTORS, processorsFor,
 } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
-import { JIT_CONFIG_CHAINING } from './layers/cpu/internal/v86-host.js';
 import { engineContractProblem } from './layers/cpu/engine.js';
 import { SETTINGS, processorName } from './settings.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
@@ -107,11 +106,7 @@ const hashText = (hash, text)=>{
 /**
  * @typedef {Object} AppOptions
  * @property {Uint8Array} executable      The program to run.
- * @property {Object} [v86]               The emulator, for `engine: 'emulator'`. The
- *           package carries none: a caller that wants it brings both halves.
- * @property {string} [v86.moduleUrl]     The emulator's module (`libv86.mjs`).
- * @property {ArrayBuffer} [v86.wasmBytes]  Its binary (`v86.wasm`).
- * @property {Object} [cork]              The translator, for every engine but `emulator`.
+ * @property {Object} [cork]              The translator.
  * @property {string} [cork.moduleUrl]    Its entry module; the package beside core by default.
  * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
  *     `store` here is a request -- `'local'` (the default) for the origin's private file
@@ -259,12 +254,8 @@ const hashText = (hash, text)=>{
  *           write it somewhere. Each of the run's processes calls it, and a
  *           record names the process's image (`image`) and the calling
  *           thread (`thread`).
- * @property {Record<string, number>} [jit]
- *     The emulator's compiler budgets, by config index. For measurement.
- * @property {'emulator' | 'cork'} [engine]
- *     Which execution engine runs the program. Default `cork`, the one the
- *     package carries; `emulator` only with `v86` handed in, and refused
- *     without it.
+ * @property {'cork'} [engine]
+ *     Which execution engine runs the program: `cork`, the only one.
  * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler.
  *     `false` turns it off, for a caller measuring the emulator's own compiler
  *     rather than the guest's code.
@@ -1851,14 +1842,13 @@ const IOS_CALL_DEPTH = 64;
  * @template {Record<string, any>} T
  * @param {T} options
  * @param {boolean} [fault]
- * @returns {T & { cork?: any, jit?: Record<string, number> }}
+ * @returns {T & { cork?: any }}
  */
 export function withoutFaultingTailCalls(options, fault = tailCallsFault()){
     return fault ? { ...options,
         cork: { ...options.cork,
             config: { crossTailCalls: false, dispatch: true, callDepth: IOS_CALL_DEPTH,
-                gatherAfter: 0, ...options.cork?.config } },
-        jit: { [JIT_CONFIG_CHAINING]: 0, ...options.jit } } : options;
+                gatherAfter: 0, ...options.cork?.config } } } : options;
 }
 
 /**
@@ -1911,34 +1901,11 @@ export function automaticCores(options, host){
     }
     if (!host.shareable || host.oneCore || options.mode === 'compatible'
         || options.cork?.config?.sharedMemory === false
-        || (options.engine ?? DEFAULT_ENGINE) === 'emulator'
         || !(Number(host.processors) >= 2))
     {
         return undefined;
     }
     return Math.min(AUTOMATIC_CORES, Math.floor(Number(host.processors)) - 1);
-}
-
-/**
- * The emulator the caller brought, for `engine: 'emulator'`; null for any other
- * engine. The package carries no emulator, so a launch that names it without
- * handing one in is refused before anything is built.
- *
- * @param {Pick<AppOptions, 'engine' | 'v86'>} options
- * @returns {{ moduleUrl: string, wasmBytes: ArrayBuffer } | null}
- */
-export function emulatorOf(options){
-    if ((options.engine ?? DEFAULT_ENGINE) !== 'emulator')
-    {
-        return null;
-    }
-    const { moduleUrl, wasmBytes } = options.v86 ?? {};
-    if (!moduleUrl || !wasmBytes)
-    {
-        throw new Error('cpu: the emulator is not installed -- engine "emulator" needs'
-            + ' the caller\'s v86, as `v86: { moduleUrl, wasmBytes }`');
-    }
-    return { moduleUrl, wasmBytes };
 }
 
 /**
@@ -2813,27 +2780,6 @@ function expectIndex(expected){
 }
 
 /**
- * The zstd decoder a bundle read uses, by engine. While the emulator is loaded
- * its wasm decoder is several times faster than this project's own
- * (`modules/core/src/zstd.js`), and a first bundle load decodes the whole
- * bundle, so `emulator` uses it; `cork` has no emulator and uses
- * the project's. Both answer synchronously, as a guest read needs. The choice
- * is made once, when the bundle is mounted; when `zstd.js` is measured at the
- * wasm decoder's speed it becomes the decoder for every engine.
- *
- * @param {string} engine
- * @param {{ decompressZstd: (packed: Uint8Array, expectedLength: number) => Uint8Array }} cpu
- * @returns {(packed: Uint8Array, expectedLength: number) => Uint8Array}
- */
-export function chooseZstdDecoder(engine, cpu){
-    if (engine !== 'cork')
-    {
-        return (packed, expectedLength)=>cpu.decompressZstd(packed, expectedLength);
-    }
-    return decompressZstd;
-}
-
-/**
  * Mounts a bundle as the read-only half of the volume.
  *
  * The blocks that have been brought in are held here rather than inside the
@@ -2858,7 +2804,7 @@ export function chooseZstdDecoder(engine, cpu){
  *                     held: () => Record<string, number | string>,
  *                     registry: Promise<any> } | null>}
  */
-async function mountBundle({ options, cpu, events, translationStore }){
+async function mountBundle({ options, events, translationStore }){
     if (!options.bundle?.fetch)
     {
         return null;
@@ -2892,13 +2838,11 @@ async function mountBundle({ options, cpu, events, translationStore }){
     };
     const roundTrip = ()=>(recentMs.length === 0 ? 0 : Math.min(...recentMs));
 
-    const zstdForEngine = chooseZstdDecoder(options.engine ?? DEFAULT_ENGINE, cpu);
     /**
      * A block, turned back into bytes, without awaiting anything.
      *
-     * zstd is decoded by the engine's decoder (`chooseZstdDecoder` above): the
-     * emulator's wasm one under `emulator`, this project's own
-     * (`zstd.js`) under `cork`. Both answer synchronously. Deflate has
+     * zstd is decoded by this project's own decoder (`zstd.js`), which
+     * answers synchronously. Deflate has
      * no synchronous decoder in a browser at all, so a deflate block is
      * inflated when it is *fetched* -- which is already an asynchronous step --
      * and by the time a read reaches it, it is plain. That is why codec 1 is
@@ -2914,7 +2858,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
             // Counted: the decoding a guest read waits for is what a pool
             // worker would take off this thread.
             const startedAt = performance.now();
-            const plain = zstdForEngine(bytes, expectedLength ?? 0);
+            const plain = decompressZstd(bytes, expectedLength ?? 0);
             decoded.blocks++;
             decoded.bytes += plain.length;
             decoded.ms += performance.now() - startedAt;
@@ -3021,8 +2965,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
     // it is not fetched again. Only an engine with the translator has a use
     // for it, the default among them.
     const member = bundle.translations;
-    if (member !== null && (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
-        && typeof translationStore?.seed === 'function')
+    if (member !== null && typeof translationStore?.seed === 'function')
     {
         const seeding = (async()=>(await translationStore.seededWith() === member.sha256
             ? null : readMember(member, 'the translations'))
@@ -4326,7 +4269,7 @@ async function buildApp(options){
             remoteObjects: options.system?.objects ?? null,
         },
         cpu: {
-            jit: options.jit, sampling: options.sampling, memorySize,
+            sampling: options.sampling, memorySize,
             reused: options.reusedMemory ?? undefined,
             initialStack: mainStack.initialStack,
             // ponytail: open, where Windows never maps the first 64 KiB, until
@@ -4345,8 +4288,7 @@ async function buildApp(options){
             // The threads holding the guest's memory bring JavaScriptCore's
             // collections forward (`gc-nudge.js`): by default there only.
             gcNudge: options.cpu?.gcNudge,
-            engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
-                ? corkArtifacts(options.cork).moduleUrl : null,
+            engineUrl: corkArtifacts(options.cork).moduleUrl,
             cork: {
                 cacheVersion: SETTINGS.cork.cacheVersion,
                 ...options.cork?.config,
@@ -5265,7 +5207,7 @@ async function buildApp(options){
 
     // Cork runs with nothing of the emulator loaded: its own host, its own
     // memory, and the translator named by `engineUrl`.
-    await cpu.boot(emulatorOf(options) ?? undefined);
+    await cpu.boot();
 
     // A processor exception goes to the handlers the program registered
     // before it stops the machine. The thread waits the way a host call does
@@ -5301,7 +5243,7 @@ async function buildApp(options){
     // second cache from the network beside the first.
     mountedBlocks = !options.system?.bundle;
     blocks = options.system?.bundle
-        ?? await mountBundle({ options, cpu, events, translationStore });
+        ?? await mountBundle({ options, events, translationStore });
     if (options.system && blocks)
     {
         options.system.bundle = blocks;
@@ -8787,7 +8729,7 @@ async function buildSystemHost(deps){
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
         filesystem, registry: system.registry, inherited: false });
     // Cork's own decoder reads the bundle's blocks: no processor is asked.
-    const blocks = await mountBundle({ options, cpu: null, events, translationStore });
+    const blocks = await mountBundle({ options, events, translationStore });
     system.bundle = blocks;
     await furnishVolume({ options, events, filesystem, blocks, seeded,
         registry: system.registry });
@@ -9484,7 +9426,6 @@ export async function createApp(options){
     options = withRunMode(withCpuSetup(withoutFaultingTailCalls(options)));
     options = { ...options, processId: options.processId ?? runProcessId() };
     graphicsChoice(options.graphicsApi);
-    emulatorOf(options);
     // Both outlive every process: subscriptions a caller made before the first
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.

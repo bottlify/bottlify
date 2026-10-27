@@ -35,11 +35,10 @@
  * the mix down it, and the worklet says back what it played.
  *
  * @typedef {Omit<import('../app.js').AppOptions,
- *     'executable' | 'v86' | 'device' | 'bundle' | 'storage' | 'watchImport'
+ *     'executable' | 'device' | 'bundle' | 'storage' | 'watchImport'
  *     | 'sample' | 'onCall' | 'pageHidden' | 'pacing' | 'discs' | 'audio'> & {
  *     executable: Uint8Array,
  *     audio?: NonNullable<import('../app.js').AppOptions['audio']> & { port?: MessagePort },
- *     v86?: { moduleUrl: string, wasmBytes: ArrayBuffer },
  *     bundle?: { url?: string, file?: Blob, store?: string | null, id?: string, prefix?: string,
  *         prefetch?: boolean, indexSha256?: string,
  *         retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } },
