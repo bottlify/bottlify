@@ -22,9 +22,15 @@
  * area of the memory past the tables (`WASM_INTERPRETER_AREA` bytes), so both
  * interpreters count the same starts, and it looks a jump's target up in the
  * entry hash translated code probes: a start with a region leaves the run.
+ *
+ * Over a 64-bit layout it is the same source built with LONG defined
+ * (`interp-wasm64.bytes.js`): long mode's tier, whose reference is `ir64.js`
+ * and which leaves what it does not run to `interp64.js` the same way, RIP at
+ * the instruction.
  */
 
 import { MODULE_BASE64 } from './interp-wasm.bytes.js';
+import { MODULE_BASE64 as MODULE_BASE64_LONG } from './interp-wasm64.bytes.js';
 import { eflagsOf } from './emit/flags.js';
 import { Tables, codeRangesAt, pageFlagsAt } from './runtime/layout.js';
 import { withSharedMemoryImport } from './wasm/shared-import.js';
@@ -72,42 +78,40 @@ export const HOST_MATH = Object.freeze({
     log2: Math.log2, log1p: Math.log1p,
 });
 
-/** @type {WebAssembly.Module | null} */
-let compiled = null;
 /** What the process's hosts ran on the JavaScript interpreter before one started the tier: its
  * start is paid once a process, so the stretch that waits for it to pay is the process's too. */
 const stretch = { work: 0 };
 
-/** The same module importing a shared memory, compiled when one is first wanted.
- * @type {WebAssembly.Module | null} */
-let compiledShared = null;
+/**
+ * The modules compiled so far, each once a process: by build (32-bit code's,
+ * long mode's) and by whether its memory import is declared shared.
+ *
+ * @type {Map<string, WebAssembly.Module>}
+ */
+const compiled = new Map();
 
 /**
  * The module, compiled once a process: its memory import declared shared for
  * a shared memory, which an import declared otherwise does not link to.
  *
- * @param {boolean} shared
+ * @param {boolean} shared @param {boolean} long  long mode's build
  */
-function wasmModule(shared){
-    if ((shared ? compiledShared : compiled) === null)
+function wasmModule(shared, long){
+    const key = `${long ? 64 : 32}${shared ? 's' : ''}`;
+    let module = compiled.get(key);
+    if (module === undefined)
     {
-        const text = atob(MODULE_BASE64);
+        const text = atob(long ? MODULE_BASE64_LONG : MODULE_BASE64);
         const bytes = new Uint8Array(text.length);
         for (let i = 0; i < text.length; i++)
         {
             bytes[i] = text.charCodeAt(i);
         }
-        if (shared)
-        {
-            compiledShared = new WebAssembly.Module(
-                /** @type {Uint8Array<ArrayBuffer>} */ (withSharedMemoryImport(bytes)));
-        }
-        else
-        {
-            compiled = new WebAssembly.Module(bytes);
-        }
+        module = new WebAssembly.Module(shared
+            ? /** @type {Uint8Array<ArrayBuffer>} */ (withSharedMemoryImport(bytes)) : bytes);
+        compiled.set(key, module);
     }
-    return /** @type {WebAssembly.Module} */ (shared ? compiledShared : compiled);
+    return module;
 }
 
 /** @typedef {import('../../core/src/layers/cpu/engine.js').WasmInterpreter} WasmInterpreter */
@@ -116,21 +120,26 @@ function wasmModule(shared){
  * The tier over one memory, or null for a layout it cannot run over: another
  * executor's (the hybrid's code table is a second thing a store is noted
  * against), one without an `fs` base, or a memory without room for its areas.
+ * A 64-bit layout (`bits` 64) gets long mode's build.
  *
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     area: number, statics: number, hotThreshold: number, trapPort?: number,
- *     parkBase: number, precise?: boolean, atomic?: boolean }} options
+ *     parkBase: number, precise?: boolean, atomic?: boolean, fold?: () => void }} options
  *     area: where the tier's `WASM_INTERPRETER_AREA` bytes lie; statics: where the
  *     instance's `WASM_INTERPRETER_STATICS` bytes, its data and stack, lie; parkBase: the
  *     park loop's address, whose jumps the ring leaves out; precise: the engine's `precise`,
  *     the x87 bookkeeping games do not read kept as the JavaScript interpreter keeps it;
- *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier
+ *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier;
+ *     fold: long mode's, called before every run to fold the flag record translated code
+ *     left (`longFlagRecord`) into the block's flags word, which the tier reads whole
+ *     (the long runtime's `fold`); a 32-bit layout's record the tier folds itself
  * @returns {WasmInterpreter | null}
  */
 export function createWasmInterpreter({ memory, layout, area, statics, hotThreshold, trapPort,
-    parkBase, precise = false, atomic = false })
+    parkBase, precise = false, atomic = false, fold })
 {
+    const long = layout.bits === 64;
     if ((layout.codePages ?? -1) >= 0 || layout.fsBase < 0
         || area + WASM_INTERPRETER_AREA > memory.buffer.byteLength
         || statics + WASM_INTERPRETER_STATICS > memory.buffer.byteLength)
@@ -154,7 +163,7 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
     const instantiate = ()=>{
         const shared = typeof SharedArrayBuffer === 'function'
             && memory.buffer instanceof SharedArrayBuffer;
-        const exports = /** @type {any} */ (new WebAssembly.Instance(wasmModule(shared), {
+        const exports = /** @type {any} */ (new WebAssembly.Instance(wasmModule(shared, long), {
             env: {
                 memory, ...HOST_MATH,
                 __memory_base: new WebAssembly.Global({ value: 'i32', mutable: false }, statics),
@@ -171,6 +180,10 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
             layout.regs, layout.eip, layout.eflags, layout.fsBase, area, HOT_SLOTS, hotThreshold,
             // No port a byte or a word can name: every `out` is left to the JavaScript tier.
             trapPort ?? 0x10000, parkBase >>> 0);
+        if (long)
+        {
+            exports.configureLong(layout.gsBase);
+        }
         exports.configureFloat(layout.x87, layout.x87Top, layout.x87Empty, layout.x87Control,
             layout.x87Status, precise ? 1 : 0, layout.xmm, layout.mxcsr);
         exports.configureEntry(layout.counter);
@@ -187,7 +200,14 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
     return {
         run(budget){
             // The record a region left, folded into the word the tier reads.
-            eflagsOf(view, layout);
+            if (long)
+            {
+                fold?.();
+            }
+            else
+            {
+                eflagsOf(view, layout);
+            }
             return (run ?? instantiate())(budget);
         },
         retired: ()=>retired(),
@@ -208,7 +228,7 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
         setStartIndex(value){
             view.setUint32(index, value >>> 0, true);
         },
-        started: ()=>compiled !== null || compiledShared !== null,
+        started: ()=>compiled.size > 0,
         stretch,
     };
 }

@@ -6,8 +6,9 @@
 
 /**
  * Builds the interpreter tier in wasm: `src/interp-wasm.c` compiled by clang
- * for wasm32 into `src/interp-wasm.bytes.js`, the module as base64 beside the
- * SHA-256 of the source it came from. The generated file is committed, so a
+ * for wasm32 into `src/interp-wasm.bytes.js`, and again with LONG defined,
+ * long mode's tier, into `src/interp-wasm64.bytes.js`: each module as base64
+ * beside the SHA-256 of the source it came from. The generated files are committed, so a
  * checkout runs without a C compiler; `interp-wasm.test.js` fails when the
  * source changed and this was not run again.
  *
@@ -124,12 +125,18 @@ function dylinkMemory(section){
 }
 
 const source = new URL('../src/interp-wasm.c', import.meta.url);
-const target = new URL('../src/interp-wasm.bytes.js', import.meta.url);
+/** The two builds of the source: 32-bit code's tier, and long mode's with LONG defined. */
+const BUILDS = [
+    { name: 'interp-wasm', defines: [], target: new URL('../src/interp-wasm.bytes.js', import.meta.url),
+        what: 'interp-wasm.c' },
+    { name: 'interp-wasm64', defines: ['-DLONG'],
+        target: new URL('../src/interp-wasm64.bytes.js', import.meta.url),
+        what: 'interp-wasm.c with LONG defined' },
+];
 
 const dir = mkdtempSync(join(tmpdir(), 'interp-wasm-'));
 try
 {
-    const out = join(dir, 'interp-wasm.wasm');
     const flags = [
         // No contraction: a multiply and an add stay two roundings, as in JavaScript.
         '--target=wasm32', '-O2', '-nostdlib', '-ffreestanding', '-fno-builtin',
@@ -142,62 +149,67 @@ try
         '-fPIC', '-Wl,--experimental-pic', '-Wl,-shared',
         '-Wl,--no-entry', '-Wl,--import-memory',
     ];
-    const compiled = docker ? compileInDocker(flags, out) : null;
-    if (!docker)
-    {
-        execFileSync(clang, [...flags, '-o', out, fileURLToPath(source)], { stdio: 'inherit' });
-    }
-    const bytes = readFileSync(out);
-    const module = new WebAssembly.Module(bytes);
-    // The dylink section's memory info: the data's size and alignment, then the table's.
-    const [dylink] = WebAssembly.Module.customSections(module, 'dylink.0');
-    const info = dylinkMemory(new Uint8Array(dylink));
-    if (info.tableSize !== 0)
-    {
-        throw new Error('interp-wasm: the module wants a function table; the loader gives none');
-    }
-    const end = info.memorySize + WASM_INTERPRETER_STACK;
-    if (end > WASM_INTERPRETER_STATICS || info.memoryAlign > 4)
-    {
-        throw new Error(`interp-wasm: data (${info.memorySize}, aligned to 2^${info.memoryAlign})`
-            + ` and a stack of ${WASM_INTERPRETER_STACK} need ${end} of the`
-            + ` ${WASM_INTERPRETER_STATICS} bytes an executor keeps`);
-    }
-    const compiler = compiled
-        ?? execFileSync(clang, ['--version']).toString().split('\n')[0].trim();
     // Hashed with LF line ends, as the repository keeps it and the test reads it.
     const digest = createHash('sha256')
         .update(readFileSync(source, 'utf8').replaceAll('\r\n', '\n')).digest('hex');
-    const base64 = bytes.toString('base64');
-    /** @type {string[]} */
-    const lines = [];
-    for (let at = 0; at < base64.length; at += 88)
+    for (const { name, defines, target, what } of BUILDS)
     {
-        lines.push(`    '${base64.slice(at, at + 88)}',`);
+        const out = join(dir, `${name}.wasm`);
+        const compiled = docker ? compileInDocker([...flags, ...defines], out) : null;
+        if (!docker)
+        {
+            execFileSync(clang, [...flags, ...defines, '-o', out, fileURLToPath(source)],
+                { stdio: 'inherit' });
+        }
+        const bytes = readFileSync(out);
+        const module = new WebAssembly.Module(bytes);
+        // The dylink section's memory info: the data's size and alignment, then the table's.
+        const [dylink] = WebAssembly.Module.customSections(module, 'dylink.0');
+        const info = dylinkMemory(new Uint8Array(dylink));
+        if (info.tableSize !== 0)
+        {
+            throw new Error(`${name}: the module wants a function table; the loader gives none`);
+        }
+        const end = info.memorySize + WASM_INTERPRETER_STACK;
+        if (end > WASM_INTERPRETER_STATICS || info.memoryAlign > 4)
+        {
+            throw new Error(`${name}: data (${info.memorySize}, aligned to 2^${info.memoryAlign})`
+                + ` and a stack of ${WASM_INTERPRETER_STACK} need ${end} of the`
+                + ` ${WASM_INTERPRETER_STATICS} bytes an executor keeps`);
+        }
+        const compiler = compiled
+            ?? execFileSync(clang, ['--version']).toString().split('\n')[0].trim();
+        const base64 = bytes.toString('base64');
+        /** @type {string[]} */
+        const lines = [];
+        for (let at = 0; at < base64.length; at += 88)
+        {
+            lines.push(`    '${base64.slice(at, at + 88)}',`);
+        }
+        writeFileSync(target, [
+            '/*',
+            ' * Copyright © 2026 Bottlify Project',
+            ' * Licensed under the Mozilla Public License, version 2.0',
+            ' * See LICENSE for details',
+            ' */',
+            '',
+            `// Generated by scripts/build-interp-wasm.mjs from ${what}: run it again after`,
+            '// changing the source, never edit this file.',
+            '',
+            '/** The SHA-256 of the interp-wasm.c this module was built from. */',
+            `export const SOURCE_SHA256 = '${digest}';`,
+            '',
+            '/** The compiler that built it. */',
+            `export const COMPILER = '${compiler.replace(/'/g, '')}';`,
+            '',
+            '/** The module, base64. */',
+            'export const MODULE_BASE64 = [',
+            ...lines,
+            "].join('');",
+            '',
+        ].join('\n'));
+        console.log(`${name}: ${bytes.length} bytes, data and stack take ${end}, ${compiler}`);
     }
-    writeFileSync(target, [
-        '/*',
-        ' * Copyright © 2026 Bottlify Project',
-        ' * Licensed under the Mozilla Public License, version 2.0',
-        ' * See LICENSE for details',
-        ' */',
-        '',
-        '// Generated by scripts/build-interp-wasm.mjs from interp-wasm.c: run it again after',
-        '// changing the source, never edit this file.',
-        '',
-        '/** The SHA-256 of the interp-wasm.c this module was built from. */',
-        `export const SOURCE_SHA256 = '${digest}';`,
-        '',
-        '/** The compiler that built it. */',
-        `export const COMPILER = '${compiler.replace(/'/g, '')}';`,
-        '',
-        '/** The module, base64. */',
-        'export const MODULE_BASE64 = [',
-        ...lines,
-        "].join('');",
-        '',
-    ].join('\n'));
-    console.log(`interp-wasm: ${bytes.length} bytes, data and stack take ${end}, ${compiler}`);
 }
 finally
 {
