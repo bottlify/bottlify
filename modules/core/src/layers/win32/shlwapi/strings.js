@@ -62,6 +62,48 @@ const searched = (width, code)=>{
 };
 
 /**
+ * Text with case ignored, folded a character at a time so that a place in the
+ * folded text is the same place in the caller's: a character whose capital is
+ * two (the German sharp s) stays as it is.
+ *
+ * @param {string} value
+ */
+const foldCase = value=>
+    Array.from(value, c=>(c.toUpperCase().length === 1 ? c.toUpperCase() : c)).join('');
+
+/**
+ * StrFromTimeInterval's text: the interval rounded to the second, then hours,
+ * minutes and seconds, each cut to the significant digits still left -- the
+ * leading unit is never zero, the ones after it appear while digits remain,
+ * and a unit's digits beyond the budget read as zeros (Wine's
+ * test_StrFromTimeIntervalA: 1 000 000 ms is " 10 min" to one digit,
+ * " 16 min 40 sec" to three).
+ *
+ * @param {number} milliseconds @param {number} digits
+ */
+export function timeInterval(milliseconds, digits){
+    const seconds = Math.floor(((milliseconds >>> 0) + 500) / 1000);
+    const units = /** @type {const} */ ([
+        [Math.floor(seconds / 3600), 'hr'], [Math.floor(seconds / 60) % 60, 'min'],
+        [seconds % 60, 'sec'],
+    ]);
+    let left = Math.max(1, digits | 0);
+    let text = '';
+    for (const [value, unit] of units)
+    {
+        if (left <= 0 || (text === '' && value === 0 && unit !== 'sec'))
+        {
+            continue;
+        }
+        const length = String(value).length;
+        const scale = length > left ? 10 ** (length - left) : 1;
+        left -= length;
+        text += ` ${Math.floor(value / scale) * scale} ${unit}`;
+    }
+    return text;
+}
+
+/**
  * @param {StringHost} host
  * @param {{ A: import('./text.js').Width, W: import('./text.js').Width }} widths
  */
@@ -217,6 +259,19 @@ export function createStringFunctions(host, { A, W }){
         }),
 
         /**
+         * PSTR StrChrIA(PCSTR pszStart, WORD wMatch)
+         *
+         * StrChr with case ignored.
+         */
+        ...both('StrChrI', 8, (width, [start, code])=>{
+            const text = width.read(start);
+            const wanted = searched(width, code);
+            const at = text === null || wanted === null ? -1
+                : foldCase(text).indexOf(foldCase(wanted));
+            return at < 0 ? 0 : (start >>> 0) + at * width.unit;
+        }),
+
+        /**
          * PSTR StrRChrA(PCSTR pszStart, PCSTR pszEnd, WORD wMatch)
          *
          * The last place it is before pszEnd, or in the whole string for a
@@ -338,12 +393,45 @@ export function createStringFunctions(host, { A, W }){
          * empty search (Wine's test_StrStrIA).
          */
         ...both('StrStrI', 8, (width, [first, second])=>{
-            const fold = (/** @type {string} */ value)=>
-                Array.from(value, c=>(c.toUpperCase().length === 1 ? c.toUpperCase() : c)).join('');
             const text = width.read(first);
             const wanted = width.read(second);
-            const at = text === null || !wanted ? -1 : fold(text).indexOf(fold(wanted));
+            const at = text === null || !wanted ? -1 : foldCase(text).indexOf(foldCase(wanted));
             return at < 0 ? 0 : (first >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * PSTR StrRStrIA(PCSTR pszSource, PCSTR pszLast, PCSTR pszSrch)
+         *
+         * The last place the search starts before pszLast, case ignored; a
+         * match may run past pszLast, and a null pszLast is the whole string
+         * (Wine's test_StrRStrI).
+         */
+        ...both('StrRStrI', 12, (width, [source, last, search])=>{
+            const text = width.read(source);
+            const wanted = width.read(search);
+            if (text === null || !wanted)
+            {
+                return 0;
+            }
+            const stop = (last >>> 0) === 0 ? text.length
+                : Math.min(text.length, Math.floor(((last >>> 0) - (source >>> 0)) / width.unit));
+            const at = stop <= 0 ? -1 : foldCase(text).lastIndexOf(foldCase(wanted), stop - 1);
+            return at < 0 ? 0 : (source >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * int StrFromTimeIntervalA(PSTR pszOut, UINT cchMax, DWORD dwTimeMS, int digits)
+         *
+         * `timeInterval`'s text, cut to the buffer; the characters written.
+         */
+        ...both('StrFromTimeInterval', 16, (width, [buffer, room, milliseconds, digits])=>{
+            const text = timeInterval(milliseconds, digits);
+            if ((buffer >>> 0) === 0 || (room >>> 0) === 0)
+            {
+                return 0;
+            }
+            writeCut(width, buffer, text, room >>> 0);
+            return Math.min(text.length, (room >>> 0) - 1);
         }),
 
         /**

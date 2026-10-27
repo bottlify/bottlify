@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shlwapiMachine } from './memory.fixture.js';
 import { createLocaleFunctions } from '../kernel32/locale.js';
+import { timeInterval } from './strings.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005;
@@ -248,6 +249,8 @@ test('each string function declares the arguments it pops', ()=>{
         StrCmpNA: 12, StrCmpNW: 12, StrCmpNIA: 12, StrCmpNIW: 12, StrCpyW: 8, StrCpyNW: 12,
         StrCatW: 8, StrCatBuffA: 12, StrCatBuffW: 12, StrDupA: 4, StrDupW: 4, StrStrA: 8,
         StrStrW: 8, StrStrIA: 8, StrStrIW: 8, StrRetToBufA: 16, StrRetToBufW: 16,
+        StrChrIA: 8, StrChrIW: 8, StrRStrIA: 12, StrRStrIW: 12, StrFromTimeIntervalA: 16,
+        StrFromTimeIntervalW: 16,
     });
     for (const [name, bytes] of Object.entries(expected))
     {
@@ -269,5 +272,74 @@ test('StrCSpn counts the characters before one of the set, StrCSpnI ignoring cas
         assert.equal(call('StrCSpn', ''), 13);
         assert.equal(m.fns[`StrCSpnI${suffix}`].handler([0, text]), 0);
         assert.equal(m.fns[`StrCSpnI${suffix}`].argBytes, 8);
+    }
+});
+
+test('StrChrI finds a character whatever its case', ()=>{
+    // Wine's test_StrChrIA and test_StrChrIW: the capital comes first in the string.
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const text = Array.from({ length: 96 }, (_, i)=>String.fromCharCode(32 + i)).join('');
+        const at = m.put(text, wide);
+        const unit = wide ? 2 : 1;
+        for (let code = 0x41; code <= 0x58; code++)
+        {
+            const found = m.fns[`StrChrI${suffix}`].handler([at, code]);
+            assert.equal(found, at + (code - 32) * unit);
+            assert.notEqual(m.fns[`StrChrI${suffix}`].handler([found + unit, code]), 0,
+                'the small letter after it');
+        }
+        for (let code = 0x61; code < 0x7a; code++)
+        {
+            assert.equal(m.fns[`StrChrI${suffix}`].handler([at + (code - 31) * unit, code]), 0);
+        }
+    }
+});
+
+test('StrRStrI finds the last match that starts before the end it is given', ()=>{
+    // Wine's test_StrRStrI.
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const unit = wide ? 2 : 1;
+        const call = m.fns[`StrRStrI${suffix}`];
+        const first = m.put('yAxxxxAy', wide);
+        assert.equal(call.handler([first, first + 4 * unit, m.put('A', wide)]), first + unit);
+        assert.equal(call.handler([first, first + 4 * unit, m.put('aX', wide)]), first + unit);
+        assert.equal(call.handler([first, first + 4 * unit, m.put('Ay', wide)]), 0);
+        const second = m.put('ABABABAB', wide);
+        const ab = m.put('ab', wide);
+        for (const [end, expected] of [[4, 2], [3, 2], [2, 0], [1, 0]])
+        {
+            assert.equal(call.handler([second, second + end * unit, ab]), second + expected * unit,
+                `ending at ${end}`);
+        }
+        assert.equal(call.handler([second, second, ab]), 0);
+        assert.equal(call.handler([second, 0, ab]), second + 6 * unit,
+            'no end is the whole string');
+    }
+});
+
+test('StrFromTimeInterval rounds to the second and cuts to the digits asked', ()=>{
+    // Wine's test_StrFromTimeIntervalA, a sample of its table.
+    for (const [ms, digits, text] of /** @type {[number, number, string][]} */ ([
+        [1, 1, ' 0 sec'], [1, 7, ' 0 sec'], [1000000, 1, ' 10 min'], [1000000, 2, ' 16 min'],
+        [1000000, 3, ' 16 min 40 sec'], [1999999, 1, ' 30 min'], [1999999, 3, ' 33 min 20 sec'],
+        [3999997, 1, ' 1 hr'], [3999997, 2, ' 1 hr 6 min'], [3999997, 3, ' 1 hr 6 min 40 sec'],
+        [149999851, 7, ' 41 hr 40 min 0 sec'], [150999850, 1, ' 40 hr'],
+        [150999850, 3, ' 41 hr 50 min'], [150999850, 5, ' 41 hr 56 min 40 sec'],
+    ]))
+    {
+        assert.equal(timeInterval(ms, digits), text, `${ms} to ${digits}`);
+    }
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const buffer = m.put(' '.repeat(32), wide);
+        assert.equal(m.fns[`StrFromTimeInterval${suffix}`].handler([buffer, 32, 1000000, 3]), 14);
+        assert.equal(m.read(buffer, wide), ' 16 min 40 sec');
+        assert.equal(m.fns[`StrFromTimeInterval${suffix}`].handler([buffer, 5, 1000000, 3]), 4);
+        assert.equal(m.read(buffer, wide), ' 16 ', 'cut to the buffer');
     }
 });
