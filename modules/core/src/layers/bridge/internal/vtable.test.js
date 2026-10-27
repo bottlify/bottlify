@@ -408,7 +408,7 @@ test('an object still reachable at a count of zero keeps its pointer until it is
     // Its owner goes; the next release anywhere finds it unreachable.
     owned = false;
     release([elsewhere]);
-    assert.equal(addRef([pointer]) >>> 0, 0x80004003, 'now it is forgotten');
+    assert.equal(addRef([pointer]), 0, 'now it is forgotten');
     assert.equal(table.diagnostics().comInterfaces, 1);
 });
 
@@ -570,7 +570,7 @@ test('an object that does not say it is over loses only the interface released t
     const first = f.table.publish(counted, IID);
     const second = f.query(first, IID_B);
     assert.equal(f.call('Release', second), 0);
-    assert.equal(f.call('AddRef', second), 0x80004003);
+    assert.equal(f.call('AddRef', second), 0);
     assert.equal(f.call('AddRef', first), 1);
 });
 
@@ -603,12 +603,12 @@ test('an object that is over keeps each interface still reachable, and only thos
     assert.equal(f.call('Release', third), 1);
     assert.equal(f.call('Release', first), 0);
 
-    assert.equal(f.call('AddRef', first), 0x80004003, 'nothing keeps the first');
-    assert.equal(f.call('AddRef', third), 0x80004003, 'nor the third');
+    assert.equal(f.call('AddRef', first), 0, 'nothing keeps the first');
+    assert.equal(f.call('AddRef', third), 0, 'nor the third');
     assert.equal(f.call('Release', second), 0, 'the second is kept, and answers');
     kept = false;
     f.call('Release', elsewhere);
-    assert.equal(f.call('Release', second), 0x80004003, 'until nothing keeps it either');
+    assert.equal(f.call('Release', second), 0, 'until nothing keeps it either');
     assert.equal(f.table.diagnostics().comInterfaces, 1);
 });
 

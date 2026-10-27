@@ -255,8 +255,13 @@ export function createVtables({ memory, register, heap }){
                         {
                             // A pointer nobody published, or one whose object
                             // was released: E_POINTER, rather than a call on
-                            // whatever the memory now holds.
-                            return 0x80004003;
+                            // whatever the memory now holds -- except from
+                            // AddRef and Release, whose answer is a count: no
+                            // references, as DirectDraw's clipper answers
+                            // through a released pointer or 0xdeadbeef.
+                            return method.builtin === 'addRef' || method.builtin === 'release'
+                                ? 0
+                                : 0x80004003;
                         }
                         const given = rest;
                         for (let i = 1; i < args.length; i++)

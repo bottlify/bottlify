@@ -304,8 +304,8 @@ test('an object whose last reference goes loses every interface pointer at the b
     const two = seam.publish(api, DESCRIPTORS, IID_TWO);
 
     assert.equal(call(IID_TWO, 'Release', two), 0);
-    assert.equal(call(IID_ONE, 'AddRef', one), E_POINTER);
-    assert.equal(call(IID_TWO, 'AddRef', two), E_POINTER);
+    assert.equal(call(IID_ONE, 'AddRef', one), 0);
+    assert.equal(call(IID_TWO, 'AddRef', two), 0);
 });
 
 test('a generation reaching zero at the bridge leaves the others the program holds', ()=>{
@@ -329,11 +329,11 @@ test('a generation reaching zero at the bridge leaves the others the program hol
     const two = seam.publish(api, DESCRIPTORS, IID_TWO);
 
     assert.equal(call(IID_ONE, 'Release', one), 0);
-    assert.equal(call(IID_ONE, 'AddRef', one), E_POINTER, 'its own generation went');
+    assert.equal(call(IID_ONE, 'AddRef', one), 0, 'its own generation went');
     assert.equal(call(IID_TWO, 'AddRef', two), 2, 'the other is still the program\'s');
     assert.equal(call(IID_TWO, 'Release', two), 1);
     assert.equal(call(IID_TWO, 'Release', two), 0);
-    assert.equal(call(IID_TWO, 'AddRef', two), E_POINTER);
+    assert.equal(call(IID_TWO, 'AddRef', two), 0);
 });
 
 test('an object that says it outlives its count is not ended by reaching zero', ()=>{
@@ -435,5 +435,5 @@ test('an interface counted in the host keeps AddRef and Release at their traps',
     assert.equal(slot(inHost, 2), traps.get(`${IID_TWO}::Release`));
     const addRef = handlers.get(`${IID_TWO}::AddRef`);
     assert.equal(addRef.handler([inHost]), 2);
-    assert.equal(addRef.handler([0xdeadbeef]) >>> 0, E_POINTER, 'refused, not followed');
+    assert.equal(addRef.handler([0xdeadbeef]), 0, 'no references: refused, not followed');
 });
