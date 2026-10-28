@@ -2217,6 +2217,11 @@ function arithmetic(e, instruction, flagsLive){
     setOperand(e, Local.op1, size);
     readOp(e, src);
     setOperand(e, Local.op2, size);
+    if (op === 'cmp' && e.owesResult && flagsLive)
+    {
+        e.oweResult(size);
+        return;
+    }
     const compute = ()=>{
         getOperand(e, Local.op1, size);
         getOperand(e, Local.op2, size);
