@@ -90,7 +90,7 @@ const wordShuffle = words=>words.flatMap(w=>[w * 2, w * 2 + 1]);
  * @returns {boolean}
  */
 export function emitSimd(e, instruction, flagsLive){
-    if (e.pendingLows.size > 0 && !OWING.has(instruction.op))
+    if (e.pendingLows.size > 0 && !owes(instruction))
     {
         // A form that reads or writes its registers whole: their owed lanes
         // put back before it, on the block's straight line.
@@ -155,6 +155,13 @@ function emitForm(e, instruction, flagsLive){
         // --- moves ---
         case 'movaps': case 'movups': case 'movapd': case 'movupd': case 'movdqa': case 'movdqu':
         case 'lddqu': case 'movntps': case 'movntpd': case 'movntdq':
+            if (dst.kind === 'xmm' && src.kind === 'xmm' && MOVES.has(op)
+                && e.lows.has(/** @type {number} */ (src.reg))
+                && e.controls.length === e.blockDepth)
+            {
+                copyHeld(e, /** @type {number} */ (dst.reg), /** @type {number} */ (src.reg));
+                return true;
+            }
             writeV(e, dst, ()=>readV(e, src, 16));
             return true;
         case 'movss': case 'movsd':
@@ -680,8 +687,15 @@ function emitForm(e, instruction, flagsLive){
             const double = op.endsWith('sd2si');
             const truncate = op.startsWith('cvtt');
             prepareAddress(e, src);
-            readV(e, src, double ? 8 : 4);
-            b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+            if (scalarsApart(e))
+            {
+                pushLow(e, src, double, true);
+            }
+            else
+            {
+                readV(e, src, double ? 8 : 4);
+                b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+            }
             b.localSet(double ? Local.d0 : Local.f0);
             if (!truncate)
             {
@@ -718,22 +732,37 @@ function emitForm(e, instruction, flagsLive){
         case 'cvtpd2ps':
             unary(e, dst, src, ()=>simd(SIMD.f32x4DemoteF64x2Zero), 0);
             return true;
-        case 'cvtss2sd':
+        case 'cvtss2sd': case 'cvtsd2ss':
+            if (scalarsApart(e) && e.controls.length === e.blockDepth)
+            {
+                // The low lane converted into the destination's local, its vector's owed.
+                const wide = op === 'cvtss2sd';
+                const reg = /** @type {number} */ (dst.reg);
+                pushLow(e, src, !wide);
+                b.op(wide ? F64.promoteF32 : F32.demoteF64);
+                oweOtherWidth(e, reg, wide);
+                const low = e.lowLocal(reg, wide);
+                b.localSet(low);
+                oweLow(e, reg, low, wide, 'replace');
+                return true;
+            }
+            if (op === 'cvtsd2ss')
+            {
+                readV(e, dst, 16);
+                prepareAddress(e, src);
+                readV(e, src, 8);
+                b.op(0xfd, [SIMD.f64x2ExtractLane, 0]);
+                b.op(F32.demoteF64);
+                b.op(0xfd, [SIMD.f32x4ReplaceLane, 0]);
+                writeV(e, dst, null);
+                return true;
+            }
             readV(e, dst, 16);
             prepareAddress(e, src);
             readV(e, src, 4);
             b.op(0xfd, [SIMD.f32x4ExtractLane, 0]);
             b.op(F64.promoteF32);
             b.op(0xfd, [SIMD.f64x2ReplaceLane, 0]);
-            writeV(e, dst, null);
-            return true;
-        case 'cvtsd2ss':
-            readV(e, dst, 16);
-            prepareAddress(e, src);
-            readV(e, src, 8);
-            b.op(0xfd, [SIMD.f64x2ExtractLane, 0]);
-            b.op(F32.demoteF64);
-            b.op(0xfd, [SIMD.f32x4ReplaceLane, 0]);
             writeV(e, dst, null);
             return true;
         case 'cvtdq2pd':
@@ -1360,7 +1389,21 @@ function scalarFloat(e, dst, src, opcode, double, unaryForm = false){
 
 /** The forms that work on an owed low lane (`pendingLows`) as it is. */
 const OWING = new Set(['addss', 'subss', 'mulss', 'divss', 'addsd', 'subsd', 'mulsd', 'divsd',
-    'sqrtss', 'sqrtsd', 'movss', 'movsd']);
+    'sqrtss', 'sqrtsd', 'movss', 'movsd', 'comiss', 'ucomiss', 'comisd', 'ucomisd',
+    'cvtss2sd', 'cvtsd2ss', 'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si']);
+
+/** The whole-register moves, which hand an owed lane on between registers. */
+const MOVES = new Set(['movaps', 'movups', 'movapd', 'movupd', 'movdqa', 'movdqu']);
+
+/**
+ * Whether a form works on its registers' owed low lanes as they are.
+ *
+ * @param {Instruction} instruction
+ */
+function owes({ op, operands }){
+    return OWING.has(op)
+        || MOVES.has(op) && operands[0].kind === 'xmm' && operands[1].kind === 'xmm';
+}
 
 /**
  * Puts back a register's owed lane of the other width, before a form of
@@ -1389,6 +1432,31 @@ function oweLow(e, reg, local, double, how){
     e.lows.set(reg, { local, double });
     e.xmmWritten.add(reg);
     e.pendingLows.set(reg, how === 'zero' || e.pendingLows.get(reg) === 'zero' ? 'zero' : how);
+}
+
+/**
+ * A whole-register copy from a register whose low lane a local holds
+ * (`lows`): the vector as it stands and that local both copied, so the
+ * copy owes what the source owes, and neither is put back for it.
+ *
+ * @param {E} e @param {number} to @param {number} from
+ */
+function copyHeld(e, to, from){
+    const { b } = e;
+    const held = /** @type {{ local: number, double: boolean }} */ (e.lows.get(from));
+    const owed = e.pendingLows.get(from);
+    e.pendingLows.delete(to);
+    e.lows.delete(to);
+    b.localGet(/** @type {number} */ (e.xmmLocals.get(from)))
+        .localSet(/** @type {number} */ (e.xmmLocals.get(to)));
+    const low = e.lowLocal(to, held.double);
+    b.localGet(held.local).localSet(low);
+    e.xmmWritten.add(to);
+    e.lows.set(to, { local: low, double: held.double });
+    if (owed !== undefined)
+    {
+        e.pendingLows.set(to, owed);
+    }
 }
 
 /**
@@ -1769,12 +1837,23 @@ function compare(e, predicate, double){
 function comparison(e, dst, src, double, flagsLive){
     const { b } = e;
     prepareAddress(e, src);
-    readV(e, dst, 16);
-    b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
-    b.localSet(double ? Local.d0 : Local.f0);
-    readV(e, src, double ? 8 : 4);
-    b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
-    b.localSet(double ? Local.d1 : Local.f1);
+    if (scalarsApart(e))
+    {
+        // The low lanes as the scalar forms hold them (`lows`).
+        pushLow(e, dst, double);
+        b.localSet(double ? Local.d0 : Local.f0);
+        pushLow(e, src, double, true);
+        b.localSet(double ? Local.d1 : Local.f1);
+    }
+    else
+    {
+        readV(e, dst, 16);
+        b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+        b.localSet(double ? Local.d0 : Local.f0);
+        readV(e, src, double ? 8 : 4);
+        b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+        b.localSet(double ? Local.d1 : Local.f1);
+    }
     if (!flagsLive)
     {
         return;

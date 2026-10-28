@@ -53,6 +53,15 @@ const POOL = [
     { name: 'comiss xmm0, xmm1', bytes: [0x0f, 0x2f, 0xc1] },
     { name: 'maxss xmm0, xmm1', bytes: [0xf3, 0x0f, 0x5f, 0xc1] },
     { name: 'xorps xmm1, xmm1', bytes: [0x0f, 0x57, 0xc9] },
+    // forms that hand an owed lane on or read it as it is
+    { name: 'movaps xmm1, xmm0', bytes: [0x0f, 0x28, 0xc8] },
+    { name: 'movaps xmm0, xmm2', bytes: [0x0f, 0x28, 0xc2] },
+    { name: 'cvtsd2ss xmm0, xmm2', bytes: [0xf2, 0x0f, 0x5a, 0xc2] },
+    { name: 'cvtss2sd xmm0, [m]', bytes: [0xf3, 0x0f, 0x5a, 0x05, ...at(DATA)] },
+    { name: 'cvttss2si eax, xmm0', bytes: [0xf3, 0x0f, 0x2c, 0xc0] },
+    { name: 'cvtsd2si ecx, xmm2', bytes: [0xf2, 0x0f, 0x2d, 0xca] },
+    { name: 'comiss xmm0, [m]', bytes: [0x0f, 0x2f, 0x05, ...at(DATA)] },
+    { name: 'ucomisd xmm2, xmm0', bytes: [0x66, 0x0f, 0x2e, 0xd0] },
     // ways out in the middle of a block
     { name: 'movss [code], xmm0', bytes: [0xf3, 0x0f, 0x11, 0x05, ...at(CODE + 0xf00)] },
     { name: 'fnstenv [m+64]', bytes: [0xd9, 0x35, ...at(DATA + 0x40)] },
