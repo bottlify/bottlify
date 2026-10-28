@@ -90,6 +90,13 @@ const wordShuffle = words=>words.flatMap(w=>[w * 2, w * 2 + 1]);
  * @returns {boolean}
  */
 export function emitSimd(e, instruction, flagsLive){
+    if (e.pendingLows.size > 0 && !OWING.has(instruction.op))
+    {
+        // A form that reads or writes its registers whole: their owed lanes
+        // put back before it, on the block's straight line.
+        e.settleLows(instruction.operands.filter(operand=>operand.kind === 'xmm')
+            .map(operand=>/** @type {number} */ (operand.reg)), true);
+    }
     const done = emitForm(e, instruction, flagsLive);
     if (done && instruction.operands.some(operand=>operand.kind === 'mm'))
     {
@@ -153,6 +160,43 @@ function emitForm(e, instruction, flagsLive){
         case 'movss': case 'movsd':
         {
             const width = op === 'movss' ? 4 : 8;
+            const double = width === 8;
+            if (scalarsApart(e) && e.controls.length === e.blockDepth)
+            {
+                // The low lane in a local, the vector's owed (`pendingLows`).
+                if (dst.kind === 'xmm')
+                {
+                    const reg = /** @type {number} */ (dst.reg);
+                    if (src.kind === 'xmm')
+                    {
+                        oweOtherWidth(e, reg, double);
+                        pushLow(e, src, double);
+                        const low = e.lowLocal(reg, double);
+                        b.localSet(low);
+                        oweLow(e, reg, low, double, 'replace');
+                        return true;
+                    }
+                    // A load: the other lanes zero, whatever was owed.
+                    prepareAddress(e, src);
+                    b.localGet(Local.addr).load(double ? 'f64' : 'f32',
+                        { offset: e.layout.ramBase });
+                    const low = e.lowLocal(reg, double);
+                    b.localSet(low);
+                    e.pendingLows.delete(reg);
+                    e.lows.delete(reg);
+                    oweLow(e, reg, low, double, 'zero');
+                    return true;
+                }
+                const held = e.lows.get(/** @type {number} */ (src.reg));
+                if (held !== undefined && held.double === double)
+                {
+                    prepareAddress(e, dst, true);
+                    noteStore(e, width);
+                    b.localGet(Local.addr).localGet(held.local)
+                        .store(double ? 'f64' : 'f32', { offset: e.layout.ramBase });
+                    return true;
+                }
+            }
             if (dst.kind === 'xmm' && src.kind === 'xmm')
             {
                 // The low lane from the source, the rest kept.
@@ -1275,7 +1319,28 @@ const scalarsApart = e=>e.context.features.armHost ?? !e.context.features.defaul
  */
 function scalarFloat(e, dst, src, opcode, double, unaryForm = false){
     const { b } = e;
-    b.localGet(e.xmmLocal(/** @type {number} */ (dst.reg)));
+    const reg = /** @type {number} */ (dst.reg);
+    if (e.controls.length === e.blockDepth)
+    {
+        // The vector's lane left owed (`pendingLows`): the next scalar form
+        // reads the local, and the lane is put back once, where needed.
+        oweOtherWidth(e, reg, double);
+        if (!unaryForm)
+        {
+            pushLow(e, dst, double);
+        }
+        pushLow(e, src, double);
+        b.op(opcode);
+        if (!e.context.features.defaultNaNNegative)
+        {
+            scalarDefaultNaN(e, unaryForm ? [src] : [dst, src], double);
+        }
+        const low = e.lowLocal(reg, double);
+        b.localSet(low);
+        oweLow(e, reg, low, double, 'replace');
+        return;
+    }
+    b.localGet(e.xmmLocal(reg));
     if (!unaryForm)
     {
         pushLow(e, dst, double);
@@ -1291,6 +1356,39 @@ function scalarFloat(e, dst, src, opcode, double, unaryForm = false){
     b.op(0xfd, [double ? SIMD.f64x2ReplaceLane : SIMD.f32x4ReplaceLane, 0]);
     writeV(e, dst, null);
     setLow(e, dst, low, double);
+}
+
+/** The forms that work on an owed low lane (`pendingLows`) as it is. */
+const OWING = new Set(['addss', 'subss', 'mulss', 'divss', 'addsd', 'subsd', 'mulsd', 'divsd',
+    'sqrtss', 'sqrtsd', 'movss', 'movsd']);
+
+/**
+ * Puts back a register's owed lane of the other width, before a form of
+ * this width holds its low lane in a local of its own.
+ *
+ * @param {E} e @param {number} reg @param {boolean} double
+ */
+function oweOtherWidth(e, reg, double){
+    const low = e.lows.get(reg);
+    if (low !== undefined && low.double !== double)
+    {
+        e.settleLows([reg], true);
+        e.lows.delete(reg);
+    }
+}
+
+/**
+ * Notes that `local` alone holds the register's low lane (`pendingLows`),
+ * its vector's lane owed: `zero`, all the other lanes are zero, else they
+ * stay as the vector has them (a lane still owed as zero stays so).
+ *
+ * @param {E} e @param {number} reg @param {number} local @param {boolean} double
+ * @param {'replace' | 'zero'} how
+ */
+function oweLow(e, reg, local, double, how){
+    e.lows.set(reg, { local, double });
+    e.xmmWritten.add(reg);
+    e.pendingLows.set(reg, how === 'zero' || e.pendingLows.get(reg) === 'zero' ? 'zero' : how);
 }
 
 /**

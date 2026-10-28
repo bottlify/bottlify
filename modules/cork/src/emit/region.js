@@ -1257,6 +1257,14 @@ export class RegionEmitter {
         this.lows = new Map();
         /** Those locals, one an xmm register and width. @type {Map<string, number>} */
         this.lowLocals = new Map();
+        /**
+         * The xmm registers whose low lane only their `lows` local holds yet,
+         * the vector's own lane behind it: put back (`settleLows`) where the
+         * vector is read, at the block's end and on every way out. 'zero': the
+         * other lanes are zero too (a scalar load wrote the register).
+         * @type {Map<number, 'replace' | 'zero'>}
+         */
+        this.pendingLows = new Map();
         /** @type {Set<number>} */
         this.mmWritten = new Set();
         /** The instruction being emitted. @type {import('../decode/decoder.js').Instruction} */
@@ -1337,12 +1345,57 @@ export class RegionEmitter {
 
     /** The local an xmm register lives in. @param {number} index @param {boolean} [write] */
     xmmLocal(index, write = false){
+        if (this.pendingLows.has(index))
+        {
+            // The vector read or written as a whole: its lane put back first.
+            // Inside a branch only that way has it, so the lane stays owed.
+            if (write && this.controls.length !== this.blockDepth)
+            {
+                throw new Error(`xmm${index} written in a branch while its low lane is owed`);
+            }
+            this.settleLows([index], this.controls.length === this.blockDepth);
+        }
         if (write)
         {
             this.xmmWritten.add(index);
             this.lows.delete(index);
         }
         return /** @type {number} */ (this.xmmLocals.get(index));
+    }
+
+    /**
+     * Puts the owed low lanes (`pendingLows`) of these registers back into
+     * their vectors, here; `clear`: where every later way through has them
+     * (the block's straight line), so they are no longer owed.
+     *
+     * @param {Iterable<number>} indices @param {boolean} clear
+     */
+    settleLows(indices, clear){
+        const { b } = this;
+        for (const index of [...indices])
+        {
+            const how = this.pendingLows.get(index);
+            const low = this.lows.get(index);
+            if (how === undefined || low === undefined)
+            {
+                continue;
+            }
+            const vector = /** @type {number} */ (this.xmmLocals.get(index));
+            if (how === 'zero')
+            {
+                b.v128const(new Array(16).fill(0));
+            }
+            else
+            {
+                b.localGet(vector);
+            }
+            // f64x2.replace_lane / f32x4.replace_lane
+            b.localGet(low.local).op(0xfd, [low.double ? 0x22 : 0x20, 0]).localSet(vector);
+            if (clear)
+            {
+                this.pendingLows.delete(index);
+            }
+        }
     }
 
     /**
@@ -1647,6 +1700,11 @@ export class RegionEmitter {
      * run leaves for the host.
      */
     epilogue(){
+        if (this.pendingLows.size > 0)
+        {
+            // Every way here put its lanes back; one put back here would be any way's.
+            throw new Error('low lanes owed at the epilogue');
+        }
         if (this.flagRecord >= 0 && this.context.hash)
         {
             this.storeMemoryState();
@@ -3040,6 +3098,10 @@ export class RegionEmitter {
      * @param {boolean[]} live @param {Map<number, any>} plan
      */
     emitInstructions(block, index, live, plan){
+        if (this.pendingLows.size > 0)
+        {
+            throw new Error(`block ${index}: low lanes owed from the block before`);
+        }
         this.lows.clear();
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
         {
@@ -3062,6 +3124,11 @@ export class RegionEmitter {
             this.blockRetired++;
             this.instructions++;
             this.memPlan = plan.get(i) ?? null;
+            if (i === block.instructions.length - 1 && block.exit.kind !== 'fallthrough')
+            {
+                // The block's way on: its vectors whole before any of it.
+                this.settleLows(this.pendingLows.keys(), true);
+            }
             const bodyAt = this.b.length;
             if (this.memPlan !== null && this.memPlan.checks.length > 0)
             {
@@ -3087,10 +3154,13 @@ export class RegionEmitter {
                 this.instructions--;
                 this.exitBefore(instruction.eip, Exit.UNTRANSLATED);
                 this.dead = true;
+                // Nothing after the way out runs: it paid what was owed.
+                this.pendingLows.clear();
                 return false;
             }
             if (this.dead)
             {
+                this.pendingLows.clear();
                 return false;
             }
             if (this.staleCheck)
@@ -3101,6 +3171,7 @@ export class RegionEmitter {
                 emitStaleExit(this, instruction.eip + instruction.length);
             }
         }
+        this.settleLows(this.pendingLows.keys(), true);
         return true;
     }
 
@@ -3547,6 +3618,8 @@ export class RegionEmitter {
         {
             x87Normalise(this);
         }
+        // This way out has the owed lanes; the block's way on still owes them.
+        this.settleLows(this.pendingLows.keys(), false);
         if (this.staleCheck)
         {
             // The instruction stored and leaves in the same breath (a call):
