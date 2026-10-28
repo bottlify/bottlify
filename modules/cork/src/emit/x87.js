@@ -61,7 +61,7 @@ import { isX87Opcode } from '../decode/decoder.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
-import { prepare, writeReg } from './integer.js';
+import { prepare, readAddress, writeReg } from './integer.js';
 import { PRECISION, noteStore } from './memory.js';
 import { callsOut, inlineReturns } from '../region.js';
 import { exactWrites } from '../ir-x87.js';
@@ -582,12 +582,16 @@ const NOTHING = Object.freeze({ held: 0, empty: 0, c1: false });
 
 /**
  * What one x87 instruction does to the stack words, as its lowering has it:
- * the ST(i) it reads (checked for an empty register, `guard`), whether it
- * pushes (checked for a held one, C1 cleared), and the physical registers it
- * leaves held (1), empty (0) or either (-1), in order.
+ * the ST(i) it reads (checked for an empty register, `guard`), the ST(i) it
+ * writes, whether it pushes (checked for a held one, C1 cleared), and the
+ * physical registers it leaves held (1), empty (0) or either (-1), in order.
+ * A register written is held after it, as the processor tags it: a source
+ * found empty is written the indefinite. Every one written is also a source,
+ * so the guard decides it held on both its ways.
  *
  * @typedef {Object} StackUse
  * @property {number[]} sources
+ * @property {number[]} writes
  * @property {boolean} pushes
  * @property {[number, number][]} marks
  * @property {'empty' | 'unknown' | null} whole  every register left empty, or unknown
@@ -603,7 +607,7 @@ export function stackUse(instruction, state){
     const [dst, src] = operands;
     const at = (/** @type {number} */ i)=>(state.top + i) & 7;
     /** @type {StackUse} */
-    const use = { sources: [], pushes: false, marks: [], whole: null, c1: 'keep' };
+    const use = { sources: [], writes: [], pushes: false, marks: [], whole: null, c1: 'keep' };
     const push = (held = 1)=>{
         use.pushes = true;
         use.marks.push([at(-1), held]);
@@ -612,6 +616,15 @@ export function stackUse(instruction, state){
         for (let k = 0; k < times; k++)
         {
             use.marks.push([at(k), 0]);
+        }
+    };
+    /** Reads ST(i) and writes it, held from then on. @param {number[]} list */
+    const writes = (...list)=>{
+        use.sources = [...new Set([...use.sources, ...list])];
+        use.writes = list;
+        for (const i of list)
+        {
+            use.marks.push([at(i), 1]);
         }
     };
     const reg = (/** @type {Operand} */ operand)=>Number(operand.reg);
@@ -649,15 +662,12 @@ export function stackUse(instruction, state){
             pop();
             return use;
         case 'fxch':
-            // Both held after it: an empty one is the indefinite first.
-            use.sources = [0, reg(src)];
-            use.marks.push([at(0), 1], [at(reg(src)), 1]);
+            writes(0, reg(src));
             return use;
         case 'fcmovb': case 'fcmove': case 'fcmovbe': case 'fcmovu':
         case 'fcmovnb': case 'fcmovne': case 'fcmovnbe': case 'fcmovnu':
-            // ST0 held after it: a stack fault leaves the indefinite there.
             use.sources = [0, reg(src)];
-            use.marks.push([at(0), 1]);
+            writes(0);
             return use;
         case 'ffree': case 'ffreep':
             use.marks.push([at(reg(dst)), 0]);
@@ -665,27 +675,30 @@ export function stackUse(instruction, state){
             return use;
         case 'fchs': case 'fabs': case 'fsqrt': case 'frndint': case 'f2xm1': case 'fsin':
         case 'fcos':
-            use.sources = [0];
+            writes(0);
             return use;
         case 'fsincos': case 'fptan':
             // The push is on the paths that compute; out of the reduction
             // range the register is left as it was.
-            use.sources = [0];
+            writes(0);
             push(-1);
             return use;
         case 'fxtract':
-            use.sources = [0];
+            writes(0);
             push();
             return use;
         case 'fscale':
             use.sources = [0, 1];
+            writes(0);
             return use;
         case 'fprem': case 'fprem1':
             use.sources = [0, 1];
+            writes(0);
             use.c1 = 'lost';
             return use;
         case 'fpatan': case 'fyl2x': case 'fyl2xp1':
             use.sources = [0, 1];
+            writes(1);
             pop();
             return use;
         case 'fadd': case 'fsub': case 'fsubr': case 'fmul': case 'fdiv': case 'fdivr':
@@ -694,6 +707,7 @@ export function stackUse(instruction, state){
         {
             const target = dst.kind === 'x87' ? reg(dst) : 0;
             use.sources = src.kind === 'x87' ? [target, reg(src)] : [target];
+            writes(target);
             pop(op.endsWith('p') ? 1 : 0);
             return use;
         }
@@ -2500,10 +2514,15 @@ export function emitX87(e, instruction, flagsLive){
      * push that overflowed -- its register already held -- also sets C1, as
      * the processor does to say which way the stack faulted; a region that
      * translated an MMX instruction meets it, since MMX holds every register
-     * and the x87 push after it overflows. What reads and pushes is the
+     * and the x87 push after it overflows. An underflow otherwise clears C1.
+     * The registers the instruction writes are held after it either way
+     * (`StackUse`); with `fill`, each of them found empty is first made the
+     * indefinite, as an exchange has it. What reads, writes and pushes is the
      * instruction's `use`.
+     *
+     * @param {boolean} [fill]
      */
-    const guard = ()=>{
+    const guard = (fill = false)=>{
         const { sources, pushes } = use;
         clear = false;
         let read = 0;
@@ -2570,7 +2589,31 @@ export function emitX87(e, instruction, flagsLive){
             setStatus(Status.C1);
             e.close();
         }
+        else if (!pushes)
+        {
+            b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
+                .localSet(Local.x87Status);
+        }
+        // Not yet held at translation: the guard is all that makes them so.
+        const writes = use.writes.map(i=>(state.top + i) & 7)
+            .filter(k=>((x.stack.held | known.held) & 1 << k) === 0);
+        if (fill)
+        {
+            for (const k of writes)
+            {
+                b.localGet(Local.x87Empty).i32const(1 << k).op(I32.and);
+                e.openIf('filled', EMPTY);
+                indefinite();
+                b.localSet(x.base + state.slot[k]);
+                syncMm(k, x.base + state.slot[k]);
+                e.close();
+            }
+        }
         e.close();
+        for (const k of writes)
+        {
+            mark(k, true);
+        }
     };
     /**
      * Rounds the f64 on the stack to a float when precision control says
@@ -2787,8 +2830,7 @@ export function emitX87(e, instruction, flagsLive){
                     // The float the double would be promoted from; a NaN keeps its bits
                     // here and is quieted where it leaves through the double.
                     prepare(e, src);
-                    b.localGet(Local.addr).load('f32', { offset: e.layout.ramBase })
-                        .localSet(singleOf(e, into));
+                    b.load('f32', { offset: readAddress(e, src) }).localSet(singleOf(e, into));
                     pushFloat(false);
                 }
                 return finish();
@@ -2812,9 +2854,8 @@ export function emitX87(e, instruction, flagsLive){
         case 'fild':
             guard();
             prepare(e, src);
-            b.localGet(Local.addr);
             b.load(src.size === 2 ? 'i64_16s' : src.size === 4 ? 'i64_32s' : 'i64',
-                { offset: e.layout.ramBase });
+                { offset: readAddress(e, src) });
             if (src.size === 8 && x.tracksExact)
             {
                 // The quadword beside the double it rounds to, for a quadword
@@ -3015,27 +3056,8 @@ export function emitX87(e, instruction, flagsLive){
             const i = /** @type {number} */ (src.reg);
             const a = state.top;
             const c = (state.top + i) & 7;
-            // An empty register faults and becomes the indefinite before the
-            // exchange; both are held after it, as the processor answers.
-            guard();
-            if (!clear)
-            {
-                b.localGet(Local.t1);
-                e.openIf('fault', EMPTY);
-                for (const [position, k] of [[0, a], [i, c]])
-                {
-                    b.localGet(Local.x87Empty).i32const(1 << k).op(I32.and);
-                    e.openIf('emptied', EMPTY);
-                    indefinite();
-                    b.localSet(st(position));
-                    // Its MMX view too, as a write leaves it.
-                    syncMm(k, st(position));
-                    e.close();
-                }
-                e.close();
-                mark(a, true);
-                mark(c, true);
-            }
+            // An empty register faults and is made the indefinite first.
+            guard(true);
             b.localGet(Local.x87Dirty).i32const((1 << a) | (1 << c)).op(I32.or)
                 .localSet(Local.x87Dirty);
             if (x.hasMmx)
@@ -3185,16 +3207,11 @@ export function emitX87(e, instruction, flagsLive){
             e.openIf('finite', EMPTY);
             b.localGet(x.temp).f64const(0).op(F64.eq);
             e.openIf('zero', EMPTY);
-            if (clear)
-            {
-                setStatus(Status.ZE);
-            }
-            else
-            {
-                // A stack fault is the invalid operation alone.
-                b.localGet(Local.x87Status).i32const(0).i32const(Status.ZE).localGet(Local.t1)
-                    .select().op(I32.or).localSet(Local.x87Status);
-            }
+            // What an empty register still holds is no operand.
+            b.localGet(Local.t1).op(I32.eqz);
+            e.openIf('operand', EMPTY);
+            setStatus(Status.ZE);
+            e.close();
             b.f64const(-Infinity).localSet(x.temp2);
             b.else();
             b.localGet(x.temp).op(F64.abs).f64const(2 ** -1022).op(F64.lt);
@@ -3318,6 +3335,7 @@ export function emitX87(e, instruction, flagsLive){
                     b.localGet(x.temp).f64const(0).op(F64.eq);
                     b.localGet(st(1)).op(F64.abs).f64const(Infinity).op(F64.lt).op(I32.and);
                     b.localGet(st(1)).f64const(0).op(F64.ne).op(I32.and);
+                    b.localGet(Local.t1).op(I32.eqz).op(I32.and);
                     e.openIf('zero', EMPTY);
                     setStatus(Status.ZE);
                     e.close();
@@ -3418,7 +3436,7 @@ export function emitX87(e, instruction, flagsLive){
                 else
                 {
                     prepare(e, src);
-                    b.localGet(Local.addr).load('f32', { offset: e.layout.ramBase });
+                    b.load('f32', { offset: readAddress(e, src) });
                 }
                 b.localSet(theirs);
                 const [a, c] = reversed ? [theirs, mine] : [mine, theirs];
@@ -3470,8 +3488,7 @@ export function emitX87(e, instruction, flagsLive){
             else if (op.startsWith('fi'))
             {
                 prepare(e, src);
-                b.localGet(Local.addr);
-                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: e.layout.ramBase });
+                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: readAddress(e, src) });
                 b.op(F64.convertI32S);
             }
             else
@@ -3519,8 +3536,7 @@ export function emitX87(e, instruction, flagsLive){
             {
                 guard();
                 prepare(e, src);
-                b.localGet(Local.addr);
-                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: e.layout.ramBase });
+                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: readAddress(e, src) });
                 b.op(F64.convertI32S).localSet(x.temp2);
             }
             else if (op === 'ftst')
@@ -3618,19 +3634,42 @@ export function emitX87(e, instruction, flagsLive){
         {
             // C3 C2 C0: empty 101, NaN 001, infinity 011, zero 100, normal 010; C1 the sign.
             const v = st(0);
-            // It reads the empty mask: the block's stale bits written first.
+            // It reads the empty mask and the dirty one: the block's stale bits written first.
             x87Flush(e, true);
             b.localGet(Local.x87Status).i32const(~Status.CONDITION).op(I32.and)
                 .localSet(Local.x87Status);
-            b.localGet(Local.x87Empty).i32const(1 << state.top).op(I32.and);
-            e.openIf('empty', EMPTY);
-            // An empty register's sign is not asked: C1 stays clear.
-            setStatus(Status.C3 | Status.C0);
-            b.else();
             b.localGet(v).op(I64.reinterpretF64).i64const(0n).op(I64.ltS);
+            if (!x.hasMmx)
+            {
+                // An empty ST0's sign is that of what the register still holds:
+                // the local where this region wrote it, else the state block's,
+                // which a region does not load for an empty register.
+                const at = e.layout.x87 + state.top * 16;
+                if (e.layout.x87Format === 'tagged80')
+                {
+                    atState(e.context, b).load('i64', { offset: at }).i64const(0n).op(I64.ltS);
+                    atState(e.context, b).load('i32_16u', { offset: at + 8 }).i32const(15)
+                        .op(I32.shrU);
+                    atState(e.context, b).load('i32_16u', { offset: at + 8 })
+                        .i32const(RELAXED_TAG).op(I32.eq);
+                    b.select();
+                }
+                else
+                {
+                    atState(e.context, b).load('i64', { offset: at }).i64const(0n).op(I64.ltS);
+                }
+                // select keeps the local's sign unless the register is empty and unwritten.
+                b.localGet(Local.x87Empty).localGet(Local.x87Dirty).i32const(-1).op(I32.xor)
+                    .op(I32.and).i32const(1 << state.top).op(I32.and).op(I32.eqz);
+                b.select();
+            }
             e.openGuard('negative', EMPTY);
             setStatus(Status.C1);
             e.close();
+            b.localGet(Local.x87Empty).i32const(1 << state.top).op(I32.and);
+            e.openIf('empty', EMPTY);
+            setStatus(Status.C3 | Status.C0);
+            b.else();
             b.localGet(v).localGet(v).op(F64.ne);
             e.openGuard('nan', EMPTY);
             setStatus(Status.C0);
@@ -3964,8 +4003,7 @@ function loadFloatValue(e, operand, mode = 'checked'){
     {
         // f32 -> f64 quiets a signalling NaN keeping its payload, as the
         // processor's own conversion does; an f64 load keeps the bits.
-        b.localGet(Local.addr).load(operand.size === 4 ? 'f32' : 'f64',
-            { offset: e.layout.ramBase });
+        b.load(operand.size === 4 ? 'f32' : 'f64', { offset: readAddress(e, operand) });
         if (operand.size === 4)
         {
             b.op(F64.promoteF32);

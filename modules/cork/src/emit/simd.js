@@ -29,7 +29,7 @@ import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
 import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT } from './region.js';
-import { prepare, readOp, writeOp, writeReg } from './integer.js';
+import { prepare, readAddress, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
 import { atState } from './bases.js';
@@ -168,7 +168,7 @@ function emitForm(e, instruction, flagsLive){
         {
             const width = op === 'movss' ? 4 : 8;
             const double = width === 8;
-            if (scalarsApart(e) && e.controls.length === e.blockDepth)
+            if (e.controls.length === e.blockDepth)
             {
                 // The low lane in a local, the vector's owed (`pendingLows`).
                 if (dst.kind === 'xmm')
@@ -184,13 +184,17 @@ function emitForm(e, instruction, flagsLive){
                         return true;
                     }
                     // A load: the other lanes zero, whatever was owed.
-                    prepareAddress(e, src);
-                    b.localGet(Local.addr).load(double ? 'f64' : 'f32',
-                        { offset: e.layout.ramBase });
-                    const low = e.lowLocal(reg, double);
-                    b.localSet(low);
                     e.pendingLows.delete(reg);
                     e.lows.delete(reg);
+                    if (!owesLoads(e))
+                    {
+                        writeV(e, dst, ()=>readV(e, src, width));
+                        return true;
+                    }
+                    prepareAddress(e, src);
+                    b.load(double ? 'f64' : 'f32', { offset: readAddress(e, src) });
+                    const low = e.lowLocal(reg, double);
+                    b.localSet(low);
                     oweLow(e, reg, low, double, 'zero');
                     return true;
                 }
@@ -501,7 +505,7 @@ function emitForm(e, instruction, flagsLive){
             const base = /** @type {'add' | 'sub' | 'mul' | 'div'} */ (op.slice(0, 3));
             const double = op.endsWith('pd') || op.endsWith('sd');
             const scalar = op.endsWith('ss') || op.endsWith('sd');
-            if (scalar && scalarsApart(e))
+            if (scalar)
             {
                 scalarFloat(e, dst, src, double ? F64[base] : F32[base], double);
                 return true;
@@ -518,7 +522,7 @@ function emitForm(e, instruction, flagsLive){
         {
             const double = op.endsWith('pd') || op.endsWith('sd');
             const scalar = op.endsWith('ss') || op.endsWith('sd');
-            if (scalar && scalarsApart(e))
+            if (scalar)
             {
                 scalarFloat(e, dst, src, double ? F64.sqrt : F32.sqrt, double, true);
                 return true;
@@ -549,7 +553,7 @@ function emitForm(e, instruction, flagsLive){
             const min = op.startsWith('min');
             // (a < b) ? a : b for min, (a > b) ? a : b for max: the second
             // operand whenever the compare is false, NaN and zeros included.
-            if (scalar && scalarsApart(e))
+            if (scalar)
             {
                 scalarSelect(e, dst, src, double, min);
                 return true;
@@ -687,15 +691,7 @@ function emitForm(e, instruction, flagsLive){
             const double = op.endsWith('sd2si');
             const truncate = op.startsWith('cvtt');
             prepareAddress(e, src);
-            if (scalarsApart(e))
-            {
-                pushLow(e, src, double, true);
-            }
-            else
-            {
-                readV(e, src, double ? 8 : 4);
-                b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
-            }
+            pushLow(e, src, double, true);
             b.localSet(double ? Local.d0 : Local.f0);
             if (!truncate)
             {
@@ -733,7 +729,7 @@ function emitForm(e, instruction, flagsLive){
             unary(e, dst, src, ()=>simd(SIMD.f32x4DemoteF64x2Zero), 0);
             return true;
         case 'cvtss2sd': case 'cvtsd2ss':
-            if (scalarsApart(e) && e.controls.length === e.blockDepth)
+            if (e.controls.length === e.blockDepth)
             {
                 // The low lane converted into the destination's local, its vector's owed.
                 const wide = op === 'cvtss2sd';
@@ -1102,6 +1098,8 @@ function readV(e, operand, width){
         return;
     }
     prepareAddress(e, operand);
+    // `addr` whole, not a wrapped sum's offset (`readAddress`): an x64 host's
+    // vector load adds an offset to the memory's base in an instruction of its own.
     b.localGet(Local.addr);
     if (width === 16)
     {
@@ -1320,27 +1318,32 @@ function pushLow(e, operand, double, again = false){
     {
         prepareAddress(e, operand);
     }
-    b.localGet(Local.addr).load(double ? 'f64' : 'f32', { offset: e.layout.ramBase });
+    b.load(double ? 'f64' : 'f32', { offset: readAddress(e, operand) });
 }
 
 /**
- * Whether a scalar float form is worked on its low lane alone (`scalarFloat`,
- * `scalarSelect`) rather than as the vector form with that lane shuffled into
- * dst: on a host whose default NaN is positive, an arm64 one. There the
- * vector form's fix-up of the default NaN and the shuffle -- a register copy
- * and four lane moves -- made one `mulss` fourteen instructions around the
- * multiply, six this way. On x86 the vector form is the multiply and one
- * blend, and the scalar one ran slower (Chromium 141, cork-bench paired:
- * fmath-sse 1.18, game-sse 1.02).
+ * Whether a scalar load leaves its value in the low lane's local alone and owes
+ * the vector, zeroed (`pendingLows`), rather than loading the vector: on a host
+ * whose default NaN is positive, an arm64 one. On x64 the vector load is the
+ * one `movss` that clears the other lanes, where the zeroed vector put back
+ * costs a zeroing and an insert at the block's end: owed there, cork-bench
+ * game-sse took 1.4 % more machine instructions an iteration and fmath-sse
+ * 1.7 % fewer.
  *
  * @param {E} e
  */
-const scalarsApart = e=>e.context.features.armHost ?? !e.context.features.defaultNaNNegative;
+const owesLoads = e=>e.context.features.armHost ?? !e.context.features.defaultNaNNegative;
 
 /**
  * The scalar form of a float arithmetic instruction (`addss` to `divsd`,
- * `sqrtss`, `sqrtsd`) where `scalarsApart`: the low lane in wasm's own f32
- * or f64 arithmetic, put back over dst, whose other lanes stay as they were.
+ * `sqrtss`, `sqrtsd`): the low lane in wasm's own f32 or f64 arithmetic, put
+ * back over dst, whose other lanes stay as they were. The vector form with that
+ * lane shuffled into dst made one `mulss` fourteen arm64 instructions around the
+ * multiply (the default NaN's fix-up, a register copy and four lane moves), six
+ * this way; on x64 it was the multiply and a blend each time, where the lane
+ * held in a local (`lows`) is the multiply alone and one insert at the block's
+ * end (cork-bench under valgrind, V8 14.6: fmath-sse 7.4 % fewer machine
+ * instructions an iteration; game-sse, whose blocks are short, 0.1 % more).
  *
  * @param {E} e @param {Operand} dst @param {Operand} src
  * @param {number} opcode  the f32 or f64 operation
@@ -1474,10 +1477,9 @@ function setLow(e, dst, local, double){
 }
 
 /**
- * `minss` to `maxsd` where `scalarsApart`: the low lane of dst the lesser
- * (`min`) or the greater of its own and src's, as a compare and a select --
- * src's whenever the compare is false, a NaN or two zeros included -- put
- * back over dst.
+ * `minss` to `maxsd`: the low lane of dst the lesser (`min`) or the greater
+ * of its own and src's, as a compare and a select -- src's whenever the
+ * compare is false, a NaN or two zeros included -- put back over dst.
  *
  * @param {E} e @param {Operand} dst @param {Operand} src @param {boolean} double
  * @param {boolean} min
@@ -1837,23 +1839,11 @@ function compare(e, predicate, double){
 function comparison(e, dst, src, double, flagsLive){
     const { b } = e;
     prepareAddress(e, src);
-    if (scalarsApart(e))
-    {
-        // The low lanes as the scalar forms hold them (`lows`).
-        pushLow(e, dst, double);
-        b.localSet(double ? Local.d0 : Local.f0);
-        pushLow(e, src, double, true);
-        b.localSet(double ? Local.d1 : Local.f1);
-    }
-    else
-    {
-        readV(e, dst, 16);
-        b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
-        b.localSet(double ? Local.d0 : Local.f0);
-        readV(e, src, double ? 8 : 4);
-        b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
-        b.localSet(double ? Local.d1 : Local.f1);
-    }
+    // The low lanes as the scalar forms hold them (`lows`).
+    pushLow(e, dst, double);
+    b.localSet(double ? Local.d0 : Local.f0);
+    pushLow(e, src, double, true);
+    b.localSet(double ? Local.d1 : Local.f1);
     if (!flagsLive)
     {
         return;
