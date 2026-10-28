@@ -92,8 +92,10 @@ test('a wide x87 region run under single leaves once, and its address is transla
     view.setUint8(m.layout.x87Empty, 0xff);
     const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
     assert.equal(exit.kind, 'untranslated');
-    assert.equal(exit.retired, 2, 'the two fld1 ran, the fadd did not');
-    assert.equal(m.eip(), CODE + 4);
+    // Tested where the region is entered: the block reaches its fadd before any
+    // control word write, so it leaves before the first fld1.
+    assert.equal(exit.retired, 0, 'it left at its entry');
+    assert.equal(m.eip(), CODE);
     const after = m.runtime.diagnostics();
     assert.equal(after.precisionSwitches, 1);
     assert.deepEqual(after.precision, { wide: 0, narrow: 1, mixed: 0 });
@@ -119,10 +121,10 @@ test('a region that runs under single and then under double is compiled for doub
     const m = machine();
     m.write(CODE, ROUNDING);
     assert.equal((await runRounding(m, CODE, 0x07f)).kind, 'halt');
-    // Double precision under the single region: it leaves before the fadd.
+    // Double precision under the single region: it leaves at its entry.
     let exit = await runRounding(m, CODE, 0x27f);
     assert.equal(exit.kind, 'untranslated');
-    assert.equal(m.eip(), CODE + 4);
+    assert.equal(m.eip(), CODE);
     assert.deepEqual(m.runtime.diagnostics().precision, { wide: 1, narrow: 0, mixed: 0 });
     assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the single region went');
     assert.equal((await runRounding(m, CODE, 0x27f)).kind, 'halt');

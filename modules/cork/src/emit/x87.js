@@ -1018,6 +1018,142 @@ export function planStack(region, states, cut, speculate, callReturn = false){
 }
 
 /**
+ * Where a region compiled for one precision control (`wide`, `narrow`) knows
+ * at a block's start that the control word is the one it was compiled for, so
+ * the block's rounding needs no test of its own: every way into the block
+ * tested it. An entry from outside tests it once in the function's head
+ * (`x87EntryCheck`), the return of a call made as a wasm call after the call
+ * (`x87AfterCall`) -- the callee may set it -- and an edge from a block that
+ * did not test it, or wrote the word after, on the edge (`x87Edge`). Only a
+ * block from which a path reaches a rounding instruction before a control word
+ * written is one: elsewhere the test would only leave for the host where
+ * nothing needs it. A loop's body then tests nothing per turn, and a loop
+ * whose way in writes the word (a float stored as an integer: `fldcw`, `fistp`,
+ * `fldcw` before it) tests on that way in, once a time round the loop around
+ * it. A block that loops onto itself with the word written after its last
+ * rounding tests in itself: its back edge is a branch with no edge's code.
+ *
+ * @param {import('../region.js').Region} region
+ * @param {(StackState | null)[]} states  the tracker's, a cut block's null
+ * @param {Set<number>} cut
+ * @param {boolean} [callReturn]
+ * @returns {boolean[]}  by block, whether its start knows the control word
+ */
+export function planPrecision(region, states, cut, callReturn = false){
+    const blocks = region.blocks;
+    const index = new Map(blocks.map((block, i)=>[block.start, i]));
+    const returns = inlineReturns(region);
+    const tracked = blocks.map((_, i)=>states[i] !== null && !cut.has(i));
+    // The edges the emitter takes from one block to another without leaving
+    // the function, as `planStack` follows them; a call made as a wasm call
+    // is no edge to its return, which tests after it.
+    const successors = blocks.map(block=>{
+        const { kind, targets, next } = block.exit;
+        const to = callReturn && callsOut(block, index) ? [] : [...targets];
+        if (kind === 'fallthrough' || kind === 'jcc' || kind === 'loop')
+        {
+            to.push(next);
+        }
+        else if (kind === 'ret')
+        {
+            to.push(...returns.get(block.start) ?? []);
+        }
+        return [...new Set(to.map(target=>index.get(target) ?? -1))].filter(j=>j >= 0);
+    });
+    // Per block: a rounding form before any control word written, a control
+    // word written, and a rounding form after the last one written (the
+    // block's own test then holds at its end).
+    const own = blocks.map(block=>{
+        let first = false;
+        let writes = false;
+        let after = false;
+        for (const instruction of block.instructions)
+        {
+            if (CONTROL_WRITERS.has(instruction.op))
+            {
+                writes = true;
+                after = false;
+            }
+            else if (ROUNDS.has(instruction.op))
+            {
+                first ||= !writes;
+                after = true;
+            }
+        }
+        return { first, writes, after };
+    });
+    const ahead = blocks.map((_, i)=>tracked[i] && own[i].first);
+    for (let changed = true; changed;)
+    {
+        changed = false;
+        for (let i = blocks.length - 1; i >= 0; i--)
+        {
+            if (!ahead[i] && tracked[i] && !own[i].writes && successors[i].some(j=>ahead[j]))
+            {
+                ahead[i] = true;
+                changed = true;
+            }
+        }
+    }
+    return ahead.map((first, i)=>first
+        && !(successors[i].includes(i) && own[i].writes && !own[i].after));
+}
+
+/**
+ * Which stack words a block may leave unwritten for the blocks after it
+ * (`Known`): the empty mask and the top are written where something reads
+ * them -- a way out of the region, a check, a form that is not plain, a call
+ * -- not at every block's end, so a loop's turn keeps neither in a local it
+ * writes. A block whose start the plan knows (`planStack`) takes on the bits
+ * it knows there as stale, since whichever way it is reached the mask holds
+ * them so, and the top it is compiled for; a block reached otherwise (one the
+ * tracker does not follow, cut, or entered at a guessed top, which tests the
+ * top local) takes nothing on, and every edge into it writes what is stale.
+ * A region with MMX, and the function of a region's copies, carry nothing.
+ *
+ * @param {import('../region.js').Region} region
+ * @param {(StackState | null)[]} states @param {Set<number>} cut
+ * @param {Map<number, number>} guarded @param {Shape[]} shapes
+ * @returns {{ takes: number[], keeps: { mask: number, top: boolean }[] }}  takes: by block,
+ *     the empty-mask bits it takes on stale, or -1 where it takes nothing, not the top
+ *     either; keeps: by block, what its end may leave stale for every block it goes on to
+ */
+export function planCarried(region, states, cut, guarded, shapes){
+    const blocks = region.blocks;
+    const index = new Map(blocks.map((block, i)=>[block.start, i]));
+    const returns = inlineReturns(region);
+    const takes = blocks.map((_, i)=>(states[i] === null || cut.has(i) || guarded.has(i)
+        ? -1 : (shapes[i].held | shapes[i].empty) & 0xff));
+    const keeps = blocks.map(block=>{
+        const { kind, targets, next } = block.exit;
+        const to = [...targets];
+        if (kind === 'fallthrough' || kind === 'jcc' || kind === 'loop')
+        {
+            to.push(next);
+        }
+        else if (kind === 'ret')
+        {
+            to.push(...returns.get(block.start) ?? []);
+        }
+        let mask = 0xff;
+        let top = true;
+        for (const target of to)
+        {
+            const j = index.get(target);
+            if (j === undefined)
+            {
+                // A way out of the region writes everything itself.
+                continue;
+            }
+            mask &= Math.max(takes[j], 0);
+            top &&= takes[j] >= 0;
+        }
+        return { mask, top };
+    });
+    return { takes, keeps };
+}
+
+/**
  * The emitter's x87 state for one region.
  *
  * @typedef {Object} X87Emit
@@ -1042,6 +1178,14 @@ export function planStack(region, states, cut, speculate, callReturn = false){
  * @property {boolean} controlWritten
  * @property {number} checkedPrecision  the block whose precision control a `wide` region
  *     has checked since the last write of the control word, or -1
+ * @property {boolean} compared  the registers a way out stores are those whose local differs
+ *     from the state block (`x87StoreRegisters`), not a dirty mask kept as they are written:
+ *     a region of doubles with no MMX
+ * @property {{ takes: number[], keeps: { mask: number, top: boolean }[] } | null} carried
+ *     the stack words left stale from block to block (`planCarried`), or null where every
+ *     block writes them at its end
+ * @property {boolean[] | null} precisionIn  by block, whether every way into it tested the
+ *     control word in a region compiled for one precision (`planPrecision`), or null
  * @property {Known} known   what the current block's own x87 has made of the stack words
  * @property {Shape[]} shapes  what is known of the stack words at each block's start (`planStack`)
  * @property {(Shape | null)[]} needs  what each entry tests of the stack words, or null
@@ -1451,9 +1595,11 @@ export function prepareX87(e, entryTop, checked = false,
         return {
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
             states: [], ends: [], cut: new Set(), guarded: new Map(), current: null, landed: null,
-            controlWritten: false, checkedPrecision: -1, known: unknown(), shapes: [], needs: [],
+            controlWritten: false, checkedPrecision: -1, precisionIn: null, known: unknown(),
+            shapes: [], needs: [],
             stack: NOTHING,
             guards: 0, relaxedReads: 0, tracksExact: false, exact: 0, exactNaN: 0, shadow: [],
+            compared: false, carried: null,
             dyn: -1, singles: noSingles(), single: [], floatTemps: [], floatsIn: null,
         };
     }
@@ -1495,8 +1641,15 @@ export function prepareX87(e, entryTop, checked = false,
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
         states, ends, cut, guarded, current: null, landed: null, controlWritten,
         checkedPrecision: -1,
+        // The function of a region's copies tests in each block, as it is entered
+        // otherwise than the region's own blocks are.
+        precisionIn: (e.wide || e.narrow) && !e.copyFunction
+            ? planPrecision(e.region, states, cut, e.callReturn) : null,
         known: unknown(), shapes, needs, stack: NOTHING, guards: 0, relaxedReads: 0,
         tracksExact, exact: 0, exactNaN: 0, shadow, dyn,
+        compared: !hasMmx && e.layout.x87Format !== 'tagged80',
+        carried: hasMmx || e.copyFunction ? null
+            : planCarried(e.region, states, cut, guarded, shapes),
         singles: noSingles(), single: new Array(8).fill(-1), floatTemps: [],
         floatsIn: e.floats === true && !hasMmx && e.context.precise !== true
             ? planFloats(e.region, analysis, e.returns) : null,
@@ -1513,16 +1666,17 @@ export function prepareX87(e, entryTop, checked = false,
  */
 export function x87EntryCheck(e){
     const x = e.x87;
-    /** @type {{ label: number, need: Shape | null, floats: number }[]} */
+    /** @type {{ label: number, need: Shape | null, floats: number, precision: boolean }[]} */
     const tests = [];
     const count = e.region.blocks.length;
     for (let label = 0; label < count; label++)
     {
         const need = x.needs[label] ?? null;
         const floats = x.floatsIn?.[label]?.held ?? 0;
-        if (need !== null || floats !== 0)
+        const precision = x.precisionIn?.[label] === true;
+        if (need !== null || floats !== 0 || precision)
         {
-            tests.push({ label, need, floats });
+            tests.push({ label, need, floats, precision });
         }
     }
     if (tests.length === 0)
@@ -1540,8 +1694,13 @@ export function x87EntryCheck(e){
         return e.depthOf(k < 0 ? 'shaped' : `shape${k}`);
     });
     b.localGet(Local.label).brTable(depths, e.depthOf('shaped'));
-    tests.forEach(({ label, need, floats }, k)=>{
+    tests.forEach(({ label, need, floats, precision }, k)=>{
         e.close();
+        if (precision)
+        {
+            // The block's rounding does not test the control word (`planPrecision`).
+            precisionGuard(e, e.region.blocks[label].start);
+        }
         if (need !== null)
         {
             // A held register's bit is 0 and an empty one's 1: whatever is not
@@ -1591,6 +1750,25 @@ export function x87EntryCheck(e){
 
 
 /**
+ * Leaves for the host at `eip` when the control word's precision is not the
+ * one the region is compiled for: single in a `wide` region, any other in a
+ * `narrow` one.
+ *
+ * @param {E} e @param {number} eip
+ */
+function precisionGuard(e, eip){
+    const { b } = e;
+    b.localGet(Local.x87Control).i32const(0x300).op(I32.and);
+    if (e.wide)
+    {
+        b.op(I32.eqz);
+    }
+    e.openGuard(e.wide ? 'single' : 'notSingle', EMPTY);
+    e.exitAt(eip, Exit.UNTRANSLATED, PRECISION);
+    e.close();
+}
+
+/**
  * The prologue: the empty mask, the status and control words, and every
  * held register into its local.
  *
@@ -1635,7 +1813,9 @@ export function x87LoadRegisters(e, needed){
         // register the machine had empty, and its value is then whatever the
         // mantissa the state block holds decodes to -- the emulator reads the
         // same bytes, so the two agree.
-        if (!x.hasMmx)
+        // So does a region that compares at its exits (`compared`): a register it
+        // does not write then holds what the block has, an empty one's bytes too.
+        if (!x.hasMmx && !x.compared)
         {
             b.localGet(Local.x87Empty).i32const(1 << k).op(I32.and).op(I32.eqz);
             e.openIf(`held${k}`, EMPTY);
@@ -1666,7 +1846,7 @@ export function x87LoadRegisters(e, needed){
         {
             atState(e.context, b).load('f64', { offset: at }).localSet(x.base + k);
         }
-        if (!x.hasMmx)
+        if (!x.hasMmx && !x.compared)
         {
             e.close();
         }
@@ -1728,6 +1908,16 @@ export function x87Epilogue(e){
 export function x87StoreRegisters(e, written){
     const { b, layout } = e;
     const x = e.x87;
+    if (x.compared)
+    {
+        // The registers stored are found here, not marked as written: those whose
+        // local is not, bit for bit, what the state block holds. A register the run
+        // did not write holds what was loaded from there, or, empty at the entry and
+        // never loaded, nothing anything reads. No mask is kept over the region's
+        // blocks, whose loops would carry it, and V8 the locals it ties up, around
+        // every turn.
+        b.i32const(0).localSet(Local.x87Dirty);
+    }
     for (let k = 0; k < 8; k++)
     {
         if (!written(k))
@@ -1735,6 +1925,16 @@ export function x87StoreRegisters(e, written){
             continue;
         }
         const at = layout.x87 + k * 16;
+        if (x.compared)
+        {
+            b.localGet(x.base + k).op(I64.reinterpretF64);
+            atState(e.context, b).load('i64', { offset: at }).op(I64.ne);
+            e.openIf(`changed${k}`, EMPTY);
+            atState(e.context, b).localGet(x.base + k).store('f64', { offset: at });
+            b.localGet(Local.x87Dirty).i32const(1 << k).op(I32.or).localSet(Local.x87Dirty);
+            e.close();
+            continue;
+        }
         b.localGet(Local.x87Dirty).i32const(1 << k).op(I32.and);
         e.openIf(`dirty${k}`, EMPTY);
         if (layout.x87Format === 'tagged80')
@@ -1830,7 +2030,15 @@ export function x87BlockStart(e, index){
     }
     x.current = x.states[index] === null ? null : cloneState(/** @type {StackState} */ (x.states[index]));
     x.stack = x.shapes[index] ?? NOTHING;
-    if (x.current !== null)
+    const takes = x.carried?.takes[index] ?? -1;
+    if (x.current !== null && takes >= 0)
+    {
+        // What the blocks before it left stale (`planCarried`): the bits the plan
+        // knows here, as it knows them, and the top it is compiled for.
+        x.known = { ...unknown(), block: index, held: x.stack.held & takes,
+            empty: x.stack.empty & takes, stale: takes, top: x.current.top, topStale: true };
+    }
+    else if (x.current !== null)
     {
         e.b.i32const(x.current.top).localSet(Local.x87Top);
     }
@@ -1853,7 +2061,14 @@ export function x87BlockStart(e, index){
  */
 export function x87Edge(e, targetIndex){
     const x = e.x87;
-    x87Flush(e, false);
+    if (x.precisionIn?.[targetIndex] === true && x.checkedPrecision !== e.blockIndex)
+    {
+        // The target's rounding does not test the control word, and this block
+        // did not, or wrote it after (`planPrecision`): before the jump.
+        precisionGuard(e, e.region.blocks[targetIndex].start);
+    }
+    const takes = x.carried?.takes[targetIndex] ?? -1;
+    x87Flush(e, false, Math.max(takes, 0), takes >= 0);
     const to = x.states[targetIndex];
     if (!to || x.cut.has(targetIndex))
     {
@@ -1905,9 +2120,12 @@ export function x87Normalise(e, from = e.x87.current){
  * path, so the locals are current from here; an exit's or an edge's write
  * inside a branch leaves them stale for the path that goes on.
  *
- * @param {E} e @param {boolean} commit
+ * `keep` and `keepTop`: what an edge into a block that takes them on stale, or a
+ * block's end before such blocks alone (`planCarried`), leaves unwritten.
+ *
+ * @param {E} e @param {boolean} commit @param {number} [keep] @param {boolean} [keepTop]
  */
-function x87Flush(e, commit){
+function x87Flush(e, commit, keep = 0, keepTop = false){
     const { b } = e;
     const known = e.x87.known;
     if (!commit)
@@ -1915,16 +2133,25 @@ function x87Flush(e, commit){
         // An exit's or an edge's: the f64 locals are what it stores or hands on.
         x87WriteSingles(e, false);
     }
-    if (known.stale !== 0)
+    const stale = known.stale & ~keep;
+    if (stale !== 0)
     {
-        b.localGet(Local.x87Empty).i32const(~known.stale).op(I32.and);
-        if ((known.empty & known.stale) !== 0)
+        if ((stale & 0xff) === 0xff)
         {
-            b.i32const(known.empty & known.stale).op(I32.or);
+            b.i32const(known.empty & stale);
+        }
+        else
+        {
+            b.localGet(Local.x87Empty).i32const(~stale).op(I32.and);
+            if ((known.empty & stale) !== 0)
+            {
+                b.i32const(known.empty & stale).op(I32.or);
+            }
         }
         b.localSet(Local.x87Empty);
     }
-    if (known.topStale)
+    const top = known.topStale && !keepTop;
+    if (top)
     {
         b.i32const(known.top).localSet(Local.x87Top);
     }
@@ -1934,8 +2161,8 @@ function x87Flush(e, commit){
     }
     if (commit)
     {
-        known.stale = 0;
-        known.topStale = false;
+        known.stale &= keep;
+        known.topStale &&= !top;
         known.dirty |= known.pending;
         known.pending = 0;
     }
@@ -1950,7 +2177,8 @@ function x87Flush(e, commit){
  */
 export function x87BlockEnd(e){
     x87WriteSingles(e, true);
-    x87Flush(e, true);
+    const keeps = e.x87.carried?.keeps[e.blockIndex];
+    x87Flush(e, true, keeps?.mask ?? 0, keeps?.top ?? false);
 }
 
 /**
@@ -2005,6 +2233,12 @@ export function x87AfterCall(e, next, top){
         e.openGuard('unshaped', EMPTY);
         e.exitAt(next, Exit.UNTRANSLATED, SHAPE);
         e.close();
+    }
+    if (x.precisionIn?.[/** @type {number} */ (e.labels.get(next))] === true)
+    {
+        // The callee may have set the control word; the code after the call
+        // does not test it (`planPrecision`).
+        precisionGuard(e, next);
     }
     x.current = { top, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
 }
@@ -2165,17 +2399,10 @@ export function emitX87(e, instruction, flagsLive){
     if ((e.wide || e.narrow) && ROUNDS.has(op)
         && x.checkedPrecision !== e.blockIndex)
     {
-        b.localGet(Local.x87Control).i32const(0x300).op(I32.and);
-        if (e.wide)
-        {
-            b.op(I32.eqz);
-        }
-        e.openGuard(e.wide ? 'single' : 'notSingle', EMPTY);
         // Not `exitBefore`: the exit is conditional, and the block stays an entry.
         e.blockRetired--;
-        e.exitAt(instruction.eip, Exit.UNTRANSLATED, PRECISION);
+        precisionGuard(e, instruction.eip);
         e.blockRetired++;
-        e.close();
         x.checkedPrecision = e.blockIndex;
     }
     // What this block's own x87 instructions have made of the stack words (see
@@ -2241,6 +2468,10 @@ export function emitX87(e, instruction, flagsLive){
      */
     const markDirty = physical=>{
         const bit = 1 << physical;
+        if (x.compared)
+        {
+            return;
+        }
         if (safe && ((known.dirty | known.pending) & bit) !== 0)
         {
             return;
@@ -3058,8 +3289,11 @@ export function emitX87(e, instruction, flagsLive){
             const c = (state.top + i) & 7;
             // An empty register faults and is made the indefinite first.
             guard(true);
-            b.localGet(Local.x87Dirty).i32const((1 << a) | (1 << c)).op(I32.or)
-                .localSet(Local.x87Dirty);
+            if (!x.compared)
+            {
+                b.localGet(Local.x87Dirty).i32const((1 << a) | (1 << c)).op(I32.or)
+                    .localSet(Local.x87Dirty);
+            }
             if (x.hasMmx)
             {
                 const ma = e.mmLocal(a);
@@ -3639,7 +3873,9 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(Local.x87Status).i32const(~Status.CONDITION).op(I32.and)
                 .localSet(Local.x87Status);
             b.localGet(v).op(I64.reinterpretF64).i64const(0n).op(I64.ltS);
-            if (!x.hasMmx)
+            // Compared stores load every register the region names at entry, so the
+            // local holds what an empty register still holds.
+            if (!x.hasMmx && !x.compared)
             {
                 // An empty ST0's sign is that of what the register still holds:
                 // the local where this region wrote it, else the state block's,

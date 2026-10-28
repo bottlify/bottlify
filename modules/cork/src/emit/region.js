@@ -2990,7 +2990,10 @@ export class RegionEmitter {
             this.ends[this.lastEmitted] = this.pending;
         }
         this.lastEmitted = index;
-        this.x87.checkedPrecision = -1;
+        // A block every way into which tested the control word tests it no more
+        // (`planPrecision`); its copy, entered otherwise, does.
+        this.x87.checkedPrecision = !this.copying && this.x87.precisionIn?.[index] === true
+            ? index : -1;
         this.hint = undefined;
         this.pending = null;
         this.fcmp = null;
