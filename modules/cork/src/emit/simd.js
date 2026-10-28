@@ -1269,7 +1269,10 @@ function scalarFloat(e, dst, src, opcode, double, unaryForm = false){
     }
     pushLow(e, src, double);
     b.op(opcode);
-    scalarDefaultNaN(e, unaryForm ? [src] : [dst, src], double);
+    if (!e.context.features.defaultNaNNegative)
+    {
+        scalarDefaultNaN(e, unaryForm ? [src] : [dst, src], double);
+    }
     b.op(0xfd, [double ? SIMD.f64x2ReplaceLane : SIMD.f32x4ReplaceLane, 0]);
     writeV(e, dst, null);
 }
@@ -1300,7 +1303,8 @@ function scalarSelect(e, dst, src, double, min){
 
 /**
  * The scalar result on the stack, a NaN while no operand was, made the
- * processor's default NaN, sign set, as `defaultNaN` does a lane. The common
+ * processor's default NaN, sign set, as `defaultNaN` does a lane: on a host
+ * whose NaN is fixed up (`exactNaN`), as the packed forms are. The common
  * path is the result compared with itself; the operands are read again only
  * when that finds a NaN.
  *

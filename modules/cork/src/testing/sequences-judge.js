@@ -214,12 +214,13 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
  * @param {number} part @param {number} of
  * @param {import('../../../core/src/layers/cpu/engine.js').EngineEnv['features']} [features]
  *     the host the translator makes code for, another than this one (`createJudge`)
+ * @param {Record<string, unknown>} [cork]  the translator's settings besides the judge's own
  */
-export function testSequences(part, of, features = undefined){
+export function testSequences(part, of, features = undefined, cork = {}){
     test(`translated sequences of x87, MMX and SSE leave what the instruction model leaves`
         + `${features ? ' as another host translates them' : ''} (part ${part + 1} of ${of})`,
     async()=>{
-        const machine = createJudge({ features });
+        const machine = createJudge({ features, cork });
         const started = Date.now();
         const next = random(SEED);
         /** @type {Map<string, { count: number, at: string, what: string }>} */
