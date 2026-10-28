@@ -471,8 +471,9 @@ const armRunner = /aarch64|arm64/.test(value('--runner') ?? process.arch);
 const hostFeatures = !armRunner ? { defaultNaNNegative: true }
     : args.includes('--exact-nan') ? { defaultNaNNegative: false }
         : { defaultNaNNegative: true, armHost: true };
-console.log(`emitted for a host whose default NaN is ${hostFeatures.defaultNaNNegative
-    ? 'negative (x86)' : 'positive (arm64)'}`);
+console.log(`emitted for ${!armRunner ? 'an x64 host'
+    : hostFeatures.armHost ? 'an arm64 host, the NaN sign left as the host makes it'
+        : 'an arm64 host, the NaN sign fixed up for x86 (--exact-nan)'}`);
 const counted = value('--count') === null ? null : new RegExp(/** @type {string} */ (value('--count')));
 console.log(`     entry  blocks  x86  wasm B  machine  bytes  per x86${counted ? '  matched' : ''}`
     + (profile ? '  ran x86  weighted' : ''));
