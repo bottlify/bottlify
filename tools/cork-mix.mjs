@@ -20,6 +20,12 @@
  * a region of its own, less an empty one: a static count, cold paths
  * included), so `weighted ops` ranks where translated code spends its work.
  * Blocks outside the entry image and the `--image` ones are counted only.
+ *
+ * `--runs` adds the runs of two and three forms in a row within a block, by how
+ * often they ran: the combinations a translator could do as one -- a compare and
+ * its branch, `fld; fmul; faddp`, a copy through a register -- rank first. A
+ * profile written by `tools/launch-probe.mjs --cork-out` (`blockCounts`) reads as
+ * one of game.mjs's.
  */
 
 import { readFileSync } from 'node:fs';
@@ -34,6 +40,8 @@ import { features } from '../modules/cork/src/wasm/features.js';
 const args = process.argv.slice(2);
 const flag = (/** @type {string} */ name, /** @type {string} */ fallback)=>(args.includes(name) ? args[args.indexOf(name) + 1] : fallback);
 const profile = JSON.parse(readFileSync(args[0], 'utf8'));
+/** @type {[number, number][]} */
+const blocks = profile.blocks ?? profile.blockCounts;
 const bundleId = flag('--bundle', profile.bundle);
 const top = Number(flag('--top', '30'));
 
@@ -87,18 +95,22 @@ const opsOf = bytes=>{
 const costOf = new Map();
 const empty = opsOf([]);
 
-const counted = new Set(profile.blocks.map((/** @type {number[]} */ [address])=>address));
+const counted = new Set(blocks.map(([address])=>address));
+/** Runs of two and three forms in a row (`--runs`), by key. @type {Map<string, number>[]} */
+const runs = [new Map(), new Map()];
 /** @type {Map<string, { executions: number, cost: number }>} */
 const mix = new Map();
 let executed = 0;
 let outside = 0;
-for (const [address, count] of profile.blocks)
+for (const [address, count] of blocks)
 {
     if (!section(address))
     {
         outside += count;
         continue;
     }
+    /** @type {string[]} */
+    const keys = [];
     for (let eip = address; ;)
     {
         const instruction = decode(read, eip);
@@ -107,6 +119,7 @@ for (const [address, count] of profile.blocks)
             break;
         }
         const key = `${instruction.op} ${instruction.operands.map(formOf).join(',')}`;
+        keys.push(key);
         if (!costOf.has(key))
         {
             const bytes = [];
@@ -126,6 +139,14 @@ for (const [address, count] of profile.blocks)
             break;
         }
     }
+    for (const [n, map] of runs.entries())
+    {
+        for (let i = n + 1; i < keys.length; i++)
+        {
+            const run = keys.slice(i - n - 1, i + 1).join(' ; ');
+            map.set(run, (map.get(run) ?? 0) + count);
+        }
+    }
 }
 
 let weighted = 0;
@@ -136,7 +157,7 @@ for (const row of mix.values())
 const rows = [...mix].sort((one, two)=>two[1].executions * two[1].cost
     - one[1].executions * one[1].cost);
 const images = [manifest.entry, ...extra].join(', ');
-console.log(`${profile.blocks.length} blocks, ${executed} instructions in ${images}`
+console.log(`${blocks.length} blocks, ${executed} instructions in ${images}`
     + `, ${outside} block executions outside it`);
 console.log('share  ops-share  ops/insn  form');
 for (const [key, row] of rows.slice(0, top))
@@ -146,8 +167,21 @@ for (const [key, row] of rows.slice(0, top))
         + `  ${String(row.cost).padStart(8)}  ${key}`);
 }
 
+if (args.includes('--runs'))
+{
+    for (const [n, map] of runs.entries())
+    {
+        console.log(`\nruns of ${n + 2} forms in a row, a share of the instructions executed`);
+        for (const [run, count] of [...map].sort((one, two)=>two[1] - one[1]).slice(0, top))
+        {
+            console.log(`${(100 * count / executed).toFixed(2).padStart(6)}%  ${run}`);
+        }
+    }
+}
+
 /**
- * An operand's form: register, memory, immediate, x87 stack or vector register.
+ * An operand's form: register, memory (a stack slot, through esp or ebp, apart),
+ * immediate, x87 stack or vector register.
  *
  * @param {import('../modules/cork/src/decode/decoder.js').Operand} operand
  */
@@ -155,7 +189,8 @@ function formOf(operand){
     switch (operand.kind)
     {
         case 'reg': return `r${operand.size * 8}`;
-        case 'mem': return `m${operand.size * 8}`;
+        case 'mem':
+            return `${operand.base === 4 || operand.base === 5 ? 'stack' : 'm'}${operand.size * 8}`;
         case 'imm': return 'i';
         default: return operand.kind;
     }
