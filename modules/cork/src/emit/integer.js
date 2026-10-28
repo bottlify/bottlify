@@ -2213,6 +2213,18 @@ function arithmetic(e, instruction, flagsLive){
         b.localSet(Local.cin);
     }
     prepare(e, dst.kind === 'mem' ? dst : src);
+    if (op === 'cmp' && e.fusesIntegerCompare())
+    {
+        const [a, c, res] = e.fusedLocals();
+        readOp(e, dst);
+        b.localTee(a);
+        readOp(e, src);
+        // SF and PF read the result's low bits and ZF compares the operands,
+        // so the difference goes unmasked.
+        b.localTee(c).op(I32.sub).localSet(res);
+        e.icmp = { kind: Kind.SUB, width: widthCode(size) };
+        return;
+    }
     readOp(e, dst);
     setOperand(e, Local.op1, size);
     readOp(e, src);
@@ -2261,6 +2273,15 @@ function logic(e, instruction, flagsLive){
     const { op, operands, size } = instruction;
     const [dst, src] = operands;
     prepare(e, dst.kind === 'mem' ? dst : src);
+    if (op === 'test' && e.fusesIntegerCompare())
+    {
+        const [, , res] = e.fusedLocals();
+        readOp(e, dst);
+        readOp(e, src);
+        b.op(I32.and).localSet(res);
+        e.icmp = { kind: Kind.LOGIC, width: widthCode(size) };
+        return;
+    }
     const compute = ()=>{
         readOp(e, dst);
         readOp(e, src);
@@ -3019,6 +3040,21 @@ function imul(e, instruction, flagsLive){
             productHigh(e, true);
             productFlags(e, true);
         }
+        return true;
+    }
+    if (!flagsLive)
+    {
+        // With CF and OF dead only the low half is wanted, and the low half
+        // of a product is the same signed or not: one i32 multiply, where the
+        // widened one cost a hashing loop (str's FNV) a sign extension and a
+        // truncation a turn.
+        readOp(e, a);
+        readOp(e, c);
+        b.op(I32.mul).localSet(Local.t1);
+        writeOp(e, dst, ()=>{
+            b.localGet(Local.t1);
+            mask(e, size);
+        });
         return true;
     }
     readSigned(a);

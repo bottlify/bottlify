@@ -52,6 +52,7 @@ import {
     recordOffsets, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
+import { copyLoopOf, emitCopyAtOnce } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
     planLoop, planRegion, readsWrapped,
@@ -1173,6 +1174,16 @@ export class RegionEmitter {
          * @type {import('./x87.js').FloatCompare | null}
          */
         this.fcmp = null;
+        /**
+         * An integer `cmp` or `test` whose flags only the block's final branch
+         * reads (`fusesIntegerCompare`): its operands and result are in the
+         * locals `fusedLocals` names, the record is left as it was, and the
+         * branch reads them in its place.
+         * @type {{ kind: number, width: number } | null}
+         */
+        this.icmp = null;
+        /** The three i32 locals of a fused integer compare, once one is made. @type {number[]} */
+        this.fused = [];
         /** Branches that compared a float compare's operands themselves, for the tests. */
         this.fusedCompares = 0;
         /** By block, the blocks whose way on goes there, in order, once a guess needs them.
@@ -2331,6 +2342,21 @@ export class RegionEmitter {
 
     /** Pushes 0/1 for a condition code. @param {number} cc */
     pushCondition(cc){
+        if (this.icmp !== null)
+        {
+            const { kind, width } = this.icmp;
+            const [a, c, res] = this.fused;
+            this.icmp = null;
+            if (kind === Kind.SUB && cc >> 1 === 2)
+            {
+                // Equal when the operands are, both read at their width.
+                this.b.localGet(a).localGet(c).op((cc & 1) === 1 ? I32.ne : I32.eq);
+                return;
+            }
+            emitCondition(this.b, { kind: -1, res, op1: a, op2: c, cin: Local.cin,
+                flags: Local.flags }, kind, width, cc);
+            return;
+        }
         if (this.fcmp !== null)
         {
             // Read once, by the branch; a loop's second copy compares again.
@@ -2340,6 +2366,33 @@ export class RegionEmitter {
             return;
         }
         this.pushRead((kind, width)=>emitCondition(this.b, this.flagLocals, kind, width, cc));
+    }
+
+    /**
+     * Whether the integer compare being emitted, a `cmp` or `test`, is read by
+     * the block's final conditional branch alone (`fusesCompare`): then it
+     * leaves the record as it was and the branch compares its operands. A loop's
+     * compare and branch were a record of four locals the compiler kept live to
+     * every way out of the loop, and a subtraction and a mask tested apart.
+     */
+    fusesIntegerCompare(){
+        const block = this.region.blocks[this.blockIndex];
+        const last = block.instructions[block.instructions.length - 1];
+        return this.width.bits === 32 && last.cc !== undefined
+            && this.fusesCompare(block.instructions.indexOf(this.current), ()=>false);
+    }
+
+    /** The fused integer compare's locals: its operands and its result. */
+    fusedLocals(){
+        if (this.fused.length === 0)
+        {
+            for (let k = 0; k < 3; k++)
+            {
+                this.fused.push(this.localTypes.length + STATE_PARAMS);
+                this.localTypes.push(ValType.i32);
+            }
+        }
+        return this.fused;
     }
 
     /**
@@ -2878,6 +2931,7 @@ export class RegionEmitter {
         this.hint = undefined;
         this.pending = null;
         this.fcmp = null;
+        this.icmp = null;
         this.dead = false;
         this.blockRetired = 0;
         this.blockDepth = this.controls.length;
@@ -2915,8 +2969,14 @@ export class RegionEmitter {
         {
             relaxedFlagReads(block, this.relaxedReads);
         }
-        const streams = this.selfLoop && !x.active && this.layout.codePages < 0
+        // A loop that only reads is left unhoisted where reads go untested: its
+        // unchecked copy saved one wrapping `and` a read and cost a turn counter
+        // and the window's test, which a short loop (a strlen, a hash of a
+        // name) never paid back.
+        const planned = this.selfLoop && !x.active && this.layout.codePages < 0
             ? planLoop(block.instructions, this.width.bits === 64) : null;
+        const streams = planned !== null && (planned.streams.some(stream=>stream.store)
+            || !readsWrapped(this.context)) ? planned : null;
         if (streams !== null)
         {
             this.emitHoistedLoop(block, index, live, streams);
@@ -2970,6 +3030,22 @@ export class RegionEmitter {
         const depth = this.controls.length;
         this.loops++;
         this.open(`selfDone${index}`, EMPTY);
+        const copy = this.width.bits === 32 && this.context.undo === undefined
+            ? copyLoopOf(block) : null;
+        if (copy !== null)
+        {
+            const pending = this.pending;
+            emitCopyAtOnce(this, block, copy, `selfDone${index}`, ()=>{
+                this.current = block.instructions[1];
+                this.flagsAfter = this.flagsAfterEach[1];
+                this.memPlan = null;
+                emitInstruction(this, block.instructions[1], live[1]);
+                // Fused, it is read by no branch here: the flags are dead past the loop.
+                this.icmp = null;
+            }, import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile
+                ? times=>this.countBlock(block.start, times) : null);
+            this.pending = pending;
+        }
         this.openLoop(`self${index}`);
         emitStreamWindow(this, streams.streams, streams.turns, streams.forward, streams.ranges);
         b.op(I32.eqz);
@@ -3039,14 +3115,23 @@ export class RegionEmitter {
      * and the address when the slot is another block's (then marked shared).
      *
      * @param {number} start
+     * @param {number} [times]  a local holding how many executions, one unless given
      */
-    countBlock(start){
+    countBlock(start, times = -1){
         const { b } = this;
         const at = this.layout.tables + blockProfileAt(this.layout)
             + blockSlot(start) * Tables.BLOCK_SLOT;
         const { context } = this;
-        atTables(context, atTables(context, b)).load('i32', { offset: at + 4 }).i32const(1)
-            .op(I32.add).store('i32', { offset: at + 4 });
+        atTables(context, atTables(context, b)).load('i32', { offset: at + 4 });
+        if (times < 0)
+        {
+            b.i32const(1);
+        }
+        else
+        {
+            b.localGet(times);
+        }
+        b.op(I32.add).store('i32', { offset: at + 4 });
         atTables(context, b).load('i32', { offset: at }).i32const(start | 0).op(I32.ne);
         this.openIf('profileSlot');
         atTables(context, atTables(context, b)).load('i32', { offset: at + 8 });
@@ -3238,8 +3323,14 @@ export class RegionEmitter {
      * budget runs out, as a run with no word does.
      */
     spentTest(){
+        this.b.localGet(Local.budget);
+        this.spentLimit();
+        this.b.op(I32.leS);
+    }
+
+    /** What `spentTest` compares the budget with: 0, or the interrupt word. */
+    spentLimit(){
         const { b } = this;
-        b.localGet(Local.budget);
         if (this.layout.interrupt === undefined)
         {
             b.i32const(0);
@@ -3248,7 +3339,6 @@ export class RegionEmitter {
         {
             atState(this.context, b).load('i32', { offset: this.layout.interrupt });
         }
-        b.op(I32.leS);
     }
 
     /**
