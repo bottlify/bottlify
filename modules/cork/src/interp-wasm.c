@@ -800,11 +800,13 @@ static void exactOut(void)
 
 /* The stack-fault check: t1 when a source ST(i) -- a bit per i in `sources` --
  * is empty or a push finds its register held, raising IE and SF; a push sets
- * C1 when it overflowed and clears it when not. */
+ * C1 when it overflowed and clears it when not, an underflow otherwise clears
+ * it. */
 static inline u32 guard(u32 top, u32 empty, u32 *status, u32 sources, u32 pushes)
 {
     u32 read = ((sources << top) | (sources >> (8 - top))) & 0xff;
     u32 t1 = (empty & read) != 0;
+    if (t1) *status &= ~S_C1;
     if (pushes)
     {
         u32 held = ((empty >> ((top - 1) & 7)) & 1) == 0;
@@ -883,6 +885,11 @@ static inline double loadF64(u32 at, u32 *status)
 #define PHYS(k) ((top + (k)) & 7)
 #define GUARD(sources, pushes) guard(top, empty, &status, (sources), (pushes))
 #define OR_INDEFINITE(v, t1) ((t1) ? fromBits(INDEFINITE_BITS) : (v))
+/* Writes ST(k), which is held after it: an instruction whose source was empty
+ * writes the indefinite there, and the register is held, as the processor
+ * tags it. */
+#define SET_ST(k, v) do { double _s = (v); u32 _p = PHYS(k); REG(_p) = _s; \
+        empty &= ~(1u << _p); } while (0)
 /* A push writes the register it lands in, a pop drops the one it frees: the
  * registers an exact integer no longer holds (xw, xp). */
 #define PUSH_ST(v) do { double _v = (v); top = (top - 1) & 7; xw |= 1u << top; REG(top) = _v; \
@@ -1117,7 +1124,7 @@ static u32 x87(const u8 *p)
             }
             else
             {
-                ST(0) = arith(g, ST(0), c0, t1, control, &status);
+                SET_ST(0, arith(g, ST(0), c0, t1, control, &status));
                 xw = 1u << top;
             }
             break;
@@ -1242,7 +1249,7 @@ static u32 x87(const u8 *p)
         }
         else
         {
-            ST(0) = arith(g, ST(0), ST(i), t1, control, &status);
+            SET_ST(0, arith(g, ST(0), ST(i), t1, control, &status));
             xw = 1u << top;
         }
         break;
@@ -1270,7 +1277,7 @@ static u32 x87(const u8 *p)
             if (g == 3 || e == 6) POP_ST();
             break;
         }
-        ST(i) = arith(g >= 4 ? g ^ 1 : g, ST(i), ST(0), t1, control, &status);
+        SET_ST(i, arith(g >= 4 ? g ^ 1 : g, ST(i), ST(0), t1, control, &status));
         xw = 1u << PHYS(i);
         if (e == 6) POP_ST();
         break;
@@ -1308,13 +1315,13 @@ static u32 x87(const u8 *p)
         case 0xe0:
         {
             double v = -ST(0);
-            ST(0) = OR_INDEFINITE(v, GUARD(1, 0));
+            SET_ST(0, OR_INDEFINITE(v, GUARD(1, 0)));
             break;
         }
         case 0xe1:
         {
             double v = __builtin_fabs(ST(0));
-            ST(0) = OR_INDEFINITE(v, GUARD(1, 0));
+            SET_ST(0, OR_INDEFINITE(v, GUARD(1, 0)));
             break;
         }
         case 0xe4:
@@ -1325,8 +1332,8 @@ static u32 x87(const u8 *p)
         {
             double v = ST(0);
             status &= ~S_CONDITION;
-            /* The sign of a held value: an empty register's leaves C1 clear. */
-            if (bitsOf(v) >> 63 && !((empty >> top) & 1)) status |= S_C1;
+            /* The sign of what the register holds, empty or not. */
+            if (bitsOf(v) >> 63) status |= S_C1;
             if ((empty >> top) & 1) status |= S_C3 | S_C0;
             else if (isNaN(v)) status |= S_C0;
             else if (__builtin_fabs(v) == __builtin_inf()) status |= S_C2 | S_C0;
@@ -1347,7 +1354,7 @@ static u32 x87(const u8 *p)
         case 0xf0:
         {
             double v = hostExpm1(ST(0) * fromBits(0x3fe62e42fefa39efull));
-            ST(0) = OR_INDEFINITE(v, GUARD(1, 0));
+            SET_ST(0, OR_INDEFINITE(v, GUARD(1, 0)));
             break;
         }
         case 0xf1: case 0xf9:
@@ -1356,7 +1363,8 @@ static u32 x87(const u8 *p)
             t1 = GUARD(3, 0);
             if (modrm == 0xf1)
             {
-                if (precise && ST(0) == 0 && __builtin_fabs(ST(1)) < __builtin_inf() && ST(1) != 0) status |= S_ZE;
+                if (precise && ST(0) == 0 && __builtin_fabs(ST(1)) < __builtin_inf() && ST(1) != 0
+                    && !t1) status |= S_ZE;
                 if (precise && ST(0) < 0) status |= S_IE;
                 /* A negative argument's logarithm is the indefinite, not the host's NaN. */
                 double log = ST(0) < 0 ? fromBits(INDEFINITE_BITS) : quietNaN(hostLog2(ST(0)));
@@ -1369,14 +1377,14 @@ static u32 x87(const u8 *p)
                     : quietNaN(hostLog1p(ST(0))) / fromBits(0x3fe62e42fefa39efull);
                 r = twoNaN(ST(1) * log, ST(1), log);
             }
-            ST(1) = OR_INDEFINITE(r, t1);
+            SET_ST(1, OR_INDEFINITE(r, t1));
             POP_ST();
             break;
         }
         case 0xf3:
         {
             double r = hostAtan2(ST(1), ST(0));
-            ST(1) = OR_INDEFINITE(r, GUARD(3, 0));
+            SET_ST(1, OR_INDEFINITE(r, GUARD(3, 0)));
             POP_ST();
             break;
         }
@@ -1391,19 +1399,19 @@ static u32 x87(const u8 *p)
             {
                 if (modrm == 0xfb)
                 {
-                    ST(0) = hostSin(v);
+                    SET_ST(0, hostSin(v));
                     PUSH_ST(hostCos(v));
                 }
                 else if (modrm == 0xf2)
                 {
-                    ST(0) = hostTan(v);
+                    SET_ST(0, hostTan(v));
                     PUSH_ST(1);
                 }
-                else ST(0) = modrm == 0xfe ? hostSin(v) : hostCos(v);
+                else SET_ST(0, modrm == 0xfe ? hostSin(v) : hostCos(v));
             }
             else if (isNaN(v) || t1)
             {
-                ST(0) = fromBits(INDEFINITE_BITS);
+                SET_ST(0, fromBits(INDEFINITE_BITS));
                 if (pushes) PUSH_ST(fromBits(INDEFINITE_BITS));
             }
             else status |= S_C2;
@@ -1416,13 +1424,13 @@ static u32 x87(const u8 *p)
             /* An infinity is its own significand with an exponent of +inf, a NaN both. */
             if (isNaN(v) || __builtin_fabs(v) == __builtin_inf())
             {
-                ST(0) = OR_INDEFINITE(isNaN(v) ? original : __builtin_inf(), t1);
+                SET_ST(0, OR_INDEFINITE(isNaN(v) ? original : __builtin_inf(), t1));
                 PUSH_ST(OR_INDEFINITE(original, t1));
                 break;
             }
             if (v == 0)
             {
-                /* A stack fault is the invalid operation alone. */
+                /* What an empty register still holds is no operand. */
                 if (precise && !t1) status |= S_ZE;
                 exponent = -__builtin_inf();
                 significand = original;
@@ -1438,7 +1446,7 @@ static u32 x87(const u8 *p)
                 exponent += (double)((i32)((word >> 52) & 0x7ff) - 1023);
                 significand = fromBits((word & 0x800fffffffffffffull) | 0x3ff0000000000000ull);
             }
-            ST(0) = OR_INDEFINITE(exponent, t1);
+            SET_ST(0, OR_INDEFINITE(exponent, t1));
             PUSH_ST(OR_INDEFINITE(significand, t1));
             break;
         }
@@ -1451,11 +1459,11 @@ static u32 x87(const u8 *p)
             if (isNaN(a) || isNaN(c) || __builtin_fabs(a) == __builtin_inf() || c == 0 || t1)
             {
                 if (precise) status |= S_IE;
-                ST(0) = fromBits(INDEFINITE_BITS);
+                SET_ST(0, fromBits(INDEFINITE_BITS));
                 break;
             }
             u32 bits;
-            ST(0) = remainderOf(a, c, modrm == 0xf5, &bits);
+            SET_ST(0, remainderOf(a, c, modrm == 0xf5, &bits));
             status = (status & ~(S_C2 | S_C0 | S_C3 | S_C1)) | bits;
             break;
         }
@@ -1469,14 +1477,14 @@ static u32 x87(const u8 *p)
         {
             t1 = GUARD(1, 0);
             double a = ST(0);
-            if (precise && a < 0) status |= S_IE;
-            ST(0) = OR_INDEFINITE(byPrecision(hostNaN(__builtin_sqrt(a), a, a), control), t1);
+            if (precise && a < 0 && !t1) status |= S_IE;
+            SET_ST(0, OR_INDEFINITE(byPrecision(hostNaN(__builtin_sqrt(a), a, a), control), t1));
             break;
         }
         case 0xfc:
         {
             double v = roundBy(ST(0), control);
-            ST(0) = OR_INDEFINITE(v, GUARD(1, 0));
+            SET_ST(0, OR_INDEFINITE(v, GUARD(1, 0)));
             break;
         }
         case 0xfd:
@@ -1490,7 +1498,7 @@ static u32 x87(const u8 *p)
                 v *= pow2((i32)k);
                 count -= k;
             }
-            ST(0) = OR_INDEFINITE(v, t1);
+            SET_ST(0, OR_INDEFINITE(v, t1));
             break;
         }
         default:
@@ -1634,9 +1642,7 @@ storeRegister:
 {
     /* fst, fstp st(i) */
     t1 = GUARD(1, 0);
-    double v = OR_INDEFINITE(ST(0), t1);
-    ST(i) = v;
-    empty &= ~(1u << PHYS(i));
+    SET_ST(i, OR_INDEFINITE(ST(0), t1));
     xw = 1u << PHYS(i);
     if (!t1 && ((exactMarks >> top) & 1))
     {
