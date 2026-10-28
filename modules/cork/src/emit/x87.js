@@ -4246,19 +4246,25 @@ function storeInt(e, operand, local, truncate){
 function conditionBits(e, a, c, ordered){
     const { b } = e;
     b.localGet(Local.x87Status).i32const(~Status.CONDITION).op(I32.and).localSet(Local.x87Status);
-    // Unordered: a NaN, or the guard's empty register already in t1.
-    b.localGet(a).localGet(a).op(F64.ne).localGet(c).localGet(c).op(F64.ne).op(I32.or);
-    b.localGet(Local.t1).op(I32.or);
     if (e.context.precise !== true)
     {
-        // No IE to raise: the three bits with no branch, the unordered case's
-        // all three over what the two compares (false for a NaN) give.
-        b.i32const(Status.C3 | Status.C2 | Status.C0).op(0x6c); // i32.mul
-        b.localGet(a).localGet(c).op(F64.eq).i32const(Status.C3).op(0x6c).op(I32.or);
-        b.localGet(a).localGet(c).op(F64.lt).i32const(Status.C0).op(0x6c).op(I32.or);
+        // No IE to raise: a <= c and a >= c, each false for a NaN, pick the
+        // bits -- both equal, the first less, the second greater, neither
+        // unordered (a NaN, or the guard's empty register in t1). No NaN
+        // tested apart: an x64 host answers that test with a branch.
+        b.localGet(a).localGet(c).op(F64.le).localGet(Local.t1).i32const(-1).op(I32.add)
+            .op(I32.and).localSet(Local.t0);
+        b.i32const(Status.C3).i32const(0).localGet(Local.t0).select();
+        b.i32const(Status.C0).i32const(Status.C3 | Status.C2 | Status.C0).localGet(Local.t0)
+            .select();
+        b.localGet(a).localGet(c).op(F64.ge).localGet(Local.t1).i32const(-1).op(I32.add)
+            .op(I32.and).select();
         b.localGet(Local.x87Status).op(I32.or).localSet(Local.x87Status);
         return;
     }
+    // Unordered: a NaN, or the guard's empty register already in t1.
+    b.localGet(a).localGet(a).op(F64.ne).localGet(c).localGet(c).op(F64.ne).op(I32.or);
+    b.localGet(Local.t1).op(I32.or);
     b.localSet(Local.t1);
     b.localGet(Local.t1);
     e.openGuard('unordered', EMPTY);

@@ -123,6 +123,12 @@ test('C0, C2 and C3 of every compare are exact; IE and C1 are not kept', ()=>{
             assert.equal(r.fast.status() & 0x3f, 0, `${name}: no IE`);
         }
     }
+    // fld dword [DATA]; fstp st0; fld1; fcom st1; fnstsw ax -- st1 is empty, its
+    // register still holding 2.0, which compares greater than 1: unordered all the same
+    const empty = both([0xd9, 0x05, ...at(DATA), 0xdd, 0xd8, 0xd9, 0xe8, 0xd8, 0xd1, 0xdf, 0xe0],
+        { data: [0, 0, 0x00, 0x40] });
+    assert.equal(empty.fast.m.reg('eax') & 0x4500, 0x4500, 'an empty register: unordered');
+    assert.equal(empty.fast.m.reg('eax') & 0x4500, empty.precise.m.reg('eax') & 0x4500);
     // fld1; fld dword [DATA]; fcomip st1: ZF PF CF from an unordered compare, no IE
     const r = both([0xd9, 0xe8, 0xd9, 0x05, ...at(DATA), 0xdf, 0xf1], { data: nan });
     assert.equal(r.fast.m.eflags() & (CF | PF | ZF), CF | PF | ZF);
