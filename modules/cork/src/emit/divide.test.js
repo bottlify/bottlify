@@ -112,11 +112,10 @@ test('divisions of a widened dividend in 32 bits leave what the interpreter leav
     {
         const code = generate(seed * 7919);
         const interpreted = await runProgram(code, { translate: false });
-        const { translated: ran, ...observed } = await runProgram(code, {});
-        const { translated: none, ...expected } = interpreted;
-        assert.deepEqual(observed, expected, `seed ${seed}`);
+        const ran = await runProgram(code, {});
+        assert.deepEqual({ ...ran, translated: 0 }, interpreted, `seed ${seed}`);
         faults += interpreted.stop.reason === 'fault' ? 1 : 0;
-        translated += ran > 0 ? 1 : 0;
+        translated += ran.translated > 0 ? 1 : 0;
     }
     // Both ways out are met: programs that end at a divide fault, programs translated.
     assert.ok(faults > 10, `${faults} programs end at a divide fault`);
