@@ -1247,6 +1247,16 @@ export class RegionEmitter {
         this.mmLocals = new Map();
         /** @type {Set<number>} */
         this.xmmWritten = new Set();
+        /**
+         * The xmm registers whose low lane a scalar float form left in a local
+         * of its own as well (`setLow` in simd.js), for the next scalar form
+         * to read with no lane taken out of the vector: held within a block's
+         * straight line, forgotten at any other write of the register.
+         * @type {Map<number, { local: number, double: boolean }>}
+         */
+        this.lows = new Map();
+        /** Those locals, one an xmm register and width. @type {Map<string, number>} */
+        this.lowLocals = new Map();
         /** @type {Set<number>} */
         this.mmWritten = new Set();
         /** The instruction being emitted. @type {import('../decode/decoder.js').Instruction} */
@@ -1330,8 +1340,26 @@ export class RegionEmitter {
         if (write)
         {
             this.xmmWritten.add(index);
+            this.lows.delete(index);
         }
         return /** @type {number} */ (this.xmmLocals.get(index));
+    }
+
+    /**
+     * The scalar local an xmm register's low lane is held in (`lows`).
+     *
+     * @param {number} index @param {boolean} double
+     */
+    lowLocal(index, double){
+        const key = `${index}${double ? 'd' : 's'}`;
+        let local = this.lowLocals.get(key);
+        if (local === undefined)
+        {
+            local = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(double ? ValType.f64 : ValType.f32);
+            this.lowLocals.set(key, local);
+        }
+        return local;
     }
 
     /** The local an mm register lives in. @param {number} index @param {boolean} [write] */
@@ -3012,6 +3040,7 @@ export class RegionEmitter {
      * @param {boolean[]} live @param {Map<number, any>} plan
      */
     emitInstructions(block, index, live, plan){
+        this.lows.clear();
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
         {
             this.markBlock(index);

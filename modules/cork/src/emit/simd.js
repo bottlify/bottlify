@@ -1226,8 +1226,21 @@ function pushLow(e, operand, double, again = false){
     const { b } = e;
     if (operand.kind === 'xmm')
     {
+        const low = e.lows.get(/** @type {number} */ (operand.reg));
+        if (low !== undefined && low.double === double)
+        {
+            b.localGet(low.local);
+            return;
+        }
         b.localGet(e.xmmLocal(/** @type {number} */ (operand.reg)));
         b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+        if (e.controls.length === e.blockDepth)
+        {
+            // Taken out once: the block's later scalar reads have it.
+            const local = e.lowLocal(/** @type {number} */ (operand.reg), double);
+            b.localTee(local);
+            setLow(e, operand, local, double);
+        }
         return;
     }
     if (!again)
@@ -1273,8 +1286,25 @@ function scalarFloat(e, dst, src, opcode, double, unaryForm = false){
     {
         scalarDefaultNaN(e, unaryForm ? [src] : [dst, src], double);
     }
+    const low = e.lowLocal(/** @type {number} */ (dst.reg), double);
+    b.localTee(low);
     b.op(0xfd, [double ? SIMD.f64x2ReplaceLane : SIMD.f32x4ReplaceLane, 0]);
     writeV(e, dst, null);
+    setLow(e, dst, low, double);
+}
+
+/**
+ * Notes that `local` holds dst's low lane as the vector does, for the next
+ * scalar form's read (`lows`): where the write is the block's own straight
+ * line, which every later read in the block comes after.
+ *
+ * @param {E} e @param {Operand} dst @param {number} local @param {boolean} double
+ */
+function setLow(e, dst, local, double){
+    if (e.controls.length === e.blockDepth)
+    {
+        e.lows.set(/** @type {number} */ (dst.reg), { local, double });
+    }
 }
 
 /**
