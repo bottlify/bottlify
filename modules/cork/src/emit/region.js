@@ -1164,6 +1164,10 @@ export class RegionEmitter {
         this.flagsOut = [];
         /** The flags live after each instruction of the block being emitted. @type {number[]} */
         this.flagsAfterEach = [];
+        /** The instruction of the block being emitted, by its place in the block; -1 between. */
+        this.at = -1;
+        /** The flags live at each block's start, as an exit's needs them (`flagsLiveAt`). @type {Map<number, number>} */
+        this.flagsIn = new Map();
         /** The flags live after the instruction being emitted. */
         this.flagsAfter = ARITH_FLAGS | DF;
         /**
@@ -2647,6 +2651,17 @@ export class RegionEmitter {
                 // comes back with the head's own label.
                 b.localGet(Local.label).i32const(lo).op(I32.ne);
                 this.openGuard(`enter${lo}`);
+                const heads = [...this.loopEnds.keys()].filter(at=>at > lo && at <= hi)
+                    .map(at=>blocks[at].start);
+                if (this.recordDeadAt(heads))
+                {
+                    // Only the heads of the loops inside are entered here, and
+                    // none reads the flags before it writes them: the record
+                    // goes in empty, so the one a turn of this loop left at
+                    // its head (where the turn comes back to the test) is not
+                    // kept alive every turn for this way in.
+                    this.emptyRecord();
+                }
                 b.localGet(Local.label);
                 b.brTable(blocks.map((block, t)=>{
                     const item = items.find(one=>one.loop && one.start <= t && t <= one.end);
@@ -2882,6 +2897,7 @@ export class RegionEmitter {
         this.blockRetired = 0;
         this.blockDepth = this.controls.length;
         this.blockIndex = index;
+        this.at = -1;
         // Until the next block starts, what is written is this block's: its
         // instructions and its ways out.
         this.b.written = this.blockWrites[index] ??= new Set();
@@ -3004,8 +3020,24 @@ export class RegionEmitter {
         backEdge(()=>b.br(this.depthOf(`checked${index}`)));
         this.close(); // checked
         this.close(); // streamsFlagged
-        // The unchecked copy, for as many turns as the test cleared.
-        b.i32const(streams.turns).localSet(turns);
+        // The unchecked copy, for as many turns as the test cleared. With no
+        // other executor to answer (no interrupt word) the turns are counted
+        // on the budget itself: the copy runs while the budget is above what
+        // those turns leave of it, or above zero if they would spend it, so a
+        // turn charges and looks once, where a count of its own and the
+        // budget's test were two looks. Where the bound is met, the budget
+        // spent leaves as before and a budget left goes back to the test.
+        const shared = this.layout.interrupt !== undefined;
+        if (shared)
+        {
+            b.i32const(streams.turns).localSet(turns);
+        }
+        else
+        {
+            b.localGet(Local.budget).i32const(streams.turns * block.instructions.length)
+                .op(I32.sub).localTee(turns).i32const(0)
+                .localGet(turns).i32const(0).op(I32.gtS).select().localSet(turns);
+        }
         this.openLoop(`unchecked${index}`);
         this.blockDepth = this.controls.length;
         this.blockRetired = 0;
@@ -3014,11 +3046,38 @@ export class RegionEmitter {
         const counted = this.instructions;
         this.emitInstructions(block, index, live, streams.plan);
         this.instructions = counted;
-        backEdge(()=>{
-            b.localGet(turns).i32const(1).op(I32.sub).localTee(turns);
-            b.brIf(this.depthOf(`unchecked${index}`));
+        if (shared)
+        {
+            backEdge(()=>{
+                b.localGet(turns).i32const(1).op(I32.sub).localTee(turns);
+                b.brIf(this.depthOf(`unchecked${index}`));
+                b.br(this.depthOf(`self${index}`));
+            });
+        }
+        else
+        {
+            if (this.blockRetired !== block.instructions.length)
+            {
+                // A turn charged less than its bound was made for would run
+                // past the pages the test cleared.
+                throw new Error(`emit: block ${index}'s unchecked turn charges`
+                    + ` ${this.blockRetired}, not ${block.instructions.length}`);
+            }
+            this.charge();
+            this.pushBranchCondition(last);
+            this.openIf('taken');
+            b.localGet(Local.budget).localGet(turns).op(I32.leS);
+            this.openGuard('turnsDone');
+            this.spentTest();
+            this.openGuard('spent');
+            this.exitAt(block.start, Exit.BUDGET);
+            this.close();
             b.br(this.depthOf(`self${index}`));
-        });
+            this.close();
+            b.br(this.depthOf(`unchecked${index}`));
+            this.close();
+            b.br(this.depthOf(`selfDone${index}`));
+        }
         this.close(); // unchecked
         this.close(); // self
         this.close(); // selfDone
@@ -3117,6 +3176,7 @@ export class RegionEmitter {
             const flagsLive = live[i];
             this.flagsAfter = this.flagsAfterEach[i];
             this.current = instruction;
+            this.at = i;
             this.staleCheck = false;
             this.x87RefusalReason = null;
             // Counted before it is emitted, so an exit *after* it (a halt, a
@@ -3562,7 +3622,85 @@ export class RegionEmitter {
     exitAt(eip, kind, vector = 0){
         this.charge();
         this.b.i32const(eip).localSet(Local.eip);
+        if (kind !== Exit.STALE && !this.staleCheck && this.recordDeadAt([eip]))
+        {
+            // Nothing from here on reads the record before it writes one, so
+            // this way out leaves an empty one rather than the last: a turn of
+            // a loop then makes no record its own branch did not need, kept
+            // alive every turn for a budget's or a fault's rare exit. What is
+            // given up: the arithmetic flags of a context taken at this point
+            // (a fault's handler, another thread's look) are the word's stale
+            // ones, as they are already after a record the dead-flag pass
+            // dropped. A store into code may have changed what is read: kept.
+            this.emptyRecord();
+        }
         this.exitWithKind(kind, vector);
+    }
+
+    /**
+     * Whether the code at every one of `eips` writes the arithmetic flags
+     * before it reads them, so the record may be left empty on the way there
+     * (`flagsLiveAt`): never under `precise`, nor without a record.
+     *
+     * @param {number[]} eips
+     */
+    recordDeadAt(eips){
+        return this.flagRecord >= 0 && this.context.precise !== true
+            && eips.every(eip=>(this.flagsLiveAt(eip) & ARITH_FLAGS) === 0);
+    }
+
+    /** The record's locals set to an empty record: the kind EAGER, the rest zero. */
+    emptyRecord(){
+        for (const { local, wide } of this.recordFields)
+        {
+            if (wide)
+            {
+                this.b.i64const(0n).localSet(local);
+            }
+            else
+            {
+                this.b.i32const(local === Local.kind ? Kind.EAGER : 0).localSet(local);
+            }
+        }
+    }
+
+    /**
+     * The arithmetic flags and DF the code at `eip` may read before it writes
+     * them, as an exit there leaves them for: a block of the region's start
+     * its own, the current instruction's what is live before it, the next
+     * instruction's what is live after it; all of them anywhere else.
+     *
+     * @param {number} eip
+     * @returns {number}
+     */
+    flagsLiveAt(eip){
+        const label = this.labels.get(eip);
+        if (label !== undefined)
+        {
+            let live = this.flagsIn.get(label);
+            if (live === undefined)
+            {
+                live = liveFlagsIn(this.region.blocks[label],
+                    this.flagsOut[label] ?? ARITH_FLAGS | DF, this.context.precise === true);
+                this.flagsIn.set(label, live);
+            }
+            return live;
+        }
+        const { current, at } = this;
+        if (at >= 0 && current !== null && current !== undefined
+            && this.region.blocks[this.blockIndex]?.instructions[at] === current)
+        {
+            if (eip === current.eip)
+            {
+                return at > 0 ? this.flagsAfterEach[at - 1]
+                    : this.flagsLiveAt(this.region.blocks[this.blockIndex].start);
+            }
+            if (eip === current.eip + current.length)
+            {
+                return this.flagsAfterEach[at];
+            }
+        }
+        return ARITH_FLAGS | DF;
     }
 
     /**
@@ -4197,6 +4335,29 @@ function comesBackTo(block, index){
         : kind === 'trap' || kind === 'indirect' && last?.op === 'call'
             && !(predicted === true && targets.some(target=>index.has(target)));
     return leaves ? index.get(next) : undefined;
+}
+
+/**
+ * The flags a block may read before it writes them, from those live at its
+ * end: the dead-flag pass's walk (`deadFlagPass`), its first instruction's
+ * live-in.
+ *
+ * @param {import('../region.js').Block} block
+ * @param {number} liveOut  the flags live after the block (`liveFlagsOut`)
+ * @param {boolean} [precise]  undefined flags as the emulator leaves them (`killedBy`)
+ */
+export function liveFlagsIn(block, liveOut, precise = true){
+    let live = liveOut;
+    for (let i = block.instructions.length - 1; i >= 0; i--)
+    {
+        const instruction = block.instructions[i];
+        const count = shiftCount(instruction);
+        if (count !== 0)
+        {
+            live = (live & ~killedBy(instruction, precise, count)) | flagsReadBy(instruction);
+        }
+    }
+    return live;
 }
 
 /**
