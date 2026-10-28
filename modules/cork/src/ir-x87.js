@@ -146,7 +146,10 @@ const stOf = (state, i)=>state.f80[(state.top + i) & 7];
 
 /** @param {import('./ir.js').EvalState} state @param {number} i @param {number} value */
 const setStOf = (state, i, value)=>{
+    // Held after it: an instruction whose source was empty writes the
+    // indefinite there, and the processor tags the register valid.
     state.f80[(state.top + i) & 7] = value;
+    state.empty &= ~(1 << ((state.top + i) & 7));
 };
 
 /** @param {import('./ir.js').EvalState} state @param {number} times */
@@ -208,7 +211,7 @@ const ARITHMETIC_FORMS = new Map([...ARITHMETIC].map(op=>{
 /**
  * The stack-fault check: t1 is set when a source ST(i) is empty or a push
  * finds its register held, and IE and SF are raised. A push that overflowed
- * also sets C1.
+ * also sets C1; an underflow otherwise clears it.
  *
  * @param {import('./ir.js').EvalState} state
  * @param {readonly number[]} sources @param {boolean} pushes
@@ -228,6 +231,7 @@ function guard(state, sources, pushes){
     if (t1)
     {
         state.status |= Status.IE | Status.SF;
+        state.status &= ~Status.C1;
     }
     if (pushes)
     {
@@ -917,7 +921,6 @@ function stepX87(instruction, state, address){
             if (dst.kind === 'x87')
             {
                 setStOf(state, Number(dst.reg), value);
-                state.empty &= ~(1 << ((state.top + Number(dst.reg)) & 7));
                 if (t1 === 0)
                 {
                     copyExactOf(state, state.top, (state.top + Number(dst.reg)) & 7);
@@ -1014,7 +1017,7 @@ function stepX87(instruction, state, address){
         case 'fsqrt':
         {
             const t1 = guard(state, ONE_SOURCE[0], false);
-            if (stOf(state, 0) < 0)
+            if (stOf(state, 0) < 0 && t1 === 0)
             {
                 state.status |= Status.IE;
             }
@@ -1145,7 +1148,7 @@ function stepX87(instruction, state, address){
             if (op === 'fyl2x')
             {
                 const y = stOf(state, 1);
-                if (stOf(state, 0) === 0 && Math.abs(y) < Infinity && y !== 0)
+                if (stOf(state, 0) === 0 && Math.abs(y) < Infinity && y !== 0 && t1 === 0)
                 {
                     state.status |= Status.ZE;
                 }
@@ -1319,7 +1322,6 @@ function stepX87(instruction, state, address){
             if (guard(state, TWO_SOURCES[0][Number(src.reg)], false) !== 0)
             {
                 setStOf(state, 0, INDEFINITE);
-                state.empty &= ~(1 << state.top);
             }
             else if (condition(/** @type {number} */ (instruction.cc), state.eflags))
             {
@@ -1332,8 +1334,8 @@ function stepX87(instruction, state, address){
             state.status &= ~Status.CONDITION;
             state.status &= ~Status.C1;
             scratchF[0] = value;
-            // The sign of a held value: an empty register's leaves C1 clear.
-            if ((scratchU32[1] & 0x80000000) !== 0 && ((state.empty >>> state.top) & 1) === 0)
+            // The sign of what the register holds, empty or not.
+            if ((scratchU32[1] & 0x80000000) !== 0)
             {
                 state.status |= Status.C1;
             }

@@ -792,7 +792,8 @@ on such a host, a quarter of the machine code of an x87 matrix-vector loop (134 
 arm64 for 37 of x86, 97 without it; V8 14.6). Programs compare a NaN, they do not read its sign,
 so the translator no longer sets it unless asked (`exactNaN`). Everything else that differs
 between the hosts' code, which SSE form a scalar operation takes among it, still follows the host
-itself. *2026-10-27.*
+itself. *2026-10-27.* The scalar forms now hold their low lane in a local on either host; only a
+scalar load still differs, loading the vector on x64 and owing it on arm64. *2026-10-28.*
 
 **A read past RAM by a small displacement reads the engine's tables.** An untested read wraps
 its address into RAM; where a block reads several fields off the same registers and writes none
@@ -801,6 +802,15 @@ after, so the host's compiler wraps once for all the fields where it wrapped eve
 (an x87 matrix-vector loop on arm64: 97 machine instructions to 89; x64 fmath 5 % faster). Such a
 read off a pointer within 64 KiB of RAM's end now reads the tables that follow RAM, where it read
 RAM's start before; the processor would have raised #GP either way. *2026-10-27.*
+A negative displacement, and one of 64 KiB or more, now shares a wrapped sum too: the fields
+within 64 KiB of each other wrap the registers' sum plus the lowest of their displacements, and
+each load takes the rest as its own offset, as the positive ones now do too (a frame's locals
+below its pointer, an array's fields at an absolute displacement off a scaled index). The address
+is the processor's wherever it lies 64 KiB or more into RAM. Below that, where Windows maps
+nothing, a read whose address is smaller than the offset its load takes past the wrapped sum
+reads the tables past RAM at the same offset, where it read RAM's first 64 KiB: a field read
+through a null pointer in a block that also reads below that pointer finds the page flags there,
+not the zeroes a null page holds. *2026-10-28.*
 
 ## C. Process model and porting
 

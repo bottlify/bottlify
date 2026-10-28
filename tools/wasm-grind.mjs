@@ -20,7 +20,8 @@
  * Prints the wasm functions by executed instructions, and with `--listing N` the N
  * heaviest functions' code, each instruction with its count (those run at least
  * `--min` times, default 1). An instruction no function printed is left out of the
- * table and counted in its last line.
+ * table and counted in its last line. `--exact` prints only the two counts, all and
+ * in printed wasm code, as integers (`tools/cork-bench/ir.sh` with `WASM=1`).
  */
 
 import { readFileSync } from 'node:fs';
@@ -133,6 +134,11 @@ for (const one of functions)
 }
 const ranked = functions.filter(one=>one.ran > 0).sort((a, b)=>b.ran - a.ran);
 const top = Number(flag('--top', '15'));
+if (args.includes('--exact'))
+{
+    console.log(`${total} ${known}`);
+    process.exit(0);
+}
 console.log(`${(total / 1e6).toFixed(1)} M instructions in all; in printed wasm code`
     + ` ${(known / 1e6).toFixed(1)} M (${(known / total * 100).toFixed(1)}%)`);
 for (const one of ranked.slice(0, top))

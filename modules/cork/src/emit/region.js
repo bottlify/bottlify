@@ -48,7 +48,7 @@
 import { CF, DF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import {
-    ARITH, CARRY_IN_WORD, I32, I64, Kind, eagerFlagsOf, emitCondition, emitFlag, kindOf,
+    ARITH, CARRY_IN_WORD, I32, I64, Kind, MASKS, eagerFlagsOf, emitCondition, emitFlag, kindOf,
     recordOffsets, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
@@ -1163,8 +1163,12 @@ export class RegionEmitter {
         /** The flags live at each block's end (`liveFlagsOut`), which the dead-flag pass
          * takes and which decides a fused compare. @type {number[]} */
         this.flagsOut = [];
+        /** The flags live at each block's start, what a way out to it hands on. @type {number[]} */
+        this.flagsIn = [];
         /** The flags live after each instruction of the block being emitted. @type {number[]} */
         this.flagsAfterEach = [];
+        /** The instruction `flagsAfter` is of. @type {import('../decode/decoder.js').Instruction | null} */
+        this.flagsAfterOf = null;
         /** The flags live after the instruction being emitted. */
         this.flagsAfter = ARITH_FLAGS | DF;
         /**
@@ -1175,15 +1179,16 @@ export class RegionEmitter {
          */
         this.fcmp = null;
         /**
-         * An integer `cmp` or `test` whose flags only the block's final branch
-         * reads (`fusesIntegerCompare`): its operands and result are in the
-         * locals `fusedLocals` names, the record is left as it was, and the
-         * branch reads them in its place.
-         * @type {{ kind: number, width: number } | null}
+         * Whether the instruction being emitted is a `cmp` the block's final
+         * conditional branch alone reads (`oweResult`).
          */
-        this.icmp = null;
-        /** The three i32 locals of a fused integer compare, once one is made. @type {number[]} */
-        this.fused = [];
+        this.owesResult = false;
+        /**
+         * The width of a `cmp` whose record has its kind and operands and not
+         * yet its result (`oweResult`), null when the record is whole.
+         * @type {number | null}
+         */
+        this.resultOwed = null;
         /** Branches that compared a float compare's operands themselves, for the tests. */
         this.fusedCompares = 0;
         /** By block, the blocks whose way on goes there, in order, once a guess needs them.
@@ -1244,6 +1249,16 @@ export class RegionEmitter {
         this.ranges = [];
         /** Whether the current block's remaining instructions are unreachable. */
         this.dead = false;
+        /**
+         * The read `prepare` last made off a wrapped sum its block's other reads
+         * share (`wrappedFirst` in integer.js): the operand, the local holding
+         * the sum and what the operand's displacement adds to it, for the load to
+         * take as its offset. `addr` holds the whole address all the same.
+         * @type {{ operand: object, local: number, offset: number } | null}
+         */
+        this.folded = null;
+        /** The i32 local `folded` sums are kept in, -1 until made. */
+        this.sumLocal = -1;
         /** Instructions retired in the current block so far, to charge at its end. */
         this.blockRetired = 0;
         /** Each block's marks made so far, in a build that marks them (`markBlock`).
@@ -1409,6 +1424,16 @@ export class RegionEmitter {
         }
     }
 
+    /** The i32 local a read's wrapped sum is kept in (`folded`). */
+    foldedSumLocal(){
+        if (this.sumLocal < 0)
+        {
+            this.sumLocal = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(ValType.i32);
+        }
+        return this.sumLocal;
+    }
+
     /**
      * The scalar local an xmm register's low lane is held in (`lows`).
      *
@@ -1484,6 +1509,8 @@ export class RegionEmitter {
                     returns: this.returns, masked: readsWrapped(this.context),
                     long: this.width.bits === 64 })
                 : null;
+        this.flagsIn = blocks.map((block, i)=>block.instructions.reduceRight((live, instruction)=>
+            liveBefore(instruction, live, this.context.precise === true), flagsOut[i]));
         if (this.copies.length > 0 && !this.copyFunction)
         {
             this.emitCopies(flagsOut, memoryPlan);
@@ -2342,19 +2369,10 @@ export class RegionEmitter {
 
     /** Pushes 0/1 for a condition code. @param {number} cc */
     pushCondition(cc){
-        if (this.icmp !== null)
+        if (this.resultOwed !== null && this.pending?.kind === Kind.SUB && cc >> 1 === 2)
         {
-            const { kind, width } = this.icmp;
-            const [a, c, res] = this.fused;
-            this.icmp = null;
-            if (kind === Kind.SUB && cc >> 1 === 2)
-            {
-                // Equal when the operands are, both read at their width.
-                this.b.localGet(a).localGet(c).op((cc & 1) === 1 ? I32.ne : I32.eq);
-                return;
-            }
-            emitCondition(this.b, { kind: -1, res, op1: a, op2: c, cin: Local.cin,
-                flags: Local.flags }, kind, width, cc);
+            // je/jne of a compare: its operands equal or not, the result unmade.
+            this.b.localGet(Local.op1).localGet(Local.op2).op((cc & 1) === 0 ? I32.eq : I32.ne);
             return;
         }
         if (this.fcmp !== null)
@@ -2366,33 +2384,6 @@ export class RegionEmitter {
             return;
         }
         this.pushRead((kind, width)=>emitCondition(this.b, this.flagLocals, kind, width, cc));
-    }
-
-    /**
-     * Whether the integer compare being emitted, a `cmp` or `test`, is read by
-     * the block's final conditional branch alone (`fusesCompare`): then it
-     * leaves the record as it was and the branch compares its operands. A loop's
-     * compare and branch were a record of four locals the compiler kept live to
-     * every way out of the loop, and a subtraction and a mask tested apart.
-     */
-    fusesIntegerCompare(){
-        const block = this.region.blocks[this.blockIndex];
-        const last = block.instructions[block.instructions.length - 1];
-        return this.width.bits === 32 && last.cc !== undefined
-            && this.fusesCompare(block.instructions.indexOf(this.current), ()=>false);
-    }
-
-    /** The fused integer compare's locals: its operands and its result. */
-    fusedLocals(){
-        if (this.fused.length === 0)
-        {
-            for (let k = 0; k < 3; k++)
-            {
-                this.fused.push(this.localTypes.length + STATE_PARAMS);
-                this.localTypes.push(ValType.i32);
-            }
-        }
-        return this.fused;
     }
 
     /**
@@ -2506,6 +2497,79 @@ export class RegionEmitter {
             this.materialise();
         }
         this.b.localGet(Local.flags).i32const(~mask).op(I32.and).localSet(Local.flags);
+    }
+
+    /**
+     * An empty record, the six flags taken as the word's: on a way out whose
+     * next code writes them before it reads them, which then are no one's.
+     */
+    clearRecord(){
+        const { b } = this;
+        b.i32const(0).localSet(Local.kind);
+        for (const { local, wide } of this.recordFields)
+        {
+            if (local !== Local.kind)
+            {
+                (wide ? b.i64const(0n) : b.i32const(0)).localSet(local);
+            }
+        }
+    }
+
+    /**
+     * Whether a `cmp` just before the block's final conditional branch may
+     * leave its record's result unmade (`oweResult`): a branch whose
+     * condition the operands alone answer, in a block that ends in it.
+     *
+     * @param {import('../region.js').Block} block
+     */
+    owesTo(block){
+        const last = block.instructions.at(-1);
+        return block.exit.kind === 'jcc' && this.width.bits === 32 && last?.cc !== undefined
+            && [1, 2, 3, 6, 7].includes(last.cc >> 1);
+    }
+
+    /**
+     * The record of a `cmp` the block's final branch alone reads, but for its
+     * result: the branch compares the operands, and the result is made only on
+     * a way on whose code reads the flags (`payResultFor`) and on a way out that
+     * hands them on (`exitWithKind`). Made where it was read, it was made every
+     * turn of a loop whose exit reads it once -- the engine computes a value
+     * where it is defined, not on the edge that uses it.
+     *
+     * @param {number} size
+     */
+    oweResult(size){
+        this.b.i32const(kindOf(Kind.SUB, size)).localSet(Local.kind);
+        this.pending = { kind: Kind.SUB, width: widthCode(size) };
+        this.resultOwed = size;
+    }
+
+    /** The owed result made (`oweResult`), on the way being emitted. */
+    payResult(){
+        const size = this.resultOwed;
+        if (size === null)
+        {
+            return;
+        }
+        this.b.localGet(Local.op1).localGet(Local.op2).op(I32.sub);
+        if (size < 4)
+        {
+            this.b.i32const(MASKS[widthCode(size)]).op(I32.and);
+        }
+        this.b.localSet(Local.res);
+    }
+
+    /**
+     * The owed result made on the way to `eip`, where the code there reads a
+     * flag before it writes it.
+     *
+     * @param {number} eip
+     */
+    payResultFor(eip){
+        if ((this.flagsLiveAt(eip) & ARITH_FLAGS) !== 0)
+        {
+            this.payResult();
+        }
     }
 
     /** Ors a 0/1 on the stack into the word as `flag`. @param {number} flag */
@@ -2931,7 +2995,6 @@ export class RegionEmitter {
         this.hint = undefined;
         this.pending = null;
         this.fcmp = null;
-        this.icmp = null;
         this.dead = false;
         this.blockRetired = 0;
         this.blockDepth = this.controls.length;
@@ -3004,6 +3067,7 @@ export class RegionEmitter {
             x87BlockEnd(this);
         }
         this.emitExit(block, index);
+        this.resultOwed = null;
         this.closeSelfLoop();
     }
 
@@ -3040,8 +3104,6 @@ export class RegionEmitter {
                 this.flagsAfter = this.flagsAfterEach[1];
                 this.memPlan = null;
                 emitInstruction(this, block.instructions[1], live[1]);
-                // Fused, it is read by no branch here: the flags are dead past the loop.
-                this.icmp = null;
             }, import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile
                 ? times=>this.countBlock(block.start, times) : null);
             this.pending = pending;
@@ -3062,7 +3124,19 @@ export class RegionEmitter {
             {
                 this.close();
             }
+            // The block ends at an instruction with no lowering, inside the checked
+            // copy; a run whose streams' pages were clean skipped that copy, and
+            // runs the block plainly to the same way out.
             this.selfLoop = false;
+            this.blockRetired = 0;
+            this.blockDepth = this.controls.length;
+            this.pending = null;
+            this.fcmp = null;
+            this.resultOwed = null;
+            this.dead = false;
+            const counted = this.instructions;
+            this.emitInstructions(block, index, live, this.memoryPlan?.blocks[index] ?? new Map());
+            this.instructions = counted;
             return;
         }
         const backEdge = (/** @type {() => void} */ taken)=>{
@@ -3073,8 +3147,11 @@ export class RegionEmitter {
             this.openGuard('spent');
             this.exitAt(block.start, Exit.BUDGET);
             this.close();
+            this.payResultFor(block.start);
             taken();
             this.close();
+            this.payResultFor(block.exit.targets[1]);
+            this.resultOwed = null;
             b.br(this.depthOf(`selfDone${index}`));
         };
         backEdge(()=>b.br(this.depthOf(`checked${index}`)));
@@ -3187,6 +3264,10 @@ export class RegionEmitter {
         {
             throw new Error(`block ${index}: low lanes owed from the block before`);
         }
+        if (this.resultOwed !== null)
+        {
+            throw new Error(`block ${index}: a compare's result owed from the block before`);
+        }
         this.lows.clear();
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
         {
@@ -3201,8 +3282,11 @@ export class RegionEmitter {
             const instruction = block.instructions[i];
             const flagsLive = live[i];
             this.flagsAfter = this.flagsAfterEach[i];
+            this.flagsAfterOf = instruction;
             this.current = instruction;
+            this.owesResult = i === block.instructions.length - 2 && this.owesTo(block);
             this.staleCheck = false;
+            this.folded = null;
             this.x87RefusalReason = null;
             // Counted before it is emitted, so an exit *after* it (a halt, a
             // call) has it charged; an exit *before* it uncounts it.
@@ -3220,6 +3304,7 @@ export class RegionEmitter {
                 emitGroupChecks(this, this.memPlan.checks);
             }
             const done = emitInstruction(this, instruction, flagsLive);
+            this.owesResult = false;
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.expansion)
             {
                 this.context.expansion(instruction, this.b.length - bodyAt, done);
@@ -3401,9 +3486,11 @@ export class RegionEmitter {
                     this.openGuard('spent');
                     this.exitAt(block.start, Exit.BUDGET);
                     this.close();
+                    this.payResultFor(block.start);
                     this.b.br(this.depthOf(`self${index}`));
                     this.close();
                     this.closeSelfLoop();
+                    this.payResultFor(notTaken);
                     if (next && next.start === notTaken)
                     {
                         this.fallThrough(after, notTaken);
@@ -3414,8 +3501,10 @@ export class RegionEmitter {
                 }
                 this.pushBranchCondition(last);
                 this.openIf('taken');
+                this.payResultFor(taken);
                 this.jumpTo(taken);
                 this.close();
+                this.payResultFor(notTaken);
                 if (next && next.start === notTaken)
                 {
                     this.fallThrough(after, notTaken);
@@ -3652,7 +3741,35 @@ export class RegionEmitter {
     exitAt(eip, kind, vector = 0){
         this.charge();
         this.b.i32const(eip).localSet(Local.eip);
-        this.exitWithKind(kind, vector);
+        this.exitWithKind(kind, vector, this.flagsLiveAt(eip));
+    }
+
+    /**
+     * The flags the code at `eip` reads before it writes them, as far as the
+     * region knows it: a block's start, or the instruction being emitted or the
+     * one after it; anywhere else all of them.
+     *
+     * @param {number} eip
+     */
+    flagsLiveAt(eip){
+        const at = this.labels.get(eip);
+        if (at !== undefined && this.flagsIn.length > at)
+        {
+            return this.flagsIn[at];
+        }
+        const of = this.flagsAfterOf;
+        if (of !== null && of === this.current)
+        {
+            if (eip === of.eip)
+            {
+                return liveBefore(of, this.flagsAfter, this.context.precise === true);
+            }
+            if (eip === of.eip + of.length)
+            {
+                return this.flagsAfter;
+            }
+        }
+        return ARITH_FLAGS | DF;
     }
 
     /**
@@ -3702,11 +3819,26 @@ export class RegionEmitter {
         this.exitWithKind(kind, vector);
     }
 
-    /** @param {number} kind @param {number} vector */
-    exitWithKind(kind, vector){
+    /**
+     * @param {number} kind @param {number} vector
+     * @param {number} [live]  the flags the code it leaves for reads before it writes them
+     */
+    exitWithKind(kind, vector, live = ARITH_FLAGS){
         if (this.x87.active)
         {
             x87Normalise(this);
+        }
+        if ((live & ARITH_FLAGS) !== 0)
+        {
+            this.payResult();
+        }
+        else
+        {
+            // Whoever runs next writes the six before reading one: the record
+            // goes on empty, so the epilogue's read of it at every way out keeps
+            // no field of it alive, nor its computation, across the loop the
+            // way out sits in -- a jump back's spent budget, a store's page check.
+            this.clearRecord();
         }
         // This way out has the owed lanes; the block's way on still owes them.
         this.settleLows(this.pendingLows.keys(), false);
@@ -4319,10 +4451,21 @@ export function deadFlagPass(block, liveOut = ARITH_FLAGS | DF, after = [], prec
             continue;
         }
         live[i] = ((instruction.flagsWritten | instruction.flagsUndefined) & liveAfter) !== 0;
-        liveAfter = (liveAfter & ~killedBy(instruction, precise, count))
-            | flagsReadBy(instruction);
+        liveAfter = liveBefore(instruction, liveAfter, precise);
     }
     return live;
+}
+
+/**
+ * The flags live before an instruction, from those live after it.
+ *
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ * @param {number} after @param {boolean} precise
+ */
+function liveBefore(instruction, after, precise){
+    const count = shiftCount(instruction);
+    return count === 0 ? after
+        : (after & ~killedBy(instruction, precise, count)) | flagsReadBy(instruction);
 }
 
 /**

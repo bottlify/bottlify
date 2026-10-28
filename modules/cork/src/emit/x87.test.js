@@ -12,6 +12,7 @@ import { formRegion } from '../region.js';
 import { CF, PF, ZF } from '../decode/table.js';
 import { step, trackRegion } from './x87.js';
 import { fpremStatus, fpremValue } from '../ir-x87.js';
+import { UNDERFLOW_CASES, enterCase, leftByCase } from '../testing/x87-underflow.js';
 
 const CODE = 0x1000;
 const DATA = 0x2000;
@@ -585,19 +586,20 @@ test('the plain forms write the stack words once, on every way out of the block'
     assert.deepEqual([loop.st(0), loop.st(1)], [1, 1]);
 });
 
-test('an empty source register faults: IE and SF, the indefinite, the mask kept', ()=>{
+test('an empty source register faults: IE and SF, the indefinite, the destination held', ()=>{
     // fadd st0, st1 with both registers empty (a fresh FPU).
     const both = run([0xd8, 0xc1, 0xdf, 0xe0]);            // fadd; fnstsw ax
     assert.equal(both.exit.kind, 3, `left out ${[...both.exit.unsupported]}`);
     assert.equal(both.m.reg('eax') & 0x41, 0x41, 'IE and SF');
     assert.ok(Number.isNaN(both.st(0)), 'the indefinite into ST(0)');
-    assert.equal(both.empty(), 0xff, 'the empty mask is unchanged');
+    // As the processor tags it (`testing/x87-underflow.js`).
+    assert.equal(both.empty(), 0xfe, 'ST(0) is held');
     // fld1; ffree st0; fadd st0, st0 -- the source emptied by hand.
     const freed = run([0xd9, 0xe8, 0xdd, 0xc0, 0xd8, 0xc0, 0xdf, 0xe0]);
     assert.equal(freed.exit.kind, 3, `left out ${[...freed.exit.unsupported]}`);
     assert.equal(freed.m.reg('eax') & 0x41, 0x41, 'IE and SF again');
     assert.ok(Number.isNaN(freed.st(0)));
-    assert.equal(freed.empty(), 0xff);
+    assert.equal(freed.empty(), 0x7f);
     // fld1; fcom st1 with st1 empty: IE and SF are raised, and ST(0) is left
     // as it was (a compare reads, it does not write).
     const compared = run([0xd9, 0xe8, 0xd8, 0xd1, 0xdf, 0xe0]); // fld1; fcom st1; fnstsw ax
@@ -673,3 +675,19 @@ test('arithmetic on two NaNs answers the x87\'s choice: quiet first, the larger 
             { data: [...qword(0xfff8000000000005n), ...qword(0x7ff8000000000005n)] });
         assert.equal(bits(r), 0x7ff8000000000005n, 'of equal significands, the positive');
     });
+
+for (const { name, start, code, want } of UNDERFLOW_CASES)
+{
+    test(`a stack underflow as the processor answers it, translated: ${name}`, ()=>{
+        const m = createTestMachine();
+        const view = new DataView(m.memory.buffer);
+        enterCase(view, m.layout, start);
+        m.write(CODE, [...code, 0xf4]);
+        m.setReg('esp', 0x80000);
+        const exit = m.runProgram(CODE);
+        // The machine has no interpreter: what ran, ran translated.
+        assert.equal(exit.kind, 3, `left out ${[...exit.unsupported]}`);
+        assert.equal(exit.unsupported.size, 0);
+        assert.deepEqual(leftByCase(view, m.layout), want);
+    });
+}
