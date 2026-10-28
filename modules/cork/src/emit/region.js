@@ -290,6 +290,10 @@ const recordFieldsOf = layout=>{
  *     at its first look (`linkedCall`); false: through the transfer
  * @property {boolean} [crossTailCalls] false: a transfer to a region of another module leaves
  *     for the host's loop rather than tail-calling into the other instance (`finishModule`)
+ * @property {boolean} [flagsAcrossCalls] false, with `callReturn`: the flag record neither
+ *     crosses a guest call made as a wasm call nor comes back with its `ret` -- the caller
+ *     goes on with its own, as no compiler's code reads flags across a call or a return
+ *     (`callAndReturn`, `returnedEpilogue`); the flags word, which holds DF, still does
  * @property {number} [callDepth] with `callReturn`, how many wasm calls may wait at once: a
  *     call made deeper leaves as any call does (`callAndReturn`); `CallStack.LIMIT` at most
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
@@ -401,7 +405,7 @@ export function prepareModule(m, layout, features, memory = {},
         place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
         linkedCalls = true, looseStacks = false, atomic = false, ordered = false,
         checkReads = false, expansion = null, markBlocks = false, crossTailCalls = true,
-        callDepth = CallStack.LIMIT } = {})
+        callDepth = CallStack.LIMIT, flagsAcrossCalls = true } = {})
 {
     const width = widthOf(layout);
     // Long mode's emitter keeps the record between regions and the vector
@@ -492,6 +496,10 @@ export function prepareModule(m, layout, features, memory = {},
         if (!linkedCalls)
         {
             context.linkedCalls = false;
+        }
+        if (!flagsAcrossCalls)
+        {
+            context.flagsAcrossCalls = false;
         }
     }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && countTransfers)
@@ -1336,9 +1344,11 @@ export class RegionEmitter {
          * integer registers, the x87 ones, or both. `regs`: every register the
          * body names (`all`), only the ones the parameters do not carry
          * (`uncarried`), or none. `site`: a guest call's stores, which leave out
-         * what the state block already holds (`fillDeferred`).
+         * what the state block already holds (`fillDeferred`). `record`: the flag
+         * record's fields and the flags word too, under cork's layout (`true`), or
+         * the flags word alone (`word`, `flagsAcrossCalls` off).
          * @type {{ at: number, kind: 'load' | 'store', regs: 'all' | 'uncarried' | 'none',
-         *     x87: boolean, site?: CallSite }[]}
+         *     x87: boolean, site?: CallSite, record?: true | 'word' }[]}
          */
         this.deferred = [];
     }
@@ -1621,23 +1631,27 @@ export class RegionEmitter {
     /**
      * The registers, the flags, the vector registers and the x87 block into the
      * locals. `fromParams`: eax to ebx came in as parameters (cork's layout,
-     * on entry), so only the other registers are loaded.
+     * on entry), so only the other registers are loaded. `afterCall`: back
+     * from a guest call's wasm call, where with `flagsAcrossCalls` off the
+     * record stays the caller's own.
      *
-     * @param {boolean} [fromParams]
+     * @param {boolean} [fromParams] @param {boolean} [afterCall]
      */
-    loadState(fromParams = false){
+    loadState(fromParams = false, afterCall = false){
         const { b, layout, context } = this;
-        atState(context, b).load('i32', { offset: layout.eflags }).localSet(Local.flags);
         if (this.flagRecord >= 0)
         {
             // The record the last region left, as it left it: its kind is not
-            // known here, and a read folds it only when it must.
-            for (const { local, offset, wide } of this.recordFields)
-            {
-                atState(context, b).load(wide ? 'i64' : 'i32', { offset: this.flagRecord + offset })
-                    .localSet(local);
-            }
+            // known here, and a read folds it only when it must. Like the
+            // registers, each field and the flags word only where the body
+            // reads it (`fillDeferred`).
+            this.deferred.push({ at: b.length, kind: 'load', regs: 'none', x87: false,
+                record: afterCall && this.context.flagsAcrossCalls === false ? 'word' : true });
             this.pending = null;
+        }
+        else
+        {
+            atState(context, b).load('i32', { offset: layout.eflags }).localSet(Local.flags);
         }
         if (layout.flagsChanged >= 0 && this.context.getEflags !== undefined)
         {
@@ -1747,14 +1761,15 @@ export class RegionEmitter {
             // The record goes as it is: the helper at every exit would be a
             // fifth of a call-heavy loop, and the next region mostly writes the
             // flags before it reads them. Whoever reads the word folds it.
-            this.storeRecord(b);
+            this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false,
+                record: true });
         }
         else
         {
             this.materialise();
+            this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
+            atState(context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
         }
-        this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
-        atState(context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
         if (layout.flagsChanged >= 0)
         {
             atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
@@ -1806,21 +1821,17 @@ export class RegionEmitter {
     /**
      * What a transfer under cork's layout leaves in the state block for its
      * callee rather than in its parameters: esp to edi as far as written, the
-     * record and the flags word. At a guest call (`site`) all three wait for
-     * the whole body (`fillDeferred`): what no path to the call wrote since
-     * the state block last held it is there already.
+     * record and the flags word. All three wait for the whole body
+     * (`fillDeferred`): what the body never writes is there already, and at a
+     * guest call (`site`) so is what no path to the call wrote since the state
+     * block last held it.
      *
      * @param {CallSite} [site]
      */
     storeUncarriedState(site){
-        const { b, layout, context } = this;
-        this.deferred.push({ at: b.length, kind: 'store', regs: 'uncarried', x87: false, site });
-        if (site !== undefined)
-        {
-            return;
-        }
-        this.storeRecord(b);
-        atState(context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
+        const { b } = this;
+        this.deferred.push({ at: b.length, kind: 'store', regs: 'uncarried', x87: false, site,
+            record: true });
     }
 
     /**
@@ -1866,9 +1877,8 @@ export class RegionEmitter {
     returnedEpilogue(){
         const { b, layout } = this;
         this.storeMemoryState();
-        this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
-        this.storeRecord(b);
-        atState(this.context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
+        this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false,
+            record: this.context.flagsAcrossCalls === false ? 'word' : true });
         atState(this.context, b).localGet(Local.budget)
             .store('i32', { offset: layout.regs + CallStack.BUDGET });
         b.i32const(Exit.RETURNED).return();
@@ -1974,7 +1984,7 @@ export class RegionEmitter {
             ? this.writtenOnEntry() : [];
         /** @type {{ at: number, body: Body }[]} */
         const pieces = [];
-        for (const { at, kind, regs, x87, site } of this.deferred.reverse())
+        for (const { at, kind, regs, x87, site, record } of this.deferred.reverse())
         {
             const b = this.b = new Body();
             // At a guest call, what the state block holds already stays: only
@@ -2025,14 +2035,41 @@ export class RegionEmitter {
                     }
                 }
             }
-            if (site !== undefined && regs === 'uncarried')
+            if (record !== undefined)
             {
-                // `storeUncarriedState`'s record and flags word.
-                this.storeRecord(b, due);
-                if (due(Local.flags))
+                // The record's fields and the flags word as the registers: one the
+                // body never writes is what the state block holds all along -- its
+                // value on entry, or a callee's after a wasm call -- and one it never
+                // names is not loaded (`uses` counts writes too: a path that leaves
+                // before the write stores the value it came in with).
+                if (kind === 'load')
                 {
-                    atState(this.context, b).localGet(Local.flags)
-                        .store('i32', { offset: layout.eflags });
+                    for (const { local, offset, wide } of this.recordFields)
+                    {
+                        if (record === true && main.uses(local))
+                        {
+                            atState(this.context, b)
+                                .load(wide ? 'i64' : 'i32', { offset: this.flagRecord + offset })
+                                .localSet(local);
+                        }
+                    }
+                    if (main.uses(Local.flags))
+                    {
+                        atState(this.context, b).load('i32', { offset: layout.eflags })
+                            .localSet(Local.flags);
+                    }
+                }
+                else
+                {
+                    // Not the record into a call that does not carry it.
+                    const into = record === true && !(site !== undefined
+                        && this.context.flagsAcrossCalls === false);
+                    this.storeRecord(b, local=>into && main.writes(local) && due(local));
+                    if (main.writes(Local.flags) && due(Local.flags))
+                    {
+                        atState(this.context, b).localGet(Local.flags)
+                            .store('i32', { offset: layout.eflags });
+                    }
                 }
             }
             pieces.push({ at, body: b });

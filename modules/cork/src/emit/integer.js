@@ -311,10 +311,16 @@ function callAndReturn(e, next, target, mechanism){
             .op(I32.add).op(I32.sub).localSet(Local.budget);
         b.else();
     }
+    // Two branches to one way out, not one condition: V8 makes a flag of each
+    // comparison it ors.
+    e.open('callable', EMPTY);
+    e.open('plain', EMPTY);
     atState(context, b).load('i32', { offset: depth }).localTee(Local.t1)
         .i32const(context.callDepth ?? CallStack.LIMIT).op(I32.geU)
-        .localGet(Local.budget).i32const(0).op(I32.leS).op(I32.or);
-    e.openGuard('plain');
+        .unlikely().brIf(e.depthOf('plain'));
+    b.localGet(Local.budget).i32const(0).op(I32.leS).unlikely().brIf(e.depthOf('plain'));
+    b.br(e.depthOf('callable'));
+    e.close();
     e.exitDynamic(Exit.UNTRANSLATED);
     e.close();
     b.localGet(Local.t1).i32const(2).op(I32.shl);
@@ -367,7 +373,7 @@ function callAndReturn(e, next, target, mechanism){
     e.close();
     atState(context, b).load('i32', { offset: layout.regs + CallStack.BUDGET })
         .localSet(Local.budget);
-    e.loadState();
+    e.loadState(false, true);
     if (e.x87.active)
     {
         x87AfterCall(e, next, top);
@@ -390,7 +396,9 @@ function callAndReturn(e, next, target, mechanism){
  * look. Anything else -- a slot that holds another address or none, an entry
  * compiled for another top, a function that does nothing -- goes through the
  * transfer, out of the way, which looks further and answers each of those as
- * before. Leaves the call's answer on the stack.
+ * before. The slot of an entry compiled for any top, nearly every call's, is
+ * tested first with two compares and no more: the key, and the top and empty
+ * code as one halfword. Leaves the call's answer on the stack.
  *
  * @param {E} e @param {number | null} target  a direct call's, null for the one in `eip`
  */
@@ -408,9 +416,43 @@ function linkedCall(e, target){
     {
         b.i32const(hash + slotOf(target, layout.hashShift ?? 16) * Tables.HASH_SLOT);
     }
-    // The index, the label, the top and the empty code in one word, the call
-    // taking two of them: with an empty code of 0 the top two bytes are the top.
-    intoTables(context, b).localTee(Local.t2)
+    intoTables(context, b).localSet(Local.t2);
+    // The way nearly every call goes: the slot holds the target compiled for
+    // any top, as a function that does something -- its top and empty code
+    // read as one halfword, which is `ANY_TOP` only then. An empty slot's
+    // halfword is 0 and a removed one's has the top 0xff (`entries.js`), so
+    // neither passes for a call to address 0 or all ones. Two branches, not
+    // one condition: V8 makes a flag of each comparison it ors.
+    e.open('linked', ValType.i32);
+    e.open('anyTop', EMPTY);
+    b.localGet(Local.t2).load('i32');
+    if (target === null)
+    {
+        b.localGet(Local.eip);
+    }
+    else
+    {
+        b.i32const(target | 0);
+    }
+    b.op(I32.ne).unlikely().brIf(e.depthOf('anyTop'));
+    b.localGet(Local.t2).load('i32_16u', { offset: 10 }).i32const(ANY_TOP).op(I32.ne)
+        .unlikely().brIf(e.depthOf('anyTop'));
+    countLinked(e);
+    b.localGet(Local.t2).load('i32_16u', { offset: 8 });
+    for (let local = Local.budget; local < STATE_PARAMS; local++)
+    {
+        b.localGet(local);
+    }
+    b.localGet(Local.t2).load('i32', { offset: 4 });
+    b.callIndirect(context.regionType, 0);
+    b.br(e.depthOf('linked'));
+    e.close();
+    // Anything else, out of the way: a slot holding the target compiled for
+    // the top the machine has is called the same way, the rest goes through
+    // the transfer. The index, the label, the top and the empty code in one
+    // word, the call taking two of them: with an empty code of 0 the top two
+    // bytes are the top.
+    b.localGet(Local.t2)
         .load('i64', { offset: 4, align: 2 }).localTee(Local.t64)
         .i64const(48n).op(I64.shrU).op(I64.wrap).localTee(Local.t0);
     b.i32const(ANY_TOP).op(I32.eq).localGet(Local.t0);
@@ -429,7 +471,7 @@ function linkedCall(e, target){
         b.i32const(target | 0).op(I32.eq).op(I32.and);
     }
     b.op(I32.eqz);
-    e.openGuard('unlinked', ValType.i32);
+    e.openIf('unlinked', ValType.i32);
     b.localGet(Local.eip);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
@@ -437,14 +479,7 @@ function linkedCall(e, target){
     }
     b.call(/** @type {number} */ (context.transfer));
     b.else();
-    e.countMechanism(Mechanism.CALL_LINKED);
-    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.countTransfers)
-    {
-        // Counted as the transfer it stands in for.
-        const at = layout.tables + Tables.TRANSFERS;
-        atTables(context, atTables(context, b)).load('i32', { offset: at }).i32const(1)
-            .op(I32.add).store('i32', { offset: at });
-    }
+    countLinked(e);
     b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).i32const(0xffff).op(I32.and);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
@@ -453,6 +488,24 @@ function linkedCall(e, target){
     b.localGet(Local.t64).op(I64.wrap);
     b.callIndirect(context.regionType, 0);
     e.close();
+    e.close();
+}
+
+/**
+ * A call `linkedCall` makes itself, counted in a profiling run, and as the
+ * transfer it stands in for where transfers are counted.
+ *
+ * @param {E} e
+ */
+function countLinked(e){
+    const { b, layout, context } = e;
+    e.countMechanism(Mechanism.CALL_LINKED);
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.countTransfers)
+    {
+        const at = layout.tables + Tables.TRANSFERS;
+        atTables(context, atTables(context, b)).load('i32', { offset: at }).i32const(1)
+            .op(I32.add).store('i32', { offset: at });
+    }
 }
 
 /**
