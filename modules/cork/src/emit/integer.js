@@ -1645,6 +1645,7 @@ function swapQuad(e, reg){
 export function prepare(e, operand, options){
     if (operand.kind === 'mem')
     {
+        e.folded = null;
         if (isLong(e))
         {
             windowed(e, operand, options?.store === true);
@@ -1663,15 +1664,25 @@ export function prepare(e, operand, options){
 }
 
 /**
- * A read left untested (`wrapsRead`) whose displacement is small and positive,
- * under a RAM that is a power of two: its registers' sum wrapped into RAM and the
- * displacement added after, not the whole address wrapped. The wrapped sum is
- * the same for every read off the same registers, which the host's compiler
- * computes once for all of them -- a float loaded from each field of a struct,
- * a matrix's twelve -- where wrapping each address took an `and` a read. An
- * address past RAM by the displacement reads the engine's tables, which begin
- * where RAM ends and run past any such displacement; it read the start of RAM
- * before, and #GP on the processor either way.
+ * A read left untested (`wrapsRead`) under a RAM that is a power of two, where
+ * its block reads other fields off the same registers and writes none through
+ * them: the registers' sum plus the lowest displacement of the fields within
+ * 64 KiB of each other (`spreadOf`) wrapped into RAM, and the rest of the
+ * read's displacement added after. The wrapped sum is the same for every read
+ * of the spread, which the host's compiler computes once for all of them -- a
+ * float loaded from each field of a struct, a matrix's twelve, a frame's
+ * locals below its pointer, an array's fields at an absolute displacement --
+ * where wrapping each address took an `add` and an `and` a read; the rest
+ * becomes the load's own offset (`readAddress`).
+ *
+ * The address is the processor's wherever it lies 64 KiB or more into RAM: the
+ * sum is then in RAM itself. Below that, where Windows maps nothing and the
+ * processor raises #GP, a read whose address is smaller than the offset its
+ * load takes reads the engine's tables, which begin where RAM ends, at that
+ * address past RAM's end rather than in RAM's first 64 KiB -- a field read
+ * through a null pointer in a block that also reads below that pointer among
+ * them -- and one past RAM's end by less than that offset reads those tables
+ * too, where it read RAM's start before.
  *
  * @param {E} e @param {Operand} operand @param {boolean} store
  * @returns {boolean}  whether the address is in `addr`, the read's test made
@@ -1679,17 +1690,89 @@ export function prepare(e, operand, options){
 function wrappedFirst(e, operand, store){
     const disp = operand.disp ?? 0;
     const { ramSize } = e.layout;
-    if (disp <= 0 || disp >= WRAPPED_DISPLACEMENT || (ramSize & ramSize - 1) !== 0
+    if ((ramSize & ramSize - 1) !== 0
         || operand.addressSize === 16 || (operand.base ?? -1) < 0 && (operand.index ?? -1) < 0
-        || e.memPlan?.access != null || !wrapsRead(e, store)
-        || (fieldsRead(e).get(registersOf(operand))?.size ?? 0) < 2)
+        || e.memPlan?.access != null || !wrapsRead(e, store))
+    {
+        return false;
+    }
+    const low = spreadOf(fieldsRead(e).get(registersOf(operand)), disp);
+    if (low === null)
     {
         return false;
     }
     const { b } = e;
-    emitAddress(e, { ...operand, disp: 0 }, true);
-    b.i32const(ramSize - 1).op(I32.and).i32const(disp).op(I32.add).localSet(Local.addr);
+    const local = e.foldedSumLocal();
+    emitAddress(e, { ...operand, disp: low }, true);
+    b.i32const(ramSize - 1).op(I32.and).localTee(local);
+    if (disp !== low)
+    {
+        b.i32const(disp - low).op(I32.add);
+    }
+    b.localSet(Local.addr);
+    e.folded = { operand, local, offset: disp - low };
     return true;
+}
+
+/**
+ * The displacement a read's wrapped sum adds to its registers (`wrappedFirst`):
+ * none for one under `WRAPPED_DISPLACEMENT` and not negative, the sum the
+ * registers' own, which every block reading such fields off them shares;
+ * otherwise the lowest of the spread `disp` lies in among the block's other
+ * displacements off them -- in ascending order, each spread beginning at the
+ * first not within `WRAPPED_DISPLACEMENT` of the one before it began. Null
+ * where the read is the only one of its spread, whose address wrapped whole
+ * costs what the wrapped sum does.
+ *
+ * @param {Set<number> | undefined} disps @param {number} disp
+ * @returns {number | null}
+ */
+function spreadOf(disps, disp){
+    if (disps === undefined || disps.size < 2)
+    {
+        return null;
+    }
+    /** @param {number} one */
+    const near = one=>one >= 0 && one < WRAPPED_DISPLACEMENT;
+    if (near(disp))
+    {
+        return [...disps].filter(near).length > 1 ? 0 : null;
+    }
+    let low = 0;
+    let count = 0;
+    for (const one of [...disps].filter(other=>!near(other)).sort((a, c)=>a - c))
+    {
+        if (count === 0 || one - low >= WRAPPED_DISPLACEMENT)
+        {
+            if (one > disp)
+            {
+                break;
+            }
+            low = one;
+            count = 0;
+        }
+        count++;
+    }
+    return count > 1 ? low : null;
+}
+
+/**
+ * Pushes the address a read of `operand` loads from and answers the offset its
+ * load takes: the wrapped sum and the rest of the displacement where `prepare`
+ * left the read one of several off that sum (`wrappedFirst`), else `addr`.
+ *
+ * @param {E} e @param {Operand} operand
+ * @returns {number}
+ */
+export function readAddress(e, operand){
+    const { folded } = e;
+    if (folded !== null && folded.operand === operand)
+    {
+        e.b.localGet(folded.local);
+        return e.layout.ramBase + folded.offset;
+    }
+    e.b.localGet(Local.addr);
+    return e.layout.ramBase;
 }
 
 /**
@@ -1895,7 +1978,10 @@ function fieldsRead(e){
     return fields;
 }
 
-/** How far past RAM a read's displacement may take a wrapped sum: the engine's tables there. */
+/**
+ * How far a read's displacement may lie past its wrapped sum's (`spreadOf`): no
+ * further than the engine's tables run past RAM.
+ */
 const WRAPPED_DISPLACEMENT = 0x10000;
 
 /** The load kind for a zero-extended read of `size` bytes. @param {number} size */
@@ -2027,7 +2113,7 @@ export function readOp(e, operand){
                 orderedLoad(e, operand.size);
                 return;
             }
-            b.localGet(Local.addr).load(loadKind(operand.size), { offset: e.layout.ramBase });
+            b.load(loadKind(operand.size), { offset: readAddress(e, operand) });
             return;
         default:
             throw new Error(`emit: cannot read a ${operand.kind} operand`);

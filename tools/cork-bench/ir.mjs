@@ -11,10 +11,29 @@
  * (`native/`). The warm-up waits for every translation it asked for, so the
  * counted iterations run translated code and no translator.
  *
- *     node ir.mjs NAME WARM ITERS [native]   env VARIANT (x87), CORK (json), APP_ROOT
+ * The runtime's budgets are timed (`holdMs` and the rest), and under valgrind
+ * a millisecond is fifty times the work: what it forms, and what forming it
+ * goes on doing between the counted slices, follows the machine's load. game-sse
+ * counted 1.047 M, 1.088 M and 1.115 M an iteration in three runs of one tree,
+ * vcall 1.33 M or 2.00 M. `CLOCK` gives the run a clock of its own, moving that
+ * many milliseconds a reading, which every run reads alike. A hundred counted
+ * iterations still differ under it (tree 3.21 M or 3.42 M at 0.001; not
+ * explained, the runtime's timers, which fire by the real clock, a suspect); a
+ * thousand (`ir.sh`'s ITERS) agreed within 0.23 % on every workload, two runs
+ * of two trees each.
+ *
+ *     node ir.mjs NAME WARM ITERS [native]   env VARIANT (x87), CORK (json), APP_ROOT, CLOCK
  */
 
 import { readFileSync } from 'node:fs';
+
+if (process.env.CLOCK)
+{
+    let now = 0;
+    const tick = Number(process.env.CLOCK);
+    performance.now = ()=>(now += tick);
+    Date.now = ()=>Math.floor(1.7e12 + now);
+}
 
 const root = process.env.APP_ROOT ?? new URL('../../', import.meta.url).pathname;
 const [name, warm, iters, native] = process.argv.slice(2);

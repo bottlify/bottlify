@@ -61,7 +61,7 @@ import { isX87Opcode } from '../decode/decoder.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
-import { prepare, writeReg } from './integer.js';
+import { prepare, readAddress, writeReg } from './integer.js';
 import { PRECISION, noteStore } from './memory.js';
 import { callsOut, inlineReturns } from '../region.js';
 import { exactWrites } from '../ir-x87.js';
@@ -2830,8 +2830,7 @@ export function emitX87(e, instruction, flagsLive){
                     // The float the double would be promoted from; a NaN keeps its bits
                     // here and is quieted where it leaves through the double.
                     prepare(e, src);
-                    b.localGet(Local.addr).load('f32', { offset: e.layout.ramBase })
-                        .localSet(singleOf(e, into));
+                    b.load('f32', { offset: readAddress(e, src) }).localSet(singleOf(e, into));
                     pushFloat(false);
                 }
                 return finish();
@@ -2855,9 +2854,8 @@ export function emitX87(e, instruction, flagsLive){
         case 'fild':
             guard();
             prepare(e, src);
-            b.localGet(Local.addr);
             b.load(src.size === 2 ? 'i64_16s' : src.size === 4 ? 'i64_32s' : 'i64',
-                { offset: e.layout.ramBase });
+                { offset: readAddress(e, src) });
             if (src.size === 8 && x.tracksExact)
             {
                 // The quadword beside the double it rounds to, for a quadword
@@ -3438,7 +3436,7 @@ export function emitX87(e, instruction, flagsLive){
                 else
                 {
                     prepare(e, src);
-                    b.localGet(Local.addr).load('f32', { offset: e.layout.ramBase });
+                    b.load('f32', { offset: readAddress(e, src) });
                 }
                 b.localSet(theirs);
                 const [a, c] = reversed ? [theirs, mine] : [mine, theirs];
@@ -3490,8 +3488,7 @@ export function emitX87(e, instruction, flagsLive){
             else if (op.startsWith('fi'))
             {
                 prepare(e, src);
-                b.localGet(Local.addr);
-                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: e.layout.ramBase });
+                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: readAddress(e, src) });
                 b.op(F64.convertI32S);
             }
             else
@@ -3539,8 +3536,7 @@ export function emitX87(e, instruction, flagsLive){
             {
                 guard();
                 prepare(e, src);
-                b.localGet(Local.addr);
-                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: e.layout.ramBase });
+                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: readAddress(e, src) });
                 b.op(F64.convertI32S).localSet(x.temp2);
             }
             else if (op === 'ftst')
@@ -4007,8 +4003,7 @@ function loadFloatValue(e, operand, mode = 'checked'){
     {
         // f32 -> f64 quiets a signalling NaN keeping its payload, as the
         // processor's own conversion does; an f64 load keeps the bits.
-        b.localGet(Local.addr).load(operand.size === 4 ? 'f32' : 'f64',
-            { offset: e.layout.ramBase });
+        b.load(operand.size === 4 ? 'f32' : 'f64', { offset: readAddress(e, operand) });
         if (operand.size === 4)
         {
             b.op(F64.promoteF32);

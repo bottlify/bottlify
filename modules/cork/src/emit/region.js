@@ -1248,6 +1248,16 @@ export class RegionEmitter {
         this.ranges = [];
         /** Whether the current block's remaining instructions are unreachable. */
         this.dead = false;
+        /**
+         * The read `prepare` last made off a wrapped sum its block's other reads
+         * share (`wrappedFirst` in integer.js): the operand, the local holding
+         * the sum and what the operand's displacement adds to it, for the load to
+         * take as its offset. `addr` holds the whole address all the same.
+         * @type {{ operand: object, local: number, offset: number } | null}
+         */
+        this.folded = null;
+        /** The i32 local `folded` sums are kept in, -1 until made. */
+        this.sumLocal = -1;
         /** Instructions retired in the current block so far, to charge at its end. */
         this.blockRetired = 0;
         /** Each block's marks made so far, in a build that marks them (`markBlock`).
@@ -1411,6 +1421,16 @@ export class RegionEmitter {
                 this.pendingLows.delete(index);
             }
         }
+    }
+
+    /** The i32 local a read's wrapped sum is kept in (`folded`). */
+    foldedSumLocal(){
+        if (this.sumLocal < 0)
+        {
+            this.sumLocal = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(ValType.i32);
+        }
+        return this.sumLocal;
     }
 
     /**
@@ -3236,6 +3256,7 @@ export class RegionEmitter {
             this.current = instruction;
             this.owesResult = i === block.instructions.length - 2 && this.owesTo(block);
             this.staleCheck = false;
+            this.folded = null;
             this.x87RefusalReason = null;
             // Counted before it is emitted, so an exit *after* it (a halt, a
             // call) has it charged; an exit *before* it uncounts it.

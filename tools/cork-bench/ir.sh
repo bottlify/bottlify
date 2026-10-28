@@ -1,12 +1,15 @@
 #!/bin/bash
 # Machine instructions an iteration of a cork-bench workload, cork or native (`ir.mjs`):
-# valgrind's count of WARM+100 iterations less WARM+0, over 100. V8's GC heuristics are
+# valgrind's count of WARM+ITERS iterations less WARM+0, over ITERS. V8's GC heuristics are
 # timed, so the node runs --predictable; liftoff and tier-up off, so every wasm function is
-# the optimising compiler's from the start. Exact to ~0.05 % run to run.
+# the optimising compiler's from the start.
+#
+# The runtime's budgets are timed too, so what it translates follows the machine's load unless
+# the run's clock is its own: CLOCK=0.001 ITERS=1000 (`ir.mjs`), within 0.23 % run to run.
 #
 # Exact is not unbiased: a one-off piece of host work (a collection, a compile) whose moment
-# depends on the arm's heap can fall inside the 100 iterations of one arm and not the other,
-# a few per cent on a workload whose translation did not change. WASM=1 also counts the
+# depends on the arm's heap can fall inside the counted iterations of one arm and not the
+# other, a few per cent on a workload whose translation did not change. WASM=1 also counts the
 # instructions in V8's printed wasm code (tools/wasm-grind.mjs), which such work never
 # reaches: judge a change to cork's code by that column.
 #
@@ -14,11 +17,12 @@
 # src/NAME.c` rebuilds vm crc switch tree fmath vcall byte for byte; sort, game and str were built
 # with flags not recorded.
 #
-#   tools/cork-bench/ir.sh NAME [native]   env NODE (node), WARM (1000), WASM, VARIANT, CORK,
-#   APP_ROOT
+#   tools/cork-bench/ir.sh NAME [native]   env NODE (node), WARM (1000), ITERS (100), WASM,
+#       VARIANT, CORK, APP_ROOT, CLOCK
 here=$(dirname "$0")
 node=${NODE:-node}
 warm=${WARM:-1000}
+iters=${ITERS:-100}
 flags=(--single-threaded --predictable --predictable-gc-schedule --no-liftoff
     --no-wasm-dynamic-tiering)
 count(){
@@ -38,11 +42,11 @@ counted(){
 }
 if [ -n "$WASM" ]; then
     read -r a wa <<< "$(counted "$1" 0 "$2")"
-    read -r b wb <<< "$(counted "$1" 100 "$2")"
-    echo "$1 ${2:-cork} $(( (b - a) / 100 )) instructions an iteration, $(( (wb - wa) / 100 ))" \
-        "in wasm"
+    read -r b wb <<< "$(counted "$1" "$iters" "$2")"
+    echo "$1 ${2:-cork} $(( (b - a) / iters )) instructions an iteration," \
+        "$(( (wb - wa) / iters )) in wasm"
 else
     a=$(count "$1" 0 "$2")
-    b=$(count "$1" 100 "$2")
-    echo "$1 ${2:-cork} $(( (b - a) / 100 )) instructions an iteration"
+    b=$(count "$1" "$iters" "$2")
+    echo "$1 ${2:-cork} $(( (b - a) / iters )) instructions an iteration"
 fi

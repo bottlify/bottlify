@@ -5,10 +5,11 @@
  */
 
 /**
- * The scalar SSE forms of an arm64 host's translation hold a register's low
- * lane in a local of their own and owe the vector its lane (`pendingLows` in
- * region.js), putting it back where the vector is read whole, at the block's
- * end and on every way out. Seeded sequences of scalar loads, stores and
+ * The scalar SSE forms hold a register's low lane in a local of their own and
+ * owe the vector its lane (`pendingLows` in region.js), putting it back where
+ * the vector is read whole, at the block's end and on every way out; a scalar
+ * load owes the zeroed vector on an arm64 host and loads it on an x64 one
+ * (`owesLoads` in simd.js). Seeded sequences of scalar loads, stores and
  * arithmetic of both widths on the same registers, mixed with forms that read
  * or write the vectors whole, with blocks' ends and with ways out in the middle
  * of a block -- a store into the code page, `fldenv` -- judged against the
@@ -76,31 +77,36 @@ const POOL = [
 
 const SEQUENCES = 3000;
 
-test('owed low lanes come out as the instruction model leaves the registers', async()=>{
-    const judge = createJudge({ pool: POOL,
-        features: { ...features(), defaultNaNNegative: true, armHost: true } });
-    const next = random(0x10a5e);
-    let judged = 0;
-    /** @type {string[]} */
-    const failures = [];
-    for (let k = 0; k < SEQUENCES; k++)
-    {
-        const body = Array.from({ length: 3 + Math.floor(next() * 10) },
-            ()=>Math.floor(next() * POOL.length));
-        const result = await judge.judge(body, []);
-        if (result === null)
-        {
-            continue;
-        }
-        judged++;
-        if (result.divergences.length > 0 && failures.length < 10)
-        {
-            const what = result.divergences.slice(0, 4)
-                .map(one=>`${one.name} ${String(one.expected)} != ${String(one.actual)}`);
-            failures.push(`${body.map(i=>POOL[i].name).join('; ')}: ${what.join('; ')}`);
-        }
-    }
-    assert.ok(judged > SEQUENCES * 0.9, `only ${judged} of ${SEQUENCES} ran`);
-    assert.ok(judge.published() > judged * 0.9, `${judge.published()} of ${judged} translated`);
-    assert.deepEqual(failures, []);
-});
+for (const [host, armHost] of /** @type {const} */ ([['an arm64', true], ['an x64', false]]))
+{
+    test(`owed low lanes come out as the instruction model leaves the registers (${host} host)`,
+        async()=>{
+            const judge = createJudge({ pool: POOL,
+                features: { ...features(), defaultNaNNegative: true, armHost } });
+            const next = random(0x10a5e);
+            let judged = 0;
+            /** @type {string[]} */
+            const failures = [];
+            for (let k = 0; k < SEQUENCES; k++)
+            {
+                const body = Array.from({ length: 3 + Math.floor(next() * 10) },
+                    ()=>Math.floor(next() * POOL.length));
+                const result = await judge.judge(body, []);
+                if (result === null)
+                {
+                    continue;
+                }
+                judged++;
+                if (result.divergences.length > 0 && failures.length < 10)
+                {
+                    const what = result.divergences.slice(0, 4)
+                        .map(one=>`${one.name} ${String(one.expected)} != ${String(one.actual)}`);
+                    failures.push(`${body.map(i=>POOL[i].name).join('; ')}: ${what.join('; ')}`);
+                }
+            }
+            assert.ok(judged > SEQUENCES * 0.9, `only ${judged} of ${SEQUENCES} ran`);
+            assert.ok(judge.published() > judged * 0.9,
+                `${judge.published()} of ${judged} translated`);
+            assert.deepEqual(failures, []);
+        });
+}

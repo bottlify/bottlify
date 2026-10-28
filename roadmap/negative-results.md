@@ -1916,3 +1916,23 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   registers' are (the entry of 2026-10-27 on callee-saved registers).
 - **Machine.** A cloud container (4 vCPU), valgrind 3.22.
 - **Decision.** Not taken.
+
+### 2026-10-28: a scalar SSE load that owes its vector on an x64 host
+
+- **Idea.** With the scalar SSE forms holding their low lane in a local on x64 too, a `movss` or
+  `movsd` load leaves the value in that local alone and owes the zeroed vector, as on arm64,
+  rather than loading the vector (`owesLoads` in emit/simd.js): the load's offset folds into the
+  scalar load, and no copy of the lane is taken out of a vector still live.
+- **Workload.** cork-bench fmath-sse and game-sse; valgrind callgrind over node 26.12.1 (V8 14.6)
+  x64, `ir.sh`'s flags, 1000 warm-up iterations, then 1000 counted less 0, divided by 1000, the
+  run's clock its own (`CLOCK=0.001`). Two runs of the vector loads, one of the owed ones; two
+  runs of one tree agreed within 0.23 % on every cork-bench workload.
+- **Values.** Machine instructions an iteration, vector loads against owed ones: fmath-sse
+  809,730 and 808,950 against 795,922 (-1.7 %); game-sse 1,135,728 and 1,135,993 against
+  1,152,080 (+1.4 %). Native wasm: 265,201 and 434,481.
+- **Why.** An owed zeroed vector is put back as a zeroing and an insert at the block's end;
+  game's blocks are short and load more than they compute, fmath's chain arithmetic on what they
+  load.
+- **Checked.** The low-lanes gate on both hosts' features (emit/low-lanes.itest.js).
+- **Machine.** A cloud container (Xeon @ 2.80 GHz, 4 vCPU), valgrind 3.22.
+- **Decision.** Not taken: x64 loads the vector.
