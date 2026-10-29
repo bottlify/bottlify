@@ -2256,3 +2256,32 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   per cent of lua does not pay for either in this change.
 - **Machine.** As the entries above.
 - **Decision.** Not taken.
+
+### 2026-10-29: a predicted call to a callee not formed in made as a wasm call
+
+- **Idea.** An indirect call whose callees the runtime predicted (`callTargets`) compares its
+  target with the callees formed in and jumps to the one it matches; any other target leaves
+  the region (`CALL_LEFT`), its `ret` coming back through the entry hash too (`RET_LEFT`).
+  Made a wasm call instead (`callAndReturn` after `predictCall`, linked or through the
+  transfer), as a call with none predicted is, in 32-bit regions without x87 (whose stack
+  planning does not follow the extra return), with the path stores' analyses carrying the
+  block's writes into the callees it jumps to before the call.
+- **Workload.** As the entries above, on top of the path stores (eight kinds), against them.
+  Gated: the path-stores gate with a call through a table of eight functions by a turning
+  index under `callTargets` and `predictAfter: 1`, misses as wasm calls counted (passed, and
+  its two mutations failed it).
+- **Values** (in wasm): calls8-order 3,819,114 -> 3,117,581 (-18.4 %; through the transfer
+  rather than linked, 3,310,493); vcall 1,690,942 -> 2,047,372 (+21.1 %; through the transfer
+  2,050,118); game 1,025,967 and tree 2,702,055, unchanged; lua unchanged (its regions hold
+  x87). Mechanisms, calls8-order an iteration: transfers 32,763 -> 1, `CALL_LEFT` 16,381 -> 0.
+  Bytes of the runtime's modules after 50 iterations: vcall 87,045 -> 99,759 (+14.6 %),
+  calls8-order +5.6 %, the twelve workloads +0.11 %.
+- **Why.** vcall's predictions always hit: no call runs, but the call on the cold way of each
+  site puts a wasm call inside its hot loop, and V8 kept the loop's values in stack slots
+  and moved them around it -- ten machine instructions more in each of its hottest blocks,
+  frame stores and loads from 9.4 % to 15 % of its main region (`ir-hot.sh`). A prediction
+  is made where a few callees take most of a site's calls, so its sites hit far more often
+  than calls8-order's.
+- **Machine.** As the entries above.
+- **Decision.** Not taken. Worth measuring again only for sites whose samples show many
+  calls to other targets, the call kept out of the hot code's function.
