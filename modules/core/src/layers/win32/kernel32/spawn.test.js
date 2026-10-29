@@ -458,7 +458,7 @@ test('a 64-bit process\'s PROCESS_INFORMATION has its handles eight bytes wide',
         [child.handle, 0, child.threadHandle, 0, child.id, child.threadId]);
 });
 
-test('OpenProcess finds the program itself and the children it made, and nothing else', ()=>{
+test('OpenProcess finds the program itself, its children and the run\'s other processes', ()=>{
     const host = fakeHost({ files: ['C:\\App\\child.exe'] });
     const fns = createSpawnFunctions(host);
     const ERROR_INVALID_PARAMETER = 87;
@@ -475,6 +475,14 @@ test('OpenProcess finds the program itself and the children it made, and nothing
         'the program itself');
     assert.equal(fns.OpenProcess.handler([PROCESS_ALL_ACCESS, 0, 0x7777]), 0);
     assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    // A process of the run another process started, as the kernel finds it.
+    const elsewhere = { id: 0x7778, exitCode: 259 };
+    const kernel = /** @type {any} */ (host.kernel);
+    kernel.processes.find = (/** @type {number} */ id)=>(id === elsewhere.id ? elsewhere : null);
+    const beside = fns.OpenProcess.handler([PROCESS_ALL_ACCESS, 0, elsewhere.id]);
+    assert.notEqual(beside, 0, 'a process beside it, not its child');
+    assert.equal(host.kernel.handles.resolve(beside, 'process'), elsewhere);
 });
 
 test('an image that is not there is refused rather than recorded', ()=>{

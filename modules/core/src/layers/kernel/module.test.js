@@ -637,3 +637,22 @@ test('a thread ended while it waits leaves the queue, and a live waiter gets the
     kernel.setEvent(event);
     assert.equal(living.state, 'ready', 'an auto-reset signal reaches the live one');
 });
+
+test('a process is found by id in the run\'s directory, whichever process started it', async()=>{
+    const directory = new Map();
+    /** @param {any} config */
+    const kernelWith = async config=>/** @type {any} */ (await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE }, ...config },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            provide: ()=>{},
+        })));
+    const ids = { thread: 1, process: 0x2000 };
+    const parent = await kernelWith({ processDirectory: directory, ids });
+    const other = await kernelWith({ processDirectory: directory, ids });
+    const child = parent.processes.create({ imagePath: 'C:\\a.exe', commandLine: 'a' });
+    assert.equal(parent.processes.find(child.id), child, 'its parent finds it');
+    assert.equal(other.processes.find(child.id), child, 'and so does a process beside it');
+    assert.equal(other.processes.find(0x9998), null);
+});

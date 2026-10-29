@@ -1029,7 +1029,25 @@ export function createKernelModule(){
                         const record = state.processes.create(options);
                         record.exited = state.sync.createEvent({ manualReset: true,
                             signalled: record.completed, name: `process ${record.id}` });
+                        // In the run's directory too, where a process that
+                        // is not its parent opens it by id.
+                        config?.processDirectory?.set(record.id, record);
                         return record;
+                    },
+                    /**
+                     * A process of the run by id: this one's child, or one any
+                     * other process on this thread started. Null for none.
+                     *
+                     * @param {number} id
+                     */
+                    find: (/** @type {number} */ id)=>{
+                        if (!live())
+                        {
+                            return null;
+                        }
+                        return state.processes.all().find(
+                            (/** @type {any} */ record)=>record.id === id)
+                            ?? config?.processDirectory?.get(id) ?? null;
                     },
                     pending: ()=>live() ? state.processes.pending() : null,
                     all: ()=>live() ? state.processes.all() : [],

@@ -891,7 +891,9 @@ export function createSpawnFunctions(host){
                 {
                     return CURRENT_PROCESS;
                 }
-                const child = kernel.processes.all().find(
+                // A child, or any process of the run on this thread: a crash
+                // reporter opens the client that asked it for a dump.
+                const child = kernel.processes.find?.(wanted) ?? kernel.processes.all().find(
                     (/** @type {any} */ made)=>made.id === wanted);
                 if (!child)
                 {

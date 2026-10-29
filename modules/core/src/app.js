@@ -3785,7 +3785,7 @@ function journalEvents(events, into){
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
  *     system?: { namedObjects: Map<string, any>, registry: any, bundle: any, windows?: any,
- *         sharedViews?: any,
+ *         sharedViews?: any, processDirectory?: Map<number, any>,
  *         ids: { thread: number, process: number }, volume: any },
  *     mainThreadId?: number,
  *     beside?: (request: any) => void,
@@ -4338,6 +4338,8 @@ async function buildApp(options){
             // The run's thread and process ids, which every process numbers
             // its own from (`system`).
             ids: options.system?.ids,
+            // Every process the run's processes on this thread started, by id.
+            processDirectory: options.system?.processDirectory,
             // A process across a link reaches the run's named objects there.
             remoteObjects: options.system?.objects ?? null,
         },
@@ -9614,7 +9616,8 @@ export async function createApp(options){
      * later process is handed rather than a copy of it.
      *
      * @type {{ namedObjects: Map<string, any>, registry: any, bundle: any, windows: any,
-     *     sharedViews?: any, ids: { thread: number, process: number },
+     *     sharedViews?: any, processDirectory?: Map<number, any>,
+     *     ids: { thread: number, process: number },
      *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
      *         writables: Map<string, any>, watchers: Set<Function>, revisions?: Int32Array,
      *         sharing?: any, sharingMemory?: SharedArrayBuffer } }}
@@ -9625,6 +9628,7 @@ export async function createApp(options){
         // Views of one page-file section, kept agreeing at the edges of each
         // process's turns (`shared-views.js`).
         sharedViews: createSharedViews(),
+        processDirectory: new Map(),
         ids: { thread: 1, process: 0x2000 },
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set(), ...volumeMemory() } };
