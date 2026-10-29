@@ -402,6 +402,24 @@ test('a spin count is recorded where a guest looks for it', ()=>{
     assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
 });
 
+test('InitializeCriticalSectionEx makes InitializeCriticalSection\'s section, flags aside', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.bytes.fill(0xcc, 0x200, 0x200 + 0x18);
+
+    assert.equal(fns.InitializeCriticalSectionEx.argBytes, 12);
+    // CRITICAL_SECTION_NO_DEBUG_INFO, as the 2015 runtime passes it.
+    assert.equal(fns.InitializeCriticalSectionEx.handler([0x200, 4000, 0x01000000]), 1);
+    assert.equal(host.readI32(0x200), -1, 'no debug record');
+    assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
+    assert.equal(host.readI32(0x200 + CS_RECURSION_COUNT), 0);
+    assert.equal(host.readI32(0x200 + CS_OWNING_THREAD), 0);
+    assert.equal(host.readI32(0x200 + CS_SPIN_COUNT), 4000);
+    // The count's top byte holds flags, not count.
+    fns.InitializeCriticalSectionEx.handler([0x200, 0x80000fa0, 0]);
+    assert.equal(host.readI32(0x200 + CS_SPIN_COUNT), 0xfa0);
+});
+
 test('SetCriticalSectionSpinCount keeps the count in the section and answers the old one', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);

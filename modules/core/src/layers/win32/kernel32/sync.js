@@ -746,6 +746,24 @@ export function createSyncFunctions(host){
         },
 
         /**
+         * BOOL InitializeCriticalSectionEx(LPCRITICAL_SECTION, DWORD dwSpinCount, DWORD Flags)
+         *
+         * Vista's form, which a C runtime from 2015 on imports for its own
+         * locks. The flags only choose whether a debug record is kept, and
+         * none is kept here whatever they say; the spin count's top byte is
+         * RTL_CRITICAL_SECTION_ALL_FLAG_BITS, flags rather than part of the
+         * count, so it is not kept as count.
+         */
+        InitializeCriticalSectionEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pointer, spinCount])=>{
+                initialise(pointer >>> 0, (spinCount & 0x00ffffff) | 0);
+                return 1;
+            },
+        },
+
+        /**
          * DWORD SetCriticalSectionSpinCount(LPCRITICAL_SECTION, DWORD dwSpinCount)
          *
          * The count is kept in the section, where
