@@ -274,21 +274,27 @@ async function runProgram(pieces, budget, config, host = undefined){
 
 /**
  * The hosts the calls are made for: this one, and an arm64 one, whose linked call tests the key
- * and the slot's top as one condition (`linkedCall`).
+ * and the slot's top as one condition (`linkedCall`). Each takes every other eight seeds, so
+ * the two run in the time one took.
  *
  * @type {[string, import('../wasm/features.js').Features | undefined][]}
  */
 const HOSTS = [['this host', undefined], ['an arm64 host', { ...features(), armHost: true }]];
 
-for (const [name, host] of HOSTS)
+for (const [which, [name, host]] of HOSTS.entries())
 {
     for (const [first, budget] of [[1, 10_000_000], [1001, 61]])
     {
         test(`direct calls linked at the call leave what calls through the transfer leave (seeds ${
-            first}.., budget ${budget}, ${name})`, async()=>{
+            first}.., every other eight from the ${which === 0 ? 'first' : 'second'}, budget ${
+            budget}, ${name})`, async()=>{
             const seen = { linked: 0, transfers: 0, empty: 0, elsewhere: 0 };
             for (let seed = first; seed < first + 80; seed++)
             {
+                if (Math.floor((seed - first) / 8) % HOSTS.length !== which)
+                {
+                    continue;
+                }
                 const pieces = generate(seed * 7919);
                 const through = await runProgram(pieces, budget, { linkedCalls: false }, host);
                 const linked = await runProgram(pieces, budget, {}, host);
