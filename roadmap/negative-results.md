@@ -2123,3 +2123,27 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
   recorded.
 - **Decision.** Not taken: the limit stays 32.
+
+### 2026-10-29: entry-test locals for jumps forward, and locals cleared in shallower loops
+
+- **Idea.** The local that lets a jump pass a block's entry test it passed before
+  (`planTestedOnce`) given also (a) to blocks only a jump forward reaches past their test, and
+  (b) to blocks whose way back to such a jump runs through a block that changes the test's
+  registers or reaches the host, that block clearing it, where every such block lay in fewer
+  of the program's loops (jumps to an address no higher, calls and returns aside) than the
+  block itself.
+- **Workload.** cork-bench, x87 images, `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64; one run an arm, on 30c1205.
+- **Values.** Taken (jumps back, nothing cleared): game 1,062,421 -> 1,030,109, the others
+  unchanged. With (a): game the same, sort 2,605,293 -> 2,661,731 (+2.2 %), crc 1,630,190 ->
+  1,628,053 (-0.1 %). With (a) and (b): crc 1,550,288 (-4.9 %), game 1,021,043 (-3.9 %), sort
+  2,724,988 (+4.6 %); with every clearing block allowed, sort +5.2 %. Other workloads
+  unchanged in every arm.
+- **Why.** Sort: one more local live across a large function, and V8 spilled and moved others
+  for it, the jumps forward rarely passing a test; with (b) the locals of its partition's
+  blocks cleared by the recursive call's pushes and pops. Not measured which of crc's locals
+  gave its 4.9 %; its one cleared local sits on a cold path, so it may be the same
+  allocation's luck the other way.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Neither taken: a jump back only, nothing on its way clearing the local.
