@@ -149,3 +149,27 @@ export function createBcryptFunctions(host){
         },
     };
 }
+
+/**
+ * bcryptprimitives.dll: ProcessPrng, the per-process generator Windows 10's
+ * own RNG calls rest on and a browser imports by name for its random bytes.
+ * It cannot fail; it answers TRUE for any count, none included.
+ *
+ * @param {BcryptHost} host
+ */
+export function createBcryptPrimitivesFunctions(host){
+    return {
+        /** BOOL ProcessPrng(PBYTE pbData, SIZE_T cbData) */
+        ProcessPrng: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, count])=>{
+                if ((count >>> 0) > 0)
+                {
+                    host.writeMemory(buffer >>> 0, randomBytes(count >>> 0));
+                }
+                return 1;
+            },
+        },
+    };
+}

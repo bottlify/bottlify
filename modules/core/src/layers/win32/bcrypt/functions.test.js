@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createBcryptFunctions } from './functions.js';
+import { createBcryptFunctions, createBcryptPrimitivesFunctions } from './functions.js';
 
 const STATUS_INVALID_HANDLE = 0xc0000008 | 0;
 const STATUS_INVALID_PARAMETER = 0xc000000d | 0;
@@ -59,4 +59,16 @@ test('an RNG algorithm handle names the same generator; other algorithms are not
     assert.equal(fns.BCryptOpenAlgorithmProvider.handler([0x300, 0x200, 0, 0]), STATUS_NOT_FOUND);
     assert.equal(fns.BCryptOpenAlgorithmProvider.handler([0, 0x200, 0, 0]),
         STATUS_INVALID_PARAMETER);
+});
+
+test('ProcessPrng fills the buffer and cannot fail', ()=>{
+    const memory = new Uint8Array(0x400);
+    const fns = createBcryptPrimitivesFunctions({
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readMemory: (address, length)=>memory.subarray(address, address + length),
+    });
+    assert.equal(fns.ProcessPrng.handler([0x100, 32]), 1);
+    assert.ok(memory.subarray(0x100, 0x120).some(byte=>byte !== 0));
+    assert.equal(memory[0x120], 0, 'nothing past the count');
+    assert.equal(fns.ProcessPrng.handler([0, 0]), 1, 'no bytes is TRUE too');
 });

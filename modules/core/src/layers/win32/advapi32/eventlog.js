@@ -70,7 +70,12 @@ const TRACE = Object.freeze({ BUFFER_SIZE: 0, GUID: 24, LOG_FILE_MODE: 64,
 const EVENT_TRACE_FILE_MODE_SEQUENTIAL = 0x1;
 const EVENT_TRACE_FILE_MODE_CIRCULAR = 0x2;
 const EVENT_TRACE_REAL_TIME_MODE = 0x100;
+const EVENT_TRACE_CONTROL_QUERY = 0;
 const EVENT_TRACE_CONTROL_STOP = 1;
+const EVENT_TRACE_CONTROL_UPDATE = 2;
+const EVENT_TRACE_CONTROL_FLUSH = 3;
+/** ControlTrace's answer for a session that is not running. */
+const ERROR_WMI_INSTANCE_NOT_FOUND = 4201;
 /** The kernel logger's GUID and the one name a session of it may have. */
 const SYSTEM_TRACE_CONTROL_GUID = '9e814aad320411d29a82006008a86939';
 const KERNEL_LOGGER_NAME = 'NT KERNEL LOGGER';
@@ -116,6 +121,8 @@ const MAX_NAME = 0x8000;
  *           Where a backup is written and read. Without it a backup is refused.
  * @property {() => number} [now]  The wall clock, in seconds since 1970.
  * @property {string} [computerName]
+ * @property {(values: { edx: number }) => void} [setRegisters]  The high half of a
+ *           64-bit answer (OpenTrace's TRACEHANDLE).
  */
 
 /** @param {string} text @param {boolean} wide @returns {Uint8Array} with its terminator */
@@ -719,7 +726,8 @@ export function createEventLogFunctions(host){
             const key = named ?? [...sessions].find(([, handle])=>handle === (low >>> 0))?.[0];
             if (key === undefined || !sessions.has(key))
             {
-                return ERROR_INVALID_PARAMETER;
+                return named === null && (low >>> 0) === 0 ? ERROR_INVALID_PARAMETER
+                    : ERROR_WMI_INSTANCE_NOT_FOUND;
             }
             if ((control >>> 0) === EVENT_TRACE_CONTROL_STOP)
             {
@@ -729,7 +737,84 @@ export function createEventLogFunctions(host){
         },
     });
 
+    /**
+     * StopTrace, QueryTrace, FlushTrace and UpdateTrace: ControlTrace with
+     * the control code each stands for.
+     *
+     * @param {boolean} wide @param {number} control
+     */
+    const controlAs = (wide, control)=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([low, high, nameAddress, properties])=>
+            controlTrace(wide).handler([low, high, nameAddress, properties, control]),
+    });
+
+    /**
+     * EnableTrace and EnableTraceEx2: a provider enabled for a running
+     * session. Nothing is delivered (no consumer reads a session here), so
+     * enabling succeeds wherever the session stands.
+     *
+     * @param {number} handleArg Where the TRACEHANDLE's low half is.
+     * @param {number} argBytes
+     */
+    const enableTrace = (handleArg, argBytes)=>({
+        argBytes,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ args)=>{
+            const low = args[handleArg] >>> 0;
+            if (low === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return [...sessions.values()].includes(low) ? ERROR_SUCCESS
+                : ERROR_WMI_INSTANCE_NOT_FOUND;
+        },
+    });
+
+    /**
+     * OpenTrace: no session here has a consumer, real-time or from a file,
+     * so the answer is INVALID_PROCESSTRACE_HANDLE and the reason in the
+     * last error -- a logger that is not running, or a file not there.
+     */
+    const openTrace = {
+        argBytes: 4,
+        handler: ()=>{
+            host.setRegisters?.({ edx: 0xffffffff });
+            host.setLastError(ERROR_WMI_INSTANCE_NOT_FOUND);
+            return -1;
+        },
+    };
+
     return {
+        /** ULONG StopTrace(TRACEHANDLE, LPCTSTR InstanceName, PEVENT_TRACE_PROPERTIES) */
+        StopTraceA: controlAs(false, EVENT_TRACE_CONTROL_STOP),
+        StopTraceW: controlAs(true, EVENT_TRACE_CONTROL_STOP),
+        /** ULONG QueryTrace(TRACEHANDLE, LPCTSTR InstanceName, PEVENT_TRACE_PROPERTIES) */
+        QueryTraceA: controlAs(false, EVENT_TRACE_CONTROL_QUERY),
+        QueryTraceW: controlAs(true, EVENT_TRACE_CONTROL_QUERY),
+        /** ULONG FlushTrace(TRACEHANDLE, LPCTSTR InstanceName, PEVENT_TRACE_PROPERTIES) */
+        FlushTraceA: controlAs(false, EVENT_TRACE_CONTROL_FLUSH),
+        FlushTraceW: controlAs(true, EVENT_TRACE_CONTROL_FLUSH),
+        /** ULONG UpdateTrace(TRACEHANDLE, LPCTSTR InstanceName, PEVENT_TRACE_PROPERTIES) */
+        UpdateTraceA: controlAs(false, EVENT_TRACE_CONTROL_UPDATE),
+        UpdateTraceW: controlAs(true, EVENT_TRACE_CONTROL_UPDATE),
+        /** ULONG EnableTrace(ULONG Enable, ULONG EnableFlag, ULONG EnableLevel, LPCGUID, TRACEHANDLE) */
+        EnableTrace: enableTrace(4, 24),
+        /**
+         * ULONG EnableTraceEx2(TRACEHANDLE, LPCGUID, ULONG ControlCode, UCHAR Level,
+         *     ULONGLONG MatchAnyKeyword, ULONGLONG MatchAllKeyword, ULONG Timeout,
+         *     PENABLE_TRACE_PARAMETERS)
+         */
+        EnableTraceEx2: enableTrace(0, 44),
+        /** TRACEHANDLE OpenTrace(PEVENT_TRACE_LOGFILE Logfile) */
+        OpenTraceA: openTrace,
+        OpenTraceW: openTrace,
+        /** ULONG ProcessTrace(PTRACEHANDLE, ULONG HandleCount, LPFILETIME, LPFILETIME) */
+        ProcessTrace: { argBytes: 16, handler: ()=>ERROR_INVALID_HANDLE },
+        /** ULONG CloseTrace(TRACEHANDLE) */
+        CloseTrace: { argBytes: 8, handler: ()=>ERROR_INVALID_HANDLE },
+
         /** HANDLE RegisterEventSource(LPCTSTR lpUNCServerName, LPCTSTR lpSourceName) */
         RegisterEventSourceA: open(false, true),
         RegisterEventSourceW: open(true, true),

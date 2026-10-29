@@ -160,4 +160,21 @@ test('a trace session starts once under its name, and the kernel logger only as 
     assert.equal(fns.ControlTraceA.handler([view.getUint32(0x300, true), 0, 0x100, properties, 1]),
         0);
     assert.equal(fns.StartTraceA.handler([0x300, 0x100, properties]), 0, 'stopped, it starts');
+    const handle = view.getUint32(0x300, true);
+    assert.equal(fns.QueryTraceA.handler([handle, 0, 0, properties]), 0);
+    assert.equal(fns.FlushTraceA.handler([0, 0, 0x100, properties]), 0, 'by name');
+    assert.equal(fns.EnableTrace.handler([1, 0, 0, 0x200, handle, 0]), 0);
+    assert.equal(fns.EnableTraceEx2.handler([handle, 0, 0x200, 1, 4]), 0);
+    assert.equal(fns.StopTraceA.handler([0, 0, 0x100, properties]), 0);
+    assert.equal(fns.StopTraceA.handler([0, 0, 0x100, properties]), 4201,
+        'ERROR_WMI_INSTANCE_NOT_FOUND: the session is not running');
+    assert.equal(fns.EnableTrace.handler([1, 0, 0, 0x200, handle, 0]), 4201);
+    assert.equal(fns.StopTraceA.handler([0, 0, 0, properties]), 87, 'neither handle nor name');
+});
+
+test('a trace has no consumer: OpenTrace answers the invalid handle and why', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.OpenTraceW.handler([0x400]) >>> 0, 0xffffffff);
+    assert.equal(fns.ProcessTrace.handler([0x300, 1, 0, 0]), 6);
+    assert.equal(fns.CloseTrace.handler([1, 0]), 6);
 });
