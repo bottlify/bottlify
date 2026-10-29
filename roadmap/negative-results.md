@@ -2021,3 +2021,51 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   recorded.
 - **Decision.** Left in: it is fewer instructions on every path that has such an access, and
   no workload measured here runs one hot; not measured apart on the others.
+
+### 2026-10-29: the flag record not taken back after a guest call, measured again on the arm64 model
+
+- **Idea.** The idea of the 2026-10-28 entry (measured there on x64): after a guest call made as
+  a wasm call the region reloads the callee's flag record for every field its body uses; where
+  the code at the return address writes every arithmetic flag before it reads one or leaves
+  (`flagsLiveAt(next)` has no arithmetic flag), take back the flags word alone (it holds DF)
+  and empty the record's locals (`clearRecord`, kind EAGER).
+- **Workload.** cork-asm on the Crysis timedemo's 21 main-thread regions (n14 block profile),
+  macOS arm64 model: node 26.12.1 arm64 (V8 14.6) under qemu-aarch64 8.2.2,
+  `--no-wasm-bounds-checks`, `--atomic`, RAM at 0; machine instructions an executed guest
+  instruction, deterministic (one run an arm).
+- **Values.** On cork2-x64 at 8740b9eb with the linked call's single load (an earlier form of
+  fe40382e): 5.413 without, 5.411 with (-0.04 %). Record loads after a call 0.038 -> 0.016 an
+  executed guest instruction; the "after the call" part 10.8 -> 12.0 instructions a call.
+- **Why.** Under the macOS model (no explicit bounds checks) V8 already drops a reload whose
+  value nothing reads; the reloads left are live through the shared epilogue's stores, and the
+  zeros put in their place cost a move each at the joins after the call, about what the loads
+  did.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), shared with other runs.
+- **Decision.** Not taken.
+
+### 2026-10-29: a guest call's depth and budget tests as one condition
+
+- **Idea.** Before a guest call made as a wasm call, `depth >= LIMIT` and `budget <= 0` were
+  two branches to the plain way out; or'ed into one condition V8 makes a cmp, a ccmp and one
+  branch on arm64. Tried as `geU` and as `depth & -LIMIT` (LIMIT a power of two).
+- **Workload.** As the entry above (cork-asm, arm64 model, 21 regions, n14 profile).
+- **Values.** At the same tree: 5.413 with two branches; one condition by `geU` 5.417
+  (+0.07 %), by the mask 5.418 (+0.09 %). The call site's test stays four instructions either
+  way: V8 moves 256 into a register to compare it (`geU`), or makes an `and` and a `cmp` of the
+  mask, before the ccmp.
+- **Machine.** As above.
+- **Decision.** Not taken. (The linked call's key and top tests as one condition did pay on
+  arm64, fe40382e: both compare against a register or a small immediate.)
+
+### 2026-10-29: every planned access off a lone register takes its displacement as its offset
+
+- **Idea.** cfd605d0 gives a planned access off esp alone esp as its address and the
+  displacement (0 to 64 KiB) as the load's or store's own offset, so V8 makes one address of esp
+  for all of them. The same for any lone base register (ebp frames, struct pointers).
+- **Workload.** As the entries above.
+- **Values.** At the same tree with the esp form: 5.385 -> 5.384 (-0.02 %).
+- **Why.** The hot planned accesses off other registers are few here; reads are mostly wrapped
+  (`wrappedFirst` already shares a wrapped sum among a block's fields).
+- **Machine.** As above.
+- **Decision.** Not taken: off a pointer in the top 64 KiB the sum, not wrapped at 4 GiB, would
+  trap where a wrapped sum reads the null page, for 0.02 %.
