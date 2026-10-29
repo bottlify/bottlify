@@ -121,6 +121,8 @@ const MAX_NAME = 0x8000;
  *           Where a backup is written and read. Without it a backup is refused.
  * @property {() => number} [now]  The wall clock, in seconds since 1970.
  * @property {string} [computerName]
+ * @property {() => any} [currentThread]  The calling thread, whose activity id
+ *           EventActivityIdControl keeps.
  * @property {(values: { edx: number }) => void} [setRegisters]  The high half of a
  *           64-bit answer (OpenTrace's TRACEHANDLE).
  */
@@ -786,6 +788,46 @@ export function createEventLogFunctions(host){
         },
     };
 
+    /**
+     * The classic (MOF) providers RegisterTraceGuids registered, by their
+     * handle's low half. No session enables one -- nothing here consumes a
+     * trace -- so a provider's control callback is never called and it is
+     * never given a logger handle to write through.
+     */
+    const traceRegistrations = new Set();
+    let nextRegistration = 1;
+
+    /** A REGHANDLE of EventRegister's, by its two halves. @param {number} low @param {number} high */
+    const registered = (low, high)=>(high >>> 0) === 0 && providers.has(low >>> 0);
+
+    /** Each thread's activity id, 16 bytes; a thread with none has GUID_NULL. */
+    const activities = new Map();
+    const ACTIVITY_CALLER = Symbol('caller');
+    const activityThread = ()=>host.currentThread?.() ?? ACTIVITY_CALLER;
+
+    /** The MOF names are not read: no consumer would read the events they describe. */
+    const registerTraceGuids = {
+        argBytes: 32,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [request, , control, count, guids, , , out])=>{
+            if ((request >>> 0) === 0 || (control >>> 0) === 0 || (out >>> 0) === 0
+                || ((count >>> 0) !== 0 && (guids >>> 0) === 0))
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const handle = nextRegistration++;
+            traceRegistrations.add(handle);
+            // TRACE_GUID_REGISTRATION: the GUID, then the handle Windows fills in.
+            for (let at = 0; at < (count >>> 0); at++)
+            {
+                writeDword((guids >>> 0) + at * 8 + 4, handle);
+            }
+            writeDword(out, handle);
+            writeDword((out >>> 0) + 4, 0);
+            return ERROR_SUCCESS;
+        },
+    };
+
     return {
         /** ULONG StopTrace(TRACEHANDLE, LPCTSTR InstanceName, PEVENT_TRACE_PROPERTIES) */
         StopTraceA: controlAs(false, EVENT_TRACE_CONTROL_STOP),
@@ -814,6 +856,167 @@ export function createEventLogFunctions(host){
         ProcessTrace: { argBytes: 16, handler: ()=>ERROR_INVALID_HANDLE },
         /** ULONG CloseTrace(TRACEHANDLE) */
         CloseTrace: { argBytes: 8, handler: ()=>ERROR_INVALID_HANDLE },
+
+        /**
+         * ULONG RegisterTraceGuids(WMIDPREQUEST RequestAddress, PVOID RequestContext,
+         *     LPCGUID ControlGuid, ULONG GuidCount, PTRACE_GUID_REGISTRATION TraceGuidReg,
+         *     LPCTSTR MofImagePath, LPCTSTR MofResourceName, PTRACEHANDLE RegistrationHandle)
+         */
+        RegisterTraceGuidsA: registerTraceGuids,
+        RegisterTraceGuidsW: registerTraceGuids,
+        /** ULONG UnregisterTraceGuids(TRACEHANDLE RegistrationHandle) */
+        UnregisterTraceGuids: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([low, high])=>((high >>> 0) === 0 && traceRegistrations.delete(low >>> 0)
+                ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER),
+        },
+        /**
+         * TRACEHANDLE GetTraceLoggerHandle(PVOID Buffer)
+         *
+         * Read out of the WNODE_HEADER an enable callback is handed, which no
+         * provider here is ever handed: INVALID_HANDLE_VALUE, ERROR_INVALID_HANDLE.
+         */
+        GetTraceLoggerHandle: {
+            argBytes: 4,
+            handler: ()=>{
+                host.setRegisters?.({ edx: 0xffffffff });
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return -1;
+            },
+        },
+        /** UCHAR GetTraceEnableLevel(TRACEHANDLE), ULONG GetTraceEnableFlags(TRACEHANDLE) */
+        GetTraceEnableLevel: {
+            argBytes: 8,
+            handler: ()=>{
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            },
+        },
+        GetTraceEnableFlags: {
+            argBytes: 8,
+            handler: ()=>{
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            },
+        },
+        /**
+         * ULONG TraceEvent(TRACEHANDLE SessionHandle, PEVENT_TRACE_HEADER EventTrace)
+         *
+         * A logger handle is only ever handed to an enabled provider, and none
+         * is: whatever handle comes is no session's.
+         */
+        TraceEvent: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , header])=>((header >>> 0) === 0
+                ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE),
+        },
+        /**
+         * ULONG TraceMessage(TRACEHANDLE LoggerHandle, ULONG MessageFlags,
+         *     LPCGUID MessageGuid, USHORT MessageNumber, ...) -- cdecl
+         */
+        TraceMessage: { argBytes: 0, handler: ()=>ERROR_INVALID_HANDLE },
+
+        /**
+         * ULONG EventWrite(REGHANDLE RegHandle, PCEVENT_DESCRIPTOR EventDescriptor,
+         *     ULONG UserDataCount, PEVENT_DATA_DESCRIPTOR UserData)
+         *
+         * Nothing listens, so an event of a registered provider goes nowhere
+         * and is a success; an unregistered handle and a missing descriptor
+         * are refused.
+         */
+        EventWrite: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([low, high, descriptor, count, data])=>{
+                if (!registered(low, high))
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                return (descriptor >>> 0) === 0 || ((count >>> 0) !== 0 && (data >>> 0) === 0)
+                    ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
+            },
+        },
+        /**
+         * ULONG EventWriteTransfer(REGHANDLE, PCEVENT_DESCRIPTOR, LPCGUID ActivityId,
+         *     LPCGUID RelatedActivityId, ULONG UserDataCount, PEVENT_DATA_DESCRIPTOR)
+         */
+        EventWriteTransfer: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([low, high, descriptor, , , count, data])=>{
+                if (!registered(low, high))
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                return (descriptor >>> 0) === 0 || ((count >>> 0) !== 0 && (data >>> 0) === 0)
+                    ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
+            },
+        },
+        /**
+         * ULONG EventSetInformation(REGHANDLE, EVENT_INFO_CLASS InformationClass,
+         *     PVOID EventInformation, ULONG InformationLength)
+         *
+         * A provider's traits or the binary tracking it asks for: kept nowhere.
+         */
+        EventSetInformation: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([low, high])=>(registered(low, high)
+                ? ERROR_SUCCESS : ERROR_INVALID_HANDLE),
+        },
+        /**
+         * ULONG EventActivityIdControl(ULONG ControlCode, LPGUID ActivityId)
+         *
+         * The calling thread's activity id: GET (1), SET (2), CREATE (3, a new
+         * one written, the thread's left), GET_SET (4, swapped) and
+         * CREATE_SET (5, a new one set, the old one written).
+         */
+        EventActivityIdControl: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([code, pointer])=>{
+                if ((pointer >>> 0) === 0 || (code >>> 0) < 1 || (code >>> 0) > 5)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const thread = activityThread();
+                const current = activities.get(thread) ?? new Uint8Array(16);
+                const fresh = ()=>{
+                    const id = new Uint8Array(16);
+                    crypto.getRandomValues(id);
+                    // A version 4 GUID, as the system makes one.
+                    id[7] = (id[7] & 0x0f) | 0x40;
+                    id[8] = (id[8] & 0x3f) | 0x80;
+                    return id;
+                };
+                const given = ()=>host.readMemory?.(pointer >>> 0, 16).slice()
+                    ?? new Uint8Array(16);
+                switch (code >>> 0)
+                {
+                    case 1:
+                        host.writeMemory?.(pointer >>> 0, current);
+                        break;
+                    case 2:
+                        activities.set(thread, given());
+                        break;
+                    case 3:
+                        host.writeMemory?.(pointer >>> 0, fresh());
+                        break;
+                    case 4: {
+                        const incoming = given();
+                        host.writeMemory?.(pointer >>> 0, current);
+                        activities.set(thread, incoming);
+                        break;
+                    }
+                    default:
+                        host.writeMemory?.(pointer >>> 0, current);
+                        activities.set(thread, fresh());
+                }
+                return ERROR_SUCCESS;
+            },
+        },
 
         /** HANDLE RegisterEventSource(LPCTSTR lpUNCServerName, LPCTSTR lpSourceName) */
         RegisterEventSourceA: open(false, true),

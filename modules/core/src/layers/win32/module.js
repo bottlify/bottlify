@@ -3821,6 +3821,8 @@ export function createWin32Module(){
                         now: ()=>Math.floor(kernel.clock.wallClock() / 1000),
                         computerName: COMPUTER_NAME,
                         setRegisters,
+                        // An activity id is each thread's own.
+                        currentThread: ()=>kernel.currentThread(),
                     }),
                     ...createTokenFunctions({
                         readMemory,

@@ -178,3 +178,46 @@ test('a trace has no consumer: OpenTrace answers the invalid handle and why', ()
     assert.equal(fns.ProcessTrace.handler([0x300, 1, 0, 0]), 6);
     assert.equal(fns.CloseTrace.handler([1, 0]), 6);
 });
+
+test('a classic trace provider registers, is never enabled, and unregisters', ()=>{
+    const { bytes, fns } = setup();
+    const view = new DataView(bytes.buffer);
+    // TRACE_GUID_REGISTRATION at 0x500: a GUID pointer, then the handle filled in.
+    view.setUint32(0x500, 0x520, true);
+    assert.equal(fns.RegisterTraceGuidsW.handler([0x401000, 0, 0x520, 1, 0x500, 0, 0, 0x540]), 0);
+    const handle = view.getUint32(0x540, true);
+    assert.notEqual(handle, 0);
+    assert.equal(view.getUint32(0x504, true), handle, 'each registration given its handle');
+    assert.equal(fns.RegisterTraceGuidsW.handler([0, 0, 0x520, 0, 0, 0, 0, 0x540]), 87,
+        'no request routine');
+    assert.equal(fns.GetTraceLoggerHandle.handler([0x600]) >>> 0, 0xffffffff);
+    assert.equal(fns.GetTraceEnableLevel.handler([1, 0]), 0);
+    assert.equal(fns.TraceEvent.handler([1, 0, 0x600]), 6, 'no session is anyone\'s logger');
+    assert.equal(fns.TraceMessage.argBytes, 0, 'cdecl');
+    assert.equal(fns.UnregisterTraceGuids.handler([handle, 0]), 0);
+    assert.equal(fns.UnregisterTraceGuids.handler([handle, 0]), 87);
+});
+
+test('an event of a registered provider goes nowhere and succeeds; activity ids per thread', ()=>{
+    const { bytes, fns } = setup();
+    const view = new DataView(bytes.buffer);
+    assert.equal(fns.EventRegister.handler([0x520, 0, 0, 0x540]), 0);
+    const handle = view.getUint32(0x540, true);
+    assert.equal(fns.EventWrite.handler([handle, 0, 0x560, 0, 0]), 0);
+    assert.equal(fns.EventWrite.handler([handle, 0, 0, 0, 0]), 87, 'no descriptor');
+    assert.equal(fns.EventWrite.handler([handle + 99, 0, 0x560, 0, 0]), 6);
+    assert.equal(fns.EventWriteTransfer.handler([handle, 0, 0x560, 0, 0, 0, 0]), 0);
+    assert.equal(fns.EventSetInformation.handler([handle, 0, 2, 0x560, 4]), 0);
+
+    bytes.fill(0xaa, 0x600, 0x610);
+    assert.equal(fns.EventActivityIdControl.handler([1, 0x600]), 0);
+    assert.ok(bytes.subarray(0x600, 0x610).every(byte=>byte === 0), 'GUID_NULL to begin with');
+    assert.equal(fns.EventActivityIdControl.handler([3, 0x600]), 0, 'CREATE');
+    const made = bytes.slice(0x600, 0x610);
+    assert.ok(made.some(byte=>byte !== 0));
+    assert.equal(fns.EventActivityIdControl.handler([2, 0x600]), 0, 'SET');
+    bytes.fill(0, 0x600, 0x610);
+    assert.equal(fns.EventActivityIdControl.handler([1, 0x600]), 0);
+    assert.deepEqual(bytes.slice(0x600, 0x610), made);
+    assert.equal(fns.EventActivityIdControl.handler([9, 0x600]), 87);
+});
