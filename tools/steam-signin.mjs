@@ -5,7 +5,7 @@
  */
 
 /**
- * Signs in to Steam by QR code from Node, as @bottlify/steam does in a page,
+ * Signs in to Steam by QR code from Node, as @bottlify/core/steam does in a page,
  * and lists the library: the way to try the sign-in, the logon and the
  * library without a browser.
  *
@@ -20,7 +20,7 @@
 
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
-import { connectCm, encodeQr, library, logOn, signInWithQr } from '../modules/steam/src/index.js';
+import { connectCm, encodeQr, library, logOn, signInWithQr } from '../modules/core/src/steam/index.js';
 
 const argv = process.argv.slice(2);
 /** @param {string} name */

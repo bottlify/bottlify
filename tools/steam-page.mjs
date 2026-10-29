@@ -5,7 +5,7 @@
  */
 
 /**
- * Builds the Steam sign-in and library page (modules/steam/demo) into one
+ * Builds the Steam sign-in and library page (modules/core/src/steam/demo) into one
  * HTML file to open in a browser, from disk or any server:
  *
  *   NODE_USE_ENV_PROXY=1 node tools/steam-page.mjs <out.html>
@@ -29,7 +29,7 @@ const endpoints = directory.response.serverlist.map((/** @type {any} */ s)=>s.en
 // Port 443 first: the one a firewall least often closes.
 endpoints.sort((a, b)=>Number(!a.endsWith(':443')) - Number(!b.endsWith(':443')));
 const bundle = await build({
-    entryPoints: [new URL('../modules/steam/demo/page.js', import.meta.url).pathname],
+    entryPoints: [new URL('../modules/core/src/steam/demo/page.js', import.meta.url).pathname],
     bundle: true, format: 'esm', write: false, target: 'es2022',
 });
 const script = bundle.outputFiles[0].text.replace(/<\/script/g, '<\\/script');

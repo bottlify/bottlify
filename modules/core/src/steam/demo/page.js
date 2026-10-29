@@ -12,7 +12,7 @@
  * directory that lists them does not answer a page from another origin.
  */
 
-import { connectCm, encodeQr, library, logOn, qrToSvg, signInWithQr } from '../src/index.js';
+import { connectCm, encodeQr, library, logOn, qrToSvg, signInWithQr } from '../index.js';
 
 /** @type {string[]} */
 const ENDPOINTS = JSON.parse(document.getElementById('endpoints')?.textContent ?? '[]');
@@ -24,7 +24,7 @@ const status = text=>{
     element('status').textContent = text;
 };
 
-/** @type {import('../src/connection.js').CmConnection | undefined} */
+/** @type {import('../connection.js').CmConnection | undefined} */
 let connection;
 /** The open connection, or a new one: a manager drops one not logged on. */
 async function connect(){
