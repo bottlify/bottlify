@@ -24,10 +24,17 @@ const notFound = name=>new DOMException(`${name} not found`, 'NotFoundError');
 function fileHandle(path){
     return {
         kind: 'file',
+        // The size from the file's entry and the bytes only when asked: a
+        // block store's file runs past the 2 GiB one read can hold.
         async getFile(){
-            const bytes = readFileSync(path);
-            return { size: bytes.length, arrayBuffer: async()=>bytes.buffer.slice(
-                bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };
+            return {
+                size: statSync(path).size,
+                arrayBuffer: async()=>{
+                    const bytes = readFileSync(path);
+                    return bytes.buffer.slice(bytes.byteOffset,
+                        bytes.byteOffset + bytes.byteLength);
+                },
+            };
         },
         async createSyncAccessHandle(){
             const fd = openSync(path, 'r+');
