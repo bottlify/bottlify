@@ -2083,3 +2083,28 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   recorded.
 - **Decision.** Not taken in this shape; a loop that only reads is hoisted as one, with no
   loop around the test (`emitReadLoop`, the change after this entry's).
+
+### 2026-10-29: a single read off a register through the register's wrapped sum
+
+- **Idea.** `wrappedFirst` shares the sum of a read's registers, wrapped into RAM, among the
+  block's reads of fields off them, each displacement the load's offset; a read alone in its
+  spread had its whole address wrapped. Taking a lone read with a small displacement (0 up to
+  64 KiB) through the wrapped sum too costs the same where it stands (an `and` of the register,
+  the displacement in the load, against a `lea` and an `and`), and the host may share that sum
+  with another block's reads off the register -- tree's lookup reads `[eax+8]` in one block
+  and `[eax]`, `[eax+4]` in the next.
+- **Workload.** cork-bench, x87 images, `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64; one run an arm. Arms: on the read-stream window (then
+  unpublished, a stream of string reads still under it) every small displacement; and on
+  8513591 with the copy run's peel and the read loops in place, any displacement but 0.
+- **Values.** Every small displacement: crc 1,716,203 -> 1,744,169 (+1.6 %), str 2,952,739 ->
+  2,958,363 (+0.2 %), tree 2,800,184 -> 2,747,558 (-1.9 %), switch 471,331 -> 468,593
+  (-0.6 %), vcall 1,701,852 -> 1,714,252 (+0.7 %), game +0.1 %; vm, sort, fmath unchanged.
+  Any but 0: crc 1,630,190 -> 1,658,177 (+1.7 %), str 2,630,056 -> 2,658,590 (+1.1 %), tree
+  -1.9 %, switch -0.6 %, vcall +0.7 %, game +0.1 %.
+- **Why.** Where the sum is shared the host has one more value live across the code between,
+  and its register allocation moved and spilled others for it (crc's literal loop: the same
+  instructions, other registers, a spill more a turn).
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken: a lone read keeps its address wrapped whole.
