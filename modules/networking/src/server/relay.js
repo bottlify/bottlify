@@ -380,7 +380,7 @@ export function createRelay(options = {}){
                 toIp: frame.toIp, toPort: frame.toPort,
             });
         });
-        socket.on('data', chunk=>{
+        socket.on('data', (/** @type {Buffer} */ chunk)=>{
             send(peer, { op: Op.STREAM, tag: frame.tag, payload: new Uint8Array(chunk) });
             // Read no faster than the page takes it: a client that stops
             // reading would otherwise have the server hold everything the far

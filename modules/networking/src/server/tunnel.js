@@ -63,36 +63,36 @@ export function connectThrough({ proxy, host, port }){
 
     const tunnel = /** @type {Duplex & { setNoDelay: (on?: boolean) => any,
      *     address: () => any }} */ (new Duplex({
-        allowHalfOpen: false,
-        write(chunk, _encoding, callback){
-            if (open)
-            {
-                raw.write(chunk, callback);
-            }
-            else
-            {
-                waiting.push([chunk, callback]);
-            }
-        },
-        final(callback){
-            if (open)
-            {
-                raw.end(callback);
-            }
-            else
-            {
-                endWhenOpen = true;
-                callback();
-            }
-        },
-        read(){
-            raw.resume();
-        },
-        destroy(error, callback){
-            raw.destroy();
-            callback(error);
-        },
-    }));
+            allowHalfOpen: false,
+            write(chunk, _encoding, callback){
+                if (open)
+                {
+                    raw.write(chunk, callback);
+                }
+                else
+                {
+                    waiting.push([chunk, callback]);
+                }
+            },
+            final(callback){
+                if (open)
+                {
+                    raw.end(callback);
+                }
+                else
+                {
+                    endWhenOpen = true;
+                    callback();
+                }
+            },
+            read(){
+                raw.resume();
+            },
+            destroy(error, callback){
+                raw.destroy();
+                callback(error);
+            },
+        }));
     tunnel.setNoDelay = (on = true)=>{
         raw.setNoDelay(on);
         return tunnel;
