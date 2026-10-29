@@ -53,12 +53,13 @@ const REGION_CHUNK = 1 << 24;
 
 /**
  * @param {{ ramSize?: number, config?: import('../../core/src/layers/cpu/engine.js').EngineConfig,
- *     trapPort?: number }} [options]
+ *     trapPort?: number, features?: import('./wasm/features.js').Features }} [options]
  *     `ramSize`: guest memory in bytes, a multiple of 64 KiB (default 16 MiB); `config`: the
  *     translator's (`EngineConfig`); `trapPort`: an I/O port whose `out` stops the run as a
- *     `trap` (default none: every `out` is one)
+ *     `trap` (default none: every `out` is one); `features`: the host the translator makes
+ *     code for, another than this one (an arm64 one's, `armHost`), this one's by default
  */
-export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}){
+export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, features } = {}){
     const layout = ownLayout({ ramSize,
         ...(config.hashSlots === undefined ? {} : { hashSlots: config.hashSlots }) });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
@@ -76,7 +77,7 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
     /** @type {number[]} */
     const trapped = [];
     const runtime = createCorkRuntime({
-        memory, layout,
+        memory, layout, ...(features === undefined ? {} : { features }),
         // Formed after every run of the interpreter: there are no frames to pace it.
         config: { feed: 'slice', ...config, ...(trapPort === undefined ? {} : { trapPort }) },
         read: address=>bytes()[layout.ramBase + address],

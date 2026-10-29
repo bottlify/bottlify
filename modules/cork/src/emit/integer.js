@@ -425,10 +425,13 @@ function linkedCall(e, target){
     // neither passes for a call to address 0 or all ones. The index, the
     // label and that halfword come in one load: a direct call's slot is a
     // constant address past what an arm64 load's offset holds, which V8 moves
-    // into a register, two instructions, for each load from it. The two tests
-    // are one condition, which V8 makes a compare and a conditional compare
-    // before one branch.
+    // into a register, two instructions, for each load from it. On an arm64
+    // host the two tests are one condition, which V8 makes a compare and a
+    // conditional compare before one branch; an x64 host has no conditional
+    // compare, and V8 makes a flag of each comparison it ors, so there they
+    // are two branches, another key straight to the transfer.
     const key = ()=>(target === null ? b.localGet(Local.eip) : b.i32const(target | 0));
+    const oneTest = context.features?.armHost === true;
     e.open('linked', ValType.i32);
     e.open('through', EMPTY);
     e.open('anyTop', EMPTY);
@@ -436,19 +439,31 @@ function linkedCall(e, target){
     b.localGet(Local.t2).load('i32');
     key();
     b.op(I32.ne);
+    if (!oneTest)
+    {
+        b.unlikely().brIf(e.depthOf('through'));
+    }
     b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap).i32const(ANY_TOP).op(I32.ne);
-    b.op(I32.or).unlikely().brIf(e.depthOf('anyTop'));
+    if (oneTest)
+    {
+        b.op(I32.or);
+    }
+    b.unlikely().brIf(e.depthOf('anyTop'));
     linkedCallOf(e);
     b.br(e.depthOf('linked'));
     e.close();
     // Out of the way: a slot holding the target compiled for the top the
     // machine has is called the same way, the rest goes through the
-    // transfer. The key read again as the low half of a quadword: read as
-    // above, V8 would take the one read and the comparison a value kept for
-    // both ways, made with a `cset` on the way nearly every call goes.
-    b.localGet(Local.t2).load('i64').op(I64.wrap);
-    key();
-    b.op(I32.ne).brIf(e.depthOf('through'));
+    // transfer. Under one test the key is read again, as the low half of a
+    // quadword: read as above, V8 would take the one read and the comparison
+    // a value kept for both ways, made with a `cset` on the way nearly every
+    // call goes.
+    if (oneTest)
+    {
+        b.localGet(Local.t2).load('i64').op(I64.wrap);
+        key();
+        b.op(I32.ne).brIf(e.depthOf('through'));
+    }
     // With an empty code of 0 the halfword is the top.
     b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap);
     atState(context, b).load('i32_8u', { offset: layout.x87Top });
