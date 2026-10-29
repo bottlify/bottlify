@@ -47,6 +47,7 @@ import {
 import {
     SOCKADDR_IN_SIZE, formatAddress, parseAddress, readSockaddr, swap16, swap32, writeSockaddr,
 } from './sockaddr.js';
+import { formatIpv6Text, parseIpv4Text, parseIpv6Text } from './inet.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 
@@ -161,6 +162,40 @@ const guidText = bytes=>{
     return `${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
         + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}`;
 };
+
+const AF_INET6 = 23;
+const WSASERVICE_NOT_FOUND = 10108;
+const WSAENOBUFS = 10055;
+const ERROR_INVALID_PARAMETER = 87;
+
+/**
+ * WSAPROTOCOL_INFOW, the wide description WSCEnumProtocols fills: the
+ * narrow one is the same up to szProtocol, which holds 256 characters of
+ * either width.
+ */
+const PROTOCOL_INFO = Object.freeze({
+    SERVICE_FLAGS1: 0, PROVIDER_FLAGS: 16, PROVIDER_ID: 20, CATALOG_ENTRY: 36,
+    CHAIN_LENGTH: 40, VERSION: 72, ADDRESS_FAMILY: 76, MAX_SOCKADDR: 80, MIN_SOCKADDR: 84,
+    SOCKET_TYPE: 88, PROTOCOL: 92, MESSAGE_SIZE: 108, NAME: 116,
+    SIZE_A: 372, SIZE_W: 628,
+});
+
+/** The base provider every Windows has for TCP/IP, mswsock's MSAFD, by its GUID's bytes. */
+const MSAFD_TCPIP = Uint8Array.of(0xa0, 0x1a, 0x0f, 0xe7, 0x8b, 0xab, 0xcf, 0x11,
+    0x8c, 0xa3, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92);
+const MSAFD_PATH = '%SystemRoot%\\system32\\mswsock.dll';
+/**
+ * The two base protocols this stack carries, as the catalogue lists them:
+ * TCP (guaranteed, ordered, graceful close, expedited data) and UDP
+ * (connectionless, message oriented, broadcast and multipoint), both with
+ * IFS handles and matching protocol zero.
+ */
+const BASE_PROTOCOLS = Object.freeze([
+    { name: 'MSAFD Tcpip [TCP/IP]', catalog: 1001, type: SOCK_STREAM, protocol: 6,
+        flags: 0x20066, messageSize: 0 },
+    { name: 'MSAFD Tcpip [UDP/IP]', catalog: 1002, type: SOCK_DGRAM, protocol: 17,
+        flags: 0x20e09, messageSize: 65527 },
+]);
 
 /**
  * @param {WinsockHost} host
@@ -1154,6 +1189,76 @@ export function createWinsockFunctions(host){
             return ok(0);
         }
         return fail(WSAEINVAL);
+    };
+
+    /** UTF-16LE with its terminator. @param {string} text */
+    const wide = text=>{
+        const out = new Uint8Array(text.length * 2 + 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            out[at * 2] = text.charCodeAt(at) & 0xff;
+            out[at * 2 + 1] = text.charCodeAt(at) >>> 8;
+        }
+        return out;
+    };
+
+    /**
+     * The protocol catalogue into `buffer`, as WSCEnumProtocols and
+     * WSAEnumProtocols give it: the base protocols the zero-terminated list
+     * at `protocols` names (all, without one), their count as the answer.
+     *
+     * @param {number} protocols @param {number} buffer @param {number} length
+     * @param {boolean} wideNames @param {(code: number) => number} refuseWith
+     */
+    const enumProtocols = (protocols, buffer, length, wideNames, refuseWith)=>{
+        if ((length >>> 0) === 0)
+        {
+            return refuseWith(WSAEFAULT);
+        }
+        /** @type {number[] | null} */
+        let wanted = null;
+        if ((protocols >>> 0) !== 0)
+        {
+            wanted = [];
+            for (let at = protocols >>> 0; wanted.length < 64; at += 4)
+            {
+                const protocol = readDword(at);
+                if (protocol === 0)
+                {
+                    break;
+                }
+                wanted.push(protocol);
+            }
+        }
+        const chosen = BASE_PROTOCOLS.filter(entry=>wanted === null
+            || wanted.includes(entry.protocol));
+        const size = wideNames ? PROTOCOL_INFO.SIZE_W : PROTOCOL_INFO.SIZE_A;
+        if ((buffer >>> 0) === 0 || readDword(length) < chosen.length * size)
+        {
+            writeDword(length, chosen.length * size);
+            return refuseWith(WSAENOBUFS);
+        }
+        chosen.forEach((entry, index)=>{
+            const record = new Uint8Array(size);
+            const view = new DataView(record.buffer);
+            view.setUint32(PROTOCOL_INFO.SERVICE_FLAGS1, entry.flags, true);
+            // PFL_MATCHES_PROTOCOL_ZERO: socket(AF_INET, type, 0) finds it.
+            view.setUint32(PROTOCOL_INFO.PROVIDER_FLAGS, 0x8, true);
+            record.set(MSAFD_TCPIP, PROTOCOL_INFO.PROVIDER_ID);
+            view.setUint32(PROTOCOL_INFO.CATALOG_ENTRY, entry.catalog, true);
+            // A base protocol's chain is itself alone.
+            view.setUint32(PROTOCOL_INFO.CHAIN_LENGTH, 1, true);
+            view.setUint32(PROTOCOL_INFO.VERSION, 2, true);
+            view.setUint32(PROTOCOL_INFO.ADDRESS_FAMILY, AF_INET, true);
+            view.setUint32(PROTOCOL_INFO.MAX_SOCKADDR, SOCKADDR_IN_SIZE, true);
+            view.setUint32(PROTOCOL_INFO.MIN_SOCKADDR, SOCKADDR_IN_SIZE, true);
+            view.setUint32(PROTOCOL_INFO.SOCKET_TYPE, entry.type, true);
+            view.setUint32(PROTOCOL_INFO.PROTOCOL, entry.protocol, true);
+            view.setUint32(PROTOCOL_INFO.MESSAGE_SIZE, entry.messageSize, true);
+            record.set(wideNames ? wide(entry.name) : sz(entry.name), PROTOCOL_INFO.NAME);
+            host.writeMemory((buffer >>> 0) + index * size, record);
+        });
+        return chosen.length;
     };
 
     const table = {
@@ -2220,6 +2325,261 @@ export function createWinsockFunctions(host){
                         ? readDword((info >>> 0) + offset) : value);
                 return createSocket(described(family, WSAPROTOCOL_INFO.iAddressFamily),
                     described(type, WSAPROTOCOL_INFO.iSocketType));
+            },
+        },
+
+        /** SOCKET WSASocketW: WSASocketA, the description read the same up to its name. */
+        WSASocketW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>table.WSASocketA.handler(args),
+        },
+
+        /**
+         * int WSASendMsg(SOCKET Handle, LPWSAMSG lpMsg, DWORD dwFlags,
+         *   LPDWORD lpNumberOfBytesSent, LPWSAOVERLAPPED lpOverlapped,
+         *   LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+         *
+         * WSASendTo with its arguments in a WSAMSG: name, namelen, the
+         * WSABUF array and its count, the control data and the flags. The
+         * control data is ancillary information TCP/IP has no use for here
+         * (no option it would set is carried by the relay), so it is not sent.
+         */
+        WSASendMsg: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, message, , sent, overlapped, routine])=>{
+                if ((message >>> 0) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                const at = message >>> 0;
+                return sendCall({ handle, buffers: readDword(at + 8), count: readDword(at + 12),
+                    sent, to: readDword(at), toLength: readDword(at + 4), overlapped, routine },
+                'WSASendMsg');
+            },
+        },
+
+        /**
+         * INT inet_pton(INT Family, PCSTR pszAddrString, PVOID pAddrBuf)
+         *
+         * 1 with the address written in network order, 0 for text that is
+         * not one, -1 with WSAEAFNOSUPPORT for a family other than the two.
+         */
+        inet_pton: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([family, text, out])=>{
+                if ((text >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                if (family !== AF_INET && family !== AF_INET6)
+                {
+                    return fail(WSAEAFNOSUPPORT);
+                }
+                const string = host.readCString(text >>> 0, 64);
+                const bytes = family === AF_INET ? parseIpv4Text(string) : parseIpv6Text(string);
+                if (!bytes)
+                {
+                    return 0;
+                }
+                host.writeMemory(out >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * PCSTR inet_ntop(INT Family, const VOID *pAddr, PSTR pStringBuf,
+         *   size_t StringBufSize)
+         *
+         * The buffer, or NULL: WSAEAFNOSUPPORT for another family,
+         * ERROR_INVALID_PARAMETER for no buffer or one too short for the text
+         * and its terminator.
+         */
+        inet_ntop: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([family, address, buffer, size])=>{
+                if (family !== AF_INET && family !== AF_INET6)
+                {
+                    return fail(WSAEAFNOSUPPORT, 0);
+                }
+                if ((address >>> 0) === 0 || (buffer >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, 0);
+                }
+                const bytes = host.readMemory(address >>> 0, family === AF_INET ? 4 : 16);
+                const text = family === AF_INET ? [...bytes].join('.') : formatIpv6Text(bytes);
+                if ((size >>> 0) < text.length + 1)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, 0);
+                }
+                host.writeMemory(buffer >>> 0, sz(text));
+                return buffer >>> 0;
+            },
+        },
+
+        /**
+         * int WSADuplicateSocketW(SOCKET s, DWORD dwProcessId,
+         *   LPWSAPROTOCOL_INFOW lpProtocolInfo)
+         *
+         * A socket is this process's registry's alone; no other process can
+         * be handed it, so the duplicate is refused as for a process it
+         * cannot go to.
+         */
+        WSADuplicateSocketW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, , info])=>{
+                if (!socketOf(handle))
+                {
+                    return fail(WSAENOTSOCK);
+                }
+                if ((info >>> 0) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                host.divergence?.('WSADuplicateSocketW',
+                    'a socket cannot be shared with another process');
+                return fail(WSAEINVAL);
+            },
+        },
+
+        /**
+         * int WSCEnumProtocols(LPINT lpiProtocols, LPWSAPROTOCOL_INFOW lpProtocolBuffer,
+         *   LPDWORD lpdwBufferLength, LPINT lpErrno)
+         *
+         * The catalogue: MSAFD's TCP and UDP, or those of them the protocol
+         * list names. Too little room is WSAENOBUFS with the length needed.
+         */
+        WSCEnumProtocols: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([protocols, buffer, length, errno])=>enumProtocols(protocols, buffer,
+                length, true, code=>{
+                    if ((errno >>> 0) !== 0)
+                    {
+                        writeDword(errno, code);
+                    }
+                    return SOCKET_ERROR;
+                }),
+        },
+
+        /** int WSAEnumProtocolsA(LPINT, LPWSAPROTOCOL_INFOA, LPDWORD): the catalogue, narrow. */
+        WSAEnumProtocolsA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([protocols, buffer, length])=>(needStarted()
+                ? fail(WSANOTINITIALISED)
+                : enumProtocols(protocols, buffer, length, false, code=>fail(code))),
+        },
+
+        /** int WSAEnumProtocolsW(LPINT, LPWSAPROTOCOL_INFOW, LPDWORD): the catalogue, wide. */
+        WSAEnumProtocolsW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([protocols, buffer, length])=>(needStarted()
+                ? fail(WSANOTINITIALISED)
+                : enumProtocols(protocols, buffer, length, true, code=>fail(code))),
+        },
+
+        /**
+         * int WSCGetProviderPath(LPGUID lpProviderId, WCHAR *lpszProviderDllPath,
+         *   LPINT lpProviderDllPathLen, LPINT lpErrno)
+         *
+         * MSAFD's library, as the catalogue keeps it -- unexpanded. Its
+         * length counts the terminator; short of it, WSAEFAULT with the
+         * length needed. Another provider is WSAEINVAL.
+         */
+        WSCGetProviderPath: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([guid, path, length, errno])=>{
+                const refuseWith = (/** @type {number} */ code)=>{
+                    if ((errno >>> 0) !== 0)
+                    {
+                        writeDword(errno, code);
+                    }
+                    return SOCKET_ERROR;
+                };
+                if ((guid >>> 0) === 0 || (length >>> 0) === 0)
+                {
+                    return refuseWith(WSAEFAULT);
+                }
+                const id = host.readMemory(guid >>> 0, 16);
+                if (!id.every((byte, index)=>byte === MSAFD_TCPIP[index]))
+                {
+                    return refuseWith(WSAEINVAL);
+                }
+                if ((path >>> 0) === 0 || readDword(length) < MSAFD_PATH.length + 1)
+                {
+                    writeDword(length, MSAFD_PATH.length + 1);
+                    return refuseWith(WSAEFAULT);
+                }
+                host.writeMemory(path >>> 0, wide(MSAFD_PATH));
+                writeDword(length, MSAFD_PATH.length + 1);
+                return 0;
+            },
+        },
+
+        /**
+         * The name space calls. No name space provider is installed here --
+         * names resolve through getaddrinfo and the relay, not a provider a
+         * program can query -- so the list is empty and every lookup finds
+         * no service.
+         */
+
+        /** INT WSAEnumNameSpaceProvidersW(LPDWORD lpdwBufferLength, LPWSANAMESPACE_INFOW) */
+        WSAEnumNameSpaceProvidersW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([length])=>{
+                if (needStarted())
+                {
+                    return fail(WSANOTINITIALISED);
+                }
+                if ((length >>> 0) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                return 0;
+            },
+        },
+
+        /** INT WSALookupServiceBeginW(LPWSAQUERYSETW, DWORD dwControlFlags, LPHANDLE) */
+        WSALookupServiceBeginW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([query, , out])=>{
+                if (needStarted())
+                {
+                    return fail(WSANOTINITIALISED);
+                }
+                if ((query >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                return fail(WSASERVICE_NOT_FOUND);
+            },
+        },
+
+        /** INT WSALookupServiceNextW(HANDLE, DWORD, LPDWORD, LPWSAQUERYSETW): no lookup was begun. */
+        WSALookupServiceNextW: { argBytes: 16, handler: ()=>fail(WSA_INVALID_HANDLE) },
+
+        /** INT WSALookupServiceEnd(HANDLE hLookup): no lookup was begun. */
+        WSALookupServiceEnd: { argBytes: 4, handler: ()=>fail(WSA_INVALID_HANDLE) },
+
+        /** INT WSASetServiceW(LPWSAQUERYSETW, WSAESETSERVICEOP, DWORD): no provider takes it. */
+        WSASetServiceW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([query])=>{
+                if (needStarted())
+                {
+                    return fail(WSANOTINITIALISED);
+                }
+                return fail((query >>> 0) === 0 ? WSAEFAULT : WSASERVICE_NOT_FOUND);
             },
         },
 

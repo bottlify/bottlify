@@ -1430,3 +1430,100 @@ test('TransmitFile sends the head, the file through ReadFile, and the tail as on
         'the buffers alone, then the disconnect');
     assert.equal(fx.call('send', [client, TEXT, 1, 0]), SOCKET_ERROR, 'shut down after');
 });
+
+test('WSASendMsg sends its WSABUFs to the address its WSAMSG names', async()=>{
+    const fx = fixture();
+    const receiver = fx.call('socket', [AF_INET, SOCK_DGRAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+    fx.call('bind', [receiver, NAME, SOCKADDR_IN_SIZE]);
+    const sender = fx.call('WSASocketW', [AF_INET, SOCK_DGRAM, 0, 0, 0, 0]);
+    assert.notEqual(sender, INVALID_SOCKET);
+    fx.put(BUFFER, 'hello');
+    fx.put(BUFFER + 0x20, 'there');
+    fx.setDword(WSABUF, 5);
+    fx.setDword(WSABUF + 4, BUFFER);
+    fx.setDword(WSABUF + 8, 5);
+    fx.setDword(WSABUF + 12, BUFFER + 0x20);
+    const message = 0x700;
+    for (const [at, value] of [[0, NAME], [4, SOCKADDR_IN_SIZE], [8, WSABUF], [12, 2], [16, 0],
+        [20, 0], [24, 0]])
+    {
+        fx.setDword(message + at, value);
+    }
+    assert.equal(fx.call('WSASendMsg', [sender, message, 0, OUT, 0, 0]), 0);
+    assert.equal(fx.dword(OUT), 10);
+    assert.equal(await fx.call('recvfrom', [receiver, OUT2, 32, 0, 0, 0]), 10);
+    assert.equal(fx.read(OUT2, 10), 'hellothere');
+    assert.equal(fx.call('WSASendMsg', [sender, 0, 0, OUT, 0, 0]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError', []), 10014, 'no WSAMSG: WSAEFAULT');
+});
+
+test('inet_pton and inet_ntop read and write both families\' text', ()=>{
+    const fx = fixture();
+    fx.put(BUFFER, '192.168.0.7\0');
+    assert.equal(fx.call('inet_pton', [AF_INET, BUFFER, OUT]), 1);
+    assert.deepEqual([...fx.bytes.subarray(OUT, OUT + 4)], [192, 168, 0, 7]);
+    fx.put(BUFFER, '2001:DB8::1\0');
+    assert.equal(fx.call('inet_pton', [23, BUFFER, OUT]), 1);
+    assert.equal(fx.call('inet_ntop', [23, OUT, OUT2, 46]), OUT2);
+    assert.equal(fx.read(OUT2, 12), '2001:db8::1\0');
+    fx.put(BUFFER, '1.2.3\0');
+    assert.equal(fx.call('inet_pton', [AF_INET, BUFFER, OUT]), 0, 'not an address');
+    assert.equal(fx.call('inet_pton', [99, BUFFER, OUT]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError', []), 10047, 'WSAEAFNOSUPPORT');
+    fx.bytes.set([10, 0, 0, 1], OUT);
+    assert.equal(fx.call('inet_ntop', [AF_INET, OUT, OUT2, 16]), OUT2);
+    assert.equal(fx.read(OUT2, 9), '10.0.0.1\0');
+    assert.equal(fx.call('inet_ntop', [AF_INET, OUT, OUT2, 8]), 0, 'no room for the terminator');
+    assert.equal(fx.call('WSAGetLastError', []), 87);
+});
+
+test('the catalogue holds MSAFD\'s TCP and UDP, its path unexpanded; no name space answers',
+    ()=>{
+        const fx = fixture();
+        const errno = 0x7f0;
+        fx.setDword(OUT, 0);
+        assert.equal(fx.call('WSCEnumProtocols', [0, 0, OUT, errno]), SOCKET_ERROR);
+        assert.equal(fx.dword(errno), 10055, 'WSAENOBUFS');
+        assert.equal(fx.dword(OUT), 2 * 628);
+        const catalogue = 0x1000;
+        assert.equal(fx.call('WSCEnumProtocols', [0, catalogue, OUT, errno]), 2);
+        assert.equal(fx.dword(catalogue + 88), SOCK_STREAM);
+        assert.equal(fx.dword(catalogue + 92), 6);
+        assert.equal(fx.dword(catalogue + 628 + 88), SOCK_DGRAM);
+        // Only UDP asked for.
+        fx.setDword(0x7e0, 17);
+        fx.setDword(0x7e4, 0);
+        assert.equal(fx.call('WSAEnumProtocolsA', [0x7e0, catalogue, OUT]), 1);
+        assert.equal(fx.read(catalogue + 116, 20), 'MSAFD Tcpip [UDP/IP]');
+
+        const guid = 0x7c0;
+        fx.bytes.set(fx.bytes.subarray(catalogue + 20, catalogue + 36), guid);
+        fx.setDword(OUT, 4);
+        assert.equal(fx.call('WSCGetProviderPath', [guid, OUT2, OUT, errno]), SOCKET_ERROR);
+        assert.equal(fx.dword(errno), 10014);
+        const length = fx.dword(OUT);
+        assert.equal(fx.call('WSCGetProviderPath', [guid, 0x2000, OUT, errno]), 0);
+        const path = new TextDecoder('utf-16le').decode(
+            fx.bytes.subarray(0x2000, 0x2000 + (length - 1) * 2));
+        assert.equal(path, '%SystemRoot%\\system32\\mswsock.dll');
+        fx.bytes[guid] ^= 1;
+        assert.equal(fx.call('WSCGetProviderPath', [guid, 0x2000, OUT, errno]), SOCKET_ERROR);
+        assert.equal(fx.dword(errno), WSAEINVAL, 'another provider');
+
+        fx.setDword(OUT, 0);
+        assert.equal(fx.call('WSAEnumNameSpaceProvidersW', [OUT, 0]), 0, 'none installed');
+        assert.equal(fx.call('WSALookupServiceBeginW', [0x1000, 0, OUT]), SOCKET_ERROR);
+        assert.equal(fx.call('WSAGetLastError', []), 10108, 'WSASERVICE_NOT_FOUND');
+        assert.equal(fx.call('WSALookupServiceEnd', [1]), SOCKET_ERROR);
+        assert.equal(fx.call('WSASetServiceW', [0x1000, 0, 0]), SOCKET_ERROR);
+    });
+
+test('a socket is not duplicated into another process', ()=>{
+    const fx = fixture();
+    const socket = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    assert.equal(fx.call('WSADuplicateSocketW', [socket, 1234, OUT]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError', []), WSAEINVAL);
+    assert.equal(fx.call('WSADuplicateSocketW', [999, 1234, OUT]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError', []), WSAENOTSOCK);
+});
