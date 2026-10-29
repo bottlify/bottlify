@@ -918,3 +918,61 @@ test('a name without an extension is looked for as a program', ()=>{
     assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x180, 0, 0, 1]), 2,
         'and a name with no program by it is a file not found');
 });
+
+test('SHGetKnownFolderPath answers a known folder\'s path in a block of the task allocator', ()=>{
+    // KnownFolders.h's GUIDs; Wine's shell32 shellpath test_knownFolders reads
+    // FOLDERID_ProgramFiles back as SHGetFolderPath's CSIDL_PROGRAM_FILES.
+    const m = machineWithFolders();
+    const view = new DataView(m.memory.buffer);
+    /** @param {number} at @param {string} text */
+    const putGuid = (at, text)=>{
+        const [a, b, c, d, e] = text.split('-');
+        view.setUint32(at, parseInt(a, 16), true);
+        view.setUint16(at + 4, parseInt(b, 16), true);
+        view.setUint16(at + 6, parseInt(c, 16), true);
+        m.memory.set(Buffer.from(d + e, 'hex'), at + 8);
+    };
+    const wideAt = (/** @type {number} */ at)=>{
+        let text = '';
+        for (let unit = view.getUint16(at, true); unit !== 0; unit = view.getUint16(at, true))
+        {
+            text += String.fromCharCode(unit);
+            at += 2;
+        }
+        return text;
+    };
+    assert.equal(m.shell.SHGetKnownFolderPath.argBytes, 16);
+    putGuid(0x100, '905e63b6-c1bf-494e-b29c-65b732d3d21a');
+    assert.equal(m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]), 0);
+    assert.equal(wideAt(view.getUint32(0x120, true)), 'C:\\Program Files');
+    // FOLDERID_ProgramFilesX86 on a 32-bit system is the same folder.
+    putGuid(0x100, '7c5a40ef-a0fb-4bfc-874a-c0f2e0b9fa8e');
+    assert.equal(m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]), 0);
+    assert.equal(wideAt(view.getUint32(0x120, true)), 'C:\\Program Files');
+
+    // FOLDERID_Fonts: a folder this machine's table does not hold.
+    putGuid(0x100, 'fd228cb7-ae11-4ae3-864c-16f3910ab8fe');
+    assert.equal(m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]) | 0, 0x80070057 | 0);
+    assert.equal(view.getUint32(0x120, true), 0, 'and NULL where the path would go');
+    putGuid(0x100, '00000000-0000-0000-0000-000000000001');
+    assert.equal(m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]) | 0, 0x80070057 | 0);
+});
+
+test('IsUserAnAdmin is shell32\'s ordinal 680 and says the one user is the administrator', ()=>{
+    const m = machineWithFolders();
+    assert.equal(SHELL32_ORDINALS[680], 'IsUserAnAdmin');
+    assert.equal(m.shell.IsUserAnAdmin.argBytes, 0);
+    assert.equal(m.shell.IsUserAnAdmin.handler([]), 1);
+});
+
+test('SetCurrentProcessExplicitAppUserModelID takes an ID of up to 128 characters', ()=>{
+    const m = machineWithFolders();
+    const put = (/** @type {string} */ text)=>m.memory.set(
+        new Uint8Array(Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer), 0x100);
+    put('Valve.Steam.Client');
+    assert.equal(m.shell.SetCurrentProcessExplicitAppUserModelID.handler([0x100]), 0);
+    put('x'.repeat(129));
+    assert.equal(m.shell.SetCurrentProcessExplicitAppUserModelID.handler([0x100]) | 0,
+        0x80070057 | 0);
+    assert.equal(m.shell.SetCurrentProcessExplicitAppUserModelID.handler([0]) | 0, 0x80070057 | 0);
+});

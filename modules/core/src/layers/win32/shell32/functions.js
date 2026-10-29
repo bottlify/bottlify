@@ -49,7 +49,7 @@ import { pointerWidth } from '../common/pointers.js';
  * The exports a program imports from shell32 by number alone, by their XP
  * ordinals.
  */
-export const SHELL32_ORDINALS = Object.freeze({ 165: 'SHCreateDirectory' });
+export const SHELL32_ORDINALS = Object.freeze({ 165: 'SHCreateDirectory', 680: 'IsUserAnAdmin' });
 
 /** ShellExecute reports failure as a value of 32 or less, not as zero. */
 const SE_ERR_FNF = 2;
@@ -193,6 +193,59 @@ const CSIDL_FOLDERS = Object.freeze({
     0x2b: 'CommonFiles',
     0x2e: 'Common Documents',
 });
+
+/**
+ * The known folders Vista names by GUID (KnownFolders.h), each by the
+ * registry's name for the CSIDL folder it is: SHGetKnownFolderPath answers
+ * the path SHGetFolderPath answers for that CSIDL. On a 32-bit system the x86
+ * folders are the plain ones.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const KNOWN_FOLDERS = Object.freeze({
+    'b4bfcc3a-db2c-424c-b029-7fe99a87c641': 'Desktop',
+    'a77f5d77-2e2b-44c3-a6a2-aba601054a51': 'Programs',
+    'fdd39ad0-238f-46af-adb4-6c85480369c7': 'Personal',
+    'b97d20bb-f46a-4c97-ba10-5e3608430854': 'Startup',
+    '625b53c3-ab48-4ec1-ba1f-a1ef4146fc19': 'Start Menu',
+    'fd228cb7-ae11-4ae3-864c-16f3910ab8fe': 'Fonts',
+    'a4115719-d62e-491d-aa7c-e74b8be3b067': 'Common Start Menu',
+    '0139d44e-6afe-49f2-8690-3dafcae6ffb8': 'Common Programs',
+    '82a5ea35-d9cd-47c5-9629-e15d2f714e6e': 'Common Startup',
+    'c4aa340d-f20f-4863-afef-f87ef2e6ba25': 'Common Desktop',
+    '3eb685db-65f9-4cf6-a03a-e3ef65729f3d': 'AppData',
+    'f1b32785-6fba-4fcf-9d55-7b8e7f157091': 'Local AppData',
+    '62ab5d82-fdc1-4dc3-a9dd-070d1d495d97': 'Common AppData',
+    'f38bf404-1d43-42f2-9305-67de0b28fc23': 'Windows',
+    '1ac14e77-02e7-4e5d-b744-2eb1ae5198b7': 'System',
+    'd65231b0-b2f1-4857-a4ce-a8e7c6ea7d27': 'System',
+    '905e63b6-c1bf-494e-b29c-65b732d3d21a': 'ProgramFiles',
+    '7c5a40ef-a0fb-4bfc-874a-c0f2e0b9fa8e': 'ProgramFiles',
+    '5e6c858f-0e22-4760-9afe-ea3317b67173': 'Profile',
+    'f7f1ed05-9f6d-47a2-aaae-29d317c6f066': 'CommonFiles',
+    'de974d24-d9c6-4d3e-bf91-f4455120b917': 'CommonFiles',
+    'ed4824af-dce4-45a8-81e2-fc7965083634': 'Common Documents',
+});
+
+/** FOLDERID_LocalAppDataLow: beside Local AppData, with no CSIDL of its own. */
+const LOCAL_APPDATA_LOW = 'a520a1a4-1780-4ff6-bd18-167343c5af16';
+
+/** The longest AppUserModelID a process may take (SetCurrentProcessExplicitAppUserModelID). */
+const APP_USER_MODEL_ID_MAX = 128;
+
+/**
+ * A GUID as its text, lower case, from the sixteen bytes a structure holds.
+ *
+ * @param {Uint8Array} bytes
+ */
+const guidText = bytes=>{
+    const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
+    const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>
+        value.toString(16).padStart(digits, '0');
+    const tail = [...bytes.subarray(8, 16)].map(byte=>hex(byte, 2)).join('');
+    return `${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
+        + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}`;
+};
 
 /**
  * @typedef {Object} ShellHost
@@ -1392,6 +1445,77 @@ export function createShellFunctions(host){
                 const folder = folderOf(csidl | 0);
                 writeWidePath(path >>> 0, folder ?? '');
                 return folder === null ? E_INVALIDARG : S_OK;
+            },
+        },
+
+        /**
+         * HRESULT SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags,
+         *   HANDLE hToken, PWSTR *ppszPath)
+         *
+         * Vista's name for SHGetFolderPath: the folder a known-folder GUID is,
+         * in a block from the task allocator the caller frees with
+         * CoTaskMemFree. A GUID that names no folder of this machine is
+         * E_INVALIDARG with NULL written, as the real one answers for a folder
+         * that is not registered.
+         */
+        SHGetKnownFolderPath: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([id, , , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                host.writeMemory(out >>> 0, dword(0));
+                if ((id >>> 0) === 0 || !host.readMemory)
+                {
+                    return E_INVALIDARG;
+                }
+                const guid = guidText(host.readMemory(id >>> 0, 16));
+                const local = host.folders?.['Local AppData'];
+                const path = guid === LOCAL_APPDATA_LOW
+                    ? local && /\\Local$/i.test(local) ? `${local}Low` : null
+                    : host.folders?.[KNOWN_FOLDERS[guid]] ?? null;
+                if (path === null)
+                {
+                    return E_INVALIDARG;
+                }
+                const text = new Uint8Array(
+                    Uint16Array.from(`${path}\0`, c=>c.charCodeAt(0)).buffer);
+                const block = host.allocate?.(text.length) ?? 0;
+                if (block === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                host.writeMemory(block, text);
+                host.writeMemory(out >>> 0, dword(block));
+                return S_OK;
+            },
+        },
+
+        /**
+         * BOOL IsUserAnAdmin(void)
+         *
+         * Shell32's ordinal 680. The one user is the administrator.
+         */
+        IsUserAnAdmin: {
+            argBytes: 0,
+            handler: ()=>1,
+        },
+
+        /**
+         * HRESULT SetCurrentProcessExplicitAppUserModelID(PCWSTR AppID)
+         *
+         * The name the taskbar groups this process's windows under. There is
+         * no taskbar to group them, so the name is only checked: longer than
+         * the 128 characters it may be is E_INVALIDARG.
+         */
+        SetCurrentProcessExplicitAppUserModelID: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([id])=>{
+                const text = wideStringOf(id >>> 0, APP_USER_MODEL_ID_MAX + 1);
+                return text === null || text.length > APP_USER_MODEL_ID_MAX ? E_INVALIDARG : S_OK;
             },
         },
 
