@@ -209,6 +209,56 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
 }
 
 /**
+ * A direct call to an import thunk -- a `jmp [slot]` through a fixed slot and
+ * nothing else, which a linker makes for each function a module imports and
+ * a compiler calls directly where the declaration did not say it was imported
+ * -- as the call through that slot it amounts to: the same return address
+ * pushed, the target read from the slot, the thunk's jump retired with it
+ * (`thunk`, emit/integer.js). As a callee formed in, the thunk's jump left
+ * through the entry hash and the target's `ret` did again; as a call through
+ * the slot it is predicted from the slot and formed in, or made as a wasm call,
+ * as any `call [slot]` is (`slotCallee`). The thunk's bytes decide the code
+ * as a runtime helper's do (`helper`): hashed with the region, and their pages
+ * its pages. A slot read that faults leaves before the call, which the
+ * interpreter runs again into the thunk. Null for any other call.
+ *
+ * @param {(address: number) => import('./decode/decoder.js').Instruction
+ *     | import('./decode/decoder.js').Refusal} decodeAt
+ * @param {(eip: number) => boolean} translatable
+ * @param {import('./decode/decoder.js').Instruction} call  a `call rel32`
+ * @returns {import('./decode/decoder.js').Instruction | null}
+ */
+function thunkCall(decodeAt, translatable, call){
+    const thunk = /** @type {number} */ (call.operands[0].target);
+    if (call.prefixes.operand || !translatable(thunk))
+    {
+        return null;
+    }
+    const jump = decodeAt(thunk);
+    if ('refused' in jump || jump.op !== 'jmp' || jump.prefixes.operand)
+    {
+        return null;
+    }
+    const [operand] = jump.operands;
+    if (operand.kind !== 'mem' || operand.size !== 4 || (operand.base ?? -1) >= 0
+        || (operand.index ?? -1) >= 0 || operand.segment === 4 || operand.segment === 5
+        || operand.addressSize === 16)
+    {
+        return null;
+    }
+    const slot = (operand.disp ?? 0) >>> 0;
+    // `call [slot]`, at the call's own address and of its length.
+    const bytes = [0xff, 0x15, slot & 0xff, slot >>> 8 & 0xff, slot >>> 16 & 0xff, slot >>> 24];
+    const through = decode(address=>bytes[address - call.eip] ?? 0, call.eip);
+    if ('refused' in through)
+    {
+        return null;
+    }
+    return { ...through, length: call.length, thunk,
+        helper: { name: 'import thunk', address: thunk, length: jump.length } };
+}
+
+/**
  * The callee of a call through a fixed slot -- `call [address]`, an import's
  * call through the import table -- when it is a leaf to form in: predicted
  * from the slot as it reads now, as the runtime predicts an indirect call
@@ -540,7 +590,7 @@ export function formShared(){
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[],
- *     bytesOf?: (start: number, end: number) => Uint8Array,
+ *     importThunks?: boolean, bytesOf?: (start: number, end: number) => Uint8Array,
  *     entered?: (eip: number) => boolean, mode?: { bits: 32 | 64 },
  *     translates?: (instruction: import('./decode/decoder.js').Instruction) => boolean,
  *     baseOf?: (reg: number) => number | null }} [options]
@@ -550,7 +600,8 @@ export function formShared(){
  *     (1: a callee's callees leave; 0: only leaves are formed in); switchEntries: the most
  *     entries a switch's jump table is followed through; helpers: a
  *     call to a compiler's runtime helper is formed as what it amounts to (helpers.js), those
- *     of RUNTIME_HELPERS or of the list given;
+ *     of RUNTIME_HELPERS or of the list given; importThunks: a direct call to an import
+ *     thunk is formed as the call through its slot (`thunkCall`; never in long mode);
  *     callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
  *     as a direct call's small callee is -- the call compares its target with each; a call
@@ -587,12 +638,14 @@ export function formRegion(read, entry,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
         formDepth = 1, predictedRoom = PREDICTED_ROOM,
         ownRoom = { blocks: maxBlocks, bytes: maxBytes },
-        switchEntries = SWITCH_ENTRIES, bytesOf, entered, mode, translates, baseOf } = {})
+        switchEntries = SWITCH_ENTRIES, bytesOf, entered, mode, translates, baseOf,
+        importThunks = true } = {})
 {
     const wide = mode?.bits === 64;
     if (wide)
     {
         helpers = false;
+        importThunks = false;
         translates ??= translatesLong;
     }
     // Every page forming reads decides what it forms -- an import slot a call is predicted
@@ -857,7 +910,7 @@ export function formRegion(read, entry,
                 block.exit = { kind: 'cut', targets: [], next: eip, backEdge: false };
                 break;
             }
-            const decoded = decodeAt(eip);
+            let decoded = decodeAt(eip);
             const called = !('refused' in decoded) && helpers !== false && decoded.op === 'call'
                 && decoded.operands[0].kind === 'rel'
                 ? /** @type {number} */ (decoded.operands[0].target) : -1;
@@ -913,6 +966,10 @@ export function formRegion(read, entry,
                     };
                     break;
                 }
+            }
+            if (importThunks && decoded.op === 'call' && decoded.operands[0].kind === 'rel')
+            {
+                decoded = thunkCall(decodeAt, translatable, decoded) ?? decoded;
             }
             block.instructions.push(decoded);
             bytes += decoded.length;
@@ -1098,6 +1155,21 @@ function copiesOf(read, spans, bytesOf){
     }
     return merged.map(([start, end])=>({ start, bytes: bytesOf?.(start, end)
         ?? Uint8Array.from({ length: end - start }, (_, at)=>read(start + at)) }));
+}
+
+/**
+ * The bytes a region's code is made of, as `[start, end)` spans: its blocks',
+ * and the runtime helpers' and import thunks' its calls were formed as
+ * (`helper`), which no block holds: a store into any of them is a store into
+ * the region's code.
+ *
+ * @param {{ blocks: Block[] }} region
+ * @returns {[number, number][]}
+ */
+export function codeSpans({ blocks }){
+    return [...blocks.map(block=>/** @type {[number, number]} */ ([block.start, block.end])),
+        ...helpersOf(blocks).map(({ address, length })=>/** @type {[number, number]} */ (
+            [address, address + length]))];
 }
 
 /**

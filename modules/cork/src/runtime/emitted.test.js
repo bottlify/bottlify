@@ -106,6 +106,7 @@ const EMITTED = {
     117: '37d0f4ea7b1bd167',
     118: '79c660aa3e6d877c',
     119: '660a774c16776f5d',
+    120: '99056538bc6f8d3a',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -170,6 +171,25 @@ function digest(){
         ['trap x87', [0xd9, 0xe8, ...trapped]]]))
     {
         const call = formRegion(address=>bytes[address - 0x1000] ?? 0, 0x1000, {});
+        const calls = new ModuleBuilder();
+        const callsContext = prepareModule(calls, layout, FEATURES, {}, { hash: true,
+            trapPort: 0xb077, resume: true, callReturn: true });
+        const atCall = emitRegion(callsContext, call, { entryTop: 0, checked: false });
+        finishModule(callsContext, [atCall.functionIndex]);
+        calls.exportFunction('region', atCall.functionIndex);
+        hash.update(`${name}:`).update(calls.toBytes());
+    }
+    // A direct call to an import thunk, formed as the call through its slot (`thunkCall`):
+    // call 0x1010; hlt; at 0x1010 jmp [0x1100], whose slot names 0x1200: mov eax, [ecx+8]; ret.
+    // Formed in from the slot, and with a callee too large to form in, as a wasm call.
+    const thunked = new Uint8Array(0x300);
+    thunked.set([0xe8, 0x0b, 0, 0, 0, 0xf4], 0);
+    thunked.set([0xff, 0x25, 0x00, 0x11, 0, 0], 0x10);
+    thunked.set([0x00, 0x12, 0, 0], 0x100);
+    thunked.set([0x8b, 0x41, 0x08, 0xc3], 0x200);
+    for (const [name, leafBlocks] of /** @type {const} */ ([['thunk', 16], ['thunk apart', 0]]))
+    {
+        const call = formRegion(address=>thunked[address - 0x1000] ?? 0, 0x1000, { leafBlocks });
         const calls = new ModuleBuilder();
         const callsContext = prepareModule(calls, layout, FEATURES, {}, { hash: true,
             trapPort: 0xb077, resume: true, callReturn: true });

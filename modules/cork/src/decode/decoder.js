@@ -83,6 +83,8 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  * @property {string} opcode        the opcode bytes as text, "0f 2e", for a report
  * @property {{ name: string, address: number, length: number }} [helper]
  *           set on the instructions a call to a compiler's runtime helper is formed as (helpers.js)
+ *           and on a call to an import thunk formed as the call through its slot
+ * @property {number} [thunk]       that thunk's address: the call retires its jump as well
  */
 
 /**

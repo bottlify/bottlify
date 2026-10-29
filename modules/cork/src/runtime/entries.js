@@ -25,6 +25,8 @@ export const slotOf = (/** @type {number} */ eip, shift = 16)=>Math.imul(eip, 0x
 
 const EMPTY = 0;
 const REMOVED = 0xffffffff;
+/** A removed slot's top byte, with an empty code of 0 (`remove`). */
+const REMOVED_TOP = 0xff;
 
 /**
  * @typedef {Object} Entry
@@ -239,7 +241,13 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
             live--;
             if (entry.slot >= 0)
             {
-                view().setUint32(hashBase + entry.slot * Tables.HASH_SLOT, REMOVED, true);
+                const at = hashBase + entry.slot * Tables.HASH_SLOT;
+                view().setUint32(at, REMOVED, true);
+                // No top an entry has, and no empty code: translated calls test
+                // the top and empty code as one halfword for `ANY_TOP`
+                // (`linkedCall`), which a call to address all ones must not
+                // find in a removed slot.
+                view().setUint16(at + 10, REMOVED_TOP, true);
                 inHash--;
                 removed++;
                 if (removed > slotCount / 4)
