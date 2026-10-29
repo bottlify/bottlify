@@ -1,0 +1,41 @@
+{
+  "name": "@bottlify/steam",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MPL-2.0",
+  "description": "A small Steam client for Bottlify: signing in, the library, depots -- what a title in a person's library needs to install and run",
+  "homepage": "https://github.com/bottlify/bottlify/tree/main/modules/steam#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bottlify/bottlify.git",
+    "directory": "modules/steam"
+  },
+  "bugs": {
+    "url": "https://github.com/bottlify/bottlify/issues"
+  },
+  "keywords": [
+    "steam",
+    "browser",
+    "qr"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "!src/**/*.test.js",
+    "!src/**/*.itest.js",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-timeout=60000 \"src/**/*.test.js\"",
+    "typecheck": "tsc -p jsconfig.json",
+    "prepack": "node -e \"require('node:fs').copyFileSync('../../LICENSE', 'LICENSE')\""
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
