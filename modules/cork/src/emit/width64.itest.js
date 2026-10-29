@@ -122,6 +122,22 @@ test('width edges of moves, scans, swaps and widenings run in the shared emitter
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
 
+test('a float compare fused with its branch over stores and arithmetic between them runs in the'
+    + ' shared emitter\'s regions as interpreted', ()=>{
+    // xmm0 from rcx, xmm1 from ebx; the compare, what stands between, a branch
+    // of each condition past `add edx, 1`, the flags written again after it.
+    const compares = ['0f2fc1', '0f2ec8', '660f2fc1', '0f2fc0'];
+    const between = ['', 'f30f110424', 'f30f59c8', 'c7042400000000', '8908', // 8908 faults: rax
+        'f30f110424f30f59c80f28c8'];
+    const conditions = ['72', '73', '74', '75', '76', '77', '7a', '7b', '7c', '7e'];
+    const codes = compares.flatMap(first=>between.flatMap(standing=>conditions.map(cc=>
+        `f30f2ac1f30f2acb${first}${standing}${cc}0383c20101d8`)));
+    const cases = edges(codes, [0, 1, 7, -1, 0x7fffffff, 0x100000000]);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
+
 test('lea under the address-size prefix keeps the address\'s low 32 bits in the shared'
     + ' emitter\'s regions, as interpreted', ()=>{
     const cases = edges([

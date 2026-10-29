@@ -45,7 +45,7 @@
  * for an instruction whose flags nothing reads before the next writer.
  */
 
-import { CF, DF, ARITH_FLAGS } from '../decode/table.js';
+import { CF, DF, PF, ZF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import {
     ARITH, CARRY_IN_WORD, I32, I64, Kind, MASKS, eagerFlagsOf, emitCondition, emitFlag, kindOf,
@@ -1294,6 +1294,12 @@ export class RegionEmitter {
         /** Those locals, one an xmm register and width. @type {Map<string, number>} */
         this.lowLocals = new Map();
         /**
+         * The locals a fused float compare keeps its operands in while
+         * instructions stand between it and its branch (`compareLocal`), by
+         * operand and width. @type {Map<string, number>}
+         */
+        this.compareLocals = new Map();
+        /**
          * The xmm registers whose low lane only their `lows` local holds yet,
          * the vector's own lane behind it: put back (`settleLows`) where the
          * vector is read, at the block's end and on every way out. 'zero': the
@@ -1459,6 +1465,25 @@ export class RegionEmitter {
             local = this.localTypes.length + STATE_PARAMS;
             this.localTypes.push(double ? ValType.f64 : ValType.f32);
             this.lowLocals.set(key, local);
+        }
+        return local;
+    }
+
+    /**
+     * A local a fused float compare's operand is kept in across the
+     * instructions between it and its branch, which may use the scratch
+     * floats it was compared in (`fusesCompare`).
+     *
+     * @param {0 | 1} operand @param {boolean} double
+     */
+    compareLocal(operand, double){
+        const key = `${operand}${double ? 'd' : 's'}`;
+        let local = this.compareLocals.get(key);
+        if (local === undefined)
+        {
+            local = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(double ? ValType.f64 : ValType.f32);
+            this.compareLocals.set(key, local);
         }
         return local;
     }
@@ -2581,6 +2606,32 @@ export class RegionEmitter {
         this.b.i32const(kindOf(Kind.SUB, size)).localSet(Local.kind);
         this.pending = { kind: Kind.SUB, width: widthCode(size) };
         this.resultOwed = size;
+    }
+
+    /**
+     * The flags of a fused float compare (`fcmp`) made into the word, on a way
+     * out of an instruction between it and its branch: the code it leaves for
+     * reads them as the compare left them -- ZF, PF and CF from its operands,
+     * OF, SF and AF clear, the record empty. Not the emitter's state: the way
+     * on still has the branch compare the operands.
+     */
+    payFloatCompare(){
+        const { b } = this;
+        const fcmp = /** @type {import('./x87.js').FloatCompare} */ (this.fcmp);
+        const { a, c, double } = fcmp;
+        const [eq, ne, lt] = double ? [0x61, 0x62, 0x63] : [0x5b, 0x5c, 0x5d];
+        const unordered = ()=>b.localGet(a).localGet(a).op(ne).localGet(c).localGet(c).op(ne)
+            .op(I32.or);
+        b.i32const(0).localSet(Local.kind);
+        b.localGet(Local.flags).i32const(~ARITH_FLAGS).op(I32.and).localSet(Local.flags);
+        unordered();
+        this.orFlag(PF);
+        unordered();
+        b.localGet(a).localGet(c).op(eq).op(I32.or);
+        this.orFlag(ZF);
+        unordered();
+        b.localGet(a).localGet(c).op(lt).op(I32.or);
+        this.orFlag(CF);
     }
 
     /** The owed result made (`oweResult`), on the way being emitted. */
@@ -3966,6 +4017,10 @@ export class RegionEmitter {
         if ((live & ARITH_FLAGS) !== 0)
         {
             this.payResult();
+            if (this.fcmp !== null)
+            {
+                this.payFloatCompare();
+            }
         }
         else
         {
