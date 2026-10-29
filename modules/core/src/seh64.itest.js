@@ -36,5 +36,7 @@ test('a 64-bit program dispatches exceptions through its unwind tables',
         assert.match(text, /^ok {3}a __finally runs as the stack unwinds past it$/m, text);
         assert.match(text, /^ok {3}an inner __finally runs before the outer __except$/m, text);
         assert.match(text, /^ok {3}a hundred faults in a row$/m, text);
+        assert.match(text, /^ok {3}a __finally around the __except that took it runs once/m,
+            text);
         assert.equal(code, 0, text);
     });

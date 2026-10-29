@@ -17,13 +17,24 @@
  * running every `__finally` and destructor on the way, and sends the thread to
  * the handler's code. Nothing handling it ends the process.
  *
- * This is ntdll's `RtlDispatchException` and `RtlUnwindEx`, and the language
- * handler `__C_specific_handler` the C compiler names for `__try`. The handler
- * is the runtime's on a real machine; here the runtime is this engine's, so it
- * is interpreted rather than run as guest code -- the scope table it reads is
- * the one the compiler emitted, and its filters and `__finally` blocks are the
- * funclets the compiler emitted, called as guest code with the frame base the
- * x64 convention gives them.
+ * This is ntdll's `RtlDispatchException` and `RtlUnwindEx`. The language
+ * handlers are the runtime's on a real machine; here the runtime is this
+ * engine's, so the ones it exports -- the C handler `__C_specific_handler`
+ * and the C++ frame handlers (`msvcrt/eh64.js`) -- are interpreted: given the
+ * frame and the walk directly, they read the tables the compiler emitted and
+ * call its filters, funclets and destructors as guest code with the frame
+ * base the x64 convention gives them. A handler that is the program's own
+ * code is called as Windows calls it, with the record, the frame, the context
+ * and a DISPATCHER_CONTEXT, and a runtime handler it hands the frame on to
+ * finds the walk again through that dispatcher context.
+ *
+ * Funclets run on the stack below the point the exception was raised at, as
+ * they do under the system's dispatcher, so the frames being searched -- and
+ * the thrown object a C++ catch reads -- stay whole until they are unwound.
+ * A catch block is called by the dispatcher and keeps running after the
+ * frames below its function are gone; a walk that leaves it continues in the
+ * function it belongs to, at the registers the function had when the catch
+ * was entered, as the system's consolidation frame makes it.
  */
 
 import { EXCEPTION_NONCONTINUABLE, STATUS } from './seh.js';
@@ -42,9 +53,10 @@ export const RECORD64 = Object.freeze({
     SIZE: 0x20 + 15 * 8,
 });
 
-/** EH_UNWINDING and EH_EXIT_UNWIND, as the 32-bit walk names them. */
+/** EH_UNWINDING, EH_EXIT_UNWIND and EH_TARGET_UNWIND, as winnt.h names them. */
 export const EH_UNWINDING = 0x02;
 export const EH_EXIT_UNWIND = 0x04;
+export const EH_TARGET_UNWIND = 0x20;
 
 /** What a filter answers. */
 const EXCEPTION_CONTINUE_SEARCH = 0;
@@ -55,6 +67,8 @@ const EXCEPTION_CONTINUE_EXECUTION = -1;
 export const Disposition = Object.freeze({
     CONTINUE_EXECUTION: 0,
     CONTINUE_SEARCH: 1,
+    NESTED_EXCEPTION: 2,
+    COLLIDED_UNWIND: 3,
 });
 
 /**
@@ -72,8 +86,42 @@ export const CONTEXT64 = Object.freeze({
     SIZE: 0x4d0,
 });
 
+/**
+ * DISPATCHER_CONTEXT, what the dispatcher hands a language handler beside
+ * the frame: quadwords but for the scope index.
+ */
+export const DISPATCHER64 = Object.freeze({
+    CONTROL_PC: 0x00,
+    IMAGE_BASE: 0x08,
+    FUNCTION_ENTRY: 0x10,
+    ESTABLISHER_FRAME: 0x18,
+    TARGET_IP: 0x20,
+    CONTEXT_RECORD: 0x28,
+    LANGUAGE_HANDLER: 0x30,
+    HANDLER_DATA: 0x38,
+    HISTORY_TABLE: 0x40,
+    SCOPE_INDEX: 0x48,
+    SIZE: 0x50,
+});
+
 /** CONTEXT_AMD64 | CONTROL | INTEGER | FLOATING_POINT: what a captured one says it holds. */
 const CONTEXT_FULL64 = 0x0010000b;
+
+/** Frames a walk takes at most before the stack is taken as damaged. */
+const WALK_LIMIT = 4096;
+
+/**
+ * How far below the point an exception was raised at its funclets start:
+ * clear of the raising call's own frame, 16-aligned.
+ */
+const FLOOR_GAP = 0x100;
+
+/**
+ * Where a funclet the dispatcher called stands, once its frame has been
+ * undone: the return into the call the bridge built, a few quadwords below
+ * the stack the call was given.
+ */
+const NESTED_REACH = 0x100;
 
 /** Codes raised by the processor, by their vector, reused from the 32-bit table's values. */
 const VECTOR_TO_STATUS = Object.freeze({
@@ -95,6 +143,77 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
 
 /**
  * @typedef {import('./unwind.js').UnwindContext} UnwindContext
+ * @typedef {import('./unwind.js').FunctionEntry} FunctionEntry
+ */
+
+/**
+ * An exception as the walk carries it.
+ *
+ * @typedef {Object} ExceptionRecord
+ * @property {number} code
+ * @property {number} flags
+ * @property {number} address
+ * @property {number[]} [parameters]
+ */
+
+/**
+ * One frame a walk reached.
+ *
+ * @typedef {Object} FrameVisit
+ * @property {FunctionEntry} fn       The entry the frame's address found.
+ * @property {number} handler         Its language handler, absolute.
+ * @property {number} handlerData     Where the handler's data begins.
+ * @property {number} establisher     The frame's establisher frame.
+ * @property {UnwindContext} context  The frame's own registers; RIP is its control PC.
+ * @property {Map<string, any>} memo  Notes a handler leaves for a later frame of the same walk.
+ */
+
+/**
+ * A funclet the dispatcher called and whose frame a later walk may meet:
+ * where it was called from, and what the walk goes on with past it.
+ *
+ * @typedef {Object} NestedCall
+ * @property {number} stack            The stack the call was given.
+ * @property {UnwindContext} resume    The registers the walk takes on past the funclet.
+ * @property {(pass: Pass) => Promise<void> | void} [abandoned]
+ *     Told when an unwind takes the funclet's frame off the stack, the call
+ *     never to return.
+ */
+
+/**
+ * An exception's dispatch, as a language handler sees it.
+ *
+ * @typedef {Object} Pass
+ * @property {ExceptionRecord} record
+ * @property {UnwindContext} faultContext  The registers at the raise.
+ * @property {any} thread
+ * @property {number} floor  The stack funclets are called on.
+ * @property {(entry: number, registers?: { rcx?: number, rdx?: number, r8?: number,
+ *     r9?: number }) => Promise<number>} call
+ *     Calls guest code on the floor with the argument registers set; answers EAX.
+ * @property {(entry: number, registers: { rcx?: number, rdx?: number },
+ *     resume: UnwindContext, abandoned?: (pass: Pass) => Promise<void> | void)
+ *     => Promise<number>} callNested
+ *     The same for a funclet that runs on after the frames below its function
+ *     are unwound -- a catch block: a walk from inside it goes on at `resume`.
+ * @property {(target: { frame: number, ip: number, state?: number }) => Promise<void>} unwindTo
+ *     Runs the termination handlers of every frame from the raise up to the
+ *     frame whose establisher is `frame`, that frame's own included.
+ * @property {(context: UnwindContext) => any} continueAt
+ *     The answer that sends the thread on at `context`, abandoning the rest.
+ */
+
+/**
+ * A language handler this engine interprets rather than calls.
+ *
+ * @typedef {Object} Interpreter
+ * @property {(visit: FrameVisit, pass: Pass) => Promise<any | null>} search
+ *     The exception pass over one frame: the continuation the thread takes
+ *     when the frame handles the exception, null to search on.
+ * @property {(visit: FrameVisit, pass: Pass,
+ *     target: { at: boolean, ip: number, state?: number }) => Promise<void>} unwind
+ *     The unwind pass: the frame's termination handlers, down to the target's
+ *     scope or state when it is the target.
  */
 
 /**
@@ -112,9 +231,15 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  *     long: { gpr: bigint[], xmm: Uint8Array, mxcsr: number } }) => any} continueAt
  *     Sends the thread on at a whole 64-bit context, abandoning the calls below.
  * @property {() => any} currentThread
+ * @property {(thread: any, stack: number) => { rip: number, rsp: number } | null}
+ *     [callbackCaller]  Where a routine the host called back returns to on the
+ *     guest side: the call into the host that made the callback, by the stack
+ *     the routine's frame left. Null when the stack is no such return.
+ * @property {() => { stubs: number[], interpreter: Interpreter }[]} [interpreters]
+ *     The runtime's own language handlers by their guest stub addresses,
+ *     resolved once, lazily: the C++ frame handlers.
  * @property {() => number[]} [handlerStubs]  The guest stub addresses of this
- *     engine's own C language handlers, so a frame naming one has its scope
- *     table read directly; resolved once, lazily.
+ *     engine's own C language handlers.
  * @property {(text: string) => void} [trace]
  * @property {(what: { code: number, address: number }) => void} [terminate]
  */
@@ -128,6 +253,8 @@ export function createSeh64(host){
         const bytes = host.readMemory(at >>> 0, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
+    /** @param {number} at */
+    const readU64Low = at=>readU32(at);
     /** @param {number} at @param {number} value */
     const writeQuad = (at, value)=>{
         const bytes = new Uint8Array(8);
@@ -137,6 +264,34 @@ export function createSeh64(host){
 
     /** The last top-level filter SetUnhandledExceptionFilter installed. */
     let topLevelFilter = 0;
+
+    /**
+     * The funclets each thread is inside that a walk may have to go past: a
+     * catch block called by a C++ handler, innermost last.
+     *
+     * @type {WeakMap<object, NestedCall[]>}
+     */
+    const nestedBy = new WeakMap();
+    /** @param {any} thread */
+    const nestedOf = thread=>{
+        let list = nestedBy.get(thread);
+        if (!list)
+        {
+            list = [];
+            nestedBy.set(thread, list);
+        }
+        return list;
+    };
+
+    /**
+     * The dispatcher contexts of the program's own language handlers being
+     * called now, by address: how a runtime handler the program's handler
+     * hands its frame on to finds the walk.
+     *
+     * @type {Map<number, { visit: FrameVisit, pass: Pass,
+     *     unwinding: { at: boolean, ip: number, state?: number } | null }>}
+     */
+    const dispatching = new Map();
 
     /**
      * The running thread's registers as an unwind context.
@@ -194,10 +349,9 @@ export function createSeh64(host){
     };
 
     /**
-     * Writes an EXCEPTION_RECORD where a filter will read it.
+     * Writes an EXCEPTION_RECORD where a filter or handler will read it.
      *
-     * @param {number} at
-     * @param {{ code: number, flags: number, address: number, parameters?: number[] }} what
+     * @param {number} at @param {ExceptionRecord} what
      */
     const writeRecord = (at, what)=>{
         const bytes = new Uint8Array(RECORD64.SIZE);
@@ -212,17 +366,310 @@ export function createSeh64(host){
         host.writeMemory(at, bytes);
     };
 
+    /** EXCEPTION_POINTERS: the record and the context, each a quadword. */
+    const pointerPair = (/** @type {number} */ record, /** @type {number} */ context)=>{
+        const bytes = new Uint8Array(16);
+        const view = new DataView(bytes.buffer);
+        view.setBigUint64(0, BigInt(record >>> 0), true);
+        view.setBigUint64(8, BigInt(context >>> 0), true);
+        return bytes;
+    };
+
     /**
-     * The scratch a handler's funclets run on, below the establisher frame:
-     * the record, the context, an EXCEPTION_POINTERS, all clear of where the
-     * funclet will push, 16-aligned.
+     * The scratch below a floor: an exception record, a context, a
+     * dispatcher context and an EXCEPTION_POINTERS, 16-aligned, and the stack
+     * the routine handed them runs on below them.
      *
-     * @param {number} below
+     * @param {number} floor
      */
-    const scratchBelow = below=>{
-        const base = (below - (RECORD64.SIZE + CONTEXT64.SIZE + 0x40) & ~15) >>> 0;
-        return { record: base, context: base + RECORD64.SIZE,
-            pointers: base + RECORD64.SIZE + CONTEXT64.SIZE, top: base };
+    const scratchBelow = floor=>{
+        const size = RECORD64.SIZE + CONTEXT64.SIZE + DISPATCHER64.SIZE + 0x10;
+        const base = (floor - size & ~15) >>> 0;
+        return {
+            record: base,
+            context: base + RECORD64.SIZE,
+            dispatcher: base + RECORD64.SIZE + CONTEXT64.SIZE,
+            pointers: base + RECORD64.SIZE + CONTEXT64.SIZE + DISPATCHER64.SIZE,
+            top: base,
+        };
+    };
+
+    /** @param {number} stack */
+    const floorBelow = stack=>(stack - FLOOR_GAP & ~15) >>> 0;
+
+    /**
+     * Where this engine's own C language handler is in the guest, and the
+     * interpreted C++ handlers: found by the stub a frame's handler address
+     * is, or the import thunk that jumps to it.
+     *
+     * @type {Map<number, Interpreter>}
+     */
+    const interpreted = new Map();
+    let seeded = false;
+    /**
+     * @param {number} address
+     * @returns {Interpreter | null}
+     */
+    const interpreterFor = address=>{
+        if (!seeded)
+        {
+            seeded = true;
+            for (const stub of host.handlerStubs?.() ?? [])
+            {
+                if (stub !== 0)
+                {
+                    interpreted.set(stub >>> 0, scopeTable);
+                }
+            }
+            for (const { stubs, interpreter } of host.interpreters?.() ?? [])
+            {
+                for (const stub of stubs)
+                {
+                    if (stub !== 0)
+                    {
+                        interpreted.set(stub >>> 0, interpreter);
+                    }
+                }
+            }
+        }
+        const known = interpreted.get(address >>> 0);
+        if (known)
+        {
+            return known;
+        }
+        // A jmp [rip+disp] thunk: follow it to the import slot and the stub.
+        const bytes = host.readMemory(address >>> 0, 6);
+        if (bytes[0] === 0xff && bytes[1] === 0x25)
+        {
+            const disp = (bytes[2] | bytes[3] << 8 | bytes[4] << 16 | bytes[5] << 24) | 0;
+            const target = interpreted.get(readU32(address + 6 + disp >>> 0));
+            if (target)
+            {
+                interpreted.set(address >>> 0, target);
+                return target;
+            }
+        }
+        return null;
+    };
+
+    /**
+     * Takes one frame off `context`, which is left as the caller's: the frame
+     * with its handler, a leaf, or the place past a funclet or callback the
+     * engine itself called. Null where the walk can go no further.
+     *
+     * @param {UnwindContext} context @param {any} thread @param {number} type
+     *     UNW_FLAG.EHANDLER for the exception pass, UHANDLER for the unwind.
+     * @param {Map<string, any>} memo
+     * @returns {{ visit?: FrameVisit, nested?: NestedCall } | null}
+     */
+    const step = (context, thread, type, memo)=>{
+        const fn = unwinder.lookup(context.rip);
+        if (fn)
+        {
+            const frameContext = copyContext(context);
+            const unwound = unwinder.virtualUnwind(type, fn, context.rip, context);
+            return { visit: { fn, handler: unwound.handler, handlerData: unwound.handlerData,
+                establisher: unwound.establisher, context: frameContext, memo } };
+        }
+        if (unwinder.known(context.rip))
+        {
+            unwinder.unwindLeaf(context);
+            return {};
+        }
+        // Outside every image: a return into a call the engine made. A catch
+        // block the dispatcher called goes on in its function, at the
+        // registers the function had when the catch was entered.
+        const stack = stackOf(context);
+        const list = nestedOf(thread);
+        for (let index = list.length - 1; index >= 0; index--)
+        {
+            const nested = list[index];
+            if (stack <= nested.stack && stack > nested.stack - NESTED_REACH)
+            {
+                const resume = copyContext(nested.resume);
+                Object.assign(context, resume);
+                return { nested };
+            }
+        }
+        // A routine the host called back -- a comparator, a window
+        // procedure -- returns into the guest code that called the host.
+        const caller = host.callbackCaller?.(thread, stack);
+        if (caller)
+        {
+            context.rip = caller.rip >>> 0;
+            context.gpr[4] = BigInt(caller.rsp >>> 0);
+            return {};
+        }
+        return null;
+    };
+
+    /**
+     * Calls the program's own language handler for a frame, as the system
+     * does: the record, the establisher frame, the context and a dispatcher
+     * context; answers its disposition.
+     *
+     * @param {FrameVisit} visit @param {Pass} pass
+     * @param {{ at: boolean, ip: number, state?: number } | null} unwinding
+     */
+    const callGuestHandler = async(visit, pass, unwinding)=>{
+        const scratch = scratchBelow(pass.floor);
+        const flags = unwinding
+            ? pass.record.flags | EH_UNWINDING | (unwinding.at ? EH_TARGET_UNWIND : 0)
+            : pass.record.flags;
+        writeRecord(scratch.record, { ...pass.record, flags });
+        writeContext(scratch.context, visit.context);
+        const bytes = new Uint8Array(DISPATCHER64.SIZE);
+        const view = new DataView(bytes.buffer);
+        /** @param {number} at @param {number} value */
+        const quad = (at, value)=>view.setBigUint64(at, BigInt(value >>> 0), true);
+        quad(DISPATCHER64.CONTROL_PC, visit.context.rip);
+        quad(DISPATCHER64.IMAGE_BASE, visit.fn.imageBase);
+        quad(DISPATCHER64.FUNCTION_ENTRY, visit.fn.entry);
+        quad(DISPATCHER64.ESTABLISHER_FRAME, visit.establisher);
+        quad(DISPATCHER64.TARGET_IP, unwinding?.ip ?? 0);
+        quad(DISPATCHER64.CONTEXT_RECORD, scratch.context);
+        quad(DISPATCHER64.LANGUAGE_HANDLER, visit.handler);
+        quad(DISPATCHER64.HANDLER_DATA, visit.handlerData);
+        host.writeMemory(scratch.dispatcher, bytes);
+        dispatching.set(scratch.dispatcher, { visit,
+            pass: passFor(pass.record, pass.faultContext, pass.thread, scratch.top), unwinding });
+        try
+        {
+            const answer = await host.callFunclet({
+                entry: visit.handler, rcx: scratch.record, rdx: visit.establisher,
+                r8: scratch.context, r9: scratch.dispatcher, stack: scratch.top,
+                thread: pass.thread,
+            });
+            return { answer: answer >>> 0, context: scratch.context };
+        }
+        finally
+        {
+            dispatching.delete(scratch.dispatcher);
+        }
+    };
+
+    /**
+     * The unwind pass of a walk: from the raise up to the target frame, each
+     * frame's termination handlers, the target's own included. Funclets the
+     * unwind takes off the stack are told they will not return.
+     *
+     * @param {Pass} pass
+     * @param {{ frame: number, ip: number, state?: number }} target
+     *     The target's establisher frame -- zero to unwind every frame -- and
+     *     the address and C++ state the thread goes on at there.
+     * @returns {Promise<UnwindContext>} the target frame's own registers, or
+     *     where the walk ended when it never met the target
+     */
+    const unwindFrames = async(pass, target)=>{
+        const everything = (target.frame >>> 0) === 0;
+        const context = copyContext(pass.faultContext);
+        /** @type {Map<string, any>} */
+        const memo = new Map();
+        const unwindingPass = passFor({ ...pass.record,
+            flags: pass.record.flags | EH_UNWINDING | (everything ? EH_EXIT_UNWIND : 0) },
+        pass.faultContext, pass.thread, pass.floor);
+        const list = nestedOf(pass.thread);
+        for (let guard = 0; guard < WALK_LIMIT; guard++)
+        {
+            const taken = step(context, pass.thread, UNW_FLAG.UHANDLER, memo);
+            if (!taken)
+            {
+                break;
+            }
+            if (taken.nested)
+            {
+                const at = list.indexOf(taken.nested);
+                if (at >= 0)
+                {
+                    const gone = list.splice(at);
+                    for (const nested of gone.reverse())
+                    {
+                        await nested.abandoned?.(pass);
+                    }
+                }
+                continue;
+            }
+            const visit = taken.visit;
+            if (!visit)
+            {
+                continue;
+            }
+            const atTarget = !everything && (visit.establisher >>> 0) === (target.frame >>> 0);
+            if (visit.handler !== 0)
+            {
+                const options = { at: atTarget, ip: target.ip >>> 0,
+                    ...target.state === undefined ? {} : { state: target.state } };
+                const interpreter = interpreterFor(visit.handler);
+                if (interpreter)
+                {
+                    await interpreter.unwind(visit, unwindingPass, options);
+                }
+                else
+                {
+                    await callGuestHandler(visit, unwindingPass, options);
+                }
+            }
+            if (atTarget)
+            {
+                return visit.context;
+            }
+            if (!everything && stackOf(context) > (target.frame >>> 0))
+            {
+                // Past the target without meeting it: the target is not on the
+                // stack, which is the caller's error. Nothing more is unwound.
+                break;
+            }
+        }
+        return context;
+    };
+
+    /**
+     * A dispatch's pass object, from the record and the registers at the raise.
+     *
+     * @param {ExceptionRecord} record @param {UnwindContext} faultContext @param {any} thread
+     * @param {number} [floor]
+     * @returns {Pass}
+     */
+    const passFor = (record, faultContext, thread, floor = floorBelow(stackOf(faultContext)))=>{
+        /** @type {Pass} */
+        const pass = {
+            record,
+            faultContext,
+            thread,
+            floor,
+            call: (entry, registers = {})=>host.callFunclet({
+                entry, ...registers, stack: pass.floor, thread,
+            }),
+            callNested: async(entry, registers, resume, abandoned)=>{
+                const list = nestedOf(thread);
+                /** @type {NestedCall} */
+                const nested = { stack: pass.floor, resume: copyContext(resume),
+                    ...abandoned ? { abandoned } : {} };
+                list.push(nested);
+                try
+                {
+                    return await host.callFunclet({ entry, ...registers, stack: pass.floor,
+                        thread });
+                }
+                finally
+                {
+                    const at = list.indexOf(nested);
+                    if (at >= 0)
+                    {
+                        list.splice(at, 1);
+                    }
+                }
+            },
+            unwindTo: async target=>{
+                await unwindFrames(pass, target);
+            },
+            continueAt: context=>host.continueAt({
+                rip: context.rip >>> 0,
+                rsp: stackOf(context),
+                long: { gpr: context.gpr.slice(), xmm: context.xmm.slice(), mxcsr: context.mxcsr },
+            }),
+        };
+        return pass;
     };
 
     /**
@@ -235,106 +682,104 @@ export function createSeh64(host){
      * @param {number} targetFrame
      * @param {number} targetIp
      * @param {number} returnValue
-     * @param {{ code: number, flags: number, address: number, parameters?: number[] }} record
+     * @param {ExceptionRecord} record
      * @param {any} thread
      * @returns {Promise<any>} the continuation the thread takes
      */
     const unwindEx = async(context, targetFrame, targetIp, returnValue, record, thread)=>{
-        const everything = (targetFrame >>> 0) === 0;
-        const flags = record.flags | EH_UNWINDING | (everything ? EH_EXIT_UNWIND : 0);
-        // The context to resume at: the target frame's own registers, which is
-        // the frame reached when its establisher meets the target. The target
-        // frame is not itself unwound -- execution goes on inside it.
-        let resume = context;
-        for (let guard = 0; guard < 4096; guard++)
-        {
-            const fn = unwinder.lookup(context.rip);
-            if (!fn)
+        const pass = passFor(record, context, thread);
+        // The target frame is not itself unwound -- execution goes on inside it
+        // with its own registers.
+        const resume = copyContext(await unwindFrames(pass,
+            { frame: targetFrame >>> 0, ip: targetIp >>> 0 }));
+        resume.rip = targetIp >>> 0;
+        resume.gpr[0] = BigInt(returnValue >>> 0);
+        return pass.continueAt(resume);
+    };
+
+    /**
+     * The C language handler, `__C_specific_handler`: its scope table read
+     * from the handler data -- a count, then that many {begin, end, handler,
+     * target} as RVAs, innermost first.
+     *
+     * @type {Interpreter}
+     */
+    const scopeTable = {
+        async search(visit, pass){
+            const scopes = readScopeTable(visit.handlerData);
+            const controlPc = visit.context.rip - visit.fn.imageBase >>> 0;
+            const establisher = visit.establisher;
+            for (const scope of scopes)
             {
-                if (!unwinder.known(context.rip))
+                if (controlPc < scope.begin || controlPc >= scope.end || scope.target === 0)
+                {
+                    continue;
+                }
+                // A filter of 1 is EXCEPTION_EXECUTE_HANDLER with no funclet;
+                // else the filter funclet runs with EXCEPTION_POINTERS in RCX
+                // and the frame in RDX.
+                let answer = EXCEPTION_EXECUTE_HANDLER;
+                if (scope.handler !== 1)
+                {
+                    const scratch = scratchBelow(pass.floor);
+                    writeRecord(scratch.record, pass.record);
+                    writeContext(scratch.context, visit.context);
+                    host.writeMemory(scratch.pointers,
+                        pointerPair(scratch.record, scratch.context));
+                    answer = await host.callFunclet({
+                        entry: visit.fn.imageBase + scope.handler >>> 0,
+                        rcx: scratch.pointers, rdx: establisher, stack: scratch.top,
+                        thread: pass.thread,
+                    }) | 0;
+                }
+                if (answer === EXCEPTION_CONTINUE_SEARCH)
+                {
+                    continue;
+                }
+                if (answer === EXCEPTION_CONTINUE_EXECUTION)
+                {
+                    return pass.continueAt(pass.faultContext);
+                }
+                // Accepted: unwind the frames below the __except to it and jump in.
+                const targetIp = visit.fn.imageBase + scope.target >>> 0;
+                const resume = copyContext(await unwindFrames(pass,
+                    { frame: establisher, ip: targetIp }));
+                resume.rip = targetIp;
+                resume.gpr[0] = BigInt(pass.record.code >>> 0);
+                return pass.continueAt(resume);
+            }
+            return null;
+        },
+
+        // The __finally funclets, the scopes with no jump target: every one
+        // around the frame's address, and at the target only those inside the
+        // scope the unwind goes to. A __finally funclet takes RCX the
+        // abnormal-termination flag and RDX the establisher frame.
+        async unwind(visit, pass, target){
+            const scopes = readScopeTable(visit.handlerData);
+            const controlPc = visit.context.rip - visit.fn.imageBase >>> 0;
+            const targetPc = target.ip - visit.fn.imageBase >>> 0;
+            for (const scope of scopes)
+            {
+                if (controlPc < scope.begin || controlPc >= scope.end)
+                {
+                    continue;
+                }
+                if (target.at && scope.target === targetPc)
                 {
                     break;
                 }
-                unwinder.unwindLeaf(context);
-                resume = context;
-                continue;
+                if (scope.target !== 0 || scope.handler === 0)
+                {
+                    continue;
+                }
+                await pass.call(visit.fn.imageBase + scope.handler >>> 0,
+                    { rcx: 1, rdx: visit.establisher });
             }
-            // The frame's own registers, before it is unwound: what its
-            // termination handler reads, and -- at the target -- what the
-            // thread resumes with.
-            const frameContext = copyContext(context);
-            const unwound = unwinder.virtualUnwind(UNW_FLAG.UHANDLER, fn, context.rip, context);
-            const atTarget = !everything && (unwound.establisher >>> 0) === (targetFrame >>> 0);
-            if (unwound.handler !== 0)
-            {
-                // At the target the frame's own `__finally` blocks between the
-                // raising scope and the target scope still run, so its handler
-                // is called before the walk stops.
-                await runTermination(unwound, fn, frameContext, unwound.establisher,
-                    { ...record, flags }, thread);
-            }
-            if (atTarget)
-            {
-                resume = frameContext;
-                break;
-            }
-            if (!everything && stackOf(context) > (targetFrame >>> 0))
-            {
-                // Past the target without meeting it: the target is not on the
-                // stack, which is the caller's error. Nothing more is unwound.
-                break;
-            }
-            resume = context;
-        }
-        resume.rip = targetIp >>> 0;
-        resume.gpr[0] = BigInt(returnValue >>> 0);
-        return host.continueAt({
-            rip: targetIp >>> 0,
-            rsp: stackOf(resume),
-            long: { gpr: resume.gpr.slice(), xmm: resume.xmm.slice(), mxcsr: resume.mxcsr },
-        });
+        },
     };
 
     /**
-     * Runs a frame's termination handlers for the unwind pass: the `__finally`
-     * funclets `__C_specific_handler` names with a null jump target.
-     *
-     * @param {import('./unwind.js').Unwound} unwound
-     * @param {import('./unwind.js').FunctionEntry} fn
-     * @param {UnwindContext} frameContext  The frame's own registers.
-     * @param {number} establisher
-     * @param {{ code: number, flags: number, address: number }} record
-     * @param {any} thread
-     */
-    const runTermination = async(unwound, fn, frameContext, establisher, record, thread)=>{
-        if (!isKnownHandler(unwound.handler))
-        {
-            return;
-        }
-        const scopes = readScopeTable(unwound.handlerData);
-        const controlPc = frameContext.rip - fn.imageBase >>> 0;
-        for (const scope of scopes)
-        {
-            if (controlPc < scope.begin || controlPc >= scope.end || scope.target !== 0
-                || scope.handler === 0)
-            {
-                continue;
-            }
-            const scratch = scratchBelow(establisher);
-            // A __finally funclet takes RCX the abnormal-termination flag and
-            // RDX the establisher frame; it reads its parent's locals through
-            // the frame.
-            await host.callFunclet({
-                entry: fn.imageBase + scope.handler >>> 0,
-                rcx: 1, rdx: establisher, stack: scratch.top, thread,
-            });
-        }
-    };
-
-    /**
-     * The scope table `__C_specific_handler` reads from its handler data: a
-     * count, then that many {begin, end, handler, target} as RVAs.
-     *
      * @param {number} at
      * @returns {{ begin: number, end: number, handler: number, target: number }[]}
      */
@@ -342,7 +787,7 @@ export function createSeh64(host){
         const count = readU32(at);
         /** @type {{ begin: number, end: number, handler: number, target: number }[]} */
         const scopes = [];
-        for (let index = 0; index < Math.min(count, 4096); index++)
+        for (let index = 0; index < Math.min(count, WALK_LIMIT); index++)
         {
             const entry = at + 4 + index * 16;
             scopes.push({
@@ -354,115 +799,6 @@ export function createSeh64(host){
     };
 
     /**
-     * Where this engine's own `__C_specific_handler` is in the guest, resolved
-     * through the import thunk its address points at, so a handler data block
-     * can be told to be its scope table. Set once the table is bound.
-     *
-     * @type {Set<number>}
-     */
-    const knownHandlers = new Set();
-    let seeded = false;
-    /** @param {number} address */
-    const isKnownHandler = address=>{
-        if (!seeded)
-        {
-            seeded = true;
-            for (const stub of host.handlerStubs?.() ?? [])
-            {
-                if (stub !== 0)
-                {
-                    knownHandlers.add(stub >>> 0);
-                }
-            }
-        }
-        if (knownHandlers.has(address >>> 0))
-        {
-            return true;
-        }
-        // A jmp [rip+disp] thunk: follow it to the import slot and the stub.
-        const bytes = host.readMemory(address >>> 0, 6);
-        if (bytes[0] === 0xff && bytes[1] === 0x25)
-        {
-            const disp = (bytes[2] | bytes[3] << 8 | bytes[4] << 16 | bytes[5] << 24) | 0;
-            const slot = address + 6 + disp >>> 0;
-            const target = readU32(slot);
-            if (knownHandlers.has(target >>> 0))
-            {
-                knownHandlers.add(address >>> 0);
-                return true;
-            }
-        }
-        return false;
-    };
-
-    /**
-     * The exception pass over one frame with a C handler: finds a `__except`
-     * whose filter accepts and, on acceptance, unwinds to it; else says to
-     * keep searching.
-     *
-     * @param {import('./unwind.js').Unwound} unwound
-     * @param {import('./unwind.js').FunctionEntry} fn
-     * @param {UnwindContext} frameContext  The faulting frame's own registers.
-     * @param {UnwindContext} faultContext  The whole thread at the fault, for the unwind.
-     * @param {{ code: number, flags: number, address: number, parameters?: number[] }} record
-     * @param {any} thread
-     * @returns {Promise<{ handled: boolean, continuation?: any }>}
-     */
-    const runException = async(unwound, fn, frameContext, faultContext, record, thread)=>{
-        const scopes = readScopeTable(unwound.handlerData);
-        const controlPc = frameContext.rip - fn.imageBase >>> 0;
-        const establisher = unwound.establisher;
-        for (const scope of scopes)
-        {
-            if (controlPc < scope.begin || controlPc >= scope.end || scope.target === 0)
-            {
-                continue;
-            }
-            // A filter of 1 is EXCEPTION_EXECUTE_HANDLER with no funclet; else
-            // the filter funclet runs with EXCEPTION_POINTERS in RCX and the
-            // frame in RDX.
-            let answer = EXCEPTION_EXECUTE_HANDLER;
-            if (scope.handler !== 1)
-            {
-                const scratch = scratchBelow(establisher);
-                writeRecord(scratch.record, record);
-                writeContext(scratch.context, frameContext);
-                host.writeMemory(scratch.pointers, pointerPair(scratch.record, scratch.context));
-                answer = await host.callFunclet({
-                    entry: fn.imageBase + scope.handler >>> 0,
-                    rcx: scratch.pointers, rdx: establisher, stack: scratch.top, thread,
-                }) | 0;
-            }
-            if (answer === EXCEPTION_CONTINUE_SEARCH)
-            {
-                continue;
-            }
-            if (answer === EXCEPTION_CONTINUE_EXECUTION)
-            {
-                return { handled: true, continuation: host.continueAt({
-                    rip: faultContext.rip, rsp: stackOf(faultContext),
-                    long: { gpr: faultContext.gpr.slice(), xmm: faultContext.xmm.slice(),
-                        mxcsr: faultContext.mxcsr },
-                }) };
-            }
-            // Accepted: unwind the frames below the __except to it and jump in.
-            const continuation = await unwindEx(copyContext(faultContext), establisher,
-                fn.imageBase + scope.target >>> 0, record.code, record, thread);
-            return { handled: true, continuation };
-        }
-        return { handled: false };
-    };
-
-    /** EXCEPTION_POINTERS: the record and the context, each a quadword. */
-    const pointerPair = (/** @type {number} */ record, /** @type {number} */ context)=>{
-        const bytes = new Uint8Array(16);
-        const view = new DataView(bytes.buffer);
-        view.setBigUint64(0, BigInt(record >>> 0), true);
-        view.setBigUint64(8, BigInt(context >>> 0), true);
-        return bytes;
-    };
-
-    /**
      * RtlDispatchException: walks the frames from the fault, offering the
      * exception to each frame's handler until one takes it.
      *
@@ -471,40 +807,57 @@ export function createSeh64(host){
      * @returns {Promise<{ handled: boolean, continuation?: any }>}
      */
     const dispatch = async(what, faultContext)=>{
+        /** @type {ExceptionRecord} */
         const record = { code: what.code >>> 0, flags: what.flags ?? 0,
-            address: what.address >>> 0, parameters: what.parameters };
+            address: what.address >>> 0,
+            ...what.parameters ? { parameters: what.parameters } : {} };
         host.trace?.(`exception ${hex(record.code)} at ${hex(record.address)}`);
-        const context = copyContext(faultContext);
-        for (let guard = 0; guard < 4096; guard++)
+        const thread = host.currentThread();
+        const pass = passFor(record, faultContext, thread);
+        // A dispatcher context below this raise belongs to a walk a handler
+        // left by sending the thread on: nothing will hand it on again.
+        for (const address of dispatching.keys())
         {
-            const fn = unwinder.lookup(context.rip);
-            if (!fn)
+            if (address < pass.floor && dispatching.get(address)?.pass.thread === thread)
             {
-                if (!unwinder.known(context.rip))
+                dispatching.delete(address);
+            }
+        }
+        const context = copyContext(faultContext);
+        /** @type {Map<string, any>} */
+        const memo = new Map();
+        for (let guard = 0; guard < WALK_LIMIT; guard++)
+        {
+            const before = { rip: context.rip >>> 0, stack: stackOf(context) };
+            const taken = step(context, thread, UNW_FLAG.EHANDLER, memo);
+            if (!taken)
+            {
+                break;
+            }
+            const visit = taken.visit;
+            if (visit && visit.handler !== 0)
+            {
+                const interpreter = interpreterFor(visit.handler);
+                if (interpreter)
                 {
-                    break;
+                    const continuation = await interpreter.search(visit, pass);
+                    if (continuation)
+                    {
+                        return { handled: true, continuation };
+                    }
                 }
-                unwinder.unwindLeaf(context);
-                continue;
-            }
-            const frameContext = copyContext(context);
-            const unwound = unwinder.virtualUnwind(UNW_FLAG.EHANDLER, fn, context.rip, context);
-            if (unwound.handler !== 0 && isKnownHandler(unwound.handler))
-            {
-                const result = await runException(unwound, fn, frameContext, faultContext,
-                    record, host.currentThread());
-                if (result.handled)
+                else
                 {
-                    return result;
+                    const { answer, context: written } = await callGuestHandler(visit, pass, null);
+                    if (answer === Disposition.CONTINUE_EXECUTION
+                        && (record.flags & EXCEPTION_NONCONTINUABLE) === 0)
+                    {
+                        return { handled: true,
+                            continuation: pass.continueAt(readContext(written)) };
+                    }
                 }
             }
-            else if (unwound.handler !== 0)
-            {
-                host.trace?.(`a handler at ${hex(unwound.handler)} this runtime does not `
-                    + 'interpret; the frame is passed over');
-            }
-            if ((context.rip >>> 0) === (frameContext.rip >>> 0)
-                && stackOf(context) === stackOf(frameContext))
+            if ((context.rip >>> 0) === before.rip && stackOf(context) === before.stack)
             {
                 break;
             }
@@ -523,9 +876,10 @@ export function createSeh64(host){
     const lastChance = async(what, faultContext)=>{
         if (topLevelFilter !== 0)
         {
-            const scratch = scratchBelow(stackOf(faultContext));
+            const scratch = scratchBelow(floorBelow(stackOf(faultContext)));
             writeRecord(scratch.record, { code: what.code >>> 0, flags: what.flags ?? 0,
-                address: what.address >>> 0, parameters: what.parameters });
+                address: what.address >>> 0,
+                ...what.parameters ? { parameters: what.parameters } : {} });
             writeContext(scratch.context, faultContext);
             host.writeMemory(scratch.pointers, pointerPair(scratch.record, scratch.context));
             const answer = await host.callFunclet({
@@ -562,6 +916,20 @@ export function createSeh64(host){
         return lastChance(what, faultContext);
     };
 
+    /**
+     * The caller's registers as it stands at a host call this engine answers:
+     * the non-volatiles as the stub left them, RIP the return address at the
+     * current RSP and RSP past it. Enough for an unwind, which reads only the
+     * stack, RSP, RIP and the non-volatiles.
+     */
+    const callerContext = ()=>{
+        const context = captureContext();
+        const rsp = stackOf(context);
+        context.rip = readU64Low(rsp);
+        context.gpr[4] = BigInt(rsp + 8 >>> 0);
+        return context;
+    };
+
     return {
         dispatch,
         unwindEx,
@@ -569,6 +937,39 @@ export function createSeh64(host){
         writeContext,
         readContext,
         raiseOn,
+
+        /**
+         * Raises an exception from the host call being answered, as
+         * RaiseException does: dispatched from the caller's registers; the
+         * answer is the continuation a handler sent the thread on with, or
+         * zero once the process has been ended.
+         *
+         * @param {{ code: number, flags?: number, parameters?: number[] }} what
+         */
+        raise(what){
+            const context = callerContext();
+            return raiseOn({ ...what, address: context.rip }, context)
+                .then(result=>result.continuation ?? 0);
+        },
+
+        /**
+         * The walk a dispatcher context the program's handler was handed
+         * belongs to, for a runtime handler it hands the frame on to; with the
+         * floor moved below where that handler stands now. Null for a
+         * dispatcher context this dispatcher did not make.
+         *
+         * @param {number} address
+         */
+        dispatcherContextAt(address){
+            const found = dispatching.get(address >>> 0);
+            if (!found)
+            {
+                return null;
+            }
+            const { pass } = found;
+            const floor = Math.min(pass.floor, floorBelow(stackOf(captureContext())));
+            return { ...found, pass: passFor(pass.record, pass.faultContext, pass.thread, floor) };
+        },
 
         /** @param {number} vector */
         claims: vector=>Object.hasOwn(VECTOR_TO_STATUS, vector),
@@ -620,11 +1021,8 @@ export function createSeh64(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([out])=>{
-                    // The caller's context: its registers as they are at the
-                    // call, RIP the return address and RSP past it. The stub
-                    // has not moved the non-volatiles the unwinder reads.
-                    const context = callerContext();
-                    writeContext(out >>> 0, context);
+                    // The stub has not moved the non-volatiles the unwinder reads.
+                    writeContext(out >>> 0, callerContext());
                     return 0;
                 },
             },
@@ -644,10 +1042,7 @@ export function createSeh64(host){
                     }
                     if ((imageBaseOut >>> 0) !== 0)
                     {
-                        const bytes = new Uint8Array(8);
-                        new DataView(bytes.buffer)
-                            .setBigUint64(0, BigInt(fn.imageBase >>> 0), true);
-                        host.writeMemory(imageBaseOut >>> 0, bytes);
+                        writeQuad(imageBaseOut >>> 0, fn.imageBase);
                     }
                     return BigInt(fn.entry >>> 0);
                 },
@@ -768,9 +1163,7 @@ export function createSeh64(host){
                     const parameters = [];
                     for (let index = 0; index < total; index++)
                     {
-                        parameters.push(Number(new DataView(
-                            host.readMemory(from + index * 8, 8).buffer.slice())
-                            .getBigUint64(0, true) & 0xffffffffn));
+                        parameters.push(readU64Low(from + index * 8));
                     }
                     const context = callerContext();
                     return raiseOn({ code: code >>> 0,
@@ -781,20 +1174,4 @@ export function createSeh64(host){
             },
         },
     };
-
-    /**
-     * The caller's registers as it stands at a host call this engine answers:
-     * the non-volatiles as the stub left them, RIP the return address at the
-     * current RSP and RSP past it. Enough for an unwind, which reads only the
-     * stack, RSP, RIP and the non-volatiles.
-     */
-    function callerContext(){
-        const context = captureContext();
-        const rsp = stackOf(context);
-        context.rip = Number(
-            new DataView(host.readMemory(rsp, 8).buffer.slice()).getBigUint64(0, true)
-            & 0xffffffffn);
-        context.gpr[4] = BigInt(rsp + 8 >>> 0);
-        return context;
-    }
 }

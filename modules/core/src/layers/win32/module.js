@@ -26,7 +26,7 @@ import { createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment 
     from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
-import { createSystemFunctions } from './kernel32/system.js';
+import { createSystemFunctions, imageBits } from './kernel32/system.js';
 import { PROCESSOR, createProcessors } from './kernel32/processor.js';
 import { createPdhFunctions, createPowrprofFunctions } from './power/functions.js';
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
@@ -38,6 +38,7 @@ import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry
 import { createThreadCalls, DLL_THREAD_DETACH } from './kernel32/thread-calls.js';
 import { createCrtSeh } from './msvcrt/seh.js';
 import { createCxxExceptions } from './msvcrt/eh.js';
+import { createCxxExceptions64 } from './msvcrt/eh64.js';
 import { createApcs } from './kernel32/apc.js';
 import { createResourceFunctions } from './kernel32/resources.js';
 import { createProfileFunctions } from './kernel32/profile.js';
@@ -130,6 +131,7 @@ import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createClassTable } from './ole32/remote.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
+import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
 
@@ -160,7 +162,7 @@ import { registerQuartzClasses } from './quartz/graph.js';
  * name in it.
  */
 const CDECL_LIBRARIES =
-    /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase|api-ms-win-crt-[a-z0-9-]+|cabinet)\.dll$/i;
+    /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase|vcruntime\d+(_1)?|api-ms-win-crt-[a-z0-9-]+|cabinet)\.dll$/i;
 
 /**
  * The runtimes built over msvcrt's table, msvcrt first: whichever of them a
@@ -169,6 +171,39 @@ const CDECL_LIBRARIES =
  * streams were records at address zero.
  */
 const CRT_IMAGES = ['msvcrt.dll', 'ucrtbase.dll', 'MSVCR80.dll', 'MSVCR71.dll', 'CRTDLL.dll'];
+
+/**
+ * The runtimes that export each 64-bit language handler the dispatcher reads
+ * the tables of itself (`kernel32/seh64.js`): the C handler, the C++ frame
+ * handlers of `__CxxFrameHandler3`'s tables -- under their older names too --
+ * and vcruntime140_1's of the compressed ones.
+ *
+ * @type {[string, string[]][]}
+ */
+const C_HANDLERS = [
+    ['msvcrt.dll', ['__C_specific_handler']], ['ntdll.dll', ['__C_specific_handler']],
+    ['VCRUNTIME140.dll', ['__C_specific_handler']],
+];
+/** @type {[string, string[]][]} */
+const CXX_HANDLERS3 = [
+    ['msvcrt.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
+    ['MSVCR80.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
+    ['VCRUNTIME140.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
+];
+/** @type {[string, string[]][]} */
+const CXX_HANDLERS4 = [['VCRUNTIME140_1.dll', ['__CxxFrameHandler4']]];
+
+/**
+ * What vcruntime140 exports of the runtime msvcrt already has: the exception
+ * machinery and the memory and string routines the compiler calls. Its own
+ * 64-bit language handler, `__CxxFrameHandler4`, is vcruntime140_1's.
+ */
+const VCRUNTIME_EXPORTS = [
+    '_CxxThrowException', '__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3',
+    '__C_specific_handler', '_except_handler3', '_except_handler4_common',
+    '__uncaught_exception', '_purecall', '_setjmp3', 'longjmp', 'memchr', 'memcmp', 'memcpy',
+    'memmove', 'memset', 'strchr', 'strrchr', 'strstr', 'wcschr', 'wcsrchr', 'wcsstr',
+];
 
 /** The reason a DllMain is called with when its library is unloaded, or the process ends. */
 const DLL_PROCESS_DETACH = 0;
@@ -322,6 +357,10 @@ export function createWin32Module(){
             const reported = reportedVersion(windows, config?.compatibility);
             const folders = shellFolders(windows);
             const pointerSize = config?.bits === 64 ? 8 : 4;
+            // The machine is a 64-bit Windows when the run says so, which its
+            // 64-bit processes always do: a 32-bit process on it runs under
+            // WOW64 (`roadmap/x64.md`).
+            const machine64 = config?.machine === 'amd64' || pointerSize === 8;
             // The thread and process blocks a handler reads, at that width.
             const blocks = blockLayouts(pointerSize);
 
@@ -347,7 +386,8 @@ export function createWin32Module(){
             };
             /** The variables the process starts with: its parent's, or the machine's. */
             const startingEnvironment = ()=>config?.environment
-                ?? defaultEnvironment(windows, folders, processors.count());
+                ?? defaultEnvironment(windows, folders, processors.count(), {
+                    long: pointerSize === 8, wow64: machine64 && pointerSize === 4 });
 
             // What the run's processes share, as one Windows does: handed in
             // from outside when there is a process beside or after this one
@@ -473,6 +513,21 @@ export function createWin32Module(){
             // needs them is exception handling, which hands a program a context and
             // continues execution from a changed one.
             const cpuRegisters = config?.registers ?? { read: ()=>0, write: ()=>{} };
+            /**
+             * Where a C function leaves a float or a double it answers: on the
+             * x87 stack in a 32-bit process, in XMM0 in a 64-bit one, as the
+             * x64 convention returns every floating-point value. Absent, the
+             * functions answering one are not exported.
+             *
+             * @type {import('./msvcrt/float.js').FloatHost | undefined}
+             */
+            // A 32-bit process's runtime runs as code what reads the x87's
+            // words; a 64-bit one has no i386 to run it as, and its handlers
+            // read them through here.
+            const floatResults = config?.fpu && pointerSize === 8 && cpuRegisters.writeXmm
+                ? { ...config.fpu, ...longFloatResults(cpuRegisters.writeXmm) }
+                : config?.fpu && { setResult: config.fpu.setResult, get: config.fpu.get,
+                    pop: config.fpu.pop };
 
             /**
              * Writes back a set of registers, for the entry points whose answer is
@@ -891,6 +946,9 @@ export function createWin32Module(){
                 }
             };
             const gdi = createGdiFunctions({
+                // GetObject's BITMAP, DIBSECTION, LOGBRUSH and EXTLOGPEN at the
+                // process's width.
+                pointerSize,
                 readMemory,
                 writeMemory,
                 fillMemory,
@@ -1193,6 +1251,17 @@ export function createWin32Module(){
             // the handlers found through the images' unwind tables instead
             // (`unwind.js`, `seh64.js`). A funclet or filter the walk runs is
             // guest code called with the x64 argument registers set.
+            /**
+             * The guest stubs of `names` in each library that exports them,
+             * once the libraries are placed.
+             *
+             * @param {[string, string[]][]} names
+             */
+            const stubsOf = names=>names.flatMap(([dll, exports])=>exports.map(name=>
+                modules.find(dll)?.addressOf?.(name) ?? 0));
+            /** The C++ runtime's 64-bit frame handlers, interpreted by the dispatcher. */
+            /** @type {ReturnType<typeof createCxxExceptions64> | null} */
+            let cxx64 = null;
             const unwinder = pointerSize === 8
                 ? createUnwinder({
                     readMemory,
@@ -1219,9 +1288,16 @@ export function createWin32Module(){
                     // handler, so a frame naming it has its scope table read
                     // rather than the handler run; resolved once the synthetic
                     // libraries are placed, which is after this returns.
-                    handlerStubs: ()=>[modules.find('msvcrt.dll')?.addressOf?.(
-                        '__C_specific_handler') ?? 0,
-                    modules.find('ntdll.dll')?.addressOf?.('__C_specific_handler') ?? 0],
+                    handlerStubs: ()=>stubsOf(C_HANDLERS),
+                    // The C++ frame handlers, the runtime's (`msvcrt/eh64.js`),
+                    // made with the runtime's tables below.
+                    interpreters: ()=>(cxx64 ? [
+                        { stubs: stubsOf(CXX_HANDLERS3), interpreter: cxx64.interpreters[3] },
+                        { stubs: stubsOf(CXX_HANDLERS4), interpreter: cxx64.interpreters[4] },
+                    ] : []),
+                    // A routine the host called back -- a comparator a throw
+                    // leaves -- returns into the code that called the host.
+                    callbackCaller: (thread, stack)=>bridge.callbackCaller?.(thread, stack) ?? null,
                     /** @param {string} text */
                     trace: text=>trace(text),
                     terminate: ({ code })=>{
@@ -1230,6 +1306,26 @@ export function createWin32Module(){
                     },
                 })
                 : null;
+
+            if (seh64)
+            {
+                const dispatcher = seh64;
+                cxx64 = createCxxExceptions64({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    /** @param {number} address */
+                    isMapped: address=>memory.find(address) !== null,
+                    imageBaseOf: address=>modules.imageOf?.(address)?.base ?? 0,
+                    raise: what=>dispatcher.raise(what),
+                    dispatcherContextAt: address=>dispatcher.dispatcherContextAt(address),
+                    currentThread: ()=>kernel.currentThread(),
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    abort: why=>abortProcess(why),
+                    park: ()=>bridge.park(),
+                    divergence: config?.divergence,
+                });
+            }
 
             /**
              * Bytes put in guest memory for as long as `use` runs, a call it
@@ -1962,6 +2058,7 @@ export function createWin32Module(){
                             sink(handle, text),
                     }),
                     ...createEnvironmentFunctions({
+                        pointerSize,
                         readCString,
                         readWideString,
                         writeMemory,
@@ -1975,6 +2072,28 @@ export function createWin32Module(){
                     ...createSystemFunctions({
                         processors,
                         pointerSize,
+                        machine64,
+                        // Another process's width, off its image's headers: the
+                        // machine of the optional header's magic.
+                        imageBitsOf: async(/** @type {any} */ process)=>{
+                            const path = process?.imagePath;
+                            const entry = typeof path === 'string' ? volume.stat(path) : null;
+                            const node = entry && !entry.isDirectory
+                                ? volume.open(path, { read: true }) : null;
+                            if (!entry || !node)
+                            {
+                                return null;
+                            }
+                            try
+                            {
+                                const head = await volume.read(node, 0, Math.min(entry.size, 4096));
+                                return imageBits(head);
+                            }
+                            finally
+                            {
+                                volume.close(node);
+                            }
+                        },
                         // TerminateProcess wakes whoever waits on the child it ends.
                         wake: (/** @type {any} */ thread, /** @type {number} */ result)=>
                             kernel.wake(thread, result),
@@ -2020,6 +2139,7 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         spawned: request=>config?.spawned?.(request),
                         spawner,
+                        pointerSize,
                         patchMemory: (address, bytes)=>
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
                     }),
@@ -2209,7 +2329,7 @@ export function createWin32Module(){
                         // that is missing. Exported without it they would set a
                         // register the caller never reads and leave it storing
                         // whatever was on the floating-point stack already.
-                        fpu: config?.fpu,
+                        fpu: floatResults,
                         // The runtime's threads are kernel32's threads: made and
                         // ended by the same calls, read from the table at the
                         // moment of the call, once it exists.
@@ -2248,6 +2368,10 @@ export function createWin32Module(){
                     // unwind data; the dispatcher reads its scope table rather
                     // than running it (`seh64.js`).
                     ...seh64 ? { __C_specific_handler: seh64.table.__C_specific_handler } : {},
+                    // And the C++ machinery at 64 bits (`msvcrt/eh64.js`), whose
+                    // tables and funclets are not the 32-bit handler's.
+                    ...cxx64 ? Object.fromEntries(Object.entries(cxx64.table)
+                        .filter(([name])=>name !== '__CxxFrameHandler4')) : {},
                 },
 
                 // One registry behind all three, as on a real machine: a socket
@@ -2910,6 +3034,9 @@ export function createWin32Module(){
                             kernel.clock.virtualTime() + delay, 0, ()=>fire()) === true;
                     },
                     dispatching,
+                    // Every structure user32 reads or writes is laid out at
+                    // the process's width (`user32/structs.js`).
+                    pointerSize,
                     // One line per message a window procedure receives, under
                     // its own category and nothing at all when nobody asked: a
                     // program's calls say what it asked, never what it was told,
@@ -2927,8 +3054,11 @@ export function createWin32Module(){
                     },
                     dispatch: (wndProc, message, thread)=>bridge.callGuest({
                         entry: wndProc,
-                        // The four arguments a window procedure declares, in order.
-                        args: [message.hwnd, message.message, message.wParam, message.lParam],
+                        // The four arguments a window procedure declares, in
+                        // order: at 64 bits a WPARAM widens as the UINT it is
+                        // kept as, an LPARAM as the LONG (`callback.js`).
+                        args: [message.hwnd >>> 0, message.message >>> 0,
+                            message.wParam >>> 0, message.lParam | 0],
                         thread,
                     }),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
@@ -3480,6 +3610,18 @@ export function createWin32Module(){
                 callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 currentThread: ()=>kernel.currentThread(),
             });
+            // Visual C++ 2015 on keeps the exception machinery and the memory
+            // routines in vcruntime140, and a 64-bit build's compressed C++
+            // tables' handler in vcruntime140_1.
+            libraries['VCRUNTIME140.dll'] = Object.fromEntries(VCRUNTIME_EXPORTS
+                .filter(name=>Object.hasOwn(libraries['msvcrt.dll'], name))
+                .map(name=>[name, libraries['msvcrt.dll'][name]]));
+            if (cxx64)
+            {
+                libraries['VCRUNTIME140_1.dll'] = {
+                    __CxxFrameHandler4: cxx64.table.__CxxFrameHandler4,
+                };
+            }
             libraries['MSVCR71.dll'] = { ...libraries['msvcrt.dll'],
                 __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter };
             libraries['MSVCP71.dll'] = createMsvcp80Functions(libraries['MSVCR71.dll'],

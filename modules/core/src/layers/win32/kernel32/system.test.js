@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MULDIV_CODE, createSystemFunctions, mulDiv } from './system.js';
+import { MULDIV_CODE, createSystemFunctions, imageBits, mulDiv } from './system.js';
 import { createProcessors } from './processor.js';
 import { KEPT, random, runCode } from '../../../../scripts/guest-code/equivalence.mjs';
 
@@ -502,6 +502,66 @@ test('a 32-bit system has no WOW64 directory, and says the call is not implement
     }
     assert.deepEqual(host.errors, [120, 120, 120, 120], 'ERROR_CALL_NOT_IMPLEMENTED');
     assert.ok(host.bytes.subarray(0x200, 0x300).every(byte=>byte === 0x55), 'nothing written');
+});
+
+test('on a 64-bit machine a 32-bit process runs under WOW64 and sees the x64 machine beneath',
+    async()=>{
+        // Wine's kernel32 test_IsWow64Process and test_GetNativeSystemInfo: a
+        // WOW64 process's GetSystemInfo names x86 and its native one x64, in
+        // the 32-bit layout; another process is judged by its own image.
+        const host = Object.assign(fakeHost(), { machine64: true,
+            imageBitsOf: (/** @type {any} */ process)=>Promise.resolve(process.bits) });
+        host.handles.set(0x40, { exitCode: STILL_ACTIVE, bits: 32 });
+        host.handles.set(0x44, { exitCode: STILL_ACTIVE, bits: 64 });
+        const fns = createSystemFunctions(host);
+        assert.equal(fns.IsWow64Process.handler([CURRENT_PROCESS, 0x200]), 1);
+        assert.equal(host.view.getUint32(0x200, true), 1, 'this process is under WOW64');
+        assert.equal(await fns.IsWow64Process.handler([0x40, 0x200]), 1);
+        assert.equal(host.view.getUint32(0x200, true), 1, 'and so is a 32-bit child');
+        assert.equal(await fns.IsWow64Process.handler([0x44, 0x200]), 1);
+        assert.equal(host.view.getUint32(0x200, true), 0, 'a 64-bit child is not');
+
+        fns.GetSystemInfo.handler([0x200]);
+        fns.GetNativeSystemInfo.handler([0x280]);
+        assert.equal(host.view.getUint16(0x200, true), 0, 'PROCESSOR_ARCHITECTURE_INTEL');
+        assert.equal(host.view.getUint16(0x280, true), 9, 'PROCESSOR_ARCHITECTURE_AMD64');
+        assert.equal(host.view.getUint32(0x280 + 24, true), 8664, 'PROCESSOR_AMD_X8664');
+        assert.deepEqual(host.bytes.slice(0x284, 0x298), host.bytes.slice(0x204, 0x218),
+            'the rest the same, in the 32-bit layout');
+    });
+
+test('a 64-bit machine\'s WOW64 directory, to a process of either width', ()=>{
+    for (const pointerSize of [4, 8])
+    {
+        const host = Object.assign(fakeHost(), { machine64: true, pointerSize });
+        const fns = createSystemFunctions(host);
+        assert.equal(fns.GetSystemWow64DirectoryA.handler([0x200, 4]), 20,
+            'too small: the room it needs, its terminator counted');
+        assert.equal(fns.GetSystemWow64DirectoryA.handler([0x200, 0x40]), 19);
+        assert.equal(new TextDecoder().decode(host.bytes.subarray(0x200, 0x214)),
+            'C:\\WINDOWS\\SysWOW64\0');
+        assert.equal(fns.GetSystemWow64DirectoryW.handler([0x300, 0x40]), 19);
+        assert.equal(new TextDecoder('utf-16le').decode(host.bytes.subarray(0x300, 0x328)),
+            'C:\\WINDOWS\\SysWOW64\0');
+        assert.deepEqual(host.errors, []);
+    }
+});
+
+test('an image\'s width is read off its optional header\'s magic', ()=>{
+    /** @param {number} magic */
+    const head = magic=>{
+        const bytes = new Uint8Array(0x200);
+        const view = new DataView(bytes.buffer);
+        bytes.set([0x4d, 0x5a]);
+        view.setUint32(0x3c, 0x80, true);
+        view.setUint32(0x80, 0x4550, true);
+        view.setUint16(0x80 + 24, magic, true);
+        return bytes;
+    };
+    assert.equal(imageBits(head(0x10b)), 32);
+    assert.equal(imageBits(head(0x20b)), 64);
+    assert.equal(imageBits(head(0x107)), null, 'a ROM image is neither');
+    assert.equal(imageBits(new Uint8Array(0x200)), null, 'nor is what is not an image');
 });
 
 test('a child process reports its own exit code, not this process\'s', ()=>{

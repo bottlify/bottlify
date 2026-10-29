@@ -6,10 +6,15 @@ differently raises a `divergence` event naming the API.
 ## Programs
 
 - 32-bit x86 programs: a PE32 image for i386. A 64-bit (PE32+) image runs on one executor, with
-  its pages below 4 GiB, as far as console programs on msvcrt go: structured exception handling,
-  floating-point arguments to the system's functions, callbacks and its TEB and PEB in their
-  64-bit layouts are not there yet (`roadmap/x64.md`). A 16-bit (NE) image is refused when it is
-  loaded.
+  its pages below 4 GiB, as far as console programs on msvcrt or vcruntime140 go, structured and
+  C++ exceptions, floating-point arguments and results, and a window program's classes,
+  windows, messages, hooks and painting, and Direct3D 9 and OpenGL included, every call into
+  them a trap: dialogs, MDI, DirectDraw and the other Direct3D versions are not there yet at
+  64 bits (`roadmap/x64.md`). A message's WPARAM and LPARAM keep 32 bits there. A run whose
+  first program is 64-bit is on a 64-bit Windows, where a 32-bit child runs under WOW64 without
+  the file system's and the registry's redirection.
+  A structured exception there passes no `_set_se_translator` translator. A 16-bit (NE) image is
+  refused when it is loaded.
 - Only user mode. There is no kernel underneath; the engine's layers answer every system call.
 - Reading or writing through a null pointer does not fault: memory from address 0 is readable and
   writable. Running code below `0x10000` does fault, as an access violation.

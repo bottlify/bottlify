@@ -40,8 +40,14 @@ import { Convention } from './conventions.js';
  * pointers then concludes it is holding two different objects.
  */
 
-/** A pointer is four bytes, and so is every vtable slot. */
+/**
+ * A pointer is four bytes in a 32-bit process, and so is every vtable slot;
+ * eight in a 64-bit one, whose interface's first word, its table's slots and
+ * the pointer QueryInterface writes are all eight bytes (the high half zero:
+ * every address the engine hands out lies below 4 GiB).
+ */
 const WORD = 4;
+const LONG_WORD = 8;
 
 /**
  * What a method that runs in the guest is built with: its own trap to fall
@@ -67,6 +73,10 @@ const WORD = 4;
  *           device's setter's record written into its command ring -- or
  *           undefined, for a call the slot's code is to make itself.
  * @property {string} [builtin]           IUnknown's three, which we implement here.
+ * @property {Record<number, 'f32' | 'f64'>} [floats]
+ *           The float and double arguments, by their first dword counting the
+ *           interface pointer, which a 64-bit caller passes among its first
+ *           four in XMM registers (the bridge's `floats`).
  */
 
 /**
@@ -112,8 +122,21 @@ const COUNT_CODE = {
  * @param {{ allocate: (bytes: number) => number, free?: (address: number) => void,
  *           allocateCode?: (bytes: number) => number }} deps.heap
  *        `allocateCode`, where it is given, places IUnknown's count routines.
+ * @param {() => boolean} [deps.long]  Whether the process is a 64-bit one, asked
+ *        when a table is laid out: its slots are eight bytes, and the methods
+ *        and counts that run in the guest, which are i386 code, are traps there.
  */
-export function createVtables({ memory, register, heap }){
+export function createVtables({ memory, register, heap, long = ()=>false }){
+    /** A pointer's width now, and a pointer written at it. */
+    const wordSize = ()=>(long() ? LONG_WORD : WORD);
+    /** @param {number} at @param {number} value */
+    const writeWord = (at, value)=>{
+        memory.writeU32(at, value >>> 0);
+        if (long())
+        {
+            memory.writeU32(at + 4, 0);
+        }
+    };
     /** One entry per object; inside it, one interface pointer per interface. */
     const published = new WeakMap();
     /**
@@ -136,8 +159,8 @@ export function createVtables({ memory, register, heap }){
     const tables = new WeakMap();
     /**
      * The same tables by shape: the interface and, slot by slot, what its
-     * stub is built from -- the arguments it pops and which of IUnknown's
-     * three it is. Two lists of one shape can share stubs, because a stub
+     * stub is built from -- the arguments it pops, which are floats, and which
+     * of IUnknown's three it is. Two lists of one shape can share stubs, because a stub
      * runs the method of the object it was called through (`owners`), not
      * the method of the list it was built for. A list with a method that
      * runs in the guest carries code of its own and has no shape.
@@ -150,10 +173,10 @@ export function createVtables({ memory, register, heap }){
      * @param {string} interfaceId @param {InterfaceMethod[]} table
      * @returns {string | null}
      */
-    const shapeOf = (interfaceId, table)=>(table.some(method=>method.guest)
+    const shapeOf = (interfaceId, table)=>(table.some(method=>method.guest) && !long()
         ? null
-        : `${interfaceId}|${table.map(method=>`${method.argBytes}:${method.builtin ?? ''}`)
-            .join(',')}`);
+        : `${interfaceId}|${table.map(method=>`${method.argBytes}:${method.builtin ?? ''}:${
+            method.floats ? JSON.stringify(method.floats) : ''}`).join(',')}`);
     /**
      * Which object an interface pointer belongs to, and that object's own
      * methods for it. A shared stub is called through many pointers, and the
@@ -244,6 +267,7 @@ export function createVtables({ memory, register, heap }){
                     // An HRESULT is the whole answer; nothing here sets the
                     // thread's error, so the trace need not read it.
                     lastError: false,
+                    ...method.floats ? { floats: method.floats } : {},
                     /** @param {number[]} args */
                     handler: args=>{
                         // The first argument is the interface pointer the guest
@@ -275,7 +299,7 @@ export function createVtables({ memory, register, heap }){
                 const trap = register(`${interfaceId}::${method.name}`, fn);
                 // A method that runs in the guest keeps its trap: that is
                 // what its code falls back to for the cases it does not take.
-                if (method.guest)
+                if (method.guest && !long())
                 {
                     const at = method.guest({ trap, register });
                     if (method.inPlace)
@@ -288,7 +312,7 @@ export function createVtables({ memory, register, heap }){
                 {
                     inPlace.set(trap, method.inPlace);
                 }
-                return method.builtin === 'addRef' || method.builtin === 'release'
+                return (method.builtin === 'addRef' || method.builtin === 'release') && !long()
                     ? countRoutine(method.builtin, trap)
                     : trap;
             });
@@ -304,14 +328,15 @@ export function createVtables({ memory, register, heap }){
             refusedBecause = e instanceof Error ? e.message : String(e);
             return 0;
         }
-        const vtable = heap.allocate(slots.length * WORD);
+        const word = wordSize();
+        const vtable = heap.allocate(slots.length * word);
         if (vtable === 0)
         {
             refused++;
             refusedBecause = 'no room in the arena for a table';
             return 0;
         }
-        slots.forEach((address, index)=>memory.writeU32(vtable + index * WORD, address));
+        slots.forEach((address, index)=>writeWord(vtable + index * word, address));
         methods += slots.length;
         tables.set(table, vtable);
         if (shape !== null)
@@ -352,7 +377,8 @@ export function createVtables({ memory, register, heap }){
         // word past `this`, and the count's the guest's AddRef and Release
         // (`COUNT_CODE`); a program sees only the vtable pointer and assumes
         // nothing after it.
-        const block = heap.allocate(3 * WORD);
+        const word = wordSize();
+        const block = heap.allocate(3 * word);
         if (block === 0)
         {
             // Nothing left in the arena. Carrying on writes the pointer over
@@ -364,9 +390,9 @@ export function createVtables({ memory, register, heap }){
             refusedBecause = 'no room in the arena for an interface';
             return 0;
         }
-        memory.writeU32(block, vtable);
-        memory.writeU32(block + WORD, (object.guestState?.() ?? 0) >>> 0);
-        memory.writeU32(block + 2 * WORD, (object.countCell?.() ?? 0) >>> 0);
+        writeWord(block, vtable);
+        writeWord(block + word, (object.guestState?.() ?? 0) >>> 0);
+        writeWord(block + 2 * word, (object.countCell?.() ?? 0) >>> 0);
         owners.set(block, { object, interfaceId, methods: table });
         byInterface.set(interfaceId, block);
         interfaces++;
@@ -550,7 +576,7 @@ export function createVtables({ memory, register, heap }){
             {
                 return E_POINTER;
             }
-            memory.writeU32(ppv >>> 0, 0);
+            writeWord(ppv >>> 0, 0);
             return 0x80070057; // E_INVALIDARG
         }
 
@@ -560,7 +586,7 @@ export function createVtables({ memory, register, heap }){
         {
             // Zeroed on failure: a program checks the pointer, not only the
             // result, and a stale value there is a pointer it will follow.
-            memory.writeU32(ppv >>> 0, 0);
+            writeWord(ppv >>> 0, 0);
             return E_NOINTERFACE;
         }
 
@@ -575,7 +601,7 @@ export function createVtables({ memory, register, heap }){
         // The reference belongs to the interface the caller asked for, not to
         // the one it asked through.
         object.addRef(record.sharedWith ?? wanted);
-        memory.writeU32(ppv >>> 0, pointer);
+        writeWord(ppv >>> 0, pointer);
         return 0; // S_OK
     }
 

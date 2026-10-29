@@ -31,7 +31,7 @@
  * that draws nowhere.
  */
 
-import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js';
+import { PAINTSTRUCT, RECT, readRect, userLayouts, writeFields, writeRect } from './structs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
 import { boundsOf, intersectArea, subtractFromArea } from '../gdi32/rects.js';
@@ -171,6 +171,8 @@ const DCX_INTERSECTRGN = 0x0080;
 
 /**
  * @typedef {Object} PaintHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
+ *     have their pointers, handles and message parameters eight bytes wide.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -491,6 +493,8 @@ export function tabbedWidth(text, widthOf, stops, interval){
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
+    /** The structures at the process's width (`structs.js`). */
+    const layouts = userLayouts(host.pointerSize);
     const shown = options.shown ?? (()=>true);
     let iconDivergenceSaid = false;
     /** @type {Set<string>} what a drawing call has said it leaves out */
@@ -1481,10 +1485,11 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
+                const layout = layouts.PAINTSTRUCT;
                 return after(beginPaint(record), ({ hdc, rect, erase })=>{
-                    writeU32s(host, paintStruct + PAINTSTRUCT.hdc, [hdc, erase ? 1 : 0]);
-                    writeRect(host, paintStruct + PAINTSTRUCT.rcPaint, rect);
-                    writeU32s(host, paintStruct + PAINTSTRUCT.fRestore, [0, 0]);
+                    writeFields(host, paintStruct, layouts, layout,
+                        { hdc, fErase: erase ? 1 : 0, fRestore: 0, fIncUpdate: 0 });
+                    writeRect(host, paintStruct + layout.rcPaint, rect);
                     return handedOut(record.hwnd, hdc);
                 });
             },
@@ -1496,7 +1501,7 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, paintStruct])=>{
                 const record = live(hwnd);
-                const hdc = host.readMemory(paintStruct + PAINTSTRUCT.hdc, 4);
+                const hdc = host.readMemory(paintStruct + layouts.PAINTSTRUCT.hdc, 4);
                 const handle = (hdc[0] | hdc[1] << 8 | hdc[2] << 16 | hdc[3] << 24) >>> 0;
                 // A kept context is still its window's after the paint.
                 if ((held.get(handle)?.kind ?? 'cache') === 'cache')

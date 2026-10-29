@@ -29,7 +29,7 @@
  * Both shapes need the FPU seam, so this whole table is conditional on it.
  */
 
-import { readDouble, returningDouble } from './float.js';
+import { readDouble, readSingle, returningDouble, returningSingle } from './float.js';
 import { EDOM, ERANGE } from './globals.js';
 import { guestEntry, guestExport } from './guest-code.js';
 import * as inGuest from './inguest.js';
@@ -83,6 +83,8 @@ function nextAfter(x, y){
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *     Where `_ftol`'s handler puts EDX; without it `_ftol` is its x86 alone.
  * @property {(code: number) => void} [errno]  The calling thread's errno.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose runtime has
+ *     the float forms and passes a structure of sixteen bytes by its address.
  */
 
 /**
@@ -115,6 +117,24 @@ const UNARY = {
  * itself -- its payload kept, as the x87 hands an operand NaN through.
  */
 const NAN_IS_DOMAIN = new Set(['atan', 'tanh', 'exp']);
+
+/**
+ * The bridge's `floats` of a function taking one double, or two: where a
+ * 64-bit caller passes them, in XMM0 and XMM1.
+ */
+const ONE_DOUBLE = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
+const TWO_DOUBLES = Object.freeze({ 0: /** @type {'f64'} */ ('f64'),
+    2: /** @type {'f64'} */ ('f64') });
+const ONE_FLOAT = Object.freeze({ 0: /** @type {'f32'} */ ('f32') });
+const TWO_FLOATS = Object.freeze({ 0: /** @type {'f32'} */ ('f32'),
+    1: /** @type {'f32'} */ ('f32') });
+
+/**
+ * The float forms a 64-bit msvcrt exports beside the double ones, which the
+ * 32-bit one has not: their arguments and result are floats, rounded so.
+ */
+const SINGLE_FORMS = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
+    'exp', 'log', 'log10', 'sqrt', 'floor', 'ceil', 'pow', 'atan2', 'fmod'];
 
 /** @type {Record<string, (left: number, right: number) => number>} */
 const BINARY = {
@@ -246,7 +266,7 @@ export function createMathFunctions(host){
     for (const [name, compute] of Object.entries(UNARY))
     {
         const respond = unary(name, compute);
-        handlers[name] = returningDouble(fpu, 8, args=>respond(readDouble(args, 0)));
+        handlers[name] = returningDouble(fpu, 8, args=>respond(readDouble(args, 0)), ONE_DOUBLE);
 
         // The FPU-stack form: one argument, consumed, replaced by the result.
         handlers[`_CI${name}`] = {
@@ -267,7 +287,7 @@ export function createMathFunctions(host){
             const left = readDouble(args, 0);
             const right = readDouble(args, 2);
             return answer([left, right], compute(left, right));
-        });
+        }, TWO_DOUBLES);
 
         // ST(1) is the left operand and ST(0) the right, because the left was
         // pushed first. Getting these the wrong way round is undetectable for
@@ -290,7 +310,7 @@ export function createMathFunctions(host){
     handlers.ldexp = returningDouble(fpu, 12, args=>{
         const value = readDouble(args, 0);
         return answer([value], value * Math.pow(2, args[2] | 0));
-    });
+    }, ONE_DOUBLE);
 
     /** double _scalb(double value, long exponent): ldexp under another name. */
     handlers._scalb = handlers.ldexp;
@@ -298,28 +318,64 @@ export function createMathFunctions(host){
     /**
      * double _cabs(struct _complex z): the magnitude, _hypot of the two parts.
      * The structure is passed by value, its two doubles on the stack where
-     * _hypot's two arguments are, so the one code serves both.
+     * _hypot's two arguments are, so the one code serves both. At 64 bits a
+     * structure of sixteen bytes is passed by its address.
      */
-    handlers._cabs = handlers._hypot;
+    const read = host.readMemory;
+    handlers._cabs = host.pointerSize === 8 && read
+        ? returningDouble(fpu, 4, ([at])=>{
+            const parts = new DataView(read(at >>> 0, 16).slice().buffer);
+            const real = parts.getFloat64(0, true);
+            const imaginary = parts.getFloat64(8, true);
+            return answer([real, imaginary], Math.hypot(real, imaginary));
+        })
+        : handlers._hypot;
 
     /** double _logb(double x): only a zero comes here, -infinity and ERANGE. */
     handlers._logb = returningDouble(fpu, 8, args=>{
         const value = readDouble(args, 0);
         return answer([value], value === 0 ? -Infinity : value);
-    });
+    }, ONE_DOUBLE);
 
     /** double _nextafter(double x, double y): only a step to an infinity, ERANGE. */
     handlers._nextafter = returningDouble(fpu, 16, args=>{
         const x = readDouble(args, 0);
         const y = readDouble(args, 2);
         return answer([x, y], nextAfter(x, y));
-    });
+    }, TWO_DOUBLES);
 
     /** double _j0(double x), double _j1(double x) */
-    handlers._j0 = returningDouble(fpu, 8, args=>besselJ(0, readDouble(args, 0)));
-    handlers._j1 = returningDouble(fpu, 8, args=>besselJ(1, readDouble(args, 0)));
+    handlers._j0 = returningDouble(fpu, 8, args=>besselJ(0, readDouble(args, 0)), ONE_DOUBLE);
+    handlers._j1 = returningDouble(fpu, 8, args=>besselJ(1, readDouble(args, 0)), ONE_DOUBLE);
     /** double _jn(int n, double x) */
-    handlers._jn = returningDouble(fpu, 12, args=>besselJ(args[0] | 0, readDouble(args, 1)));
+    handlers._jn = returningDouble(fpu, 12, args=>besselJ(args[0] | 0, readDouble(args, 1)),
+        { 1: 'f64' });
+
+    // sqrtf and the rest: a 64-bit runtime's, computed as the double form
+    // is and rounded to a float, errno as it sets it.
+    /** @type {Record<string, ReturnType<typeof returningSingle>>} */
+    const singles = {};
+    if (host.pointerSize === 8)
+    {
+        for (const name of SINGLE_FORMS)
+        {
+            if (Object.hasOwn(UNARY, name))
+            {
+                const respond = unary(name, UNARY[/** @type {keyof typeof UNARY} */ (name)]);
+                singles[`${name}f`] = returningSingle(fpu, 4,
+                    args=>respond(readSingle(args, 0)), ONE_FLOAT);
+            }
+            else
+            {
+                const compute = BINARY[name];
+                singles[`${name}f`] = returningSingle(fpu, 8, args=>{
+                    const left = readSingle(args, 0);
+                    const right = readSingle(args, 1);
+                    return answer([left, right], compute(left, right));
+                }, TWO_FLOATS);
+            }
+        }
+    }
 
     const guest = {
         readMemory: host.readMemory,
@@ -332,6 +388,10 @@ export function createMathFunctions(host){
     const inTheGuest = {};
     for (const name of [...Object.keys(handlers), 'frexp', 'modf'])
     {
+        if (name === '_cabs' && host.pointerSize === 8)
+        {
+            continue;
+        }
         const code = CODE_OF[name] ?? name;
         // Through unknown: the float module exports its tables beside its functions.
         const source = /** @type {Record<string, Function>} */ (inGuestMath)[code]
@@ -379,6 +439,7 @@ export function createMathFunctions(host){
     return {
         ...handlers,
         ...inTheGuest,
+        ...singles,
 
         /** double floor(double x) -- in the guest */
         floor: guestEntry(inGuest.floor, COMPILED.floor, host),
@@ -396,8 +457,12 @@ export function createMathFunctions(host){
         div: divide,
         ldiv: divide,
 
-        /** double _copysign(double x, double y) -- in the guest */
-        _copysign: guestEntry(inGuestFloat._copysign, FLOAT_CODE._copysign, guest),
+        /**
+         * double _copysign(double x, double y) -- in the guest, which reads y
+         * as its two halves; a 64-bit caller passes it in XMM1.
+         */
+        _copysign: { ...guestEntry(inGuestFloat._copysign, FLOAT_CODE._copysign, guest),
+            floats: TWO_DOUBLES },
 
         /** double _chgsign(double x) -- in the guest */
         _chgsign: guestEntry(inGuestFloat._chgsign, FLOAT_CODE._chgsign, guest),

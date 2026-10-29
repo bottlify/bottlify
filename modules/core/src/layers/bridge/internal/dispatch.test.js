@@ -1941,3 +1941,52 @@ test('a quadword argument is one x64 slot, split into the two dwords the handler
     assert.throws(()=>dispatcher.register(3, { name: 'X!Short', ...STDCALL, argBytes: 8,
         quadwords: [1], handler: ()=>0 }), /quadwords/, 'a quadword needs two dwords');
 });
+
+test('a float or a double among the first four is read from the XMM register of its slot', ()=>{
+    // _jn(int n, double x): ECX, then XMM1 -- the second slot's register,
+    // whatever the first holds -- read into the two dwords the 32-bit handler
+    // takes it in. powf(float, float): XMM0 and XMM1, a dword each.
+    const { dispatcher } = longMachine({ rcx: 3n, r11: 0x55n });
+    /** @type {Map<number, number[]>} */
+    const xmm = new Map([[0, [0x40490fdb, 7, 7, 7]], [1, [0x54442d18, 0x400921fb, 9, 9]]]);
+    /** @type {any} */ (dispatcher).cpu.readXmm = (/** @type {number} */ index)=>
+        Uint32Array.from(xmm.get(index) ?? [0, 0, 0, 0]);
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!_jn', ...STDCALL, argBytes: 12, floats: { 1: 'f64' },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen[0], [3, 0x54442d18, 0x400921fb]);
+
+    dispatcher.register(2, { name: 'X!powf', ...STDCALL, argBytes: 8,
+        floats: { 0: 'f32', 1: 'f32' },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(2);
+    assert.deepEqual(seen[1], [0x40490fdb, 0x54442d18], 'one dword each, the low lane');
+
+    // Past the four registers a float is its stack slot, as any argument is,
+    // and a double the slot's two dwords; the slots after a double come one
+    // earlier than the dwords say.
+    const stack = longMachine({ rcx: 1n, r11: 2n, r8: 3n, r9: 4n });
+    /** @type {Map<number, number>} */
+    const words = new Map([[0x8000, 0x401234], [0x8028, 0x3f800000], [0x8030, 0x11],
+        [0x8034, 0x40000000], [0x8038, 7]]);
+    /** @type {any} */ (stack.dispatcher).memory = {
+        /** @param {number} address */
+        readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
+    /** @type {any} */ (stack.dispatcher).cpu.readXmm = ()=>Uint32Array.of(0, 0, 0, 0);
+    stack.dispatcher.register(3, { name: 'X!Late', ...STDCALL, argBytes: 32,
+        floats: { 4: 'f32', 5: 'f64' },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    stack.dispatcher.dispatch(3);
+    assert.deepEqual(seen[2], [1, 2, 3, 4, 0x3f800000, 0x11, 0x40000000, 7]);
+
+    assert.throws(()=>dispatcher.register(4, { name: 'X!Past', ...STDCALL, argBytes: 8,
+        floats: { 1: 'f64' }, handler: ()=>0 }), /f64/, 'a double needs two dwords');
+    assert.throws(()=>dispatcher.register(5, { name: 'X!Both', ...STDCALL, argBytes: 8,
+        quadwords: [0], floats: { 0: 'f64' }, handler: ()=>0 }), /f64/,
+    'and is not a quadword besides');
+});

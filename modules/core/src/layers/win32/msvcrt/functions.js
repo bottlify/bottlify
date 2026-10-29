@@ -52,6 +52,9 @@ import { createProcessFunctions } from './process.js';
 import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
+/** A double the code reads as its two halves, which a 64-bit caller passes in XMM0. */
+const DOUBLE_HALVES = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
+
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
 
@@ -588,11 +591,15 @@ export function createMsvcrtFunctions(host){
          *
          * Questions about the bits of a double on the stack, answered in EAX
          * by code in the guest (`inguest-float.js`) that reads them as integers:
-         * no FPU, so they are here rather than with the maths.
+         * no FPU, so they are here rather than with the maths. The code takes
+         * the double as its two halves; a 64-bit caller passes it in XMM0.
          */
-        _isnan: guestEntry(inGuestFloat._isnan, FLOAT_CODE._isnan, {}),
-        _finite: guestEntry(inGuestFloat._finite, FLOAT_CODE._finite, {}),
-        _fpclass: guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
+        _isnan: { ...guestEntry(inGuestFloat._isnan, FLOAT_CODE._isnan, {}),
+            floats: DOUBLE_HALVES },
+        _finite: { ...guestEntry(inGuestFloat._finite, FLOAT_CODE._finite, {}),
+            floats: DOUBLE_HALVES },
+        _fpclass: { ...guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
+            floats: DOUBLE_HALVES },
 
         /**
          * unsigned int _control87(unsigned int newControl, unsigned int mask),
@@ -1158,6 +1165,7 @@ export function createMsvcrtFunctions(host){
                 writeMemory: host.writeMemory,
                 fpu: host.fpu,
                 errno,
+                pointerSize: host.pointerSize ?? 4,
                 ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
             })
             : {}),

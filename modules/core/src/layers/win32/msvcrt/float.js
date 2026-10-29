@@ -22,6 +22,9 @@
  *
  * @typedef {Object} FloatHost
  * @property {(value: number) => void} setResult  Leaves a double in ST(0).
+ * @property {(value: number) => void} [setSingleResult]  Leaves a float where
+ *           the caller reads one: the same ST(0) at 32 bits, XMM0's low lane in
+ *           a 64-bit process, where a float and a double are returned apart.
  * @property {(index: number) => number} get      Reads ST(index), for the `_CI*`
  *           entry points, whose arguments arrive on the FPU stack rather than
  *           on the caller's stack.
@@ -60,15 +63,87 @@ const SCRATCH = new DataView(new ArrayBuffer(8));
  * @param {FloatHost} fpu
  * @param {number} argBytes
  * @param {(args: number[]) => number} compute
+ * @param {Record<number, 'f32' | 'f64'>} [floats]  Its floating-point
+ *     arguments by their first dword (the bridge's `floats`), which a 64-bit
+ *     caller passes in XMM registers.
  */
-export function returningDouble(fpu, argBytes, compute){
+export function returningDouble(fpu, argBytes, compute, floats){
     return {
         convention: 'cdecl',
         argBytes,
+        ...floats ? { floats } : {},
         /** @param {number[]} args */
         handler: args=>{
             fpu.setResult(compute(args));
             return 0;
+        },
+    };
+}
+
+/**
+ * The same for a float result.
+ *
+ * @param {FloatHost} fpu
+ * @param {number} argBytes
+ * @param {(args: number[]) => number} compute
+ * @param {Record<number, 'f32' | 'f64'>} [floats]
+ */
+export function returningSingle(fpu, argBytes, compute, floats){
+    return {
+        convention: 'cdecl',
+        argBytes,
+        ...floats ? { floats } : {},
+        /** @param {number[]} args */
+        handler: args=>{
+            setSingle(fpu, compute(args));
+            return 0;
+        },
+    };
+}
+
+/**
+ * Leaves a float result where the caller reads one: ST(0) as a double is
+ * left at 32 bits, where the caller's store rounds it.
+ *
+ * @param {FloatHost} fpu @param {number} value
+ */
+export function setSingle(fpu, value){
+    if (fpu.setSingleResult)
+    {
+        fpu.setSingleResult(value);
+        return;
+    }
+    fpu.setResult(value);
+}
+
+/**
+ * A float read from the dword it occupies.
+ *
+ * @param {number[]} args @param {number} at
+ */
+export function readSingle(args, at){
+    SCRATCH.setUint32(0, (args[at] ?? 0) >>> 0, true);
+    return SCRATCH.getFloat32(0, true);
+}
+
+/**
+ * Where a 64-bit process's C functions answer a floating-point value: XMM0,
+ * a double in its low quadword and a float in its low lane, the lanes above
+ * cleared. What the x64 convention returns them in, in place of ST(0).
+ *
+ * @param {(index: number, words: Uint32Array) => void} writeXmm
+ * @returns {Pick<FloatHost, 'setResult' | 'setSingleResult'>}
+ */
+export function longFloatResults(writeXmm){
+    return {
+        setResult(value){
+            SCRATCH.setFloat64(0, value, true);
+            writeXmm(0, Uint32Array.of(SCRATCH.getUint32(0, true), SCRATCH.getUint32(4, true),
+                0, 0));
+        },
+        setSingleResult(value){
+            SCRATCH.setFloat32(0, value, true);
+            writeXmm(0, Uint32Array.of(SCRATCH.getUint32(0, true), 0, 0, 0));
         },
     };
 }

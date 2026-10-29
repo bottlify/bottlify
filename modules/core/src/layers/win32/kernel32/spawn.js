@@ -120,10 +120,12 @@ const DEBUG_ONLY_THIS_PROCESS = 0x00000002;
 
 /** STARTUPINFO's dwFlags bit that says its three handles are the child's own. */
 const STARTF_USESTDHANDLES = 0x00000100;
-/** Where dwFlags, hStdOutput and hStdError sit in STARTUPINFOA and W alike. */
-const SI_FLAGS = 44;
-const SI_STD_OUTPUT = 60;
-const SI_STD_ERROR = 64;
+/**
+ * Where dwFlags, hStdOutput and hStdError sit in STARTUPINFOA and W alike;
+ * in a 64-bit process, whose three strings and four handles are eight bytes.
+ */
+const STARTUP = Object.freeze({ flags: 44, output: 60, error: 64 });
+const STARTUP64 = Object.freeze({ flags: 60, output: 88, error: 96 });
 
 /** The pseudo-handle for the running process; -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
@@ -139,12 +141,11 @@ const MAX_PATH = 260;
 /** And a command line, which Windows caps at the same place. */
 const MAX_COMMAND_LINE = 32768;
 
-/** sizeof(PROCESS_INFORMATION) and the offsets inside it. */
-const PROCESS_INFORMATION_SIZE = 16;
-const PI_PROCESS_HANDLE = 0;
-const PI_THREAD_HANDLE = 4;
-const PI_PROCESS_ID = 8;
-const PI_THREAD_ID = 12;
+/** PROCESS_INFORMATION, and in a 64-bit process, whose two handles are eight bytes. */
+const PROCESS_INFORMATION = Object.freeze({ process: 0, thread: 4, processId: 8, threadId: 12,
+    SIZE: 16 });
+const PROCESS_INFORMATION64 = Object.freeze({ process: 0, thread: 8, processId: 16,
+    threadId: 20, SIZE: 24 });
 
 /** @param {string} path */
 const isQualified = path=>/^[A-Za-z]:[\\/]/.test(path) || /^[\\/]/.test(path);
@@ -457,6 +458,8 @@ export function createSpawner(host){
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]
  *           Writes into this process through the pages' protection
  *           (`writeThroughProtection`); false when not all of it is mapped.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose STARTUPINFO and
+ *           PROCESS_INFORMATION hold eight-byte handles; absent, 4.
  */
 
 /**
@@ -465,6 +468,8 @@ export function createSpawner(host){
 export function createSpawnFunctions(host){
     const { kernel } = host;
     const record = (host.spawner ?? createSpawner(host)).launch;
+    const STARTUP_ = host.pointerSize === 8 ? STARTUP64 : STARTUP;
+    const INFORMATION = host.pointerSize === 8 ? PROCESS_INFORMATION64 : PROCESS_INFORMATION;
 
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
@@ -502,7 +507,7 @@ export function createSpawnFunctions(host){
      * @returns {{ output?: any, error?: any } | undefined}
      */
     const standardFiles = startup=>{
-        if (startup === 0 || (readDword(startup + SI_FLAGS) & STARTF_USESTDHANDLES) === 0)
+        if (startup === 0 || (readDword(startup + STARTUP_.flags) & STARTF_USESTDHANDLES) === 0)
         {
             return undefined;
         }
@@ -519,8 +524,8 @@ export function createSpawnFunctions(host){
             }
         };
         return {
-            output: fileOf(readDword(startup + SI_STD_OUTPUT)),
-            error: fileOf(readDword(startup + SI_STD_ERROR)),
+            output: fileOf(readDword(startup + STARTUP_.output)),
+            error: fileOf(readDword(startup + STARTUP_.error)),
         };
     };
 
@@ -539,12 +544,12 @@ export function createSpawnFunctions(host){
         made.standardFiles = standardFiles(startup >>> 0);
         if ((information >>> 0) !== 0)
         {
-            const bytes = new Uint8Array(PROCESS_INFORMATION_SIZE);
+            const bytes = new Uint8Array(INFORMATION.SIZE);
             host.writeMemory(information >>> 0, bytes);
-            writeDword((information >>> 0) + PI_PROCESS_HANDLE, made.handle);
-            writeDword((information >>> 0) + PI_THREAD_HANDLE, made.threadHandle);
-            writeDword((information >>> 0) + PI_PROCESS_ID, made.id);
-            writeDword((information >>> 0) + PI_THREAD_ID, made.threadId);
+            writeDword((information >>> 0) + INFORMATION.process, made.handle);
+            writeDword((information >>> 0) + INFORMATION.thread, made.threadHandle);
+            writeDword((information >>> 0) + INFORMATION.processId, made.id);
+            writeDword((information >>> 0) + INFORMATION.threadId, made.threadId);
         }
         host.setLastError(ERROR_SUCCESS);
         return 1;

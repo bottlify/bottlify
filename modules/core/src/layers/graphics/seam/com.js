@@ -31,7 +31,7 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 /**
  * @typedef {Object} InterfaceDescriptor
  * @property {string} id
- * @property {{ name: string, argBytes: number,
+ * @property {{ name: string, argBytes: number, floats?: Record<number, 'f32' | 'f64'>,
  *              invoke?: (target: any, args: number[]) => number,
  *              guest?: (builder: { trap: number }) => number }[]} methods
  *           In vtable order, after IUnknown's three unless `bare`. `target` is the API object,
@@ -76,6 +76,7 @@ function methodsFor(descriptor){
             ...descriptor.methods.map((/** @type {any} */ method)=>({
                 name: method.name,
                 argBytes: method.argBytes,
+                ...method.floats ? { floats: method.floats } : {},
                 guest: method.guest,
                 inPlace: method.inPlace,
                 invoke: method.invoke

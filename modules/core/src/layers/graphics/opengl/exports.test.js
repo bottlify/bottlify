@@ -16,7 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ARGUMENT_WORDS, createOpengl } from './exports.js';
+import { ARGUMENT_WORDS, createOpengl, floatArguments } from './exports.js';
 import { GL, PFD, WGL } from './constants.js';
 import { PIXELFORMATDESCRIPTOR, PIXEL_FORMATS, encodePixelFormat } from './pixelformat.js';
 
@@ -1072,4 +1072,36 @@ test('a context handle deleted or never made is ERROR_INVALID_HANDLE to delete o
     assert.equal(table.wglDeleteContext.handler([0x4321]), 0);
     assert.equal(table.wglMakeCurrent.handler([0, 0x4321]), 0);
     assert.deepEqual(errors, [6, 6]);
+});
+
+test('every export\'s floats and doubles are where its prototype puts them, in its words', ()=>{
+    // A 64-bit caller passes them in XMM registers and a double in one slot,
+    // so the bridge is told which words they are; each declaration is checked
+    // against the export's word count as it is made.
+    const names = Object.values(ARGUMENT_WORDS).flat();
+    /** @type {string[]} */
+    const typed = [];
+    for (const name of names)
+    {
+        const floats = floatArguments(name);
+        if (floats)
+        {
+            typed.push(name);
+        }
+        // A name that reads as taking floats and declares none is one of
+        // the matrix calls, whose argument is a pointer.
+        else if (/[fd](ARB|EXT)?$/.test(name) && !/v(ARB|EXT)?$/.test(name))
+        {
+            assert.match(name, /^gl(LoadMatrix|MultMatrix)[fd]$|^gl(End|IsEnabled)$/, name);
+        }
+    }
+    assert.ok(typed.length > 90, `${typed.length} exports declare floats`);
+    assert.deepEqual(floatArguments('glClearColor'), { 0: 'f32', 1: 'f32', 2: 'f32', 3: 'f32' });
+    assert.deepEqual(floatArguments('glOrtho'),
+        { 0: 'f64', 2: 'f64', 4: 'f64', 6: 'f64', 8: 'f64', 10: 'f64' });
+    assert.deepEqual(floatArguments('glMultiTexCoord2dARB'), { 1: 'f64', 3: 'f64' },
+        'a family: the target, then two doubles');
+    assert.deepEqual(floatArguments('glBitmap'), { 2: 'f32', 3: 'f32', 4: 'f32', 5: 'f32' });
+    assert.equal(floatArguments('glVertex3i'), null);
+    assert.equal(floatArguments('glLoadMatrixf'), null, 'a pointer to floats is a pointer');
 });

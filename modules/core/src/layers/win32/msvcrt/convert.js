@@ -30,6 +30,9 @@ import { pointerWidth } from '../common/pointers.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 
+/** A double as the first argument, which a 64-bit caller passes in XMM0. */
+const DOUBLE_FIRST = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
+
 const MAX_STRING = 1 << 20;
 
 const LONG_MAX = 0x7fffffffn;
@@ -524,6 +527,7 @@ export function createConversionFunctions(host){
     const cvt = fixed=>({
         convention: 'cdecl',
         argBytes: 20,
+        floats: DOUBLE_FIRST,
         /** @param {number[]} args */
         handler: args=>{
             const { digits, point, negative } = cvtDigits(
@@ -636,6 +640,7 @@ export function createConversionFunctions(host){
         _gcvt: {
             convention: 'cdecl',
             argBytes: 16,
+            floats: DOUBLE_FIRST,
             /** @param {number[]} args */
             handler: args=>{
                 const value = readDouble(args, 0);

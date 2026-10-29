@@ -9,7 +9,8 @@
  * built against the system runtime uses it: `__try`/`__except` frames whose
  * language handler is `__C_specific_handler`, a raised exception and
  * processor faults alike reaching their filter, a `__finally` that runs as
- * the stack unwinds past it, and a hundred faults in a row so the walk is the
+ * the stack unwinds past it and one around the `__except` that took the
+ * exception which the unwind does not run, and a hundred faults in a row so the walk is the
  * same every time. Each check prints a line; the exit code counts the ones
  * that failed.
  */
@@ -165,6 +166,26 @@ int mainCRTStartup(void)
         }
     }
     check("a hundred faults in a row", caught == 100);
+
+    finally_count = 0;
+    r = 0;
+    __try
+    {
+        __try
+        {
+            raise_one();
+        }
+        __except (1)
+        {
+            r = 1;
+        }
+    }
+    __finally
+    {
+        finally_count++;
+    }
+    check("a __finally around the __except that took it runs once, on leaving",
+        r == 1 && finally_count == 1);
 
     ExitProcess(failures);
     return 0;

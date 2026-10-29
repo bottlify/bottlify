@@ -46,17 +46,16 @@ import {
     createControlProcedures, pointOf,
 } from './controls.js';
 import {
-    MSG,
-    WNDCLASSA,
-    WNDCLASSEXA,
+    putFields,
     readMessage,
     readRect,
     readU32,
     readWindowClass,
+    userLayouts,
     writeMessage,
     writeRect,
     writeU32s,
-    writeWindowClassA,
+    writeWindowClass,
 } from './structs.js';
 import { convertCharacter, readText, translated, writeText } from './unicode.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
@@ -214,8 +213,6 @@ const WH_CBT = 5;
 const WH_KEYBOARD = 2;
 const WH_MOUSE = 7;
 const WH_GETMESSAGE = 3;
-/** MOUSEHOOKSTRUCT: pt.x, pt.y, hwnd, wHitTestCode, dwExtraInfo. */
-const MOUSEHOOKSTRUCT_SIZE = 20;
 /** A keyboard hook's codes: the message is being taken, or only looked at. */
 const HC_ACTION = 0;
 const HC_NOREMOVE = 3;
@@ -227,8 +224,6 @@ const HCBT_ACTIVATE = 5;
 const HCBT_SYSCOMMAND = 8;
 const HCBT_SETFOCUS = 9;
 
-/** CBT_CREATEWNDA: what a CBT hook is handed for HCBT_CREATEWND. */
-const CBT_CREATEWNDA = Object.freeze({ lpcs: 0, hwndInsertAfter: 4, SIZE: 8 });
 
 /** TranslateMessage answers for exactly these, translated or not. */
 const KEY_MESSAGES = new Set([WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP]);
@@ -309,29 +304,6 @@ export function watchDispatch(host, message, answer){
     return answer;
 }
 
-/**
- * CREATESTRUCTA, which is what WM_NCCREATE and WM_CREATE carry.
- *
- * A program reads `lpCreateParams` out of it to find whatever it passed to
- * CreateWindowEx, and that is routinely the object the window belongs to --
- * so a procedure that gets the message without the structure is worse off
- * than one that gets no message at all.
- */
-const CREATESTRUCTA = Object.freeze({
-    lpCreateParams: 0x00,
-    hInstance: 0x04,
-    hMenu: 0x08,
-    hwndParent: 0x0c,
-    cy: 0x10,
-    cx: 0x14,
-    y: 0x18,
-    x: 0x1c,
-    style: 0x20,
-    lpszName: 0x24,
-    lpszClass: 0x28,
-    dwExStyle: 0x2c,
-    SIZE: 0x30,
-});
 
 /** The one style bit that changes what a window is rather than how it looks. */
 const WS_VISIBLE = 0x10000000;
@@ -552,6 +524,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
 
 /**
  * @typedef {Object} WindowHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
+ *     have their pointers, handles and message parameters eight bytes wide.
  * @property {number} [processId]  The running process's identifier, which
  *           GetWindowThreadProcessId reports for this process's windows.
  * @property {ReturnType<typeof createWindowDirectory>} [directory]
@@ -809,6 +783,12 @@ class WindowTable extends Map {
  * @param {WindowHost} host
  */
 export function createWindowFunctions(host){
+    /**
+     * The structures a handler here reads and writes, at the process's
+     * width: a 64-bit process's have their pointers, handles and message
+     * parameters eight bytes wide (`structs.js`).
+     */
+    const L = userLayouts(host.pointerSize);
     /** @type {Map<string, any>} */
     const classes = new Map();
     /** @type {Map<number, string>} */
@@ -2126,10 +2106,13 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        const at = host.allocate?.(8) ?? 0;
+        const at = host.allocate?.(L.CBTACTIVATESTRUCT.SIZE) ?? 0;
         if (at !== 0)
         {
-            writeU32s(host, at, [how === WA_CLICKACTIVE ? 1 : 0, active]);
+            const bytes = new Uint8Array(L.CBTACTIVATESTRUCT.SIZE);
+            putFields(new DataView(bytes.buffer), 0, L, L.CBTACTIVATESTRUCT,
+                { fMouse: how === WA_CLICKACTIVE ? 1 : 0, hWndActive: active });
+            host.writeMemory(at, bytes);
         }
         return andThen(callHook(WH_CBT, null, [HCBT_ACTIVATE, target, at], thread), answer=>{
             if (at !== 0)
@@ -2624,6 +2607,51 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * A pointer-sized long of a 64-bit process's window: eight of its extra
+     * bytes whole, or a field GWLP_ names -- a pointer, a handle, a style --
+     * sign-extended from the dword the record keeps, as RAX is.
+     *
+     * @param {any} record @param {number} index
+     * @returns {bigint}
+     */
+    const readLongPtr = (record, index)=>{
+        const at = index | 0;
+        if (at >= 0)
+        {
+            return at + 8 <= record.extra.byteLength ? record.extra.getBigUint64(at, true) : 0n;
+        }
+        return BigInt.asUintN(64, BigInt(readLong(record, index) | 0));
+    };
+
+    /**
+     * SetWindowLongPtr: its value whole in the extra bytes, its low half in a
+     * field GWLP_ names; answers the long it replaced.
+     *
+     * @param {number} hwnd @param {number} index @param {number} low @param {number} high
+     * @param {boolean} unicode
+     * @returns {bigint}
+     */
+    const setLongPtr = (hwnd, index, low, high, unicode)=>{
+        const record = live(hwnd);
+        if (!record)
+        {
+            return 0n;
+        }
+        const previous = readLongPtr(record, index);
+        const at = index | 0;
+        if (at < 0)
+        {
+            writeLong(record, index, low, unicode);
+        }
+        else if (at + 8 <= record.extra.byteLength)
+        {
+            record.extra.setUint32(at, low >>> 0, true);
+            record.extra.setUint32(at + 4, high >>> 0, true);
+        }
+        return previous;
+    };
+
+    /**
      * @param {any} record @param {number} index @param {number} value
      * @param {boolean} [unicode]  Set through SetWindowLongW: a procedure set
      *     so reads wide text, and one set through the ANSI form reads bytes.
@@ -2977,8 +3005,7 @@ export function createWindowFunctions(host){
      * @returns {number | Promise<number>}
      */
     const calcClient = (record, placed, thread, pos = 0)=>{
-        const NCCALCSIZE_PARAMS_SIZE = 52;
-        const at = host.allocate?.(pos !== 0 ? NCCALCSIZE_PARAMS_SIZE : 16) ?? 0;
+        const at = host.allocate?.(pos !== 0 ? L.NCCALCSIZE_PARAMS.SIZE : 16) ?? 0;
         if (at === 0)
         {
             return 0;
@@ -2991,9 +3018,17 @@ export function createWindowFunctions(host){
             const edges = geometry.frame(record);
             const old = [record.x, record.y, record.x + record.width, record.y + record.height];
             words.push(...old, old[0] + edges.left, old[1] + edges.top, old[2] - edges.right,
-                old[3] - edges.bottom, pos);
+                old[3] - edges.bottom);
         }
         writeU32s(host, at, words);
+        if (pos !== 0)
+        {
+            // The WINDOWPOS's address after the three rectangles, a pointer wide.
+            const pointer = new DataView(new ArrayBuffer(L.pointerSize));
+            putFields(pointer, -L.NCCALCSIZE_PARAMS.lppos, L, L.NCCALCSIZE_PARAMS,
+                { lppos: pos });
+            host.writeMemory(at + L.NCCALCSIZE_PARAMS.lppos, new Uint8Array(pointer.buffer));
+        }
         return andThen(send(record.hwnd, WM_NCCALCSIZE, pos !== 0 ? 1 : 0, at, thread), ()=>{
             const view = new DataView(host.readMemory(at, 16).slice().buffer);
             const [left, top, right, bottom] = [0, 4, 8, 12]
@@ -3286,6 +3321,7 @@ export function createWindowFunctions(host){
         }
         // The CREATESTRUCT, and behind it the two words a CBT hook is handed
         // that point at it.
+        const { CREATESTRUCTA, CBT_CREATEWNDA } = L;
         const nameAt = CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE;
         const create = host.allocate(nameAt + (nameBytes?.length ?? 0));
         if (create === 0)
@@ -3295,22 +3331,22 @@ export function createWindowFunctions(host){
         }
         const bytes = new Uint8Array(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
         const view = new DataView(bytes.buffer);
-        /** @param {number} at @param {number} value */
-        const put = (at, value)=>view.setUint32(at, value >>> 0, true);
-        put(CREATESTRUCTA.lpCreateParams, params ?? 0);
-        put(CREATESTRUCTA.hInstance, instance);
-        put(CREATESTRUCTA.hMenu, menu);
-        put(CREATESTRUCTA.hwndParent, parent);
-        put(CREATESTRUCTA.cy, record.height);
-        put(CREATESTRUCTA.cx, record.width);
-        put(CREATESTRUCTA.y, record.y);
-        put(CREATESTRUCTA.x, record.x);
-        put(CREATESTRUCTA.style, style);
-        put(CREATESTRUCTA.lpszName, nameBytes === null ? Number(givenName) : create + nameAt);
-        put(CREATESTRUCTA.lpszClass, className);
-        put(CREATESTRUCTA.dwExStyle, asked);
-        put(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.lpcs, create);
-        put(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.hwndInsertAfter, 0);
+        putFields(view, 0, L, CREATESTRUCTA, {
+            lpCreateParams: params ?? 0,
+            hInstance: instance,
+            hMenu: menu,
+            hwndParent: parent,
+            cy: record.height,
+            cx: record.width,
+            y: record.y,
+            x: record.x,
+            style,
+            lpszName: nameBytes === null ? Number(givenName) : create + nameAt,
+            lpszClass: className,
+            dwExStyle: asked,
+        });
+        putFields(view, CREATESTRUCTA.SIZE, L, CBT_CREATEWNDA,
+            { lpcs: create, hwndInsertAfter: 0 });
         host.writeMemory(create, bytes);
         if (nameBytes !== null)
         {
@@ -3342,7 +3378,7 @@ export function createWindowFunctions(host){
         // Not yet among its siblings while the hook decides whether it may be.
         record.unlinked = true;
         const cbt = andThen(callHook(WH_CBT, null,
-            [HCBT_CREATEWND, record.hwnd, create + CREATESTRUCTA.SIZE], thread), answer=>{
+            [HCBT_CREATEWND, record.hwnd, create + L.CREATESTRUCTA.SIZE], thread), answer=>{
             delete record.unlinked;
             return answer;
         });
@@ -4980,7 +5016,7 @@ export function createWindowFunctions(host){
      */
     const askKeyboardHooks = (entry, code, thread)=>(!KEY_MESSAGES.has(entry.message >>> 0)
         || chainOf(WH_KEYBOARD, thread).length === 0 ? 0
-        : callHook(WH_KEYBOARD, null, [code, entry.wParam >>> 0, entry.lParam >>> 0], thread));
+        : callHook(WH_KEYBOARD, null, [code, entry.wParam >>> 0, entry.lParam | 0], thread));
 
     /**
      * A mouse message being retrieved, shown to the thread's WH_MOUSE hooks
@@ -5001,13 +5037,17 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        const at = (host.allocate?.(MOUSEHOOKSTRUCT_SIZE) ?? 0) >>> 0;
+        const at = (host.allocate?.(L.MOUSEHOOKSTRUCT.SIZE) ?? 0) >>> 0;
         if (at === 0)
         {
             return 0;
         }
-        writeU32s(host, at, [entry.x | 0, entry.y | 0, entry.hwnd >>> 0,
-            client ? HTCLIENT : entry.wParam & 0xffff, 0]);
+        const bytes = new Uint8Array(L.MOUSEHOOKSTRUCT.SIZE);
+        putFields(new DataView(bytes.buffer), 0, L, L.MOUSEHOOKSTRUCT, {
+            ptX: entry.x | 0, ptY: entry.y | 0, hwnd: entry.hwnd >>> 0,
+            wHitTestCode: client ? HTCLIENT : entry.wParam & 0xffff, dwExtraInfo: 0,
+        });
+        host.writeMemory(at, bytes);
         return andThen(callHook(WH_MOUSE, null, [code, kind, at], thread), answer=>{
             host.release?.(at);
             return answer;
@@ -5074,7 +5114,7 @@ export function createWindowFunctions(host){
                 // screen, or in the parent's client area for a child -- if it
                 // moved, and its size if that changed.
                 const word = (message.lParam >>> 0) === 0 ? null
-                    : host.readMemory((message.lParam >>> 0) + 24, 4);
+                    : host.readMemory((message.lParam >>> 0) + L.WINDOWPOS.flags, 4);
                 const flags = word ? (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) : 0;
                 const client = geometry.clientRect(record);
                 const parent = isChild(record) ? live(record.parent) : null;
@@ -6646,12 +6686,12 @@ export function createWindowFunctions(host){
         }
         // Taken all the same, with nowhere to put it (msg.c: "PeekMessage
         // (NULL) fails, but still removes the message").
-        if (host.canWrite?.(out >>> 0, MSG.SIZE) === false)
+        if (host.canWrite?.(out >>> 0, L.MSG.SIZE) === false)
         {
             host.setLastError?.(ERROR_NOACCESS);
             return 0;
         }
-        writeMessage(host, out, retrieved(taken, unicode));
+        writeMessage(host, out, retrieved(taken, unicode), L);
         return andThen(showGotMessage(out, remove, thread), ()=>1);
     };
 
@@ -6680,7 +6720,7 @@ export function createWindowFunctions(host){
         const next = ()=>andThen(receiveSent(thread), ()=>takeThrough(wanted, thread));
         /** @param {any} entry */
         const answer = entry=>{
-            writeMessage(host, out, retrieved(entry, unicode));
+            writeMessage(host, out, retrieved(entry, unicode), L);
             return andThen(showGotMessage(out, true, thread),
                 ()=>(entry.message === WM_QUIT ? 0 : 1));
         };
@@ -6857,7 +6897,7 @@ export function createWindowFunctions(host){
         RegisterClassA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([wndClass])=>register(readWindowClass(host, wndClass, WNDCLASSA)),
+            handler: ([wndClass])=>register(readWindowClass(host, wndClass, L.WNDCLASSA)),
         },
 
         /** ATOM RegisterClassExA(const WNDCLASSEXA *lpWndClass) */
@@ -6867,12 +6907,12 @@ export function createWindowFunctions(host){
             handler: ([wndClassEx])=>{
                 // cbSize is the only thing that says which structure the guest
                 // actually compiled; a mismatch means every offset below is wrong.
-                const declared = readU32(host, wndClassEx + WNDCLASSEXA.cbSize);
-                if (declared !== WNDCLASSEXA.SIZE)
+                const declared = readU32(host, wndClassEx + L.WNDCLASSEXA.cbSize);
+                if (declared !== L.WNDCLASSEXA.SIZE)
                 {
                     return 0;
                 }
-                return register(readWindowClass(host, wndClassEx, WNDCLASSEXA));
+                return register(readWindowClass(host, wndClassEx, L.WNDCLASSEXA));
             },
         },
 
@@ -6885,7 +6925,7 @@ export function createWindowFunctions(host){
         RegisterClassW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([wndClass])=>register(readWindowClass(host, wndClass, WNDCLASSA), true),
+            handler: ([wndClass])=>register(readWindowClass(host, wndClass, L.WNDCLASSA), true),
         },
 
         /** ATOM RegisterClassExW(const WNDCLASSEXW *lpWndClass) */
@@ -6893,11 +6933,11 @@ export function createWindowFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([wndClassEx])=>{
-                if (readU32(host, wndClassEx + WNDCLASSEXA.cbSize) !== WNDCLASSEXA.SIZE)
+                if (readU32(host, wndClassEx + L.WNDCLASSEXA.cbSize) !== L.WNDCLASSEXA.SIZE)
                 {
                     return 0;
                 }
-                return register(readWindowClass(host, wndClassEx, WNDCLASSEXA), true);
+                return register(readWindowClass(host, wndClassEx, L.WNDCLASSEXA), true);
             },
         },
 
@@ -6925,7 +6965,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClassA(host, out, cls);
+                writeWindowClass(host, out, cls, L);
                 return 1;
             },
         },
@@ -6946,7 +6986,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClassA(host, out, { ...cls, className: className >>> 0 });
+                writeWindowClass(host, out, { ...cls, className: className >>> 0 }, L);
                 return 1;
             },
         },
@@ -6961,9 +7001,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClassA(host, (out >>> 0) + WNDCLASSEXA.style,
-                    { ...cls, className: className >>> 0 });
-                writeU32s(host, (out >>> 0) + WNDCLASSEXA.hIconSm, [cls.iconSm ?? 0]);
+                writeWindowClass(host, out >>> 0, { ...cls, className: className >>> 0 }, L,
+                    L.WNDCLASSEXA);
                 return 1;
             },
         },
@@ -6984,8 +7023,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClassA(host, (out >>> 0) + WNDCLASSEXA.style, cls);
-                writeU32s(host, (out >>> 0) + WNDCLASSEXA.hIconSm, [cls.iconSm ?? 0]);
+                writeWindowClass(host, out >>> 0, cls, L, L.WNDCLASSEXA);
                 return 1;
             },
         },
@@ -7417,6 +7455,44 @@ export function createWindowFunctions(host){
             },
         },
 
+        // The pointer-sized longs a 64-bit user32 has besides the LONG ones:
+        // GetWindowLongPtr and SetWindowLongPtr are its own exports there,
+        // and only macros over GetWindowLong and SetWindowLong at 32 bits.
+        ...L.pointerSize === 8 ? {
+            /** LONG_PTR GetWindowLongPtrA(HWND hWnd, int nIndex) */
+            GetWindowLongPtrA: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([hwnd, index])=>{
+                    const record = live(hwnd);
+                    return record ? readLongPtr(record, index) : 0n;
+                },
+            },
+            /** LONG_PTR GetWindowLongPtrW(HWND hWnd, int nIndex) */
+            GetWindowLongPtrW: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([hwnd, index])=>{
+                    const record = live(hwnd);
+                    return record ? readLongPtr(record, index) : 0n;
+                },
+            },
+            /** LONG_PTR SetWindowLongPtrA(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
+            SetWindowLongPtrA: {
+                argBytes: 16,
+                quadwords: [2],
+                /** @param {number[]} args */
+                handler: ([hwnd, index, low, high])=>setLongPtr(hwnd, index, low, high, false),
+            },
+            /** LONG_PTR SetWindowLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
+            SetWindowLongPtrW: {
+                argBytes: 16,
+                quadwords: [2],
+                /** @param {number[]} args */
+                handler: ([hwnd, index, low, high])=>setLongPtr(hwnd, index, low, high, true),
+            },
+        } : {},
+
         /** LONG GetWindowLongW(HWND hWnd, int nIndex) */
         GetWindowLongW: {
             argBytes: 8,
@@ -7599,7 +7675,9 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                return callHook(hook.type, hook.handle, [code, wParam, lParam],
+                // At 64 bits the next hook is handed the LPARAM as a message's
+                // is (decision A54): what this handler reads is its low half.
+                return callHook(hook.type, hook.handle, [code, wParam >>> 0, lParam | 0],
                     host.callerThread?.());
             },
         },
@@ -8030,7 +8108,7 @@ export function createWindowFunctions(host){
         TranslateMessage: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([msg])=>translate(readMessage(host, msg)),
+            handler: ([msg])=>translate(readMessage(host, msg, L)),
         },
 
         /**
@@ -8307,7 +8385,7 @@ export function createWindowFunctions(host){
         DispatchMessageA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([msg])=>deliver(readMessage(host, msg)),
+            handler: ([msg])=>deliver(readMessage(host, msg, L)),
         },
 
         /**
@@ -8319,7 +8397,7 @@ export function createWindowFunctions(host){
         DispatchMessageW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([msg])=>deliver({ ...readMessage(host, msg), unicode: true }),
+            handler: ([msg])=>deliver({ ...readMessage(host, msg, L), unicode: true }),
         },
 
         /**

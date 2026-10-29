@@ -501,6 +501,8 @@ const ENUMERATED_FONTTYPE = 0x0004;
 
 /**
  * @typedef {Object} GdiHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
+ *     have their pointers, handles and message parameters eight bytes wide.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, value: number, length: number) => void} [fillMemory]

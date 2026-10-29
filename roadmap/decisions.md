@@ -496,6 +496,37 @@ counted (`moved.copied` in the device's shadow diagnostics). The price is a copy
 Call of Duty 4 locks part of its 4.5 MB skinning buffer with DISCARD every frame, and its moves
 copied 25.5 GB in a run of 326 s (27 620 moves, three executors, the fake GPU). *2026-10-24.*
 
+**A53. A 64-bit process's C++ frames do not call the `_set_se_translator` translator.** At 32
+bits a structured exception reaching a C++ frame with try blocks is handed to the translator the
+program installed, which turns it into a C++ throw; a 64-bit frame keeps the translator
+`_set_se_translator` set and answers it back, but searches as though none were set, and says so
+with a `divergence`. The translator is documented for code built with /EHa, and the compiler that
+builds this project's fixtures emits /EHs tables, so no program here exercises it; a translator
+called by the dispatcher throws from inside the walk, which the 64-bit dispatcher has no test for.
+Revisit when a 64-bit program is found that needs it. *2026-10-29.*
+
+**A54. A 64-bit process's window messages carry 32-bit WPARAM and LPARAM values.** The
+message queue and every handler that sends, posts or answers a message keep its parameters as
+the dwords a 32-bit process has; at 64 bits a value is widened as its type widens a 32-bit one,
+a WPARAM (UINT_PTR) zero-extended and an LPARAM (LONG_PTR) sign-extended, when it reaches a
+window procedure, a hook procedure (and the next one through CallNextHookEx) or a MSG, and an
+LRESULT is sign-extended into RAX, a late one included. Every
+pointer and handle the engine hands out lies below 2 GiB, so a pointer in either parameter
+reaches the procedure whole and -1 is -1; a value that needs the high half of a quadword loses
+it. Carrying quadwords through the queue would change every handler that reads a message;
+revisit when a program is found that passes one. *2026-10-29.*
+
+**A55. A run is on a 64-bit Windows when its first program is a 64-bit one.** A 64-bit process
+needs a 64-bit Windows beneath it, and a 32-bit process started on that machine runs under WOW64:
+it reads x86 from `GetSystemInfo` and x64 from `GetNativeSystemInfo`, `IsWow64Process` is TRUE
+of it, the WOW64 directory is `C:\WINDOWS\SysWOW64`, and its environment sets
+`PROCESSOR_ARCHITEW6432`. Every process of the run sees the one machine, its children in workers
+too. A run whose first program is 32-bit stays on a 32-bit Windows, as every run was, unless the
+caller asks for `machine: 'amd64'`: a 32-bit title that asks whether it is under WOW64 then
+answers as on the machines it was written for, the ones of its era. The file system and the
+registry are not redirected (no `System32` to `SysWOW64`, no `Wow6432Node`, no
+`Program Files (x86)`). *2026-10-29.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
