@@ -176,6 +176,8 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  * @property {boolean} closed
  * @property {boolean} cut  a client the server disconnected
  * @property {number} refs  handles onto it, in every process
+ * @property {any} [signal]  the event a wait on its handle waits on, made when first
+ *     waited on: set while no operation of it is pending, as a file object is
  * @property {() => void} retain  one more handle onto it
  */
 
@@ -188,6 +190,7 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  * @property {Context} ctx
  * @property {any} thread
  * @property {number} handle
+ * @property {End} [end]  the end it is on, whose signal it holds down while pending
  * @property {number} overlapped  0 for a synchronous call, parked
  * @property {number} buffer
  * @property {number} length
@@ -324,6 +327,10 @@ export function createNamedPipes(host){
      */
     const finish = (op, status, count)=>{
         const owner = op.ctx.host;
+        if (op.end?.signal)
+        {
+            owner.kernel.setEvent?.(op.end.signal);
+        }
         const error = toDosError(status);
         const succeeded = status === STATUS.SUCCESS;
         if (op.overlapped !== 0)
@@ -720,8 +727,12 @@ export function createNamedPipes(host){
         /** @type {Op} */
         const op = { kind: 'read', ctx, thread: host.currentThread(), handle,
             overlapped: overlapped >>> 0, buffer: buffer >>> 0, length: length >>> 0,
-            out: out >>> 0, native };
+            out: out >>> 0, native, end };
         end.readers.push(op);
+        if (end.signal)
+        {
+            kernel.resetEvent?.(end.signal);
+        }
         if (overlapped !== 0)
         {
             writeDword(overlapped + OVERLAPPED_INTERNAL, STATUS.PENDING);
@@ -963,8 +974,12 @@ export function createNamedPipes(host){
                 /** @type {Op} */
                 const op = { kind: 'connect', ctx, thread: host.currentThread(),
                     handle: handle >>> 0, overlapped: overlapped >>> 0, buffer: 0, length: 0,
-                    out: 0 };
+                    out: 0, end };
                 instance.connects.push(op);
+                if (end.signal)
+                {
+                    kernel.resetEvent?.(end.signal);
+                }
                 if ((overlapped >>> 0) !== 0)
                 {
                     writeDword(overlapped, STATUS.PENDING);
@@ -1169,6 +1184,26 @@ export function createNamedPipes(host){
 
     return {
         functions,
+        /**
+         * What a wait on a pipe end's handle waits on: an event set while no
+         * operation of the end is pending, as a file object is -- a program
+         * that watches the handle itself learns its read or connect is done.
+         * Null for a handle that is no end.
+         *
+         * @param {number} handle
+         */
+        waitable(handle){
+            const end = endOf(handle);
+            if (!end)
+            {
+                return null;
+            }
+            end.signal ??= kernel.createEvent({ manualReset: true,
+                signalled: end.readers.length === 0
+                    && !end.instance.connects.some(op=>op.end === end),
+                name: `pipe ${end.instance.pipe.name}` });
+            return end.signal;
+        },
         read,
         write,
         open,

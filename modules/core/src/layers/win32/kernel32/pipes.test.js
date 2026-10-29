@@ -89,6 +89,13 @@ function processOn(table, id = 1){
             },
             onTimeout: (/** @type {(thread: any) => void} */ handler)=>timeouts.push(handler),
             clock: { virtualTime: ()=>now },
+            createEvent: (/** @type {any} */ options)=>({ ...options }),
+            setEvent: (/** @type {any} */ event)=>{
+                event.signalled = true;
+            },
+            resetEvent: (/** @type {any} */ event)=>{
+                event.signalled = false;
+            },
         },
         handles: {
             open: (type, object)=>{
@@ -491,4 +498,20 @@ test('a handle made inheritable is one a child gets, and only those the list nam
     p.pipes.closed(kept, entry.object);
     const client = p.client();
     assert.ok(client > 0, 'the instance the child holds still listens');
+});
+
+test('a wait on an end\'s handle is a wait on its pending operations, as on a file', ()=>{
+    const p = processOn(new Map());
+    const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
+    const signal = p.pipes.waitable(server);
+    assert.equal(signal.signalled, true, 'nothing pending yet');
+    assert.equal(p.fns.ConnectNamedPipe.handler([server, OVERLAPPED]), 0);
+    assert.equal(signal.signalled, false, 'a connect is pending');
+    const client = p.client(RW, FILE_FLAG_OVERLAPPED);
+    assert.equal(signal.signalled, true, 'the connect is done');
+    assert.equal(p.read(server, 10, OVERLAPPED), 0);
+    assert.equal(signal.signalled, false, 'a read is pending');
+    p.write(client, 'x');
+    assert.equal(signal.signalled, true, 'and done');
+    assert.equal(p.pipes.waitable(0x9999), null);
 });

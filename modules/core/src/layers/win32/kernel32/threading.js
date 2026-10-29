@@ -171,7 +171,8 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           What kind of object a handle names. The kernel's handle table
  *           knows; it is not forwarded through the kernel API yet, and
  *           without it DuplicateHandle refuses rather than guessing.
- * @property {{ setInheritable: (handle: number, on: boolean) => void }} [pipes]
+ * @property {{ setInheritable: (handle: number, on: boolean) => void,
+ *     waitable?: (handle: number) => any }} [pipes]
  *           Told what a pipe handle's inheritance is set to, which a child reads.
  */
 
@@ -1183,6 +1184,24 @@ export function createThreadingFunctions(host){
                 // deadline answered at once too, but left the thread queued on
                 // the object, and a later signal woke it out of whatever it
                 // was waiting on by then with an answer naming the wrong thing.
+                // A pipe end is waited on as a file object is: through the
+                // event its pending operations hold down.
+                if (kindOf(handle >>> 0) === 'pipe')
+                {
+                    const signal = host.pipes?.waitable?.(handle >>> 0) ?? null;
+                    if (!signal)
+                    {
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return WAIT_FAILED;
+                    }
+                    if (wait === 0)
+                    {
+                        return kernel.poll(signal, thread) ?? WAIT_TIMEOUT;
+                    }
+                    return settle(kernel.wait(signal, thread, wait === INFINITE
+                        ? undefined
+                        : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
+                }
                 if (wait === 0)
                 {
                     return kernel.poll(target, thread) ?? WAIT_TIMEOUT;
