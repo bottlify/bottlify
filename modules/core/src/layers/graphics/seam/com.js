@@ -49,6 +49,13 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  *           Told when the program lets go of the object's last reference,
  *           while its pointers still name it: state the guest set by pointer
  *           and the host has not yet read is adopted then, or never.
+ * @property {boolean} [countedInHost]
+ *           AddRef and Release go to the host, not the guest routine that
+ *           counts through the pointer it is given: for an interface whose
+ *           runtime checks `this` -- DirectDraw's clipper answers through a
+ *           released pointer or one that never was a clipper -- where the
+ *           guest routine reads whatever the pointer points at, and faults or
+ *           counts in memory the heap has handed to someone else.
  */
 
 /**
@@ -66,13 +73,24 @@ const methodLists = new WeakMap();
 /** IUnknown alone, one list for everyone: it names no method of the object's own. */
 const IUNKNOWN_ONLY = Object.freeze([...IUNKNOWN_METHODS]);
 
+/**
+ * IUnknown with its counts kept at their traps: a slot that runs "in the
+ * guest" as its own trap is the trap, and the bridge's owner lookup refuses a
+ * pointer it never published.
+ */
+const IUNKNOWN_IN_HOST = Object.freeze(IUNKNOWN_METHODS.map(method=>(
+    method.builtin === 'queryInterface'
+        ? method
+        : Object.freeze({ ...method, guest: (/** @type {{ trap: number }} */ { trap })=>trap }))));
+
 /** @param {any} descriptor */
 function methodsFor(descriptor){
     let methods = methodLists.get(descriptor);
     if (!methods)
     {
         methods = [
-            ...(descriptor.bare ? [] : IUNKNOWN_METHODS),
+            ...(descriptor.bare ? []
+                : descriptor.countedInHost ? IUNKNOWN_IN_HOST : IUNKNOWN_METHODS),
             ...descriptor.methods.map((/** @type {any} */ method)=>({
                 name: method.name,
                 argBytes: method.argBytes,

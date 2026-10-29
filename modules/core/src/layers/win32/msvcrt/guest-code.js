@@ -137,10 +137,13 @@ export const longCodeOf = compiled=>LONG_CODE.get(compiled);
  * @property {() => number} statusWord  The x87 status word, the stack's top
  *     left out (`fnstsw`).
  * @property {() => void} clearExceptions  `fnclex`.
+ * @property {() => number} mxcsr  SSE's control and status register (`stmxcsr`).
+ * @property {(word: number) => void} setMxcsr  `ldmxcsr`.
  */
 
 /** The helpers that are the x87's control and status words, not the guest's memory. */
-const X87_WORDS = ['controlWord', 'setControlWord', 'statusWord', 'clearExceptions'];
+const X87_WORDS = ['controlWord', 'setControlWord', 'statusWord', 'clearExceptions', 'mxcsr',
+    'setMxcsr'];
 
 /**
  * The x87's words as a handler reaches them: through the FPU seam, which
@@ -162,6 +165,9 @@ function x87Words(fpu){
         statusWord: ()=>(fpu?.statusWord ? fpu.statusWord() & 0xc7ff : missing('statusWord')),
         clearExceptions: ()=>(fpu?.clearExceptions ? fpu.clearExceptions()
             : missing('clearExceptions')),
+        mxcsr: ()=>(fpu?.mxcsr ? fpu.mxcsr() >>> 0 : missing('mxcsr')),
+        /** @param {number} word */
+        setMxcsr: word=>(fpu?.setMxcsr ? fpu.setMxcsr(word >>> 0) : missing('setMxcsr')),
     };
 }
 
@@ -181,8 +187,8 @@ function x87Words(fpu){
  * The helpers that are the guest's memory, its calls and `host`: all of
  * Guest but the x87's words.
  *
- * @typedef {Omit<Guest, 'controlWord' | 'setControlWord' | 'statusWord' | 'clearExceptions'>}
- *     GuestMemory
+ * @typedef {Omit<Guest, 'controlWord' | 'setControlWord' | 'statusWord' | 'clearExceptions'
+ *     | 'mxcsr' | 'setMxcsr'>} GuestMemory
  */
 
 /**

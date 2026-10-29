@@ -132,6 +132,17 @@ test('the file index is stable, so two handles on one file compare equal', ()=>{
     assert.equal(dword(bytes, 0x400 + BY_HANDLE_FILE_INFORMATION.nNumberOfLinks), 1);
 });
 
+test('a time is set only through a handle that may write attributes', ()=>{
+    const { fns, errors, file, stamped } = setup();
+    const held = /** @type {any} */ (file);
+    held.writeAttributes = false;
+    assert.equal(fns.SetFileTime.handler([8, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED, even setting nothing');
+    held.writeAttributes = true;
+    assert.equal(fns.SetFileTime.handler([8, 0, 0, 0]), 1);
+    assert.deepEqual(stamped, []);
+});
+
 test('a handle that is not a file is refused everywhere', ()=>{
     const { fns } = setup();
     assert.equal(fns.GetFileTime.handler([99, 0x100, 0, 0]), 0);
@@ -149,6 +160,46 @@ test('the timezone reports no bias and no daylight saving', ()=>{
     assert.equal(dword(bytes, 0x600 + TIME_ZONE_INFORMATION.Bias), 0);
     assert.equal(dword(bytes, 0x600 + TIME_ZONE_INFORMATION.StandardDate), 0,
         'and no transition date, which is what makes the bias mean anything');
+});
+
+test('the dynamic zone calls: the machine\'s zone by its key, another by its key and year', ()=>{
+    // Wine's time.c test_GetDynamicTimeZoneInformation and test_GetTimeZoneInformationForYear.
+    const { fns, bytes, errors } = setup();
+    const view = new DataView(bytes.buffer);
+    const DYNAMIC = 0x800;
+    const keyOf = (/** @type {number} */ at)=>{
+        let key = '';
+        for (let code = view.getUint16(at + 172, true), next = 0; code !== 0;
+            code = view.getUint16(at + 172 + (next += 2), true))
+        {
+            key += String.fromCharCode(code);
+        }
+        return key;
+    };
+    const plantKey = (/** @type {string} */ key)=>{
+        bytes.fill(0, DYNAMIC, DYNAMIC + 432);
+        [...key].forEach((character, at)=>view.setUint16(DYNAMIC + 172 + at * 2,
+            character.charCodeAt(0), true));
+    };
+
+    assert.equal(fns.GetDynamicTimeZoneInformation.handler([DYNAMIC]), 0);
+    assert.equal(keyOf(DYNAMIC), 'UTC');
+    assert.equal(fns.GetTimeZoneInformation.handler([0x600]), 0);
+    assert.deepEqual(bytes.subarray(DYNAMIC, DYNAMIC + 172), bytes.subarray(0x600, 0x600 + 172));
+
+    assert.equal(fns.GetTimeZoneInformationForYear.handler([2020, 0, 0x400]), 1);
+    assert.deepEqual(bytes.subarray(0x400, 0x400 + 172), bytes.subarray(0x600, 0x600 + 172));
+    plantKey('Greenland Standard Time');
+    assert.equal(fns.GetTimeZoneInformationForYear.handler([2016, DYNAMIC, 0x400]), 1);
+    assert.equal(view.getInt32(0x400, true), 180);
+    assert.equal(view.getUint16(0x400 + 68 + 2, true), 10, 'standard time from October');
+    plantKey('Greenland Daylight Time');
+    assert.equal(fns.GetTimeZoneInformationForYear.handler([2016, DYNAMIC, 0x400]), 0);
+    assert.deepEqual(errors, [2]);
+
+    assert.equal(fns.EnumDynamicTimeZoneInformation.handler([0, DYNAMIC]), 0);
+    assert.ok(keyOf(DYNAMIC).length > 0);
+    assert.equal(fns.EnumDynamicTimeZoneInformation.handler([100000, DYNAMIC]), 259);
 });
 
 test('the clock cannot be set', ()=>{
@@ -320,4 +371,53 @@ test('TzSpecificLocalTimeToSystemTime reads daylight off the local clock, as Win
     assert.equal(fns.TzSpecificLocalTimeToSystemTime.handler([0, 0x100, 0x120]), 0);
     assert.equal(fns.TzSpecificLocalTimeToSystemTime.handler([0, 0x100, 0]), 0);
     assert.deepEqual(errors, [87, 87]);
+});
+
+test('a directory lists by handle as many entries as fit, then goes on, then has no more', ()=>{
+    const bytes = new Uint8Array(0x1000);
+    /** @type {number[]} */
+    const errors = [];
+    const folder = { path: 'C:\\GAME', directory: true };
+    const fns = createFileTimeFunctions({
+        readMemory: (address, length)=>bytes.slice(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        setLastError: code=>{
+            errors.push(code);
+        },
+        resolveHandle: ()=>folder,
+        stat: ()=>({ exists: true, isDirectory: true, size: 0 }),
+        list: ()=>[{ name: 'SAVE.DAT', isDirectory: false, size: 5000 },
+            { name: 'DATA', isDirectory: true, size: 0 }],
+    });
+    const list = fns.GetFileInformationByHandleEx;
+    assert.equal(list.handler([8, 10, 0, 0]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(list.handler([8, 10, 0, 0x400]), 0);
+    assert.equal(errors.at(-1), 998, 'ERROR_NOACCESS');
+    assert.equal(list.handler([8, 10, 0x100, 0]), 0);
+    assert.equal(errors.at(-1), 24);
+
+    // ".", ".." and SAVE.DAT fit: 104 + 2 -> 112, 104 + 4 -> 224, 104 + 16 = 344.
+    assert.equal(list.handler([8, 10, 0x100, 344]), 1);
+    assert.equal(dword(bytes, 0x100), 112, 'the next entry on an eight-byte boundary');
+    assert.equal(dword(bytes, 0x100 + 60), 2, '"." named');
+    assert.equal(bytes[0x100 + 104], '.'.charCodeAt(0));
+    assert.equal(dword(bytes, 0x100 + 112), 112);
+    const third = 0x100 + 224;
+    assert.equal(dword(bytes, third), 0, 'the last of this call');
+    assert.equal(dword(bytes, third + 40), 5000, 'EndOfFile');
+    assert.equal(dword(bytes, third + 48), 8192, 'whole clusters');
+    assert.equal(dword(bytes, third + 56), 0x20, 'FILE_ATTRIBUTE_ARCHIVE');
+    assert.equal(dword(bytes, third + 60), 16);
+    assert.notEqual(dword(bytes, third + 96), 0, 'a file ID');
+
+    assert.equal(list.handler([8, 10, 0x100, 0x400]), 1, 'on from where it stopped');
+    assert.equal(dword(bytes, 0x100 + 56), 0x10, 'DATA, a directory');
+    assert.equal(dword(bytes, 0x100), 0);
+    assert.equal(list.handler([8, 10, 0x100, 0x400]), 0);
+    assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
+    assert.equal(list.handler([8, 11, 0x100, 112]), 1, 'a restart lists from the start');
+    assert.equal(dword(bytes, 0x100 + 60), 2);
+    assert.equal(list.handler([8, 10, 0x100, 100]), 0, 'no room for one entry');
+    assert.equal(errors.at(-1), 234, 'ERROR_MORE_DATA');
 });

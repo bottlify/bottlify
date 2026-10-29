@@ -22,8 +22,9 @@ const STATUS_PARTIAL_COPY = 0x8000000d;
  *
  * @param {Record<string, any>} [answers]  what each call answers, by name
  * @param {number} [lastError]
+ * @param {Record<string, any>} [more]  further host members
  */
-function setup(answers = {}, lastError = 0){
+function setup(answers = {}, lastError = 0, more = {}){
     const memory = new Uint8Array(0x2000);
     const view = new DataView(memory.buffer);
     /** @type {{ name: string, args: number[] }[]} */
@@ -50,6 +51,7 @@ function setup(answers = {}, lastError = 0){
             WriteProcessMemory: recorder('WriteProcessMemory', 1),
             GetLastError: { argBytes: 0, handler: ()=>lastError },
         },
+        ...more,
     });
     return { fns, view, calls };
 }
@@ -132,3 +134,45 @@ test('NtReadVirtualMemory and NtWriteVirtualMemory are kernel32\'s, answered as 
     assert.equal(partial.fns.NtReadVirtualMemory.handler([0x44, 0x10000, 0x300, 16, 0]),
         STATUS_PARTIAL_COPY);
 });
+
+test('a call answered later by another process answers its status then, from its caller\'s error',
+    async()=>{
+        // A handle to a child is answered where the child runs, after the
+        // caller's thread has stopped: the status is the promise's, and the
+        // error it stands for is the caller's, not the thread running then.
+        const caller = { id: 1 };
+        const errors = new Map([[caller, 487]]);
+        let running = /** @type {any} */ (caller);
+        const later = (/** @type {number} */ value)=>(()=>Promise.resolve(value).then(got=>{
+            running = { id: 2 };
+            return got;
+        }));
+        const more = { currentThread: ()=>running,
+            lastErrorOf: (/** @type {any} */ thread)=>errors.get(thread) ?? 0 };
+        const refused = setup({ VirtualAllocEx: later(0) }, 0, more);
+        assert.equal(await refused.fns.NtAllocateVirtualMemory.handler(
+            [0x44, 0x100, 0, 0x104, 0x3000, 4]), STATUS_CONFLICTING_ADDRESSES);
+
+        running = caller;
+        const made = setup({ VirtualAllocEx: later(0x30000) }, 0, more);
+        made.view.setUint32(0x104, 0x1800, true);
+        assert.equal(await made.fns.NtAllocateVirtualMemory.handler(
+            [0x44, 0x100, 0, 0x104, 0x3000, 4]), 0);
+        assert.equal(made.view.getUint32(0x100, true), 0x30000);
+        assert.equal(made.view.getUint32(0x104, true), 0x2000);
+
+        // A release of size zero asks the child how far its region runs first.
+        running = caller;
+        const freed = setup({ VirtualQueryEx: later(28), VirtualFreeEx: later(1) }, 0, more);
+        freed.view.setUint32(0x1800 + 12, 0x5000, true);
+        freed.view.setUint32(0x100, 0x30000, true);
+        freed.view.setUint32(0x104, 0, true);
+        assert.equal(await freed.fns.NtFreeVirtualMemory.handler([0x44, 0x100, 0x104, 0x8000]), 0);
+        assert.equal(freed.view.getUint32(0x104, true), 0x5000);
+
+        running = caller;
+        errors.set(caller, 299);
+        const partial = setup({ ReadProcessMemory: later(0) }, 0, more);
+        assert.equal(await partial.fns.NtReadVirtualMemory.handler([0x44, 0, 0, 0, 0]),
+            STATUS_PARTIAL_COPY);
+    });

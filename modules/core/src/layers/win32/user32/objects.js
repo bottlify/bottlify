@@ -98,6 +98,10 @@ const MF_POPUP = 0x0010;
 const MF_END = 0x0080;
 const MF_OWNERDRAW = 0x0100;
 const MF_SEPARATOR = 0x0800;
+const MF_MENUBARBREAK = 0x0020;
+const MF_MENUBREAK = 0x0040;
+/** MF_HELP, which MENUITEMINFO calls MFT_RIGHTJUSTIFY. */
+const MF_HELP = 0x4000;
 /** The check mark of the default menu font, in pixels each way. */
 const CHECK_MARK_SIZE = 13;
 /** What a call handed a handle that names no menu leaves for GetLastError. */
@@ -157,6 +161,10 @@ const MIIM_SUBMENU = 0x0004;
 const MIIM_TYPE = 0x0010;
 const MIIM_DATA = 0x0020;
 const MIIM_STRING = 0x0040;
+const MIIM_BITMAP = 0x0080;
+const MIIM_FTYPE = 0x0100;
+/** HBMMENU_CALLBACK is -1, the system's own bitmaps 1 to 11; a handle is above them. */
+const HBMMENU_LAST = 11;
 
 /** SCROLLINFO. */
 const SCROLLINFO = Object.freeze({
@@ -947,13 +955,18 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
 
     /**
      * The item a MENUITEMINFOA or MENUITEMINFOW describes; the two differ only
-     * in what dwTypeData points at.
+     * in what dwTypeData points at. Null for a structure of no size this
+     * knows, and for MIIM_TYPE with MIIM_STRING, MIIM_FTYPE or MIIM_BITMAP:
+     * the old member and its newer halves describe the same thing twice.
      *
-     * Under MIIM_TYPE alone dwTypeData is a string only for a string item:
-     * for a bitmap it is the bitmap's handle, for an owner-drawn item the
+     * Under MIIM_TYPE dwTypeData is a string only for a string item: for a
+     * bitmap it is the bitmap's handle, for an owner-drawn item the
      * program's own value and for a separator nothing, and reading any of
      * them as a pointer reads wherever it happens to point. Such an item
-     * carries no text.
+     * carries no text. Under MIIM_STRING it is text whatever the type --
+     * an owner-drawn item may have some -- and NULL is no text at all,
+     * which is not the empty string: a string item without one reads back
+     * as a separator.
      *
      * @param {number} address @param {boolean} wide
      * @returns {any | null}
@@ -965,22 +978,26 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             return null;
         }
         const mask = readU32(address + MENUITEMINFO.fMask);
+        if ((mask & MIIM_TYPE) !== 0 && (mask & (MIIM_STRING | MIIM_FTYPE | MIIM_BITMAP)) !== 0)
+        {
+            return null;
+        }
         const type = readU32(address + MENUITEMINFO.fType);
+        // MFT_BITMAP is MIIM_TYPE's way of naming a bitmap; the newer
+        // members name it with MIIM_BITMAP and refuse the type bit.
+        if ((mask & MIIM_FTYPE) !== 0 && (type & MF_BITMAP) !== 0)
+        {
+            return null;
+        }
         const typeData = readU32(address + MENUITEMINFO.dwTypeData);
-        const notText = (mask & MIIM_STRING) === 0
-            && (type & (MF_BITMAP | MF_OWNERDRAW | MFT_SEPARATOR)) !== 0;
-        /** @type {string | null} */
+        const notText = (mask & MIIM_TYPE) !== 0 && !isStringType(type);
+        /** @type {string | null} null when the mask gives no text */
         let text = null;
+        let noText = false;
         if ((mask & (MIIM_STRING | MIIM_TYPE)) !== 0)
         {
-            if (notText)
-            {
-                text = '';
-            }
-            else if (typeData !== 0)
-            {
-                text = readText(host, typeData, wide, MAX_TEXT);
-            }
+            noText = notText || typeData === 0;
+            text = noText ? '' : readText(host, typeData, wide, MAX_TEXT);
         }
         return {
             mask,
@@ -990,8 +1007,17 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             submenu: readU32(address + MENUITEMINFO.hSubMenu),
             data: readU32(address + MENUITEMINFO.dwItemData),
             text,
+            noText,
+            // What dwTypeData held in place of text, which MIIM_TYPE hands
+            // back: a bitmap item's handle.
+            typeData: notText && (type & MF_BITMAP) !== 0 ? typeData : 0,
+            // hbmpItem, which a structure of the older size does not have.
+            bitmap: declared === MENUITEMINFO.SIZE ? readU32(address + MENUITEMINFO.hbmpItem) : 0,
         };
     };
+
+    /** Whether an item of this type shows text. @param {number} type */
+    const isStringType = type=>(type & (MF_BITMAP | MF_OWNERDRAW | MFT_SEPARATOR)) === 0;
 
     /**
      * Parsed items made into a live menu, its popups made into live menus of
@@ -1094,16 +1120,41 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         const flags = uFlags >>> 0;
         const separator = (flags & MF_SEPARATOR) !== 0;
         const popup = (flags & MF_POPUP) !== 0;
+        const bitmap = (flags & MF_BITMAP) !== 0;
+        const text = !separator && !bitmap && (flags & MF_OWNERDRAW) === 0;
         return {
             id: popup ? 0 : id >>> 0,
-            type: (separator ? MFT_SEPARATOR : 0) | (flags & MF_OWNERDRAW),
+            // The layout flags are the item's type as MENUITEMINFO reads it
+            // back, MF_BITMAP among them.
+            type: (separator ? MFT_SEPARATOR : 0)
+                | (flags & (MF_OWNERDRAW | MF_BITMAP | MF_MENUBARBREAK | MF_MENUBREAK | MF_HELP)),
             state: flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED | MF_HILITE),
             submenu: popup ? id >>> 0 : 0,
             data: (flags & MF_OWNERDRAW) !== 0 ? newItem >>> 0 : 0,
-            text: separator || (flags & (MF_BITMAP | MF_OWNERDRAW)) !== 0 || (newItem >>> 0) === 0
-                ? ''
+            // A bitmap item's last argument is its HBITMAP, a magic
+            // HBMMENU value or a handle.
+            bitmap: bitmap ? newItem >>> 0 : 0,
+            text: !text || (newItem >>> 0) === 0 ? ''
                 : readText(host, newItem >>> 0, wide, MAX_TEXT),
+            noText: text && (newItem >>> 0) === 0,
         };
+    };
+
+    /**
+     * Where an item added at the end goes: before the system's own bitmaps
+     * a menu bar ends with -- an MDI child's restore, minimize and close
+     * buttons, magic bitmaps 1 to 6 -- which stay last whatever is added
+     * after them (Wine's menu test, test_InsertMenu).
+     *
+     * @param {{ items: any[] }} menu
+     */
+    const endOf = menu=>{
+        let at = menu.items.length;
+        while (at > 0 && (menu.items[at - 1].bitmap ?? 0) >= 1 && menu.items[at - 1].bitmap <= 6)
+        {
+            at--;
+        }
+        return at;
     };
 
     /** AppendMenuA or AppendMenuW. @param {boolean} wide */
@@ -1116,7 +1167,7 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             {
                 return 0;
             }
-            menu.items.push(flaggedItem(flags, id, newItem, wide));
+            menu.items.splice(endOf(menu), 0, flaggedItem(flags, id, newItem, wide));
             return 1;
         },
     });
@@ -1133,7 +1184,7 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             }
             const found = findItem(menu, position, flags);
             const into = found?.menu ?? menu;
-            into.items.splice(found ? found.at : into.items.length, 0,
+            into.items.splice(found ? found.at : endOf(into), 0,
                 flaggedItem(flags, id, newItem, wide));
             return 1;
         },
@@ -1152,21 +1203,40 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [handle, position, byPosition, info])=>{
             const menu = menuOf(handle);
-            const described = (info >>> 0) === 0 ? null : readItemInfo(info, wide);
-            if (!menu || !described)
+            if ((info >>> 0) === 0)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const described = readItemInfo(info, wide);
+            if (!described)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            if (!menu || ((described.mask & MIIM_SUBMENU) !== 0 && described.submenu !== 0
+                && !menuOf(described.submenu)))
             {
                 return 0;
             }
+            // A position past the last item, -1 among them, is the end.
             const at = (byPosition >>> 0) !== 0
-                ? Math.min(Math.max(position | 0, 0), menu.items.length)
+                ? ((position >>> 0) < menu.items.length ? position >>> 0 : endOf(menu))
                 : menu.items.findIndex((/** @type {any} */ item)=>item.id === (position >>> 0));
+            // A member the mask does not name was not given: what the
+            // structure holds there is whatever the caller left in it.
+            const given = (/** @type {number} */ bit, /** @type {number} */ value)=>
+                ((described.mask & bit) !== 0 ? value : 0);
             menu.items.splice(at < 0 ? menu.items.length : at, 0, {
-                id: described.id,
-                type: described.type,
-                state: described.state,
-                submenu: described.submenu,
-                data: described.data,
+                id: given(MIIM_ID, described.id),
+                type: given(MIIM_TYPE | MIIM_FTYPE, described.type),
+                state: given(MIIM_STATE, described.state),
+                submenu: given(MIIM_SUBMENU, described.submenu),
+                data: given(MIIM_DATA, described.data),
                 text: described.text ?? '',
+                noText: described.text === null || described.noText,
+                typeData: given(MIIM_TYPE, described.typeData),
+                bitmap: given(MIIM_BITMAP, described.bitmap),
             });
             return 1;
         },
@@ -1206,15 +1276,31 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 return 0;
             }
             const mask = readU32(info + MENUITEMINFO.fMask);
+            if ((mask & MIIM_TYPE) !== 0
+                && (mask & (MIIM_STRING | MIIM_FTYPE | MIIM_BITMAP)) !== 0)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
             const held = found.menu.items[found.at];
+            // MIIM_TYPE predates hbmpItem and reports an item's bitmap as a
+            // bitmap item, its handle in dwTypeData; a magic HBMMENU value is
+            // no bitmap of the program's and is not reported so.
+            const bitmapped = (mask & MIIM_TYPE) !== 0 && (held.bitmap ?? 0) > HBMMENU_LAST;
+            const type = (isStringType(held.type) && held.noText === true
+                ? held.type | MFT_SEPARATOR : held.type) | (bitmapped ? MF_BITMAP : 0);
             /** @type {[number, number, number][]} */
             const members = [
-                [MIIM_TYPE, MENUITEMINFO.fType, held.type],
+                [MIIM_TYPE | MIIM_FTYPE, MENUITEMINFO.fType, type],
                 [MIIM_STATE, MENUITEMINFO.fState, held.state],
                 [MIIM_ID, MENUITEMINFO.wID, held.id],
                 [MIIM_SUBMENU, MENUITEMINFO.hSubMenu, held.submenu],
                 [MIIM_DATA, MENUITEMINFO.dwItemData, held.data],
             ];
+            if (declared === MENUITEMINFO.SIZE)
+            {
+                members.push([MIIM_BITMAP, MENUITEMINFO.hbmpItem, held.bitmap ?? 0]);
+            }
             for (const [bit, offset, value] of members)
             {
                 if ((mask & bit) !== 0)
@@ -1222,16 +1308,27 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     writeU32s(info + offset, [value]);
                 }
             }
-            if ((mask & (MIIM_STRING | MIIM_TYPE)) !== 0)
+            const length = held.noText === true ? 0 : held.text.length;
+            if ((mask & MIIM_TYPE) !== 0 && !isStringType(type))
+            {
+                // dwTypeData is not a buffer for an item that is no string:
+                // a bitmap item's is its handle, any other's nothing, and
+                // cch is the length of what text the item has.
+                writeU32s(info + MENUITEMINFO.dwTypeData,
+                    [bitmapped ? held.bitmap : held.typeData ?? 0]);
+                writeU32s(info + MENUITEMINFO.cch, [length]);
+            }
+            else if ((mask & (MIIM_STRING | MIIM_TYPE)) !== 0)
             {
                 // cch is the buffer's size going in and the length coming
                 // out, and dwTypeData being null means the caller is asking
                 // for that length rather than for the text.
                 const buffer = readU32(info + MENUITEMINFO.dwTypeData);
                 const room = readU32(info + MENUITEMINFO.cch);
+                const text = held.noText === true ? '' : held.text;
                 const written = buffer === 0
-                    ? held.text.length
-                    : writeText(host, buffer, held.text, room, wide);
+                    ? text.length
+                    : writeText(host, buffer, text, room, wide);
                 writeU32s(info + MENUITEMINFO.cch, [written]);
             }
             return 1;
@@ -1243,9 +1340,19 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         argBytes: 16,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [handle, item, byPosition, info])=>{
+            if ((info >>> 0) === 0)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
             const found = itemNamed(handle, item, byPosition);
-            const described = (info >>> 0) === 0 ? null : readItemInfo(info, wide);
-            if (!found || !described)
+            const described = readItemInfo(info, wide);
+            if (!described)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            if (!found)
             {
                 return 0;
             }
@@ -1254,8 +1361,8 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             // structure would blank every member the caller left alone.
             /** @type {[number, string][]} */
             const members = [
-                [MIIM_TYPE, 'type'], [MIIM_STATE, 'state'], [MIIM_ID, 'id'],
-                [MIIM_SUBMENU, 'submenu'], [MIIM_DATA, 'data'],
+                [MIIM_TYPE | MIIM_FTYPE, 'type'], [MIIM_STATE, 'state'], [MIIM_ID, 'id'],
+                [MIIM_SUBMENU, 'submenu'], [MIIM_DATA, 'data'], [MIIM_BITMAP, 'bitmap'],
             ];
             for (const [bit, name] of members)
             {
@@ -1267,6 +1374,11 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             if (described.text !== null)
             {
                 held.text = described.text;
+                held.noText = described.noText;
+            }
+            if ((described.mask & MIIM_TYPE) !== 0)
+            {
+                held.typeData = described.typeData;
             }
             return 1;
         },

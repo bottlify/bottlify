@@ -250,4 +250,13 @@ test('sscanf_s takes each string buffer\'s size, and text too long for it ends t
     assert.equal(table.sscanf_s.handler([memory.put('four 7'), memory.put('%s %d'),
         word, 4, number]), 0, 'four characters and a terminator do not fit in four');
     assert.equal(memory.text(word), '', 'the buffer is emptied');
+    // Wine's msvcrt test_sscanf_s: a refusal at the end of the input is no EOF.
+    assert.equal(table.sscanf_s.handler([memory.put('123'), memory.put('%s'), word, 3]), 0);
+    assert.equal(memory.text(word), '');
+    memory.writeMemory(word, new Uint8Array(4).fill(0x61));
+    assert.equal(table.sscanf_s.handler([memory.put('123'), memory.put('%3c'), word, 2]), 0);
+    assert.deepEqual([...memory.bytes.subarray(word, word + 3)], [0, 0x32, 0x61],
+        'what fit, the first character zeroed');
+    assert.equal(table.sscanf_s.handler([memory.put('123'), memory.put('%3c'), word, 3]), 1);
+    assert.deepEqual([...memory.bytes.subarray(word, word + 4)], [0x31, 0x32, 0x33, 0x61]);
 });

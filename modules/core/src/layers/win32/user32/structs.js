@@ -130,11 +130,12 @@ const MOUSEHOOKSTRUCT64 = Object.freeze({
  * boundary at 64 bits. The offsets are the union members' from the INPUT.
  */
 const INPUT32 = Object.freeze({
-    type: 0, dx: 4, dy: 8, mouseData: 12, dwFlags: 16, wVk: 4, wScan: 6, keyFlags: 8, SIZE: 28,
+    type: 0, dx: 4, dy: 8, mouseData: 12, dwFlags: 16, wVk: 4, wScan: 6, keyFlags: 8,
+    mouseExtra: 24, keyExtra: 16, SIZE: 28,
 });
 const INPUT64 = Object.freeze({
     type: 0, dx: 8, dy: 12, mouseData: 16, dwFlags: 20, wVk: 8, wScan: 10, keyFlags: 12,
-    SIZE: 40,
+    mouseExtra: 32, keyExtra: 24, SIZE: 40,
 });
 
 /** NCCALCSIZE_PARAMS: three RECTs, then the WINDOWPOS's address. */

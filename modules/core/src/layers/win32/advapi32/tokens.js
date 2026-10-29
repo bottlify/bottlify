@@ -26,6 +26,7 @@
  */
 
 import { COMPUTER_NAME } from '../kernel32/drives.js';
+import { createDescriptorCodec } from './descriptors.js';
 
 /**
  * Who the program is running as. There is one account and no way to become
@@ -38,10 +39,19 @@ export const USER_NAME = 'User';
 /** The native calls' table, published by ntdll beside its own. */
 export const TOKEN_NATIVES = Symbol('tokenNatives');
 
+/**
+ * The hook a kernel-object creator (CreateEvent, CreateMutex, …) calls to
+ * keep the SECURITY_ATTRIBUTES' descriptor it was given, so that
+ * GetKernelObjectSecurity hands it back -- a mandatory label among it.
+ */
+export const RECORD_OBJECT_SECURITY = Symbol('recordObjectSecurity');
+
 /** Statuses the native calls answer. */
 const STATUS_SUCCESS = 0;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_BUFFER_TOO_SMALL = 0xc0000023;
+const STATUS_ACCESS_DENIED = 0xc0000022;
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -82,7 +92,7 @@ const SE_SELF_RELATIVE = 0x8000;
 /** An ACL's header: revision, a pad, its size, its ACE count, a pad. */
 const ACL = Object.freeze({ REVISION: 0, SIZE: 2, COUNT: 4, HEADER: 8 });
 /** The revisions an ACL may be made with: ACL_REVISION and ACL_REVISION_DS. */
-const ACL_REVISIONS = new Set([2, 4]);
+const ACL_REVISIONS = new Set([2, 3, 4]);
 const ACL_REVISION = 2;
 /**
  * An ACE: type, flags, size, then the mask and, for the four kinds that name
@@ -93,6 +103,11 @@ const ACCESS_DENIED_ACE_TYPE = 1;
 const SYSTEM_AUDIT_ACE_TYPE = 2;
 const SYSTEM_ALARM_ACE_TYPE = 3;
 const ACCESS_DENIED_OBJECT_ACE_TYPE = 6;
+const SYSTEM_MANDATORY_LABEL_ACE_TYPE = 0x11;
+/** SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, NO_READ_UP and NO_EXECUTE_UP. */
+const MANDATORY_POLICIES = 0x7;
+/** The one of those a process token's own integrity label carries. */
+const MANDATORY_LABEL_NO_WRITE_UP = 0x1;
 /** An ACE's flags: how it is inherited, and whether it was. */
 const INHERITANCE_FLAGS = 0x0f;
 const INHERITED_ACE = 0x10;
@@ -136,7 +151,7 @@ const PRIVILEGE_SET_EMPTY = 8;
  * them: the low part of the LUID, and a high part of zero. Fixed numbers,
  * not a table read from anywhere -- these are the same on every machine.
  */
-const PRIVILEGES = new Map([
+export const PRIVILEGES = new Map([
     ['SeCreateTokenPrivilege', 2], ['SeAssignPrimaryTokenPrivilege', 3],
     ['SeLockMemoryPrivilege', 4], ['SeIncreaseQuotaPrivilege', 5],
     ['SeMachineAccountPrivilege', 6], ['SeTcbPrivilege', 7], ['SeSecurityPrivilege', 8],
@@ -165,10 +180,64 @@ const TokenOwner = 4;
 const TokenPrimaryGroup = 5;
 const TokenType = 8;
 const TokenSessionId = 12;
+const TokenPrivileges = 3;
+const TokenDefaultDacl = 6;
+const TokenImpersonationLevel = 9;
+const TokenStatistics = 10;
+const TokenElevationType = 18;
+const TokenLinkedToken = 19;
+const TokenElevation = 20;
+const TokenIntegrityLevel = 25;
+const TokenLogonSid = 28;
+const TokenIsAppContainer = 29;
+
+/** TOKEN_ELEVATION_TYPE: an account with no split token, as with UAC off. */
+const TokenElevationTypeDefault = 1;
+const ERROR_NO_SUCH_LOGON_SESSION = 1312;
+const ERROR_BAD_LENGTH = 24;
+
+/** SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED. */
+const PRIVILEGE_ON = 0x3;
+/**
+ * The privileges an administrator's token holds, and which of them are on
+ * from the start: change-notify, as on every token, and the ones an
+ * elevated administrator has enabled -- impersonate and create-global.
+ */
+const HELD_PRIVILEGES = [
+    'SeIncreaseQuotaPrivilege', 'SeSecurityPrivilege', 'SeTakeOwnershipPrivilege',
+    'SeLoadDriverPrivilege', 'SeSystemProfilePrivilege', 'SeSystemtimePrivilege',
+    'SeProfileSingleProcessPrivilege', 'SeIncreaseBasePriorityPrivilege',
+    'SeCreatePagefilePrivilege', 'SeBackupPrivilege', 'SeRestorePrivilege',
+    'SeShutdownPrivilege', 'SeDebugPrivilege', 'SeSystemEnvironmentPrivilege',
+    'SeChangeNotifyPrivilege', 'SeRemoteShutdownPrivilege', 'SeUndockPrivilege',
+    'SeManageVolumePrivilege', 'SeImpersonatePrivilege', 'SeCreateGlobalPrivilege',
+];
+const PRIVILEGES_ON = new Set(['SeChangeNotifyPrivilege', 'SeImpersonatePrivilege',
+    'SeCreateGlobalPrivilege']);
+
+/** S-1-16-12288: the high integrity level an elevated administrator runs at. */
+const HIGH_INTEGRITY = { authority: 16, subAuthorities: [0x3000] };
+/** SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED. */
+const INTEGRITY_ATTRIBUTES = 0x60;
+/**
+ * S-1-5-5-0-<n>: the logon session's SID, which every token of the session
+ * holds as a group marked SE_GROUP_LOGON_ID.
+ */
+const LOGON_SID = { authority: 5, subAuthorities: [5, 0, 0x3e7a1] };
+const LOGON_ATTRIBUTES = 0xc0000007;
 
 /** TOKEN_TYPE: a process's own token, and one made to impersonate with. */
 const TOKEN_PRIMARY = 1;
 const TOKEN_IMPERSONATION = 2;
+
+/** SECURITY_IMPERSONATION_LEVEL: what ImpersonateLoggedOnUser impersonates at. */
+const SECURITY_IMPERSONATION = 2;
+
+/**
+ * TokenOwner, TokenPrimaryGroup, TokenDefaultDacl, TokenSessionId,
+ * TokenIntegrityLevel and the rest SetTokenInformation documents as settable.
+ */
+const SETTABLE_TOKEN_CLASSES = new Set([4, 5, 6, 12, 18, 24, 25, 26]);
 
 /** SID_AND_ATTRIBUTES: a pointer and a DWORD. */
 const SID_AND_ATTRIBUTES_SIZE = 8;
@@ -235,6 +304,10 @@ export const WELL_KNOWN_SIDS = Object.freeze({
 const OWNER_SECURITY_INFORMATION = 0x1;
 const GROUP_SECURITY_INFORMATION = 0x2;
 const DACL_SECURITY_INFORMATION = 0x4;
+const SACL_SECURITY_INFORMATION = 0x8;
+const LABEL_SECURITY_INFORMATION = 0x10;
+/** SE_OBJECT_TYPE of a service, whose security is the service manager's. */
+const SE_SERVICE = 2;
 /** Every standard and specific right: what GENERIC_ALL comes to on any object. */
 const ALL_RIGHTS = 0x001fffff;
 
@@ -254,12 +327,28 @@ export const sidBytes = sid=>{
 };
 
 /**
+ * A SID's text, as ConvertSidToStringSid writes it.
+ *
+ * @param {Uint8Array} sid
+ */
+export const sidText = sid=>{
+    const view = new DataView(sid.buffer, sid.byteOffset, sid.length);
+    const authority = view.getUint16(2) * 2 ** 32 + view.getUint32(4);
+    let text = `S-1-${authority >= 2 ** 32 ? `0x${authority.toString(16)}` : authority}`;
+    for (let at = 0; at < sid[1]; at++)
+    {
+        text += `-${view.getUint32(8 + at * 4, true)}`;
+    }
+    return text;
+};
+
+/**
  * The two-letter names SDDL gives the well-known SIDs, as ConvertStringSidToSid
  * reads them; the domain's own are this machine's.
  *
  * @type {Record<string, Sid>}
  */
-const SDDL_SIDS = {
+export const SDDL_SIDS = {
     WD: { authority: 1, subAuthorities: [0] },
     CO: { authority: 3, subAuthorities: [0] },
     CG: { authority: 3, subAuthorities: [1] },
@@ -309,13 +398,16 @@ export const parseSid = text=>{
     {
         return sidBytes(named);
     }
-    const parts = /^S-1-(0x[0-9a-f]{1,12}|\d{1,15})((?:-\d{1,10}){0,15})$/i.exec(text);
+    // Every number may be written in hex; a SID with no sub-authority is not
+    // one ConvertStringSidToSid makes, though S-1-5 is a well-known one.
+    const parts = /^S-(0x0*1|0*1)-(0x[0-9a-f]{1,12}|\d{1,15})((?:-(?:0x[0-9a-f]{1,8}|\d{1,10})){1,15})$/i
+        .exec(text);
     if (!parts)
     {
         return null;
     }
-    const authority = Number(parts[1]);
-    const subs = parts[2] ? parts[2].slice(1).split('-').map(Number) : [];
+    const authority = Number(parts[2].toLowerCase());
+    const subs = parts[3].slice(1).split('-').map(sub=>Number(sub.toLowerCase()));
     if (authority >= 2 ** 48 || subs.some(sub=>sub > 0xffffffff))
     {
         return null;
@@ -407,7 +499,7 @@ export const selfRelativeDescriptor = parts=>{
 };
 
 /** The access rights SDDL names with two letters. */
-const SDDL_RIGHTS = Object.freeze({
+export const SDDL_RIGHTS = Object.freeze({
     GA: 0x10000000, GR: 0x80000000, GW: 0x40000000, GX: 0x20000000,
     RC: 0x00020000, SD: 0x00010000, WD: 0x00040000, WO: 0x00080000,
     RP: 0x10, WP: 0x20, CC: 0x01, DC: 0x02, LC: 0x04, SW: 0x08, LO: 0x80, DT: 0x40, CR: 0x100,
@@ -415,12 +507,12 @@ const SDDL_RIGHTS = Object.freeze({
     KA: 0x000f003f, KR: 0x00020019, KW: 0x00020006, KX: 0x00020019,
 });
 /** The ACE flags SDDL names: inheritance, and the audit outcomes. */
-const SDDL_ACE_FLAGS = Object.freeze({
+export const SDDL_ACE_FLAGS = Object.freeze({
     OI: 0x01, CI: 0x02, NP: 0x04, IO: 0x08, ID: INHERITED_ACE,
     SA: SUCCESSFUL_ACCESS_ACE_FLAG, FA: FAILED_ACCESS_ACE_FLAG,
 });
 /** The ACE types SDDL names that this builds: the ones naming one trustee. */
-const SDDL_ACE_TYPES = Object.freeze({
+export const SDDL_ACE_TYPES = Object.freeze({
     A: ACCESS_ALLOWED_ACE_TYPE, D: ACCESS_DENIED_ACE_TYPE, AU: SYSTEM_AUDIT_ACE_TYPE,
     AL: SYSTEM_ALARM_ACE_TYPE,
 });
@@ -587,7 +679,7 @@ export const wideTextAt = (readMemory, pointer, limit)=>{
 };
 
 /** @param {string} text @param {boolean} wide @returns {Uint8Array} with its terminator */
-const encodeText = (text, wide)=>{
+export const encodeText = (text, wide)=>{
     const unit = wide ? 2 : 1;
     const bytes = new Uint8Array((text.length + 1) * unit);
     for (let at = 0; at < text.length; at++)
@@ -608,7 +700,7 @@ const encodeText = (text, wide)=>{
  *
  * @param {string | null} name
  */
-const isThisMachine = name=>name === null || name === ''
+export const isThisMachine = name=>name === null || name === ''
     || name.replace(/^\\\\/, '').toUpperCase() === COMPUTER_NAME.toUpperCase();
 
 /** SID_NAME_USE: what kind of account a name is. */
@@ -681,8 +773,15 @@ const ACCOUNTS = [
     { sid: USER_SID, name: USER_NAME, domain: COMPUTER_NAME, use: SidTypeUser },
 ];
 
+/**
+ * Names Windows also accepts for NT AUTHORITY's service accounts: written
+ * without the space, as a service's configuration writes them.
+ */
+const ACCOUNT_ALIASES = new Map([['LOCALSERVICE', 'LOCAL SERVICE'],
+    ['NETWORKSERVICE', 'NETWORK SERVICE']]);
+
 /** @param {Uint8Array} sid @returns {Account | null} the account a SID, laid out, is */
-const accountOfSid = sid=>ACCOUNTS.find(entry=>sameBytes(sidBytes(entry.sid), sid)) ?? null;
+export const accountOfSid = sid=>ACCOUNTS.find(entry=>sameBytes(sidBytes(entry.sid), sid)) ?? null;
 
 /**
  * The account a name names, alone or after its domain and a backslash, in
@@ -690,14 +789,14 @@ const accountOfSid = sid=>ACCOUNTS.find(entry=>sameBytes(sidBytes(entry.sid), si
  *
  * @param {string} written @returns {Account | null}
  */
-const accountNamed = written=>{
+export const accountNamed = written=>{
     const at = written.lastIndexOf('\\');
     const domain = at < 0 ? null : written.slice(0, at).toUpperCase();
-    const name = written.slice(at + 1).toUpperCase();
+    const typed = written.slice(at + 1).toUpperCase();
+    const name = ACCOUNT_ALIASES.get(typed) ?? typed;
     return ACCOUNTS.find(entry=>entry.name.toUpperCase() === name
         && (domain === null || entry.domain.toUpperCase() === domain)) ?? null;
 };
-
 /**
  * @typedef {Object} TokenHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -709,6 +808,9 @@ const accountNamed = written=>{
  *              resolve: (handle: number, type?: string) => any }} handles
  *           The one handle table: a token is closed with CloseHandle like
  *           everything else.
+ * @property {(handle: number, wanted: number) => Uint8Array | null} [serviceSecurity]
+ *           A service handle's descriptor, self-relative with the parts asked
+ *           for, or null for a handle that is not one.
  * @property {() => any} [currentThread]
  *           The calling thread, whose impersonation token SetThreadToken and
  *           ImpersonateSelf set. Absent, every caller is one thread.
@@ -812,6 +914,42 @@ export function createTokenFunctions(host){
     };
 
     /**
+     * Each token's default DACL once SetTokenInformation has set it, by what
+     * the token is of -- every handle onto a process's token is the one
+     * token. Null is a DACL set to none.
+     *
+     * @type {Map<unknown, Uint8Array | null>}
+     */
+    const defaultDacls = new Map();
+
+    /**
+     * @param {any} token @returns {Uint8Array | null} the DACL objects made
+     *   with it get: everything to the administrators and the system, until set
+     */
+    const defaultDaclOf = token=>{
+        const key = token?.process ?? token;
+        return defaultDacls.has(key) ? /** @type {Uint8Array | null} */ (defaultDacls.get(key))
+            : aclBytes([GROUP_SIDS[2], SYSTEM_SID].map(sid=>
+                aceBytes(ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL, sidBytes(sid))));
+    };
+
+    /** The LUID TokenStatistics names each token by, given out on first ask. */
+    const tokenIds = new WeakMap();
+    let nextTokenId = 0x20000;
+    /** @param {any} token */
+    const tokenIdOf = token=>{
+        if (token === null || typeof token !== 'object')
+        {
+            return 0;
+        }
+        if (!tokenIds.has(token))
+        {
+            tokenIds.set(token, nextTokenId++);
+        }
+        return tokenIds.get(token);
+    };
+
+    /**
      * What GetTokenInformation writes: the fixed part, then the SIDs the
      * pointers in it name, all inside the one buffer the caller gave. The
      * pointers sit `stride` apart from `slot` on.
@@ -842,6 +980,68 @@ export function createTokenFunctions(host){
                 };
             // The one interactive session there is: the console's, zero on NT 5.
             case TokenSessionId:
+                return { fixed: dwordBytes(0), sids: [] };
+            case TokenPrivileges:
+            {
+                const fixed = new Uint8Array(4 + 12 * HELD_PRIVILEGES.length);
+                const view = new DataView(fixed.buffer);
+                view.setUint32(0, HELD_PRIVILEGES.length, true);
+                HELD_PRIVILEGES.forEach((name, at)=>{
+                    view.setUint32(4 + at * 12, PRIVILEGES.get(name) ?? 0, true);
+                    view.setUint32(4 + at * 12 + 8, PRIVILEGES_ON.has(name) ? PRIVILEGE_ON : 0,
+                        true);
+                });
+                return { fixed, sids: [] };
+            }
+            // TOKEN_DEFAULT_DACL: the pointer, and the ACL after it unless it is null.
+            case TokenDefaultDacl:
+            {
+                const dacl = defaultDaclOf(token);
+                return { fixed: new Uint8Array(4), sids: dacl === null ? [] : [dacl] };
+            }
+            case TokenImpersonationLevel:
+                return token?.impersonationLevel === undefined ? null
+                    : { fixed: dwordBytes(token.impersonationLevel), sids: [] };
+            case TokenStatistics:
+            {
+                // TOKEN_STATISTICS: its id, the logon's, a never-expiring
+                // time, the type and level, the charge, and the counts.
+                const fixed = new Uint8Array(56);
+                const view = new DataView(fixed.buffer);
+                view.setUint32(0, tokenIdOf(token), true);
+                view.setUint32(8, LOGON_SID.subAuthorities[2], true);
+                view.setUint32(16, 0xffffffff, true);
+                view.setUint32(20, 0x7fffffff, true);
+                view.setUint32(24, token?.impersonationLevel === undefined
+                    ? TOKEN_PRIMARY : TOKEN_IMPERSONATION, true);
+                view.setUint32(28, token?.impersonationLevel ?? 0, true);
+                view.setUint32(32, 1024, true);
+                view.setUint32(36, 1024 - (defaultDaclOf(token)?.length ?? 0), true);
+                view.setUint32(40, GROUP_SIDS.length + 1, true);
+                view.setUint32(44, HELD_PRIVILEGES.length, true);
+                view.setUint32(48, tokenIdOf(token), true);
+                return { fixed, sids: [] };
+            }
+            case TokenElevationType:
+                return { fixed: dwordBytes(TokenElevationTypeDefault), sids: [] };
+            case TokenElevation:
+                return { fixed: dwordBytes(1), sids: [] };
+            case TokenIntegrityLevel:
+            {
+                const fixed = new Uint8Array(SID_AND_ATTRIBUTES_SIZE);
+                new DataView(fixed.buffer).setUint32(4, INTEGRITY_ATTRIBUTES, true);
+                return { fixed, sids: [sidBytes(HIGH_INTEGRITY)] };
+            }
+            case TokenLogonSid:
+            {
+                const fixed = new Uint8Array(4 + SID_AND_ATTRIBUTES_SIZE);
+                const view = new DataView(fixed.buffer);
+                view.setUint32(0, 1, true);
+                view.setUint32(8, LOGON_ATTRIBUTES, true);
+                return { fixed, sids: [sidBytes(LOGON_SID)], slot: 4,
+                    stride: SID_AND_ATTRIBUTES_SIZE };
+            }
+            case TokenIsAppContainer:
                 return { fixed: dwordBytes(0), sids: [] };
             case TokenGroups:
             {
@@ -1070,7 +1270,7 @@ export function createTokenFunctions(host){
      * @param {number} mask
      * @param {number} sid
      */
-    const addAce = (acl, type, mask, sid)=>{
+    const addAce = (acl, type, mask, sid, flags = 0, revision = ACL_REVISION)=>{
         const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
         if (aces === null)
         {
@@ -1087,15 +1287,25 @@ export function createTokenFunctions(host){
         {
             return fail(ERROR_ALLOTTED_SPACE_EXCEEDED);
         }
-        const ace = new Uint8Array(aceSize);
-        ace[0] = type;
-        ace[2] = aceSize & 0xff;
-        ace[3] = aceSize >>> 8;
-        new DataView(ace.buffer).setUint32(4, mask >>> 0, true);
-        ace.set(bytes, 8);
-        host.writeMemory((acl >>> 0) + at, ace);
+        host.writeMemory((acl >>> 0) + at, aceBytes(type, flags & 0xff, mask, bytes));
         writeWord((acl >>> 0) + ACL.COUNT, aces.length + 1);
+        raiseRevision(acl, revision);
         return 1;
+    };
+
+    /**
+     * An ACL takes the highest revision any ACE added to it was added with:
+     * an object ACE makes it a directory-service ACL. A revision past the
+     * last is written as given, as Windows does, and leaves an ACL nothing
+     * else accepts.
+     *
+     * @param {number} acl @param {number} revision
+     */
+    const raiseRevision = (acl, revision)=>{
+        if ((revision >>> 0) > host.readMemory(acl >>> 0, 1)[0] && (revision >>> 0) <= 0xff)
+        {
+            host.writeMemory(acl >>> 0, new Uint8Array([revision >>> 0]));
+        }
     };
 
     /**
@@ -1265,6 +1475,61 @@ export function createTokenFunctions(host){
             return 1;
         },
     });
+
+    /**
+     * BOOL LookupAccountName(LPCTSTR lpSystemName, LPCTSTR lpAccountName, PSID Sid,
+     *   LPDWORD cbSid, LPTSTR ReferencedDomainName, LPDWORD cchReferencedDomainName,
+     *   PSID_NAME_USE peUse)
+     *
+     * The account a name names, alone or after its domain; the sizes work as
+     * LookupAccountSid's do -- both fit or neither is written.
+     *
+     * @param {boolean} wide
+     */
+    const lookupAccountName = wide=>({
+        argBytes: 28,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [system, accountName, sid, sidSize, domain, domainSize,
+            use])=>{
+            if (!isThisMachine(textAt(system, wide, MAX_ACCOUNT_NAME)))
+            {
+                return fail(RPC_S_SERVER_UNAVAILABLE);
+            }
+            const written = textAt(accountName, wide, MAX_ACCOUNT_NAME);
+            if (written === null || (sidSize >>> 0) === 0 || (domainSize >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            // An empty name is the machine's own domain.
+            const found = accountNamed(written === '' ? COMPUTER_NAME : written);
+            if (found === null)
+            {
+                return fail(ERROR_NONE_MAPPED);
+            }
+            const bytes = sidBytes(found.sid);
+            if (readDword(sidSize) < bytes.length || readDword(domainSize) <= found.domain.length
+                || (sid >>> 0) === 0 || (domain >>> 0) === 0)
+            {
+                writeDword(sidSize >>> 0, bytes.length);
+                writeDword(domainSize >>> 0, found.domain.length + 1);
+                return fail(ERROR_INSUFFICIENT_BUFFER);
+            }
+            host.writeMemory(sid >>> 0, bytes);
+            host.writeMemory(domain >>> 0, encodeText(found.domain, wide));
+            writeDword(sidSize >>> 0, bytes.length);
+            writeDword(domainSize >>> 0, found.domain.length);
+            if ((use >>> 0) !== 0)
+            {
+                writeDword(use >>> 0, found.use);
+            }
+            host.setLastError(ERROR_SUCCESS);
+            return 1;
+        },
+    });
+
+    /** @param {number} handle @returns {any} the token a handle names, or null */
+    const tokenNamed = handle=>(isToken(handle)
+        ? host.handles.resolve(handle >>> 0, 'token') : null);
 
     /**
      * The SID an EXPLICIT_ACCESS's trustee names, laid out, or the error that
@@ -1503,9 +1768,243 @@ export function createTokenFunctions(host){
         return ERROR_SUCCESS;
     };
 
+    const codec = createDescriptorCodec(host.readMemory);
+
+    /** The pseudo-handles a process has for itself and its thread, as objects of their own. */
+    const PSEUDO_OBJECTS = new Map([[0xffffffff, { pseudo: 'process' }],
+        [0xfffffffe, { pseudo: 'thread' }], [0xfffffffd, { pseudo: 'token' }]]);
+
+    /** @param {number} handle @returns {object | null} the kernel object a handle names */
+    const kernelObject = handle=>{
+        const pseudo = PSEUDO_OBJECTS.get(handle >>> 0);
+        if (pseudo)
+        {
+            return pseudo;
+        }
+        try
+        {
+            const object = host.handles.resolve(handle >>> 0);
+            return object !== null && typeof object === 'object' ? object : null;
+        }
+        catch (e){
+            void e;
+            return null;
+        }
+    };
+
+    /**
+     * Each kernel object's descriptor once a program has set one, by the
+     * object: every handle onto it sees the same.
+     *
+     * @type {WeakMap<object, import('./descriptors.js').DescriptorParts>}
+     */
+    const objectSecurity = new WeakMap();
+
+    /** @returns {import('./descriptors.js').DescriptorParts} what an object starts with */
+    const defaultParts = ()=>({
+        control: SE_DACL_PRESENT,
+        owner: sidBytes(DEFAULT_OWNER),
+        group: sidBytes(PRIMARY_GROUP),
+        dacl: aclBytes([GROUP_SIDS[2], SYSTEM_SID].map(sid=>
+            aceBytes(ACCESS_ALLOWED_ACE_TYPE, 0, ALL_RIGHTS, sidBytes(sid)))),
+    });
+
+    /**
+     * What a token starts with: an object's default parts and, besides, the
+     * token's own integrity label as a SACL -- one mandatory-label ACE at the
+     * level the token runs at, which GetKernelObjectSecurity(LABEL) hands
+     * back. A program reads it to learn its own integrity before it tries
+     * something a lower one may not.
+     *
+     * @returns {import('./descriptors.js').DescriptorParts}
+     */
+    const tokenDefaultParts = ()=>({
+        ...defaultParts(),
+        control: SE_DACL_PRESENT | SE_SACL_PRESENT,
+        sacl: aclBytes([aceBytes(SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0,
+            MANDATORY_LABEL_NO_WRITE_UP, sidBytes(HIGH_INTEGRITY))]),
+    });
+
+    /**
+     * The parts a SECURITY_INFORMATION names, put over the object's.
+     *
+     * @param {object} object @param {import('./descriptors.js').DescriptorParts} parts
+     * @param {number} wanted
+     */
+    const storeParts = (object, parts, wanted)=>{
+        const held = { ...objectSecurity.get(object) ?? defaultParts() };
+        if ((wanted & OWNER_SECURITY_INFORMATION) !== 0 && parts.owner)
+        {
+            held.owner = parts.owner;
+        }
+        if ((wanted & GROUP_SECURITY_INFORMATION) !== 0 && parts.group)
+        {
+            held.group = parts.group;
+        }
+        if ((wanted & DACL_SECURITY_INFORMATION) !== 0)
+        {
+            held.dacl = parts.dacl ?? null;
+            held.control |= SE_DACL_PRESENT;
+        }
+        if ((wanted & SACL_SECURITY_INFORMATION) !== 0)
+        {
+            held.sacl = (parts.control & SE_SACL_PRESENT) !== 0 ? parts.sacl ?? null
+                : aclBytes([]);
+            held.control |= SE_SACL_PRESENT;
+        }
+        else if ((wanted & LABEL_SECURITY_INFORMATION) !== 0)
+        {
+            // A label is the SACL's mandatory-label ACEs alone: setting it
+            // keeps those of the SACL given, in its revision, and none
+            // given leaves an empty SACL behind.
+            const given = (parts.control & SE_SACL_PRESENT) !== 0 ? parts.sacl ?? null : null;
+            const aces = given === null ? [] : codec.acesIn(given) ?? [];
+            held.sacl = aclBytes(aces.filter(ace=>ace.type === SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                .map(ace=>ace.bytes), given?.[0] ?? ACL_REVISION);
+            held.control |= SE_SACL_PRESENT;
+        }
+        objectSecurity.set(object, held);
+    };
+
+    /**
+     * A kernel object's descriptor, self-relative, with the parts asked for;
+     * null for a handle that names none. A label asked for alone is the
+     * SACL's mandatory labels, an empty SACL when there are none set.
+     *
+     * @param {number} handle @param {number} wanted @returns {Uint8Array | null}
+     */
+    const kernelDescriptor = (handle, wanted)=>{
+        const object = kernelObject(handle);
+        if (object === null)
+        {
+            return null;
+        }
+        const parts = objectSecurity.get(object)
+            ?? (isToken(handle) ? tokenDefaultParts() : defaultParts());
+        const asked = codec.partsAskedFor(parts, wanted);
+        return codec.selfRelative(asked);
+    };
+
     /** @param {number} code @returns {number} the status a native call answers it with */
     const statusOf = code=>(code === ERROR_SUCCESS ? STATUS_SUCCESS
         : code === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE : STATUS_ACCESS_VIOLATION);
+
+    /**
+     * The access an object's DACL grants a token, as both AccessCheck (a
+     * BOOL and win32 error) and NtAccessCheck (an NTSTATUS) need it: the two
+     * differ only in how they write the verdict out, so the walk lives once.
+     *
+     * `code` is ERROR_SUCCESS when the check ran -- `ok` then says whether
+     * access was granted and `granted` is the mask -- or the win32 error that
+     * stopped it. The PRIVILEGE_SET buffer and its length are out-parameters
+     * either form writes, so they are written here. The granted/status
+     * pointers are not read: each caller validates and writes its own.
+     *
+     * @param {number} descriptor @param {number} token @param {number} desired
+     * @param {number} mapping @param {number} privileges @param {number} privilegesLength
+     * @returns {{ code: number, ok?: boolean, granted?: number }}
+     */
+    const evaluateAccess = (descriptor, token, desired, mapping, privileges, privilegesLength)=>{
+        if (!isToken(token))
+        {
+            return { code: ERROR_INVALID_HANDLE };
+        }
+        // Either form: what GetKernelObjectSecurity hands back is
+        // self-relative, and is checked as it comes.
+        const held = anyDescriptor(descriptor);
+        if (held === null)
+        {
+            return { code: ERROR_INVALID_SECURITY_DESCR };
+        }
+        if ((mapping >>> 0) === 0 || (privilegesLength >>> 0) === 0)
+        {
+            return { code: ERROR_INVALID_PARAMETER };
+        }
+        if (readDword(privilegesLength) < PRIVILEGE_SET_EMPTY)
+        {
+            writeDword(privilegesLength >>> 0, PRIVILEGE_SET_EMPTY);
+            return { code: ERROR_INSUFFICIENT_BUFFER };
+        }
+        if ((privileges >>> 0) !== 0)
+        {
+            host.writeMemory(privileges >>> 0, new Uint8Array(PRIVILEGE_SET_EMPTY));
+        }
+        const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
+        const wanted = mapGeneric(desired >>> 0, map);
+        const control = held.control;
+        const dacl = held.part(SD.DACL);
+        let allowed = 0;
+        let denied = 0;
+        if ((control & SE_DACL_PRESENT) === 0 || dacl === 0)
+        {
+            // Everything the object's rights come to, and anything asked for
+            // by name besides.
+            allowed = (map[3] | wanted & ~MAXIMUM_ALLOWED) >>> 0;
+        }
+        else
+        {
+            const aces = acesOf(dacl);
+            if (aces === null)
+            {
+                return { code: ERROR_INVALID_ACL };
+            }
+            for (const ace of aces)
+            {
+                // An audit or alarm ACE says what to record, not who is let in.
+                if (ace.type > ACCESS_DENIED_ACE_TYPE || ace.sid === null
+                    || !isTokenMember(ace.sid))
+                {
+                    continue;
+                }
+                // What an ACE already allowed stays allowed, as the DACL is
+                // read in order and the first word on a right decides it.
+                const rights = mapGeneric(ace.mask, map);
+                if (ace.type === ACCESS_ALLOWED_ACE_TYPE)
+                {
+                    allowed |= rights & ~denied;
+                }
+                else
+                {
+                    denied |= rights & ~allowed;
+                }
+            }
+        }
+        const asked = (wanted & MAXIMUM_ALLOWED) !== 0 ? (wanted & ~MAXIMUM_ALLOWED) : wanted;
+        const ok = (asked & ~allowed) === 0 && (wanted === MAXIMUM_ALLOWED ? allowed !== 0 : true);
+        const answer = (wanted & MAXIMUM_ALLOWED) !== 0 ? allowed >>> 0 : asked;
+        return { code: ERROR_SUCCESS, ok, granted: ok ? answer : 0 };
+    };
+
+    /**
+     * AccessCheck's body: the verdict written as a BOOL *AccessStatus and the
+     * granted mask, 1 returned unless a parameter is wrong. A denied check is
+     * still a successful call (1), with the last error set.
+     *
+     * @param {number} descriptor @param {number} token @param {number} desired
+     * @param {number} mapping @param {number} privileges @param {number} privilegesLength
+     * @param {number} granted @param {number} status
+     */
+    const accessCheck = (descriptor, token, desired, mapping, privileges, privilegesLength,
+        granted, status)=>
+    {
+        if ((granted >>> 0) === 0 || (status >>> 0) === 0)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const verdict = evaluateAccess(descriptor, token, desired, mapping, privileges,
+            privilegesLength);
+        if (verdict.code !== ERROR_SUCCESS)
+        {
+            return fail(verdict.code);
+        }
+        writeDword(granted >>> 0, verdict.granted ?? 0);
+        writeDword(status >>> 0, verdict.ok ? 1 : 0);
+        if (!verdict.ok)
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
+        }
+        return 1;
+    };
 
     return {
         /**
@@ -1521,6 +2020,27 @@ export function createTokenFunctions(host){
          *   PTOKEN_PRIVILEGES NewState, ULONG BufferLength,
          *   PTOKEN_PRIVILEGES PreviousState, PULONG ReturnLength)
          */
+        /**
+         * A freshly created kernel object keeps the descriptor its
+         * SECURITY_ATTRIBUTES carried: owner, group, DACL and SACL as the
+         * descriptor marks each present. Absent or null, the object keeps
+         * nothing and GetKernelObjectSecurity synthesises a default.
+         *
+         * @param {object} object @param {number} descriptor
+         */
+        [RECORD_OBJECT_SECURITY]: (object, descriptor)=>{
+            const parts = codec.partsOf(descriptor);
+            if (parts === null)
+            {
+                return;
+            }
+            const wanted = (parts.owner ? OWNER_SECURITY_INFORMATION : 0)
+                | (parts.group ? GROUP_SECURITY_INFORMATION : 0)
+                | ((parts.control & SE_DACL_PRESENT) !== 0 ? DACL_SECURITY_INFORMATION : 0)
+                | ((parts.control & SE_SACL_PRESENT) !== 0 ? SACL_SECURITY_INFORMATION : 0);
+            storeParts(object, parts, wanted);
+        },
+
         [TOKEN_NATIVES]: {
             NtOpenProcessToken: {
                 argBytes: 12,
@@ -1537,6 +2057,131 @@ export function createTokenFunctions(host){
                 /** @param {number[]} args */
                 handler: ([token, , newState, , previous, returnLength])=>
                     statusOf(adjustPrivileges(token, newState, previous, returnLength)),
+            },
+
+            /**
+             * NTSTATUS NtSetSecurityObject(HANDLE, SECURITY_INFORMATION,
+             *   PSECURITY_DESCRIPTOR) -- the handle's security kept, as
+             *   SetKernelObjectSecurity keeps it.
+             */
+            NtSetSecurityObject: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([handle, wanted, descriptor])=>{
+                    const object = kernelObject(handle);
+                    const parts = codec.partsOf(descriptor);
+                    if (object === null)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
+                    if (parts === null)
+                    {
+                        return STATUS_ACCESS_VIOLATION;
+                    }
+                    storeParts(object, parts, wanted >>> 0);
+                    return STATUS_SUCCESS;
+                },
+            },
+
+            /**
+             * NTSTATUS NtQuerySecurityObject(HANDLE, SECURITY_INFORMATION,
+             *   PSECURITY_DESCRIPTOR, ULONG Length, PULONG LengthNeeded)
+             */
+            NtQuerySecurityObject: {
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([handle, wanted, descriptor, length, needed])=>{
+                    const bytes = kernelDescriptor(handle, wanted >>> 0);
+                    if (bytes === null)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
+                    if ((needed >>> 0) !== 0)
+                    {
+                        writeDword(needed >>> 0, bytes.length);
+                    }
+                    if ((length >>> 0) < bytes.length)
+                    {
+                        return STATUS_BUFFER_TOO_SMALL;
+                    }
+                    host.writeMemory(descriptor >>> 0, bytes);
+                    return STATUS_SUCCESS;
+                },
+            },
+
+            /**
+             * NTSTATUS NtAccessCheck(PSECURITY_DESCRIPTOR, HANDLE ClientToken,
+             *   ACCESS_MASK DesiredAccess, PGENERIC_MAPPING, PPRIVILEGE_SET,
+             *   PULONG ReturnLength, PACCESS_MASK GrantedAccess, PNTSTATUS AccessStatus)
+             *
+             * The same walk as AccessCheck, but the verdict is an NTSTATUS:
+             * the call returns STATUS_SUCCESS when the check ran and writes
+             * *AccessStatus as STATUS_SUCCESS or STATUS_ACCESS_DENIED, rather
+             * than a BOOL with the last error set.
+             */
+            NtAccessCheck: {
+                argBytes: 32,
+                /** @param {number[]} args */
+                handler: ([descriptor, token, desired, mapping, privileges, privilegesLength,
+                    granted, status])=>{
+                    if ((granted >>> 0) === 0 || (status >>> 0) === 0)
+                    {
+                        return STATUS_ACCESS_VIOLATION;
+                    }
+                    const verdict = evaluateAccess(descriptor, token, desired, mapping, privileges,
+                        privilegesLength);
+                    if (verdict.code !== ERROR_SUCCESS)
+                    {
+                        return verdict.code === ERROR_INSUFFICIENT_BUFFER
+                            ? STATUS_BUFFER_TOO_SMALL : statusOf(verdict.code);
+                    }
+                    writeDword(granted >>> 0, verdict.granted ?? 0);
+                    writeDword(status >>> 0, verdict.ok ? STATUS_SUCCESS : STATUS_ACCESS_DENIED);
+                    return STATUS_SUCCESS;
+                },
+            },
+
+            /**
+             * NTSTATUS NtDuplicateToken(HANDLE ExistingToken, ACCESS_MASK,
+             *   POBJECT_ATTRIBUTES, BOOLEAN EffectiveOnly, TOKEN_TYPE, PHANDLE)
+             *
+             * DuplicateTokenEx answered as a status. The impersonation level
+             * is the one the OBJECT_ATTRIBUTES' SecurityQualityOfService names,
+             * SecurityAnonymous when it carries none, and it rides a new
+             * impersonation token (a primary one carries none, telling the two
+             * apart as GetTokenInformation does).
+             */
+            NtDuplicateToken: {
+                argBytes: 24,
+                /** @param {number[]} args */
+                handler: ([existing, , attributes, , type, out])=>{
+                    const token = tokenNamed(existing);
+                    if (!token)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
+                    if ((out >>> 0) === 0)
+                    {
+                        return STATUS_ACCESS_VIOLATION;
+                    }
+                    // OBJECT_ATTRIBUTES.SecurityQualityOfService is its last
+                    // field (+20); the level is that structure's second (+4).
+                    let level = 0;
+                    if ((attributes >>> 0) !== 0)
+                    {
+                        const qos = readDword((attributes >>> 0) + 20);
+                        if (qos !== 0)
+                        {
+                            level = readDword(qos + 4);
+                        }
+                    }
+                    writeDword(out >>> 0, host.handles.open('token', {
+                        ...token,
+                        impersonationLevel: (type >>> 0) === TOKEN_IMPERSONATION ? level >>> 0
+                            : undefined,
+                    }));
+                    return STATUS_SUCCESS;
+                },
             },
         },
 
@@ -1569,7 +2214,7 @@ export function createTokenFunctions(host){
         IsValidSecurityDescriptor: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([descriptor])=>(descriptorAt(descriptor) === null
+            handler: ([descriptor])=>(anyDescriptor(descriptor) === null
                 ? fail(ERROR_INVALID_SECURITY_DESCR) : 1),
         },
 
@@ -1711,7 +2356,71 @@ export function createTokenFunctions(host){
         AddAccessAllowedAce: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([acl, , mask, sid])=>addAce(acl, ACCESS_ALLOWED_ACE_TYPE, mask, sid),
+            handler: ([acl, revision, mask, sid])=>
+                addAce(acl, ACCESS_ALLOWED_ACE_TYPE, mask, sid, 0, revision),
+        },
+
+        /**
+         * BOOL AddAccessAllowedAceEx(PACL, DWORD dwAceRevision, DWORD AceFlags,
+         *   DWORD AccessMask, PSID)
+         * BOOL AddAccessDeniedAceEx(PACL, DWORD, DWORD AceFlags, DWORD, PSID)
+         *
+         * As the plain ones, with the ACE's inheritance flags.
+         */
+        AddAccessAllowedAceEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([acl, revision, flags, mask, sid])=>
+                addAce(acl, ACCESS_ALLOWED_ACE_TYPE, mask, sid, flags, revision),
+        },
+        AddAccessDeniedAceEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([acl, revision, flags, mask, sid])=>
+                addAce(acl, ACCESS_DENIED_ACE_TYPE, mask, sid, flags, revision),
+        },
+
+        /**
+         * BOOL AddAuditAccessAce(PACL, DWORD dwAceRevision, DWORD dwAccessMask,
+         *   PSID, BOOL bAuditSuccess, BOOL bAuditFailure)
+         * BOOL AddAuditAccessAceEx(PACL, DWORD, DWORD AceFlags, DWORD, PSID, BOOL, BOOL)
+         *
+         * An audit ACE, the outcomes it audits written as its two flags.
+         */
+        AddAuditAccessAce: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([acl, revision, mask, sid, success, failure])=>addAce(acl,
+                SYSTEM_AUDIT_ACE_TYPE, mask, sid, (success ? SUCCESSFUL_ACCESS_ACE_FLAG : 0)
+                    | (failure ? FAILED_ACCESS_ACE_FLAG : 0), revision),
+        },
+        AddAuditAccessAceEx: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([acl, revision, flags, mask, sid, success, failure])=>addAce(acl,
+                SYSTEM_AUDIT_ACE_TYPE, mask, sid, flags & INHERITANCE_FLAGS
+                    | (success ? SUCCESSFUL_ACCESS_ACE_FLAG : 0)
+                    | (failure ? FAILED_ACCESS_ACE_FLAG : 0), revision),
+        },
+
+        /**
+         * BOOL AddMandatoryAce(PACL, DWORD dwAceRevision, DWORD AceFlags,
+         *   DWORD MandatoryPolicy, PSID pLabelSid)
+         *
+         * An integrity label: its mask is the policy, no-write-up, no-read-up
+         * and no-execute-up and nothing else.
+         */
+        AddMandatoryAce: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([acl, revision, flags, policy, sid])=>{
+                if (((policy >>> 0) & ~MANDATORY_POLICIES) !== 0
+                    || ((flags >>> 0) & ~INHERITANCE_FLAGS) !== 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                return addAce(acl, SYSTEM_MANDATORY_LABEL_ACE_TYPE, policy, sid, flags, revision);
+            },
         },
 
         /**
@@ -1724,11 +2433,11 @@ export function createTokenFunctions(host){
         AddAce: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([acl, , index, list, length])=>{
+            handler: ([acl, revision, index, list, length])=>{
                 const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
                 if (aces === null)
                 {
-                    return fail(ERROR_INVALID_ACL);
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 const size = length >>> 0;
                 if ((list >>> 0) === 0 || size === 0)
@@ -1757,6 +2466,7 @@ export function createTokenFunctions(host){
                 host.writeMemory((acl >>> 0) + at, added);
                 host.writeMemory((acl >>> 0) + at + size, moved);
                 writeWord((acl >>> 0) + ACL.COUNT, aces.length + count);
+                raiseRevision(acl, revision);
                 return 1;
             },
         },
@@ -1767,7 +2477,8 @@ export function createTokenFunctions(host){
         AddAccessDeniedAce: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([acl, , mask, sid])=>addAce(acl, ACCESS_DENIED_ACE_TYPE, mask, sid),
+            handler: ([acl, revision, mask, sid])=>
+                addAce(acl, ACCESS_DENIED_ACE_TYPE, mask, sid, 0, revision),
         },
 
         /**
@@ -1802,15 +2513,82 @@ export function createTokenFunctions(host){
         SetEntriesInAclW: setEntriesInAcl(true),
 
         /**
-         * DWORD SetSecurityInfo(HANDLE, SE_OBJECT_TYPE, SECURITY_INFORMATION, PSID owner,
-         *   PSID group, PACL dacl, PACL sacl)
+         * DWORD GetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
+         *   SECURITY_INFORMATION SecurityInfo, PSID *ppsidOwner, PSID *ppsidGroup,
+         *   PACL *ppDacl, PACL *ppSacl, PSECURITY_DESCRIPTOR *ppSecurityDescriptor)
          *
-         * Taken and kept nowhere: the one account is the only one there is, so
-         * a DACL on an object has nobody else to let in or keep out.
+         * The object's descriptor with the parts asked for, self-relative in a
+         * LocalAlloc block, the part pointers into it. With nowhere to put any
+         * of it the call is refused, the last error left alone. A service's
+         * descriptor is the service manager's; any other handle is a kernel
+         * object's.
+         */
+        GetSecurityInfo: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, type, wanted, owner, group, dacl, sacl,
+                descriptor])=>{
+                const outs = [owner, group, dacl, sacl, descriptor];
+                if (outs.every(out=>(out >>> 0) === 0))
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const bytes = (type >>> 0) === SE_SERVICE
+                    ? host.serviceSecurity?.(handle >>> 0, wanted >>> 0) ?? null
+                    : kernelDescriptor(handle, wanted >>> 0);
+                if (bytes === null)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                const block = host.allocate(bytes.length);
+                host.writeMemory(block, bytes);
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+                [[owner, SD.OWNER], [group, SD.GROUP], [sacl, SD.SACL], [dacl, SD.DACL]]
+                    .forEach(([out, slot])=>{
+                        if ((out >>> 0) !== 0)
+                        {
+                            const offset = view.getUint32(slot, true);
+                            writeDword(out >>> 0, offset === 0 ? 0 : block + offset);
+                        }
+                    });
+                if ((descriptor >>> 0) !== 0)
+                {
+                    writeDword(descriptor >>> 0, block);
+                }
+                return ERROR_SUCCESS;
+            },
+        },
+
+        /**
+         * DWORD SetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
+         *   SECURITY_INFORMATION SecurityInfo, PSID psidOwner, PSID psidGroup,
+         *   PACL pDacl, PACL pSacl)
+         *
+         * The parts given become the kernel object's; a service's are taken
+         * and kept nowhere, as the service manager here keeps none.
          */
         SetSecurityInfo: {
             argBytes: 28,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, type, wanted, owner, group, dacl, sacl])=>{
+                if ((type >>> 0) === SE_SERVICE)
+                {
+                    return ERROR_SUCCESS;
+                }
+                const object = kernelObject(handle);
+                if (object === null)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                /** @param {number} acl */
+                const aclOf = acl=>(acl === 0 ? null
+                    : host.readMemory(acl, aclLength(acl)).slice());
+                const parts = { control: SE_DACL_PRESENT | SE_SACL_PRESENT,
+                    owner: sidAt(owner) ?? undefined, group: sidAt(group) ?? undefined,
+                    dacl: aclOf(dacl >>> 0), sacl: aclOf(sacl >>> 0) };
+                storeParts(object, parts, wanted >>> 0);
+                return ERROR_SUCCESS;
+            },
         },
 
         /**
@@ -1818,41 +2596,23 @@ export function createTokenFunctions(host){
          *   RequestedInformation, PSECURITY_DESCRIPTOR pSecurityDescriptor,
          *   DWORD nLength, LPDWORD lpnLengthNeeded)
          *
-         * The object's descriptor, self-relative, with the parts asked for:
-         * an object the one account made is owned by BUILTIN\Administrators,
-         * as an elevated administrator's objects are, its group the account's
-         * primary one, and its DACL the token's default -- everything to the
-         * administrators and to the system. Too small a buffer is the
-         * documented ERROR_INSUFFICIENT_BUFFER with the size needed, which is
-         * how a caller learns it.
+         * The object's descriptor, self-relative, with the parts asked for.
+         * Until a program sets one, an object the one account made is owned by
+         * BUILTIN\Administrators, as an elevated administrator's objects are,
+         * its group the account's primary one, and its DACL the token's
+         * default -- everything to the administrators and to the system. Too
+         * small a buffer is the documented ERROR_INSUFFICIENT_BUFFER with the
+         * size needed, which is how a caller learns it.
          */
         GetKernelObjectSecurity: {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, requested, descriptor, length, needed])=>{
-                const PSEUDO_HANDLES = new Set([0xffffffff, 0xfffffffe, 0xfffffffd]);
-                let known = PSEUDO_HANDLES.has(handle >>> 0);
-                try
-                {
-                    known = known || host.handles.resolve(handle >>> 0) != null;
-                }
-                catch (e){
-                    void e;
-                }
-                if (!known)
+                const bytes = kernelDescriptor(handle, requested >>> 0);
+                if (bytes === null)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const { bytes } = selfRelativeDescriptor({
-                    ...(requested & OWNER_SECURITY_INFORMATION) !== 0
-                        ? { owner: sidBytes(DEFAULT_OWNER) } : {},
-                    ...(requested & GROUP_SECURITY_INFORMATION) !== 0
-                        ? { group: sidBytes(PRIMARY_GROUP) } : {},
-                    ...(requested & DACL_SECURITY_INFORMATION) !== 0
-                        ? { dacl: aclBytes([GROUP_SIDS[2], SYSTEM_SID].map(sid=>
-                            aceBytes(ACCESS_ALLOWED_ACE_TYPE, 0, ALL_RIGHTS, sidBytes(sid)))) }
-                        : {},
-                });
                 if ((needed >>> 0) !== 0)
                 {
                     writeDword(needed >>> 0, bytes.length);
@@ -1869,11 +2629,26 @@ export function createTokenFunctions(host){
         /**
          * BOOL SetKernelObjectSecurity(HANDLE, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR)
          *
-         * As SetSecurityInfo: accepted, with nobody else for it to matter to.
+         * The parts the information names, taken from the descriptor, become
+         * the object's: what the next GetKernelObjectSecurity answers.
          */
         SetKernelObjectSecurity: {
             argBytes: 12,
-            handler: ()=>1,
+            /** @param {number[]} args */
+            handler: ([handle, wanted, descriptor])=>{
+                const object = kernelObject(handle);
+                if (object === null)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const parts = codec.partsOf(descriptor);
+                if (parts === null)
+                {
+                    return fail(ERROR_INVALID_SECURITY_DESCR);
+                }
+                storeParts(object, parts, wanted >>> 0);
+                return 1;
+            },
         },
 
         /**
@@ -1905,88 +2680,15 @@ export function createTokenFunctions(host){
          * impersonation token here; the one account's primary token is taken
          * as well, since there is nothing it could be told apart from.
          */
+
         AccessCheck: {
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([descriptor, token, desired, mapping, privileges, privilegesLength,
-                granted, status])=>{
-                if (!isToken(token))
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                const at = descriptorAt(descriptor);
-                if (at === null)
-                {
-                    return fail(ERROR_INVALID_SECURITY_DESCR);
-                }
-                if ((mapping >>> 0) === 0 || (granted >>> 0) === 0 || (status >>> 0) === 0
-                    || (privilegesLength >>> 0) === 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                if (readDword(privilegesLength) < PRIVILEGE_SET_EMPTY)
-                {
-                    writeDword(privilegesLength >>> 0, PRIVILEGE_SET_EMPTY);
-                    return fail(ERROR_INSUFFICIENT_BUFFER);
-                }
-                if ((privileges >>> 0) !== 0)
-                {
-                    host.writeMemory(privileges >>> 0, new Uint8Array(PRIVILEGE_SET_EMPTY));
-                }
-                const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
-                const wanted = mapGeneric(desired >>> 0, map);
-                const control = readWord(at + SD.CONTROL);
-                const dacl = readDword(at + SD.DACL);
-                let allowed = 0;
-                let denied = 0;
-                if ((control & SE_DACL_PRESENT) === 0 || dacl === 0)
-                {
-                    allowed = 0xffffffff;
-                }
-                else
-                {
-                    const aces = acesOf(dacl);
-                    if (aces === null)
-                    {
-                        return fail(ERROR_INVALID_ACL);
-                    }
-                    for (const ace of aces)
-                    {
-                        // An audit or alarm ACE says what to record, not who
-                        // is let in.
-                        if (ace.type > ACCESS_DENIED_ACE_TYPE || ace.sid === null
-                            || !isTokenMember(ace.sid))
-                        {
-                            continue;
-                        }
-                        // What an ACE already allowed stays allowed, as the
-                        // DACL is read in order and the first word on a right
-                        // decides it.
-                        const rights = mapGeneric(ace.mask, map);
-                        if (ace.type === ACCESS_ALLOWED_ACE_TYPE)
-                        {
-                            allowed |= rights & ~denied;
-                        }
-                        else
-                        {
-                            denied |= rights & ~allowed;
-                        }
-                    }
-                }
-                const asked = (wanted & MAXIMUM_ALLOWED) !== 0
-                    ? (wanted & ~MAXIMUM_ALLOWED) : wanted;
-                const ok = (asked & ~allowed) === 0 && (wanted === MAXIMUM_ALLOWED
-                    ? allowed !== 0 : true);
-                const answer = (wanted & MAXIMUM_ALLOWED) !== 0 ? allowed >>> 0 : asked;
-                writeDword(granted >>> 0, ok ? answer : 0);
-                writeDword(status >>> 0, ok ? 1 : 0);
-                if (!ok)
-                {
-                    host.setLastError(ERROR_ACCESS_DENIED);
-                }
-                return 1;
-            },
+                granted, status])=>accessCheck(descriptor, token, desired, mapping, privileges,
+                privilegesLength, granted, status),
         },
+
 
         /**
          * BOOL OpenThreadToken(HANDLE hThread, DWORD DesiredAccess,
@@ -2141,6 +2843,139 @@ export function createTokenFunctions(host){
         },
 
         /**
+         * BOOL DuplicateTokenEx(HANDLE hExistingToken, DWORD dwDesiredAccess,
+         *   LPSECURITY_ATTRIBUTES, SECURITY_IMPERSONATION_LEVEL, TOKEN_TYPE TokenType,
+         *   PHANDLE phNewToken)
+         *
+         * DuplicateToken with the type chosen: a primary token carries no
+         * impersonation level, which is how GetTokenInformation tells them apart.
+         */
+        DuplicateTokenEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([existing, , , level, type, out])=>{
+                const token = tokenNamed(existing);
+                if (!token)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((out >>> 0) === 0 || ((type >>> 0) !== TOKEN_PRIMARY
+                    && (type >>> 0) !== TOKEN_IMPERSONATION) || (level >>> 0) > 3)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                writeDword(out >>> 0, host.handles.open('token', {
+                    ...token,
+                    impersonationLevel: (type >>> 0) === TOKEN_IMPERSONATION ? level >>> 0
+                        : undefined,
+                }));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL CreateRestrictedToken(HANDLE ExistingTokenHandle, DWORD Flags,
+         *   DWORD DisableSidCount, PSID_AND_ATTRIBUTES SidsToDisable,
+         *   DWORD DeletePrivilegeCount, PLUID_AND_ATTRIBUTES PrivilegesToDelete,
+         *   DWORD RestrictedSidCount, PSID_AND_ATTRIBUTES SidsToRestrict,
+         *   PHANDLE NewTokenHandle)
+         *
+         * A new token of the same type as the one it is made from, the SIDs
+         * to disable kept on it; with one account and no access checks those
+         * change nothing a caller can see but the token's own answers.
+         */
+        CreateRestrictedToken: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [existing, , disableCount, disable, , , , , out])=>{
+                const token = tokenNamed(existing);
+                if (!token)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const disabled = [];
+                for (let at = 0; at < (disableCount >>> 0); at++)
+                {
+                    const sid = sidAt(readDword((disable >>> 0) + at * SID_AND_ATTRIBUTES_SIZE));
+                    if (sid === null)
+                    {
+                        return fail(ERROR_INVALID_SID);
+                    }
+                    disabled.push(sid);
+                }
+                writeDword(out >>> 0, host.handles.open('token', {
+                    ...token, disabled: [...token.disabled ?? [], ...disabled],
+                }));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetTokenInformation(HANDLE TokenHandle, TOKEN_INFORMATION_CLASS,
+         *   LPVOID TokenInformation, DWORD TokenInformationLength)
+         *
+         * The classes a caller may set -- the default owner, group and DACL,
+         * the session, the integrity level -- are accepted; there is one
+         * account, and nothing here makes an object with them.
+         */
+        SetTokenInformation: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([token, tokenClass, given, length])=>{
+                const held = tokenNamed(token);
+                if (!held)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((length >>> 0) === 0)
+                {
+                    return fail(ERROR_BAD_LENGTH);
+                }
+                if ((given >>> 0) === 0)
+                {
+                    return fail(ERROR_NOACCESS);
+                }
+                if ((tokenClass >>> 0) === TokenDefaultDacl)
+                {
+                    const acl = readDword(given);
+                    defaultDacls.set(held.process ?? held, acl === 0 ? null
+                        : host.readMemory(acl, readWord(acl + ACL.SIZE)).slice());
+                    return 1;
+                }
+                return SETTABLE_TOKEN_CLASSES.has(tokenClass >>> 0) ? 1
+                    : fail(ERROR_INVALID_PARAMETER);
+            },
+        },
+
+        /**
+         * BOOL ImpersonateLoggedOnUser(HANDLE hToken)
+         *
+         * The calling thread acts as the token's user. A primary token is
+         * accepted too, impersonated at the impersonation level.
+         */
+        ImpersonateLoggedOnUser: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const token = tokenNamed(handle);
+                if (!token)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                impersonating.set(callingThread(), token.impersonationLevel === undefined
+                    ? { ...token, impersonationLevel: SECURITY_IMPERSONATION } : token);
+                return 1;
+            },
+        },
+
+        LookupAccountNameA: lookupAccountName(false),
+        LookupAccountNameW: lookupAccountName(true),
+
+        /**
          * BOOL GetTokenInformation(HANDLE TokenHandle,
          *   TOKEN_INFORMATION_CLASS TokenInformationClass, LPVOID TokenInformation,
          *   DWORD TokenInformationLength, PDWORD ReturnLength)
@@ -2158,6 +2993,11 @@ export function createTokenFunctions(host){
                 if (!isToken(token))
                 {
                     return fail(ERROR_INVALID_HANDLE);
+                }
+                // An account with no split token has no linked one.
+                if ((tokenClass >>> 0) === TokenLinkedToken)
+                {
+                    return fail(ERROR_NO_SUCH_LOGON_SESSION);
                 }
                 const answer = information(tokenClass,
                     host.handles.resolve(token >>> 0, 'token'));
@@ -2186,8 +3026,8 @@ export function createTokenFunctions(host){
                         slot + index * stride, (buffer >>> 0) + at, true);
                     at += answer.sids[index].length;
                 }
+                // A success leaves the last error as it was.
                 host.writeMemory(buffer >>> 0, whole);
-                host.setLastError(ERROR_SUCCESS);
                 return 1;
             },
         },

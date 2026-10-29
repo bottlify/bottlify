@@ -5,13 +5,13 @@
  */
 
 /**
- * A replacement is invisible to whoever is reading the log.
+ * A child is visible to whoever is reading the log.
  *
- * A parent that starts a child and then exits hands its process over: the
- * machine is torn down and rebuilt on the child's image. Everything the reader
+ * A launcher starts its game and exits: the game runs beside it on a machine
+ * of its own, and goes on when the launcher has gone. Everything the reader
  * holds -- the level it raised at run time, the cursor it drains from, the sink
- * it attached -- has to survive that, or the call log simply stops at the
- * handover and the child runs unobserved.
+ * it attached -- has to reach that machine, or the call log simply stops at the
+ * launcher and the game runs unobserved.
  */
 
 import { test } from 'node:test';
@@ -131,10 +131,10 @@ function buildParentExe(){
     });
 }
 
-test('the reader keeps its level, its cursor and its sink across a replacement',
+test('the reader keeps its level, its cursor and its sink across a child it starts',
     { timeout: 30000 }, async t=>{
         // The decoder binary is fetched, not tracked; without it this test still
-        // exercises the replacement, and the instance sharing below is skipped.
+        // exercises the child, and the instance sharing below is skipped.
         const decoder = await readFile(new URL('video-decoder.wasm', PREBUILT)).catch(()=>null);
         const child = buildChildExe();
         // The GPU the worker would have opened, and the canvas it presents into.
@@ -190,9 +190,9 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         // its first call, so take it again at the handover -- the parent's last
         // lines then -- which is the cursor a live view would be holding.
         let cursor = app.log.drain(0, 1000).next;
-        /** What `process-replace` said the parent's journal had reached. */
+        /** What the parent's journal had reached when it started its child. */
         let replacedAt = 0;
-        app.on('process-replace', ()=>{
+        app.on('process-child', ()=>{
             cursor = app.log.drain(0, 1000).next;
             replacedAt = cursor;
         });
@@ -259,7 +259,7 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         await new Promise(resolve=>setImmediate(resolve));
         assert.equal(app.presenter(), presenter, 'the run kept the presenter it made');
         assert.equal(presenter.diagnostics().presents, 2,
-            'the count continued across the replacement');
+            'the count continued into the child');
         assert.equal(gpu.count('configure'), 1, 'the canvas was not reconfigured at the swap');
 
         // The child's own GetSystemMetrics reached the journal at the level the
@@ -281,7 +281,7 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         assert.ok(started, 'process-started fired after the rebuild');
         const announced = /** @type {{ image: string, sequenceBase: number }} */ (started);
         assert.equal(announced.image, 'C:\\App\\Child.exe');
-        assert.equal(announced.sequenceBase, replacedAt,
+        assert.ok(announced.sequenceBase >= replacedAt,
             'the child continues the sequence the parent reached');
         assert.ok(after.records.some((/** @type {any} */ record)=>
             record.sequence === announced.sequenceBase),
@@ -289,7 +289,7 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
 
         // The sink attached before the handover was still the one detachLog knew.
         assert.deepEqual(output, ['A'],
-            'detaching after the replacement stopped the sink receiving');
+            'detaching while the child ran stopped the sink receiving');
 
         // The child's machine writes into the table the reader already holds,
         // rather than making one of its own that nobody would read.

@@ -53,7 +53,8 @@ function fakeHeap(base = 0x8000){
 
 function setup(){
     /** Whether the volume answers a read with a promise, as it does for bytes not yet fetched. */
-    const fixture = { deferReads: false };
+    /** @type {{ deferReads: boolean, refusal: string | null, opens: any[] }} */
+    const fixture = { deferReads: false, refusal: null, opens: [] };
     const bytes = new Uint8Array(0x10000);
     /** @type {string[]} */
     const reported = [];
@@ -117,6 +118,12 @@ function setup(){
             },
             /** @param {string} path @param {{ write?: boolean }} mode */
             open: (path, mode)=>{
+                fixture.opens.push(mode);
+                // Another open's terms, as the volume refuses this one for them.
+                if (fixture.refusal)
+                {
+                    return null;
+                }
                 if (mode.write)
                 {
                     if (!directories.has(path.slice(0, path.lastIndexOf('\\'))))
@@ -144,6 +151,7 @@ function setup(){
                 return data.length;
             },
             close: ()=>{},
+            openRefusal: ()=>fixture.refusal,
         },
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
@@ -665,13 +673,13 @@ test('a copy saved without remembering leaves the current file and the dirty fla
     assert.equal(call(object, IID_IPERSIST_FILE, 'GetCurFile', [0x3000]), S_FALSE);
 });
 
-test('SetPath: null refused, quotes and a trailing separator dropped', ()=>{
+test('SetPath: null refused, quotes and a trailing separator dropped, the drive upper case', ()=>{
     const fx = setup();
     const object = createLink(fx);
     assert.equal(call(object, IID_ISHELL_LINK_A, 'SetPath', [0]), E_INVALIDARG);
     for (const [given, kept] of [
-        ['c:\\nonexistent\\file\\', 'c:\\nonexistent\\file'],
-        ['"c:\\nonexistent\\file"', 'c:\\nonexistent\\file'],
+        ['c:\\nonexistent\\file\\', 'C:\\nonexistent\\file'],
+        ['"c:\\nonexistent\\file"', 'C:\\nonexistent\\file'],
         ['D:\\', 'D:\\'],
     ])
     {
@@ -753,4 +761,33 @@ test('a loaded link with an id list hands back the namespace\'s list for its pat
     const list = listBytes('C:\\Games\\game.exe');
     assert.deepEqual([...fx.bytes.subarray(fx.u32(0x3000), fx.u32(0x3000) + list.length)],
         [...list]);
+});
+
+test('SetPath gives a path that names no file the program extension that does', ()=>{
+    const fx = setup();
+    const object = createLink(fx);
+    fx.volume.set('C:\\Games\\run.bat', { bytes: new Uint8Array(1), modified: 0 });
+    fx.volume.set('C:\\Games\\game.exe', { bytes: new Uint8Array(1), modified: 0 });
+    for (const [given, kept] of [['C:\\Games\\run', 'C:\\Games\\run.bat'],
+        ['C:\\Games\\game', 'C:\\Games\\game.exe'],
+        ['C:\\Games\\none', 'C:\\Games\\none']])
+    {
+        fx.putAnsi(STR, given);
+        assert.equal(call(object, IID_ISHELL_LINK_A, 'SetPath', [STR]), S_OK);
+        call(object, IID_ISHELL_LINK_A, 'GetPath', [BUF, 260, 0, 0]);
+        assert.equal(fx.ansiAt(BUF), kept, given);
+    }
+});
+
+test('Save and Load share with the opens already there, and say when one bars them', ()=>{
+    const fx = setup();
+    const object = createLink(fx);
+    fx.putWide(STR, 'C:\\Start Menu\\Programs\\Game.lnk');
+    assert.equal(call(object, IID_IPERSIST_FILE, 'Save', [STR, 1]), S_OK);
+    assert.equal(fx.opens.at(-1).shareRead, true, 'a reader keeps reading');
+    assert.equal(call(object, IID_IPERSIST_FILE, 'Load', [STR, 0]), S_OK);
+    assert.deepEqual([fx.opens.at(-1).shareRead, fx.opens.at(-1).shareWrite], [true, true]);
+    fx.refusal = 'SHARING_VIOLATION';
+    assert.equal(call(object, IID_IPERSIST_FILE, 'Save', [STR, 1]), 0x80070020 | 0);
+    assert.equal(call(object, IID_IPERSIST_FILE, 'Load', [STR, 0]), 0x80070020 | 0);
 });

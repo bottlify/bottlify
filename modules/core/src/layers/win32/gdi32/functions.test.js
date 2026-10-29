@@ -2298,6 +2298,62 @@ test('GetTextFace names the face asked for, or the one its family stands in with
     assert.equal(faceA(), 'MS Shell Dlg', 'DEFAULT_GUI_FONT');
 });
 
+test('a realized font answers its realization, and an empty file for a face that has none', ()=>{
+    // Wine's test_RealizationInfo and test_realization_info: the 16- and
+    // 24-byte forms, any other size refused; GetFontFileInfo telling the size
+    // it needs on a short buffer, refusing an id that is no realization.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        setLastError: code=>errors.push(code),
+    }).table;
+    const hdc = fns.GetDC.handler([HWND]);
+    putLogFont(memory, { faceName: 'Tahoma' });
+    const font = fns.CreateFontIndirectA.handler([STRUCT]);
+    fns.SelectObject.handler([hdc, font]);
+
+    memory.fill(OUT, 8);
+    assert.equal(fns.GdiRealizationInfo.handler([hdc, OUT]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(OUT + at)), [1, 1, font, UNTOUCHED]);
+
+    memory.fill(OUT, 8);
+    memory.putU32s(OUT, [28]);
+    assert.equal(fns.GetFontRealizationInfo.handler([hdc, OUT]), 0, 'no 28-byte form');
+    memory.putU32s(OUT, [16]);
+    assert.equal(fns.GetFontRealizationInfo.handler([hdc, OUT]), 1);
+    assert.deepEqual([0, 4, 8, 12, 16].map(at=>memory.u32(OUT + at)), [16, 1, 1, font, UNTOUCHED]);
+    memory.putU32s(OUT, [24]);
+    assert.equal(fns.GetFontRealizationInfo.handler([hdc, OUT]), 1);
+    assert.deepEqual([0, 12, 16, 20, 24].map(at=>memory.u32(OUT + at)),
+        [24, font, 0, 0, UNTOUCHED]);
+    assert.equal(fns.GetFontRealizationInfo.handler([0x9999, OUT]), 0, 'not a context');
+
+    const NEEDED = STRUCT + 0x80;
+    assert.equal(fns.GetFontFileInfo.handler([0xabababab, 0, OUT, 64, NEEDED]), 0);
+    assert.equal(errors.pop(), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(fns.GetFontFileInfo.handler([font, 0, 0, 0, NEEDED]), 0);
+    assert.equal(errors.pop(), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(memory.u32(NEEDED), 18, 'the size needed told regardless');
+    memory.fill(OUT, 8);
+    assert.equal(fns.GetFontFileInfo.handler([font, 0, OUT, 17, 0]), 0);
+    assert.equal(memory.u32(OUT), UNTOUCHED, 'a short buffer is not written');
+    assert.equal(fns.GetFontFileInfo.handler([font, 0, OUT, 64, 0]), 1);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 18)], new Array(18).fill(0),
+        'no time, no size, an empty path');
+    assert.equal(memory.u32(OUT + 20), UNTOUCHED);
+
+    assert.equal(fns.GetFontFileData.handler([font, 0, 0, 0, OUT, 0]), 1);
+    assert.equal(fns.GetFontFileData.handler([font, 0, 16, 0, OUT, 0xfffffff0]), 0);
+    assert.equal(errors.pop(), 87, 'no byte past the end of an empty file');
+});
+
 test('GetTextFace cuts the name to the count, and a null buffer asks for the size', ()=>{
     const { memory, fns, hdc } = withDC();
     const NAME = 0x2000;

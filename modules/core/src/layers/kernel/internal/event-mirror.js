@@ -77,27 +77,30 @@ export function createEventMirror(write, own = ()=>true){
          *
          * @param {number} at  the table's address
          * @param {number} count  how many handles it has a word for
-         * @param {{ handle: number, type: string, object: any }[]} open
+         * @param {{ handle: number, type: string, object: any, access?: number | null }[]} open
          */
         attach(at, count, open){
             table = at >>> 0;
             slots = count;
-            for (const { handle, type, object } of open)
+            for (const { handle, type, object, access } of open)
             {
-                mirror.opened(handle, type, object);
+                mirror.opened(handle, type, object, access);
             }
         },
 
         /**
          * A handle was opened onto an object. Only an event of this process,
          * and a mutex of it with a word of its own, has a word: one another
-         * process holds changes there, unseen here.
+         * process holds changes there, unseen here. A handle granted fewer
+         * than all rights has none either: what it may do is the host's to
+         * check, on every call.
          *
          * @param {number} handle @param {string} type @param {any} object
+         * @param {number | null} [access]
          */
-        opened(handle, type, object){
+        opened(handle, type, object, access = null){
             const index = handle >>> HANDLE_SHIFT;
-            if (slots === 0 || object.remote || index >= slots || !own(object))
+            if (slots === 0 || object.remote || index >= slots || !own(object) || access !== null)
             {
                 return;
             }

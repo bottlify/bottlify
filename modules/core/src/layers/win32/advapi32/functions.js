@@ -31,6 +31,8 @@ import {
 import { STATUS } from '../ntdll/status.js';
 import { USER_NAME } from './tokens.js';
 import { createNamedSecurityFunctions } from './named-security.js';
+import { createSecurityFunctions } from './security.js';
+import { createLsaFunctions } from './lsa.js';
 import { isTextUnicode } from './text.js';
 
 const ERROR_SUCCESS = 0;
@@ -39,6 +41,7 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_MORE_DATA = 234;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_SID = 1337;
@@ -72,6 +75,13 @@ export const UNLOAD_KEY = Symbol('unloadKey');
  */
 export const REGISTRY_NATIVES = Symbol('registryNatives');
 
+/**
+ * The hive's key a registry handle is open on, for a library that installs
+ * into a key the program opened (setupapi's HKR): null for a handle that is
+ * not a key.
+ */
+export const KEY_OF_HANDLE = Symbol('keyOfHandle');
+
 /** NtQueryKey's and NtEnumerateKey's classes, and the value classes, this answers. */
 const KEY_BASIC_INFORMATION = 0;
 const KEY_NODE_INFORMATION = 1;
@@ -99,6 +109,19 @@ const REG_SZ = 1;
 const REG_EXPAND_SZ = 2;
 const REG_BINARY = 3;
 const REG_MULTI_SZ = 7;
+
+/**
+ * The three performance-data predefined keys. RegQueryValueEx on them answers
+ * a PERF_DATA_BLOCK for any counter name and the "Counter"/"Help" index lists;
+ * nothing else treats them as keys, so opening or setting one fails.
+ */
+const HKEY_PERFORMANCE_DATA = 0x80000004;
+const HKEY_PERFORMANCE_TEXT = 0x80000050;
+const HKEY_PERFORMANCE_NLSTEXT = 0x80000060;
+const PERFORMANCE_KEYS = new Set([
+    HKEY_PERFORMANCE_DATA, HKEY_PERFORMANCE_TEXT, HKEY_PERFORMANCE_NLSTEXT]);
+/** PERF_DATA_BLOCK's fixed part: the header before the system name. */
+const PERF_BLOCK_SIZE = 88;
 
 /** RegGetValue's errors for a value it found and will not answer as asked. */
 const ERROR_DATATYPE_MISMATCH = 1629;
@@ -159,9 +182,15 @@ export { USER_NAME };
  *           The volume a hive is saved to and loaded from. Without it a
  *           save is refused and a load finds no file.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {Map<string, any>} [security]  The run's file-security store (named-security.js).
+ * @property {(path: string) => string} [resolvePath]  A path made absolute, to key the store by.
  * @property {{ set: (handle: number) => boolean, reset: (handle: number) => boolean }} [events]
  *           The kernel's events, which a change notification signals. Without
  *           them an asynchronous RegNotifyChangeKeyValue finds no event.
+ * @property {(library: string, name: string, args: number[]) => number} [system]
+ *           Another library's export, called as the program would call it:
+ *           the performance-data block reads kernel32's clocks through it.
+ * @property {string} [computerName]  This machine's name, in the perf block.
  */
 
 /** @param {number[]} numbers */
@@ -210,8 +239,8 @@ export function createRegistryFunctions(host){
      */
     const hive = {
         ...host.hive,
-        /** @param {any} key @param {string | null} [path] */
-        create(key, path){
+        /** @param {any} key @param {string | null} [path] @param {string} [keyClass] */
+        create(key, path, keyClass = ''){
             let parent = key;
             for (const part of typeof path === 'string' ? path.split('\\').filter(Boolean) : [])
             {
@@ -222,7 +251,7 @@ export function createRegistryFunctions(host){
                 }
                 parent = next;
             }
-            const made = host.hive.create(key, path);
+            const made = host.hive.create(key, path, keyClass);
             if (made.created)
             {
                 notify(parent, REG_NOTIFY_CHANGE_NAME);
@@ -841,14 +870,14 @@ export function createRegistryFunctions(host){
      */
     /**
      * @param {any} key @param {string | null} subKey
-     * @param {number} result @param {number} disposition
+     * @param {number} result @param {number} disposition @param {string} [keyClass]
      */
-    const createKey = (key, subKey, result, disposition)=>{
+    const createKey = (key, subKey, result, disposition, keyClass = '')=>{
         if (result === 0)
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const made = hive.create(key, subKey);
+        const made = hive.create(key, subKey, keyClass);
         writeDword(result, allocate(made.key));
         writeDwordIf(disposition,
             made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
@@ -856,8 +885,8 @@ export function createRegistryFunctions(host){
     };
     const createKeyEx = {
         argBytes: 36,
-        handler: onKey((key, [, subKey, , , , , , result, disposition])=>
-            createKey(key, readText(subKey), result, disposition)),
+        handler: onKey((key, [, subKey, , keyClass, , , , result, disposition])=>
+            createKey(key, readText(subKey), result, disposition, readText(keyClass) ?? '')),
     };
 
     /**
@@ -894,37 +923,139 @@ export function createRegistryFunctions(host){
      *
      * @param {boolean} wide
      */
-    const queryValueEx = wide=>({
-        argBytes: 24,
-        handler: onKey((key, [, name, , type, data, size])=>{
-            const value = hive.getValue(key, (wide ? readWideText(name) : readText(name)) ?? '');
-            if (!value)
+    /** The computer name, wide and null-terminated, for the perf block. */
+    const systemNameBytes = ()=>widened(encodeAnsi(`${host.computerName ?? 'COMPUTER'}\0`));
+
+    /** The whole length of the PERF_DATA_BLOCK, its header rounded up to eight. */
+    const perfDataLength = ()=>(PERF_BLOCK_SIZE + systemNameBytes().length + 7) & ~7;
+
+    /**
+     * A PERF_DATA_BLOCK and the computer name after it, written at `data` and
+     * stamped with the clocks the program reads itself: there are no object
+     * types, so the whole block is its header. Returns the length written.
+     *
+     * @param {number} data
+     */
+    const writePerfData = data=>{
+        const name = systemNameBytes();
+        const total = (PERF_BLOCK_SIZE + name.length + 7) & ~7;
+        const block = new Uint8Array(total);
+        const view = new DataView(block.buffer);
+        [...'PERF'].forEach((character, at)=>view.setUint16(at * 2, character.charCodeAt(0), true));
+        view.setUint32(8, 1, true);                  // LittleEndian
+        view.setUint32(12, 1, true);                 // Version
+        view.setUint32(16, 1, true);                 // Revision
+        view.setUint32(20, total, true);             // TotalByteLength
+        view.setUint32(24, total, true);             // HeaderLength
+        view.setUint32(28, 0, true);                 // NumObjectTypes
+        view.setInt32(32, 238, true);                // DefaultObject
+        view.setUint32(80, name.length, true);       // SystemNameLength
+        view.setUint32(84, PERF_BLOCK_SIZE, true);   // SystemNameOffset
+        block.set(name, PERF_BLOCK_SIZE);
+        host.writeMemory(data, block);
+        // The three clocks and the time as the program reads them: the QPC
+        // value at +56, its frequency at +64, a file time at +72, and the
+        // SYSTEMTIME at +36 made from that file time.
+        host.system?.('KERNEL32.dll', 'QueryPerformanceCounter', [data + 56]);
+        host.system?.('KERNEL32.dll', 'QueryPerformanceFrequency', [data + 64]);
+        host.system?.('KERNEL32.dll', 'GetSystemTimeAsFileTime', [data + 72]);
+        host.system?.('KERNEL32.dll', 'FileTimeToSystemTime', [data + 72, data + 36]);
+        return total;
+    };
+
+    /**
+     * The "Counter" or "Help" index list, a REG_MULTI_SZ of index/name pairs.
+     * Counter's first pair is index 1 naming the last index; both end with the
+     * End Marker Windows closes them with. Bottlify defines no counters of its
+     * own, so the list is that frame alone.
+     *
+     * @param {boolean} help
+     */
+    const perfIndexList = help=>encodeAnsi(
+        `${(help ? ['1', '1847', '1847', 'End Marker'] : ['1', '1847', '1846', 'End Marker'])
+            .join('\0')}\0\0`);
+
+    /**
+     * RegQueryValueEx on a performance-data key. A counter name (anything but
+     * Counter/Help, a language suffix ignored) answers a PERF_DATA_BLOCK as
+     * REG_BINARY; "Counter"/"Help" answer the index lists as REG_MULTI_SZ. The
+     * block never reports its size on a sizing call -- the interface cannot --
+     * so too small a buffer is ERROR_MORE_DATA with the size left alone; the
+     * index lists report their size as an ordinary value does.
+     *
+     * @param {boolean} wide @param {number} namePointer
+     * @param {number} type @param {number} data @param {number} size
+     */
+    const queryPerformance = (wide, namePointer, type, data, size)=>{
+        if (size === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const read = wide ? readWideText(namePointer) : readText(namePointer);
+        const name = (read ?? '').toLowerCase();
+        if (name.startsWith('counter') || name.startsWith('help'))
+        {
+            const bytes = perfIndexList(name.startsWith('help'));
+            const answer = wide ? widened(bytes) : bytes;
+            writeDwordIf(type, REG_MULTI_SZ);
+            if (data !== 0 && readDword(size) < answer.length)
             {
-                return ERROR_FILE_NOT_FOUND;
-            }
-            writeDwordIf(type, value.type);
-            if (size === 0)
-            {
-                // Asking for data without saying how much room there is is
-                // the one combination Windows rejects outright.
-                return data === 0 ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER;
-            }
-            const bytes = wide && STRING_TYPES.has(value.type) ? widened(value.data) : value.data;
-            const required = bytes.length;
-            if (data === 0)
-            {
-                writeDword(size, required);
-                return ERROR_SUCCESS;
-            }
-            if (readDword(size) < required)
-            {
-                writeDword(size, required);
+                writeDword(size, answer.length);
                 return ERROR_MORE_DATA;
             }
-            host.writeMemory(data, bytes);
-            writeDword(size, required);
+            if (data !== 0)
+            {
+                host.writeMemory(data, answer);
+            }
+            writeDword(size, answer.length);
             return ERROR_SUCCESS;
-        }),
+        }
+        writeDwordIf(type, REG_BINARY);
+        if (data === 0 || readDword(size) < perfDataLength())
+        {
+            return ERROR_MORE_DATA;
+        }
+        writeDword(size, writePerfData(data));
+        return ERROR_SUCCESS;
+    };
+
+    /** @param {boolean} wide */
+    const queryValueEx = wide=>({
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: args=>((PERFORMANCE_KEYS.has(args[0] >>> 0))
+            ? queryPerformance(wide, args[1], args[3], args[4], args[5])
+            : onKey((key, [, name, , type, data, size])=>{
+                const value = hive.getValue(key,
+                    (wide ? readWideText(name) : readText(name)) ?? '');
+                if (!value)
+                {
+                    return ERROR_FILE_NOT_FOUND;
+                }
+                writeDwordIf(type, value.type);
+                if (size === 0)
+                {
+                    // Asking for data without saying how much room there is is
+                    // the one combination Windows rejects outright.
+                    return data === 0 ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER;
+                }
+                const bytes = wide && STRING_TYPES.has(value.type)
+                    ? widened(value.data) : value.data;
+                const required = bytes.length;
+                if (data === 0)
+                {
+                    writeDword(size, required);
+                    return ERROR_SUCCESS;
+                }
+                if (readDword(size) < required)
+                {
+                    writeDword(size, required);
+                    return ERROR_MORE_DATA;
+                }
+                host.writeMemory(data, bytes);
+                writeDword(size, required);
+                return ERROR_SUCCESS;
+            })(args)),
     });
 
     /**
@@ -1066,6 +1197,47 @@ export function createRegistryFunctions(host){
     });
 
     /**
+     * RegQueryInfoKey's class out-parameters, and the status they decide. With
+     * a length pointer but no buffer, only the class length (in characters) is
+     * reported. With a buffer, an empty one (size zero) is left untouched; a
+     * buffer too small for the class and its terminator is a short read -- the
+     * ANSI form writes what fits and a terminator and answers ERROR_MORE_DATA,
+     * the wide form writes nothing and answers ERROR_INSUFFICIENT_BUFFER, as
+     * NtQueryKey hands each back -- and a buffer that fits takes the class.
+     *
+     * @param {TextForm} text @param {number} buffer @param {number} sizePointer
+     * @param {string} className
+     */
+    const writeClass = (text, buffer, sizePointer, className)=>{
+        if (sizePointer === 0 || buffer === 0)
+        {
+            writeDwordIf(sizePointer, className.length);
+            return ERROR_SUCCESS;
+        }
+        const room = readDword(sizePointer);
+        if (room === 0)
+        {
+            writeDword(sizePointer, 0);
+            return ERROR_SUCCESS;
+        }
+        if (room <= className.length)
+        {
+            if (text.unit === 2)
+            {
+                writeDword(sizePointer, className.length);
+                return ERROR_INSUFFICIENT_BUFFER;
+            }
+            const fit = room - 1;
+            text.write(buffer, className.slice(0, fit));
+            writeDword(sizePointer, fit);
+            return ERROR_MORE_DATA;
+        }
+        text.write(buffer, className);
+        writeDword(sizePointer, className.length);
+        return ERROR_SUCCESS;
+    };
+
+    /**
      * RegQueryInfoKey in either width. The longest data is counted in the
      * bytes the caller's width answers it in.
      *
@@ -1076,22 +1248,25 @@ export function createRegistryFunctions(host){
         handler: onKey((key, args)=>{
             const [, keyClass, classSize, , subKeys, maxSubKeyLen, maxClassLen, valueCount,
                 maxValueNameLen, maxValueLen, securitySize, fileTime] = args;
+            // A class buffer with nowhere to say how long it is is refused, and
+            // nothing is written to it.
+            if (keyClass !== 0 && classSize === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
             const names = hive.subkeys(key);
             const values = hive.values(key);
-            if (keyClass !== 0)
-            {
-                text.write(keyClass, '');
-            }
-            writeDwordIf(classSize, 0);
+            const className = hive.classOf(key);
+            const classStatus = writeClass(text, keyClass, classSize, className);
             writeDwordIf(subKeys, names.length);
             writeDwordIf(maxSubKeyLen, largest(names.map(name=>name.length)));
-            writeDwordIf(maxClassLen, 0);
+            writeDwordIf(maxClassLen, hive.maxSubkeyClassLength(key));
             writeDwordIf(valueCount, values.length);
             writeDwordIf(maxValueNameLen, largest(values.map(value=>value.name.length)));
             writeDwordIf(maxValueLen, largest(values.map(value=>text.answer(value).length)));
             writeDwordIf(securitySize, 0);
             writeFileTime(fileTime);
-            return ERROR_SUCCESS;
+            return classStatus;
         }),
     });
 
@@ -1644,8 +1819,9 @@ export function createRegistryFunctions(host){
          */
         RegCreateKeyExW: {
             argBytes: 36,
-            handler: onKey((key, [, subKey, , , , , , result, disposition])=>
-                createKey(key, readWideText(subKey), result, disposition)),
+            handler: onKey((key, [, subKey, , keyClass, , , , result, disposition])=>
+                createKey(key, readWideText(subKey), result, disposition,
+                    readWideText(keyClass) ?? '')),
         },
 
         /**
@@ -1771,6 +1947,7 @@ export function createRegistryFunctions(host){
                 if ((buffer >>> 0) === 0 || readDword(size >>> 0) < needed)
                 {
                     writeDword(size >>> 0, needed);
+                    host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
                 writeText(buffer >>> 0, USER_NAME);
@@ -1792,6 +1969,7 @@ export function createRegistryFunctions(host){
                 if ((buffer >>> 0) === 0 || readDword(size >>> 0) < needed)
                 {
                     writeDword(size >>> 0, needed);
+                    host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
                 host.writeMemory(buffer >>> 0, widened(encodeAnsi(`${USER_NAME}\0`)));
@@ -1800,21 +1978,8 @@ export function createRegistryFunctions(host){
             },
         },
 
-        /**
-         * BOOL GetFileSecurityA(LPCSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-         *                      DWORD nLength, LPDWORD lpnLengthNeeded)
-         * BOOL SetFileSecurityA(LPCSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR)
-         * BOOL GetFileSecurityW(LPCWSTR, ...), the same with a wide name
-         *
-         * This machine's volume carries no security descriptors, and the
-         * honest answer is the one the consumer line of Windows gave: the
-         * call is not implemented. A program of the era asks before it
-         * copies a file and carries on when told so; told nothing -- a zero
-         * with a stale error behind it -- it takes the copy for failed.
-         */
-        GetFileSecurityA: { argBytes: 20, handler: notImplemented },
-        SetFileSecurityA: { argBytes: 12, handler: notImplemented },
-        GetFileSecurityW: { argBytes: 20, handler: notImplemented },
+        // GetFileSecurity and SetFileSecurity are advapi32's file-security
+        // calls, beside the named ones (named-security.js).
 
         /**
          * BOOL IsTextUnicode(const VOID *lpv, int iSize, LPINT lpiResult)
@@ -1863,14 +2028,6 @@ export function createRegistryFunctions(host){
                     return notImplemented();
                 },
             }])),
-
-        SetFileSecurityW: {
-            argBytes: 12,
-            handler: ()=>{
-                host.setLastError?.(ERROR_CALL_NOT_IMPLEMENTED);
-                return 0;
-            },
-        },
 
         /**
          * BOOL AllocateAndInitializeSid(PSID_IDENTIFIER_AUTHORITY pIdentifierAuthority,
@@ -2317,8 +2474,13 @@ export function createRegistryFunctions(host){
         // Named by a path or a key's name, an object's security needs the
         // volume and the hive this library already holds.
         ...createNamedSecurityFunctions(host),
+        // The descriptor and SDDL calls hand out LocalAlloc blocks.
+        ...host.allocate ? createSecurityFunctions({ ...host, allocate: host.allocate,
+            setLastError: host.setLastError ?? (()=>{}) }) : {},
+        ...host.allocate ? createLsaFunctions({ ...host, allocate: host.allocate }) : {},
 
         [UNLOAD_KEY]: unload,
         [REGISTRY_NATIVES]: nativeRegistry(),
+        [KEY_OF_HANDLE]: keyOf,
     };
 }

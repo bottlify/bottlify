@@ -5,6 +5,12 @@
  */
 
 /**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
+/**
  * sfc — System File Protection's client library, and the System Restore call
  * it also exports.
  *
@@ -21,8 +27,6 @@ const ERROR_SERVICE_DISABLED = 1058;
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
-
-const MAX_PATH = 260;
 
 /**
  * Where an installed catalog is kept: the system catalog database, one
@@ -75,7 +79,7 @@ export function createSfcFunctions(host){
 
     /** @param {number} address */
     const text = address=>((address >>> 0) === 0 || !host.readCString
-        ? '' : host.readCString(address >>> 0, MAX_PATH));
+        ? '' : host.readCString(address >>> 0, WHOLE_NAME));
 
     /**
      * Writes a whole catalog into the store under its own name.

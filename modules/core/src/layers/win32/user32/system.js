@@ -75,6 +75,11 @@ const SWP_NOACTIVATE = 0x0010;
 const WM_CHILDACTIVATE = 0x0022;
 const WM_WINDOWPOSCHANGING = 0x0046;
 const WM_WINDOWPOSCHANGED = 0x0047;
+/** The accessibility events placing a window raises, about the window itself. */
+const EVENT_OBJECT_SHOW = 0x8002;
+const EVENT_OBJECT_HIDE = 0x8003;
+const EVENT_OBJECT_LOCATIONCHANGE = 0x800b;
+const OBJID_WINDOW = 0;
 const SWP_SHOWWINDOW = 0x0040;
 const SWP_HIDEWINDOW = 0x0080;
 const SWP_FRAMECHANGED = 0x0020;
@@ -273,6 +278,33 @@ const KEYEVENTF_EXTENDEDKEY = 0x0001;
 const KEYEVENTF_KEYUP = 0x0002;
 const KEYEVENTF_UNICODE = 0x0004;
 const KEYEVENTF_SCANCODE = 0x0008;
+/** The low-level hooks an injected event is shown before it is queued. */
+const WH_KEYBOARD_LL = 13;
+const WH_MOUSE_LL = 14;
+/** MSLLHOOKSTRUCT and KBDLLHOOKSTRUCT's flags: put in by a program, a key let go, extended. */
+const LLMHF_INJECTED = 0x01;
+const LLKHF_EXTENDED = 0x01;
+const LLKHF_INJECTED = 0x10;
+const LLKHF_ALTDOWN = 0x20;
+const LLKHF_UP = 0x80;
+const VK_PACKET = 0xe7;
+const VK_MENU = 0x12;
+const VK_LMENU = 0xa4;
+const VK_RMENU = 0xa5;
+const VK_CONTROL = 0x11;
+const VK_LCONTROL = 0xa2;
+const VK_RCONTROL = 0xa3;
+const VK_F10 = 0x79;
+const VK_SHIFT = 0x10;
+const VK_LSHIFT = 0xa0;
+const VK_RSHIFT = 0xa1;
+const VK_NUMLOCK = 0x90;
+/** The keys of the numeric keypad with NumLock off: VK_NUMPAD0..9, then VK_DECIMAL. */
+const KEYPAD_NAVIGATION = [0x2d, 0x23, 0x28, 0x22, 0x25, 0x0c, 0x27, 0x24, 0x26, 0x21];
+const VK_NUMPAD0 = 0x60;
+const VK_DECIMAL = 0x6e;
+const VK_DELETE = 0x2e;
+const WM_MOUSEMOVE = 0x0200;
 const ERROR_INVALID_PARAMETER = 87;
 /** The ids of the system's cursors SetSystemCursor replaces (OCR_NORMAL to OCR_APPSTARTING). */
 const SYSTEM_CURSOR_IDS = Object.freeze([32512, 32513, 32514, 32515, 32516, 32640, 32641, 32642,
@@ -836,14 +868,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         // A system class's procedure lives on this side, and a program
-        // that subclassed one calls it through here with its address.
-        return host.callProcedure(previous >>> 0, {
+        // that subclassed one calls it through here with its address. An
+        // address is called as a procedure of the call's own encoding; a
+        // handle names one of the other, and the message is converted on
+        // its way (class.c test_wndproc_handles).
+        const behind = host.procBehind?.(previous) ?? null;
+        return host.callProcedure(behind ? behind.address : previous >>> 0, {
             hwnd: hwnd >>> 0,
             message: message >>> 0,
             wParam: wParam >>> 0,
             lParam: lParam >>> 0,
             ...unicode ? { unicode } : {},
-        }, host.callerThread?.());
+        }, host.callerThread?.(), behind ? behind.unicode : unicode);
     };
 
     /**
@@ -942,7 +978,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 height: (flags & SWP_NOSIZE) !== 0 ? record.height : cy,
             }, thread, pos) ?? 0 : 0;
             /** WM_WINDOWPOSCHANGED, with what became of what was asked. */
-            const changed = ()=>{
+            /** @param {boolean} restacked */
+            const changed = restacked=>{
                 const window = host.geometry.windowRect(record);
                 const client = host.geometry.clientRect(record);
                 const same = (/** @type {any} */ a, /** @type {any} */ b)=>a.left === b.left
@@ -958,7 +995,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 {
                     final &= ~(SWP_SHOWWINDOW | SWP_HIDEWINDOW);
                 }
-                if ((final & SWP_STATUS) === SWP_NO_CHANGE)
+                // Nothing changed, not even the stacking: only WM_WINDOWPOSCHANGING
+                // was sent (msg.c WmSetFocus_1's raise of the active window).
+                if (((final | (restacked ? 0 : SWP_NOZORDER)) & SWP_STATUS) === SWP_NO_CHANGE)
                 {
                     return 0;
                 }
@@ -986,7 +1025,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      *
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
      * @param {unknown} [thread]
-     * @param {() => any} [changed]
+     * @param {(restacked: boolean) => any} [changed]  Told whether the window
+     *     moved in the stacking.
      */
     const place = (args, thread = host.callerThread?.(), changed = ()=>0)=>{
         const [hwnd, after, x, y, cx, cy, flags] = args;
@@ -998,6 +1038,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const wasShown = host.shown(record);
+        const wasVisible = (record.style & WS_VISIBLE) !== 0;
         const before = wasShown ? host.geometry.shapedRect(record) : null;
         const oldWidth = record.width;
         const oldHeight = record.height;
@@ -1010,7 +1051,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // Moved while it holds the mouse, it is being dragged: held as it is,
         // its picture taken before it moves.
         const dragged = wasShown && moved && !sized && host.dragging?.(record) === true;
-        const watched = host.beforeChange?.(record, dragged) ?? null;
+        // A placement that changes nothing -- activation bringing a window
+        // already on top to the top -- marks, paints and tells nothing.
+        const nothing = !moved && !sized && (flags & SWP_FRAMECHANGED) === 0
+            && ((flags & SWP_SHOWWINDOW) === 0 || (record.style & WS_VISIBLE) !== 0)
+            && ((flags & SWP_HIDEWINDOW) === 0 || (record.style & WS_VISIBLE) === 0)
+            && ((flags & SWP_NOZORDER) !== 0 || host.inPlace?.(record, after >>> 0) === true);
+        const watched = nothing ? null : host.beforeChange?.(record, dragged) ?? null;
         if ((flags & SWP_NOMOVE) === 0)
         {
             record.x = x | 0;
@@ -1029,13 +1076,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             record.style = (record.style & ~WS_VISIBLE) >>> 0;
         }
+        let restacked = false;
         if ((flags & SWP_NOZORDER) === 0 && (record.style & WS_CHILD) !== 0)
         {
-            host.restack(record, after >>> 0, false);
+            restacked = host.restack(record, after >>> 0, false) !== false;
         }
         else if ((flags & SWP_NOZORDER) === 0 && (after | 0) !== HWND_BOTTOM)
         {
-            host.raise(record, false);
+            restacked = host.raise(record, false) !== false;
         }
         host.tell?.(record);
         const isShown = host.shown(record);
@@ -1071,9 +1119,17 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 redraw,
             });
         }
+        // EVENT_OBJECT_SHOW or _HIDE as the window's own visibility flips,
+        // before anything is painted or told (msg.c WmShowOverlappedSeq,
+        // WmHideOverlappedSeq).
+        const nowVisible = (record.style & WS_VISIBLE) !== 0;
+        const flipped = nowVisible === wasVisible ? 0
+            : host.winEvent?.(nowVisible ? EVENT_OBJECT_SHOW : EVENT_OBJECT_HIDE, record.hwnd,
+                OBJID_WINDOW, thread) ?? 0;
         // What it showed is framed and erased before it returns, as Windows
         // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
-        const erased = redrawn ? host.eraseShown?.(thread) ?? 1 : 1;
+        const erased = andThen(flipped, ()=>(redrawn && !nothing
+            ? host.eraseShown?.(thread) ?? 1 : 1));
         // A top-level window placed without SWP_NOACTIVATE is activated
         // before it hears WM_WINDOWPOSCHANGED; the active one hidden hands the
         // activation on after (msg.c WmShowOverlappedSeq,
@@ -1087,7 +1143,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // child, shown or not (user32's message tests, WmShowChildSeq_2 and
         // _4): an MDI child becomes the client's active one this way when its
         // program brings it to the top.
-        const told = andThen(andThen(activated, changed),
+        // EVENT_OBJECT_LOCATIONCHANGE once it has heard where it went.
+        const located = andThen(andThen(activated, ()=>changed(restacked)), ()=>(moved || sized
+            ? host.winEvent?.(EVENT_OBJECT_LOCATIONCHANGE, record.hwnd, OBJID_WINDOW, thread) ?? 0
+            : 0));
+        const told = andThen(located,
             ()=>(handsOn ? host.activateOther?.(record, thread) ?? 0 : 0));
         if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
             && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
@@ -1249,13 +1309,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return record ? classes.get(record.className) ?? null : null;
     };
 
-    /** @param {any} cls @param {number} index */
-    const readClassLong = (cls, index)=>{
+    /**
+     * @param {any} cls @param {number} index
+     * @param {boolean} [unicode]  Read through GetClassLongW: a procedure of
+     *     the other encoding is answered as its handle.
+     */
+    const readClassLong = (cls, index, unicode = false)=>{
         switch (index | 0){
             case GCL_STYLE:
                 return cls.style;
             case GCL_WNDPROC:
-                return cls.wndProc;
+                return host.procAs ? host.procAs(cls.wndProc, cls.unicode === true, unicode)
+                    : cls.wndProc;
             case GCL_CBCLSEXTRA:
                 return cls.classExtra;
             case GCL_CBWNDEXTRA:
@@ -1337,15 +1402,23 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return (index | 0) >= 0 && (index | 0) + 2 <= cls.extra.byteLength ? index | 0 : null;
     };
 
-    /** @param {any} cls @param {number} index @param {number} value */
-    const writeClassLong = (cls, index, value)=>{
+    /**
+     * @param {any} cls @param {number} index @param {number} value
+     * @param {boolean} [unicode]  Set through SetClassLongW: the windows made
+     *     of the class from now on read wide text; those made already keep
+     *     their own procedure (win.c test_IsWindowUnicode).
+     */
+    const writeClassLong = (cls, index, value, unicode = false)=>{
         switch (index | 0){
             case GCL_STYLE:
                 cls.style = value >>> 0;
                 return;
-            case GCL_WNDPROC:
-                cls.wndProc = value >>> 0;
+            case GCL_WNDPROC: {
+                const behind = host.procBehind?.(value) ?? null;
+                cls.wndProc = behind ? behind.address : value >>> 0;
+                cls.unicode = behind ? behind.unicode : unicode;
                 return;
+            }
             case GCL_HICON:
                 cls.icon = value >>> 0;
                 return;
@@ -1483,7 +1556,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const FILE_HEADER = 14;
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         if (bytes.length <= FILE_HEADER + 12 || view.getUint16(0, true) !== 0x4d42
-            || !host.allocate || !host.bitmapFromDib)
+            || !host.allocate || !host.bitmapFromDib || !loadableDib(view, FILE_HEADER))
         {
             return 0;
         }
@@ -1505,6 +1578,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             host.release?.(at);
         }
     });
+
+    /**
+     * Whether the DIB a .bmp file holds is one LoadImage takes: its header
+     * one of the four sizes a header has -- BITMAPCOREHEADER, BITMAPINFOHEADER
+     * and its V4 and V5 forms -- inside the file, and no side longer than
+     * 65535 pixels. Any other size is a broken file rather than a header
+     * newer than this one, and the colour table it would place lies wherever
+     * that size says (Wine's cursoricon test, broken biSize).
+     *
+     * @param {DataView} view @param {number} at  Where the DIB starts in the file.
+     */
+    const loadableDib = (view, at)=>{
+        const size = view.getUint32(at, true);
+        if (![12, 40, 108, 124].includes(size) || at + size > view.byteLength)
+        {
+            return false;
+        }
+        const width = size === 12 ? view.getUint16(at + 4, true) : view.getInt32(at + 4, true);
+        const height = size === 12 ? view.getUint16(at + 6, true) : view.getInt32(at + 8, true);
+        return width > 0 && width <= 0xffff && height !== 0 && Math.abs(height) <= 0xffff;
+    };
 
     /**
      * A file's bytes, handed to `make`; 0 for a name that is no file. The
@@ -1603,13 +1697,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * 0..65535 across the display, which is the only coordinate space the call
      * has, so it is scaled onto the screen here.
      *
-     * @param {{ dx: number, dy: number, data: number, flags: number }} event
+     * Each piece of it -- a move, a button, the wheel -- is first shown to
+     * the WH_MOUSE_LL hooks as the message it makes, with an MSLLHOOKSTRUCT
+     * flagged LLMHF_INJECTED (`lowLevelHook`): a hook of the calling thread
+     * that answers other than zero takes that piece away.
+     *
+     * @param {{ dx: number, dy: number, data: number, flags: number, extra?: number }} event
      *     The MOUSEINPUT's fields, as SendInput reads them or mouse_event takes them.
-     * @returns {boolean} whether anything was inserted.
+     * @returns {boolean | Promise<boolean>} whether anything was inserted.
      */
-    const injectMouse = ({ dx, dy, data, flags })=>{
-        let inserted = false;
-
+    const injectMouse = ({ dx, dy, data, flags, extra: extraInfo = 0 })=>{
+        /** @type {{ message: number, data?: number, input: any, quiet?: boolean }[]} */
+        const pieces = [];
+        const before = host.cursor?.() ?? { x: 0, y: 0 };
+        let at = before;
         if ((flags & MOUSEEVENTF_MOVE) !== 0)
         {
             /** @type {{ kind: string, dx?: number, dy?: number,
@@ -1619,28 +1720,35 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             {
                 move.x = Math.round((dx | 0) * (screen.width - 1) / 65535);
                 move.y = Math.round((dy | 0) * (screen.height - 1) / 65535);
+                at = { x: move.x, y: move.y };
             }
             else
             {
                 move.dx = dx | 0;
                 move.dy = dy | 0;
+                at = { x: Math.min(Math.max(before.x + move.dx, 0), screen.width - 1),
+                    y: Math.min(Math.max(before.y + move.dy, 0), screen.height - 1) };
             }
-            host.sendInput?.(move);
-            inserted = true;
+            // A move of nothing is not shown to the hooks, as Windows since
+            // 10 1709 does not show it.
+            pieces.push({ message: WM_MOUSEMOVE, input: move,
+                quiet: (flags & MOUSEEVENTF_ABSOLUTE) === 0 && move.dx === 0 && move.dy === 0 });
         }
 
-        /** @type {[number, string, boolean][]} */
+        /** @type {[number, string, boolean, number][]} */
         const presses = [
-            [MOUSEEVENTF_LEFTDOWN, 'left', true], [MOUSEEVENTF_LEFTUP, 'left', false],
-            [MOUSEEVENTF_RIGHTDOWN, 'right', true], [MOUSEEVENTF_RIGHTUP, 'right', false],
-            [MOUSEEVENTF_MIDDLEDOWN, 'middle', true], [MOUSEEVENTF_MIDDLEUP, 'middle', false],
+            [MOUSEEVENTF_LEFTDOWN, 'left', true, 0x0201],
+            [MOUSEEVENTF_LEFTUP, 'left', false, 0x0202],
+            [MOUSEEVENTF_RIGHTDOWN, 'right', true, 0x0204],
+            [MOUSEEVENTF_RIGHTUP, 'right', false, 0x0205],
+            [MOUSEEVENTF_MIDDLEDOWN, 'middle', true, 0x0207],
+            [MOUSEEVENTF_MIDDLEUP, 'middle', false, 0x0208],
         ];
-        for (const [flag, button, down] of presses)
+        for (const [flag, button, down, message] of presses)
         {
             if ((flags & flag) !== 0)
             {
-                host.sendInput?.({ kind: 'pointerButton', button, down });
-                inserted = true;
+                pieces.push({ message, input: { kind: 'pointerButton', button, down } });
             }
         }
         // The two extra buttons share a flag pair and name themselves in the
@@ -1648,24 +1756,85 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const extra = (data >>> 0) >>> 16;
         if ((flags & MOUSEEVENTF_XDOWN) !== 0)
         {
-            host.sendInput?.({ kind: 'pointerButton',
-                button: extra === 2 ? 'x2' : 'x1', down: true });
-            inserted = true;
+            pieces.push({ message: 0x020b, data: extra << 16, input: { kind: 'pointerButton',
+                button: extra === 2 ? 'x2' : 'x1', down: true } });
         }
         if ((flags & MOUSEEVENTF_XUP) !== 0)
         {
-            host.sendInput?.({ kind: 'pointerButton',
-                button: extra === 2 ? 'x2' : 'x1', down: false });
-            inserted = true;
+            pieces.push({ message: 0x020c, data: extra << 16, input: { kind: 'pointerButton',
+                button: extra === 2 ? 'x2' : 'x1', down: false } });
         }
         if ((flags & MOUSEEVENTF_WHEEL) !== 0)
         {
             // mouseData is the wheel delta itself, in WHEEL_DELTA (120) units,
             // which is what both the message and DirectInput carry.
-            host.sendInput?.({ kind: 'wheel', delta: data | 0 });
-            inserted = true;
+            pieces.push({ message: 0x020a, data: (data & 0xffff) << 16,
+                input: { kind: 'wheel', delta: data | 0 } });
         }
-        return inserted;
+        /** @param {number} index @returns {boolean | Promise<boolean>} */
+        const next = index=>{
+            const piece = pieces[index];
+            if (!piece)
+            {
+                return pieces.length !== 0;
+            }
+            // MSLLHOOKSTRUCT: pt, mouseData, flags, time, dwExtraInfo.
+            const structure = ()=>new Uint8Array(new Uint32Array([at.x, at.y, piece.data ?? 0,
+                LLMHF_INJECTED, Math.floor(host.now?.() ?? 0), extraInfo]).buffer);
+            const shown = piece.quiet ? 0
+                : host.lowLevelHook?.(WH_MOUSE_LL, piece.message, structure) ?? 0;
+            return andThen(shown, (/** @type {number} */ taken)=>{
+                if ((taken | 0) === 0)
+                {
+                    host.sendInput?.(piece.input);
+                }
+                return next(index + 1);
+            });
+        };
+        return next(0);
+    };
+
+    /**
+     * The virtual key a low-level keyboard hook is told of: a side for a
+     * shift, control or alt named without one (the right control and alt by
+     * the extended flag; a shift is the left one either way), the key a scan
+     * code names when the program named it by its scan code, and VK_PACKET
+     * for a character put in with no key named.
+     *
+     * @param {number} vk @param {number} scan @param {number} flags
+     */
+    const lowLevelKey = (vk, scan, flags)=>{
+        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0;
+        if ((flags & KEYEVENTF_UNICODE) !== 0 && vk === 0)
+        {
+            return VK_PACKET;
+        }
+        if ((flags & KEYEVENTF_SCANCODE) !== 0)
+        {
+            const named = mapVirtualKey(scan & 0xff, MAPVK_VSC_TO_VK_EX);
+            if (extended)
+            {
+                return named === VK_LCONTROL ? VK_RCONTROL : named === VK_LMENU ? VK_RMENU : named;
+            }
+            // The keypad's digits are its arrows and the rest while NumLock is off.
+            const numLock = ((host.keyState?.(VK_NUMLOCK) ?? 0) & 0x01) !== 0;
+            if (!numLock && named >= VK_NUMPAD0 && named < VK_NUMPAD0 + 10)
+            {
+                return KEYPAD_NAVIGATION[named - VK_NUMPAD0];
+            }
+            return !numLock && named === VK_DECIMAL ? VK_DELETE : named;
+        }
+        switch (vk)
+        {
+            case VK_SHIFT:
+                return VK_LSHIFT;
+            case VK_CONTROL:
+                return extended ? VK_RCONTROL : VK_LCONTROL;
+            case VK_MENU:
+                return extended ? VK_RMENU : VK_LMENU;
+            default:
+                return vk;
+        }
     };
 
     /**
@@ -1680,30 +1849,63 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * VK_PACKET and lets TranslateMessage alone turn it into WM_CHAR, so only
      * the down half of such a pair produces anything here.
      *
-     * @param {{ wVk: number, wScan: number, flags: number }} event
+     * The press is first shown to the WH_KEYBOARD_LL hooks, with a
+     * KBDLLHOOKSTRUCT flagged LLKHF_INJECTED (`lowLevelHook`): a hook of the
+     * calling thread that answers other than zero takes it away. The hook
+     * hears the message the keys as they are after the press make -- with
+     * Alt down and Control up a system key and LLKHF_ALTDOWN, so Alt's own
+     * release is a plain WM_KEYUP -- and a character put in by KEYEVENTF_UNICODE
+     * as VK_PACKET unless a virtual key was named beside it (user32:input's
+     * keyboard sequences).
+     *
+     * @param {{ wVk: number, wScan: number, flags: number, extra?: number }} event
      *     The KEYBDINPUT's fields, as SendInput reads them or keybd_event takes them.
-     * @returns {boolean} whether anything was inserted.
+     * @returns {boolean | Promise<boolean>} whether anything was inserted.
      */
-    const injectKeyboard = ({ wVk, wScan, flags })=>{
+    const injectKeyboard = ({ wVk, wScan, flags, extra = 0 })=>{
         const up = (flags & KEYEVENTF_KEYUP) !== 0;
-
-        if ((flags & KEYEVENTF_UNICODE) !== 0)
-        {
-            if (!up)
+        const unicode = (flags & KEYEVENTF_UNICODE) !== 0;
+        // The right shift is an extended key to a low-level hook whether or
+        // not the program said so.
+        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0
+            || ((flags & (KEYEVENTF_SCANCODE | KEYEVENTF_UNICODE)) === 0
+                && (wVk & 0xff) === VK_RSHIFT);
+        const vk = lowLevelKey(wVk & 0xff, wScan, flags);
+        // A scan code, or a character with a virtual key beside it, is
+        // reported by its low byte; a character alone whole.
+        const scan = unicode && (wVk & 0xff) === 0 ? wScan & 0xffff : wScan & 0xff;
+        /** Whether one of two keys is down once this press is in. @param {number[]} pair */
+        const held = pair=>(pair.includes(vk) ? !up
+            : ((host.keyState?.(pair[0]) ?? 0) & 0x8000) !== 0);
+        const alt = held([VK_MENU, VK_LMENU, VK_RMENU]);
+        const altOnly = alt && !held([VK_CONTROL, VK_LCONTROL, VK_RCONTROL]);
+        const message = (altOnly || vk === VK_F10 ? 0x0104 : 0x0100) + (up ? 1 : 0);
+        // KBDLLHOOKSTRUCT: vkCode, scanCode, flags, time, dwExtraInfo.
+        const shown = host.lowLevelHook?.(WH_KEYBOARD_LL, message, ()=>new Uint8Array(
+            new Uint32Array([vk, scan, LLKHF_INJECTED | (up ? LLKHF_UP : 0)
+                | (extended ? LLKHF_EXTENDED : 0) | (altOnly ? LLKHF_ALTDOWN : 0),
+            Math.floor(host.now?.() ?? 0), extra]).buffer)) ?? 0;
+        return andThen(shown, (/** @type {number} */ taken)=>{
+            if ((taken | 0) !== 0)
             {
-                host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan) });
+                return true;
             }
+            if (unicode)
+            {
+                if (!up)
+                {
+                    host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan) });
+                }
+                return true;
+            }
+            // A key named by its virtual key still carries the scan code the
+            // program wrote beside it, which is what DirectInput 8 reads.
+            const named = (flags & KEYEVENTF_SCANCODE) !== 0
+                ? { scan: wScan, extended }
+                : { vk: wVk, scanGiven: wScan, extended };
+            host.sendInput?.({ kind: 'key', ...named, down: !up });
             return true;
-        }
-
-        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0;
-        // A key named by its virtual key still carries the scan code the
-        // program wrote beside it, which is what DirectInput 8 reads.
-        const named = (flags & KEYEVENTF_SCANCODE) !== 0
-            ? { scan: wScan, extended }
-            : { vk: wVk, scanGiven: wScan, extended };
-        host.sendInput?.({ kind: 'key', ...named, down: !up });
-        return true;
+        });
     };
 
     /**
@@ -2048,10 +2250,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const startY = top ? vertGap : size.height - vertGap - height;
         let x = startX;
         let y = startY;
+        /** @type {number[][]} */
+        const moves = [];
         for (const icon of icons)
         {
-            setWindowPos([icon.hwnd, 0, x, y, 0, 0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+            moves.push([icon.hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
             if ((arrange & ARW_UP) === 0)
             {
                 x += right ? -across : across;
@@ -2071,7 +2274,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 }
             }
         }
-        return icons.length;
+        return andThen(oneAfterAnother(moves), ()=>icons.length);
     };
 
     /**
@@ -2108,15 +2311,29 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     };
 
     /**
-     * Places one arranged window: a window without a sizing frame keeps its
-     * size and only moves.
+     * Where one arranged window goes, as SetWindowPos's arguments: a window
+     * without a sizing frame keeps its size and only moves.
      *
      * @param {any} record @param {number} x @param {number} y
      * @param {number} width @param {number} height
      */
-    const arrangeOne = (record, x, y, width, height)=>setWindowPos([record.hwnd, 0, x, y,
+    const arrangeOne = (record, x, y, width, height)=>[record.hwnd, 0, x, y,
         width, height, SWP_NOZORDER | SWP_NOACTIVATE
-            | ((record.style & WS_THICKFRAME) !== 0 ? 0 : SWP_NOSIZE)]);
+            | ((record.style & WS_THICKFRAME) !== 0 ? 0 : SWP_NOSIZE)];
+
+    /**
+     * SetWindowPos for each window in turn: each may run its procedure, and
+     * the next is placed once the one before has returned.
+     *
+     * @param {number[][]} moves  SetWindowPos's arguments, one set a window.
+     * @returns {number | Promise<number>}
+     */
+    const oneAfterAnother = moves=>{
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>(at >= moves.length ? 0
+            : andThen(setWindowPos(moves[at]), ()=>next(at + 1)));
+        return next(0);
+    };
 
     /** @param {number} index */
     const metric = index=>{
@@ -3115,6 +3332,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 const height = Math.floor((area.bottom - area.top) * 3 / 4);
                 let x = area.left;
                 let y = area.top;
+                /** @type {number[][]} */
+                const moves = [];
                 for (const [at, record] of [...found.windows].reverse().entries())
                 {
                     if (at > 0)
@@ -3122,9 +3341,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                         x = x + spacing + width > area.right ? area.left : x + spacing;
                         y = y + spacing + height > area.bottom ? area.top : y + spacing;
                     }
-                    arrangeOne(record, x, y, width, height);
+                    moves.push(arrangeOne(record, x, y, width, height));
                 }
-                return found.windows.length;
+                return andThen(oneAfterAnother(moves), ()=>found.windows.length);
             },
         },
 
@@ -3159,18 +3378,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 const shorter = Math.floor(tiles.length / columns);
                 const longer = tiles.length % columns;
                 let at = 0;
+                /** @type {number[][]} */
+                const moves = [];
                 for (let column = 0; column < columns; column++)
                 {
                     const rows = shorter + (column >= columns - longer ? 1 : 0);
                     const height = Math.floor((area.bottom - area.top) / rows);
                     for (let row = 0; row < rows; row++, at++)
                     {
-                        arrangeOne(tiles[at], area.left + column * Math.floor(
+                        moves.push(arrangeOne(tiles[at], area.left + column * Math.floor(
                             (area.right - area.left) / columns), area.top + row * height, width,
-                        height);
+                        height));
                     }
                 }
-                return tiles.length;
+                return andThen(oneAfterAnother(moves), ()=>tiles.length);
             },
         },
 
@@ -3348,6 +3569,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
+                // Null on either side is refused, as for the uncounted form.
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
                 host.writeMemory(target >>> 0, transcodeSingleByte(
                     host.readMemory(source >>> 0, count >>> 0), OEM_PAGE, ANSI_PAGE));
                 return 1;
@@ -3359,6 +3585,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
+                // Null on either side is refused, as for the uncounted form.
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
                 host.writeMemory(target >>> 0, transcodeSingleByte(
                     host.readMemory(source >>> 0, count >>> 0), ANSI_PAGE, OEM_PAGE));
                 return 1;
@@ -3712,8 +3943,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         GrayStringA: { argBytes: 36, handler: ()=>0 },
         TabbedTextOutA: { argBytes: 32, handler: ()=>0 },
         WinHelpA: { argBytes: 16, handler: ()=>0 },
-        /** void NotifyWinEvent(DWORD event, HWND hwnd, LONG idObject, LONG idChild): nobody listens */
-        NotifyWinEvent: { argBytes: 16, handler: ()=>0 },
         GrayStringW: { argBytes: 36, handler: ()=>0 },
         TabbedTextOutW: { argBytes: 32, handler: ()=>0 },
         WinHelpW: { argBytes: 16, handler: ()=>0 },
@@ -3895,7 +4124,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([format, name, count])=>{
                 const text = clipboardFormatName(format >>> 0);
-                if (text === null)
+                // No room, not even for the terminator: nothing is written,
+                // and a NULL buffer is what such a caller passes.
+                if (text === null || (count | 0) <= 0)
                 {
                     return 0;
                 }
@@ -3907,7 +4138,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([format, name, count])=>{
                 const text = clipboardFormatName(format >>> 0);
-                if (text === null)
+                if (text === null || (count | 0) <= 0)
                 {
                     return 0;
                 }
@@ -4383,35 +4614,40 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 }
                 const events = count >>> 0;
                 const at = inputs >>> 0;
-                let inserted = 0;
-                for (let index = 0; index < events; index++)
-                {
+                // One after the other: a low-level hook may run guest code
+                // between two of them.
+                /** @param {number} index @param {number} inserted @returns {any} */
+                const next = (index, inserted)=>{
+                    if (index >= events)
+                    {
+                        return inserted;
+                    }
                     const piece = at + index * INPUT.SIZE;
                     const type = readU32(piece + INPUT.type);
                     if (type === INPUT_MOUSE)
                     {
-                        injectMouse({ dx: readI32(piece + INPUT.dx), dy: readI32(piece + INPUT.dy),
-                            data: readU32(piece + INPUT.mouseData),
-                            flags: readU32(piece + INPUT.dwFlags) });
-                        inserted++;
+                        return andThen(injectMouse({ dx: readI32(piece + INPUT.dx),
+                            dy: readI32(piece + INPUT.dy), data: readU32(piece + INPUT.mouseData),
+                            flags: readU32(piece + INPUT.dwFlags),
+                            extra: readU32(piece + INPUT.mouseExtra) }),
+                        ()=>next(index + 1, inserted + 1));
                     }
-                    else if (type === INPUT_KEYBOARD)
+                    if (type === INPUT_KEYBOARD)
                     {
-                        injectKeyboard({ wVk: readU16(piece + INPUT.wVk),
+                        return andThen(injectKeyboard({ wVk: readU16(piece + INPUT.wVk),
                             wScan: readU16(piece + INPUT.wScan),
-                            flags: readU32(piece + INPUT.keyFlags) });
-                        inserted++;
+                            flags: readU32(piece + INPUT.keyFlags),
+                            extra: readU32(piece + INPUT.keyExtra) }),
+                        ()=>next(index + 1, inserted + 1));
                     }
-                    else if (type === INPUT_HARDWARE)
+                    if (type === INPUT_HARDWARE)
                     {
-                        inserted++;
+                        return next(index + 1, inserted + 1);
                     }
-                    else
-                    {
-                        host.divergence?.('SendInput', `INPUT type ${type} is not injected`);
-                    }
-                }
-                return inserted;
+                    host.divergence?.('SendInput', `INPUT type ${type} is not injected`);
+                    return next(index + 1, inserted);
+                };
+                return next(0, 0);
             },
         },
 
@@ -4424,10 +4660,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         keybd_event: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([vk, scan, flags])=>{
-                injectKeyboard({ wVk: vk & 0xff, wScan: scan & 0xff, flags: flags >>> 0 });
-                return 0;
-            },
+            handler: ([vk, scan, flags, extra])=>andThen(injectKeyboard({ wVk: vk & 0xff,
+                wScan: scan & 0xff, flags: flags >>> 0, extra: extra >>> 0 }), ()=>0),
         },
 
         /**
@@ -4439,10 +4673,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         mouse_event: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([flags, dx, dy, data])=>{
-                injectMouse({ dx, dy, data, flags: flags >>> 0 });
-                return 0;
-            },
+            handler: ([flags, dx, dy, data, extra])=>andThen(injectMouse({ dx, dy, data,
+                flags: flags >>> 0, extra: extra >>> 0 }), ()=>0),
         },
 
         /**
@@ -5000,7 +5232,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, x, y])=>{
                 const VK_LBUTTON = 0x01;
-                const WM_MOUSEMOVE = 0x0200;
                 const WM_LBUTTONUP = 0x0202;
                 const WM_MOUSELAST = 0x020e;
                 const SM_CXDRAG = 68;
@@ -5296,7 +5527,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
                 const cls = classOfWindow(hwnd);
-                return cls ? readClassLong(cls, index) : 0;
+                return cls ? readClassLong(cls, index, true) : 0;
             },
         },
 
@@ -5310,8 +5541,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 {
                     return 0;
                 }
-                const previous = readClassLong(cls, index);
-                writeClassLong(cls, index, value);
+                const previous = readClassLong(cls, index, true);
+                writeClassLong(cls, index, value, true);
                 return previous;
             },
         },
@@ -5381,13 +5612,36 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             },
         },
 
-        /** HWND SetActiveWindow(HWND hWnd) */
+        /**
+         * HWND SetActiveWindow(HWND hWnd)
+         *
+         * As win.c test_SetActiveWindow finds it: a handle that names no
+         * window is ERROR_INVALID_WINDOW_HANDLE; a child changes nothing and
+         * answers the active window; the desktop and another thread's window
+         * change nothing and answer NULL; and NULL, as Windows 10 answers it,
+         * changes nothing and answers NULL, the last error untouched (win.c
+         * test_SetActiveWindow_0_proc).
+         */
         SetActiveWindow: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
                 const previous = programs(host.active?.() ?? 0);
-                if (!live(hwnd))
+                if ((hwnd >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                if ((record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
+                {
+                    return previous;
+                }
+                if (host.isDesktop?.(record) || callerHolds(hwnd >>> 0) === 0)
                 {
                     return 0;
                 }
@@ -5974,6 +6228,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([hwnd])=>{
                 if ((hwnd >>> 0) !== 0 && !live(hwnd))
                 {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
                 return host.setFocus(hwnd >>> 0, host.callerThread?.());

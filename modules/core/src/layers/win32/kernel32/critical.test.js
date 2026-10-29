@@ -92,6 +92,7 @@ function machine(){
             free += bytes;
             return at;
         },
+        isHandle: handle=>handle === 0x44,
     });
     /** @param {number} at */
     const get32 = at=>i32(memory, at);
@@ -227,3 +228,19 @@ test('a deleted section takes its queue with it', ()=>{
     assert.deepEqual(m.sections.waiting(), []);
     assert.equal(m.sections.diagnostics().queued, 0);
 });
+
+test('a contended entry where LockSemaphore names nothing raises STATUS_INVALID_HANDLE',
+    ()=>{
+        // Wine's kernel32 sync.c test_crit_section: noncontinuable, no
+        // parameters, and nobody queued.
+        const m = machine();
+        const section = 0x9000;
+        new DataView(m.memory.buffer).setUint32(section + CS.LOCK_SEMAPHORE, 0xdeadbeef, true);
+        assert.throws(()=>m.sections.wait(section), (/** @type {any} */ error)=>
+            error.code === 'GUEST_EXCEPTION' && error.status === 0xc0000008 && error.flags === 1
+            && error.parameters.length === 0);
+        assert.deepEqual(m.blocked, []);
+
+        new DataView(m.memory.buffer).setUint32(section + CS.LOCK_SEMAPHORE, 0x44, true);
+        assert.equal(m.sections.wait(section), PARKED, 'one that names an object is waited on');
+    });

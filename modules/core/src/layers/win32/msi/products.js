@@ -30,6 +30,7 @@ import { BASE85 } from './system.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_MORE_DATA = 234;
@@ -155,6 +156,11 @@ export function decomposeDescriptor(descriptor){
  * @property {import('./registration.js').Hive} hive
  * @property {any} files
  * @property {(path: string) => string} fullPath
+ * @property {(path: string) => any} statPath
+ *     The entry a program's path names; null for none, a path that names
+ *     nothing (an empty one) among them.
+ * @property {(path: string) => Promise<Uint8Array | null>} readPath
+ *     The bytes of the file a program's path names, or null.
  * @property {(wide: boolean) => (address: number) => string | null} reader
  * @property {(wide: boolean, text: string, buffer: number, size: number) => number} putString
  * @property {(wide: boolean, text: string, buffer: number) => void} putFixed
@@ -767,7 +773,12 @@ export function createProductFunctions(context){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const bytes = await context.readFile(context.fullPath(name));
+            // An empty path names no directory to look in.
+            if (name === '')
+            {
+                return ERROR_PATH_NOT_FOUND;
+            }
+            const bytes = await context.readPath(name);
             if (!bytes)
             {
                 return ERROR_FILE_NOT_FOUND;
@@ -785,7 +796,7 @@ export function createProductFunctions(context){
                 return E_INVALIDARG | 0;
             }
             writeU32(certificate, 0);
-            const stat = context.files.stat(context.fullPath(name));
+            const stat = context.statPath(name);
             return (!stat || stat.exists === false ? HRESULT_FILE_NOT_FOUND
                 : TRUST_E_NOSIGNATURE) | 0;
         }),
@@ -796,7 +807,7 @@ export function createProductFunctions(context){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const bytes = await context.readFile(context.fullPath(path));
+            const bytes = await context.readPath(path);
             const link = bytes ? decodeShellLink(bytes) : null;
             const parts = link?.darwinId ? decomposeDescriptor(link.darwinId) : null;
             if (!parts)
@@ -961,7 +972,7 @@ export function createProductFunctions(context){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const stat = context.files.stat(context.fullPath(name));
+            const stat = context.statPath(name);
             if (!stat || stat.exists === false)
             {
                 return ERROR_INSTALL_PACKAGE_OPEN_FAILED;

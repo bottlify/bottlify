@@ -24,17 +24,34 @@
  * rather than an invented one.
  */
 
+import { ZONE_KEYS, zoneForYear } from './timezones.js';
+
 /** Codes this surface reports. */
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_MORE_DATA = 234;
+const ERROR_NOACCESS = 998;
+const ERROR_NO_MORE_FILES = 18;
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_NO_MORE_ITEMS = 259;
+
+/**
+ * DYNAMIC_TIME_ZONE_INFORMATION: a TIME_ZONE_INFORMATION, the zone's
+ * registry key as WCHAR[128], and whether its year-by-year rules are off.
+ */
+const DYNAMIC_TIME_ZONE = Object.freeze({ KeyName: 172, Disabled: 428, SIZE: 432 });
+/** The key of the zone this machine is in. */
+const MACHINE_ZONE_KEY = 'UTC';
 
 /** GetFileInformationByHandleEx's classes here, and the fixed ones' sizes. */
 const FILE_BASIC_INFO = 0;
 const FILE_STANDARD_INFO = 1;
 const FILE_NAME_INFO = 2;
 const FILE_ATTRIBUTE_TAG_INFO = 9;
+const FILE_ID_BOTH_DIRECTORY_INFO = 10;
+const FILE_ID_BOTH_DIRECTORY_RESTART_INFO = 11;
 const FILE_INFO_SIZES = new Map([
     [FILE_BASIC_INFO, 40], [FILE_STANDARD_INFO, 24], [FILE_ATTRIBUTE_TAG_INFO, 8],
 ]);
@@ -90,7 +107,7 @@ const SYSTEMTIME_SIZE = 16;
  * @param {Uint8Array} bytes
  * @returns {number | null}
  */
-function systemTimeToMs(bytes){
+export function systemTimeToMs(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, SYSTEMTIME_SIZE);
     const [year, month, , day, hour, minute, second, millisecond] =
         Array.from({ length: 8 }, (_, at)=>view.getUint16(at * 2, true));
@@ -330,10 +347,20 @@ export function fileAttributes(entry){
  * @property {(handle: number, type?: string) => any} resolveHandle
  * @property {(path: string) => { exists: boolean, isDirectory: boolean,
  *                                size: number, modified?: number, readOnly?: boolean,
- *                                hidden?: boolean } | null} stat
+ *                                hidden?: boolean, links?: number,
+ *                                identity?: string } | null} stat
  * @property {(path: string, modified: number) => boolean} [setModified]
  *           Stamps a file's write time, in milliseconds since the epoch.
+ * @property {(path: string, pattern: string) => { name: string, isDirectory: boolean,
+ *     size: number, modified?: number, readOnly?: boolean, hidden?: boolean,
+ *     attributes?: number, identity?: string }[]} [list]
+ *           A directory's entries, for a listing by handle. Absent, a directory
+ *           lists only its dots.
  */
+
+/** FILE_ID_BOTH_DIR_INFO up to its name, and the boundary each entry starts on. */
+const ID_BOTH_DIR_FIXED = 104;
+const ENTRY_ALIGNMENT = 8;
 
 /** @param {string} text @returns {Uint8Array} UTF-16, NUL-terminated. */
 const wide = text=>{
@@ -377,6 +404,56 @@ export function createFileTimeFunctions(host){
         return result;
     };
 
+    /** A DYNAMIC_TIME_ZONE_INFORMATION's key. @param {number} address */
+    const zoneKeyOf = address=>{
+        const bytes = host.readMemory(address + DYNAMIC_TIME_ZONE.KeyName, 256);
+        let key = '';
+        for (let at = 0; at < 256; at += 2)
+        {
+            const code = bytes[at] | bytes[at + 1] << 8;
+            if (code === 0)
+            {
+                break;
+            }
+            key += String.fromCharCode(code);
+        }
+        return key;
+    };
+
+    /**
+     * A zone's TIME_ZONE_INFORMATION for a year, by its key; the machine's
+     * own for its key, null for a key Windows does not have.
+     *
+     * @param {string} key @param {number} year
+     */
+    const zoneByKey = (key, year)=>(key === MACHINE_ZONE_KEY ? currentZone()
+        : zoneForYear(key, year));
+
+    /**
+     * The rules a DYNAMIC_TIME_ZONE_INFORMATION stands for at a moment: its
+     * zone's for that year, or the TIME_ZONE_INFORMATION it carries when its
+     * year-by-year rules are off or its key is none Windows has.
+     *
+     * @param {number} address @param {number} utc
+     */
+    const dynamicRules = (address, utc)=>{
+        const carried = host.readMemory(address, DYNAMIC_TIME_ZONE.SIZE).slice();
+        if (carried[DYNAMIC_TIME_ZONE.Disabled] !== 0)
+        {
+            return carried.subarray(0, TIME_ZONE_INFORMATION.SIZE);
+        }
+        return zoneByKey(zoneKeyOf(address), new Date(utc).getUTCFullYear())
+            ?? carried.subarray(0, TIME_ZONE_INFORMATION.SIZE);
+    };
+
+    /** @param {number} address @param {Uint8Array} zone @param {string} key */
+    const writeDynamic = (address, zone, key)=>{
+        const bytes = new Uint8Array(DYNAMIC_TIME_ZONE.SIZE);
+        bytes.set(zone);
+        bytes.set(wide(key).subarray(0, 254), DYNAMIC_TIME_ZONE.KeyName);
+        host.writeMemory(address, bytes);
+    };
+
     /** @param {number} address @returns {bigint} */
     const readFileTime = address=>{
         const bytes = host.readMemory(address, 8);
@@ -401,6 +478,97 @@ export function createFileTimeFunctions(host){
     const timesOf = file=>{
         const written = msToFileTime(host.stat(file.path)?.modified ?? 0);
         return { created: written, accessed: written, written };
+    };
+
+    /**
+     * Where each open directory's listing by handle has got to: the entries
+     * taken at its first listing, and the next to give. A restart takes them
+     * again.
+     *
+     * @type {WeakMap<object, { entries: any[], next: number }>}
+     */
+    const listings = new WeakMap();
+
+    /**
+     * GetFileInformationByHandleEx's FileIdBothDirectoryInfo: as many of an
+     * open directory's entries as fit, each a FILE_ID_BOTH_DIR_INFO on an
+     * eight-byte boundary chained by NextEntryOffset, the last's zero; the
+     * next call goes on where this one stopped, and one past the end says
+     * ERROR_NO_MORE_FILES. A folder that is not a drive's root lists "." and
+     * ".." first, as a find does. No 8.3 names are kept, so ShortName is empty.
+     *
+     * @param {any} file @param {boolean} restart
+     * @param {number} buffer @param {number} room
+     */
+    const listDirectory = (file, restart, buffer, room)=>{
+        if (room === 0)
+        {
+            return fail(ERROR_BAD_LENGTH);
+        }
+        if (buffer === 0)
+        {
+            return fail(ERROR_NOACCESS);
+        }
+        const holder = host.stat(file.path);
+        if (!holder?.isDirectory)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        let listing = listings.get(file);
+        if (!listing || restart)
+        {
+            const dots = /^[A-Za-z]:\\?$/.test(file.path) ? []
+                : ['.', '..'].map(name=>({ ...holder, name, isDirectory: true, size: 0 }));
+            listing = { entries: [...dots, ...host.list?.(file.path, '*') ?? []], next: 0 };
+            listings.set(file, listing);
+        }
+        if (listing.next >= listing.entries.length)
+        {
+            return fail(ERROR_NO_MORE_FILES);
+        }
+        /** @type {{ start: number, record: Uint8Array }[]} */
+        const records = [];
+        let used = 0;
+        for (; listing.next < listing.entries.length; listing.next++)
+        {
+            const entry = listing.entries[listing.next];
+            const start = (used + ENTRY_ALIGNMENT - 1) & ~(ENTRY_ALIGNMENT - 1);
+            const length = ID_BOTH_DIR_FIXED + entry.name.length * 2;
+            if (start + length > room)
+            {
+                break;
+            }
+            const record = new Uint8Array(length);
+            const view = new DataView(record.buffer);
+            const time = msToFileTime(entry.modified ?? 0);
+            for (const at of [8, 16, 24, 32])
+            {
+                view.setBigUint64(at, time, true);
+            }
+            const size = BigInt(entry.isDirectory ? 0 : entry.size ?? 0);
+            view.setBigUint64(40, size, true);
+            view.setBigUint64(48, (size + 4095n) & ~4095n, true);
+            view.setUint32(56, fileAttributes(entry), true);
+            view.setUint32(60, entry.name.length * 2, true);
+            const own = entry.name === '.' ? file.path
+                : entry.name === '..' ? file.path.replace(/\\[^\\]*$/, '')
+                    : `${file.path}\\${entry.name}`;
+            view.setUint32(96, fileIndex(entry.identity ?? own), true);
+            [...entry.name].forEach((unit, at)=>view.setUint16(ID_BOTH_DIR_FIXED + at * 2,
+                unit.charCodeAt(0), true));
+            records.push({ start, record });
+            used = start + length;
+        }
+        if (records.length === 0)
+        {
+            return fail(ERROR_MORE_DATA);
+        }
+        records.forEach(({ start, record }, index)=>{
+            const after = records[index + 1];
+            new DataView(record.buffer).setUint32(0, after ? after.start - start : 0, true);
+            host.writeMemory(buffer + start, record);
+        });
+        return 1;
     };
 
     return {
@@ -537,6 +705,12 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
+                // Setting a time is writing an attribute, which the handle
+                // has to have been opened for, whatever is set.
+                if (!(file.writeAttributes ?? file.write ?? true))
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
                 if ((written >>> 0) !== 0)
                 {
                     const ms = fileTimeToMs(readFileTime(written >>> 0));
@@ -574,7 +748,7 @@ export function createFileTimeFunctions(host){
                 }
                 const entry = host.stat(file.path);
                 const size = entry?.size ?? 0;
-                const index = fileIndex(file.path);
+                const index = fileIndex(entry?.identity ?? file.path);
 
                 const data = new Uint8Array(BY_HANDLE_FILE_INFORMATION.SIZE);
                 const view = new DataView(data.buffer);
@@ -589,7 +763,7 @@ export function createFileTimeFunctions(host){
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileSizeHigh,
                     Math.floor(size / 0x100000000) >>> 0, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileSizeLow, size >>> 0, true);
-                view.setUint32(BY_HANDLE_FILE_INFORMATION.nNumberOfLinks, 1, true);
+                view.setUint32(BY_HANDLE_FILE_INFORMATION.nNumberOfLinks, entry?.links ?? 1, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileIndexLow, index, true);
                 host.writeMemory(information >>> 0, data);
                 return 1;
@@ -615,6 +789,12 @@ export function createFileTimeFunctions(host){
                 if (!file)
                 {
                     return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((kind >>> 0) === FILE_ID_BOTH_DIRECTORY_INFO
+                    || (kind >>> 0) === FILE_ID_BOTH_DIRECTORY_RESTART_INFO)
+                {
+                    return listDirectory(file, (kind >>> 0) === FILE_ID_BOTH_DIRECTORY_RESTART_INFO,
+                        buffer >>> 0, size >>> 0);
                 }
                 const entry = host.stat(file.path);
                 const room = size >>> 0;
@@ -706,6 +886,128 @@ export function createFileTimeFunctions(host){
         },
 
         /**
+         * DWORD GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION)
+         *
+         * GetTimeZoneInformation's answer, and the key of the zone it is.
+         */
+        GetDynamicTimeZoneInformation: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([information])=>{
+                if (information === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, 0xffffffff);
+                }
+                writeDynamic(information >>> 0, currentZone(), MACHINE_ZONE_KEY);
+                return TIME_ZONE_ID_UNKNOWN;
+            },
+        },
+
+        /**
+         * BOOL GetTimeZoneInformationForYear(USHORT wYear,
+         *   PDYNAMIC_TIME_ZONE_INFORMATION pdtzi, LPTIME_ZONE_INFORMATION ptzi)
+         *
+         * A zone's rules as they stood that year (`timezones.js`); a NULL zone
+         * is the machine's. A key Windows has no zone for is
+         * ERROR_FILE_NOT_FOUND, the missing registry key it is there.
+         */
+        GetTimeZoneInformationForYear: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([year, dynamic, information])=>{
+                if (information === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const zone = dynamic === 0 ? currentZone()
+                    : zoneByKey(zoneKeyOf(dynamic >>> 0), year & 0xffff);
+                if (zone === null)
+                {
+                    return fail(ERROR_FILE_NOT_FOUND);
+                }
+                host.writeMemory(information >>> 0, zone);
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD EnumDynamicTimeZoneInformation(DWORD dwIndex,
+         *                                      PDYNAMIC_TIME_ZONE_INFORMATION)
+         *
+         * The zones in their keys' order, each with this year's rules.
+         */
+        EnumDynamicTimeZoneInformation: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([index, information])=>{
+                if (information === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const key = ZONE_KEYS[index >>> 0];
+                const zone = key === undefined ? null
+                    : zoneByKey(key, new Date().getUTCFullYear());
+                if (key === undefined || zone === null)
+                {
+                    return ERROR_NO_MORE_ITEMS;
+                }
+                writeDynamic(information >>> 0, zone, key);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL SystemTimeToTzSpecificLocalTimeEx(
+         *   const DYNAMIC_TIME_ZONE_INFORMATION *, const SYSTEMTIME *, LPSYSTEMTIME)
+         *
+         * As SystemTimeToTzSpecificLocalTime, by the zone's rules for the
+         * year of the time.
+         */
+        SystemTimeToTzSpecificLocalTimeEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([zone, universal, local])=>{
+                if (universal === 0 || local === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const utc = systemTimeToMs(host.readMemory(universal >>> 0, SYSTEMTIME_SIZE));
+                if (utc === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const data = zone === 0 ? currentZone() : dynamicRules(zone >>> 0, utc);
+                const bias = biasAt(new DataView(data.buffer, data.byteOffset), utc);
+                host.writeMemory(local >>> 0, msToSystemTime(utc - bias * 60_000));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL TzSpecificLocalTimeToSystemTimeEx(
+         *   const DYNAMIC_TIME_ZONE_INFORMATION *, const SYSTEMTIME *, LPSYSTEMTIME)
+         */
+        TzSpecificLocalTimeToSystemTimeEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([zone, local, universal])=>{
+                if (local === 0 || universal === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const wall = systemTimeToMs(host.readMemory(local >>> 0, SYSTEMTIME_SIZE));
+                if (wall === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const data = zone === 0 ? currentZone() : dynamicRules(zone >>> 0, wall);
+                const bias = biasOnLocalClock(new DataView(data.buffer, data.byteOffset), wall);
+                host.writeMemory(universal >>> 0, msToSystemTime(wall + bias * 60_000));
+                return 1;
+            },
+        },
+
+        /**
          * BOOL SystemTimeToTzSpecificLocalTime(
          *   const TIME_ZONE_INFORMATION *lpTimeZoneInformation,
          *   const SYSTEMTIME *lpUniversalTime, LPSYSTEMTIME lpLocalTime)
@@ -783,7 +1085,7 @@ export function createFileTimeFunctions(host){
  *
  * @param {string} path
  */
-function fileIndex(path){
+export function fileIndex(path){
     let hash = 2166136261;
     const text = path.toLowerCase();
     for (let at = 0; at < text.length; at++)

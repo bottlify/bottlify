@@ -148,6 +148,16 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
              * @returns {boolean} whether the run has it
              */
             terminate: (id, code)=>ask('processes', 'terminate', [id, code]),
+            /**
+             * A call made in one of them, where it runs (`cross-process.js`):
+             * asked without blocking this thread, which goes on with its
+             * other threads meanwhile.
+             *
+             * @param {number} id @param {any} request
+             * @returns {Promise<any>}
+             */
+            ask: (id, request)=>(call ? call('processes', 'ask', [id, request])
+                : Promise.resolve(ask('processes', 'ask', [id, request]))),
             /** @param {Record<string, (...args: any[]) => any>} parent */
             answer(parent){
                 handlers.parent = parent;

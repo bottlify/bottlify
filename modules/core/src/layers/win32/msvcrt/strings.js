@@ -18,10 +18,11 @@
  * position between calls, because that is what the C library promises.
  */
 
-import { encodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { EINVAL } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
+import { unitsAt } from './widetext.js';
 import { COMPILED } from './inguest.x86.js';
 
 /**
@@ -137,8 +138,10 @@ export function createStringFunctions(host){
                 const existing = readString(destination);
                 // Unlike strncpy, this one always terminates: the count bounds
                 // what is appended, not what is written.
-                writeString(destination + existing.length,
-                    readString(source).slice(0, count >>> 0));
+                // The source is read no further than the count: it need not be
+                // terminated within it.
+                writeString(destination + existing.length, decodeAnsi(Uint8Array.from(
+                    unitsAt(host.readMemory, source, 1, Math.min(count >>> 0, MAX_STRING)))));
                 return destination;
             },
         },

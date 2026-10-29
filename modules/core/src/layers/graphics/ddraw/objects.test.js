@@ -17,6 +17,7 @@ import {
     DDERR_INVALIDCAPS,
     DDERR_INVALIDMODE,
     DDERR_INVALIDPARAMS,
+    DDPF_FOURCC,
     DDERR_NOCLIPPERATTACHED,
     DDERR_NOCOLORKEY,
     DDERR_NOCOOPERATIVELEVELSET,
@@ -1027,6 +1028,70 @@ test('a complex mip-mapped texture is a chain of halving levels, as long as aske
     assert.equal(single.surface?.release(), 0);
 
     assert.equal(ddraw.surfaceCount, 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('a DXTn surface off the 4x4 block grid is refused; its lower levels are not', ()=>{
+    // Wine's test_block_formats_creation, every size from 1x1 to 8x8.
+    const ddraw = withLevel();
+    const DXT1 = { size: 0x20, flags: DDPF_FOURCC, fourCC: 0x31545844, bitCount: 0,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 };
+    /** @param {number} width @param {number} height @param {number} [count] */
+    const make = (width, height, count)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | (count === undefined ? 0 : DDSD_MIPMAPCOUNT),
+        caps: count === undefined ? DDSCAPS_TEXTURE : MIPPED,
+        width, height, mipMapCount: count ?? 0, pixelFormat: DXT1,
+    }, { version: 4 });
+    for (const [width, height] of [[1, 1], [2, 4], [4, 6], [8, 3]])
+    {
+        assert.deepEqual(make(width, height), { hr: DDERR_INVALIDPARAMS, surface: null },
+            `${width}x${height}`);
+    }
+    for (const [width, height] of [[4, 4], [8, 4]])
+    {
+        const made = make(width, height);
+        assert.equal(made.hr, DD_OK, `${width}x${height}`);
+        assert.equal(made.surface?.release(), 0);
+    }
+    const chain = make(8, 8, 4);
+    assert.equal(chain.hr, DD_OK, 'levels of 2x2 and 1x1 below a whole top');
+    assert.equal(levelsOf(chain.surface).length, 4);
+    assert.equal(chain.surface?.release(), 0);
+    assert.equal(ddraw.surfaceCount, 0);
+});
+
+test('a cube map is its six faces, the others attached to the first, each with its levels', ()=>{
+    // Wine's ddraw7 test_surface_desc_size and lock tests: the faces of a
+    // DDSCAPS2_CUBEMAP_ALLFACES texture are found from the one handed back by
+    // DDSCAPS2_CUBEMAP and their own face bit, and are let go with it.
+    const CUBEMAP = 0x200;
+    const POSITIVEX = 0x400;
+    const ALLFACES = 0xfc00;
+    const ddraw = withLevel();
+    const made = ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT,
+        caps: MIPPED, caps2: CUBEMAP | ALLFACES,
+        width: 16, height: 16, mipMapCount: 2, pixelFormat: RGB32,
+    }, { version: 7 });
+    assert.equal(made.hr, DD_OK);
+    const root = /** @type {any} */ (made.surface);
+    assert.equal(root.caps2 & (CUBEMAP | ALLFACES), CUBEMAP | POSITIVEX, 'the first face alone');
+    const faces = [root];
+    for (let face = 1; face < 6; face++)
+    {
+        const found = root.getAttachedSurface(0, CUBEMAP | (POSITIVEX << face));
+        assert.equal(found.hr, DD_OK, `face ${face}`);
+        assert.equal(found.surface.caps2 & ALLFACES, POSITIVEX << face);
+        assert.equal(found.surface.width, 16);
+        found.surface.release();
+        faces.push(found.surface);
+    }
+    assert.ok(faces.every(face=>levelsOf(face).length === 2), 'two levels on every face');
+    assert.equal(new Set(faces.map(face=>face.buffer)).size, 6, 'six faces, six buffers');
+    assert.equal(root.enumAttachedSurfaces().length, 6, 'its level, then the five faces');
+    assert.equal(ddraw.surfaceCount, 12);
+    assert.equal(root.release(), 0);
+    assert.equal(ddraw.surfaceCount, 0, 'the faces and their levels go with the first');
     assert.equal(ddraw.release('IDirectDraw7'), 0);
 });
 

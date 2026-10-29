@@ -67,8 +67,9 @@ int mainCRTStartup(void)
     char first[] = "spawn_child.exe first";
     check("the child is created", start(first, &child));
     unsigned code = 0;
-    GetExitCodeProcess(child.process, &code);
-    check("and has not run yet", code == STILL_ACTIVE);
+    /* A child runs from CreateProcess on, so it may already have finished. */
+    check("its exit code can be asked at once",
+        GetExitCodeProcess(child.process, &code) && (code == STILL_ACTIVE || code == 42));
 
     check("the wait returns when the child exits", WaitForSingleObject(child.process, INFINITE) == 0);
     GetExitCodeProcess(child.process, &code);

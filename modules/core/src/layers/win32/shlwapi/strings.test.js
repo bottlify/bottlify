@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shlwapiMachine } from './memory.fixture.js';
 import { createLocaleFunctions } from '../kernel32/locale.js';
+import { byteSize, kbSize, timeInterval } from './strings.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005;
@@ -65,6 +66,11 @@ test('StrChr finds the first place a character is, StrRChr the last', ()=>{
     const m = shlwapiMachine();
     const wide = m.put('x\u4e2dy', true);
     assert.equal(m.fns.StrChrW.handler([wide, 0x4e2d]), wide + 2, 'a wide character beyond a byte');
+    // Wine's test_StrChrW: a string of 16 352 characters is searched to its end.
+    const long = m.put(Array.from({ length: 16352 }, (_, i)=>String.fromCharCode(32 + i)).join(''),
+        true);
+    assert.equal(m.fns.StrChrW.handler([long, 16383]), long + (16383 - 32) * 2);
+    assert.equal(m.fns.StrChrW.handler([long + 2, 32]), 0);
     const narrow = m.put('x\u20acy');
     assert.equal(m.fns.StrChrA.handler([narrow, 0x80]), narrow + 1,
         'an ANSI byte is the page\'s character');
@@ -243,6 +249,8 @@ test('each string function declares the arguments it pops', ()=>{
         StrCmpNA: 12, StrCmpNW: 12, StrCmpNIA: 12, StrCmpNIW: 12, StrCpyW: 8, StrCpyNW: 12,
         StrCatW: 8, StrCatBuffA: 12, StrCatBuffW: 12, StrDupA: 4, StrDupW: 4, StrStrA: 8,
         StrStrW: 8, StrStrIA: 8, StrStrIW: 8, StrRetToBufA: 16, StrRetToBufW: 16,
+        StrChrIA: 8, StrChrIW: 8, StrRStrIA: 12, StrRStrIW: 12, StrFromTimeIntervalA: 16,
+        StrFromTimeIntervalW: 16,
     });
     for (const [name, bytes] of Object.entries(expected))
     {
@@ -265,4 +273,158 @@ test('StrCSpn counts the characters before one of the set, StrCSpnI ignoring cas
         assert.equal(m.fns[`StrCSpnI${suffix}`].handler([0, text]), 0);
         assert.equal(m.fns[`StrCSpnI${suffix}`].argBytes, 8);
     }
+});
+
+test('StrChrI finds a character whatever its case', ()=>{
+    // Wine's test_StrChrIA and test_StrChrIW: the capital comes first in the string.
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const text = Array.from({ length: 96 }, (_, i)=>String.fromCharCode(32 + i)).join('');
+        const at = m.put(text, wide);
+        const unit = wide ? 2 : 1;
+        for (let code = 0x41; code <= 0x58; code++)
+        {
+            const found = m.fns[`StrChrI${suffix}`].handler([at, code]);
+            assert.equal(found, at + (code - 32) * unit);
+            assert.notEqual(m.fns[`StrChrI${suffix}`].handler([found + unit, code]), 0,
+                'the small letter after it');
+        }
+        for (let code = 0x61; code < 0x7a; code++)
+        {
+            assert.equal(m.fns[`StrChrI${suffix}`].handler([at + (code - 31) * unit, code]), 0);
+        }
+    }
+});
+
+test('StrRStrI finds the last match that starts before the end it is given', ()=>{
+    // Wine's test_StrRStrI.
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const unit = wide ? 2 : 1;
+        const call = m.fns[`StrRStrI${suffix}`];
+        const first = m.put('yAxxxxAy', wide);
+        assert.equal(call.handler([first, first + 4 * unit, m.put('A', wide)]), first + unit);
+        assert.equal(call.handler([first, first + 4 * unit, m.put('aX', wide)]), first + unit);
+        assert.equal(call.handler([first, first + 4 * unit, m.put('Ay', wide)]), 0);
+        const second = m.put('ABABABAB', wide);
+        const ab = m.put('ab', wide);
+        for (const [end, expected] of [[4, 2], [3, 2], [2, 0], [1, 0]])
+        {
+            assert.equal(call.handler([second, second + end * unit, ab]), second + expected * unit,
+                `ending at ${end}`);
+        }
+        assert.equal(call.handler([second, second, ab]), 0);
+        assert.equal(call.handler([second, 0, ab]), second + 6 * unit,
+            'no end is the whole string');
+    }
+});
+
+test('StrFromTimeInterval rounds to the second and cuts to the digits asked', ()=>{
+    // Wine's test_StrFromTimeIntervalA, a sample of its table.
+    for (const [ms, digits, text] of /** @type {[number, number, string][]} */ ([
+        [1, 1, ' 0 sec'], [1, 7, ' 0 sec'], [1000000, 1, ' 10 min'], [1000000, 2, ' 16 min'],
+        [1000000, 3, ' 16 min 40 sec'], [1999999, 1, ' 30 min'], [1999999, 3, ' 33 min 20 sec'],
+        [3999997, 1, ' 1 hr'], [3999997, 2, ' 1 hr 6 min'], [3999997, 3, ' 1 hr 6 min 40 sec'],
+        [149999851, 7, ' 41 hr 40 min 0 sec'], [150999850, 1, ' 40 hr'],
+        [150999850, 3, ' 41 hr 50 min'], [150999850, 5, ' 41 hr 56 min 40 sec'],
+    ]))
+    {
+        assert.equal(timeInterval(ms, digits), text, `${ms} to ${digits}`);
+    }
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const buffer = m.put(' '.repeat(32), wide);
+        assert.equal(m.fns[`StrFromTimeInterval${suffix}`].handler([buffer, 32, 1000000, 3]), 14);
+        assert.equal(m.read(buffer, wide), ' 16 min 40 sec');
+        assert.equal(m.fns[`StrFromTimeInterval${suffix}`].handler([buffer, 5, 1000000, 3]), 4);
+        assert.equal(m.read(buffer, wide), ' 16 ', 'cut to the buffer');
+    }
+});
+
+test('a size is shown in bytes or three digits of its unit, and in kilobytes rounded up', ()=>{
+    // Wine's StrFormatSize_results, against Windows.
+    for (const [size, bytes, kb] of /** @type {[bigint, string, string][]} */ ([
+        [-1023n, '-1023 bytes', '0 KB'], [309n, '309 bytes', '1 KB'], [10191n, '9.95 KB', '10 KB'],
+        [100353n, '98.0 KB', '99 KB'], [1022286n, '998 KB', '999 KB'],
+        [1046862n, '0.99 MB', '1,023 KB'], [1048574619n, '999 MB', '1,023,999 KB'],
+        [1073741775n, '0.99 GB', '1,048,576 KB'],
+        [0x0fffffffn << 32n | 0xfffffa9bn, '0.99 EB', '1,125,899,906,842,623 KB'],
+    ]))
+    {
+        assert.equal(byteSize(size), bytes, `${size}`);
+        assert.equal(kbSize(size), kb, `${size}`);
+    }
+    assert.equal(byteSize(2147483647n, true), '2.00 GB', 'rounded');
+    assert.equal(byteSize(2147483647n), '1.99 GB', 'or cut');
+    const m = shlwapiMachine();
+    const out = m.put('', false, 0x40);
+    assert.equal(m.fns.StrFormatByteSize64A.handler([10191, 0, out, 0x40]), out);
+    assert.equal(m.read(out, false), '9.95 KB');
+    assert.equal(m.fns.StrFormatKBSizeW.handler([1046862, 0, out, 0x20]), out);
+    assert.equal(m.read(out, true), '1,023 KB');
+    assert.equal(m.fns.StrFormatByteSizeEx.handler([0x7fffffff, 0, 1, out, 0x20]), S_OK);
+    assert.equal(m.read(out, true), '2.00 GB');
+    assert.equal(m.fns.StrFormatByteSizeEx.handler([1, 0, 10, out, 0x20]), 0x80070057 | 0);
+    assert.equal(m.fns.StrFormatByteSizeEx.handler([1, 0, 2, out, 0]), 0x80070057 | 0);
+});
+
+test('the counted searches, the chained copy and the copies that say where they end', ()=>{
+    // Wine's test_StrStrNW, test_StrStrNIW, test_StrCatChainW, test_StrCpyNXA, test_SHAnsiToAnsi.
+    const m = shlwapiMachine();
+    const text = m.put('DeAdBeEf', true);
+    const beef = m.put('BeEf', true);
+    assert.equal(m.fns.StrStrNW.handler([text, beef, 4]), 0, 'it must start within the count');
+    assert.equal(m.fns.StrStrNW.handler([text, beef, 5]), text + 8);
+    assert.equal(m.fns.StrStrNW.handler([text, m.put('beef', true), 9]), 0);
+    assert.equal(m.fns.StrStrNIW.handler([text, m.put('beef', true), 9]), text + 8);
+    assert.equal(m.fns.StrStrNIW.handler([text, m.put('', true), 9]), 0);
+    assert.equal(m.fns.StrChrNW.handler([m.put('Testing String', true), 'r'.charCodeAt(0), 10]),
+        0, 'not within the first ten');
+    const buffer = m.put('', true, 0x40);
+    m.memory.fill(0x11, buffer, buffer + 0x40);
+    assert.equal(m.fns.StrCatChainW.handler([buffer, 4, 0, m.put('DeAd', true)]), 3);
+    assert.equal(m.read(buffer, true), 'DeA');
+    assert.equal(m.fns.StrCatChainW.handler([buffer, 4, 1, beef]), 3);
+    assert.equal(m.read(buffer, true), 'DBe');
+    assert.equal(m.view.getUint16(buffer + 8, true), 0x1111, 'nothing past the buffer');
+    assert.equal(m.fns.StrCatChainW.handler([buffer, 32, -1, beef]), 7);
+    assert.equal(m.read(buffer, true), 'DBeBeEf');
+    assert.equal(m.fns.StrCatChainW.handler([buffer, 9, 10, beef]), 10, 'past the buffer');
+    assert.equal(m.fns.StrCatChainW.handler([0, 0, 0, beef]), 0);
+    const narrow = m.put('', false, 0x10);
+    m.memory.fill(10, narrow, narrow + 8);
+    assert.equal(m.fns.StrCpyNXA.handler([narrow, m.put('hello', false), 8]), narrow + 5);
+    assert.deepEqual([...m.memory.slice(narrow, narrow + 8)], [...Buffer.from('hello'), 0, 10, 10]);
+    assert.equal(m.fns.SHAnsiToAnsi.handler([m.put('hello', false), narrow, 8]), 6);
+    assert.equal(m.fns.SHUnicodeToUnicode.handler([m.put('hello', true), buffer, 8]), 6);
+    assert.equal(m.read(buffer, true), 'hello');
+    assert.equal(m.fns.ChrCmpIA.handler([0x61, 0x41]), 0);
+    assert.notEqual(m.fns.ChrCmpIW.handler([0x61, 0x42]), 0);
+    assert.equal(m.fns.StrPBrkW.handler([text, m.put('xyB', true)]), text + 8);
+});
+
+test('wnsprintf formats as the C runtime does, and says when it did not fit', ()=>{
+    // Wine's test_StrXXX_overflows.
+    const m = shlwapiMachine();
+    const buffer = m.put('', false, 0x40);
+    const long = m.put('0123456789'.repeat(3), false);
+    m.memory.fill(0xbf, buffer, buffer + 0x40);
+    assert.equal(m.fns.wnsprintfA.handler([buffer, 10, m.put('%s', false), long]), -1);
+    assert.equal(m.read(buffer, false), '012345678');
+    assert.equal(m.memory[buffer + 10], 0xbf);
+    assert.equal(m.fns.wnsprintfA.handler([buffer, 0x40, m.put('%d-%x', false), 42, 255]), 5);
+    assert.equal(m.read(buffer, false), '42-ff');
+    m.memory.fill(0xbf, buffer, buffer + 0x40);
+    assert.equal(m.fns.wnsprintfA.handler([buffer + 1, 0, m.put('%s', false), long]), -1);
+    assert.equal(m.memory[buffer + 1], 0xbf, 'no room, nothing written');
+    assert.equal(m.fns.wnsprintfA.handler([buffer + 1, -1, m.put('%s', false), long]), -1);
+    assert.deepEqual([m.memory[buffer], m.memory[buffer + 1], m.memory[buffer + 2]],
+        [0xbf, 0, 0xbf], 'a negative size takes the terminator');
+    const wide = m.put('', true, 0x40);
+    assert.equal(m.fns.wnsprintfW.handler([wide, 0x20, m.put('%s!', true), m.put('hi', true)]), 3);
+    assert.equal(m.read(wide, true), 'hi!');
+    assert.equal(/** @type {any} */ (m.fns.wnsprintfW).convention, 'cdecl');
 });

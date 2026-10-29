@@ -45,6 +45,12 @@ const WAIT_FAILED = 0xffffffff;
 const ERROR_INVALID_HANDLE = 6;
 /** QueueUserAPC's refusal of a thread that has ended. */
 const ERROR_GEN_FAILURE = 31;
+const ERROR_NOT_SUPPORTED = 50;
+const ERROR_INVALID_PARAMETER = 87;
+
+/** QueueUserAPC2's flags: none, or an APC that interrupts whatever the thread is doing. */
+const QUEUE_USER_APC_FLAGS_NONE = 0;
+const QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC = 1;
 
 /** What the native calls answer. */
 const STATUS_SUCCESS = 0;
@@ -192,6 +198,29 @@ export function createApcs(host){
         }
     };
 
+    /**
+     * QueueUserAPC's answer.
+     *
+     * @param {number[]} args
+     */
+    const queueUser = ([routine, handle, data])=>{
+        const thread = threadOf(handle);
+        if (!thread || (routine >>> 0) === 0)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        // A thread that has ended will never wait again, and
+        // kernel32's sync tests expect the queue refused.
+        if (ended(thread))
+        {
+            host.setLastError(ERROR_GEN_FAILURE);
+            return 0;
+        }
+        queue(thread, routine, [data >>> 0]);
+        return 1;
+    };
+
     return {
         queue,
         deliver,
@@ -210,24 +239,7 @@ export function createApcs(host){
              */
             QueueUserAPC: {
                 argBytes: 12,
-                /** @param {number[]} args */
-                handler: ([routine, handle, data])=>{
-                    const thread = threadOf(handle);
-                    if (!thread || (routine >>> 0) === 0)
-                    {
-                        host.setLastError(ERROR_INVALID_HANDLE);
-                        return 0;
-                    }
-                    // A thread that has ended will never wait again, and
-                    // kernel32's sync tests expect the queue refused.
-                    if (ended(thread))
-                    {
-                        host.setLastError(ERROR_GEN_FAILURE);
-                        return 0;
-                    }
-                    queue(thread, routine, [data >>> 0]);
-                    return 1;
-                },
+                handler: queueUser,
                 /**
                  * The native calls over the same queues, which ntdll
                  * publishes: they are reachable from nowhere else.
@@ -277,6 +289,28 @@ export function createApcs(host){
                                 : deliver(thread).then(()=>STATUS_SUCCESS);
                         },
                     },
+                },
+            },
+
+            /**
+             * BOOL QueueUserAPC2(PAPCFUNC ApcRoutine, HANDLE Thread, ULONG_PTR Data,
+             *                    QUEUE_USER_APC_FLAGS Flags)
+             *
+             * With no flags, QueueUserAPC. A special user APC, delivered without
+             * waiting for an alertable wait, is a 64-bit facility: a 32-bit
+             * process is answered ERROR_NOT_SUPPORTED, as Windows answers it.
+             */
+            QueueUserAPC2: {
+                argBytes: 16,
+                /** @param {number[]} args */
+                handler: ([routine, handle, data, flags])=>{
+                    if ((flags >>> 0) === QUEUE_USER_APC_FLAGS_NONE)
+                    {
+                        return queueUser([routine, handle, data]);
+                    }
+                    host.setLastError((flags >>> 0) === QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC
+                        ? ERROR_NOT_SUPPORTED : ERROR_INVALID_PARAMETER);
+                    return 0;
                 },
             },
 

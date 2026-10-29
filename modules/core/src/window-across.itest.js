@@ -18,14 +18,13 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 
-// Where processes run at once a message sent to the parent's window is
-// answered; where one runs at a time the parent runs nothing while its child
-// does, and a send is refused rather than waited on for ever.
-// With concurrency the child is in a worker of its own, and every window
-// question crosses a link -- the child's about the parent's, and the parent's
-// about the child's.
+// A child runs beside its parent at every concurrency, so a message it sends
+// to the parent's window is answered by the parent's message loop: on one
+// thread the two share it, with concurrency the child is in a worker of its
+// own, and every window question crosses a link -- the child's about the
+// parent's, and the parent's about the child's.
 for (const [concurrency, flag, sends] of /** @type {const} */ ([
-    [1, '', 0], [1, '-held', 2], [2, '', 0], [2, '-send', 6]]))
+    [1, '', 0], [1, '-send', 6], [2, '', 0], [2, '-send', 6]]))
 {
     test(`a window is found, described and posted to by another process (concurrency ${
         concurrency}${flag ? `, ${flag}` : ''})`, { timeout: 120000 }, async t=>{

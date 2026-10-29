@@ -155,7 +155,9 @@ export function oleProcess(options = {}){
             {
                 const [iidAt, outAt] = args;
                 const found = record.object.queryInterface(guidAt(iidAt));
-                put(outAt, found ? vtables.publish(found.object, found.id) : 0);
+                // As the bridge does: an interface that shares another's
+                // pointer is handed out as that one.
+                put(outAt, found ? vtables.publish(found.object, found.sharedWith ?? found.id) : 0);
                 return found ? S_OK : E_NOINTERFACE;
             }
             if (method.builtin === 'addRef')
@@ -164,6 +166,12 @@ export function oleProcess(options = {}){
             }
             if (method.builtin === 'release')
             {
+                // As the bridge does: what the object owes the program is
+                // made, and waited for, inside its last Release.
+                if (record.object.refCount === 1 && record.object.lastRelease)
+                {
+                    await record.object.lastRelease();
+                }
                 return record.object.release();
             }
             return (await method.invoke(record.object, args)) | 0;
@@ -201,7 +209,11 @@ export function oleProcess(options = {}){
                 return E_NOINTERFACE;
             },
             1: ()=>++object.refs,
-            2: ()=>--object.refs,
+            // A turn of the event loop, as a guest call takes: a Release
+            // nobody waits for has not happened when the caller looks.
+            2: ()=>new Promise(resolve=>{
+                setImmediate(()=>resolve(--object.refs));
+            }),
         };
         for (const [slot, fn] of Object.entries(slots))
         {
@@ -359,7 +371,7 @@ export function oleProcess(options = {}){
     /** The definition `makeObject` is making. @type {any} */
     let making = null;
 
-    /** @type {import('./oleutil.js').OleEnv} */
+    /** @type {import('./ole2.js').Ole2Env} */
     const env = {
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
@@ -433,7 +445,7 @@ export function oleProcess(options = {}){
     return {
         bytes, view, heap, u32, u16, put, wide, readWide, guid, guidAt, out, registry, records,
         callMethod, guestObject, queryPointer, hive, setKey, classes, created, user32, metafiles,
-        systemCalls, reported, releasedMedia, thread, env, storage, docfile,
+        systemCalls, reported, releasedMedia, thread, env, storage, docfile, exports,
         /** The object behind a pointer this layer published. @param {number} pointer */
         objectAt: pointer=>records.get(pointer)?.object,
     };

@@ -86,6 +86,13 @@ test('a created database, filled and committed, reads back from its file', async
     await run('INSERT INTO `Fruit` (`Name`, `Count`) VALUES (\'pear\', 5)', database);
     assert.equal(await call('MsiGetSummaryInformationA', [database, 0, 20, 0x44]), 0);
     const summary = view.getUint32(0x44, true);
+    // Wine's suminfo test: no text, or no time, is ERROR_INVALID_PARAMETER.
+    assert.equal(await call('MsiSummaryInfoSetPropertyA', [summary, PID_TITLE, VT_LPSTR, 0, 0,
+        0]), 87);
+    const PID_LASTSAVE_DTM = 13;
+    const VT_FILETIME = 64;
+    assert.equal(await call('MsiSummaryInfoSetPropertyA', [summary, PID_LASTSAVE_DTM,
+        VT_FILETIME, 0, 0, 0]), 87);
     assert.equal(await call('MsiSummaryInfoSetPropertyA', [summary, PID_TITLE, VT_LPSTR, 0, 0,
         put('Fruit basket')]), 0);
     assert.equal(await call('MsiSummaryInfoPersist', [summary]), 0);

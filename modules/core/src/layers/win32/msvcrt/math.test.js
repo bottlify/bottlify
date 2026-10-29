@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { besselJ, createMathFunctions } from './math.js';
 import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
+import { GUEST_EXCEPTION } from '../common/raise.js';
 import { EDOM, ERANGE } from './globals.js';
 import { fakeMemory, fakeFpu, doubleSlots } from './harness.test.js';
 
@@ -205,6 +206,18 @@ test('atan, tanh and exp hand a NaN back as it came, payload and all', ()=>{
     }
 });
 
+test('a signalling NaN goes out quiet, its payload kept, as the x87 answers an operand NaN', ()=>{
+    // Wine's msvcrt test_math_functions: cosh, sinh and tanh of 0xfff0000123456780.
+    const { fpu, table } = build();
+    const nan = new Float64Array(new BigUint64Array([0xfff0000123456780n]).buffer)[0];
+    for (const name of ['cosh', 'sinh', 'tanh', 'exp', 'sqrt'])
+    {
+        table[name].handler(doubleSlots(nan));
+        const bits = new BigUint64Array(new Float64Array([fpu.result]).buffer)[0];
+        assert.equal(bits, 0xfff8000123456780n, name);
+    }
+});
+
 test('ldexp reaches what a double holds from a power of two a double does not', ()=>{
     const { fpu, table } = build();
     table.ldexp.handler([...doubleSlots(1e300), -1100 >>> 0]);
@@ -222,4 +235,23 @@ test('the Bessel functions of the first kind agree with their tables on both sid
     {
         assert.ok(Math.abs(besselJ(order, x) - expected) < 1e-12, `J${order}(${x})`);
     }
+});
+
+test('div and ldiv answer in EAX and EDX, and raise what idiv raises', ()=>{
+    /** @type {Record<string, number>} */
+    const registers = {};
+    const memory = fakeMemory();
+    const table = /** @type {Record<string, any>} */ (createMathFunctions({
+        readMemory: memory.readMemory, writeMemory: memory.writeMemory, fpu: fakeFpu(),
+        setRegisters: values=>Object.assign(registers, values),
+    }));
+    assert.equal(table.div.handler([-7, 2]) | 0, -3);
+    assert.equal(registers.edx | 0, -1, 'the remainder has the dividend\'s sign');
+    assert.equal(table.ldiv.handler([7, -2]) | 0, -3);
+    assert.equal(registers.edx | 0, 1);
+    /** @param {number[]} args @param {number} status */
+    const raises = (args, status)=>assert.throws(()=>table.div.handler(args),
+        (/** @type {any} */ error)=>error.code === GUEST_EXCEPTION && error.status === status);
+    raises([5, 0], 0xc0000094);
+    raises([-0x80000000, -1], 0xc0000095);
 });

@@ -37,6 +37,24 @@ const CHANGE_SIZE = 0x008;
 const CHANGE_LAST_WRITE = 0x010;
 
 /**
+ * The FILE_ACTION_ a change to one name is, as ReadDirectoryChangesW reports
+ * it. A rename is its old name and its new one; seen from a watch that holds
+ * only one of the two, it is a name removed or a name added.
+ */
+export const FILE_ACTION_ADDED = 1;
+export const FILE_ACTION_REMOVED = 2;
+export const FILE_ACTION_MODIFIED = 3;
+export const FILE_ACTION_RENAMED_OLD_NAME = 4;
+export const FILE_ACTION_RENAMED_NEW_NAME = 5;
+
+/**
+ * One change as a watch is told it: what happened, and to which name, from
+ * the watched directory down, as the volume spells it.
+ *
+ * @typedef {{ action: number, name: string }} ChangeRecord
+ */
+
+/**
  * @param {any} fs  The filesystem layer's API.
  * @param {((blocks: any[]) => Promise<void>) | null} [fetchBlocks]
  *        Brings absent bundle blocks in. Absent itself when nothing is mounted
@@ -132,6 +150,15 @@ export function createVolume(fs, fetchBlocks = null){
     const recorded = new Map();
     /** @param {string} path */
     const keyOf = path=>path.toLowerCase();
+    /**
+     * A file with more than one name says how many and what it is known by;
+     * one with its own alone says nothing of either.
+     *
+     * @param {any} entry
+     * @returns {{ links?: number, identity?: string }}
+     */
+    const linked = entry=>(entry.links > 1 ? { links: entry.links, identity: entry.identity } : {});
+
     /** @param {string} path */
     const setBy = path=>{
         const attributes = recorded.get(keyOf(path));
@@ -165,9 +192,13 @@ export function createVolume(fs, fetchBlocks = null){
      * it asked for, what to tell, and whether anyone still holds it.
      *
      * @type {Set<{ directory: string, subtree: boolean, filter: number,
-     *     changed: () => void, alive: () => boolean }>}
+     *     changed: (records: ChangeRecord[]) => void, alive: () => boolean }>}
      */
     const watches = new Set();
+
+    /** Why the last open was refused, for the surface to answer with: `openRefusal`. */
+    /** @type {string | null} */
+    let refusedOpen = null;
 
     /**
      * Where each open file is, so a write through it can be told to the
@@ -177,9 +208,10 @@ export function createVolume(fs, fetchBlocks = null){
      */
     const openedAt = new WeakMap();
 
+    /** @param {string} path  The volume's own spelling, no trailing separator. */
+    const spelled = path=>attempt(()=>fs.resolve(path).path, path).replace(/\\+$/, '');
     /** @param {string} path  The volume's own spelling, folded, no trailing separator. */
-    const canonical = path=>attempt(()=>fs.resolve(path).path, path)
-        .replace(/\\+$/, '').toLowerCase();
+    const canonical = path=>spelled(path).toLowerCase();
 
     /**
      * A change to one name, told to every watch over the directory it is in
@@ -187,17 +219,22 @@ export function createVolume(fs, fetchBlocks = null){
      * filter asks about it. Removing the watched directory itself is told
      * too, as Windows tells it. Nothing is worked out while nothing watches.
      *
-     * One operation is one change, whatever names it touches: a rename is
-     * told once to a watch that sees both its names.
+     * One operation is one telling, whatever names it touches: a rename is
+     * told once to a watch that sees both its names, as the records of
+     * both. The watched directory's own removal is told with no record;
+     * its rename is not told.
      *
      * @param {string | string[]} paths @param {number} kind  FILE_NOTIFY_CHANGE_ flags.
+     * @param {number | number[]} actions  FILE_ACTION_ of each path.
      */
-    const changed = (paths, kind)=>{
+    const changed = (paths, kind, actions)=>{
         if (watches.size === 0)
         {
             return;
         }
-        const names = (Array.isArray(paths) ? paths : [paths]).map(canonical);
+        const given = Array.isArray(paths) ? paths : [paths];
+        const names = given.map(spelled);
+        const acts = Array.isArray(actions) ? actions : given.map(()=>actions);
         for (const watch of [...watches])
         {
             if (!watch.alive())
@@ -205,15 +242,35 @@ export function createVolume(fs, fetchBlocks = null){
                 watches.delete(watch);
                 continue;
             }
-            const within = names.some(name=>{
-                const parent = name.slice(0, Math.max(name.lastIndexOf('\\'), 0));
-                return parent === watch.directory
-                    || (watch.subtree && parent.startsWith(`${watch.directory}\\`))
-                    || (name === watch.directory && kind === CHANGE_DIR_NAME);
-            });
-            if (within && (watch.filter & kind) !== 0)
+            if ((watch.filter & kind) === 0)
             {
-                watch.changed();
+                continue;
+            }
+            // Its removal is told; its move is not, as Windows does neither
+            // more nor less.
+            const self = names.some((name, index)=>name.toLowerCase() === watch.directory
+                && kind === CHANGE_DIR_NAME && acts[index] === FILE_ACTION_REMOVED);
+            /** @type {ChangeRecord[]} */
+            const records = [];
+            names.forEach((name, index)=>{
+                const folded = name.toLowerCase();
+                const parent = folded.slice(0, Math.max(folded.lastIndexOf('\\'), 0));
+                if (parent === watch.directory
+                    || (watch.subtree && parent.startsWith(`${watch.directory}\\`)))
+                {
+                    records.push({ action: acts[index],
+                        name: name.slice(watch.directory.length + 1) });
+                }
+            });
+            if (records.length === 1 && acts.length === 2)
+            {
+                // Half a rename: the name left the watch, or came into it.
+                records[0].action = records[0].action === FILE_ACTION_RENAMED_OLD_NAME
+                    ? FILE_ACTION_REMOVED : FILE_ACTION_ADDED;
+            }
+            if (records.length > 0 || self)
+            {
+                watch.changed(records);
             }
         }
     };
@@ -223,13 +280,14 @@ export function createVolume(fs, fetchBlocks = null){
          * @param {string} path
          * @returns {{ exists: boolean, isDirectory: boolean, size: number,
          *             modified: number, readOnly?: boolean, hidden?: boolean,
-         *             attributes?: number } | null}
+         *             attributes?: number, links?: number, identity?: string } | null}
          */
         stat(path){
             const entry = attempt(()=>fs.stat(path), null);
             return entry
                 ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size,
-                    modified: entry.modified ?? 0, ...marks(entry), ...setBy(path) }
+                    modified: entry.modified ?? 0, ...linked(entry), ...marks(entry),
+                    ...setBy(path) }
                 : null;
         },
 
@@ -245,16 +303,52 @@ export function createVolume(fs, fetchBlocks = null){
             {
                 return false;
             }
-            changed(path, CHANGE_ATTRIBUTES);
-            if (attributes === null)
+            changed(path, CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
+            // The attributes are the file's: every name it has shows them.
+            for (const name of attempt(()=>fs.namesOf?.(path), null) ?? [path])
             {
-                recorded.delete(keyOf(path));
-            }
-            else
-            {
-                recorded.set(keyOf(path), attributes >>> 0);
+                if (attributes === null)
+                {
+                    recorded.delete(keyOf(name));
+                }
+                else
+                {
+                    recorded.set(keyOf(name), attributes >>> 0);
+                }
             }
             return true;
+        },
+
+        /**
+         * Gives the file at `existing` the further name `path`: null when it
+         * did, or the volume's code for why not -- NOT_SAME_DEVICE across
+         * drives, ACCESS_DENIED for a directory, ALREADY_EXISTS for a name
+         * taken, NOT_FOUND or PATH_NOT_FOUND for what is not there. The new
+         * name shows the attributes the file was given.
+         *
+         * @param {string} path @param {string} existing
+         * @returns {string | null}
+         */
+        link(path, existing){
+            try
+            {
+                fs.link(path, existing);
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return error.code;
+            }
+            const attributes = recorded.get(keyOf(existing));
+            if (attributes !== undefined)
+            {
+                recorded.set(keyOf(path), attributes);
+            }
+            changed(path, CHANGE_FILE_NAME, FILE_ACTION_ADDED);
+            return null;
         },
 
         /**
@@ -265,10 +359,18 @@ export function createVolume(fs, fetchBlocks = null){
         setModified(path, modified){
             return attempt(()=>{
                 fs.setModified(path, modified);
-                changed(path, CHANGE_LAST_WRITE);
+                changed(path, CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
                 return true;
             }, false);
         },
+
+        /**
+         * Why the last `open` answered null: the volume's code -- NOT_FOUND,
+         * SHARING_VIOLATION and the rest -- or null when it opened.
+         *
+         * @returns {string | null}
+         */
+        openRefusal: ()=>refusedOpen,
 
         /**
          * @param {string} path
@@ -278,23 +380,39 @@ export function createVolume(fs, fetchBlocks = null){
         open(path, mode){
             const existed = watches.size > 0 && (mode.create || mode.truncate)
                 ? attempt(()=>fs.stat(path), null) !== null : null;
-            const node = attempt(()=>fs.open(path, {
-                read: mode.read !== false,
-                write: Boolean(mode.write),
-                shareWrite: mode.shareWrite === true,
-                disposition: dispositionOf(mode),
-                inherited: mode.inherited === true,
-            }), null);
+            refusedOpen = null;
+            const node = attempt(()=>{
+                try
+                {
+                    return fs.open(path, {
+                        read: mode.read !== false,
+                        write: Boolean(mode.write),
+                        shareRead: mode.shareRead !== false,
+                        shareWrite: mode.shareWrite === true,
+                        delete: mode.delete === true,
+                        // Only CreateFile says how it shares deletion; a layer's own
+                        // reader (an installer's database, a library a DLL loads) does
+                        // not stand in the way of the program deleting the file.
+                        shareDelete: mode.shareDelete !== false,
+                        disposition: dispositionOf(mode),
+                        inherited: mode.inherited === true,
+                    });
+                }
+                catch (e){
+                    refusedOpen = /** @type {any} */ (e)?.code ?? null;
+                    throw e;
+                }
+            }, null);
             if (node && watches.size > 0)
             {
                 openedAt.set(node, path);
                 if (existed === false)
                 {
-                    changed(path, CHANGE_FILE_NAME);
+                    changed(path, CHANGE_FILE_NAME, FILE_ACTION_ADDED);
                 }
                 else if (existed && mode.truncate)
                 {
-                    changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                    changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
                 }
             }
             return node;
@@ -345,7 +463,7 @@ export function createVolume(fs, fetchBlocks = null){
             const path = watches.size > 0 ? openedAt.get(node) : undefined;
             if (path !== undefined && bytes.length > 0)
             {
-                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
             }
             return written;
         },
@@ -385,7 +503,7 @@ export function createVolume(fs, fetchBlocks = null){
             const path = watches.size > 0 ? openedAt.get(node) : undefined;
             if (path !== undefined)
             {
-                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
             }
         },
 
@@ -436,17 +554,69 @@ export function createVolume(fs, fetchBlocks = null){
                     fs.deleteFile(path);
                 }
                 carry(path, null);
-                changed(path, entry.directory ? CHANGE_DIR_NAME : CHANGE_FILE_NAME);
+                changed(path, entry.directory ? CHANGE_DIR_NAME : CHANGE_FILE_NAME,
+                    FILE_ACTION_REMOVED);
                 return true;
             }, false);
         },
+
+        /**
+         * Why the file at `path` may not be renamed or deleted as its opens
+         * stand -- SHARING_VIOLATION, an open that does not share deletion --
+         * or null when it may.
+         *
+         * @param {string} path
+         * @returns {string | null}
+         */
+        removalRefused(path){
+            try
+            {
+                fs.mayRemove?.(path);
+                return null;
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return error.code;
+            }
+        },
+
+        /** @param {string} path @returns {boolean} whether any process holds the file open */
+        isOpen: path=>attempt(()=>fs.isOpen?.(path) ?? false, false),
+
+        /**
+         * The device a path names wherever it is -- `nul`, `C:\\dir\\NUL.txt` --
+         * in upper case, or null.
+         *
+         * @param {string} path @returns {string | null}
+         */
+        deviceOf: path=>attempt(()=>fs.resolve?.(path)?.device ?? null, null),
+
+        /**
+         * How a section maps the file, or null.
+         *
+         * @param {string} path @returns {'readonly' | 'readwrite' | 'image' | null}
+         */
+        mappedAs: path=>attempt(()=>fs.mappedAs?.(path) ?? null, null),
+
+        /**
+         * A section's own hold on the file `node` has open, on the section's
+         * terms: what the section keeps once the file's handle is closed.
+         * Null where the volume cannot give one.
+         *
+         * @param {any} node @param {'readonly' | 'readwrite' | 'image'} kind
+         */
+        section: (node, kind)=>attempt(()=>fs.reopenSection?.(node, kind) ?? null, null),
 
         /** @param {string} path @returns {boolean} */
         mkdir: path=>{
             const made = attempt(()=>fs.createDirectory(path), false);
             if (made !== false)
             {
-                changed(path, CHANGE_DIR_NAME);
+                changed(path, CHANGE_DIR_NAME, FILE_ACTION_ADDED);
             }
             return made;
         },
@@ -459,7 +629,8 @@ export function createVolume(fs, fetchBlocks = null){
             {
                 const kind = attempt(()=>fs.stat(to), null)?.directory
                     ? CHANGE_DIR_NAME : CHANGE_FILE_NAME;
-                changed([from, to], kind);
+                changed([from, to], kind,
+                    [FILE_ACTION_RENAMED_OLD_NAME, FILE_ACTION_RENAMED_NEW_NAME]);
             }
             return true;
         }, false),
@@ -470,7 +641,7 @@ export function createVolume(fs, fetchBlocks = null){
          * nobody holds it any more.
          *
          * @param {string} path @param {boolean} subtree @param {number} filter
-         * @param {() => void} notify @param {() => boolean} alive
+         * @param {(records: ChangeRecord[]) => void} notify @param {() => boolean} alive
          * @returns {{ close: () => void }}
          */
         watch(path, subtree, filter, notify, alive){
@@ -489,6 +660,7 @@ export function createVolume(fs, fetchBlocks = null){
                 isDirectory: Boolean(entry.directory),
                 size: entry.size,
                 modified: entry.modified ?? 0,
+                ...linked(entry),
                 ...marks(entry),
                 ...setBy(`${path.replace(/\\$/, '')}\\${entry.name}`),
             })), []),

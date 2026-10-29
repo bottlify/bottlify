@@ -53,7 +53,8 @@
  *
  * `controlWord()` and `statusWord()` answer the x87's control word and its
  * status word (without the stack's top), `setControlWord(word)` loads the
- * control word and `clearExceptions()` clears the exception flags: the
+ * control word and `clearExceptions()` clears the exception flags; `mxcsr()`
+ * and `setMxcsr(word)` read and load SSE's control and status register: the
  * runtime's own business with the floating-point environment, whose
  * JavaScript reads and writes the words the host's FPU seam keeps.
  *
@@ -323,9 +324,11 @@ const FLOAT_STORES = new Set(['setF32', 'setF64']);
  * answer them (`fnstcw`, `fnstsw` -- the status word without the stack's
  * top, which a function cannot see from its source), `setControlWord(word)`
  * loads the control word (`fldcw`), `clearExceptions()` clears the
- * exception flags (`fnclex`).
+ * exception flags (`fnclex`); MXCSR, SSE's, is `mxcsr()` (`stmxcsr`) and
+ * `setMxcsr(word)` (`ldmxcsr`).
  */
-const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clearExceptions']);
+const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clearExceptions',
+    'mxcsr', 'setMxcsr']);
 
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
     'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', ...X87_WORDS]);
@@ -2359,6 +2362,15 @@ class FunctionCompiler {
                     this.x87Used = true;
                     return;
                 }
+                if (name === 'setMxcsr' && this.helpers.has(name))
+                {
+                    this.arity(node, 1);
+                    const value = this.expr(node.arguments[0]);
+                    this.integer(value, node.arguments[0], 'typed');
+                    this.toEax(value, node.arguments[0]);
+                    a.emit(0x50, 0x0f, 0xae, 0x14, 0x24, 0x58);         // push; ldmxcsr [esp]; pop
+                    return;
+                }
                 if (name === 'clearExceptions' && this.helpers.has(name))
                 {
                     this.arity(node, 0);
@@ -4074,6 +4086,15 @@ class FunctionCompiler {
             {
                 this.guestCall(node, name === 'callStd');
                 return { where: 'eax', type: 'i32' };
+            }
+            if (name === 'mxcsr')
+            {
+                this.arity(node, 0);
+                a.emit(0x83, 0xec, 0x04);                                  // sub esp, 4
+                a.emit(0x0f, 0xae, 0x1c, 0x24);                            // stmxcsr [esp]
+                a.emit(0x8b, 0x04, 0x24);                                  // mov eax, [esp]
+                a.emit(0x83, 0xc4, 0x04);                                  // add esp, 4
+                return { where: 'eax', type: 'nat' };
             }
             if (name === 'controlWord' || name === 'statusWord')
             {

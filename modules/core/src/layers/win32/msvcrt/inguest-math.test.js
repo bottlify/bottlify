@@ -213,3 +213,28 @@ test('_CIfabs, _CIfloor and _CIceil on the x87 stack', ()=>{
         }
     }
 });
+
+test('pow to a whole power is the power correctly rounded, in the guest and the handler alike',
+    ()=>{
+        // Wine's msvcrt test__atodbl holds 10^n against _atodbl's answer to
+        // two units in the last place; 2 to y log2 x in doubles was hundreds
+        // out (10^100 by 117). By squaring in two doubles every one is the
+        // double nearest the power.
+        const guest = /** @type {any} */ ({ host: ()=>Number.NaN });
+        for (let n = -307; n <= 308; n++)
+        {
+            assert.equal(sources.pow(guest, 10, n), Number(`1e${n}`), `10^${n}`);
+        }
+        assert.equal(sources.pow(guest, 3, 40), 12157665459056929000, 'the double nearest 3^40');
+        assert.equal(sources.pow(guest, -2, 7), -128);
+        assert.equal(sources.pow(guest, -1.5, 4), 5.0625);
+        assert.equal(sources.pow(guest, 7, -3), 1 / 343);
+
+        // And the x86 computes it bit for bit, under every control word.
+        const next = random(21);
+        const cases = Array.from({ length: 40 }, ()=>[
+            (next() / 2 ** 31 - 1) * 2 ** ((next() % 60) - 30),
+            (next() % 400) - 200,
+        ]);
+        both('pow', [...cases, [10, 308], [10, -307], [0.1, 300], [-3, 41], [1.0000001, 1e9]]);
+    });

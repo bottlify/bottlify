@@ -28,20 +28,26 @@
 import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from '../kernel32/console.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { EACCES, EBADF, EEXIST, EINVAL, EMFILE, ENOENT, ENOSPC } from './globals.js';
+import { Pipe } from './pipes.js';
 import {
-    O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf, foldUnits, markIn,
-    markOf, textOfUnits, unitsOf, unmarkedEncodingOf, wideStringAt,
+    O_U16TEXT, O_U8TEXT, O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf,
+    foldUnits, markIn, markOf, textOfUnits, unitsOf, unmarkedEncodingOf, wideStringAt,
 } from './widetext.js';
 
 /** `_open` flags, at msvcrt's values (fcntl.h). */
+/** The system error a read or write without the access answers. */
+const ERROR_ACCESS_DENIED = 5;
+
 const O_WRONLY = 0x0001;
 const O_RDWR = 0x0002;
 const O_ACCMODE = 0x0003;
 const O_APPEND = 0x0008;
+const O_SEQUENTIAL = 0x0020;
 const O_TEMPORARY = 0x0040;
 const O_CREAT = 0x0100;
 const O_TRUNC = 0x0200;
 const O_EXCL = 0x0400;
+const O_NOINHERIT = 0x0080;
 const O_TEXT = 0x4000;
 export const O_BINARY = 0x8000;
 
@@ -69,13 +75,25 @@ const INVALID_HANDLE_VALUE = -1;
  * section.
  */
 const IOINFO = Object.freeze({
-    BLOCK: 32, SIZE: 36, BLOCKS: MAX_DESCRIPTORS / 32, HANDLE: 0, WXFLAG: 4,
+    BLOCK: 32, SIZE: 36, BLOCKS: MAX_DESCRIPTORS / 32, HANDLE: 0, WXFLAG: 4, EXFLAG: 8,
 });
-/** `wxflag`'s bits: open, appending, a character device, text mode. */
+/** `wxflag`'s bits: open, a pipe, not inherited, appending, a character device, text mode. */
 const WX_OPEN = 0x01;
+const WX_PIPE = 0x08;
+const WX_DONTINHERIT = 0x10;
 const WX_APPEND = 0x20;
 const WX_TTY = 0x40;
 const WX_TEXT = 0x80;
+/**
+ * `exflag`'s bits: the Unicode translation a descriptor was opened in --
+ * UTF-8, UTF-16, and with `_O_WTEXT` the mark of one still to be told from
+ * the file -- and that its lock was made, which every open does. They stay
+ * when the descriptor closes.
+ */
+const EF_UTF8 = 0x01;
+const EF_UTF16 = 0x02;
+const EF_CRIT_INIT = 0x04;
+const EF_UNK_UNICODE = 0x08;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -123,6 +141,7 @@ const STAT64I32 = Object.freeze({
 
 /** `st_mode` bits, as sys/stat.h numbers them. */
 const S_IFDIR = 0x4000;
+const S_IFIFO = 0x1000;
 const S_IFCHR = 0x2000;
 const S_IFREG = 0x8000;
 const ALL_READ = 0o444;
@@ -199,6 +218,7 @@ function lineEnd(raw, width){
  * @property {boolean} ended     A ^Z was read: reads answer nothing until a seek.
  * @property {boolean} temporary The file is removed when the descriptor closes.
  * @property {number} [console]  The standard handle a console descriptor stands for.
+ * @property {boolean} [inherit] False for a pipe's end made not to be inherited.
  * @property {{ offset: number, bytes: Uint8Array, whole: boolean } | null} ahead
  *           What a stream read last took from the volume; `whole` when that
  *           read reached the end of the file.
@@ -277,6 +297,8 @@ const onConsole = (handle, settings)=>{
  * @property {boolean} [append]
  * @property {boolean | null} [text]  Null: whatever `_fmode` says.
  * @property {boolean} [temporary]  Remove the file when the descriptor closes.
+ * @property {boolean} [sequential]  Read front to back: the cache hint
+ *           FILE_FLAG_SEQUENTIAL_SCAN gives, which the file's handle reports.
  * @property {number} [unicode]  A Unicode translation to open it in.
  */
 
@@ -312,8 +334,11 @@ export function createDescriptors(host){
     table.set(1, onConsole(HANDLE_STDOUT, { text: true }));
     table.set(2, onConsole(HANDLE_STDERR, { text: true }));
 
+    /** Each number's `exflag`, kept past its descriptor's close. @type {Map<number, number>} */
+    const exflags = new Map();
+
     /**
-     * A descriptor's `__pioinfo` entry, its handle and `wxflag`: a number not
+     * A descriptor's `__pioinfo` entry, its handle, `wxflag` and `exflag`: a number not
      * open has no handle. A file's handle is made only when one is asked
      * for, so until then the entry holds none, though `wxflag` says it is
      * open.
@@ -322,11 +347,21 @@ export function createDescriptors(host){
      */
     const entryOf = fd=>{
         const descriptor = table.get(fd);
-        const bytes = new Uint8Array(IOINFO.WXFLAG + 1);
-        new DataView(bytes.buffer).setInt32(IOINFO.HANDLE,
-            descriptor?.handle || INVALID_HANDLE_VALUE, true);
+        const bytes = new Uint8Array(IOINFO.EXFLAG + 4);
+        const view = new DataView(bytes.buffer);
+        view.setInt32(IOINFO.HANDLE, descriptor?.handle || INVALID_HANDLE_VALUE, true);
+        if (descriptor)
+        {
+            const unicode = descriptor.unicode ?? 0;
+            exflags.set(fd, EF_CRIT_INIT | (unicode === O_U8TEXT ? EF_UTF8 : 0)
+                | (unicode === O_U16TEXT || unicode === O_WTEXT ? EF_UTF16 : 0)
+                | (unicode === O_WTEXT ? EF_UNK_UNICODE : 0));
+        }
+        view.setInt32(IOINFO.EXFLAG, exflags.get(fd) ?? 0, true);
         bytes[IOINFO.WXFLAG] = !descriptor ? 0 : WX_OPEN | (descriptor.append ? WX_APPEND : 0)
-            | (descriptor.console !== undefined ? WX_TTY : 0) | (descriptor.text ? WX_TEXT : 0);
+            | (descriptor.console !== undefined ? WX_TTY : 0) | (descriptor.text ? WX_TEXT : 0)
+            | (descriptor.node instanceof Pipe ? WX_PIPE : 0)
+            | (descriptor.inherit === false ? WX_DONTINHERIT : 0);
         return bytes;
     };
 
@@ -510,7 +545,8 @@ export function createDescriptors(host){
                 fail(!there ? ENOENT : (request.exclusive ? EEXIST : EACCES));
                 return -1;
             }
-            const file = { node, path, position: 0, read: request.read, write: request.write };
+            const file = { node, path, position: 0, read: request.read, write: request.write,
+                ...request.sequential ? { sequential: true } : {} };
             const descriptor = over(file, {
                 append: request.append,
                 text: request.text ?? ((host.fmode?.() ?? 0) & O_BINARY) === 0,
@@ -571,6 +607,42 @@ export function createDescriptors(host){
                 mirror(fd);
             }
             return fd;
+        },
+
+        /**
+         * A pipe's two ends, the reading one first, at the lowest numbers
+         * free; null with EMFILE when there are not two.
+         *
+         * @param {number} flags  `_O_TEXT`, `_O_BINARY` or neither, `_O_NOINHERIT`.
+         * @returns {[number, number] | null}
+         */
+        pipe(flags){
+            const settings = {
+                text: (flags & O_TEXT) !== 0
+                    || ((flags & O_BINARY) === 0 && ((host.fmode?.() ?? 0) & O_BINARY) === 0),
+                inherit: (flags & O_NOINHERIT) === 0,
+            };
+            const pipe = new Pipe();
+            const ends = [true, false].map(reading=>{
+                const fd = lowestFree();
+                if (fd < 0)
+                {
+                    return -1;
+                }
+                const end = over({ node: pipe, path: '', position: 0, read: reading,
+                    write: !reading }, { text: settings.text });
+                end.inherit = settings.inherit;
+                table.set(fd, end);
+                return fd;
+            });
+            if (ends.includes(-1))
+            {
+                ends.filter(fd=>fd >= 0).forEach(fd=>this.close(fd));
+                fail(EMFILE);
+                return null;
+            }
+            ends.forEach(mirror);
+            return /** @type {[number, number]} */ (ends);
         },
 
         /**
@@ -857,6 +929,7 @@ export function createDescriptors(host){
  * @property {any} files  The volume: stat and currentDirectory, besides what
  *           the descriptors use.
  * @property {(code: number) => void} [errno]
+ * @property {(code: number) => void} [doserrno]  Where the system's reason goes.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call refuses what real Windows would have done.
  * @property {(values: Record<string, number>) => void} [setRegisters]
@@ -878,6 +951,21 @@ export function createIoFunctions(host, descriptors){
      * @param {(args: number[]) => number | Promise<number>} handler
      */
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
+
+    /**
+     * A read or a write the descriptor refuses: EBADF, and for one open the
+     * other way the system's own reason in `_doserrno`, ERROR_ACCESS_DENIED,
+     * as ReadFile on a handle without the access answers.
+     *
+     * @param {Descriptor | undefined | null} descriptor
+     */
+    const refuse = descriptor=>{
+        fail(EBADF);
+        if (descriptor)
+        {
+            host.doserrno?.(ERROR_ACCESS_DENIED);
+        }
+    };
 
     /** @param {number} milliseconds */
     const seconds = milliseconds=>Math.floor((milliseconds ?? 0) / 1000) >>> 0;
@@ -923,6 +1011,8 @@ export function createIoFunctions(host, descriptors){
             append: (flags & O_APPEND) !== 0,
             text: (flags & O_BINARY) !== 0 ? false : ((flags & O_TEXT) !== 0 ? true : null),
             temporary: (flags & O_TEMPORARY) !== 0,
+            // _O_SEQUENTIAL wins over _O_RANDOM, said together.
+            sequential: (flags & O_SEQUENTIAL) !== 0,
             unicode: (flags & O_BINARY) !== 0 ? 0 : unicodeOf(flags),
         });
     };
@@ -1026,6 +1116,12 @@ export function createIoFunctions(host, descriptors){
         if (descriptor.node === null)
         {
             writeStat(buffer, { device: fd | 0, mode: S_IFCHR, size: 0, modified: 0 }, layout);
+            return 0;
+        }
+        if (descriptor.node instanceof Pipe)
+        {
+            writeStat(buffer, { device: fd | 0, mode: S_IFIFO,
+                size: descriptor.node.available(descriptor.position), modified: 0 }, layout);
             return 0;
         }
         const entry = host.files.stat(descriptor.path);
@@ -1147,6 +1243,32 @@ export function createIoFunctions(host, descriptors){
         : {};
 
     const duplicates = {
+        /**
+         * int _pipe(int *pfds, unsigned int psize, int textmode)
+         *
+         * A pipe, its reading end in `pfds[0]` and its writing end in
+         * `pfds[1]`, in the mode asked or `_fmode`'s; the size is a hint
+         * about buffering and bounds nothing. -1 with EINVAL for no array,
+         * EMFILE when two numbers are not free.
+         */
+        _pipe: cdecl(12, ([fds, , mode])=>{
+            if ((fds >>> 0) === 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
+            const ends = descriptors.pipe(mode >>> 0);
+            if (!ends)
+            {
+                return -1;
+            }
+            const bytes = new Uint8Array(8);
+            new DataView(bytes.buffer).setInt32(0, ends[0], true);
+            new DataView(bytes.buffer).setInt32(4, ends[1], true);
+            host.writeMemory(fds >>> 0, bytes);
+            return 0;
+        }),
+
         /** int _dup(int fd) -- a second descriptor on the same file, its position shared. */
         _dup: cdecl(4, ([fd])=>descriptors.duplicate(fd)),
 
@@ -1184,6 +1306,18 @@ export function createIoFunctions(host, descriptors){
          * and the volume keeps no such bit, so it is read and not used.
          */
         _open: cdecl(12, ([path, oflag])=>openNamed(path, oflag, false)),
+
+        /**
+         * int _creat(const char *filename, int pmode)
+         *
+         * `_open` creating or truncating the file, for reading and writing, in
+         * `_fmode`'s translation. `pmode` would mark a new file read-only, a
+         * bit the volume does not keep.
+         */
+        _creat: cdecl(8, ([path])=>openNamed(path, O_CREAT | O_TRUNC | O_RDWR, false)),
+
+        /** int _wcreat(const wchar_t *filename, int pmode) -- `_creat`, wide. */
+        _wcreat: cdecl(8, ([path])=>openNamed(path, O_CREAT | O_TRUNC | O_RDWR, true)),
 
         /** int _wopen(const wchar_t *filename, int oflag [, int pmode]) -- `_open`, wide. */
         _wopen: cdecl(12, ([path, oflag])=>openNamed(path, oflag, true)),
@@ -1251,7 +1385,7 @@ export function createIoFunctions(host, descriptors){
             const descriptor = descriptors.get(fd | 0);
             if (!descriptor || !descriptor.read)
             {
-                fail(EBADF);
+                refuse(descriptor);
                 return -1;
             }
             const wanted = count >>> 0;
@@ -1300,11 +1434,18 @@ export function createIoFunctions(host, descriptors){
                     return deliver(out.subarray(0, filled), raw.length);
                 }
                 return settle(host.files.read(descriptor.node, start + raw.length, 1), next=>{
+                    // A CR the read ended on is looked past: before an LF the
+                    // two are the LF. A file's read takes it only when the CR
+                    // was all it read, Windows' own answer; a pipe's always,
+                    // the runtime having kept the byte it looked at aside.
                     if (next.length === 1 && next[0] === LF)
                     {
-                        return filled === 0
-                            ? deliver(Uint8Array.of(LF), raw.length + 1)
-                            : deliver(out.subarray(0, filled), raw.length);
+                        if (filled === 0 || descriptor.node instanceof Pipe)
+                        {
+                            out[filled] = LF;
+                            return deliver(out.subarray(0, filled + 1), raw.length + 1);
+                        }
+                        return deliver(out.subarray(0, filled), raw.length);
                     }
                     out[filled] = CR;
                     return deliver(out.subarray(0, filled + 1), raw.length);
@@ -1322,7 +1463,7 @@ export function createIoFunctions(host, descriptors){
             const descriptor = descriptors.get(fd | 0);
             if (!descriptor || !descriptor.write)
             {
-                fail(EBADF);
+                refuse(descriptor);
                 return -1;
             }
             const wanted = count >>> 0;

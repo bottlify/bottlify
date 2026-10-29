@@ -7,7 +7,9 @@
 import { createRegistryService } from './registry-service.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REGISTRY_NATIVES, USER_NAME, createRegistryFunctions } from './functions.js';
+import {
+    KEY_OF_HANDLE, REGISTRY_NATIVES, UNLOAD_KEY, USER_NAME, createRegistryFunctions,
+} from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
     createHive,
@@ -16,6 +18,7 @@ import {
     HKEY_LOCAL_MACHINE,
     REG_BINARY,
     REG_DWORD,
+    REG_MULTI_SZ,
     REG_SZ,
 } from './registry.js';
 
@@ -225,6 +228,47 @@ test('names and strings are kept in the ANSI page, whichever form set them', ()=
     assert.deepEqual([...memory.bytes.subarray(OUT_DATA, OUT_DATA + 5)], [...text, 0]);
 });
 
+test('a key keeps the class RegCreateKeyEx gave it, read back by RegQueryInfoKey', ()=>{
+    const { memory, fns } = setup();
+    const CLASS_IN = 0x300;
+    const CLASS_OUT = 0x340;
+    const CLASS_SIZE = 0x380;
+    const MAX_CLASS = 0x384;
+    memory.putString(SUBKEY, 'Software\\Classy');
+    memory.putString(CLASS_IN, 'subkey class');
+    assert.equal(fns.RegCreateKeyExA.handler(
+        [HKEY_LOCAL_MACHINE, SUBKEY, 0, CLASS_IN, 0, 0, 0, OUT_HANDLE, 0]), ERROR_SUCCESS);
+    const key = memory.dword(OUT_HANDLE);
+
+    // A class buffer with no length pointer is refused, and left untouched.
+    memory.bytes[CLASS_OUT] = 0x55;
+    assert.equal(fns.RegQueryInfoKeyA.handler(
+        [key, CLASS_OUT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(memory.bytes[CLASS_OUT], 0x55, 'the buffer is left alone');
+
+    // Its length alone, with no buffer.
+    memory.putDword(CLASS_SIZE, 0);
+    assert.equal(fns.RegQueryInfoKeyA.handler(
+        [key, 0, CLASS_SIZE, 0, 0, 0, 0, 0, 0, 0, 0, 0]), ERROR_SUCCESS);
+    assert.equal(memory.dword(CLASS_SIZE), 'subkey class'.length, 'the class length');
+
+    // The class into a buffer that fits, with its length.
+    memory.putDword(CLASS_SIZE, 0x40);
+    assert.equal(fns.RegQueryInfoKeyA.handler(
+        [key, CLASS_OUT, CLASS_SIZE, 0, 0, 0, 0, 0, 0, 0, 0, 0]), ERROR_SUCCESS);
+    assert.equal(memory.string(CLASS_OUT), 'subkey class');
+    assert.equal(memory.dword(CLASS_SIZE), 'subkey class'.length);
+
+    // A subkey with a longer class: the parent reports it as the most room.
+    memory.putString(SUBKEY, 'subsubkey');
+    memory.putString(CLASS_IN, 'subsubkey class');
+    assert.equal(fns.RegCreateKeyExA.handler(
+        [key, SUBKEY, 0, CLASS_IN, 0, 0, 0, OUT_HANDLE, 0]), ERROR_SUCCESS);
+    assert.equal(fns.RegQueryInfoKeyA.handler(
+        [key, 0, 0, 0, 0, 0, MAX_CLASS, 0, 0, 0, 0, 0]), ERROR_SUCCESS);
+    assert.equal(memory.dword(MAX_CLASS), 'subsubkey class'.length, 'the longest subkey class');
+});
+
 test('a key is created, reopened whatever its case, and read back', ()=>{
     const { memory, fns, create, setString } = setup();
     const created = create('Software\\Vendor\\Product');
@@ -298,6 +342,112 @@ test('a query with no buffer reports the size, and does not need one', ()=>{
         ERROR_SUCCESS);
     assert.equal(memory.string(OUT_DATA), 'abcd');
     assert.equal(memory.dword(OUT_SIZE), 5);
+});
+
+// The clocks a program reads itself: the perf block is stamped from the same
+// calls, so a stub that writes known marks is enough to see them land.
+/** @param {ReturnType<typeof fakeMemory>} memory */
+const perfClockStub = memory=>(/** @type {string} */ library,
+    /** @type {string} */ name, /** @type {number[]} */ args)=>
+{
+    const marks = { QueryPerformanceCounter: 0x11112222, QueryPerformanceFrequency: 10000000,
+        GetSystemTimeAsFileTime: 0xaaaabbbb };
+    if (name in marks)
+    {
+        memory.putDword(args[0], marks[/** @type {keyof typeof marks} */ (name)]);
+    }
+    else if (name === 'FileTimeToSystemTime')
+    {
+        memory.putDword(args[1], 2026);
+    }
+    return 0;
+};
+
+test('a performance key answers a PERF_DATA_BLOCK, stamped with the clocks it reads', ()=>{
+    const memory = fakeMemory(0x200000);
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createRegistryService(createHive()),
+        system: perfClockStub(memory),
+        computerName: 'BOTTLIFY',
+    });
+    const PERF = 0x80000004;
+    const BIG = 0x100000;
+    const OUT = 0x1000;
+
+    // The sizing calls: the block never reports its size, so both a null
+    // buffer and a short one are ERROR_MORE_DATA, and the size is left alone.
+    memory.putDword(OUT_SIZE, 0);
+    assert.equal(fns.RegQueryValueExA.handler([PERF, 0, 0, OUT_TYPE, 0, OUT_SIZE]),
+        234, 'ERROR_MORE_DATA with no buffer');
+    assert.equal(memory.dword(OUT_SIZE), 0, 'the size is left as it was');
+    memory.putDword(OUT_SIZE, 10);
+    assert.equal(fns.RegQueryValueExA.handler([PERF, 0, 0, 0, OUT, OUT_SIZE]), 234);
+    assert.equal(memory.dword(OUT_SIZE), 10, 'and a short buffer leaves it too');
+
+    // The whole block, into a big enough buffer.
+    memory.putDword(OUT_SIZE, BIG);
+    assert.equal(fns.RegQueryValueExA.handler([PERF, 0, 0, OUT_TYPE, OUT, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_TYPE), REG_BINARY);
+    const size = memory.dword(OUT_SIZE);
+    assert.equal(size, (88 + ('BOTTLIFY'.length + 1) * 2 + 7) & ~7, 'header rounded up to eight');
+    assert.equal(String.fromCharCode(memory.bytes[OUT], memory.bytes[OUT + 2],
+        memory.bytes[OUT + 4], memory.bytes[OUT + 6]), 'PERF', 'the signature');
+    assert.deepEqual([memory.dword(OUT + 8), memory.dword(OUT + 12), memory.dword(OUT + 16)],
+        [1, 1, 1], 'little-endian, version and revision');
+    assert.equal(memory.dword(OUT + 20), size, 'TotalByteLength');
+    assert.equal(memory.dword(OUT + 24), size, 'HeaderLength -- no object types');
+    assert.equal(memory.dword(OUT + 56), 0x11112222, 'PerfTime, the counter it read');
+    assert.equal(memory.dword(OUT + 64), 10000000, 'PerfFreq');
+    assert.equal(memory.dword(OUT + 72), 0xaaaabbbb, 'PerfTime100nSec, the file time');
+    assert.equal(memory.dword(OUT + 36), 2026, 'the SYSTEMTIME, from that file time');
+    assert.equal(memory.dword(OUT + 80), ('BOTTLIFY'.length + 1) * 2, 'SystemNameLength');
+    assert.equal(memory.dword(OUT + 84), 88, 'SystemNameOffset');
+    let computerName = '';
+    for (let at = OUT + 88; memory.bytes[at] !== 0 || memory.bytes[at + 1] !== 0; at += 2)
+    {
+        computerName += String.fromCharCode(memory.bytes[at] | memory.bytes[at + 1] << 8);
+    }
+    assert.equal(computerName, 'BOTTLIFY', 'the computer name, wide');
+});
+
+test('a performance key answers the Counter and Help index lists as REG_MULTI_SZ', ()=>{
+    const memory = fakeMemory(0x10000);
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createRegistryService(createHive()),
+        computerName: 'BOTTLIFY',
+    });
+    const HKEY_PERFORMANCE_DATA = 0x80000004;
+    const OUT = 0x1000;
+    // Any language suffix on the name is ignored: "Counterwine" is "Counter".
+    memory.putString(NAME, 'cOuNtErwine');
+    memory.putDword(OUT_SIZE, 0x1000);
+    assert.equal(fns.RegQueryValueExA.handler([HKEY_PERFORMANCE_DATA, NAME, 0, OUT_TYPE, OUT,
+        OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_TYPE), REG_MULTI_SZ);
+    // Index/name pairs: the first index, its last-index name, then the pair
+    // the conformance test looks up -- 1846 is the End Marker.
+    const strings = [];
+    let at = OUT;
+    while (memory.bytes[at] !== 0)
+    {
+        const s = memory.string(at);
+        strings.push(s);
+        at += s.length + 1;
+    }
+    assert.deepEqual(strings, ['1', '1847', '1846', 'End Marker']);
+
+    memory.putString(NAME, 'hElP');
+    memory.putDword(OUT_SIZE, 0x1000);
+    assert.equal(fns.RegQueryValueExA.handler([HKEY_PERFORMANCE_DATA, NAME, 0, 0, OUT, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.string(OUT), '1', 'Help is a pair list too');
 });
 
 test('a buffer one byte short is ERROR_MORE_DATA with the size that would fit', ()=>{
@@ -690,6 +840,22 @@ test('too small a buffer is refused, and the size needed is written back', ()=>{
         'and the size it asked for is enough');
 });
 
+test('the refusal says ERROR_INSUFFICIENT_BUFFER, as a caller sizing its buffer checks', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createRegistryService(createHive()),
+        setLastError: code=>errors.push(code),
+    });
+    memory.putDword(OUT_SIZE, 0);
+    assert.equal(fns.GetUserNameW.handler([0, OUT_SIZE]), 0);
+    assert.deepEqual(errors, [122]);
+});
+
 test('no size pointer at all is a refusal rather than a write to address zero', ()=>{
     const { fns } = setup();
     assert.equal(fns.GetUserNameA.handler([OUT_NAME, 0]), 0);
@@ -734,25 +900,23 @@ test('a build with nowhere to put a SID says it ran out of memory rather than fa
         [0x100, 1, 18, 0, 0, 0, 0, 0, 0, 0, OUT_HANDLE]), 0);
 });
 
-test('the wide file security calls are refused like the narrow ones, popping what they took', ()=>{
+test('GetFileSecurity and SetFileSecurity are the file-security calls, stdcall-sized', ()=>{
     const memory = fakeMemory();
-    /** @type {number[]} */
-    const errors = [];
     const fns = createRegistryFunctions({
         readMemory: memory.readMemory, writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        hive: createRegistryService(createHive()), setLastError: code=>errors.push(code),
+        hive: createRegistryService(createHive()), setLastError: ()=>{},
     });
-
-    assert.equal(fns.SetFileSecurityW.handler(), 0);
-    assert.deepEqual(errors, [120], 'ERROR_CALL_NOT_IMPLEMENTED');
     assert.equal(fns.SetFileSecurityW.argBytes, 12);
-    assert.equal(fns.GetFileSecurityW.handler(), 0);
-    assert.deepEqual(errors, [120, 120], 'and asking for a descriptor is not implemented either');
     assert.equal(fns.GetFileSecurityW.argBytes, 20);
+    assert.equal(fns.GetFileSecurityA.argBytes, 20);
 });
 
-test('the file security calls refuse plainly', ()=>{
+test('the file security calls are named-security\'s, wired into the table', ()=>{
+    // GetFileSecurity and SetFileSecurity are advapi32's file-security calls:
+    // named-security.js owns them (it keeps the run's descriptors), and the
+    // module spreads them into this table. Here they stand with the right
+    // widths, and a call with no name fails plainly rather than faulting.
     const memory = fakeMemory();
     /** @type {number[]} */
     const errors = [];
@@ -763,16 +927,17 @@ test('the file security calls refuse plainly', ()=>{
         hive: createRegistryService(createHive()),
         setLastError: code=>errors.push(code),
     });
-    const ERROR_CALL_NOT_IMPLEMENTED = 120;
-    const expected = { GetFileSecurityA: 20, SetFileSecurityA: 12 };
+    const expected = { GetFileSecurityA: 20, GetFileSecurityW: 20,
+        SetFileSecurityA: 12, SetFileSecurityW: 12 };
     const table = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (fns));
     for (const [name, argBytes] of Object.entries(expected))
     {
         assert.equal(table[name].argBytes, argBytes, name);
-        assert.equal(table[name].handler([]), 0, name);
+        assert.equal(table[name].handler([]), 0, `${name} with no name fails`);
     }
-    assert.deepEqual(errors, Object.keys(expected).map(()=>ERROR_CALL_NOT_IMPLEMENTED));
+    assert.ok(errors.length > 0 && errors.every(code=>code !== 0),
+        'a real error stands behind each refusal');
 });
 
 test('a restart is not implemented, as the consumer line answered, and says so', ()=>{
@@ -885,6 +1050,26 @@ test('a class the machine registers is found under the classes root, both ways',
     createUnder(HKEY_CLASSES_ROOT, 'CLSID\\{00000000-0000-0000-0000-00000000C0DE}\\InprocServer32');
     assert.ok(open(HKEY_LOCAL_MACHINE,
         'SOFTWARE\\Classes\\CLSID\\{00000000-0000-0000-0000-00000000C0DE}\\InprocServer32') > 0);
+});
+
+test('RegDeleteKey with an empty subkey deletes the classes-root key the handle names', ()=>{
+    // ole_server.c's unregister_server opens a CLSID through HKEY_CLASSES_ROOT
+    // and deletes it with RegDeleteKey(key, ""). The empty subkey means the
+    // key itself, and the delete has to reach the real key the merged view
+    // names -- not stop at the view, which answered ERROR_FILE_NOT_FOUND.
+    const machine = setup();
+    const { createUnder, open, remove } = classes(machine);
+    const clsid = 'CLSID\\{00000000-0000-0000-0000-00000000DEAD}';
+
+    const made = createUnder(HKEY_CLASSES_ROOT, clsid);
+    assert.ok(made > 0, 'the class is created through the classes root');
+    assert.equal(remove(made, ''), ERROR_SUCCESS, 'deleting the key itself succeeds');
+    assert.equal(open(HKEY_CLASSES_ROOT, clsid), -2, 'and it is gone (ERROR_FILE_NOT_FOUND)');
+
+    // The same under HKLM, which already worked, still does.
+    const hklm = createUnder(HKEY_LOCAL_MACHINE, 'Software\\DeadKeyTest');
+    assert.equal(remove(hklm, ''), ERROR_SUCCESS);
+    assert.equal(open(HKEY_LOCAL_MACHINE, 'Software\\DeadKeyTest'), -2);
 });
 
 test('the user\'s classes lie over the machine\'s under the classes root', ()=>{
@@ -1129,7 +1314,7 @@ test('an object\'s security by name is read through the volume and the hive this
         memory.putString(NAME, 'C:\\setup.ini');
         assert.equal(fns.GetNamedSecurityInfoA.handler([NAME, SE_FILE_OBJECT, DACL, 0, 0,
             OUT_HANDLE, 0, OUT_TYPE]), ERROR_SUCCESS);
-        assert.equal(memory.dword(OUT_HANDLE), 0, 'the null DACL of a volume that keeps none');
+        assert.notEqual(memory.dword(OUT_HANDLE), 0, 'the file keeps a DACL, as NTFS does');
         memory.putString(NAME, 'C:\\gone.ini');
         assert.equal(fns.SetNamedSecurityInfoA.handler([NAME, SE_FILE_OBJECT, DACL, 0, 0, 0, 0]),
             ERROR_FILE_NOT_FOUND);
@@ -1157,7 +1342,7 @@ test('a key saved to a file loads under a root, writes its changes back as it un
     const STATUS_ACCESS_DENIED = 0xc0000022;
     const HKEY_USERS = 0x80000003;
     const FILE = 0x800;
-    const unload = fns[Object.getOwnPropertySymbols(fns)[0]];
+    const unload = fns[UNLOAD_KEY];
 
     memory.putString(SUBKEY, 'Software\\Saved\\Inner');
     fns.RegCreateKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, 0, 0, 0, OUT_HANDLE, 0]);
@@ -1450,4 +1635,21 @@ test('IsTextUnicode reads the buffer, the tests asked for, and writes back which
     assert.deepEqual([...memory.readMemory(RESULT, 4)], [0, 0, 0, 0]);
     assert.equal(fns.IsTextUnicode.handler([BUFFER, 1, 0]), 0, 'less than a character');
     assert.equal(fns.IsTextUnicode.argBytes, 12);
+});
+
+test('a handle the program holds names the hive\'s key, for a library installing under it', ()=>{
+    // setupapi's HKR under a key the program opened: its values go into
+    // that key, the one the program reads them back through.
+    const { hive, fns, create, setString } = setup();
+    const handle = create('Software\\Hkr');
+    const keyOf = /** @type {any} */ (fns)[KEY_OF_HANDLE];
+    const key = keyOf(handle);
+    assert.ok(key);
+    hive.setValue(key, 'Installed', REG_SZ, Uint8Array.of(0x79, 0));
+    assert.equal(setString(handle, 'Other', 'x'), ERROR_SUCCESS);
+    assert.ok(hive.getValue(key, 'Other'), 'the same key both ways');
+    assert.ok(keyOf(HKEY_LOCAL_MACHINE), 'a predefined root is its root');
+    assert.equal(keyOf(0x12345), null, 'not a key');
+    fns.RegCloseKey.handler([handle]);
+    assert.equal(keyOf(handle), null, 'a handle closed names none');
 });

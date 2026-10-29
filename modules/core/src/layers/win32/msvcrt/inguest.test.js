@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import { COMPILED } from './inguest.x86.js';
+import { createWideClassificationFunctions } from './mbstring.js';
 import * as sources from './inguest.js';
 import { CALLBACK, DATA, doubleWords, equivalence, random } from
     '../../../../scripts/guest-code/equivalence.mjs';
@@ -173,11 +174,15 @@ test('the classifiers and the case functions, narrow and wide', ()=>{
         'iswspace', 'iswupper', 'iswlower', 'iswpunct', 'iswxdigit', 'iswcntrl', 'iswprint',
         'iswgraph', 'iswascii', 'towupper', 'towlower'];
     const values = characters(6);
+    // A wide classifier hands a unit past 0xff to the host, which classes it
+    // by Unicode: the handler its trap reaches.
+    const wide = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        createWideClassificationFunctions());
     for (const name of names)
     {
         for (const c of values)
         {
-            same(name, { stack: [c] });
+            same(name, { stack: [c] }, { host: ()=>wide[name].handler([c]) });
         }
     }
 });

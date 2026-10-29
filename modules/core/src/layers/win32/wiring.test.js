@@ -18,6 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { win32Module } from './module.js';
 import { filesystemModule } from '../filesystem/module.js';
+import { createMemoryModule } from '../memory/module.js';
 import { certificates, NOW, signedCabinet } from './wintrust/fixtures.test.js';
 
 const ARENA = { base: 0x100000, size: 0x200000 };
@@ -98,6 +99,10 @@ function hostOver(replace = {}){
         },
         filesystem: replace.filesystem ?? { drives: ()=>[], stat: ()=>null },
     };
+    if (replace.memory)
+    {
+        apis.memory = replace.memory;
+    }
     Object.assign(apis.kernel, replace.kernel ?? {});
     Object.assign(apis.bridge, replace.bridge ?? {});
     const host = /** @type {any} */ ({
@@ -909,4 +914,33 @@ test('a \\\\?\\ path reaches the volume\'s files as the plain path does', async(
         0xffffffff, 'a slash is no separator there');
     await win32Module.dispose();
     await filesystemModule.dispose();
+});
+
+test('a string past the limit a handler reads is cut there; '
+    + 'memory not there is a fault', async()=>{
+    // The layer's readers over the memory layer's own: a string past a
+    // handler's limit -- an atom name of 300 characters -- is the handler's
+    // to answer, not a host exception; one that runs off its region is the
+    // access violation the processor would take.
+    const bytes = new Uint8Array(0x400000);
+    const memoryModule = createMemoryModule();
+    const memory = await memoryModule.create({}, /** @type {any} */ ({ requireApi: (
+        /** @type {string} */ name)=>(name === 'cpu' ? {
+        readPhysical: (/** @type {number} */ at, /** @type {number} */ n)=>
+            bytes.subarray(at, at + n),
+        writePhysical: (/** @type {number} */ at, /** @type {Uint8Array} */ d)=>bytes.set(d, at),
+    } : {}) }));
+    memory.register({ name: 'data', base: 0x1000, size: 0x3ff000,
+        kind: memory.RegionKind.STACK, access: memory.Access.READ_WRITE });
+    const thread = { id: 1 };
+    const { libraries, lastError } = await build({ memory,
+        kernel: { currentThread: ()=>thread } });
+    bytes.fill(0x61, 0x14000, 0x14000 + 300);
+    assert.equal(libraries['KERNEL32.dll'].GlobalAddAtomA.handler([0x14000]), 0);
+    assert.equal(lastError(), 87, 'ERROR_INVALID_PARAMETER');
+    bytes.fill(0x62, 0x3ffff0 - 8, 0x400000);
+    assert.throws(()=>libraries['KERNEL32.dll'].GlobalAddAtomA.handler([0x3ffff0]),
+        (/** @type {any} */ e)=>e.code === 'GUEST_ACCESS' && e.address === 0x400000);
+    await win32Module.dispose();
+    await memoryModule.dispose();
 });

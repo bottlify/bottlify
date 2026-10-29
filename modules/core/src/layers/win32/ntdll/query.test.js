@@ -238,6 +238,13 @@ test('the process reports the block a program would have found itself', ()=>{
     assert.equal(host.view.getUint32(BUFFER + 0x00, true), STATUS.PENDING,
         'a running process has no exit status yet');
     assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x18);
+    assert.equal(host.view.getUint32(BUFFER + 0x14, true), 0, 'nothing started it');
+
+    const child = { ...fakeHost(), processes: ()=>[
+        { id: 0x1234, parent: 0x2a4, path: 'C:\\child.exe', threads: [0x1238] }] };
+    createQueryFunctions(child).NtQueryInformationProcess.handler([-1, 0, BUFFER, 0x18, 0]);
+    assert.equal(child.view.getUint32(BUFFER + 0x14, true), 0x2a4,
+        'InheritedFromUniqueProcessId: the process that started it');
 });
 
 test('there is no debugger, and the answer says so rather than declining', ()=>{
@@ -376,16 +383,15 @@ test('the debug-help queries are refused as unsupported and say so', ()=>{
     const said = [];
     const fns = /** @type {Record<string, any>} */ (createQueryFunctions({ ...fakeHost(),
         divergence: api=>said.push(api) }));
-    assert.deepEqual(['NtOpenThread', 'NtQueryInformationThread', 'RtlCreateQueryDebugBuffer',
+    assert.deepEqual(['NtOpenThread', 'RtlCreateQueryDebugBuffer',
         'RtlDestroyQueryDebugBuffer', 'RtlQueryProcessDebugInformation']
-        .map(name=>fns[name].argBytes), [16, 20, 8, 4, 12]);
+        .map(name=>fns[name].argBytes), [16, 8, 4, 12]);
     assert.equal(fns.NtOpenThread.handler([0, 0, 0, 0]), STATUS.NOT_IMPLEMENTED);
-    assert.equal(fns.NtQueryInformationThread.handler([0, 0, 0, 0, 0]), STATUS.NOT_IMPLEMENTED);
     assert.equal(fns.RtlCreateQueryDebugBuffer.handler([0, 0]), 0, 'no buffer');
     assert.equal(fns.RtlDestroyQueryDebugBuffer.handler([0]), STATUS.INVALID_PARAMETER);
     assert.equal(fns.RtlDestroyQueryDebugBuffer.handler([0x1000]), STATUS.SUCCESS);
     assert.equal(fns.RtlQueryProcessDebugInformation.handler([0, 0, 0]), STATUS.NOT_IMPLEMENTED);
-    assert.equal(said.length, 4);
+    assert.equal(said.length, 3);
 });
 
 test('SystemProcessInformation chains the idle process and each process with its threads', ()=>{
@@ -431,3 +437,43 @@ test('the system file cache is sized by a well-formed request, and nothing else 
     assert.equal(fns.NtSetSystemInformation.handler([0, BUFFER, 0x2c]),
         STATUS.INVALID_INFO_CLASS);
 });
+
+test('a child\'s handle is answered by the child about itself, or from its record once gone',
+    async()=>{
+        // Wine's kernel32 process.c reads a child's PROCESS_BASIC_INFORMATION
+        // through its handle: its own id, its parent, its block, and its exit
+        // status once it has ended.
+        const host = /** @type {any} */ (fakeHost());
+        /** @type {any[]} */
+        const asked = [];
+        const answer = new Uint8Array(0x18);
+        new DataView(answer.buffer).setUint32(0x04, 0x7ffd0000, true);
+        new DataView(answer.buffer).setUint32(0x10, 0x2000, true);
+        const child = { id: 0x2000, parentId: 0x1234, exitCode: 259 };
+        host.processOf = (/** @type {number} */ handle)=>(handle === 0x40 ? child : null);
+        host.askChild = (/** @type {any} */ record, /** @type {any} */ call)=>{
+            asked.push([record, call]);
+            return Promise.resolve({ result: 0, error: null,
+                outs: [null, null, answer, null, new Uint8Array([0x18, 0, 0, 0])] });
+        };
+        const fns = createQueryFunctions(host);
+
+        assert.equal(await fns.NtQueryInformationProcess.handler(
+            [0x40, 0, BUFFER, 0x18, RETURN_LENGTH]), STATUS.SUCCESS);
+        assert.deepEqual(asked, [[child, { call: 'NtQueryInformationProcess',
+            args: [0xffffffff, 0, { out: 0x18 }, 0x18, { out: 4 }] }]]);
+        assert.equal(host.view.getUint32(BUFFER + 0x04, true), 0x7ffd0000, 'the child\'s block');
+        assert.equal(host.view.getUint32(BUFFER + 0x10, true), 0x2000);
+        assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x18);
+
+        // Ended: its record says what is left of it.
+        Object.assign(child, { completed: true, exitCode: 7 });
+        host.bytes.fill(0xcc, BUFFER, BUFFER + 0x18);
+        assert.equal(fns.NtQueryInformationProcess.handler([0x40, 0, BUFFER, 0x18, 0]),
+            STATUS.SUCCESS);
+        assert.deepEqual([0, 4, 0x10, 0x14].map(at=>host.view.getUint32(BUFFER + at, true)),
+            [7, 0, 0x2000, 0x1234], 'its code, no block, its id and its parent');
+        assert.equal(fns.NtQueryInformationProcess.handler([0x40, 7, BUFFER, 4, 0]),
+            STATUS.INVALID_INFO_CLASS, 'and nothing else');
+        assert.equal(asked.length, 1);
+    });

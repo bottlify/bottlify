@@ -24,21 +24,53 @@ function machine(){
     return { memory, view, diverged, shell };
 }
 
-test('SHAppBarMessage answers FALSE to every message: there is no taskbar', ()=>{
-    const m = machine();
-    const ABM_NEW = 0;
-    const ABM_GETSTATE = 4;
-    const ABM_GETTASKBARPOS = 5;
-    const ABM_GETAUTOHIDEBAR = 7;
-    m.view.setUint32(0x100, 36, true);
-    for (const message of [ABM_NEW, ABM_GETSTATE, ABM_GETTASKBARPOS, ABM_GETAUTOHIDEBAR])
-    {
-        assert.equal(m.shell.SHAppBarMessage.handler([message, 0x100]), 0, `${message}`);
-    }
-    assert.deepEqual([...m.memory.subarray(0x104, 0x124)], Array(32).fill(0xaa),
-        'the record is not written');
-    assert.equal(m.diverged.length, 1, 'said once');
-    assert.equal(m.shell.SHAppBarMessage.argBytes, 8);
+test('application bars are kept along the edges, a later one clear of the earlier', ()=>{
+    /** @type {number[][]} */
+    const posted = [];
+    const memory = new Uint8Array(0x400);
+    const view = new DataView(memory.buffer);
+    const shell = /** @type {any} */ (createShellFunctions({
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        library: name=>(name === 'USER32.dll' ? { PostMessageA: { handler: args=>{
+            posted.push(args);
+            return 1;
+        } } } : undefined),
+    }));
+    const [ABM_NEW, ABM_REMOVE, ABM_QUERYPOS, ABM_SETPOS, ABM_GETTASKBARPOS] = [0, 1, 2, 3, 5];
+    const [ABE_RIGHT, ABE_BOTTOM] = [2, 3];
+    /**
+     * @param {number} message @param {number} window @param {number} edge
+     * @param {number[]} [rect]
+     */
+    const send = (message, window, edge = ABE_BOTTOM, rect = [0, 0, 0, 0])=>{
+        view.setUint32(0x100, 36, true);
+        view.setUint32(0x104, window, true);
+        view.setUint32(0x108, 0x401, true);
+        view.setUint32(0x10c, edge, true);
+        rect.forEach((value, at)=>view.setInt32(0x110 + at * 4, value, true));
+        return shell.SHAppBarMessage.handler([message, 0x100]);
+    };
+    const rect = ()=>[0, 1, 2, 3].map(at=>view.getInt32(0x110 + at * 4, true));
+    assert.equal(send(ABM_NEW, 0x10), 1);
+    assert.equal(send(ABM_NEW, 0x10), 0, 'once');
+    assert.equal(send(ABM_NEW, 0x20), 1);
+    assert.equal(send(ABM_QUERYPOS, 0x30), 0, 'a window that is no bar');
+    assert.equal(send(ABM_SETPOS, 0x10, ABE_BOTTOM, [0, 465, 640, 480]), 1);
+    assert.deepEqual(rect(), [0, 465, 640, 480], 'the first has its strip');
+    assert.deepEqual(posted, [[0x20, 0x401, 1, 0]], 'the next is told: ABN_POSCHANGED');
+    assert.equal(send(ABM_QUERYPOS, 0x20, ABE_BOTTOM, [0, 470, 640, 480]), 1);
+    assert.deepEqual(rect(), [0, 470, 640, 465], 'the bottom moves, the top is the caller\'s');
+    assert.equal(send(ABM_SETPOS, 0x20, ABE_RIGHT, [625, 0, 640, 480]), 1);
+    assert.deepEqual(rect(), [625, 0, 640, 465], 'clear of an earlier bar on another edge');
+    posted.length = 0;
+    assert.equal(send(ABM_REMOVE, 0x10), 1);
+    assert.deepEqual(posted, [[0x20, 0x401, 1, 0]], 'the bars after it are told');
+    assert.equal(send(ABM_SETPOS, 0x20, ABE_RIGHT, [625, 0, 640, 480]), 1);
+    assert.deepEqual(rect(), [625, 0, 640, 480], 'and have the room back');
+    assert.equal(send(ABM_REMOVE, 0x10), 0);
+    assert.equal(send(ABM_GETTASKBARPOS, 0), 0, 'there is no taskbar');
+    assert.equal(shell.SHAppBarMessage.argBytes, 8);
 });
 
 test('SHGetSettings sets the bits asked for as a fresh profile has them', ()=>{

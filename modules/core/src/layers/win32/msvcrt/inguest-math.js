@@ -79,6 +79,29 @@ const POW_RANGE = 1022;
 /** From it on in magnitude every double is a whole even number. */
 const WHOLE = 2 ** 53;
 
+/**
+ * Whole powers below it in magnitude are taken by squaring in two doubles:
+ * 32 squarings at most.
+ */
+const POWER_STEPS = 2 ** 32;
+
+/** Veltkamp's constant: a double times it splits into halves whose products are exact. */
+const SPLIT = 134217729;
+
+/** A double's upper 26 bits, by Veltkamp's split. */
+const highOf = (/** @type {number} */ a)=>SPLIT * a - (SPLIT * a - a);
+
+/** The rest of it: the two halves add to it exactly. */
+const lowOf = (/** @type {number} */ a)=>a - highOf(a);
+
+/** What a times b lost when rounded to p, exactly (Dekker). */
+const productError = (/** @type {number} */ a, /** @type {number} */ b, /** @type {number} */ p)=>
+    ((highOf(a) * highOf(b) - p) + highOf(a) * lowOf(b) + lowOf(a) * highOf(b))
+    + lowOf(a) * lowOf(b);
+
+/** A positive's exponent, `fxtract`'s: scaled by its negative, it is in [1, 2). */
+const exponentOf = (/** @type {number} */ a)=>X87.exponent(a);
+
 /** 2^t, n the nearest integer to t: `f2xm1` of the rest, one added, and n applied by `fscale`. */
 const twoTo = (/** @type {number} */ t, /** @type {number} */ n)=>X87.scale(X87.f2xm1(t - n) + 1, n);
 
@@ -460,6 +483,80 @@ export function pow({ host }, x, y){
     {
         return 1;
     }
+    // A whole power of a finite base but zero, by squaring in two doubles,
+    // hi + lo times 2^e, brought back into [1, 2) after each product so neither
+    // overflows on the way: what the runtime's x87 gets in its 64 bits, where
+    // 2 to y log2 x in doubles is hundreds of units in the last place out
+    // (10^100). A result past the normal doubles is the handler's.
+    if (Math.floor(y) === y && Math.abs(y) < POWER_STEPS && x !== 0 && Math.abs(x) <= MAX)
+    {
+        const magnitude = Math.abs(x);
+        const k0 = exponentOf(magnitude);
+        let bh = X87.scale(magnitude, -k0);
+        /** @type {f64} */
+        let bl = 0;
+        /** @type {f64} */
+        let be = k0;
+        /** @type {f64} */
+        let rh = 1;
+        /** @type {f64} */
+        let rl = 0;
+        /** @type {f64} */
+        let re = 0;
+        /** @type {f64} */
+        let n = Math.abs(y);
+        const odd = n - 2 * Math.floor(n * 0.5);
+        while (n > 0)
+        {
+            const half = Math.floor(n * 0.5);
+            if (n - 2 * half === 1)
+            {
+                const p = rh * bh;
+                const e = productError(rh, bh, p) + (rh * bl + rl * bh);
+                const h = p + e;
+                const k = exponentOf(h);
+                rh = X87.scale(h, -k);
+                rl = X87.scale(e - (h - p), -k);
+                re = re + be + k;
+            }
+            n = half;
+            if (n > 0)
+            {
+                const p = bh * bh;
+                const e = productError(bh, bh, p) + 2 * bh * bl;
+                const h = p + e;
+                const k = exponentOf(h);
+                bh = X87.scale(h, -k);
+                bl = X87.scale(e - (h - p), -k);
+                be = be + be + k;
+            }
+        }
+        if (y < 0)
+        {
+            // 1 / (rh + rl): a first quotient, and its correction from what
+            // it leaves of one, taken exactly.
+            const q = 1 / rh;
+            const p = q * rh;
+            const r = ((1 - p) - productError(q, rh, p)) - q * rl;
+            rh = q + q * r;
+            rl = 0;
+            re = -re;
+        }
+        // The significand rounded once, and the power normal only if its
+        // exponent, that rounding's included, is a normal double's.
+        const significand = rh + rl;
+        const exponent = re + exponentOf(significand);
+        if (exponent < -1022 || exponent > 1023)
+        {
+            return host();
+        }
+        const power = X87.scale(significand, re);
+        if (x < 0 && odd === 1)
+        {
+            return -power;
+        }
+        return power;
+    }
     // Any other finite power of a finite base but zero, as the runtime takes
     // it: 2 to y log2|x|, by `fyl2x`, `f2xm1` and `fscale`; a negative base
     // to a whole power, the sign an odd power gives. A result that leaves the
@@ -536,6 +633,80 @@ export function _CIpow({ host }, x, y){
     if (y === 0 && !Number.isNaN(x))
     {
         return 1;
+    }
+    // A whole power of a finite base but zero, by squaring in two doubles,
+    // hi + lo times 2^e, brought back into [1, 2) after each product so neither
+    // overflows on the way: what the runtime's x87 gets in its 64 bits, where
+    // 2 to y log2 x in doubles is hundreds of units in the last place out
+    // (10^100). A result past the normal doubles is the handler's.
+    if (Math.floor(y) === y && Math.abs(y) < POWER_STEPS && x !== 0 && Math.abs(x) <= MAX)
+    {
+        const magnitude = Math.abs(x);
+        const k0 = exponentOf(magnitude);
+        let bh = X87.scale(magnitude, -k0);
+        /** @type {f64} */
+        let bl = 0;
+        /** @type {f64} */
+        let be = k0;
+        /** @type {f64} */
+        let rh = 1;
+        /** @type {f64} */
+        let rl = 0;
+        /** @type {f64} */
+        let re = 0;
+        /** @type {f64} */
+        let n = Math.abs(y);
+        const odd = n - 2 * Math.floor(n * 0.5);
+        while (n > 0)
+        {
+            const half = Math.floor(n * 0.5);
+            if (n - 2 * half === 1)
+            {
+                const p = rh * bh;
+                const e = productError(rh, bh, p) + (rh * bl + rl * bh);
+                const h = p + e;
+                const k = exponentOf(h);
+                rh = X87.scale(h, -k);
+                rl = X87.scale(e - (h - p), -k);
+                re = re + be + k;
+            }
+            n = half;
+            if (n > 0)
+            {
+                const p = bh * bh;
+                const e = productError(bh, bh, p) + 2 * bh * bl;
+                const h = p + e;
+                const k = exponentOf(h);
+                bh = X87.scale(h, -k);
+                bl = X87.scale(e - (h - p), -k);
+                be = be + be + k;
+            }
+        }
+        if (y < 0)
+        {
+            // 1 / (rh + rl): a first quotient, and its correction from what
+            // it leaves of one, taken exactly.
+            const q = 1 / rh;
+            const p = q * rh;
+            const r = ((1 - p) - productError(q, rh, p)) - q * rl;
+            rh = q + q * r;
+            rl = 0;
+            re = -re;
+        }
+        // The significand rounded once, and the power normal only if its
+        // exponent, that rounding's included, is a normal double's.
+        const significand = rh + rl;
+        const exponent = re + exponentOf(significand);
+        if (exponent < -1022 || exponent > 1023)
+        {
+            return host();
+        }
+        const power = X87.scale(significand, re);
+        if (x < 0 && odd === 1)
+        {
+            return -power;
+        }
+        return power;
     }
     // Any other finite power of a finite base but zero, as the runtime takes
     // it: 2 to y log2|x|, by `fyl2x`, `f2xm1` and `fscale`; a negative base

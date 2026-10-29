@@ -35,6 +35,8 @@ export const ErrorCode = {
     SHARING_VIOLATION: 'SHARING_VIOLATION',
     /** The path names a reserved device; the caller above answers it. */
     IS_DEVICE: 'IS_DEVICE',
+    /** Two names that have to be on one drive -- a file and its hard link -- are not. */
+    NOT_SAME_DEVICE: 'NOT_SAME_DEVICE',
     INVALID_HANDLE: 'INVALID_HANDLE',
 };
 

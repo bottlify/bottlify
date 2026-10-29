@@ -270,6 +270,19 @@ next read answers the same. A setup that reads a folder's DACL, merges an entry 
 `SetEntriesInAcl` and writes it back goes through and changes nothing it could see. Not measured
 against XP; revisit if a program is found that checks the DACL it wrote. *2026-10-07.*
 
+*Reconsidered 2026-10-27:* the volume is NTFS and keeps security descriptors, reporting
+`FILE_PERSISTENT_ACLS`, rather than a FAT32 volume that keeps none. `GetNamedSecurityInfo` and
+`GetFileSecurity` answer a file the way NTFS answers one that inherited nothing and had none set
+-- full control to the administrators, the system and the owner, the DACL present and not null --
+and what a program sets with `SetNamedSecurityInfo`, `SetFileSecurity` or a `SECURITY_ATTRIBUTES`
+at `CreateFile`/`CreateDirectory` is kept and answered back. A null DACL read back as full access
+was the old call's weakness: a program that read a DACL, merged an entry and wrote it back could
+not see its change take, and one that checked the DACL it wrote found the made-up one instead. The
+descriptors are the run's, not a process's -- a setup writes one and a service reads it in another
+process of the one run -- so they live in a store beside the hive for the run's lifetime; nothing
+is written to the volume, so a later run starts fresh. The registry side of A34 (a key answered in
+Windows' own shape, set accepted and kept nowhere) stands. *2026-10-27.*
+
 **A35. kernel32 exports the Windows 95 family's own calls, and each fails as it does when what it
 reaches for is absent.** XP's kernel32 is believed (not checked against an XP export table) not to
 export the flat-thunk helpers (`ThunkConnect32`, `FT_Thunk`, `FT_Exit*`, `MapLS`, `MapSL`,
@@ -356,6 +369,12 @@ as Windows XP SP3's build (2008-04-14). A search with a wildcard lists the folde
 the name cannot be opened: what it holds is the engine's, not bytes; GetFileVersionInfo answers
 such a library already (A39). The system programs stay as A38 has them. Revisit if a program
 reads a system library's bytes or enumerates the folder to find one. *2026-10-08.*
+
+Planned to change (status: plan, no code; 2026-10-27): with a file explorer, the system programs
+of A38 and these libraries become read-only entries the volume serves from their synthesised
+images, carrying icon resources of the project's own drawing, so a search by path finds them and
+ExtractIcon, SHGetStockIconInfo and a shortcut's icon read real ones. Until then Wine's checks of
+those files and icons (shell32:shelllink, about 165) are counted as divergences under A38 and A41.
 
 **A42. A thread's stack is at least a megabyte, whatever SizeOfStackReserve says.** The first
 thread and every thread created with the image's default get `max(SizeOfStackReserve, 1 MiB)`.
@@ -496,7 +515,85 @@ counted (`moved.copied` in the device's shadow diagnostics). The price is a copy
 Call of Duty 4 locks part of its 4.5 MB skinning buffer with DISCARD every frame, and its moves
 copied 25.5 GB in a run of 326 s (27 620 moves, three executors, the fake GPU). *2026-10-24.*
 
-**A53. A 64-bit process's C++ frames do not call the `_set_se_translator` translator.** At 32
+**A53. Each top-level window has a surface of its own, as Windows 7's desktop composes them; only
+what follows from that differs from what Windows' messages say.** The window manager keeps a
+picture per top-level window and the screen is composed from them, bottom to top, the way the
+Desktop Window Manager composes a Windows 7 desktop (`windows.js` `surfaceOf`, `surfaces`). The
+alternative, XP's model, keeps one screen and computes every window's visible region against the
+windows above it, so that a window paints only where it is seen and is told to repaint whatever
+another uncovers; with a surface per window none of that crosses windows, and a window moved over
+another neither damages it nor sends it WM_PAINT. The scope is exactly what follows from the
+surface: what a top-level window paints, when it is invalidated and repainted, and how it is
+clipped against its siblings at the top level. Everything else follows Windows and is a gap where
+it does not: the messages and their order, the WinEvents, activation and focus order, the CBT
+hook's sequences. A difference in those is not this decision. *2026-10-26.*
+
+**A54. The mount manager gives each volume an MBR disk's unique ID, one disk per drive letter.**
+`IOCTL_MOUNTMGR_QUERY_POINTS` lists each drive by its letter and by its volume name, and both links
+carry the volume's unique ID. There is no disk under the volumes to read one from, so the ID is
+what an MBR partition's is, twelve bytes: the disk signature (the volume serial `drives.js`
+reports) and the partition's offset, 1 MiB times the letter's place among the drives
+(`mountPointsOf`). It is the same for a volume's two links and differs between volumes, which is
+all a program comparing IDs asks; a GPT ID (`DMIO:ID:` and a GUID) would serve as well. *2026-10-26,
+`08e7ceb`.*
+
+**A55. Every time an open file reports is its last write.** The volume keeps one time per file,
+when it was last written, and `NtQueryInformationFile` (Basic, NetworkOpen, All) and
+`FileIdBothDirectoryInfo` give it as the creation, access, write and change times alike, as
+`GetFileTime` and `GetFileInformationByHandle` already did. A creation time later than the write
+time would be a contradiction a program can see; one earlier would be invented. *2026-10-26,
+`08e7ceb`.*
+
+**A56. A file's number on its volume is the FNV-1a hash of its full path, case folded.**
+`GetFileInformationByHandle`'s file index, `FileInternalInformation` and a directory listing's
+`FileId` are that one number (`filetime.js` `fileIndex`): the same for the same file however it
+was opened, which is what a program comparing two handles asks, and different for different paths
+but for a hash collision. NTFS numbers files by their place in the MFT, which nothing here has; a
+rename gives a file another number here where NTFS keeps it. *2026-10-26, `08e7ceb`, `33a6087`.*
+
+*Reconsidered 2026-10-27:* a file with hard links has one number under all its names: the hash of
+the path its bytes are kept at, which is always one of its names. The number changes when that
+name is renamed or deleted and another of its names keeps the bytes. A file with one name is
+unchanged.
+
+**A57. The engine's side-by-side store holds the Visual C++ 8 and 9 runtimes and Common Controls
+6, each found where the bottle really has it.** A bottle carries no WinSxS, so an assembly a
+program's manifest names -- Microsoft.VC80/VC90 .CRT, .OpenMP, .ATL, .MFC, Common-Controls 6 --
+is answered by the engine's store when neither the bottle's own store nor the program's folder
+has it: its DLLs are the engine's own where it has them (msvcr80, msvcp80, comctl32) and the
+bottle's copy otherwise, from system32, the Windows folder or beside the program, and the
+loader maps that copy at the assembly's WinSxS directory, where the runtime's own check expects
+an installed runtime to be. A runtime the bottle has nowhere is no assembly, and the program does
+not start, as on a Windows without that redistributable. The store answers for the newest
+version of a major and minor version, as the runtimes' publisher policies do; a private assembly
+must match the version asked for exactly. *2026-10-27.*
+
+**A58. A manifest is refused only for what breaks its structure.** CreateActCtx and the loader
+refuse a manifest that is not XML, a root that is not an asm.v1, v2 or v3 `<assembly
+manifestVersion="1.0">`, anything after the root, a file without a name, UTF-16 without its byte
+order mark, and a run level given twice. Windows also refuses an element or attribute it does
+not know; that is not done here, as a refusal stops a program from starting while accepting
+costs only a check of a malformed manifest. A resource padded with NULs is read up to them.
+*2026-10-27.*
+
+**A59. A program whose activation context cannot be built does not start.** When the program's
+manifest names an assembly found nowhere (A57), the run ends before the first instruction with
+`the side-by-side configuration is incorrect` and the `activation-context-failed` event, as
+Windows ends it. A library loaded at run time whose own manifest cannot be satisfied is refused
+as one that is missing. *2026-10-27.*
+
+**A60. DeactivateActCtx refuses a cookie it cannot take off rather than raising.** Windows raises
+STATUS_SXS_EARLY_DEACTIVATION for a frame under others without
+DEACTIVATE_ACTCTX_FLAG_FORCE_EARLY_DEACTIVATION, and STATUS_SXS_INVALID_DEACTIVATION for a cookie
+that is no frame of the thread; here the call fails with the matching error and the stack stays
+as it was, so a program that gets a cookie wrong goes on. *2026-10-27.*
+
+**A61. A font has no file behind it.** Faces are drawn through the browser, and none comes from
+a file on the volume, so GetFontFileInfo answers the empty file Windows answers for a font added
+from memory -- no time, no size, an empty path -- and GetFontFileData has no byte to give; Windows
+names the face's file and reads it. GetFontRealizationInfo and GdiRealizationInfo answer the DC's
+font by its handle as the instance id. *2026-10-27, `90ecc574`.*
+**A62. A 64-bit process's C++ frames do not call the `_set_se_translator` translator.** At 32
 bits a structured exception reaching a C++ frame with try blocks is handed to the translator the
 program installed, which turns it into a C++ throw; a 64-bit frame keeps the translator
 `_set_se_translator` set and answers it back, but searches as though none were set, and says so
@@ -505,7 +602,7 @@ builds this project's fixtures emits /EHs tables, so no program here exercises i
 called by the dispatcher throws from inside the walk, which the 64-bit dispatcher has no test for.
 Revisit when a 64-bit program is found that needs it. *2026-10-29.*
 
-**A54. A 64-bit process's window messages carry 32-bit WPARAM and LPARAM values.** The
+**A63. A 64-bit process's window messages carry 32-bit WPARAM and LPARAM values.** The
 message queue and every handler that sends, posts or answers a message keep its parameters as
 the dwords a 32-bit process has; at 64 bits a value is widened as its type widens a 32-bit one,
 a WPARAM (UINT_PTR) zero-extended and an LPARAM (LONG_PTR) sign-extended, when it reaches a
@@ -516,7 +613,7 @@ reaches the procedure whole and -1 is -1; a value that needs the high half of a 
 it. Carrying quadwords through the queue would change every handler that reads a message;
 revisit when a program is found that passes one. *2026-10-29.*
 
-**A55. A run is on a 64-bit Windows when its first program is a 64-bit one.** A 64-bit process
+**A64. A run is on a 64-bit Windows when its first program is a 64-bit one.** A 64-bit process
 needs a 64-bit Windows beneath it, and a 32-bit process started on that machine runs under WOW64:
 it reads x86 from `GetSystemInfo` and x64 from `GetNativeSystemInfo`, `IsWow64Process` is TRUE
 of it, the WOW64 directory is `C:\WINDOWS\SysWOW64`, and its environment sets
@@ -870,6 +967,22 @@ that lands, this decision stands. On the `cork2` branch the copying is gone: the
 share one registry hive, one volume (the drives, their writable layers and the bundle mount) and
 one numbering of process and thread ids, so a child's writes are its parent's as they are made.
 *2026-10-05.*
+Reconsidered: **a child runs beside its parent from `CreateProcess` on, at every concurrency.**
+At concurrency 1 a child used to have no machine until its parent waited on it or exited, when it
+was run in the parent's place; a parent could therefore never reach into it (`VirtualAllocEx`,
+`ReadProcessMemory`, `WriteProcessMemory`, `SuspendThread` on its thread, `GetThreadContext`), and
+a parent that spun on `GetExitCodeProcess` or its message loop had to be detected as waiting. Now
+the child's machine is built when `CreateProcess` returns and takes turns with its parent on the
+same thread (in a worker of its own at concurrency 2 and 4, as before); `CREATE_SUSPENDED` builds
+it with its first thread suspended until `ResumeThread`; a wait on its handle is a wait on the
+manual-reset event its exit sets; a launcher that exits leaves its child running, and the run's
+code is the last process's. A call a parent makes in its child is sent there and made with the
+child's own kernel32 (`kernel32/cross-process.js`), whichever way the child runs; a seeded gate
+(`cross-process.itest.js`) compares what the parent sees down the three ways. Rejected: (B), a
+child left lazy until its parent first reaches into it, then started beside it. It changed less,
+but kept two ways for a child to run at the default concurrency, chosen by whether the parent
+happened to touch it, the second without a gate; and a program cannot tell why its child had not
+started. *2026-10-26.*
 
 **Only Windows system libraries are reimplemented; a redistributable middleware runtime is ours to
 reimplement too (§B above); anything else a game ships in its own directory is loaded and run as
@@ -904,6 +1017,24 @@ first instruction. Absent, the runtime treats the system as one without side-by-
 and runs. Removed on 2026-09-09 (16110a45), added back by an export audit on 2026-10-08
 (884102c9) and Gothic 3 met R6034 at vcomp.dll that day; kernel32's system.test.js now fails
 if the names come back. *2026-10-08.*
+
+**Reconsidered: FindActCtxSectionStringA/W are exported, activation contexts being built from
+manifests.** The condition the entry above names is met: a context is built from the program's
+manifest (its RT_MANIFEST 1 or `<program>.manifest`), a library's RT_MANIFEST 2 and CreateActCtx,
+its dependencies found as Windows finds them (A57), and the loader takes a DLL a context names
+from where the context puts it. The runtimes' check was read from Microsoft's binaries rather
+than guessed: msvcr80.dll and vcomp.dll (8.0.50727.6195) look themselves up as a DLL redirection
+of the active context, refuse a load from the system directory, and accept one from WinSxS or
+beside their assembly's manifest; msvcr90.dll makes the same check. `tools/vcredist-matrix.mjs`
+runs Microsoft's own vcomp.dll and msvcr90.dll in the engine through seven layouts each --
+the runtime and its manifest beside the program, in its assembly's folder, named by an embedded
+or an external manifest, loaded with LoadLibrary, installed (only in system32, presented by the
+store), and named by no manifest -- and each runs or stops with R6034 exactly where Windows does
+(2026-10-27, all 14 rows agree). msvcr80.dll is the engine's own (`runtimes()`), so a program
+importing it runs even with no manifest, where Windows stops it. kernel32's system.test.js now
+runs the check's logic over each layout instead of guarding the names. A Visual C++ 2005 title
+(Gothic 3, R6034 at vcomp.dll on 2026-10-08) must be checked before this reaches main.
+*2026-10-27.*
 
 **A periodic multimedia timer that has fallen more than a period behind fires once, not once per
 tick missed.** Its next due time moves to the first tick of the same grid still to come, and the

@@ -1800,9 +1800,9 @@ test('the DirectInput object counts its references, one count for every interfac
     assert.equal(g.call(second, RELEASE), 1);
 
     assert.equal(g.call(root, RELEASE), 0);
-    assert.equal(g.call(root, ADDREF), E_POINTER);
-    assert.equal(g.call(second, ADDREF), E_POINTER);
-    assert.equal(g.call(unknown, ADDREF), E_POINTER);
+    assert.equal(g.call(root, ADDREF), 0);
+    assert.equal(g.call(second, ADDREF), 0);
+    assert.equal(g.call(unknown, ADDREF), 0);
 });
 
 test('a device goes on working after the DirectInput object that made it is released', ()=>{

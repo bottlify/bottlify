@@ -23,6 +23,7 @@ const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const S_OK = 0;
 const E_POINTER = 0x80004003;
 const E_INVALIDARG = 0x80070057;
+const E_OUTOFMEMORY = 0x8007000e;
 const ERROR_INVALID_PARAMETER = 87;
 
 /** @param {string} c */
@@ -330,6 +331,34 @@ const strippedRoot = path=>{
  */
 
 /**
+ * The volume's answer for a path, against the current directory, or null for
+ * nothing there. A path the volume refuses -- a wildcard, a tab, a drive that
+ * is not a letter -- is nothing there too: Windows' GetFileAttributes fails
+ * on it and PathFileExists and PathIsDirectory answer FALSE.
+ *
+ * @param {{ files?: { stat(path: string): { exists?: boolean, isDirectory?: boolean } | null },
+ *     fullPath?: (path: string) => string }} host
+ * @param {string | null} path
+ */
+export function statPath(host, path){
+    if (!path || !host.files || !host.fullPath)
+    {
+        return null;
+    }
+    try
+    {
+        return host.files.stat(host.fullPath(path));
+    }
+    catch (e){
+        if (e && typeof e === 'object' && 'code' in e)
+        {
+            return null;
+        }
+        throw e;
+    }
+}
+
+/**
  * PathCompactPath's answer: the path as it is when it fits in `limit`
  * pixels; otherwise the directories before its file name cut back and an
  * ellipsis put in their place, as much of the path's start kept as fits --
@@ -374,6 +403,49 @@ export function compactPath(path, limit, width){
     return kept + ELLIPSIS + file;
 }
 
+/** PathIsValidChar's classes, as the SDK names them. */
+const PATH_CHAR_CLASS = Object.freeze({ LETTER: 0x1, ASTERISK: 0x2, DOT: 0x4, BACKSLASH: 0x8,
+    COLON: 0x10, SEMICOLON: 0x20, COMMA: 0x40, SPACE: 0x80, OTHER_VALID: 0x100,
+    DOUBLEQUOTE: 0x200, ANY: 0xffffffff });
+
+/**
+ * The classes an ASCII character is in (Wine's SHELL_charclass, against
+ * Windows): a letter is any class, `?` a letter's, the separators and
+ * marks each their own, the controls and `/ < > |` none, and the rest
+ * other valid characters. A character past ASCII is other valid.
+ *
+ * @param {number} code
+ */
+export const charClass = code=>{
+    if (code >= 0x7f)
+    {
+        return PATH_CHAR_CLASS.OTHER_VALID;
+    }
+    const c = String.fromCharCode(code);
+    if (/[A-Za-z]/.test(c))
+    {
+        return PATH_CHAR_CLASS.ANY;
+    }
+    const marks = /** @type {Record<string, number>} */ ({ ' ': PATH_CHAR_CLASS.SPACE,
+        '"': PATH_CHAR_CLASS.DOUBLEQUOTE, '*': PATH_CHAR_CLASS.ASTERISK,
+        ',': PATH_CHAR_CLASS.COMMA, '.': PATH_CHAR_CLASS.DOT, ':': PATH_CHAR_CLASS.COLON,
+        ';': PATH_CHAR_CLASS.SEMICOLON, '?': PATH_CHAR_CLASS.LETTER,
+        '\\': PATH_CHAR_CLASS.BACKSLASH });
+    if (c in marks)
+    {
+        return marks[c];
+    }
+    return code < 0x20 || '/<>|'.includes(c) ? 0 : PATH_CHAR_CLASS.OTHER_VALID;
+};
+
+/**
+ * The variables PathUnExpandEnvStrings puts back for the start of a path,
+ * as MSDN lists them less %COMPUTERNAME%, whose value names no path (Wine's
+ * test_PathUnExpandEnvStrings).
+ */
+const UNEXPANDED = Object.freeze(['ALLUSERSPROFILE', 'APPDATA', 'USERPROFILE', 'ProgramFiles',
+    'SystemRoot', 'SystemDrive']);
+
 /**
  * @param {PathHost} host
  * @param {{ A: import('./text.js').Width, W: import('./text.js').Width }} widths
@@ -392,6 +464,42 @@ export function createPathFunctions(host, { A, W }){
 
     /** @param {number} address @param {import('./text.js').Width} width @param {string} text */
     const write = (address, width, text)=>host.writeMemory(address >>> 0, width.sz(text));
+
+    /**
+     * The process's variables as kernel32 has them now, by upper-case name;
+     * null without kernel32 or memory to read them from.
+     *
+     * @returns {Map<string, string> | null}
+     */
+    const environment = ()=>{
+        const kernel32 = host.library?.('KERNEL32.dll');
+        const read = host.readMemory;
+        const block = kernel32 && read
+            ? /** @type {number} */ (kernel32.GetEnvironmentStringsW?.handler([])) >>> 0 : 0;
+        if (!block || !read || !kernel32)
+        {
+            return null;
+        }
+        /** @type {Map<string, string>} */
+        const variables = new Map();
+        let at = block;
+        for (let count = 0; count < 0x8000; count++)
+        {
+            const entry = W.read(at) ?? '';
+            at += (entry.length + 1) * 2;
+            if (entry === '')
+            {
+                break;
+            }
+            const split = entry.indexOf('=', 1);
+            if (split > 0)
+            {
+                variables.set(entry.slice(0, split).toUpperCase(), entry.slice(split + 1));
+            }
+        }
+        kernel32.FreeEnvironmentStringsW?.handler([block]);
+        return variables;
+    };
 
     /**
      * The count a caller passes by pointer: how much room its buffer has,
@@ -426,8 +534,7 @@ export function createPathFunctions(host, { A, W }){
      *
      * @param {string | null} path
      */
-    const stat = path=>(path && host.files && host.fullPath
-        ? host.files.stat(host.fullPath(path)) : null);
+    const stat = path=>statPath(host, path);
 
     /**
      * One of kernel32's file functions, called with the caller's own
@@ -547,6 +654,82 @@ export function createPathFunctions(host, { A, W }){
             return answerCounted(width, path, buffer, count, room);
         }),
 
+        /**
+         * BOOL PathIsValidCharA(UCHAR ch, DWORD dwFlags)  (#455)
+         * BOOL PathIsValidCharW(WCHAR ch, DWORD dwFlags)  (#456)
+         *
+         * Whether the character is in any of the classes asked for.
+         */
+        PathIsValidCharA: { argBytes: 8, handler: (/** @type {number[]} */ [code, classes])=>
+            ((charClass(code & 0xff) & classes) !== 0 ? 1 : 0) },
+        PathIsValidCharW: { argBytes: 8, handler: (/** @type {number[]} */ [code, classes])=>
+            ((charClass(code & 0xffff) & classes) !== 0 ? 1 : 0) },
+
+        /**
+         * BOOL PathUnExpandEnvStringsA(LPCSTR pszPath, LPSTR pszBuf, UINT cchBuf)
+         *
+         * The path with the longest of the variables' values that starts it
+         * put back as the variable, read from the environment as it is now;
+         * FALSE, the buffer as it was, when none does or the answer does not
+         * fit.
+         */
+        ...both('PathUnExpandEnvStrings', 12, (width, [pointer, buffer, room])=>{
+            const path = width.read(pointer);
+            const variables = environment();
+            if (path === null || (buffer >>> 0) === 0 || !variables)
+            {
+                return 0;
+            }
+            let best = null;
+            for (const name of UNEXPANDED)
+            {
+                const value = variables.get(name.toUpperCase());
+                const ends = (/** @type {string} */ text)=>/[\\:]$/.test(text)
+                    || path.length === text.length || path[text.length] === '\\';
+                if (value && path.toUpperCase().startsWith(value.toUpperCase()) && ends(value)
+                    && (best === null || value.length > best.value.length))
+                {
+                    best = { name, value };
+                }
+            }
+            if (best === null)
+            {
+                return 0;
+            }
+            const text = `%${best.name}%${path.slice(best.value.length)}`;
+            if (text.length + 1 > (room >>> 0))
+            {
+                return 0;
+            }
+            write(buffer, width, text);
+            return 1;
+        }),
+
+        /**
+         * HRESULT PathCreateFromUrlAlloc(PCWSTR pszIn, PWSTR *ppszOut, DWORD dwFlags)
+         *
+         * PathCreateFromUrlW's path in a block the caller frees with LocalFree.
+         */
+        PathCreateFromUrlAlloc: { argBytes: 12, handler: (/** @type {number[]} */ [url, out])=>{
+            const text = W.read(url);
+            const path = text === null ? null : pathFromFileUrl(text, W.char);
+            if (path === null || (out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const bytes = W.sz(path);
+            const alloc = host.library?.('KERNEL32.dll')?.LocalAlloc;
+            const block = alloc ? /** @type {number} */ (alloc.handler([0, bytes.length])) >>> 0 : 0;
+            host.writeMemory(out >>> 0, Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
+                block >>> 16 & 0xff, block >>> 24 & 0xff));
+            if (!block)
+            {
+                return E_OUTOFMEMORY;
+            }
+            host.writeMemory(block, bytes);
+            return S_OK;
+        } },
+
         /** BOOL PathFileExistsA(LPCSTR pszPath): a file or a directory there. */
         ...both('PathFileExists', 4, (width, [pointer])=>
             (stat(width.read(pointer))?.exists ? 1 : 0)),
@@ -583,6 +766,91 @@ export function createPathFunctions(host, { A, W }){
         }),
 
         /**
+         * BOOL PathMakePrettyA(LPSTR lpPath)
+         *
+         * A path all in capitals put in small letters but its first
+         * character; one with a small letter anywhere is left as it is, and
+         * FALSE (Wine's test_PathMakePretty).
+         */
+        ...both('PathMakePretty', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null || path !== path.toUpperCase())
+            {
+                return 0;
+            }
+            write(pointer, width, path.slice(0, 1) + path.slice(1).toLowerCase());
+            return 1;
+        }),
+
+        /**
+         * void PathUnquoteSpacesA(LPSTR lpszPath)
+         *
+         * One double quote taken off each end, when both ends have one; a
+         * lone quote is the empty path.
+         */
+        ...both('PathUnquoteSpaces', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path !== null && path.startsWith('"') && (path.length === 1 || path.endsWith('"')))
+            {
+                write(pointer, width, path.slice(1, Math.max(1, path.length - 1)));
+            }
+            return 0;
+        }),
+
+        /**
+         * void PathUndecorateA(LPSTR pszPath)
+         *
+         * The "[n]" a browser's cache puts before a file's extension taken
+         * out: only ASCII digits, only right before the extension -- or the
+         * end, for a name with none -- and never the whole name (Wine's
+         * test_PathUndecorate).
+         */
+        ...both('PathUndecorate', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null)
+            {
+                return 0;
+            }
+            const dot = extensionIndex(path);
+            const stem = path.slice(0, dot);
+            const decoration = /\[[0-9]*\]$/.exec(stem);
+            const start = decoration ? stem.length - decoration[0].length : -1;
+            if (decoration && start > 0 && !isSeparator(stem[start - 1]))
+            {
+                write(pointer, width, stem.slice(0, start) + path.slice(dot));
+            }
+            return 0;
+        }),
+
+        /**
+         * int PathGetDriveNumberA(LPCSTR lpszPath)
+         *
+         * The drive a path starts with, 0 for A; through a `\\?\` prefix in
+         * the wide spelling, which alone has one; -1 for none, and for NULL
+         * with the last error left alone (Wine's test_PathGetDriveNumber).
+         */
+        ...both('PathGetDriveNumber', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            const drive = path === null ? null
+                : (width.wide ? /^(?:\\\\\?\\)?([A-Za-z]):/ : /^([A-Za-z]):/).exec(path);
+            return drive ? drive[1].toUpperCase().charCodeAt(0) - 0x41 : -1;
+        }),
+
+        /**
+         * LPSTR PathBuildRootA(LPSTR pszRoot, int iDrive)
+         *
+         * "A:\" for drive 0 to "Z:\" for 25 into the buffer; another number
+         * leaves it alone. The buffer either way.
+         */
+        ...both('PathBuildRoot', 8, (width, [pointer, drive])=>{
+            if ((pointer >>> 0) !== 0 && (drive | 0) >= 0 && (drive | 0) < 26)
+            {
+                write(pointer, width, `${String.fromCharCode(0x41 + (drive | 0))}:\\`);
+            }
+            return pointer >>> 0;
+        }),
+
+        /**
          * BOOL PathRemoveFileSpecA(LPSTR pszPath)
          *
          * The last component and the backslash before it cut off, a root's
@@ -603,15 +871,16 @@ export function createPathFunctions(host, { A, W }){
          * int PathCommonPrefixA(LPCSTR pszFile1, LPCSTR pszFile2, LPSTR achPath)
          *
          * The shared length (`commonPrefixLength`), and the prefix itself
-         * into achPath when one is given.
+         * into achPath when one is given; a missing path leaves it alone
+         * (Wine's test_PathCommonPrefixA).
          */
         ...both('PathCommonPrefix', 12, (width, [first, second, out])=>{
             const one = width.read(first);
             const two = width.read(second);
             const length = one === null || two === null ? 0 : commonPrefixLength(one, two);
-            if ((out >>> 0) !== 0)
+            if ((out >>> 0) !== 0 && one !== null && two !== null)
             {
-                write(out, width, (one ?? '').slice(0, length));
+                write(out, width, one.slice(0, length));
             }
             return length;
         }),

@@ -129,7 +129,8 @@ function scanset(body){
  *        `wide` for the wscanf family, where %s and %c are wide and %S and
  *        %C narrow; `secure` for the _s family, where each %c, %s and %[
  *        takes its buffer's size in characters after its pointer, and text
- *        that does not fit ends the scan with the buffer emptied;
+ *        that does not fit ends the scan with the buffer emptied and the
+ *        assignments made so far answered, none of them EOF;
  *        `progress` is filled in with how far the scan read.
  * @returns {number} Assignments made, or SCAN_EOF.
  */
@@ -292,9 +293,14 @@ export function runScan(input, format, nextPointer, store, options = {}){
             if (!suppress)
             {
                 const pointer = nextPointer();
-                if (options.secure && (nextPointer() >>> 0) < count)
+                const room = options.secure ? nextPointer() >>> 0 : Infinity;
+                if (room < count)
                 {
-                    return stop();
+                    // What fits is stored, and the first character zeroed:
+                    // the scan ends there, nothing assigned by it.
+                    store.text(pointer, taken.slice(0, room), false, wide);
+                    store.text(pointer, '', true, wide);
+                    return done(assigned);
                 }
                 // No terminator: %c reads characters, not a string, and the
                 // caller's buffer is exactly as long as it asked for.
@@ -335,7 +341,7 @@ export function runScan(input, format, nextPointer, store, options = {}){
                 if (options.secure && (nextPointer() >>> 0) < at - start + 1)
                 {
                     store.text(pointer, '', true, wide);
-                    return stop();
+                    return done(assigned);
                 }
                 store.text(pointer, input.slice(start, at), true, wide);
                 assigned++;

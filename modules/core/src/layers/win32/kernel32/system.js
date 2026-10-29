@@ -25,6 +25,13 @@
 import { lstrcpyCode, lstrcpyLongCode, lstrlenCode, lstrlenLongCode } from './lstr.js';
 import { assemble } from '../msvcrt/guest-code.js';
 import { createWin9xFunctions } from './win9x.js';
+import { askChild, isChildThread, threadArg } from './cross-process.js';
+import { blockLayouts } from './teb.js';
+import { systemTimeToMs } from './filetime.js';
+import { formatMessageText } from './format-message.js';
+import { systemMessage } from './system-messages.js';
+import { compareStrings, decodeAnsi, encodeAnsi } from './locale.js';
+import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
 import {
     PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION, createProcessors,
 } from './processor.js';
@@ -32,6 +39,7 @@ import {
 /** Error codes this file can produce. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
 /** TerminateProcess on a process that has already ended. */
 const ERROR_ACCESS_DENIED = 5;
@@ -77,6 +85,17 @@ const RELATION_PROCESSOR_CORE = 0;
 const RELATION_NUMA_NODE = 1;
 const RELATION_CACHE = 2;
 const RELATION_PROCESSOR_PACKAGE = 3;
+const RELATION_GROUP = 4;
+/** RelationAll, which the extended form takes for every kind. */
+const RELATION_ALL = 0xffff;
+/**
+ * SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX's records as a 32-bit program lays
+ * them out: Relationship and Size, then the kind's structure, each ending in
+ * one GROUP_AFFINITY (a 4-byte mask, its group, three reserved words) but the
+ * group's, which ends in one PROCESSOR_GROUP_INFO.
+ */
+const PROCESSOR_EX = Object.freeze({ CORE: 44, NUMA: 44, CACHE: 52, GROUP: 76,
+    BODY: 8, GROUP_COUNT: 22, CACHE_GROUP_COUNT: 30, MASK: 24, CACHE_MASK: 32 });
 /** PROCESSOR_CACHE_TYPE, by the kind leaf 4 names. */
 const CACHE_TYPES = Object.freeze({ unified: 0, instruction: 1, data: 2 });
 
@@ -104,6 +123,9 @@ const STILL_ACTIVE = 259;
 const CURRENT_PROCESS = 0xffffffff;
 /** Where a 64-bit Windows keeps its 32-bit system libraries. */
 const WOW64_DIRECTORY = 'C:\\WINDOWS\\SysWOW64';
+/** The machines a process here runs on, as an image header names them. */
+const IMAGE_FILE_MACHINE_I386 = 0x14c;
+const IMAGE_FILE_MACHINE_AMD64 = 0x8664;
 
 /** 100ns units between the FILETIME epoch (1601-01-01) and the Unix one. */
 const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
@@ -187,6 +209,15 @@ const FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200;
 const FORMAT_MESSAGE_FROM_STRING = 0x00000400;
 const FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000;
 const FORMAT_MESSAGE_ARGUMENT_ARRAY = 0x00002000;
+const FORMAT_MESSAGE_FROM_HMODULE = 0x00000800;
+const FORMAT_MESSAGE_MAX_WIDTH_MASK = 0x000000ff;
+/** FormatMessageA writes no message this long or longer. */
+const ANSI_MESSAGE_LIMIT = 32767;
+const ERROR_NO_WORK_DONE = 235;
+/** lstrcmpi's CompareString flag. */
+const NORM_IGNORECASE = 0x00000001;
+const ERROR_MR_MID_NOT_FOUND = 317;
+const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
 
 /**
  * How far a string argument is read before it is taken for a pointer that is
@@ -202,11 +233,6 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 /** A pointer the call cannot write through. */
 const ERROR_NOACCESS = 998;
-/** What DeactivateActCtx answers for a cookie that is not the innermost. */
-const ERROR_SXS_INVALID_DEACTIVATION = 14065;
-/** What CreateActCtx sets when it cannot build a context from a manifest. */
-const ERROR_SXS_CANT_GEN_ACTCTX = 14001;
-const INVALID_HANDLE_VALUE = 0xffffffff;
 
 /**
  * SetThreadExecutionState's requests: the system, the display, a user, and
@@ -221,51 +247,17 @@ const EXECUTION_STATES = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRES
     | ES_CONTINUOUS;
 
 /**
- * What FormatMessage says about a code, for the codes this build produces.
- *
- * A program shows or logs these, so they are the real Windows wordings rather
- * than paraphrases: a person searching for the text of an error they saw should
- * find the same results they would from a real machine.
- */
-const SYSTEM_MESSAGES = Object.freeze({
-    0: 'The operation completed successfully.',
-    2: 'The system cannot find the file specified.',
-    3: 'The system cannot find the path specified.',
-    5: 'Access is denied.',
-    6: 'The handle is invalid.',
-    8: 'Not enough memory resources are available to process this command.',
-    18: 'There are no more files.',
-    50: 'The request is not supported.',
-    80: 'The file exists.',
-    87: 'The parameter is incorrect.',
-    111: 'The file name is too long.',
-    120: 'This function is not supported on this system.',
-    122: 'The data area passed to a system call is too small.',
-    126: 'The specified module could not be found.',
-    127: 'The specified procedure could not be found.',
-    145: 'The directory is not empty.',
-    183: 'Cannot create a file when that file already exists.',
-    259: 'No more data is available.',
-    267: 'The directory name is invalid.',
-});
-
-/**
- * The sign of a comparison, which is all lstrcmp promises. A caller may test
- * it against zero and nothing else, so returning a difference of bytes would
- * be inventing a guarantee.
- *
- * @param {string} left @param {string} right
- */
-const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
-
-/**
  * @typedef {Object} SystemHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {() => number} systemTimeMs   Guest wall clock, milliseconds since 1970.
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, type?: string) => any} resolveHandle
+ * @property {(handle: number) => string | null} [handleType]  what kind of object a handle is
  * @property {() => any} currentThread
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child, for the exit code of one of its threads.
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {(code: number) => void} exit
  * @property {() => any} park
  * @property {(bytes: number) => number} [allocate]
@@ -284,6 +276,9 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  *           Ends a thread's wait with its answer: how a thread waiting on a
  *           child another one terminates goes on. Without it that thread
  *           stays waiting.
+ * @property {(child: any, code: number) => void} [finishChild]
+ *           A child that ended without running: its exit code, and its event
+ *           set. Absent, the code alone, where nothing waits on an event.
  * @property {(child: any, code: number) => boolean} [terminateChild]
  *           Ends a child that is running beside this process, with the code:
  *           false where the run cannot reach it.
@@ -477,6 +472,58 @@ export function createSystemFunctions(host){
     };
 
     /**
+     * The idle cycle counts' answer: the length a processor's ULONG64 each
+     * takes, then the counts when there is room for them.
+     *
+     * @param {number} length @param {number} buffer
+     */
+    const idleCycleTime = (length, buffer)=>{
+        if (length === 0)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const needed = processors.count() * 8;
+        if (buffer === 0)
+        {
+            if (readDword(length) === 0)
+            {
+                writeDword(length, needed);
+            }
+            return 1;
+        }
+        const room = readDword(length);
+        writeDword(length, needed);
+        if (room < needed)
+        {
+            host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        host.writeMemory(buffer, new Uint8Array(needed));
+        return 1;
+    };
+
+    /**
+     * lstrcmp in one form: the sign of CompareString's answer.
+     *
+     * @param {boolean} wide @param {number} flags
+     */
+    const lstrcmpOf = (wide, flags)=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: survivesFault(([first, second])=>{
+            if ((first >>> 0) === 0 || (second >>> 0) === 0)
+            {
+                return Math.sign((first >>> 0 === 0 ? 0 : 1) - (second >>> 0 === 0 ? 0 : 1));
+            }
+            const read = wide ? readWide : (/** @type {number} */ address)=>decodeAnsi(
+                Uint8Array.from(readAnsi(address, MAX_STRING), character=>character.charCodeAt(0)));
+            return compareStrings(read(first >>> 0, MAX_STRING), read(second >>> 0, MAX_STRING),
+                flags) - 2;
+        }),
+    });
+
+    /**
      * What SetThreadExecutionState holds for each thread, by its record; a
      * call with no thread to name is the process's own, under this map.
      *
@@ -484,210 +531,18 @@ export function createSystemFunctions(host){
      */
     const executionStates = new WeakMap();
 
-
-    /** @type {number[]} What ActivateActCtx put on the stack, innermost last. */
-    const activations = [];
-
-    /**
-     * CreateActCtxA and CreateActCtxW, which differ only in the strings
-     * this build never reads.
-     *
-     * @param {string} name
-     * @returns {(args: number[]) => number}
-     */
-    const createActCtx = name=>([actCtx])=>{
-        // cbSize, dwFlags and lpSource are the least any version carries.
-        if ((actCtx >>> 0) === 0 || readDword(actCtx >>> 0) < 12)
-        {
-            host.setLastError(ERROR_INVALID_PARAMETER);
-            return INVALID_HANDLE_VALUE;
-        }
-        host.divergence?.(name, 'manifests are not read; no activation context is built');
-        host.setLastError(ERROR_SXS_CANT_GEN_ACTCTX);
-        return INVALID_HANDLE_VALUE;
-    };
-
-    /**
-     * One insert's text. The conversion is the printf spelling a message
-     * carries between the exclamation marks, and it decides how the
-     * argument's slot reads: `s` a string pointer, `d`/`i` a signed decimal,
-     * `u` an unsigned one, `x`/`X` hexadecimal, `o` octal, `c` a character.
-     * There is no insert without a conversion in a message table, but a
-     * caller's own format string may write a bare `%1`; a string is the
-     * default, which is the reading that makes `%1 = %2` expand two text
-     * arguments.
-     *
-     * `w` asks for a wide argument and `h` for a narrow one, and a capital
-     * `S` or `C` is the other width to the family, as it is in printf. A
-     * conversion this surface does not format produces nothing rather than a
-     * reading of the slot that would be a different type's. The family's own
-     * width is the caller's: FormatMessageW reads a bare `s` as wide and `S`
-     * as narrow.
-     *
-     * Ahead of the conversion stand printf's flags, width and precision --
-     * `%1!.8X!` is eight hexadecimal digits, `%2!-10s!` a string padded on the
-     * right -- and they shape the text as printf would.
-     *
-     * @param {number} value @param {string} conversion @param {boolean} wideCaller
-     * @returns {string}
-     */
-    const insertValue = (value, conversion, wideCaller)=>{
-        const spec = /^([-+ #0]*)(\d*)(?:\.(\d*))?(.*)$/.exec(conversion)
-            ?? ['', '', '', undefined, conversion];
-        const [, flagText, widthText, precisionText] = spec;
-        const body = bareInsert(value, spec[4], wideCaller, precisionText);
-        const width = Number(widthText || 0);
-        if (body.length >= width)
-        {
-            return body;
-        }
-        if (flagText.includes('-'))
-        {
-            return body.padEnd(width);
-        }
-        const numeric = /[diuxo]$/i.test(spec[4]);
-        if (flagText.includes('0') && numeric && precisionText === undefined)
-        {
-            const sign = /^[-+ ]/.test(body) ? body[0] : '';
-            return sign + body.slice(sign.length).padStart(width - sign.length, '0');
-        }
-        return body.padStart(width);
-    };
-
-    /**
-     * One insert's conversion with no flags or width: a precision is the
-     * fewest digits of a number and the most characters of a string.
-     *
-     * @param {number} value @param {string} conversion @param {boolean} wideCaller
-     * @param {string | undefined} precisionText
-     * @returns {string}
-     */
-    const bareInsert = (value, conversion, wideCaller, precisionText)=>{
-        const precision = precisionText === undefined ? -1 : Number(precisionText || 0);
-        /** @param {string} digits */
-        const least = digits=>{
-            const negative = digits.startsWith('-');
-            const magnitude = negative ? digits.slice(1) : digits;
-            return (negative ? '-' : '') + magnitude.padStart(precision, '0');
-        };
-        const text = plainInsert(value, conversion, wideCaller);
-        const last = conversion === '' ? 's' : conversion[conversion.length - 1].toLowerCase();
-        if (precision < 0)
-        {
-            return text;
-        }
-        return last === 's' ? text.slice(0, precision) : last === 'c' ? text : least(text);
-    };
-
-    /**
-     * @param {number} value @param {string} conversion @param {boolean} wideCaller
-     * @returns {string}
-     */
-    const plainInsert = (value, conversion, wideCaller)=>{
-        const shape = conversion.toLowerCase();
-        const last = conversion === '' ? 's' : conversion[conversion.length - 1];
-        const other = last === 'S' || last === 'C';
-        const wide = shape.includes('w') || (!shape.includes('h') && wideCaller !== other);
-        switch (last.toLowerCase())
-        {
-            case 's':
-                return (value >>> 0) === 0 ? ''
-                    : (wide ? readWide(value >>> 0, MAX_STRING)
-                        : readAnsi(value >>> 0, MAX_STRING));
-            case 'c':
-                return wide ? String.fromCharCode(value & 0xffff)
-                    : String.fromCharCode(value & 0xff);
-            case 'd':
-            case 'i':
-                return String(value | 0);
-            case 'u':
-                return String(value >>> 0);
-            case 'x': {
-                const hex = (value >>> 0).toString(16);
-                return last === 'X' ? hex.toUpperCase() : hex;
-            }
-            case 'o':
-                return (value >>> 0).toString(8);
-            default:
-                return '';
-        }
-    };
-
-    /**
-     * FormatMessage's insert pass over a caller's own format string: `%1`
-     * through `%99` take the n-th argument, `%%` is a literal percent, and
-     * everything else is copied through.
-     *
-     * The arguments are a va_list, not an array: `argumentsPtr` points at the
-     * pointer to the first value, so it is dereferenced once before indexing.
-     * Reading the pointer as the array itself is what makes the first value a
-     * stack address, and answering ERROR_INVALID_PARAMETER when that address
-     * is then read as a string -- which is the error Windows answers for a
-     * malformed call. With FORMAT_MESSAGE_ARGUMENT_ARRAY the caller says the
-     * pointer *is* the array, and then it is indexed directly.
-     *
-     * @param {string} text @param {number} argumentsPtr @param {boolean} array
-     * @param {boolean} [wideCaller]
-     * @returns {string}
-     */
-    const insertArguments = (text, argumentsPtr, array, wideCaller = false)=>{
-        const base = array ? argumentsPtr : readDword(argumentsPtr);
-        /** @param {number} index */
-        const valueAt = index=>readDword(base + index * 4);
-        let out = '';
-        for (let at = 0; at < text.length; at++)
-        {
-            const ch = text[at];
-            if (ch !== '%')
-            {
-                out += ch;
-                continue;
-            }
-            const next = text[at + 1];
-            if (next === '%')
-            {
-                out += '%';
-                at++;
-                continue;
-            }
-            if (next === undefined || next < '1' || next > '9')
-            {
-                out += ch;
-                continue;
-            }
-            // Up to two digits: %1 to %99.
-            const second = text[at + 2];
-            const twoDigits = second !== undefined && second >= '0' && second <= '9';
-            const index = Number(twoDigits ? next + second : next) - 1;
-            at += twoDigits ? 2 : 1;
-            let conversion = 's';
-            if (text[at + 1] === '!')
-            {
-                const close = text.indexOf('!', at + 2);
-                if (close > at)
-                {
-                    conversion = text.slice(at + 2, close);
-                    at = close;
-                }
-            }
-            out += insertValue(valueAt(index), conversion, wideCaller);
-        }
-        return out;
-    };
-
-    /** @param {number} address @param {string} text  UTF-16, written with a terminator. */
-    const writeWide = (address, text)=>{
-        const units = new Uint16Array(text.length + 1);
-        for (let at = 0; at < text.length; at++)
-        {
-            units[at] = text.charCodeAt(at);
-        }
-        host.writeMemory(address, new Uint8Array(units.buffer));
-    };
-
     /**
      * FormatMessageA and FormatMessageW: one body, the width of the source,
      * the inserts and the buffer the only difference.
+     *
+     * The text is formatted by `format-message.js`. What is Windows' here is
+     * the buffer: with FORMAT_MESSAGE_ALLOCATE_BUFFER the pointer is NULL
+     * until there is a message to point at; FormatMessageW writes as it goes,
+     * so a message cut short by an error leaves what was formatted (with no
+     * terminator), one the buffer cannot hold leaves as much as fits,
+     * terminated, and an empty one an empty string; FormatMessageA writes
+     * only a whole message, and none of 32767 characters or more. A va_list
+     * is advanced past the arguments read, as the caller's own va_arg would.
      *
      * @param {boolean} wide
      */
@@ -697,57 +552,143 @@ export function createSystemFunctions(host){
         handler: survivesFault(([flags, source, messageId, , buffer, size,
             argumentsPtr])=>{
             const asked = flags >>> 0;
-            /** @type {string} */
-            let text;
-            if ((asked & FORMAT_MESSAGE_FROM_STRING) !== 0)
+            const allocating = (asked & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0;
+            if (allocating && (buffer >>> 0) !== 0)
             {
-                text = (wide ? readWide : readAnsi)(source >>> 0, MAX_STRING);
-                if ((asked & FORMAT_MESSAGE_IGNORE_INSERTS) === 0
-                    && (argumentsPtr >>> 0) !== 0)
-                {
-                    text = insertArguments(text, argumentsPtr >>> 0,
-                        (asked & FORMAT_MESSAGE_ARGUMENT_ARRAY) !== 0, wide);
-                }
+                writeDword(buffer >>> 0, 0);
             }
-            else if ((asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0)
+            if ((asked & (FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_FROM_HMODULE
+                | FORMAT_MESSAGE_FROM_SYSTEM)) === 0)
             {
-                const code = messageId >>> 0;
-                text = /** @type {Record<number, string>} */ (SYSTEM_MESSAGES)[code]
-                    ?? `Error ${code}.`;
-            }
-            else
-            {
-                // FROM_HMODULE needs a message table in a module, which no
-                // caller in this build asks this surface for.
-                host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
+                host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-
-            const unit = wide ? 2 : 1;
-            const write = wide ? writeWide : writeAnsi;
-            if ((asked & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0)
+            if ((buffer >>> 0) === 0 && (wide || !allocating))
             {
-                if (!host.allocate || buffer === 0)
+                host.setLastError(wide ? ERROR_INVALID_PARAMETER : ERROR_INSUFFICIENT_BUFFER);
+                return 0;
+            }
+            if ((buffer >>> 0) === 0)
+            {
+                host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                return 0;
+            }
+            /** @type {string | null} */
+            let format;
+            if ((asked & FORMAT_MESSAGE_FROM_STRING) !== 0)
+            {
+                if ((source >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const address = host.allocate((text.length + 1) * unit);
+                format = wide ? readWide(source >>> 0, MAX_STRING)
+                    : decodeAnsi(Uint8Array.from(readAnsi(source >>> 0, MAX_STRING),
+                        character=>character.charCodeAt(0)));
+            }
+            else
+            {
+                // A module's own message table is not read here; the system's
+                // is, for the system's modules and FORMAT_MESSAGE_FROM_SYSTEM.
+                format = (asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0
+                    ? systemMessage(messageId >>> 0) : null;
+                if (format === null)
+                {
+                    host.setLastError((asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0
+                        ? ERROR_MR_MID_NOT_FOUND : ERROR_RESOURCE_TYPE_NOT_FOUND);
+                    return 0;
+                }
+            }
+
+            const array = (asked & FORMAT_MESSAGE_ARGUMENT_ARRAY) !== 0;
+            const list = (argumentsPtr >>> 0) === 0 ? 0
+                : array ? argumentsPtr >>> 0 : readDword(argumentsPtr >>> 0);
+            const room = allocating ? Infinity : (size >>> 0) - 1;
+            const { text, error, reads } = formatMessageText(format, {
+                wide,
+                ignoreInserts: (asked & FORMAT_MESSAGE_IGNORE_INSERTS) !== 0,
+                width: asked & FORMAT_MESSAGE_MAX_WIDTH_MASK,
+                args: (argumentsPtr >>> 0) === 0 ? null
+                    : { array, read: slot=>readDword(list + slot * 4) },
+                readString: (address, wideString)=>(wideString
+                    ? readWide(address, MAX_STRING)
+                    : decodeAnsi(Uint8Array.from(readAnsi(address, MAX_STRING),
+                        character=>character.charCodeAt(0)))),
+                room: wide ? room : Infinity,
+            });
+            if (!array && (argumentsPtr >>> 0) !== 0 && reads > 0)
+            {
+                writeDword(argumentsPtr >>> 0, list + reads * 4);
+            }
+
+            const unit = wide ? 2 : 1;
+            const bytes = wide ? null : encodeAnsi(text);
+            const length = bytes === null ? text.length : bytes.length;
+            /** Writes the first `count` characters, and a terminator when asked. */
+            /** @param {number} address @param {number} count @param {boolean} terminated */
+            const put = (address, count, terminated)=>{
+                if (bytes === null)
+                {
+                    const units = new Uint16Array(count + (terminated ? 1 : 0));
+                    for (let at = 0; at < count; at++)
+                    {
+                        units[at] = text.charCodeAt(at);
+                    }
+                    host.writeMemory(address, new Uint8Array(units.buffer));
+                }
+                else
+                {
+                    const out = new Uint8Array(count + (terminated ? 1 : 0));
+                    out.set(bytes.subarray(0, count));
+                    host.writeMemory(address, out);
+                }
+            };
+            if (error === ERROR_INVALID_PARAMETER || (!wide && length >= ANSI_MESSAGE_LIMIT))
+            {
+                if (wide && !allocating && text.length > 0)
+                {
+                    put(buffer >>> 0, Math.min(text.length, (size >>> 0)), false);
+                }
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            if (allocating)
+            {
+                if (length === 0)
+                {
+                    host.setLastError(ERROR_NO_WORK_DONE);
+                    return 0;
+                }
+                const address = host.allocate?.(Math.max(length + 1, size >>> 0) * unit) ?? 0;
                 if (address === 0)
                 {
                     host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
                     return 0;
                 }
-                write(address, text);
+                put(address, length, true);
                 writeDword(buffer >>> 0, address);
-                return text.length;
+                return length;
             }
-            if (buffer === 0 || text.length + 1 > (size >>> 0))
+            if (error === ERROR_INSUFFICIENT_BUFFER || length + 1 > (size >>> 0))
             {
+                if (wide && (size >>> 0) > 0)
+                {
+                    put(buffer >>> 0, (size >>> 0) - 1, true);
+                }
+                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                 return 0;
             }
-            write(buffer >>> 0, text);
-            return text.length;
+            if (length === 0)
+            {
+                if (wide)
+                {
+                    put(buffer >>> 0, 0, true);
+                }
+                host.setLastError(ERROR_NO_WORK_DONE);
+                return 0;
+            }
+            put(buffer >>> 0, length, true);
+            return length;
         }),
     });
 
@@ -828,6 +769,28 @@ export function createSystemFunctions(host){
         ? host.currentThread()
         : object(handle, 'thread'));
 
+    /** The thread block at the process's width. */
+    const TEB = blockLayouts(host.pointerSize).teb;
+    /** The calling thread's block, where its error mode is; 0 for none. */
+    const ownBlock = ()=>(host.currentThread()?.tebAddress ?? 0) >>> 0;
+    /** @returns {number} the calling thread's error mode, in ntdll's bits */
+    const threadErrorMode = ()=>{
+        const block = ownBlock();
+        return block === 0 ? 0
+            : new DataView(host.readMemory(block + TEB.HARD_ERROR_MODE, 4).slice().buffer)
+                .getUint32(0, true);
+    };
+    /** @param {number} mode  in ntdll's bits */
+    const setThreadErrorMode = mode=>{
+        const block = ownBlock();
+        if (block !== 0)
+        {
+            const bytes = new Uint8Array(4);
+            new DataView(bytes.buffer).setUint32(0, mode >>> 0, true);
+            host.writeMemory(block + TEB.HARD_ERROR_MODE, bytes);
+        }
+    };
+
     /** @param {bigint} filetime @returns {Uint8Array} SYSTEMTIME */
     const systemTimeFrom = filetime=>{
         const milliseconds = Number((filetime - FILETIME_AT_UNIX_EPOCH) / 10_000n);
@@ -858,15 +821,16 @@ export function createSystemFunctions(host){
         host.writeMemory(address, bytes);
     };
 
-    /** @param {number} address The SYSTEMTIME to read. */
+    /**
+     * The FILETIME of the SYSTEMTIME at an address, or null when it names no
+     * moment: a year before 1601, a month, day or time of day out of range.
+     *
+     * @param {number} address
+     */
     const filetimeFrom = address=>{
-        const bytes = host.readMemory(address, SYSTEMTIME_SIZE);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, SYSTEMTIME_SIZE);
-        const milliseconds = Date.UTC(
-            view.getUint16(0, true), view.getUint16(2, true) - 1, view.getUint16(6, true),
-            view.getUint16(8, true), view.getUint16(10, true), view.getUint16(12, true),
-            view.getUint16(14, true));
-        return BigInt(milliseconds) * 10_000n + FILETIME_AT_UNIX_EPOCH;
+        const milliseconds = systemTimeToMs(host.readMemory(address, SYSTEMTIME_SIZE));
+        return milliseconds === null ? null
+            : BigInt(milliseconds) * 10_000n + FILETIME_AT_UNIX_EPOCH;
     };
 
     /** The process runs under WOW64: a 32-bit one on a 64-bit machine. */
@@ -952,6 +916,91 @@ export function createSystemFunctions(host){
     };
 
     /**
+     * The extended form's records of one relationship or all: the same cores,
+     * caches, package and node as above, and the one group, each processor's
+     * mask in group 0.
+     *
+     * @param {number} relation
+     * @returns {Uint8Array | null}  null for a relationship that is none
+     */
+    const logicalProcessorsEx = relation=>{
+        const wants = (/** @type {number} */ kind)=>relation === RELATION_ALL || relation === kind;
+        if (relation !== RELATION_ALL && (relation < 0 || relation > RELATION_GROUP))
+        {
+            return null;
+        }
+        const count = processors.count();
+        const all = processors.systemMask();
+        /** @type {Uint8Array[]} */
+        const records = [];
+        /** @param {number} kind @param {number} size */
+        const record = (kind, size)=>{
+            const bytes = new Uint8Array(size);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(0, kind, true);
+            view.setUint32(4, size, true);
+            records.push(bytes);
+            return view;
+        };
+        /** @param {number} kind @param {number} mask */
+        const affine = (kind, mask)=>{
+            const view = record(kind, PROCESSOR_EX.CORE);
+            view.setUint16(PROCESSOR_EX.BODY + PROCESSOR_EX.GROUP_COUNT, 1, true);
+            view.setUint32(PROCESSOR_EX.BODY + PROCESSOR_EX.MASK, mask, true);
+        };
+        for (let index = 0; index < count; index++)
+        {
+            const mask = (1 << index) >>> 0;
+            if (wants(RELATION_PROCESSOR_CORE))
+            {
+                affine(RELATION_PROCESSOR_CORE, mask);
+            }
+            if (wants(RELATION_CACHE))
+            {
+                for (const cache of PROCESSOR_CACHES)
+                {
+                    const view = record(RELATION_CACHE, PROCESSOR_EX.CACHE);
+                    const body = PROCESSOR_EX.BODY;
+                    view.setUint8(body, cache.level);
+                    view.setUint8(body + 1, cache.ways);
+                    view.setUint16(body + 2, cache.lineSize, true);
+                    view.setUint32(body + 4, cache.size, true);
+                    view.setUint32(body + 8, CACHE_TYPES[cache.type], true);
+                    view.setUint16(body + PROCESSOR_EX.CACHE_GROUP_COUNT, 1, true);
+                    view.setUint32(body + PROCESSOR_EX.CACHE_MASK, mask, true);
+                }
+            }
+        }
+        if (wants(RELATION_PROCESSOR_PACKAGE))
+        {
+            affine(RELATION_PROCESSOR_PACKAGE, all);
+        }
+        if (wants(RELATION_NUMA_NODE))
+        {
+            // Node 0, its number the structure's first DWORD.
+            affine(RELATION_NUMA_NODE, all);
+        }
+        if (wants(RELATION_GROUP))
+        {
+            const view = record(RELATION_GROUP, PROCESSOR_EX.GROUP);
+            const body = PROCESSOR_EX.BODY;
+            view.setUint16(body, 1, true);
+            view.setUint16(body + 2, 1, true);
+            view.setUint8(body + 24, count);
+            view.setUint8(body + 25, count);
+            view.setUint32(body + 64, all, true);
+        }
+        const bytes = new Uint8Array(records.reduce((sum, one)=>sum + one.length, 0));
+        let at = 0;
+        for (const one of records)
+        {
+            bytes.set(one, at);
+            at += one.length;
+        }
+        return bytes;
+    };
+
+    /**
      * GetSystemWow64Directory in either form. A 32-bit Windows has no WOW64
      * directory: zero, and ERROR_CALL_NOT_IMPLEMENTED, the buffer never
      * written. A 64-bit one answers its SysWOW64 to a process of either
@@ -1014,6 +1063,31 @@ export function createSystemFunctions(host){
         GetNativeSystemInfo: systemInfoOf(true),
 
         /**
+         * BOOL QueryIdleProcessorCycleTime(PULONG BufferLength,
+         *                                  PULONG64 ProcessorIdleCycleTime)
+         *
+         * A ULONG64 of idle cycles for each processor. Nothing here counts the
+         * cycles a processor spends idle -- an executor waiting is not one
+         * sleeping -- so each is zero. Without a buffer the call only measures,
+         * and a length already given is left as it was (Wine's time.c
+         * test_processor_idle_cycle_time pins both).
+         */
+        QueryIdleProcessorCycleTime: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([length, buffer])=>idleCycleTime(length >>> 0, buffer >>> 0),
+        },
+
+        /** BOOL QueryIdleProcessorCycleTimeEx(USHORT Group, PULONG, PULONG64): group 0 is all. */
+        QueryIdleProcessorCycleTimeEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([group, length, buffer])=>((group & 0xffff) !== 0
+                ? (host.setLastError(ERROR_INVALID_PARAMETER), 0)
+                : idleCycleTime(length >>> 0, buffer >>> 0)),
+        },
+
+        /**
          * BOOL GetLogicalProcessorInformation(
          *     PSYSTEM_LOGICAL_PROCESSOR_INFORMATION Buffer, PDWORD ReturnedLength)
          *
@@ -1034,6 +1108,38 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 const bytes = logicalProcessors();
+                const room = new DataView(host.readMemory(returned >>> 0, 4).slice().buffer)
+                    .getUint32(0, true);
+                const length = new Uint8Array(4);
+                new DataView(length.buffer).setUint32(0, bytes.length, true);
+                host.writeMemory(returned >>> 0, length);
+                if (room < bytes.length || (buffer >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                host.writeMemory(buffer >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetLogicalProcessorInformationEx(LOGICAL_PROCESSOR_RELATIONSHIP,
+         *     PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX Buffer, PDWORD ReturnedLength)
+         *
+         * As the plain form, in records of their own sizes, of one relationship
+         * or of all (Wine's kernel32 process.c test_GetLogicalProcessorInformationEx).
+         */
+        GetLogicalProcessorInformationEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([relation, buffer, returned])=>{
+                const bytes = logicalProcessorsEx(relation >>> 0);
+                if ((returned >>> 0) === 0 || bytes === null)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 const room = new DataView(host.readMemory(returned >>> 0, 4).slice().buffer)
                     .getUint32(0, true);
                 const length = new Uint8Array(4);
@@ -1082,6 +1188,50 @@ export function createSystemFunctions(host){
                 /** @param {boolean} under */
                 const say = under=>{
                     host.writeMemory(answer >>> 0, Uint8Array.of(under ? 1 : 0, 0, 0, 0));
+                    return 1;
+                };
+                if (current || host.machine64 !== true)
+                {
+                    return say(current && wow64);
+                }
+                const bits = host.imageBitsOf?.(other) ?? null;
+                return bits instanceof Promise ? bits.then(read=>say(read === 32))
+                    : say(bits === 32);
+            },
+        },
+
+        /**
+         * BOOL IsWow64Process2(HANDLE hProcess, USHORT *pProcessMachine,
+         *                      USHORT *pNativeMachine)
+         *
+         * The process's machine is I386 for a 32-bit process on a 64-bit
+         * Windows and IMAGE_FILE_MACHINE_UNKNOWN for one that is not under
+         * WOW64; the machine underneath is AMD64 on a 64-bit Windows and the
+         * i386 otherwise, and may be asked for or not. Another process is
+         * judged by its image's headers, as IsWow64Process judges it.
+         */
+        IsWow64Process2: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, machine, native])=>{
+                const current = (handle >>> 0) === CURRENT_PROCESS;
+                const other = current ? null : object(handle, 'process');
+                if (!current && !other)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                /** @param {number} at @param {number} value */
+                const half = (at, value)=>host.writeMemory(at >>> 0,
+                    Uint8Array.of(value & 0xff, value >>> 8));
+                /** @param {boolean} under */
+                const say = under=>{
+                    half(machine, under ? IMAGE_FILE_MACHINE_I386 : 0);
+                    if ((native >>> 0) !== 0)
+                    {
+                        half(native, host.machine64 === true ? IMAGE_FILE_MACHINE_AMD64
+                            : IMAGE_FILE_MACHINE_I386);
+                    }
                     return 1;
                 };
                 if (current || host.machine64 !== true)
@@ -1158,7 +1308,13 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([systemTime, fileTime])=>{
-                writeFileTime(fileTime >>> 0, filetimeFrom(systemTime >>> 0));
+                const value = filetimeFrom(systemTime >>> 0);
+                if (value === null)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeFileTime(fileTime >>> 0, value);
                 return 1;
             },
         },
@@ -1168,7 +1324,15 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([fileTime, systemTime])=>{
-                host.writeMemory(systemTime >>> 0, systemTimeFrom(readFileTime(fileTime >>> 0)));
+                // A FILETIME is a signed count: one with the top bit set is
+                // before 1601, and no SYSTEMTIME holds it.
+                const value = readFileTime(fileTime >>> 0);
+                if (value >= 1n << 63n)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                host.writeMemory(systemTime >>> 0, systemTimeFrom(value));
                 return 1;
             },
         },
@@ -1206,14 +1370,35 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return FILE_TYPE_UNKNOWN;
                 }
-                switch (target.kind ?? target.type)
+                if ((target.kind ?? target.type) === 'console')
                 {
-                    case 'console':
-                        return FILE_TYPE_CHAR;
-                    case 'pipe':
-                        return FILE_TYPE_PIPE;
-                    default:
+                    return FILE_TYPE_CHAR;
+                }
+                switch (host.handleType?.(handle >>> 0) ?? 'file')
+                {
+                    case 'file':
+                    case 'directory':
                         return FILE_TYPE_DISK;
+                    case 'pipe':
+                    case 'pipe-read':
+                    case 'pipe-write':
+                        return FILE_TYPE_PIPE;
+                    case 'device':
+                        if (target.device === 'nul')
+                        {
+                            return FILE_TYPE_CHAR;
+                        }
+                    // Another device: unknown, as a mailslot is.
+                    // falls through
+                    case 'mailslot':
+                    case 'mailslot-client':
+                        // A file object of no type of these: unknown, and no error.
+                        host.setLastError(ERROR_SUCCESS);
+                        return FILE_TYPE_UNKNOWN;
+                    default:
+                        // An event, a mutex, a mapping, a process: no file at all.
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return FILE_TYPE_UNKNOWN;
                 }
             },
         },
@@ -1331,10 +1516,6 @@ export function createSystemFunctions(host){
                 new DataView(bytes.buffer).setUint32(
                     0, child ? child.exitCode : STILL_ACTIVE, true);
                 host.writeMemory(code >>> 0, bytes);
-                if (child && child.exitCode === STILL_ACTIVE && !child.started)
-                {
-                    child.polled = true;
-                }
                 return 1;
             },
         },
@@ -1350,7 +1531,23 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, code])=>{
-                const target = thread(handle);
+                // A child's thread is asked where the child runs, until its
+                // end is known here.
+                const named = (handle >>> 0) === CURRENT_THREAD ? null : object(handle);
+                const remote = isChildThread(named) ? named : null;
+                if (remote && remote.exitCode === null && host.setLastErrorFor)
+                {
+                    const asked = askChild({ askChild: host.askChild,
+                        writeMemory: host.writeMemory, currentThread: host.currentThread,
+                        setLastErrorFor: host.setLastErrorFor }, remote.process,
+                    { call: 'GetExitCodeThread', args: [threadArg(remote), { out: 4 }] },
+                    [null, code >>> 0]);
+                    if (asked !== null)
+                    {
+                        return asked;
+                    }
+                }
+                const target = remote ?? thread(handle);
                 if (!target)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
@@ -1358,7 +1555,8 @@ export function createSystemFunctions(host){
                 }
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(
-                    0, target.exitCode ?? STILL_ACTIVE, true);
+                    0, remote && remote.exitCode === null ? remote.process.exitCode ?? 0
+                        : target.exitCode ?? STILL_ACTIVE, true);
                 host.writeMemory(code >>> 0, bytes);
                 return 1;
             },
@@ -1398,8 +1596,14 @@ export function createSystemFunctions(host){
                     {
                         return 1;
                     }
-                    child.exitCode = code >>> 0;
-                    child.completed = true;
+                    if (host.finishChild)
+                    {
+                        host.finishChild(child, code >>> 0);
+                    }
+                    else
+                    {
+                        Object.assign(child, { exitCode: code >>> 0, completed: true });
+                    }
                     const waiters = (child.waiters ?? []).filter(
                         (/** @type {any} */ waiter)=>waiter.live?.() ?? true);
                     child.waiters = [];
@@ -1426,77 +1630,7 @@ export function createSystemFunctions(host){
             handler: ()=>1,
         },
 
-        /**
-         * HANDLE CreateActCtxA(PCACTCTXA pActCtx)
-         * HANDLE CreateActCtxW(PCACTCTXW pActCtx)
-         *
-         * Manifests are not read in this build, so no context can be built:
-         * the call fails as it does for a manifest Windows cannot use, and a
-         * caller takes its no-context path rather than activating a handle
-         * that resolves to nothing. Real Windows would answer a handle, so the
-         * refusal is reported. A missing or truncated ACTCTX is an invalid
-         * parameter, as it is there.
-         */
-        CreateActCtxA: { argBytes: 4, handler: createActCtx('CreateActCtxA') },
-        CreateActCtxW: { argBytes: 4, handler: createActCtx('CreateActCtxW') },
-
-        /**
-         * BOOL ActivateActCtx(HANDLE hActCtx, ULONG_PTR *lpCookie)
-         * BOOL DeactivateActCtx(DWORD dwFlags, ULONG_PTR ulCookie)
-         * BOOL GetCurrentActCtx(HANDLE *lphActCtx)
-         *
-         * A stack of what was activated, the cookie naming its place. No
-         * context can have been built, so the stack only ever holds what a
-         * caller handed back from a refused CreateActCtx, and the current
-         * context is always none.
-         */
-        ActivateActCtx: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([handle, cookie])=>{
-                if ((cookie >>> 0) === 0)
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                activations.push(handle >>> 0);
-                writeDword(cookie >>> 0, activations.length);
-                return 1;
-            },
-        },
-        DeactivateActCtx: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([, cookie])=>{
-                if ((cookie >>> 0) !== activations.length || activations.length === 0)
-                {
-                    host.setLastError(ERROR_SXS_INVALID_DEACTIVATION);
-                    return 0;
-                }
-                activations.pop();
-                return 1;
-            },
-        },
-        GetCurrentActCtx: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([out])=>{
-                if ((out >>> 0) === 0)
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                writeDword(out >>> 0, 0);
-                return 1;
-            },
-        },
-        /** void AddRefActCtx(HANDLE) and ReleaseActCtx(HANDLE): there is nothing to count. */
-        AddRefActCtx: { argBytes: 4, handler: ()=>0 },
-        ReleaseActCtx: { argBytes: 4, handler: ()=>0 },
-
-        // FindActCtxSectionStringA/W are absent on purpose (decisions.md): no activation
-        // context is built here, and a C runtime that finds the lookup present takes its
-        // "not found" for a load without its manifest and stops the program with R6034.
+        // The activation context calls are actctx.js's.
 
         /**
          * UINT SetErrorMode(UINT uMode)
@@ -1514,6 +1648,40 @@ export function createSystemFunctions(host){
                 const previous = errorMode;
                 errorMode = mode >>> 0;
                 return previous;
+            },
+        },
+
+        /**
+         * DWORD GetThreadErrorMode(void) and
+         * BOOL SetThreadErrorMode(DWORD dwNewMode, LPDWORD lpOldMode)
+         *
+         * The calling thread's own mode, kept where Windows keeps it, in its
+         * block, in ntdll's bits (RtlGetThreadErrorMode reads the same word).
+         * Only SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX and
+         * SEM_NOOPENFILEERRORBOX are a thread's.
+         */
+        GetThreadErrorMode: {
+            argBytes: 0,
+            handler: ()=>fromRtlMode(threadErrorMode()),
+        },
+        SetThreadErrorMode: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([mode, old])=>{
+                if (((mode >>> 0) & ~THREAD_ERROR_MODES) !== 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const previous = fromRtlMode(threadErrorMode());
+                setThreadErrorMode(toRtlMode(mode >>> 0));
+                if ((old >>> 0) !== 0)
+                {
+                    const bytes = new Uint8Array(4);
+                    new DataView(bytes.buffer).setUint32(0, previous, true);
+                    host.writeMemory(old >>> 0, bytes);
+                }
+                return 1;
             },
         },
 
@@ -1843,41 +2011,14 @@ export function createSystemFunctions(host){
         /**
          * int lstrcmpA(LPCSTR, LPCSTR) and int lstrcmpiA(LPCSTR, LPCSTR)
          *
-         * Both answer the sign of a comparison rather than a difference of
-         * bytes, which is all a caller may rely on. The insensitive form folds
-         * case the way the C library does here: without a code page there is
-         * nothing better to fold by, and above ASCII the two disagree only for
-         * text this build cannot decode anyway.
+         * CompareString's word sort with its answer less two, the insensitive
+         * form under NORM_IGNORECASE; a NULL string is less than any other,
+         * the empty one among them.
          */
-        lstrcmpA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: survivesFault(([first, second])=>compare(
-                readAnsi(first >>> 0, MAX_STRING), readAnsi(second >>> 0, MAX_STRING))),
-        },
-
-        lstrcmpiA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: survivesFault(([first, second])=>compare(
-                readAnsi(first >>> 0, MAX_STRING).toLowerCase(),
-                readAnsi(second >>> 0, MAX_STRING).toLowerCase())),
-        },
-
-        lstrcmpW: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: survivesFault(([first, second])=>compare(
-                readWide(first >>> 0, MAX_STRING), readWide(second >>> 0, MAX_STRING))),
-        },
-
-        lstrcmpiW: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: survivesFault(([first, second])=>compare(
-                readWide(first >>> 0, MAX_STRING).toLowerCase(),
-                readWide(second >>> 0, MAX_STRING).toLowerCase())),
-        },
+        lstrcmpA: lstrcmpOf(false, 0),
+        lstrcmpiA: lstrcmpOf(false, NORM_IGNORECASE),
+        lstrcmpW: lstrcmpOf(true, 0),
+        lstrcmpiW: lstrcmpOf(true, NORM_IGNORECASE),
     };
 
     // The undecorated names are kernel32's own exports beside the ANSI ones

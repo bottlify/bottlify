@@ -431,5 +431,5 @@ test('an adapter\'s last reference ends every interface it was published as', ()
     assert.equal(adapter.destroyed, false);
     assert.equal(call(IID_IUNKNOWN, 'Release', unknown), 0);
     assert.equal(adapter.destroyed, true);
-    assert.equal(call(IID_ITYPELIB, 'AddRef', typeLib), 0x80004003, 'E_POINTER');
+    assert.equal(call(IID_ITYPELIB, 'AddRef', typeLib), 0, 'no references: it is forgotten');
 });
