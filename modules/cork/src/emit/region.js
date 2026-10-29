@@ -52,7 +52,7 @@ import {
     recordOffsets, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
-import { copyLoopOf, emitCopyAtOnce } from './copy-loop.js';
+import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
     planLoop, planRegion, readsWrapped,
@@ -3228,16 +3228,29 @@ export class RegionEmitter {
         this.open(`selfDone${index}`, EMPTY);
         const copy = this.width.bits === 32 && this.context.undo === undefined
             ? copyLoopOf(block) : null;
-        if (copy !== null)
+        const indexed = this.width.bits === 64 && this.context.undo === undefined
+            ? indexedCopyOf(block) : null;
+        if (copy !== null || indexed !== null)
         {
             const pending = this.pending;
-            emitCopyAtOnce(this, block, copy, `selfDone${index}`, ()=>{
-                this.current = block.instructions[1];
-                this.flagsAfter = this.flagsAfterEach[1];
+            const at = indexed?.compare ?? 1;
+            const emitCompare = ()=>{
+                this.current = block.instructions[at];
+                this.flagsAfter = this.flagsAfterEach[at];
                 this.memPlan = null;
-                emitInstruction(this, block.instructions[1], live[1]);
-            }, import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile
-                ? times=>this.countBlock(block.start, times) : null);
+                emitInstruction(this, block.instructions[at], live[at]);
+            };
+            const profile = import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile
+                ? (/** @type {number} */ times)=>this.countBlock(block.start, times) : null;
+            if (copy !== null)
+            {
+                emitCopyAtOnce(this, block, copy, `selfDone${index}`, emitCompare, profile);
+            }
+            else if (indexed !== null)
+            {
+                emitIndexedCopyAtOnce(this, block, indexed, `selfDone${index}`, emitCompare,
+                    profile);
+            }
             this.pending = pending;
         }
         this.openLoop(`self${index}`);

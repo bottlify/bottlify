@@ -22,7 +22,7 @@
 
 import { DF } from '../decode/table.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
-import { I32 } from './flags.js';
+import { I32, I64 } from './flags.js';
 import { Local, STATE_PARAMS } from './region.js';
 import { registerLocal } from './width.js';
 import { pageFlagsAt } from '../runtime/layout.js';
@@ -116,38 +116,11 @@ export function emitCopyAtOnce(e, block, loop, doneLabel, emitCompare, profile){
     const shift = Math.log2(size);
     const edi = registerLocal(e, EDI);
     const esi = registerLocal(e, ESI);
-    const table = pageFlagsAt(e.layout);
-    const ram = e.layout.ramBase;
     const length = block.instructions.length;
-    const local = ()=>{
-        const made = e.localTypes.length + STATE_PARAMS;
-        e.localTypes.push(ValType.i32);
-        return made;
-    };
-    const bytes = local();
-    const left = local();
-    const at = local();
-    const charge = local();
-    /** The flags of the page holding the address on the stack. */
-    const flagsOf = ()=>{
-        b.i32const(12).op(I32.shrU);
-        if ((table & 0xfffff) === 0)
-        {
-            b.i32const(table | 0).op(I32.or).load('i32_8u', { offset: 0 });
-        }
-        else
-        {
-            b.load('i32_8u', { offset: table });
-        }
-    };
-    /** The flags of the run's first and last pages from `pointer`. @param {number} pointer */
-    const rangeFlags = pointer=>{
-        b.localGet(pointer);
-        flagsOf();
-        b.localGet(pointer).localGet(bytes).op(I32.add).i32const(1).op(I32.sub);
-        flagsOf();
-        b.op(I32.or);
-    };
+    const bytes = i32Local(e);
+    const left = i32Local(e);
+    const at = i32Local(e);
+    const charge = i32Local(e);
     e.open('copyLoop', EMPTY);
     const out = ()=>b.brIf(e.depthOf('copyLoop'));
     // The run's bytes: one to the limit, a whole number of elements, DF clear.
@@ -169,20 +142,287 @@ export function emitCopyAtOnce(e, block, loop, doneLabel, emitCompare, profile){
     e.spentLimit();
     b.op(I32.leS);
     out();
-    rangeFlags(esi);
+    rangeFlags(e, esi, bytes);
     b.i32const(PageFlag.INACCESSIBLE).op(I32.and);
-    rangeFlags(edi);
+    rangeFlags(e, edi, bytes);
     b.i32const(PageFlag.INACCESSIBLE | STORE_FLAGS).op(I32.and).op(I32.or);
     out();
-    // Eight bytes at a time while eight are left.
+    copyRun(e, edi, esi, bytes, at, left, size);
+    b.localGet(esi).localGet(bytes).op(I32.add).localSet(esi);
+    b.localGet(edi).localGet(bytes).op(I32.add).localSet(edi);
+    b.localGet(Local.budget).localGet(charge).op(I32.sub).localSet(Local.budget);
+    if (profile !== null)
+    {
+        b.localGet(bytes).i32const(shift).op(I32.shrU).localSet(left);
+        profile(left);
+    }
+    emitCompare();
+    b.br(e.depthOf(doneLabel));
+    e.close();
+}
+
+/**
+ * @typedef {object} IndexedCopy
+ * @property {number} source      the load's base register
+ * @property {number} sourceDisp  its displacement
+ * @property {number} target      the store's base register
+ * @property {number} targetDisp  its displacement
+ * @property {number} index       the register both are indexed by, a byte apart a turn
+ * @property {1 | -1} step        what a turn adds to it
+ * @property {number} value       the register the byte goes through
+ * @property {number} copy        the register the index is copied into before the step, or -1
+ * @property {number} compared    the register the compare reads of those two
+ * @property {number} end         the register it compares it with, which the loop does not write
+ * @property {number} compare     the compare's place in the block
+ */
+
+/**
+ * A long-mode block that is the whole of a byte copy loop by an index, as an
+ * x86-64 compiler makes of a freestanding memcpy or memmove: `movzx v, byte
+ * [s + i + d]; mov [t + i + d'], v8`, maybe `mov c, i`, `add i, 1` (or `sub
+ * i, 1`), a quadword compare of `i` or `c` with a register the loop does not
+ * write, and a `jne` back to the block's start. Null for any other block.
+ *
+ * @param {Block} block
+ * @returns {IndexedCopy | null}
+ */
+export function indexedCopyOf(block){
+    const list = block.instructions;
+    if ((list.length !== 5 && list.length !== 6) || block.exit.kind !== 'jcc'
+        || block.exit.targets[0] !== block.start
+        || list.some(({ prefixes })=>prefixes.lock || prefixes.rep || prefixes.repne
+            || prefixes.address || prefixes.segment !== -1))
+    {
+        return null;
+    }
+    const [load, store] = list;
+    const [branch, compare, step] = [list.at(-1), list.at(-2), list.at(-3)];
+    const move = list.length === 6 ? list[2] : null;
+    /** @param {import('../decode/decoder.js').Operand} operand @param {number} size */
+    const register = (operand, size)=>(operand?.kind === 'reg' && operand.size === size
+        && operand.high !== true ? /** @type {number} */ (operand.reg) : -1);
+    /** @param {import('../decode/decoder.js').Operand} operand */
+    const byteAt = operand=>operand?.kind === 'mem' && operand.size === 1 && operand.scale === 1
+        && (operand.base ?? -1) >= 0 && (operand.index ?? -1) >= 0 && operand.rip !== true
+        && operand.addressSize === 64;
+    if (branch?.op !== 'jne' || branch.cc !== NOT_EQUAL || load.op !== 'movzx'
+        || store.op !== 'mov' || !byteAt(load.operands[1]) || !byteAt(store.operands[0]))
+    {
+        return null;
+    }
+    const value = Math.max(register(load.operands[0], 4), register(load.operands[0], 8));
+    const [from, to] = [load.operands[1], store.operands[0]];
+    const index = /** @type {number} */ (from.index);
+    if (value < 0 || register(store.operands[1], 1) !== value || to.index !== index
+        || value === index)
+    {
+        return null;
+    }
+    const copy = move === null ? -1 : register(move.operands[0], 8);
+    if (move !== null && (move.op !== 'mov' || copy < 0 || copy === index
+        || register(move.operands[1], 8) !== index))
+    {
+        return null;
+    }
+    const [i, one] = step?.operands ?? [];
+    if ((step?.op !== 'add' && step?.op !== 'sub') || register(i, 8) !== index
+        || one?.kind !== 'imm' || one.value !== 1 || (one.upper ?? 0) !== 0)
+    {
+        return null;
+    }
+    const [a, c] = compare?.operands ?? [];
+    const [x, y] = [register(a, 8), register(c, 8)];
+    if (compare?.op !== 'cmp' || x < 0 || y < 0)
+    {
+        return null;
+    }
+    const counted = new Set([index, copy].filter(r=>r >= 0));
+    const compared = counted.has(x) ? x : y;
+    const end = compared === x ? y : x;
+    const written = new Set([index, copy, value]);
+    if (!counted.has(compared) || written.has(end) || written.has(/** @type {number} */ (from.base))
+        || written.has(/** @type {number} */ (to.base)))
+    {
+        return null;
+    }
+    return { source: /** @type {number} */ (from.base), sourceDisp: /** @type {number} */ (from.disp),
+        target: /** @type {number} */ (to.base), targetDisp: /** @type {number} */ (to.disp), index,
+        step: step.op === 'add' ? 1 : -1, value, copy, compared, end, compare: list.length - 2 };
+}
+
+/**
+ * The indexed byte copy loop run whole, ahead of the loop's own code (as
+ * `emitCopyAtOnce` the `movs` one): when the turns until the compare finds
+ * its register equal are at most `COPY_RUN_LIMIT`, the bytes either side
+ * reads and writes lie in the 4 GiB window and apart, the budget pays for
+ * every turn with more than a back edge's test left over, and the source's
+ * pages are readable and the destination's writable, with no code and no
+ * watch. Then the bytes go eight at a time, the registers come out as the
+ * last turn leaves them -- the index past it, its copy at it, the byte
+ * register the last byte (or the copy, where they are one) -- the budget is
+ * charged the loop's instructions for every turn, the compare
+ * (`emitCompare`) sets the flags as the last turn's does, and the code
+ * branches to `doneLabel`, past the loop. Any other case falls through to it.
+ *
+ * @param {E} e @param {Block} block @param {IndexedCopy} loop
+ * @param {string} doneLabel  the label past the loop
+ * @param {() => void} emitCompare  the block's compare, its flags as live as the block has them
+ * @param {((turns: number) => void) | null} profile  adds the turns (the local given) to the
+ *     block's profile slot
+ */
+export function emitIndexedCopyAtOnce(e, block, loop, doneLabel, emitCompare, profile){
+    const { b } = e;
+    const { step } = loop;
+    const index = registerLocal(e, loop.index);
+    const turns = i32Local(e);
+    const from = i32Local(e);
+    const to = i32Local(e);
+    const at = i32Local(e);
+    const left = i32Local(e);
+    const charge = i32Local(e);
+    const ram = e.layout.ramBase;
+    e.open('copyLoop', EMPTY);
+    const out = ()=>b.brIf(e.depthOf('copyLoop'));
+    // The turn whose compare finds the two equal, counted from 0: the
+    // compared register is the index at the turn, or past it.
+    const past = loop.compared === loop.index ? step : 0;
+    if (step > 0)
+    {
+        b.localGet(registerLocal(e, loop.end)).localGet(index).op(I64.sub);
+    }
+    else
+    {
+        b.localGet(index).localGet(registerLocal(e, loop.end)).op(I64.sub);
+    }
+    if (past !== 0)
+    {
+        b.i64const(1n).op(I64.sub);
+    }
+    b.localTee(Local.t64).i64const(BigInt(COPY_RUN_LIMIT)).op(I64.geU);
+    out();
+    b.localGet(Local.t64).op(I64.wrap).i32const(1).op(I32.add).localSet(turns);
+    // Each side's lowest byte, its whole run in the window: the first turn's
+    // address, and for a loop going down the last turn's.
+    for (const [base, disp, lowest] of /** @type {const} */ ([
+        [loop.source, loop.sourceDisp, from], [loop.target, loop.targetDisp, to]]))
+    {
+        b.localGet(registerLocal(e, base)).localGet(index).op(I64.add)
+            .i64const(BigInt(disp)).op(I64.add);
+        if (step < 0)
+        {
+            b.localGet(turns).op(I64.extendU).op(I64.sub).i64const(1n).op(I64.add);
+        }
+        b.localTee(Local.t64).localGet(Local.t64).localGet(turns).op(I64.extendU).op(I64.add)
+            .i64const(1n).op(I64.sub).op(I64.or).i64const(32n).op(I64.shrU).op(I64.wrap);
+        out();
+        b.localGet(Local.t64).op(I64.wrap).localSet(lowest);
+    }
+    // Apart: a byte loop that meets its own writes copies otherwise than a run.
+    b.localGet(to).localGet(from).op(I32.sub).localGet(turns).op(I32.add).i32const(1)
+        .op(I32.sub).localGet(turns).i32const(1).op(I32.shl).i32const(1).op(I32.sub)
+        .op(I32.ltU);
+    out();
+    // The budget after every turn, which must leave more than a back edge's
+    // test leaves on (`spentTest`): the loop would have left before its end.
+    b.localGet(Local.budget).localGet(turns).i32const(block.instructions.length).op(I32.mul)
+        .localTee(charge).op(I32.sub);
+    e.spentLimit();
+    b.op(I32.leS);
+    out();
+    rangeFlags(e, from, turns);
+    b.i32const(PageFlag.INACCESSIBLE).op(I32.and);
+    rangeFlags(e, to, turns);
+    b.i32const(PageFlag.INACCESSIBLE | STORE_FLAGS).op(I32.and).op(I32.or);
+    out();
+    copyRun(e, to, from, turns, at, left, 1);
+    // The registers as the last turn leaves them: the byte, the index's
+    // copy at the last turn, the index past it.
+    if (loop.copy !== loop.value)
+    {
+        b.localGet(from);
+        if (step > 0)
+        {
+            b.localGet(turns).op(I32.add).i32const(1).op(I32.sub);
+        }
+        b.load('i32_8u', { offset: ram }).op(I64.extendU).localSet(registerLocal(e, loop.value));
+    }
+    b.localGet(turns).op(I64.extendU).i64const(BigInt(step)).op(I64.mul).localGet(index)
+        .op(I64.add).localSet(index);
+    if (loop.copy >= 0)
+    {
+        b.localGet(index).i64const(BigInt(step)).op(I64.sub).localSet(registerLocal(e, loop.copy));
+    }
+    b.localGet(Local.budget).localGet(charge).op(I32.sub).localSet(Local.budget);
+    if (profile !== null)
+    {
+        profile(turns);
+    }
+    emitCompare();
+    b.br(e.depthOf(doneLabel));
+    e.close();
+}
+
+/** A new i32 local of the region's function. @param {E} e */
+function i32Local(e){
+    const made = e.localTypes.length + STATE_PARAMS;
+    e.localTypes.push(ValType.i32);
+    return made;
+}
+
+/**
+ * The flags of the page holding the address on the stack.
+ *
+ * @param {E} e
+ */
+function flagsOf(e){
+    const { b } = e;
+    const table = pageFlagsAt(e.layout);
+    b.i32const(12).op(I32.shrU);
+    if ((table & 0xfffff) === 0)
+    {
+        b.i32const(table | 0).op(I32.or).load('i32_8u', { offset: 0 });
+    }
+    else
+    {
+        b.load('i32_8u', { offset: table });
+    }
+}
+
+/**
+ * The flags of a run's first and last pages, `bytes` from the address in `pointer`.
+ *
+ * @param {E} e @param {number} pointer @param {number} bytes  i32 locals
+ */
+function rangeFlags(e, pointer, bytes){
+    const { b } = e;
+    b.localGet(pointer);
+    flagsOf(e);
+    b.localGet(pointer).localGet(bytes).op(I32.add).i32const(1).op(I32.sub);
+    flagsOf(e);
+    b.op(I32.or);
+}
+
+/**
+ * Copies `bytes` (a whole number of `size`-byte elements) from the address in
+ * `from` to the one in `to`, forward: eight at a time while eight are left,
+ * then by four, two and one. The two do not overlap, or the destination lies
+ * eight or more ahead: what a byte loop writes either way.
+ *
+ * @param {E} e @param {number} to @param {number} from @param {number} bytes
+ * @param {number} at @param {number} left  scratch
+ * @param {number} size
+ */
+function copyRun(e, to, from, bytes, at, left, size){
+    const { b } = e;
+    const ram = e.layout.ramBase;
     b.i32const(0).localSet(at);
     b.localGet(bytes).localSet(left);
     e.open('words', EMPTY);
     e.openLoop('word');
     b.localGet(left).i32const(8).op(I32.ltU);
     b.brIf(e.depthOf('words'));
-    b.localGet(edi).localGet(at).op(I32.add);
-    b.localGet(esi).localGet(at).op(I32.add).load('i64', { offset: ram, align: 0 });
+    b.localGet(to).localGet(at).op(I32.add);
+    b.localGet(from).localGet(at).op(I32.add).load('i64', { offset: ram, align: 0 });
     b.store('i64', { offset: ram, align: 0 });
     b.localGet(at).i32const(8).op(I32.add).localSet(at);
     b.localGet(left).i32const(8).op(I32.sub).localSet(left);
@@ -198,8 +438,8 @@ export function emitCopyAtOnce(e, block, loop, doneLabel, emitCompare, profile){
         }
         b.localGet(left).i32const(step).op(I32.and);
         e.openIf('copyRest');
-        b.localGet(edi).localGet(at).op(I32.add);
-        b.localGet(esi).localGet(at).op(I32.add).load(load, { offset: ram, align: 0 });
+        b.localGet(to).localGet(at).op(I32.add);
+        b.localGet(from).localGet(at).op(I32.add).load(load, { offset: ram, align: 0 });
         b.store(store, { offset: ram, align: 0 });
         if (step > 1)
         {
@@ -207,15 +447,4 @@ export function emitCopyAtOnce(e, block, loop, doneLabel, emitCompare, profile){
         }
         e.close();
     }
-    b.localGet(esi).localGet(bytes).op(I32.add).localSet(esi);
-    b.localGet(edi).localGet(bytes).op(I32.add).localSet(edi);
-    b.localGet(Local.budget).localGet(charge).op(I32.sub).localSet(Local.budget);
-    if (profile !== null)
-    {
-        b.localGet(bytes).i32const(shift).op(I32.shrU).localSet(left);
-        profile(left);
-    }
-    emitCompare();
-    b.br(e.depthOf(doneLabel));
-    e.close();
 }
