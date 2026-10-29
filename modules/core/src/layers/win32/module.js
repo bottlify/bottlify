@@ -32,6 +32,8 @@ import { createPdhFunctions, createPowrprofFunctions } from './power/functions.j
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
+import { createUnwinder } from './kernel32/unwind.js';
+import { createSeh64 } from './kernel32/seh64.js';
 import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry.js';
 import { createThreadCalls, DLL_THREAD_DETACH } from './kernel32/thread-calls.js';
 import { createCrtSeh } from './msvcrt/seh.js';
@@ -1187,6 +1189,48 @@ export function createWin32Module(){
                 },
             });
 
+            // The same, table-based, for a 64-bit process: no chain at FS:[0],
+            // the handlers found through the images' unwind tables instead
+            // (`unwind.js`, `seh64.js`). A funclet or filter the walk runs is
+            // guest code called with the x64 argument registers set.
+            const unwinder = pointerSize === 8
+                ? createUnwinder({
+                    readMemory,
+                    /** @param {number} address */
+                    imageOf: address=>modules.imageOf?.(address) ?? null,
+                })
+                : null;
+            /** @type {ReturnType<typeof createSeh64> | null} */
+            const seh64 = unwinder
+                ? createSeh64({
+                    unwinder,
+                    readMemory,
+                    writeMemory,
+                    longState: ()=>cpuRegisters.long(),
+                    /** @param {any} call */
+                    callFunclet: ({ entry, rcx = 0, rdx = 0, r8 = 0, r9 = 0, stack, thread })=>
+                        bridge.callGuest({ entry, args: [rcx, rdx, r8, r9], thread,
+                            stackAtRest: stack }),
+                    /** @param {any} where */
+                    continueAt: where=>bridge.continueAt({ eip: where.rip, esp: where.rsp,
+                        long: where.long }, { below: where.rsp }),
+                    currentThread: ()=>kernel.currentThread(),
+                    // The stub addresses of this engine's own C language
+                    // handler, so a frame naming it has its scope table read
+                    // rather than the handler run; resolved once the synthetic
+                    // libraries are placed, which is after this returns.
+                    handlerStubs: ()=>[modules.find('msvcrt.dll')?.addressOf?.(
+                        '__C_specific_handler') ?? 0,
+                    modules.find('ntdll.dll')?.addressOf?.('__C_specific_handler') ?? 0],
+                    /** @param {string} text */
+                    trace: text=>trace(text),
+                    terminate: ({ code })=>{
+                        exitCode = code >>> 0;
+                        processEnded();
+                    },
+                })
+                : null;
+
             /**
              * Bytes put in guest memory for as long as `use` runs, a call it
              * parks on included: what a call that takes a pointer is handed
@@ -1980,6 +2024,11 @@ export function createWin32Module(){
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
                     }),
                     ...seh.table,
+                    // In a 64-bit process the table-based entries stand over
+                    // the chain-based ones: RaiseException and the filter are
+                    // dispatched through the images' unwind tables, and the
+                    // Rtl unwinders kernel32 forwards to ntdll are exported here.
+                    ...seh64 ? seh64.table : {},
                     ...createModuleFunctions({
                         readCString,
                         readWideString,
@@ -2195,6 +2244,10 @@ export function createWin32Module(){
                         park: ()=>bridge.park(),
                         divergence: config?.divergence,
                     }).table,
+                    // The C language handler a 64-bit function names in its
+                    // unwind data; the dispatcher reads its scope table rather
+                    // than running it (`seh64.js`).
+                    ...seh64 ? { __C_specific_handler: seh64.table.__C_specific_handler } : {},
                 },
 
                 // One registry behind all three, as on a real machine: a socket
@@ -3473,6 +3526,19 @@ export function createWin32Module(){
                 processors,
             });
 
+            // The table-based unwind ntdll exports and kernel32 forwards to it:
+            // the function-table lookup, the virtual unwind, the unwind to a
+            // target, the register capture and the run-time tables. RaiseException
+            // and the filter stay kernel32's; __C_specific_handler is msvcrt's.
+            if (seh64)
+            {
+                for (const name of ['RtlLookupFunctionEntry', 'RtlVirtualUnwind', 'RtlUnwindEx',
+                    'RtlCaptureContext', 'RtlAddFunctionTable', 'RtlDeleteFunctionTable'])
+                {
+                    libraries['ntdll.dll'][name] = /** @type {any} */ (seh64.table)[name];
+                }
+            }
+
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));
 
@@ -3903,10 +3969,21 @@ export function createWin32Module(){
                  * @returns {Promise<any> | null}
                  */
                 dispatchFault(fault){
-                    // A 64-bit process's handlers are found through its
-                    // images' unwind tables, which nothing here walks yet;
-                    // the 32-bit chain at FS:[0] is not its, and a frame
-                    // built for it would be the wrong shape.
+                    // A 64-bit process's handlers are found through its images'
+                    // unwind tables, not the chain at FS:[0]: the registers at
+                    // the fault are the block's whole 64-bit state, RIP the
+                    // faulting instruction, and the dispatcher walks from there.
+                    if (seh64)
+                    {
+                        if (!kernel.currentThread() || !seh64.claims(fault.vector))
+                        {
+                            return null;
+                        }
+                        const faultContext = seh64.captureContext();
+                        faultContext.rip = fault.vector === 3 ? fault.eip - 1 >>> 0 : fault.eip;
+                        return seh64.onFault(fault, faultContext).then(result=>(result.handled
+                            ? result.continuation ?? null : null));
+                    }
                     if (pointerSize === 8 || !kernel.currentThread() || fault.stack === undefined
                         || !seh.claims(fault.vector))
                     {

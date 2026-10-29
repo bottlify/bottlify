@@ -16,7 +16,7 @@ import { THREAD_DESCRIPTOR } from './internal/boot-rom.js';
 import { describeFault, hostFault } from './internal/faults.js';
 import {
     captureContext, clearGeneralRegisters, freshThreadFpu, restoreContext, setContextEflags,
-    setThreadBase,
+    setContextLong, setThreadBase,
 } from './internal/context.js';
 import { createSampleTable, creditSample, takeDue, topSamples } from './internal/samples.js';
 import { fileNameOf } from './internal/translation-store.js';
@@ -156,6 +156,10 @@ const bytesHeldOf = (instance, cork)=>{
     return { translation,
         ...instance.store ? { heaps: { storeIndex: NOT_MEASURED } } : {} };
 };
+
+/** The long-mode general registers, in the encoding's order. */
+const LONG_REGISTERS = Object.freeze(['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
+    'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15']);
 
 /** Where each general register sits in a saved context, in the processor's own order. */
 const REGISTER_INDEX = Object.freeze({
@@ -1037,6 +1041,27 @@ export function createCpuModule(){
                 readReg64: name=>started().readReg64(name),
                 /** @param {string} name @param {bigint} value */
                 writeReg64: (name, value)=>started().writeReg64(name, value),
+                /**
+                 * A long-mode thread's state whole, as it stands on the
+                 * processor: the sixteen general registers, the flags, the
+                 * XMM registers and MXCSR -- what an x64 CONTEXT is made of.
+                 *
+                 * @returns {{ gpr: bigint[], eflags: number, xmm: Uint8Array, mxcsr: number }}
+                 */
+                longState(){
+                    const host = started();
+                    const xmm = new Uint8Array(256);
+                    for (let index = 0; index < 16; index++)
+                    {
+                        xmm.set(new Uint8Array(host.readXmm(index).buffer), index * 16);
+                    }
+                    return {
+                        gpr: LONG_REGISTERS.map(name=>/** @type {bigint} */ (host.readReg64(name))),
+                        eflags: host.readReg32('eflags') >>> 0,
+                        xmm,
+                        mxcsr: host.readMxcsr() >>> 0,
+                    };
+                },
 
                 /**
                  * Takes a stub slot and returns the trap id it raises together with
@@ -1362,6 +1387,11 @@ export function createCpuModule(){
                             if (name === 'eflags')
                             {
                                 setContextEflags(context, value);
+                                continue;
+                            }
+                            if (name === 'long')
+                            {
+                                setContextLong(context, /** @type {any} */ (value));
                                 continue;
                             }
                             const index = REGISTER_INDEX[/** @type {keyof typeof REGISTER_INDEX} */

@@ -24,9 +24,11 @@ const HEADERS = 0x200;
  *
  * @param {Uint8Array} section
  * @param {Record<number, { address: number, size: number }>} directories
+ * @param {boolean} [wide]  PE32+ for x86-64, whose optional header is
+ *        sixteen bytes longer and whose ImageBase is a quadword.
  * @returns {Uint8Array}
  */
-function fixture(section, directories){
+function fixture(section, directories, wide = false){
     const file = new Uint8Array(HEADERS + section.length);
     const view = new DataView(file.buffer);
     const pe = 0x80;
@@ -35,25 +37,27 @@ function fixture(section, directories){
     view.setUint16(0, 0x5a4d, true); //             "MZ"
     view.setUint32(0x3c, pe, true); //              e_lfanew
     view.setUint32(pe, 0x00004550, true); //        "PE\0\0"
-    view.setUint16(pe + 4, 0x014c, true); //        i386
+    const optionalSize = wide ? 0xf0 : 0xe0;
+    view.setUint16(pe + 4, wide ? 0x8664 : 0x014c, true); // x86-64 or i386
     view.setUint16(pe + 6, 1, true); //             one section
-    view.setUint16(pe + 20, 0xe0, true); //         optional header size
-    view.setUint16(optional, 0x010b, true); //      PE32
+    view.setUint16(pe + 20, optionalSize, true); // optional header size
+    view.setUint16(optional, wide ? 0x020b : 0x010b, true); // PE32+ or PE32
     view.setUint32(optional + 16, SECTION_RVA, true); // entry point
-    view.setUint32(optional + 28, IMAGE_BASE, true);
+    view.setUint32(optional + (wide ? 24 : 28), IMAGE_BASE, true);
     view.setUint32(optional + 32, 0x1000, true); // section alignment
     view.setUint32(optional + 56, SECTION_RVA + section.length, true); // sizeOfImage
     view.setUint32(optional + 60, HEADERS, true); // sizeOfHeaders
-    view.setUint32(optional + 92, 16, true); //     directory count
+    const tail = wide ? 16 : 0;
+    view.setUint32(optional + 92 + tail, 16, true); // directory count
 
     for (const [index, { address, size }] of Object.entries(directories))
     {
-        const at = optional + 96 + Number(index) * 8;
+        const at = optional + 96 + tail + Number(index) * 8;
         view.setUint32(at, address, true);
         view.setUint32(at + 4, size, true);
     }
 
-    const header = optional + 0xe0;
+    const header = optional + optionalSize;
     file.set(new TextEncoder().encode('.data'), header);
     view.setUint32(header + 8, section.length, true); //  virtualSize
     view.setUint32(header + 12, SECTION_RVA, true); //    virtualAddress
@@ -98,9 +102,11 @@ const UNLOAD_TABLE = 0x240;
  * @param {boolean} options.rvaBased
  * @param {DelayedDll[]} options.dlls
  * @param {boolean} [options.optionalTables]  Emit a bound and an unload table.
+ * @param {boolean} [options.wide]  A PE32+ image, whose thunks are quadwords.
  * @returns {{ bytes: Uint8Array, image: import('./pe.js').PeImage }}
  */
-function withDelayLoads({ rvaBased, dlls, optionalTables = false }){
+function withDelayLoads({ rvaBased, dlls, optionalTables = false, wide = false }){
+    const thunk = wide ? 8 : 4;
     const section = new Uint8Array(0x2000);
     const view = new DataView(section.buffer);
     const encoder = new TextEncoder();
@@ -133,19 +139,25 @@ function withDelayLoads({ rvaBased, dlls, optionalTables = false }){
         imports.forEach((entry, slot)=>{
             if (typeof entry === 'number')
             {
-                view.setUint32(block + NAMES + slot * 4, 0x80000000 | entry, true);
+                // The ordinal flag is the thunk's top bit, of the quadword in PE32+.
+                view.setUint32(block + NAMES + slot * thunk, wide ? entry : 0x80000000 | entry,
+                    true);
+                if (wide)
+                {
+                    view.setUint32(block + NAMES + slot * thunk + 4, 0x80000000, true);
+                }
                 return;
             }
             const name = block + IMPORT_NAMES + slot * IMPORT_STRIDE;
             view.setUint16(name, 0, true); // hint
             section.set(encoder.encode(entry), name + 2);
-            view.setUint32(block + NAMES + slot * 4, address(name), true);
+            view.setUint32(block + NAMES + slot * thunk, address(name), true);
         });
     });
 
     const size = (dlls.length + 1) * DESCRIPTOR;
-    const bytes = fixture(section, { 13: { address: SECTION_RVA, size } });
-    return { bytes, image: parsePe(bytes) };
+    const bytes = fixture(section, { 13: { address: SECTION_RVA, size } }, wide);
+    return { bytes, image: parsePe(bytes, { wide }) };
 }
 
 /**
@@ -351,4 +363,33 @@ test('a library the program delay-loads and brought is planned, as an import is'
     assert.deepEqual(order.map(entry=>entry.name), ['updspapi.dll']);
     assert.deepEqual(asked, ['updspapi.dll', 'nowhere.dll'], 'a KnownDLL is not looked for');
     assert.deepEqual(missing, ['nowhere.dll']);
+});
+
+test('a PE32+ descriptor\'s thunks are quadwords, bound eight bytes wide', ()=>{
+    // Read four bytes at a time, the high half of each name thunk reads as the
+    // end of the table after the first import, and an ordinal's flag -- bit 63
+    // -- is never seen at all.
+    const { bytes, image } = withDelayLoads({ rvaBased: true, wide: true,
+        dlls: [{ imports: ['Alpha', 9, 'Beta'] }] });
+    const [entry] = readDelayImports(bytes, image);
+    const slot = (/** @type {number} */ index)=>SECTION_RVA + blockOf(0) + IAT + index * 8;
+    assert.deepEqual(entry.entries, [
+        { name: 'Alpha', ordinal: null, iatRva: slot(0) },
+        { name: null, ordinal: 9, iatRva: slot(1) },
+        { name: 'Beta', ordinal: null, iatRva: slot(2) },
+    ]);
+
+    const mapped = mapImage(bytes, undefined, { wide: true });
+    const view = new DataView(mapped.bytes.buffer, mapped.bytes.byteOffset,
+        mapped.bytes.byteLength);
+    // Every slot was something nonzero before, so a high half left as it was shows.
+    for (let index = 0; index < 3; index++)
+    {
+        view.setUint32(slot(index) + 4, 0xdeadbeef, true);
+    }
+    assert.deepEqual(bindDelayImports(mapped, (_dll, name, ordinal)=>
+        (name === 'Alpha' ? 0x7000_1000 : ordinal === 9 ? 0x7000_2000 : null),
+    ()=>0x7000_3000), ['thing.dll!Beta']);
+    assert.deepEqual([0, 1, 2].map(index=>view.getBigUint64(slot(index), true)),
+        [0x7000_1000n, 0x7000_2000n, 0x7000_3000n]);
 });

@@ -93,7 +93,8 @@ export function readDelayImports(bytes, image){
         // entirely through its bound table, which nothing here reads.
         const entries = nameTableRva === 0
             ? []
-            : readNameTable({ bytes, view, fileOffset, toRva, nameTableRva, iatRva });
+            : readNameTable({ bytes, view, fileOffset, toRva, nameTableRva, iatRva,
+                width: image.bits === 64 ? 8 : 4 });
 
         result.push({
             dll: readCString(bytes, fileOffset(toRva(nameField))),
@@ -133,6 +134,11 @@ export function bindDelayImports({ bytes, file, image }, resolveImport, missing)
     /** @type {string[]} */
     const unresolved = [];
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    // A PE32+ slot is a pointer eight bytes wide, as an ordinary import's is.
+    /** @param {number} at @param {number} address */
+    const setSlot = (at, address)=>(image.bits === 64
+        ? view.setBigUint64(at, BigInt(address >>> 0), true)
+        : view.setUint32(at, address >>> 0, true));
 
     for (const { dll, entries } of readDelayImports(file, image))
     {
@@ -145,11 +151,11 @@ export function bindDelayImports({ bytes, file, image }, resolveImport, missing)
                 const stub = missing?.(dll, entry.name, entry.ordinal) ?? null;
                 if (stub !== null)
                 {
-                    view.setUint32(entry.iatRva, stub >>> 0, true);
+                    setSlot(entry.iatRva, stub);
                 }
                 continue;
             }
-            view.setUint32(entry.iatRva, address >>> 0, true);
+            setSlot(entry.iatRva, address);
         }
     }
     return unresolved;
@@ -165,21 +171,25 @@ export function bindDelayImports({ bytes, file, image }, resolveImport, missing)
  * @param {(address: number) => number} options.toRva
  * @param {number} options.nameTableRva
  * @param {number} options.iatRva
+ * @param {4 | 8} options.width  A thunk's size: eight bytes in PE32+, its
+ *        ordinal flag the top bit of the quadword.
  * @returns {import('./pe.js').ImportEntry[]}
  */
-function readNameTable({ bytes, view, fileOffset, toRva, nameTableRva, iatRva }){
+function readNameTable({ bytes, view, fileOffset, toRva, nameTableRva, iatRva, width }){
     /** @type {import('./pe.js').ImportEntry[]} */
     const entries = [];
     for (let index = 0; ; index++)
     {
-        const thunk = view.getUint32(fileOffset(nameTableRva + index * 4), true);
-        if (thunk === 0)
+        const at = fileOffset(nameTableRva + index * width);
+        const thunk = view.getUint32(at, true);
+        const high = width === 8 ? view.getUint32(at + 4, true) : thunk;
+        if (thunk === 0 && high === 0)
         {
             break;
         }
-        if ((thunk & 0x80000000) !== 0)
+        if ((high & 0x80000000) !== 0)
         {
-            entries.push({ name: null, ordinal: thunk & 0xffff, iatRva: iatRva + index * 4 });
+            entries.push({ name: null, ordinal: thunk & 0xffff, iatRva: iatRva + index * width });
             continue;
         }
         // IMAGE_IMPORT_BY_NAME, reached the same way an ordinary import is: a
@@ -187,7 +197,7 @@ function readNameTable({ bytes, view, fileOffset, toRva, nameTableRva, iatRva })
         entries.push({
             name: readCString(bytes, fileOffset(toRva(thunk)) + 2),
             ordinal: null,
-            iatRva: iatRva + index * 4,
+            iatRva: iatRva + index * width,
         });
     }
     return entries;

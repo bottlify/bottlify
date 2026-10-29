@@ -123,7 +123,9 @@ const IMPORTS = {
     },
     'msvcrt.dll': {
         undecorated: [
-            '__CxxFrameHandler3', '_CxxThrowException@8', '_except_handler3', 'qsort',
+            '__CxxFrameHandler3', '__C_specific_handler', '_CxxThrowException@8',
+            '_except_handler3',
+            'qsort',
             '??3@YAXPAX@Z', '_setjmp3', 'longjmp', 'fprintf', 'fwrite', 'fread', '__iob_func',
             '_iob DATA', '_osver DATA', '_winver DATA', '_winmajor DATA', '_winminor DATA',
             '_HUGE DATA', '_environ DATA', '__getmainargs', '_initterm', '_onexit',
@@ -158,6 +160,7 @@ const PROGRAMS = [
     { name: 'hello64', source: 'hello64.c', cxx: false, x64: true },
     { name: 'crt64', source: 'crt64.c', cxx: false, x64: true },
     { name: 'win64', source: 'win64.c', cxx: false, x64: true },
+    { name: 'seh64', source: 'seh64.c', cxx: false, x64: true },
 ];
 
 /** The fixtures named on the command line, or every one. */

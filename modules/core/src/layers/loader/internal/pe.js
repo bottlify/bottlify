@@ -24,6 +24,7 @@ const IMAGE_FILE_RELOCS_STRIPPED = 0x0001;
 /** Data directory indices we care about. */
 export const DIR_EXPORT = 0;
 export const DIR_IMPORT = 1;
+export const DIR_EXCEPTION = 3;
 export const DIR_BASERELOC = 5;
 
 /** Section characteristics. */

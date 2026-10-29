@@ -372,6 +372,51 @@ export function setContextEflags(context, value){
 }
 
 /**
+ * A long-mode thread's registers whole, as an x64 CONTEXT carries them: the
+ * sixteen general registers in the encoding's order, and the XMM registers and
+ * MXCSR when given. What an exception's continuation is: RtlUnwindEx and a
+ * handler that continues execution put back every non-volatile register a
+ * frame saved, upper halves and XMM6 to XMM15 included, which the dword view
+ * a context is otherwise moved with cannot say.
+ *
+ * @typedef {Object} LongRegisters
+ * @property {bigint[]} [gpr]      Sixteen, rax..r15.
+ * @property {Uint8Array} [xmm]    Sixteen registers of sixteen bytes.
+ * @property {number} [mxcsr]
+ */
+
+/**
+ * Writes `long` into a saved long-mode context. The low dwords of the first
+ * eight registers are kept in `reg32` as well, which a restore writes last.
+ *
+ * @param {any} context  A block context of a 64-bit thread.
+ * @param {LongRegisters} long
+ */
+export function setContextLong(context, long){
+    const { block, layout } = /** @type {BlockContext} */ (context);
+    if (!(block instanceof Uint8Array) || layout.bits !== 64)
+    {
+        throw new Error('cpu: a long-mode context is set on a 64-bit thread only');
+    }
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    long.gpr?.forEach((value, index)=>{
+        view.setBigUint64(layout.regs + index * 8, BigInt.asUintN(64, value), true);
+        if (index < 8)
+        {
+            context.reg32[index] = Number(BigInt.asIntN(32, value));
+        }
+    });
+    if (long.xmm)
+    {
+        block.set(long.xmm.subarray(0, 256), layout.xmm);
+    }
+    if (long.mxcsr !== undefined)
+    {
+        view.setUint32(layout.mxcsr, long.mxcsr >>> 0, true);
+    }
+}
+
+/**
  * Reports which fields differ, for tests and for diagnosing a switch that lost
  * something. Empty means the two contexts are identical.
  *

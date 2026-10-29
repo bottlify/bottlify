@@ -24,7 +24,8 @@ import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js'
 import { baseOf, compositionPlan, needsComposing } from './layers/graphics/webgpu/internal/compose.js';
 import { connectGraphicsWorker, portEnd } from './layers/graphics/remote/connect.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
-import { DIR_EXPORT, parseExportDirectory, parsePe, readExports, readImports, rvaToFileOffset }
+import { DIR_EXCEPTION, DIR_EXPORT, parseExportDirectory, parsePe, readExports, readImports,
+    rvaToFileOffset }
     from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import {
@@ -4947,6 +4948,8 @@ async function buildApp(options){
                 read: name=>core.api('cpu').readReg32(name),
                 /** @param {string} name @param {number} value */
                 write: (name, value)=>core.api('cpu').writeReg32(name, value),
+                /** A long-mode thread's registers whole (`longState`). */
+                long: ()=>core.api('cpu').longState(),
             },
             // A C runtime returns a double on the floating-point stack, not in
             // a register, so the functions that do are exported only when this
@@ -4988,6 +4991,33 @@ async function buildApp(options){
                         {
                             return module;
                         }
+                    }
+                    return null;
+                },
+                /**
+                 * The image an address lies in, its base and size and its
+                 * exception directory, for the x64 unwinder (`imageOf`): the
+                 * `.pdata` table is an RVA and a size in the fourth data
+                 * directory, read off the image a module carries.
+                 *
+                 * @param {number} address
+                 */
+                imageOf: address=>{
+                    const at = address >>> 0;
+                    for (const module of byBase.values())
+                    {
+                        if (module.loaded === false || !module.image
+                            || at < module.base || at >= module.base + (module.size ?? 0))
+                        {
+                            continue;
+                        }
+                        const directory = module.image.directories?.[DIR_EXCEPTION];
+                        return {
+                            base: module.base,
+                            size: module.size ?? 0,
+                            table: directory && directory.size > 0
+                                ? { address: directory.address, size: directory.size } : null,
+                        };
                     }
                     return null;
                 },
