@@ -26,7 +26,9 @@ and in Node.
   RDRAND. Exactly the set cork reports through `cpuid`.
 - 64-bit user-mode x86-64, the same set with the sixteen 64-bit registers, by the same
   translator and runtime at a 64-bit width, its memory a 4 GiB window: an address at or past
-  4 GiB faults ([`roadmap/x64.md`](../../roadmap/x64.md)).
+  4 GiB faults, except where an access goes untested -- outside precise mode a read, and while
+  stacks are loose (`looseStacks`) a push, pop, call or return through rsp -- which takes the
+  address's low half ([`roadmap/x64.md`](../../roadmap/x64.md)).
 - Code that rewrites itself. When the program writes over code that is already translated, the old
   translation is thrown away and a new one made. A page rewritten over and over (eight times within
   100 ms) is left to the interpreter for a while.

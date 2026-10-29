@@ -22,7 +22,11 @@
  * thousand (`ir.sh`'s ITERS) agreed within 0.23 % on every workload, two runs
  * of two trees each.
  *
- *     node ir.mjs NAME WARM ITERS [native]   env VARIANT (x87), CORK (json), APP_ROOT, CLOCK
+ * BITS=64 runs the workload's x86-64 twin (`images64/NAME-x64.bin`) on the
+ * 64-bit translator.
+ *
+ *     node ir.mjs NAME WARM ITERS [native]   env VARIANT (x87), BITS (32), CORK (json), APP_ROOT,
+ *         CLOCK
  */
 
 import { readFileSync } from 'node:fs';
@@ -50,9 +54,11 @@ else
     const host = await import(`${root}/modules/core/src/layers/cpu/internal/cork-host.js`);
     const engine = await import(`${root}/modules/cork/src/index.js`);
     const { hostOf } = await import(`${root}/tools/cork-bench/paired.js`);
-    const image = readFileSync(`${root}/tools/cork-bench/images/${name}-${process.env.VARIANT ?? 'x87'}.bin`);
+    const bits = process.env.BITS === '64' ? 64 : 32;
+    const image = readFileSync(bits === 64 ? `${root}/tools/cork-bench/images64/${name}-x64.bin`
+        : `${root}/tools/cork-bench/images/${name}-${process.env.VARIANT ?? 'x87'}.bin`);
     const made = hostOf({ ...host, engine, cork: JSON.parse(process.env.CORK ?? '{}'), executors: 1,
-        executor: 0, bits: 32 }, new Uint8Array(image));
+        executor: 0, bits }, new Uint8Array(image));
     const cork = made.host.cork();
     step = made.iteration;
     for (let i = 0; i < Number(warm); i++)

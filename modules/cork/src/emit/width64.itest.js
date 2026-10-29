@@ -15,7 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CORPUS, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, loopCases, nested, pool, program,
+    CORPUS, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, flagsLeftUndefined, load,
+    loopCases, machine, nested, pool, program, run, stacked,
 } from '../testing/long-machine.js';
 import { createSharedRunner64 } from '../testing/shared-runner64.js';
 
@@ -90,6 +91,7 @@ test('width edges of multiplies and divides run in the shared emitter\'s regions
             'f7e1', 'f7e9', '66f7e1', '66f7e9', 'f6e1', 'f6e9', // ecx, cx, cl
             '480fafc1', '4c0fafc1', '0fafc1', '660fafc1', '480fafc0', // imul r, r
             '486bc103', '4869c1ffffff7f', '486bc1ff', '6bc1fd', // imul r, r, imm
+            '0faf0424', '660faf0424', '6b0424fd', '4469042401800000', // imul r, [rsp][, imm]
         ], counts, ['', 'b864000000', '48c7c09cffffff']);
         const divides = edges([
             '48f7f1', '48f7f9', 'f7f1', 'f7f9', '66f7f1', '66f7f9', 'f6f1', 'f6f9', // rcx..cl
@@ -137,6 +139,10 @@ test('leave and indirect jumps and calls run in the shared emitter\'s regions as
         '488d0502000000ffe0', '488d0502000000ffd0', // jmp rax, call rax to the next instruction
         '4c8d050300000041ffe0', // jmp r8
         '48b80000000001000000ffe0', '48b80000000001000000ffd0', // past the window
+        '488d050200000050c3', '488d050400000050c20800', // ret, ret 8 to the next instruction
+        '48b8000000000100000050c3', '48b8000000000100000050c20800', // ret past the window
+        '48b8ffffffff0000000050c3', // ret to the window's last byte
+        'e800000000480fba2c2420c3', // call; bts qword [rsp], 32; ret: the call's address + 4 GiB
     ], [0], ['', '4885c9']);
     const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
@@ -211,5 +217,38 @@ test('loops whose accesses move by a stride run as interpreted, to the turn a pa
         const { failures, stats } = compare(cases, { budget, makeRunner: shared });
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+    }
+});
+
+test('seeded stack traffic and untested reads run in loose regions as interpreted', ()=>{
+    // Outside `precise`, as the runtime emits: rsp's accesses take its low half
+    // untested (`stackAccess`, `push`) and a read's address is summed in i32
+    // (`windowed`), each beside the interpreter's quadword address and test.
+    const loose = (/** @type {WebAssembly.Memory} */ memory, /** @type {any} */ layout)=>
+        createSharedRunner64({ memory, layout, precise: false, looseStacks: true });
+    // The flags a program leaves undefined are the emitter's to leave as it will
+    // there, and a program that reads one is left out.
+    const instructions = pool();
+    const interpreter = machine();
+    const bytes = new Uint8Array(interpreter.memory.buffer);
+    const cases = Array.from({ length: 600 }, (_, i)=>stacked(instructions, 0x57ac + i,
+        10 + i % 50)).flatMap(one=>{
+        load(interpreter, one);
+        const undefinedFlags = flagsLeftUndefined(interpreter.state,
+            address=>bytes[interpreter.layout.ramBase + address]);
+        load(interpreter, one);
+        return undefinedFlags !== null && run(interpreter, false).fault === 'exit'
+            ? [{ ...one, undefinedFlags }] : [];
+    });
+    assert.ok(cases.length > 450, `${cases.length} programs`);
+    // RAM of 1 GiB too: a read then wraps with one `and`, and a block's reads
+    // of several fields off the same registers share one wrapped sum (`wrappedFirst`).
+    for (const [budget, ramSize] of [[7, undefined], [100000, undefined], [7, 1 << 30],
+        [100000, 1 << 30]])
+    {
+        const { failures, exits, stats } = compare(cases, { budget, makeRunner: loose, ramSize });
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.equal(exits, cases.length);
+        assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
     }
 });

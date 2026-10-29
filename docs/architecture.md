@@ -386,7 +386,8 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   again. Every write checks the page's flag byte (the accesses a block makes off one register once
   for all of them, as one window). A store through `esp` alone goes unchecked while no translated
   code lies on a thread's stack (`looseStacks`); once code is translated there, every region checks
-  those too.
+  those too. In long mode such an access through rsp takes rsp's low half, without the test of
+  the 4 GiB window.
   When the program writes where translated code lies on a page, the region exits. The first such
   write drops all of that page's translations. The regions formed there afterwards keep a copy of
   the bytes they were formed from, and a later write drops only those whose bytes it actually

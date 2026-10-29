@@ -31,7 +31,8 @@ import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import {
-    checkAccess, emitStaleExit, looseStackStore, noteStore, readsOnly, stackAccess, windowAddress,
+    checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
+    windowAddress,
     wrapsRead,
 } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
@@ -462,16 +463,28 @@ function linkedCall(e, target){
  * caller to go on.
  *
  * @param {import('./region.js').RegionEmitter} e
+ * @param {() => void} [taken]  long mode's: what the `ret` does on this way alone, rsp
+ *     moved (`returnLong`)
  */
-function returnToCall(e){
+function returnToCall(e, taken){
     const { b, layout, context } = e;
     const depth = layout.regs + CallStack.DEPTH;
     atState(context, b).load('i32', { offset: depth }).localTee(Local.t1);
     e.openIf('called');
     b.localGet(Local.t1).i32const(2).op(I32.shl);
-    intoState(context, b).load('i32', { offset: layout.regs + CallStack.STACK - 4 })
-        .localGet(Local.eip).op(I32.eq);
+    intoState(context, b).load('i32', { offset: layout.regs + CallStack.STACK - 4 });
+    if (isLong(e))
+    {
+        // Long mode's whole return address (`returnLong`), which matching the
+        // call's says lies inside the window.
+        b.op(I64.extendU).localGet(Local.t64b).op(I64.eq);
+    }
+    else
+    {
+        b.localGet(Local.eip).op(I32.eq);
+    }
     e.openIf('returns');
+    taken?.();
     e.countMechanism(Mechanism.RET_TO_CALL);
     atState(context, b).localGet(Local.t1).i32const(1).op(I32.sub)
         .store('i32', { offset: depth });
@@ -1167,25 +1180,15 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'ret':
             if (isLong(e))
             {
-                // A return past the window faults where the interpreter takes it.
-                stackAccess(e, 8);
-                b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase })
-                    .localTee(Local.t64b).i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
-                e.openGuard('farReturn', EMPTY);
-                e.exitBefore(instruction.eip, Exit.FAULT, 13);
-                e.close();
-                b.localGet(Local.t64b).op(I64.wrap).localSet(Local.eip);
-                addStack(e, 8 + (dst ? /** @type {number} */ (dst.value) : 0));
+                returnLong(e, instruction);
+                return true;
             }
-            else
-            {
-                stackAccess(e, 4);
-                b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase })
-                    .localSet(Local.eip);
-                b.localGet(registerLocal(e, 4))
-                    .i32const(4 + (dst ? /** @type {number} */ (dst.value) : 0))
-                    .op(I32.add).localSet(registerLocal(e, 4));
-            }
+            stackAccess(e, 4);
+            b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase })
+                .localSet(Local.eip);
+            b.localGet(registerLocal(e, 4))
+                .i32const(4 + (dst ? /** @type {number} */ (dst.value) : 0))
+                .op(I32.add).localSet(registerLocal(e, 4));
             // Back to a call of this region whose callee it formed in: a jump.
             // Charged once, here at the block's depth, for every way out below:
             // a charge inside the `if` left the block's count standing, and the
@@ -1517,6 +1520,52 @@ function nearTarget(e, instruction){
 }
 
 /**
+ * Long mode's ret. A return to a call of this region whose callee it formed
+ * in, or to the call a wasm call waits at (`returnToCall`), is the quadword
+ * compared with the call's own address, which says too that it lies inside
+ * the 4 GiB window: each such way moves rsp and charges the block itself, and
+ * only a return that matches none is tested against the window, before
+ * either, faulting past it where the interpreter takes it.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function returnLong(e, instruction){
+    const { b } = e;
+    const [dst] = instruction.operands;
+    const popped = 8 + (dst ? /** @type {number} */ (dst.value) : 0);
+    stackAccess(e, 8);
+    b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase }).localTee(Local.t64b)
+        .op(I64.wrap).localSet(Local.eip);
+    for (const at of e.returns.get(e.region.blocks[e.blockIndex].start) ?? [])
+    {
+        b.localGet(Local.t64b).i64const(BigInt(at)).op(I64.eq);
+        e.openIf('return');
+        addStack(e, popped);
+        // Charged here for the jump, which charges what is left again.
+        e.charge();
+        const retired = e.blockRetired;
+        e.blockRetired = 0;
+        e.countMechanism(Mechanism.RET_FORMED);
+        e.jumpTo(at);
+        e.blockRetired = retired;
+        e.close();
+    }
+    if (e.context.callReturn)
+    {
+        returnToCall(e, ()=>addStack(e, popped));
+    }
+    b.localGet(Local.t64b).i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
+    e.openGuard('farReturn', EMPTY);
+    e.exitBefore(instruction.eip, Exit.FAULT, 13);
+    e.close();
+    addStack(e, popped);
+    e.charge();
+    e.countMechanism(Mechanism.RET_LEFT);
+    e.exitDynamic(Exit.UNTRANSLATED);
+    e.dead = true;
+}
+
+/**
  * Long mode's leave: rsp from rbp, then rbp (or bp) popped, the pop's access
  * checked before rsp moves.
  *
@@ -1646,13 +1695,13 @@ export function prepare(e, operand, options){
     if (operand.kind === 'mem')
     {
         e.folded = null;
+        if (wrappedFirst(e, operand, options?.store === true))
+        {
+            return;
+        }
         if (isLong(e))
         {
             windowed(e, operand, options?.store === true);
-        }
-        else if (wrappedFirst(e, operand, options?.store === true))
-        {
-            return;
         }
         else
         {
@@ -1696,7 +1745,7 @@ function wrappedFirst(e, operand, store){
     {
         return false;
     }
-    const low = spreadOf(fieldsRead(e).get(registersOf(operand)), disp);
+    const low = spreadOf(fieldsRead(e).get(fieldKey(e, e.current, operand) ?? ''), disp);
     if (low === null)
     {
         return false;
@@ -1803,9 +1852,12 @@ function windowed(e, operand, store){
     }
     if (wrapsRead(e, store) || e.memPlan?.access != null)
     {
-        // Untested, or a stream's window test covered it, the window included.
-        emitAddress64(e, operand);
-        b.op(I64.wrap).localSet(Local.addr);
+        // Untested, or a stream's window test covered it, the window included:
+        // the low half alone, summed in i32, which the host's 32-bit `lea`
+        // takes off the registers as they are where the quadword sum needed a
+        // move to cut it.
+        emitAddress(e, operand, true);
+        b.localSet(Local.addr);
         return;
     }
     windowAddress(e, ()=>emitAddress64(e, operand), size);
@@ -1932,9 +1984,38 @@ const registersOf = operand=>`${operand.base ?? -1},${operand.index ?? -1},${ope
 /** By block, its memory operands' displacements by the registers they add to. @type {WeakMap<object, Map<string, Set<number>>>} */
 const fieldsByBlock = new WeakMap();
 
+/** By block, long mode's keys of its memory operands (`operandValues`). @type {WeakMap<object, (string | null)[][]>} */
+const valuesByBlock = new WeakMap();
+
+/**
+ * The key a memory operand of an instruction of the current block is grouped
+ * by among the block's reads: its registers (`registersOf`), and in long mode
+ * the values they hold (`operandValues`) -- a read before a pointer moves and
+ * one after it share no wrapped sum, which the host would compute twice, each
+ * with an add more than the address wrapped whole.
+ *
+ * @param {E} e @param {Instruction} instruction @param {Operand} operand
+ * @returns {string | null}
+ */
+function fieldKey(e, instruction, operand){
+    if (!isLong(e))
+    {
+        return registersOf(operand);
+    }
+    const block = e.region.blocks[e.blockIndex];
+    let keys = valuesByBlock.get(block);
+    if (keys === undefined)
+    {
+        keys = operandValues(block.instructions, 8);
+        valuesByBlock.set(block, keys);
+    }
+    return keys[block.instructions.indexOf(instruction)]?.[instruction.operands.indexOf(operand)]
+        ?? null;
+}
+
 /**
  * The current block's reads' displacements, by the registers each adds them to
- * (`registersOf`): the reads off one pointer a wrapped sum serves
+ * (`fieldKey`): the reads off one pointer a wrapped sum serves
  * (`wrappedFirst`). Where a block reads one address twice and nothing else off
  * its registers, or also writes through them, the whole address wrapped is the
  * one the host computes once for all of those accesses.
@@ -1958,7 +2039,7 @@ function fieldsRead(e){
                 {
                     continue;
                 }
-                const key = registersOf(operand);
+                const key = /** @type {string} */ (fieldKey(e, instruction, operand));
                 if (!reads)
                 {
                     written.add(key);
@@ -2254,7 +2335,15 @@ export function push(e, size, pushValue){
         const rsp = registerLocal(e, 4);
         pushValue();
         b.localSet(size === 8 ? Local.t64b : Local.t2);
-        windowAddress(e, ()=>b.localGet(rsp).i64const(BigInt(size)).op(I64.sub), size);
+        if (e.context.looseStacks === true)
+        {
+            // Untested as esp's pushes are (`stackAccess`).
+            b.localGet(rsp).op(I64.wrap).i32const(size).op(I32.sub).localSet(Local.addr);
+        }
+        else
+        {
+            windowAddress(e, ()=>b.localGet(rsp).i64const(BigInt(size)).op(I64.sub), size);
+        }
         if (!looseStackStore(e, size))
         {
             checkAccess(e, size, { store: true });
@@ -3110,6 +3199,20 @@ function imul(e, instruction, flagsLive){
             productHigh(e, true);
             productFlags(e, true);
         }
+        return true;
+    }
+    if (!flagsLive && isLong(e))
+    {
+        // The low half alone, which no sign extension changes: an i32 product,
+        // where the quadword one had the host load a memory operand twice --
+        // once as it is and once sign-extended into the multiply.
+        readOp(e, a);
+        readOp(e, c);
+        b.op(I32_EXTRA.mul).localSet(Local.t1);
+        writeOp(e, dst, ()=>{
+            b.localGet(Local.t1);
+            mask(e, size);
+        });
         return true;
     }
     readSigned(a);

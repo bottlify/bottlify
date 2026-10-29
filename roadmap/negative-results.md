@@ -1936,3 +1936,40 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Checked.** The low-lanes gate on both hosts' features (emit/low-lanes.itest.js).
 - **Machine.** A cloud container (Xeon @ 2.80 GHz, 4 vCPU), valgrind 3.22.
 - **Decision.** Not taken: x64 loads the vector.
+
+### 2026-10-28: long mode's push and pop without the 4 GiB test under loose stacks, measured again
+
+- **Idea.** As the 2026-10-27 entry: under `looseStacks` a push, pop, call or return through rsp
+  takes rsp's low half as its address, without the 4 GiB window test (`push`, `stackAccess`).
+  That entry measured sort-x64 alone, whose hot loops neither call nor push.
+- **Workload.** cork-bench sort-x64 and tree-x64 (images64, committed), `tools/cork-bench/ir.sh`
+  as it was at 73ed219 (callgrind, WARM 1000, 100 iterations, the run's clock the real one),
+  each of its two processes counted twice and a third time where two differed past 0.1 %, the
+  median taken; node 26.12.1 (V8 14.6.202.34). Arms: the tree at 73ed219, and the same with
+  this change alone.
+- **Values.** Machine instructions an iteration, base then without the test: sort 6 026 075 ->
+  5 989 352 (-0.6 %); tree 4 016 095 -> 3 696 743 (-8.0 %), one call, one return, a push and a
+  pop every 33 guest instructions. Noise floor: on code emitted byte for byte the same, medians of
+  this measure moved by 0.1-0.7 % between invocations (switch at 32 bits, 1.9 %).
+- **Machine.** A cloud container (Xeon @ 2.80 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Taken, with the 4 GiB test of a return moved past its compares (`returnLong`).
+  The earlier entry's sort result stands; its decision does not.
+
+### 2026-10-28: long mode's field reads off one wrapped sum, grouped by register name
+
+- **Idea.** The 32-bit emitter's `wrappedFirst` (a block's reads of several fields off the same
+  registers share their sum wrapped into RAM, each field's displacement added after) for long
+  mode too, grouping reads by register name as the 32-bit emitter does.
+- **Workload.** cork-bench x64 images, measured as in the entry above. Arms: this change's tree
+  on 73ed219 with long-mode `wrappedFirst` grouped by register name, and the same without it.
+- **Values.** Without, then with: fmath 817 357 -> 779 192 (-4.7 %); game 1 303 648 -> 1 305 015
+  (+0.1 %); vm 2 819 381 -> 2 842 234 (+0.8 %); sort 5 588 781 -> 5 599 661 (+0.2 %). All but
+  fmath's within or just past the noise floor of the entry above.
+- **Why.** vm's dispatch reads `[rdx + 4]`, moves rdx by 8 and reads `[rdx]`: one register name,
+  two values, so no sum is shared and each read pays an add more than its address wrapped whole.
+- **Machine.** As the entry above.
+- **Decision.** Grouped by register name, not taken. Grouped by the values the registers hold
+  (`operandValues`, the access planner's model), taken: vm 2 800 365 (-0.7 % against without),
+  sort 5 573 581 (-0.3 %); fmath and game emit the same wasm as by name. All on 73ed219's
+  `wrappedFirst`, before its spreads of 64 KiB (cbe09368).

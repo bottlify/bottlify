@@ -58,14 +58,15 @@ export function fill(seed, size){
  * A machine with the corpus's data and code areas open and every other page closed.
  *
  * @param {{ config?: Record<string, unknown>, trapPort?: number, tiered?: boolean,
- *     makeRunner?: MakeRunner | null }} [options]  `config`: the runtime's settings over
- *     the runner's; `tiered`: what no region holds runs on the interpreter tier in wasm
- *     (`createWasmInterpreter`), `interp64.js` taking what it hands back
+ *     makeRunner?: MakeRunner | null, ramSize?: number }} [options]  `config`: the runtime's
+ *     settings over the runner's; `tiered`: what no region holds runs on the interpreter tier
+ *     in wasm (`createWasmInterpreter`), `interp64.js` taking what it hands back; `ramSize`:
+ *     the RAM past the code area, 1 GiB for one a power of two (the translator's reads
+ *     wrapped with one `and`, a struct's field reads off one wrapped sum)
  */
 export function machine({ config = {}, trapPort = undefined, tiered = false,
-    makeRunner = null } = {})
+    makeRunner = null, ramSize = CORPUS.codeAt + 0x100000 } = {})
 {
-    const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
         tablesSize(layout) + (tiered ? WASM_INTERPRETER_AREA : 0)) });
@@ -250,6 +251,148 @@ export function nested(instructions, seed){
 }
 
 /**
+ * A seeded program of the stack's traffic among the pool's instructions:
+ * pushes of registers, immediates and memory, pops into the registers no
+ * address uses, reads through the pointer registers (rbx, rbp, rsi, rdi, with
+ * r12 or r13 scaled as the index, and rsp into what is pushed and above it) at
+ * every width and displacement size, and calls of a subroutine laid out after
+ * the call that pushes, reads and pops in turn -- the stack balanced at the
+ * end, the whole run three times by a loop on r15 as `program`'s.
+ *
+ * @param {Buffer[]} instructions @param {number} seed @param {number} count
+ */
+export function stacked(instructions, seed, count){
+    let x = seed >>> 0 || 1;
+    const next = ()=>{
+        x ^= x << 13;
+        x ^= x >>> 17;
+        x ^= x << 5;
+        x >>>= 0;
+        return x;
+    };
+    /** The registers no address uses, which a pop may write. */
+    const free = [0, 1, 2, 8, 9, 10, 11, 14];
+    /** @param {number} op @param {number} r */
+    const oneByte = (op, r)=>Buffer.from(r < 8 ? [op + r] : [0x41, op + r - 8]);
+    /**
+     * A read of `[base + index * scale + disp]` into `reg` by `opcode`, a REX.W one when `wide`.
+     * @param {number[]} opcode @param {boolean} wide @param {number} reg @param {number} base
+     * @param {number} index  -1 for none @param {number} scale @param {number} disp
+     */
+    const read = (opcode, wide, reg, base, index, scale, disp)=>{
+        const rex = 0x40 | (wide ? 8 : 0) | (reg >> 3) << 2 | (index >= 0 ? index >> 3 : 0) << 1
+            | base >> 3;
+        const near = disp >= -128 && disp < 128;
+        const at = Buffer.alloc(near ? 1 : 4);
+        if (near)
+        {
+            at.writeInt8(disp);
+        }
+        else
+        {
+            at.writeInt32LE(disp);
+        }
+        return Buffer.concat([Buffer.from([...(rex === 0x40 ? [] : [rex]), ...opcode,
+            (near ? 0x40 : 0x80) | (reg & 7) << 3 | 4,
+            Math.log2(scale) << 6 | (index >= 0 ? index & 7 : 4) << 3 | base & 7]), at]);
+    };
+    /** A read off a pointer register or rsp. @param {number} depth  quadwords pushed */
+    const access = depth=>{
+        // Each form's opcode, whether REX.W, and the immediate after the operand:
+        // mov, movzx, add, cmp, movsxd, movsx and imul in its two- and three-operand forms.
+        const forms = [[[0x8b], true, 0], [[0x8b], false, 0], [[0x0f, 0xb6], false, 0],
+            [[0x0f, 0xb7], true, 0], [[0x03], true, 0], [[0x3b], false, 0], [[0x63], true, 0],
+            [[0x0f, 0xbe], false, 0], [[0x0f, 0xaf], false, 0], [[0x0f, 0xaf], true, 0],
+            [[0x6b], false, 1], [[0x69], false, 4], [[0x69], true, 4]];
+        const [opcode, wide, imm] = /** @type {[number[], boolean, number]} */
+            (forms[next() % forms.length]);
+        const reg = free[next() % free.length];
+        let one;
+        if (next() % 3 === 0)
+        {
+            // rsp 0x10001f00 less the pushes, the data ending 0x100 past it.
+            one = read(opcode, wide, reg, 4, -1, 1, next() % (depth * 8 + 0xf0));
+        }
+        else
+        {
+            const index = [-1, 12, 13][next() % 3];
+            const disp = next() % 4 === 0 ? -0x300 + next() % 0x1300 : next() % 0x80;
+            one = read(opcode, wide, reg, [3, 5, 6, 7][next() % 4], index, 1 << next() % 4, disp);
+        }
+        const suffix = Buffer.from(Uint32Array.of(next()).buffer).subarray(0, imm);
+        // The word form of an imul: its operand-size prefix before the REX.
+        const word = opcode[0] !== 0x63 && opcode[0] !== 0x8b && !wide && next() % 4 === 0
+            && (opcode[0] === 0x6b || opcode[0] === 0x69 || opcode[1] === 0xaf);
+        return Buffer.concat([Buffer.from(word ? [0x66] : []), one,
+            word && imm === 4 ? suffix.subarray(0, 2) : suffix]);
+    };
+    /** @param {number} turns @param {boolean} nest @returns {Buffer} */
+    const body = (turns, nest)=>{
+        /** @type {Buffer[]} */
+        const parts = [];
+        let depth = 0;
+        for (let i = 0; i < turns; i++)
+        {
+            const kind = next() % 8;
+            if (kind === 0 || kind === 1)
+            {
+                parts.push(oneByte(0x50, next() % 16));
+                depth++;
+            }
+            else if (kind === 2)
+            {
+                parts.push(next() % 2 === 0 ? Buffer.from([0x6a, next() & 0xff])
+                    : Buffer.concat([Buffer.from([0x68]),
+                        Buffer.from(Uint32Array.of(next()).buffer)]));
+                depth++;
+            }
+            else if (kind === 3 && depth > 0)
+            {
+                parts.push(oneByte(0x58, free[next() % free.length]));
+                depth--;
+            }
+            else if (kind === 4)
+            {
+                // push qword [m]: ff /6 in place of the read's opcode and register.
+                const one = read([0xff], false, 6, [3, 5, 6, 7][next() % 4], -1, 1, next() % 0x100);
+                parts.push(one);
+                depth++;
+            }
+            else if (kind === 5 && nest)
+            {
+                // call sub; jmp over; sub: ...; ret; over:
+                const callee = Buffer.concat([body(1 + next() % 5, false), Buffer.from([0xc3])]);
+                parts.push(Buffer.from([0xe8, 2, 0, 0, 0, 0xeb, callee.length]), callee);
+            }
+            else if (kind === 6)
+            {
+                parts.push(access(depth));
+            }
+            else
+            {
+                parts.push(instructions[next() % instructions.length]);
+            }
+        }
+        for (; depth > 0; depth--)
+        {
+            parts.push(oneByte(0x58, free[next() % free.length]));
+        }
+        return Buffer.concat(parts);
+    };
+    const code = body(count, true);
+    const back = -(code.length + 3 + 6);
+    const loop = Buffer.from([0x41, 0xff, 0xcf, 0x0f, 0x85, back & 0xff, back >>> 8 & 0xff,
+        back >>> 16 & 0xff, back >>> 24 & 0xff]);
+    const one = CORPUS.cases[next() % CORPUS.cases.length];
+    const regs = [...one.regs];
+    regs[12] = (next() & 0x1f).toString(16);
+    regs[13] = (next() & 0x1f).toString(16);
+    regs[15] = '3';
+    return { ...one, text: `stacked ${seed}`, code: Buffer.concat([code, loop]).toString('hex'),
+        regs };
+}
+
+/**
  * Sets a case up on a machine: its code area (with the exit jump and EXIT in
  * the area's last eight bytes), data, registers, flags and XMM registers.
  *
@@ -362,8 +505,8 @@ export function run(m, translated, budget = 7){
  *
  * @param {any[]} cases
  * @param {{ budget?: number, config?: Record<string, unknown>, tiered?: boolean,
- *     makeRunner?: MakeRunner | null }} [options]  `budget`: each translated run's;
- *     the rest the translated machine's (`machine`)
+ *     makeRunner?: MakeRunner | null, ramSize?: number }} [options]  `budget`: each
+ *     translated run's; the rest the translated machine's (`machine`)
  */
 export function compare(cases, { budget = 7, ...options } = {}){
     const translatedMachine = machine(options);

@@ -17,7 +17,7 @@
 # src/NAME.c` rebuilds vm crc switch tree fmath vcall byte for byte; sort, game and str were built
 # with flags not recorded.
 #
-#   tools/cork-bench/ir.sh NAME [native]   env NODE (node), WARM (1000), ITERS (100), WASM,
+#   tools/cork-bench/ir.sh NAME [native]   env NODE (node), WARM (1000), ITERS (100), WASM, BITS,
 #       VARIANT, CORK, APP_ROOT, CLOCK
 here=$(dirname "$0")
 node=${NODE:-node}

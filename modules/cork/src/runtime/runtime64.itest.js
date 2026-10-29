@@ -86,6 +86,22 @@ test('calls and returns, switches among them, run in the shared runtime as inter
     }
 });
 
+test('a return to its call\'s address past the 4 GiB window faults as interpreted', ()=>{
+    // call f (or call rdi, f a region of its own whose ret goes back to the wasm call
+    // waiting for it); jmp done; f: [bts qword [rsp], 32]; ret -- three turns on esi,
+    // the last with the return address moved past the window: its low half the call's own.
+    const codes = ['be03000000e806000000ffce75f7eb0c83fe017506480fba2c2420c3',
+        'be03000000488d3d08000000ffd7ffce75faeb0c83fe017506480fba2c2420c3'];
+    const cases = codes.flatMap(code=>CORPUS.cases.slice(0, 4).map((/** @type {any} */ one,
+        /** @type {number} */ i)=>({ ...one, text: `far return ${i}`, code })));
+    for (const budget of [7, 100000])
+    {
+        const { failures, stats } = compare(cases, { budget, makeRunner: runtime });
+        assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
+        assert.ok(stats.translated > 0, JSON.stringify(stats));
+    }
+});
+
 test('a switch whose entry is rewritten past the 4 GiB window faults as interpreted', ()=>{
     const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `far ${i}`, code: FAR_SWITCH }));

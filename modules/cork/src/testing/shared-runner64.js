@@ -32,9 +32,13 @@ import { interpret64 } from '../interp64.js';
 /**
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
- *     precise?: boolean, leafCalls?: boolean }} settings
+ *     precise?: boolean, leafCalls?: boolean, looseStacks?: boolean }} settings
+ *     looseStacks: with precise false, the stack's accesses untested, as the runtime
+ *     emits them until code is translated on a stack
  */
-export function createSharedRunner64({ memory, layout, precise = true, leafCalls = true }){
+export function createSharedRunner64({ memory, layout, precise = true, leafCalls = true,
+    looseStacks = false })
+{
     const found = features();
     const flagsAt = pageFlagsAt(layout);
     const helpers = new WebAssembly.Instance(new WebAssembly.Module(
@@ -61,7 +65,7 @@ export function createSharedRunner64({ memory, layout, precise = true, leafCalls
             return null;
         }
         const m = new ModuleBuilder();
-        const context = prepareModule(m, layout, found, {}, { precise });
+        const context = prepareModule(m, layout, found, {}, { precise, looseStacks });
         const translation = emitRegion(context, region, { entryTop: 0, checked: true });
         finishModule(context, [translation.functionIndex]);
         m.exportFunction('region', translation.functionIndex);

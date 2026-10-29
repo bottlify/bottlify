@@ -1426,6 +1426,30 @@ function effect(ins, values, forward = false, word = 4){
 }
 
 /**
+ * By instruction of a block, each memory operand's registers as the values
+ * they hold there (`effect`), as a key, null for an operand not in memory:
+ * two operands off one register across a write of it -- `[rdx + 4]`,
+ * `add rdx, 8`, `[rdx]` -- have keys of their own.
+ *
+ * @param {import('../decode/decoder.js').Instruction[]} instructions
+ * @param {4 | 8} [word]  (`effect`)
+ * @returns {(string | null)[][]}
+ */
+export function operandValues(instructions, word = 4){
+    const values = freshValues({ n: 0 }, word === 8 ? 16 : 8);
+    /** @param {number | undefined} r */
+    const held = r=>((r ?? -1) < 0 ? '-'
+        : `${values.sym[/** @type {number} */ (r)]}+${values.delta[/** @type {number} */ (r)]}`);
+    return instructions.map(ins=>{
+        const keys = ins.operands.map(operand=>(operand.kind === 'mem'
+            ? `${held(operand.base)},${held(operand.index)},${operand.scale ?? 1},`
+                + `${operand.segment ?? -1}` : null));
+        effect(ins, values, false, word);
+        return keys;
+    });
+}
+
+/**
  * Long mode's writes a loop's plan follows besides `effect`'s: a dword `add`,
  * `sub`, `inc` or `dec` by a constant, a dword `mov` from a register and a
  * `lea` of one or two registers (a quadword one too) keep the value they move,
@@ -2043,9 +2067,12 @@ function planned(e, size, store){
  * @param {E} e @param {number} size
  */
 export function stackAccess(e, size){
-    if (e.width.bits === 64 && e.memPlan?.access != null)
+    if (e.width.bits === 64 && (e.memPlan?.access != null || e.context.looseStacks === true))
     {
-        // A stream's window test covered it, the window included.
+        // A stream's window test covered it, the window included; or the
+        // stack is loose, its accesses tested no more than esp's are at 32
+        // bits: rsp's low half addresses it, and an rsp a program moved past
+        // the 4 GiB window reads there rather than faulting.
         e.b.localGet(registerLocal(e, 4)).op(I64.wrap).localSet(Local.addr);
     }
     else if (e.width.bits === 64)
