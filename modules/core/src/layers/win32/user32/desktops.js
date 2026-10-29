@@ -92,6 +92,42 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
     const threadDesktops = new Map();
     /** The handle GetProcessWindowStation gives out, made when first asked for. */
     let stationHandle = 0;
+    /** Stations made beside WinSta0 (CreateWindowStation), by name without regard to case. */
+    /** @type {UserObject[]} */
+    const stations = [station];
+    /** How many unnamed stations have been made, for their generated names. */
+    let unnamed = 0;
+    /** The station SetProcessWindowStation chose, when not WinSta0. @type {UserObject} */
+    let processStation = station;
+
+    /** @param {string} name */
+    const stationNamed = name=>stations.find(each=>each.name.toLowerCase() === name.toLowerCase())
+        ?? null;
+
+    /**
+     * CreateWindowStation in either width: a station of that name, made or
+     * opened, or for no name one named as Windows names a service's
+     * (Service-0x0-<n>$). Its desktops are not kept apart from WinSta0's:
+     * every window is drawn on the input desktop all the same.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const createStation = ([name, , , attributes], wide)=>{
+        const text = (name >>> 0) === 0 ? null
+            : wide ? readText(host, name >>> 0, true, MAX_NAME)
+                : host.readCString(name >>> 0, MAX_NAME);
+        let made = text === null ? null : stationNamed(text);
+        if (!made)
+        {
+            made = { kind: 'station',
+                name: text ?? `Service-0x0-${(0x3e7 + ++unnamed).toString(16)}$`, flags: 0 };
+            stations.push(made);
+        }
+        const inherit = (attributes >>> 0) !== 0
+            && new DataView(host.readMemory((attributes >>> 0) + 8, 4).slice().buffer)
+                .getUint32(0, true) !== 0;
+        return open(made, inherit);
+    };
 
     /** @param {number} code */
     const fail = code=>{
@@ -488,9 +524,10 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         GetProcessWindowStation: {
             argBytes: 0,
             handler: ()=>{
-                if (stationHandle === 0 || !opened.has(stationHandle))
+                if (stationHandle === 0 || !opened.has(stationHandle)
+                    || opened.get(stationHandle)?.object !== processStation)
                 {
-                    stationHandle = open(station, false);
+                    stationHandle = open(processStation, false);
                 }
                 return stationHandle;
             },
@@ -500,18 +537,37 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         OpenWindowStationA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name, inherit])=>((name >>> 0) !== 0
-                && host.readCString(name >>> 0, MAX_NAME).toLowerCase() === 'winsta0'
-                ? open(station, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND)),
+            handler: ([name, inherit])=>{
+                const found = (name >>> 0) === 0 ? null
+                    : stationNamed(host.readCString(name >>> 0, MAX_NAME));
+                return found ? open(found, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND);
+            },
         },
 
         /** HWINSTA OpenWindowStationW(LPCWSTR lpszWinSta, BOOL fInherit, ACCESS_MASK) */
         OpenWindowStationW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name, inherit])=>((name >>> 0) !== 0
-                && readText(host, name >>> 0, true, MAX_NAME).toLowerCase() === 'winsta0'
-                ? open(station, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND)),
+            handler: ([name, inherit])=>{
+                const found = (name >>> 0) === 0 ? null
+                    : stationNamed(readText(host, name >>> 0, true, MAX_NAME));
+                return found ? open(found, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND);
+            },
+        },
+
+        /**
+         * HWINSTA CreateWindowStationA(LPCSTR lpwinsta, DWORD dwFlags,
+         *     ACCESS_MASK dwDesiredAccess, LPSECURITY_ATTRIBUTES lpsa), and the W form
+         */
+        CreateWindowStationA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>createStation(args, false),
+        },
+        CreateWindowStationW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>createStation(args, true),
         },
 
         /** BOOL CloseWindowStation(HWINSTA hWinSta) */
@@ -525,7 +581,15 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         SetProcessWindowStation: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(named(handle, 'station') ? 1 : fail(ERROR_INVALID_HANDLE)),
+            handler: ([handle])=>{
+                const entry = named(handle, 'station');
+                if (!entry)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                processStation = entry.object;
+                return 1;
+            },
         },
 
         /**

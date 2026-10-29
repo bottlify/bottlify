@@ -133,3 +133,22 @@ test('GetUserObjectInformation says the kind, the flags, and when the buffer is 
     assert.equal(fns.GetUserObjectInformationA.handler([0x9999, UOI_NAME, OUT, 64, NEEDED]), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
 });
+
+test('a window station made beside WinSta0, opened by its name and set as the process\'s', ()=>{
+    // As a sandbox makes an alternate station for the processes it starts.
+    const { fns, text, put } = setup();
+    const made = fns.CreateWindowStationA.handler([0, 0, 0x37f, 0]);
+    assert.notEqual(made, 0);
+    fns.GetUserObjectInformationA.handler([made, UOI_NAME, OUT, 64, NEEDED]);
+    const name = text(OUT);
+    assert.match(name, /^Service-0x0-[0-9a-f]+\$$/, 'an unnamed station gets a service\'s name');
+    assert.notEqual(fns.OpenWindowStationA.handler([put(name), 0, 0x37f]), 0);
+    const named = fns.CreateWindowStationA.handler([put('Sandbox'), 0, 0x37f, 0]);
+    assert.notEqual(fns.OpenWindowStationA.handler([put('sandbox'), 0, 0x37f]), 0,
+        'found again without regard to case');
+    assert.equal(fns.SetProcessWindowStation.handler([named]), 1);
+    const now = fns.GetProcessWindowStation.handler();
+    fns.GetUserObjectInformationA.handler([now, UOI_NAME, OUT, 64, NEEDED]);
+    assert.equal(text(OUT), 'Sandbox');
+    assert.equal(fns.CloseWindowStation.handler([made]), 1);
+});
