@@ -2531,3 +2531,54 @@ test('a media\'s cabinet is where its first file was sought, for the files after
         assert.equal(m.contents('C:\\dst\\seven.txt'), '7');
         assert.equal(m.contents('C:\\dst\\eight.txt'), '8', 'from the same cabinet');
     });
+
+test('a device node\'s status: started once registered, none while a phantom', async()=>{
+    const m = await machine();
+    const guid = m.buffer(16);
+    m.view.setUint32(guid, 0x6a55b5a4, true);
+    const set = m.fns.SetupDiCreateDeviceInfoList.handler([guid, 0]);
+    const device = m.buffer(28);
+    m.view.setUint32(device, 28, true);
+    m.fns.SetupDiCreateDeviceInfoA.handler([set, m.str('ROOT\\LEGACY_BOGUS\\0000'), guid, 0, 0,
+        0, device]);
+    const status = m.buffer(4);
+    const problem = m.buffer(4);
+    const node = m.u32(device + 20);
+    assert.equal(m.fns.CM_Get_DevNode_Status.handler([status, problem, node, 0]), 0x0d,
+        'CR_NO_SUCH_DEVINST: a phantom');
+    m.fns.SetupDiRegisterDeviceInfo.handler([set, device, 0, 0, 0, 0]);
+    m.view.setUint32(problem, 7, true);
+    assert.equal(m.fns.CM_Get_DevNode_Status.handler([status, problem, node, 0]), 0);
+    assert.equal(m.u32(status), 0x2 | 0x8, 'DN_DRIVER_LOADED | DN_STARTED');
+    assert.equal(m.u32(problem), 0);
+    assert.equal(m.fns.CM_Get_DevNode_Status.handler([status, problem, 1, 0]), 0, 'the root');
+    assert.equal(m.fns.CM_Get_DevNode_Status.handler([status, problem, 0x777, 0]), 0x05);
+    assert.equal(m.fns.CM_Get_DevNode_Status.handler([0, problem, 1, 0]), 0x03);
+    assert.equal(m.fns.CM_Get_DevNode_Status.handler([status, problem, 1, 1]), 0x04);
+});
+
+test('a class name names the installed classes of that name, counted before they are listed',
+    async()=>{
+        const m = await machine();
+        m.file('C:\\src\\class.inf', ['[Version]', 'Signature="$Chicago$"', 'Class=Bogus',
+            'ClassGUID={6a55b5a4-3f65-11db-b704-0011955c2bdb}', '[ClassInstall32]',
+            'AddReg=BogusClass.NT.AddReg', '[BogusClass.NT.AddReg]',
+            'HKR,,,,"Wine test devices"'].join('\r\n'));
+        const list = m.buffer(32);
+        const needed = m.buffer(4);
+        assert.equal(m.fns.SetupDiClassGuidsFromNameA.handler([m.str('bogus'), list, 2, needed]),
+            1);
+        assert.equal(m.u32(needed), 0, 'no such class yet: none, and TRUE');
+        await m.fns.SetupDiInstallClassA.handler([0, m.str('C:\\src\\class.inf'), 0, 0]);
+        assert.equal(m.fns.SetupDiClassGuidsFromNameA.handler([m.str('BOGUS'), list, 0, needed]),
+            0);
+        assert.equal(m.lastError(), 122, 'ERROR_INSUFFICIENT_BUFFER');
+        assert.equal(m.u32(needed), 1, 'the count is written all the same');
+        assert.equal(m.fns.SetupDiClassGuidsFromNameW.handler([m.wstr('Bogus'), list, 2, needed]),
+            1);
+        assert.equal(m.u32(list), 0x6a55b5a4);
+        assert.equal(m.fns.SetupDiClassGuidsFromNameExA.handler([m.str('Bogus'), list, 2, needed,
+            m.str('elsewhere'), 0]), 0);
+        assert.equal(m.lastError(), 0xe0000220, 'ERROR_INVALID_MACHINENAME');
+        assert.equal(m.fns.SetupDiClassGuidsFromNameA.handler([0, list, 2, needed]), 0);
+    });

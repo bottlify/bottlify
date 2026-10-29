@@ -1926,6 +1926,44 @@ export function createRegistryFunctions(host){
         },
 
         /**
+         * LONG RegDisableReflectionKey(HKEY), RegEnableReflectionKey alike
+         *
+         * Registry reflection between the 32- and 64-bit views is gone from
+         * Windows 7 on, and the calls succeed with no effect for a key that
+         * is open; RegQueryReflectionKey says it is disabled.
+         */
+        RegDisableReflectionKey: {
+            argBytes: 4,
+            handler: onKey(()=>ERROR_SUCCESS),
+        },
+        RegEnableReflectionKey: {
+            argBytes: 4,
+            handler: onKey(()=>ERROR_SUCCESS),
+        },
+        /** LONG RegQueryReflectionKey(HKEY hBase, BOOL *bIsReflectionDisabled) */
+        RegQueryReflectionKey: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: onKey((/** @type {any} */ _key, /** @type {number[]} */ [, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                writeDword(out, 1);
+                return ERROR_SUCCESS;
+            }),
+        },
+
+        /**
+         * LONG RegDisablePredefinedCache(void), and RegDisablePredefinedCacheEx
+         *
+         * A process's HKEY_CURRENT_USER is not cached apart from the hive
+         * here, so there is no cache to give up: success.
+         */
+        RegDisablePredefinedCache: { argBytes: 0, handler: ()=>ERROR_SUCCESS },
+        RegDisablePredefinedCacheEx: { argBytes: 0, handler: ()=>ERROR_SUCCESS },
+
+        /**
          * BOOL GetUserNameA(LPSTR buffer, LPDWORD size)
          *
          * The size is in characters and includes the terminator in both

@@ -73,6 +73,9 @@ const NULL_PEN = 8;
 const SYSTEM_FONT = 13;
 const DEVICE_DEFAULT_FONT = 14;
 const DEFAULT_PALETTE = 15;
+/** The stock brush and pen whose color is the DC's own (SetDCBrushColor, SetDCPenColor). */
+const DC_BRUSH = 18;
+const DC_PEN = 19;
 const SYSTEM_FIXED_FONT = 16;
 const DEFAULT_GUI_FONT = 17;
 
@@ -653,6 +656,13 @@ export function createGdiFunctions(host){
                 return { type: 'pen', attributes: { style: 0, width: 1, color: BLACK } };
             case NULL_PEN:
                 return { type: 'pen', attributes: { style: PS_NULL, width: 1, color: BLACK } };
+            // Drawn in the DC's default colors, white and black: the color a
+            // DC was given by SetDCBrushColor or SetDCPenColor is kept and
+            // answered, not drawn with (a divergence, said when one is set).
+            case DC_BRUSH:
+                return { type: 'brush', attributes: { style: BS_SOLID, color: WHITE, hatch: 0 } };
+            case DC_PEN:
+                return { type: 'pen', attributes: { style: 0, width: 1, color: BLACK } };
             case SYSTEM_FONT:
             case DEVICE_DEFAULT_FONT:
                 return { type: 'font',
@@ -672,6 +682,30 @@ export function createGdiFunctions(host){
                 return null;
         }
     };
+
+    /**
+     * SetDCBrushColor or SetDCPenColor: the color the DC's DC_BRUSH or DC_PEN
+     * stands for; answers the one before, CLR_INVALID for a handle that is
+     * no DC.
+     *
+     * @param {'Brush' | 'Pen'} kind @param {'dcBrushColor' | 'dcPenColor'} field
+     */
+    const setDcColor = (kind, field)=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, color])=>{
+            const dc = dcOf(handle);
+            if (!dc)
+            {
+                return CLR_INVALID;
+            }
+            const previous = dc[field];
+            dc[field] = color >>> 0;
+            host.divergence?.(`SetDC${kind}Color`,
+                `DC_${kind.toUpperCase()} draws in its default color, not the one set`);
+            return previous;
+        },
+    });
 
     /**
      * A LOGFONT with everything the guest did not say filled in. The stock fonts
@@ -763,6 +797,9 @@ export function createGdiFunctions(host){
             palette: stockObject(DEFAULT_PALETTE),
             textColor: BLACK,
             bkColor: WHITE,
+            /** The colors DC_BRUSH and DC_PEN stand for in this DC. */
+            dcBrushColor: WHITE,
+            dcPenColor: BLACK,
             bkMode: OPAQUE,
             rop2: R2_COPYPEN,
             textAlign: 0,
@@ -3460,6 +3497,26 @@ export function createGdiFunctions(host){
                 dc.bkColor = color >>> 0;
                 return previous;
             },
+        },
+
+        /**
+         * COLORREF SetDCBrushColor(HDC hdc, COLORREF color), SetDCPenColor alike
+         *
+         * The color the DC's DC_BRUSH or DC_PEN stands for; answers the one
+         * before, CLR_INVALID for a handle that is no DC.
+         */
+        SetDCBrushColor: setDcColor('Brush', 'dcBrushColor'),
+        SetDCPenColor: setDcColor('Pen', 'dcPenColor'),
+        /** COLORREF GetDCBrushColor(HDC hdc), GetDCPenColor alike */
+        GetDCBrushColor: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle)?.dcBrushColor ?? CLR_INVALID,
+        },
+        GetDCPenColor: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle)?.dcPenColor ?? CLR_INVALID,
         },
 
         /** COLORREF GetBkColor(HDC hdc) */

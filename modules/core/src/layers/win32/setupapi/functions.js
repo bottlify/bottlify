@@ -155,6 +155,9 @@ const CR_INVALID_FLAG = 0x04;
 const CR_INVALID_DEVNODE = 0x05;
 const CR_NO_SUCH_DEVNODE = 0x0d;
 const CR_BUFFER_SMALL = 0x1a;
+/** CM_Get_DevNode_Status's status bits, cfg.h. */
+const DN_DRIVER_LOADED = 0x2;
+const DN_STARTED = 0x8;
 
 /** CM_Get_Device_ID_List's filters, and CM_Get_Device_Interface_List's one flag. */
 const CM_GETIDLIST_FILTER_NONE = 0x0;
@@ -1370,6 +1373,32 @@ export function createSetupapiFunctions(host){
         }
         const key = devices?.instanceKey(device.id) ?? null;
         return key ? [...keys, ...storedKeys(host.registry, key)] : keys;
+    };
+
+    /**
+     * SetupDiClassGuidsFromName's answer: the installed classes of a name.
+     *
+     * @param {number} namePointer @param {number} list @param {number} room
+     * @param {number} required @param {boolean} wide
+     */
+    const classGuidsFromName = (namePointer, list, room, required, wide)=>{
+        const name = textOf(namePointer, wide);
+        if (name === null)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const found = installedClasses()
+            .filter(entry=>entry.name.toLowerCase() === name.toLowerCase());
+        if ((required >>> 0) !== 0)
+        {
+            writeU32(required, found.length);
+        }
+        if (found.length > (room >>> 0))
+        {
+            return fail(ERROR_INSUFFICIENT_BUFFER);
+        }
+        found.forEach((entry, index)=>writeGuid((list >>> 0) + index * 16, entry.guid));
+        return fail(ERROR_SUCCESS, 1);
     };
 
     /**
@@ -3961,6 +3990,70 @@ export function createSetupapiFunctions(host){
                 }
                 writeU32(lengthOut, list.text.length + 1);
                 return CR_SUCCESS;
+            },
+        })),
+
+        /**
+         * CONFIGRET CM_Get_DevNode_Status(PULONG pulStatus, PULONG pulProblemNumber,
+         *     DEVINST dnDevInst, ULONG ulFlags)
+         *
+         * A registered device is started with its driver loaded and no
+         * problem, as the system brought it up; the root is too. A phantom
+         * has no node in the live tree: CR_NO_SUCH_DEVINST.
+         */
+        CM_Get_DevNode_Status: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([statusOut, problemOut, devnode, flags])=>{
+                if ((statusOut >>> 0) === 0 || (problemOut >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return CR_INVALID_FLAG;
+                }
+                const id = devices?.idOf(devnode >>> 0) ?? null;
+                if (id === null)
+                {
+                    return CR_INVALID_DEVNODE;
+                }
+                if ((devnode >>> 0) !== ROOT_DEVNODE && !devices?.registered(id))
+                {
+                    return CR_NO_SUCH_DEVNODE;
+                }
+                writeU32(statusOut, DN_DRIVER_LOADED | DN_STARTED);
+                writeU32(problemOut, 0);
+                return CR_SUCCESS;
+            },
+        },
+
+        /**
+         * BOOL SetupDiClassGuidsFromNameA(PCSTR ClassName, LPGUID ClassGuidList,
+         *     DWORD ClassGuidListSize, PDWORD RequiredSize), the W form, and the
+         *     Ex forms with a machine and a reserved pointer after them
+         *
+         * Every installed class whose Class value is the name, case aside.
+         * The count is written whatever the list's room; too little room is
+         * ERROR_INSUFFICIENT_BUFFER with nothing listed, no class at all a
+         * count of zero and TRUE.
+         */
+        ...bothWidths('SetupDiClassGuidsFromName', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [namePointer, list, room, required])=>{
+                return classGuidsFromName(namePointer, list, room, required, wide);
+            },
+        })),
+        ...bothWidths('SetupDiClassGuidsFromNameEx', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [namePointer, list, room, required, machine])=>{
+                if ((textOf(machine, wide) ?? '') !== '')
+                {
+                    return fail(ERROR_INVALID_MACHINENAME);
+                }
+                return classGuidsFromName(namePointer, list, room, required, wide);
             },
         })),
 

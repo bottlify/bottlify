@@ -263,6 +263,26 @@ export function createImmFunctions(host){
          *   DWORD dwCompLen, LPVOID lpRead, DWORD dwReadLen)
          */
         ImmSetCompositionStringA: noContext(24),
+        ImmSetCompositionStringW: noContext(24),
+
+        /**
+         * BOOL ImmGetCompositionFontA(HIMC hIMC, LPLOGFONTA lplf), and the W form
+         *
+         * The context's font: no context is handed out, so there is none to
+         * read, refused as the other calls on a context are.
+         */
+        ImmGetCompositionFontA: noContext(8),
+        ImmGetCompositionFontW: noContext(8),
+
+        /**
+         * UINT ImmGetIMEFileNameA(HKL hKL, LPSTR lpszFileName, UINT uBufLen), and
+         * the W form
+         *
+         * The input method's file. A layout that is none has no file: zero
+         * characters, as for its description.
+         */
+        ImmGetIMEFileNameA: { argBytes: 12, handler: ()=>0 },
+        ImmGetIMEFileNameW: { argBytes: 12, handler: ()=>0 },
 
         /**
          * LRESULT ImmEscapeA(HKL hKL, HIMC hIMC, UINT uEscape, LPVOID lpData)

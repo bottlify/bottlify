@@ -131,12 +131,15 @@ test('there is no IME window, and nothing about an input method to describe', ()
     const m = machine();
     assert.equal(m.imm.ImmGetDefaultIMEWnd.handler([0x40]), 0);
     assert.equal(m.imm.ImmGetDescriptionA.handler([0x04090409, 0x10, 32]), 0);
+    assert.equal(m.imm.ImmGetIMEFileNameA.handler([0x04090409, 0x10, 32]), 0, 'no file either');
     assert.equal(m.memory[0x10], 0xcd, 'the buffer is untouched');
     assert.equal(m.imm.ImmGetProperty.handler([0x04090409, 4]), 0);
     assert.equal(m.imm.ImmEscapeA.handler([0x04090409, 0, 0x1000, 0]), 0);
     const sizes = { ImmGetDefaultIMEWnd: 4, ImmGetDescriptionA: 12, ImmGetProperty: 8,
         ImmEscapeA: 16, ImmGetCandidateListW: 16, ImmGetCandidateListCountW: 8,
-        ImmSetCandidateWindow: 8, ImmSetCompositionStringA: 24, ImmIsUIMessageA: 16 };
+        ImmSetCandidateWindow: 8, ImmSetCompositionStringA: 24, ImmIsUIMessageA: 16,
+        ImmSetCompositionStringW: 24, ImmGetCompositionFontA: 8, ImmGetCompositionFontW: 8,
+        ImmGetIMEFileNameA: 12, ImmGetIMEFileNameW: 12 };
     for (const [name, bytes] of Object.entries(sizes))
     {
         assert.equal(m.imm[name].argBytes, bytes, name);
@@ -161,7 +164,9 @@ test('setting a context\'s candidate window or composition string is refused for
         }));
         assert.equal(imm.ImmSetCandidateWindow.handler([0, 0x10]), 0);
         assert.equal(imm.ImmSetCompositionStringA.handler([0, 9, 0x10, 4, 0, 0]), 0);
-        assert.deepEqual(errors, [6, 6], 'ERROR_INVALID_HANDLE');
+        assert.equal(imm.ImmSetCompositionStringW.handler([0, 9, 0x10, 4, 0, 0]), 0);
+        assert.equal(imm.ImmGetCompositionFontW.handler([0, 0x10]), 0);
+        assert.deepEqual(errors, [6, 6, 6, 6], 'ERROR_INVALID_HANDLE');
     });
 
 test('ImmIsUIMessage knows the IME messages and hands them to the window it is given', ()=>{

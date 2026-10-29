@@ -5283,6 +5283,45 @@ test('GetRawInputBuffer takes the queued reports end to end, as many as fit', ()
     assert.equal(memory.u32(COUNT), RAWINPUT_MOUSE_SIZE, 'too small even for one');
 });
 
+test('the raw input devices are a mouse and a keyboard, each with its name and its info', ()=>{
+    // As documented for GetRawInputDeviceList and GetRawInputDeviceInfo: a
+    // null list or buffer asks the count or size, too little room is -1 and
+    // ERROR_INSUFFICIENT_BUFFER with the size, the name's size is in characters.
+    const RIDI_DEVICENAME = 0x20000007;
+    const RIDI_DEVICEINFO = 0x2000000b;
+    const RIDI_PREPARSEDDATA = 0x20000005;
+    const { fns, memory, errors } = setup();
+    memory.putU32s(COUNT, [0]);
+    assert.equal(fns.GetRawInputDeviceList.handler([0, COUNT, 8]), 0);
+    assert.equal(memory.u32(COUNT), 2);
+    assert.equal(fns.GetRawInputDeviceList.handler([RAW, COUNT, 4]), 0xffffffff);
+    memory.putU32s(COUNT, [1]);
+    assert.equal(fns.GetRawInputDeviceList.handler([RAW, COUNT, 8]), 0xffffffff);
+    assert.equal(memory.u32(COUNT), 2);
+    assert.equal(fns.GetRawInputDeviceList.handler([RAW, COUNT, 8]), 2);
+    const [mouse, mouseType, keyboard, keyboardType] = [0, 4, 8, 12].map(at=>memory.u32(RAW + at));
+    assert.deepEqual([mouseType, keyboardType], [0, 1], 'RIM_TYPEMOUSE, RIM_TYPEKEYBOARD');
+
+    memory.putU32s(COUNT, [0]);
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([mouse, RIDI_DEVICENAME, 0, COUNT]), 0);
+    const characters = memory.u32(COUNT);
+    assert.equal(fns.GetRawInputDeviceInfoW.handler([mouse, RIDI_DEVICENAME, RAW, COUNT]),
+        characters, 'the same count of characters, twice the bytes');
+    assert.equal(memory.u32(RAW) & 0xffff, '\\'.charCodeAt(0));
+    memory.putU32s(COUNT, [32]);
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([keyboard, RIDI_DEVICEINFO, RAW, COUNT]), 32);
+    assert.deepEqual([0, 4, 8, 20, 24, 28].map(at=>memory.u32(RAW + at)), [32, 1, 4, 12, 3, 101]);
+    memory.putU32s(COUNT, [8]);
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([mouse, RIDI_DEVICEINFO, RAW, COUNT]),
+        0xffffffff);
+    assert.equal(memory.u32(COUNT), 32);
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([mouse, RIDI_PREPARSEDDATA, 0, COUNT]), 0);
+    assert.equal(memory.u32(COUNT), 0, 'a mouse has no preparsed data');
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([0x1234, RIDI_DEVICEINFO, RAW, COUNT]),
+        0xffffffff);
+    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+});
+
 test('GetRawInputData refuses a handle that names no input', ()=>{
     const { fns, memory, errors } = setup();
     memory.putU32s(COUNT, [0]);
@@ -5322,7 +5361,8 @@ test('a registered mouse is posted WM_INPUT, and GetRawInputData reads the repor
     assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, RAW, COUNT, RAWINPUTHEADER_SIZE]),
         RAWINPUT_MOUSE_SIZE);
     assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RAW + at)),
-        [0, RAWINPUT_MOUSE_SIZE, 0, 0], 'RIM_TYPEMOUSE, its size, no device, RIM_INPUT');
+        [0, RAWINPUT_MOUSE_SIZE, 0x00010041, 0],
+        'RIM_TYPEMOUSE, its size, the listed mouse, RIM_INPUT');
     assert.deepEqual([16, 20, 24, 28, 32, 36].map(at=>memory.u32(RAW + at)),
         [0, 0, 0, 5, 0xfffffffd, 0], 'relative motion, no buttons');
 

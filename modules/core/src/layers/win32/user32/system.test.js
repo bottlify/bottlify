@@ -3691,6 +3691,26 @@ test('FlashWindow draws the caption the other way about, and answers how it was'
     assert.deepEqual(errors, [1400]);
 });
 
+test('FlashWindowEx flashes the caption as FlashWindow does, and FLASHW_STOP ends it', ()=>{
+    const COLOR_INACTIVE = 0x00808080;
+    /** @type {number[]} */
+    const fills = [];
+    const { memory, fns, errors } = setup({ draw: recordingDraw(fills) });
+    const hwnd = makeWindow(memory, fns, WS_CAPTION | WS_VISIBLE);
+    fns.SetActiveWindow.handler([hwnd]);
+    const info = 0x7000;
+    const put = (/** @type {number[]} */ fields)=>memory.putU32s(info, fields);
+    put([20, hwnd, 3 | 4, 5, 0]);
+    fills.length = 0;
+    assert.equal(fns.FlashWindowEx.handler([info]), 1, 'it was drawn active');
+    assert.ok(fills.includes(COLOR_INACTIVE));
+    put([20, hwnd, 0, 0, 0]);
+    assert.equal(fns.FlashWindowEx.handler([info]), 0, 'FLASHW_STOP: it was flashed');
+    put([16, hwnd, 3, 0, 0]);
+    assert.equal(fns.FlashWindowEx.handler([info]), 0);
+    assert.deepEqual(errors, [87], 'a FLASHWINFO of another size');
+});
+
 test('OpenIcon restores a minimised window, and refuses one that is not', async()=>{
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);

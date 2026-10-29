@@ -801,6 +801,10 @@ test('flushing a key that was closed is refused, not quietly accepted', ()=>{
     const key = create('Software\\Test');
 
     assert.equal(fns.RegFlushKey.handler([key]), ERROR_SUCCESS);
+    assert.equal(fns.RegDisableReflectionKey.handler([key]), ERROR_SUCCESS);
+    assert.equal(fns.RegEnableReflectionKey.handler([key]), ERROR_SUCCESS);
+    assert.equal(fns.RegDisableReflectionKey.handler([0x777]), ERROR_INVALID_HANDLE);
+    assert.equal(fns.RegDisablePredefinedCache.handler(), ERROR_SUCCESS);
     fns.RegCloseKey.handler([key]);
     assert.equal(fns.RegFlushKey.handler([key]), ERROR_INVALID_HANDLE);
 });

@@ -1104,6 +1104,13 @@ test('every setter answers with the value it replaced', ()=>{
     assert.equal(fns.GetTextColor.handler([hdc]), 0x00ff0000);
     assert.equal(fns.SetBkColor.handler([hdc, 0x00000080]), 0x00ffffff);
     assert.equal(fns.GetBkColor.handler([hdc]), 0x00000080);
+    assert.equal(fns.SetDCBrushColor.handler([hdc, 0x00123456]), 0x00ffffff);
+    assert.equal(fns.GetDCBrushColor.handler([hdc]), 0x00123456);
+    assert.equal(fns.SetDCPenColor.handler([hdc, 0x00654321]), 0x00000000);
+    assert.equal(fns.GetDCPenColor.handler([hdc]), 0x00654321);
+    assert.equal(fns.SetDCBrushColor.handler([0x1234, 0]), 0xffffffff, 'CLR_INVALID: no DC');
+    assert.notEqual(fns.GetStockObject.handler([18]), 0, 'DC_BRUSH');
+    assert.notEqual(fns.GetStockObject.handler([19]), 0, 'DC_PEN');
     assert.equal(fns.SetBkMode.handler([hdc, TRANSPARENT]), OPAQUE);
     assert.equal(fns.GetBkMode.handler([hdc]), TRANSPARENT);
     assert.equal(fns.SetROP2.handler([hdc, R2_XORPEN]), R2_COPYPEN);
@@ -1892,6 +1899,10 @@ test('every function declares the stack its arguments occupy', ()=>{
         GetTextColor: 4,
         SetBkColor: 8,
         GetBkColor: 4,
+        SetDCBrushColor: 8,
+        GetDCBrushColor: 4,
+        SetDCPenColor: 8,
+        GetDCPenColor: 4,
         SetBkMode: 8,
         GetBkMode: 4,
         SetROP2: 8,

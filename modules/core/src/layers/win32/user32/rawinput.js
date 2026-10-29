@@ -43,6 +43,8 @@ const RIM_INPUT = 0;
 const RIM_INPUTSINK = 1;
 const RIM_TYPEMOUSE = 0;
 const RIM_TYPEKEYBOARD = 1;
+/** Where a RAWINPUTHEADER keeps hDevice. */
+const HEADER_DEVICE = 8;
 const RI_KEY_BREAK = 0x0001;
 const RI_KEY_E0 = 0x0002;
 const RI_MOUSE_WHEEL = 0x0400;
@@ -61,6 +63,7 @@ const BUTTON_FLAGS = Object.freeze({
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_NOACCESS = 998;
 const FAILED = 0xffffffff;
 
 /**
@@ -71,6 +74,24 @@ const FAILED = 0xffffffff;
 const KEPT_REPORTS = 256;
 /** The first handle a report is given, away from zero and the small numbers. */
 const FIRST_REPORT = 0x00010000;
+
+/**
+ * The two devices behind raw input, as GetRawInputDeviceList lists them and
+ * every report of theirs names them in its header: a PS/2 mouse and
+ * keyboard as the ACPI enumerator names them, under their interface classes
+ * (GUID_DEVINTERFACE_MOUSE, GUID_DEVINTERFACE_KEYBOARD).
+ */
+const DEVICES = Object.freeze([
+    { handle: 0x00010041, type: RIM_TYPEMOUSE,
+        name: '\\\\?\\ACPI#PNP0F13#4&1c2e7a6&0#{378de44c-56ef-11d1-bc8c-00a0c91405dd}' },
+    { handle: 0x00010043, type: RIM_TYPEKEYBOARD,
+        name: '\\\\?\\ACPI#PNP0303#4&1c2e7a6&0#{884b96c3-56ef-11d1-bc8c-00a0c91405dd}' },
+]);
+const RAWINPUTDEVICELIST_SIZE = 8;
+const RID_DEVICE_INFO_SIZE = 32;
+const RIDI_PREPARSEDDATA = 0x20000005;
+const RIDI_DEVICENAME = 0x20000007;
+const RIDI_DEVICEINFO = 0x2000000b;
 
 /**
  * One event of a device, as the input layer hands it over.
@@ -125,6 +146,87 @@ export function createRawInput({ host, isWindow, focus, foreground }){
     };
 
     /**
+     * GetRawInputDeviceInfo in one width.
+     *
+     * @param {boolean} wide
+     */
+    const deviceInfo = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, command, data, sizeAt])=>{
+            const device = DEVICES.find(one=>one.handle === (handle >>> 0));
+            if (!device)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if ((sizeAt >>> 0) === 0)
+            {
+                return fail(ERROR_NOACCESS);
+            }
+            /** @type {Uint8Array} */
+            let bytes;
+            /** @type {number} */
+            let size;
+            switch (command >>> 0)
+            {
+                case RIDI_DEVICENAME: {
+                    const unit = wide ? 2 : 1;
+                    bytes = new Uint8Array((device.name.length + 1) * unit);
+                    [...device.name].forEach((ch, at)=>{
+                        bytes[at * unit] = ch.charCodeAt(0);
+                    });
+                    size = device.name.length + 1;
+                    break;
+                }
+                case RIDI_DEVICEINFO: {
+                    bytes = new Uint8Array(RID_DEVICE_INFO_SIZE);
+                    const view = new DataView(bytes.buffer);
+                    view.setUint32(0, RID_DEVICE_INFO_SIZE, true);
+                    view.setUint32(4, device.type, true);
+                    if (device.type === RIM_TYPEMOUSE)
+                    {
+                        // dwId, buttons, sample rate, no horizontal wheel.
+                        view.setUint32(8, 0x100, true);
+                        view.setUint32(12, 5, true);
+                        view.setUint32(16, 100, true);
+                    }
+                    else
+                    {
+                        // An enhanced 101/102-key keyboard: type 4, its
+                        // twelve function keys, three lights, 101 keys.
+                        view.setUint32(8, 4, true);
+                        view.setUint32(16, 1, true);
+                        view.setUint32(20, 12, true);
+                        view.setUint32(24, 3, true);
+                        view.setUint32(28, 101, true);
+                    }
+                    size = RID_DEVICE_INFO_SIZE;
+                    break;
+                }
+                case RIDI_PREPARSEDDATA:
+                    bytes = new Uint8Array(0);
+                    size = 0;
+                    break;
+                default:
+                    return fail(ERROR_INVALID_PARAMETER);
+            }
+            if ((data >>> 0) === 0)
+            {
+                writeU32s(host, sizeAt, [size]);
+                return 0;
+            }
+            if (readU32(host, sizeAt) < size)
+            {
+                writeU32s(host, sizeAt, [size]);
+                return fail(ERROR_INSUFFICIENT_BUFFER);
+            }
+            host.writeMemory(data >>> 0, bytes);
+            return size;
+        },
+    });
+
+
+    /**
      * The registration a collection's input goes by: its own, unless it is
      * excluded, and otherwise its page's.
      *
@@ -153,8 +255,8 @@ export function createRawInput({ host, isWindow, focus, foreground }){
     };
 
     /**
-     * A RAWINPUT: the header, then the device's own structure. hDevice is 0,
-     * as for input a program injects: no device handles are enumerated here.
+     * A RAWINPUT: the header, naming the device the list has for its type,
+     * then the device's own structure.
      *
      * @param {number} type @param {number} size @param {number} wParam
      */
@@ -163,6 +265,8 @@ export function createRawInput({ host, isWindow, focus, foreground }){
         const view = new DataView(bytes.buffer);
         view.setUint32(0, type, true);
         view.setUint32(4, size, true);
+        view.setUint32(HEADER_DEVICE, DEVICES.find(device=>device.type === type)?.handle ?? 0,
+            true);
         view.setUint32(12, wParam, true);
         return { bytes, view };
     };
@@ -334,6 +438,49 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                 return devices.length;
             },
         },
+
+        /**
+         * UINT GetRawInputDeviceList(PRAWINPUTDEVICELIST pRawInputDeviceList,
+         *   PUINT puiNumDevices, UINT cbSize)
+         *
+         * The mouse and the keyboard: a null list is told how many, a list
+         * too small is told so and how many.
+         */
+        GetRawInputDeviceList: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([list, countAt, size])=>{
+                if ((countAt >>> 0) === 0 || (size >>> 0) !== RAWINPUTDEVICELIST_SIZE)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((list >>> 0) === 0)
+                {
+                    writeU32s(host, countAt, [DEVICES.length]);
+                    return 0;
+                }
+                if (readU32(host, countAt) < DEVICES.length)
+                {
+                    writeU32s(host, countAt, [DEVICES.length]);
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                DEVICES.forEach((device, index)=>writeU32s(host,
+                    (list >>> 0) + index * RAWINPUTDEVICELIST_SIZE, [device.handle, device.type]));
+                return DEVICES.length;
+            },
+        },
+
+        /**
+         * UINT GetRawInputDeviceInfoA(HANDLE hDevice, UINT uiCommand, LPVOID pData,
+         *   PUINT pcbSize), and the W form
+         *
+         * The device's interface name (its size in characters), its
+         * RID_DEVICE_INFO, or its preparsed data, which a mouse or a
+         * keyboard has none of. A null buffer is told the size; one too
+         * small is told it and answered -1.
+         */
+        GetRawInputDeviceInfoA: deviceInfo(false),
+        GetRawInputDeviceInfoW: deviceInfo(true),
 
         /**
          * LRESULT DefRawInputProc(PRAWINPUT *paRawInput, INT nInput, UINT cbSizeHeader)

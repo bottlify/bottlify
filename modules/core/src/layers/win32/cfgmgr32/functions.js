@@ -28,7 +28,11 @@ export const CR = Object.freeze({
     NO_SUCH_DEVNODE: 0x0d,
     NO_MORE_LOG_CONF: 0x0e,
     NO_MORE_RES_DES: 0x0f,
+    BUFFER_SMALL: 0x1a,
 });
+
+/** CM_Get_DevNode_Status's bits for a node that is up: DN_DRIVER_LOADED | DN_STARTED. */
+const STARTED = 0x2 | 0x8;
 
 /** The device instance handle of the tree's root, the only node there is. */
 export const ROOT_DEVNODE = 1;
@@ -58,6 +62,52 @@ export function createCfgmgrFunctions(host){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address >>> 0, bytes);
     };
+
+    /** CM_Get_Parent, CM_Get_Child and CM_Get_Sibling: the root has no relative. */
+    const noRelative = {
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([out, devnode, flags])=>{
+            if ((out >>> 0) === 0)
+            {
+                return CR.INVALID_POINTER;
+            }
+            writeDword(out, 0);
+            if ((flags >>> 0) !== 0)
+            {
+                return CR.INVALID_FLAG;
+            }
+            return (devnode >>> 0) === ROOT_DEVNODE ? CR.NO_SUCH_DEVNODE : CR.INVALID_DEVNODE;
+        },
+    };
+
+    /** CM_Get_Device_ID in one width. @param {boolean} wide */
+    const deviceId = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([devnode, buffer, length, flags])=>{
+            if ((buffer >>> 0) === 0)
+            {
+                return CR.INVALID_POINTER;
+            }
+            if ((flags >>> 0) !== 0)
+            {
+                return CR.INVALID_FLAG;
+            }
+            if ((devnode >>> 0) !== ROOT_DEVNODE)
+            {
+                return CR.INVALID_DEVNODE;
+            }
+            const unit = wide ? 2 : 1;
+            const bytes = new Uint8Array((ROOT_ID.length + 1) * unit);
+            [...ROOT_ID].forEach((ch, at)=>{
+                bytes[at * unit] = ch.charCodeAt(0);
+            });
+            const room = (length >>> 0) * unit;
+            host.writeMemory(buffer >>> 0, bytes.subarray(0, Math.min(room, bytes.length)));
+            return room < bytes.length - unit ? CR.BUFFER_SMALL : CR.SUCCESS;
+        },
+    });
 
     return {
         /**
@@ -156,6 +206,56 @@ export function createCfgmgrFunctions(host){
             /** @param {number[]} args */
             handler: ([, buffer])=>((buffer >>> 0) === 0 ? CR.INVALID_POINTER : CR.INVALID_RES_DES),
         },
+
+        /**
+         * CONFIGRET CM_Get_DevNode_Status(PULONG pulStatus, PULONG pulProblemNumber,
+         *     DEVINST dnDevInst, ULONG ulFlags)
+         *
+         * The root is up, its driver loaded, with no problem.
+         */
+        CM_Get_DevNode_Status: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([status, problem, devnode, flags])=>{
+                if ((status >>> 0) === 0 || (problem >>> 0) === 0)
+                {
+                    return CR.INVALID_POINTER;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return CR.INVALID_FLAG;
+                }
+                if ((devnode >>> 0) !== ROOT_DEVNODE)
+                {
+                    return CR.INVALID_DEVNODE;
+                }
+                writeDword(status, STARTED);
+                writeDword(problem, 0);
+                return CR.SUCCESS;
+            },
+        },
+
+        /**
+         * CONFIGRET CM_Get_Parent(PDEVINST pdnDevInst, DEVINST dnDevInst, ULONG ulFlags),
+         * CM_Get_Child and CM_Get_Sibling alike
+         *
+         * The root is the whole tree: it has no parent, no child and no
+         * sibling, and the handle is cleared to say so.
+         */
+        CM_Get_Parent: noRelative,
+        CM_Get_Child: noRelative,
+        CM_Get_Sibling: noRelative,
+
+        /**
+         * CONFIGRET CM_Get_Device_IDA(DEVINST dnDevInst, PSTR Buffer, ULONG BufferLen,
+         *     ULONG ulFlags), and the W form
+         *
+         * The root's ID; a buffer that cannot hold it is CR_BUFFER_SMALL
+         * with as much as fits, a buffer with no room for the terminator
+         * takes the ID without one.
+         */
+        CM_Get_Device_IDA: deviceId(false),
+        CM_Get_Device_IDW: deviceId(true),
 
         /** CONFIGRET CM_Free_Log_Conf_Handle(LOG_CONF lcLogConf) */
         CM_Free_Log_Conf_Handle: {

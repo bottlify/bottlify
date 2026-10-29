@@ -497,6 +497,8 @@ const HWND_THREAD_MESSAGES = 0xffffffff;
 /** What PostThreadMessage reports for an identifier that names no thread. */
 const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_INVALID_PARAMETER = 87;
+/** FLASHWINFO.dwFlags: the caption is what flashes here. */
+const FLASHW_CAPTION = 0x1;
 /** A pointer the call was to write through, and could not. */
 const ERROR_NOACCESS = 998;
 /** Another thread's window, which only its own may destroy. */
@@ -7906,6 +7908,31 @@ export function createWindowFunctions(host){
                     painted();
                 }
                 return before ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL FlashWindowEx(PFLASHWINFO pfwi)
+         *
+         * FLASHWINFO is cbSize, hwnd, dwFlags, uCount, dwTimeout. The
+         * caption flashes as FlashWindow draws it, once: there is no timer
+         * here to repeat it, and the tray part is the host's. FLASHW_STOP
+         * puts the caption back. Answers as FlashWindow does.
+         */
+        FlashWindowEx: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([info])=>{
+                const view = (info >>> 0) === 0 ? null
+                    : new DataView(host.readMemory(info >>> 0, 20).slice().buffer);
+                if (!view || view.getUint32(0, true) !== 20)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const flags = view.getUint32(8, true);
+                const caption = (flags & FLASHW_CAPTION) !== 0;
+                return table.FlashWindow.handler([view.getUint32(4, true), caption ? 1 : 0]);
             },
         },
 
