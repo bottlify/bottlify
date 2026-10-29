@@ -253,11 +253,7 @@ const DISPLAY_ADAPTER_NAME = '\\\\.\\DISPLAY1';
  */
 const DEFAULT_MONITOR_ID = 'MONITOR\\DEFAULT\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0000';
 
-/**
- * SendInput's contract: one INPUT per event, 28 bytes on 32-bit Windows --
- * a type, then the union of every event kind laid out at its widest.
- */
-const INPUT_SIZE = 28;
+/** SendInput's event kinds: the INPUT's type (its layout is `userLayouts`'). */
 const INPUT_MOUSE = 0;
 const INPUT_KEYBOARD = 1;
 const INPUT_HARDWARE = 2;
@@ -4374,7 +4370,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([count, inputs, size])=>{
-                if ((size | 0) !== INPUT_SIZE || (count >>> 0) === 0)
+                const { INPUT } = layouts;
+                if ((size | 0) !== INPUT.SIZE || (count >>> 0) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -4389,18 +4386,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 let inserted = 0;
                 for (let index = 0; index < events; index++)
                 {
-                    const piece = at + index * INPUT_SIZE;
-                    const type = readU32(piece);
+                    const piece = at + index * INPUT.SIZE;
+                    const type = readU32(piece + INPUT.type);
                     if (type === INPUT_MOUSE)
                     {
-                        injectMouse({ dx: readI32(piece + 4), dy: readI32(piece + 8),
-                            data: readU32(piece + 12), flags: readU32(piece + 16) });
+                        injectMouse({ dx: readI32(piece + INPUT.dx), dy: readI32(piece + INPUT.dy),
+                            data: readU32(piece + INPUT.mouseData),
+                            flags: readU32(piece + INPUT.dwFlags) });
                         inserted++;
                     }
                     else if (type === INPUT_KEYBOARD)
                     {
-                        injectKeyboard({ wVk: readU16(piece + 4),
-                            wScan: readU16(piece + 6), flags: readU32(piece + 8) });
+                        injectKeyboard({ wVk: readU16(piece + INPUT.wVk),
+                            wScan: readU16(piece + INPUT.wScan),
+                            flags: readU32(piece + INPUT.keyFlags) });
                         inserted++;
                     }
                     else if (type === INPUT_HARDWARE)

@@ -114,6 +114,29 @@ const WINDOWPOS32 = Object.freeze({
 const WINDOWPOS64 = Object.freeze({
     hwnd: 0, hwndInsertAfter: 8, x: 16, y: 20, cx: 24, cy: 28, flags: 32, SIZE: 40,
 });
+/** CBTACTIVATESTRUCT: whether a click did it, and the window active until now. */
+const CBTACTIVATESTRUCT32 = Object.freeze({ fMouse: 0, hWndActive: 4, SIZE: 8 });
+const CBTACTIVATESTRUCT64 = Object.freeze({ fMouse: 0, hWndActive: 8, SIZE: 16 });
+/** MOUSEHOOKSTRUCT: the point on the screen, the window, the hit, the extra word. */
+const MOUSEHOOKSTRUCT32 = Object.freeze({
+    ptX: 0, ptY: 4, hwnd: 8, wHitTestCode: 12, dwExtraInfo: 16, SIZE: 20,
+});
+const MOUSEHOOKSTRUCT64 = Object.freeze({
+    ptX: 0, ptY: 4, hwnd: 8, wHitTestCode: 16, dwExtraInfo: 24, SIZE: 32,
+});
+/**
+ * INPUT, as SendInput reads it: the type, then the union of MOUSEINPUT,
+ * KEYBDINPUT and HARDWAREINPUT, whose dwExtraInfo puts it on an eight-byte
+ * boundary at 64 bits. The offsets are the union members' from the INPUT.
+ */
+const INPUT32 = Object.freeze({
+    type: 0, dx: 4, dy: 8, mouseData: 12, dwFlags: 16, wVk: 4, wScan: 6, keyFlags: 8, SIZE: 28,
+});
+const INPUT64 = Object.freeze({
+    type: 0, dx: 8, dy: 12, mouseData: 16, dwFlags: 20, wVk: 8, wScan: 10, keyFlags: 12,
+    SIZE: 40,
+});
+
 /** NCCALCSIZE_PARAMS: three RECTs, then the WINDOWPOS's address. */
 const NCCALCSIZE_PARAMS32 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 52 });
 const NCCALCSIZE_PARAMS64 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 56 });
@@ -125,6 +148,7 @@ const WIDE = Object.freeze({
     lpszClassName: 'signed', hIconSm: 'signed', wParam: 'unsigned', lParam: 'signed',
     hdc: 'signed', lpCreateParams: 'signed', hMenu: 'signed', hwndParent: 'signed',
     lpszName: 'signed', lpszClass: 'signed', lpcs: 'signed', lppos: 'signed',
+    hWndActive: 'signed', dwExtraInfo: 'unsigned',
 });
 
 /**
@@ -138,6 +162,9 @@ const WIDE = Object.freeze({
  * @property {Record<string, number>} CBT_CREATEWNDA
  * @property {Record<string, number>} WINDOWPOS
  * @property {Record<string, number>} NCCALCSIZE_PARAMS
+ * @property {Record<string, number>} CBTACTIVATESTRUCT
+ * @property {Record<string, number>} MOUSEHOOKSTRUCT
+ * @property {Record<string, number>} INPUT
  */
 
 /** @type {Map<number, UserLayouts>} */
@@ -164,6 +191,9 @@ export function userLayouts(pointerSize = 4){
             CBT_CREATEWNDA: wide ? CBT_CREATEWNDA64 : CBT_CREATEWNDA32,
             WINDOWPOS: wide ? WINDOWPOS64 : WINDOWPOS32,
             NCCALCSIZE_PARAMS: wide ? NCCALCSIZE_PARAMS64 : NCCALCSIZE_PARAMS32,
+            CBTACTIVATESTRUCT: wide ? CBTACTIVATESTRUCT64 : CBTACTIVATESTRUCT32,
+            MOUSEHOOKSTRUCT: wide ? MOUSEHOOKSTRUCT64 : MOUSEHOOKSTRUCT32,
+            INPUT: wide ? INPUT64 : INPUT32,
         });
         LAYOUTS.set(pointerSize, layouts);
     }

@@ -138,7 +138,16 @@ test('a 64-bit process\'s structures have their pointers eight bytes wide, as wi
             L.CREATESTRUCTA.dwExStyle, L.CREATESTRUCTA.SIZE], [32, 48, 56, 72, 80]);
         assert.deepEqual([L.WINDOWPOS.x, L.WINDOWPOS.flags, L.WINDOWPOS.SIZE], [16, 32, 40]);
         assert.deepEqual([L.NCCALCSIZE_PARAMS.lppos, L.NCCALCSIZE_PARAMS.SIZE], [48, 56]);
+        assert.deepEqual([L.CBTACTIVATESTRUCT.hWndActive, L.CBTACTIVATESTRUCT.SIZE], [8, 16]);
+        assert.deepEqual([L.MOUSEHOOKSTRUCT.hwnd, L.MOUSEHOOKSTRUCT.wHitTestCode,
+            L.MOUSEHOOKSTRUCT.dwExtraInfo, L.MOUSEHOOKSTRUCT.SIZE], [8, 16, 24, 32]);
+        // INPUT's union holds a ULONG_PTR, so it starts on eight bytes.
+        assert.deepEqual([L.INPUT.dx, L.INPUT.dwFlags, L.INPUT.wVk, L.INPUT.keyFlags,
+            L.INPUT.SIZE], [8, 20, 8, 12, 40]);
         assert.equal(userLayouts(4).MSG, MSG, 'and a 32-bit one\'s are the ones it always had');
+        assert.deepEqual([userLayouts(4).INPUT.dx, userLayouts(4).INPUT.SIZE,
+            userLayouts(4).MOUSEHOOKSTRUCT.SIZE, userLayouts(4).CBTACTIVATESTRUCT.SIZE],
+        [4, 28, 20, 8]);
     });
 
 test('a 64-bit field widens a dword as its type does: a handle and an LPARAM by sign', ()=>{

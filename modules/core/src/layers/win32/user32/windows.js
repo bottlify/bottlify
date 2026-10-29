@@ -213,8 +213,6 @@ const WH_CBT = 5;
 const WH_KEYBOARD = 2;
 const WH_MOUSE = 7;
 const WH_GETMESSAGE = 3;
-/** MOUSEHOOKSTRUCT: pt.x, pt.y, hwnd, wHitTestCode, dwExtraInfo. */
-const MOUSEHOOKSTRUCT_SIZE = 20;
 /** A keyboard hook's codes: the message is being taken, or only looked at. */
 const HC_ACTION = 0;
 const HC_NOREMOVE = 3;
@@ -2108,10 +2106,13 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        const at = host.allocate?.(8) ?? 0;
+        const at = host.allocate?.(L.CBTACTIVATESTRUCT.SIZE) ?? 0;
         if (at !== 0)
         {
-            writeU32s(host, at, [how === WA_CLICKACTIVE ? 1 : 0, active]);
+            const bytes = new Uint8Array(L.CBTACTIVATESTRUCT.SIZE);
+            putFields(new DataView(bytes.buffer), 0, L, L.CBTACTIVATESTRUCT,
+                { fMouse: how === WA_CLICKACTIVE ? 1 : 0, hWndActive: active });
+            host.writeMemory(at, bytes);
         }
         return andThen(callHook(WH_CBT, null, [HCBT_ACTIVATE, target, at], thread), answer=>{
             if (at !== 0)
@@ -5015,7 +5016,7 @@ export function createWindowFunctions(host){
      */
     const askKeyboardHooks = (entry, code, thread)=>(!KEY_MESSAGES.has(entry.message >>> 0)
         || chainOf(WH_KEYBOARD, thread).length === 0 ? 0
-        : callHook(WH_KEYBOARD, null, [code, entry.wParam >>> 0, entry.lParam >>> 0], thread));
+        : callHook(WH_KEYBOARD, null, [code, entry.wParam >>> 0, entry.lParam | 0], thread));
 
     /**
      * A mouse message being retrieved, shown to the thread's WH_MOUSE hooks
@@ -5036,13 +5037,17 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        const at = (host.allocate?.(MOUSEHOOKSTRUCT_SIZE) ?? 0) >>> 0;
+        const at = (host.allocate?.(L.MOUSEHOOKSTRUCT.SIZE) ?? 0) >>> 0;
         if (at === 0)
         {
             return 0;
         }
-        writeU32s(host, at, [entry.x | 0, entry.y | 0, entry.hwnd >>> 0,
-            client ? HTCLIENT : entry.wParam & 0xffff, 0]);
+        const bytes = new Uint8Array(L.MOUSEHOOKSTRUCT.SIZE);
+        putFields(new DataView(bytes.buffer), 0, L, L.MOUSEHOOKSTRUCT, {
+            ptX: entry.x | 0, ptY: entry.y | 0, hwnd: entry.hwnd >>> 0,
+            wHitTestCode: client ? HTCLIENT : entry.wParam & 0xffff, dwExtraInfo: 0,
+        });
+        host.writeMemory(at, bytes);
         return andThen(callHook(WH_MOUSE, null, [code, kind, at], thread), answer=>{
             host.release?.(at);
             return answer;
@@ -7670,7 +7675,9 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                return callHook(hook.type, hook.handle, [code, wParam, lParam],
+                // At 64 bits the next hook is handed the LPARAM as a message's
+                // is (decision A54): what this handler reads is its low half.
+                return callHook(hook.type, hook.handle, [code, wParam >>> 0, lParam | 0],
                     host.callerThread?.());
             },
         },
