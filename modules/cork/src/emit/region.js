@@ -1601,6 +1601,10 @@ export class RegionEmitter {
             this.open('returned', EMPTY);
         }
         this.open('out', EMPTY);
+        // The ways out that hand on an empty record (`exitWithKind`) empty it
+        // here, once: each emptied it on its own, and the zeros were moves
+        // into the epilogue's registers at every one of them.
+        this.open('emptied', EMPTY);
         if (this.x87.active)
         {
             x87EntryCheck(this);
@@ -1624,6 +1628,8 @@ export class RegionEmitter {
         // label forever, so leave instead.
         b.unreachable();
         this.close(); // dispatch
+        this.close(); // emptied
+        this.clearRecord();
         this.close(); // out
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
         {
@@ -4653,17 +4659,14 @@ export class RegionEmitter {
         {
             x87Normalise(this);
         }
-        if ((live & ARITH_FLAGS) !== 0)
+        // Whoever runs next writes the six before reading one: the record
+        // goes on empty, so the epilogue's read of it at every way out keeps
+        // no field of it alive, nor its computation, across the loop the
+        // way out sits in -- a jump back's spent budget, a store's page check.
+        const emptied = (live & ARITH_FLAGS) === 0;
+        if (!emptied)
         {
             this.payResult();
-        }
-        else
-        {
-            // Whoever runs next writes the six before reading one: the record
-            // goes on empty, so the epilogue's read of it at every way out keeps
-            // no field of it alive, nor its computation, across the loop the
-            // way out sits in -- a jump back's spent budget, a store's page check.
-            this.clearRecord();
         }
         // This way out has the owed lanes; the block's way on still owes them.
         this.settleLows(this.pendingLows.keys(), false);
@@ -4679,7 +4682,7 @@ export class RegionEmitter {
         {
             this.b.i32const(kind | vector << 8).localSet(Local.t0);
         }
-        this.b.br(this.depthOf('out'));
+        this.b.br(this.depthOf(emptied ? 'emptied' : 'out'));
     }
 }
 
