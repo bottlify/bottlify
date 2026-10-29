@@ -23,6 +23,7 @@
  */
 
 import { HKEY_LOCAL_MACHINE, REG_SZ, REG_EXPAND_SZ, REG_DWORD } from './registry.js';
+import { WELL_KNOWN_SIDS, aceBytes, aclBytes, selfRelativeDescriptor, sidBytes } from './tokens.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 const ERROR_INVALID_HANDLE = 6;
@@ -63,6 +64,63 @@ const MAX_TEXT = 0x8000;
 
 /** ChangeServiceConfig's "leave this one alone". */
 const SERVICE_NO_CHANGE = 0xffffffff;
+
+/** QueryServiceStatusEx's one level, and the SERVICE_STATUS_PROCESS it writes. */
+const SC_STATUS_PROCESS_INFO = 0;
+const SERVICE_STATUS_PROCESS_SIZE = 36;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_INVALID_ADDRESS = 487;
+const ERROR_SERVICE_NEVER_STARTED = 1077;
+const ERROR_INVALID_SECURITY_DESCR = 1338;
+
+/**
+ * ChangeServiceConfig2's levels, winsvc.h's from the description (1) to
+ * launch protection (12); the tenth and eleventh are not defined.
+ */
+const SERVICE_CONFIG_DESCRIPTION = 1;
+const CONFIG2_LEVELS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 12]);
+
+/** A security descriptor's header, and what its control word says. */
+const SD_SIZE = 20;
+const SECURITY_DESCRIPTOR_REVISION = 1;
+const SE_DACL_PRESENT = 0x0004;
+const SE_SELF_RELATIVE = 0x8000;
+const OWNER_SECURITY_INFORMATION = 0x1;
+const GROUP_SECURITY_INFORMATION = 0x2;
+const DACL_SECURITY_INFORMATION = 0x4;
+
+/** Rights on a service: all of them, and reading, asking its state and starting it. */
+const SERVICE_ALL_ACCESS = 0xf01ff;
+const SERVICE_READ_AND_START = 0x2019d;
+const ACCESS_ALLOWED_ACE_TYPE = 0;
+/** The interactive user and service logons, whom the default lets start a service. */
+const INTERACTIVE_SID = { authority: 5, subAuthorities: [4] };
+const SERVICE_LOGON_SID = { authority: 5, subAuthorities: [6] };
+
+/**
+ * A service's security, part by part: each SID and the DACL as bytes, the
+ * DACL null for the null DACL and absent for none.
+ *
+ * @typedef {{ owner?: Uint8Array, group?: Uint8Array, dacl?: Uint8Array | null }} ServiceSecurity
+ */
+
+/**
+ * The descriptor the manager gives a service it creates, as Windows' own
+ * default reads.
+ *
+ * @returns {ServiceSecurity}
+ */
+const defaultSecurity = ()=>({
+    owner: sidBytes(WELL_KNOWN_SIDS.administrators),
+    group: sidBytes(WELL_KNOWN_SIDS.system),
+    dacl: aclBytes([
+        aceBytes(ACCESS_ALLOWED_ACE_TYPE, 0, SERVICE_ALL_ACCESS, sidBytes(WELL_KNOWN_SIDS.system)),
+        aceBytes(ACCESS_ALLOWED_ACE_TYPE, 0, SERVICE_ALL_ACCESS,
+            sidBytes(WELL_KNOWN_SIDS.administrators)),
+        aceBytes(ACCESS_ALLOWED_ACE_TYPE, 0, SERVICE_READ_AND_START, sidBytes(INTERACTIVE_SID)),
+        aceBytes(ACCESS_ALLOWED_ACE_TYPE, 0, SERVICE_READ_AND_START, sidBytes(SERVICE_LOGON_SID)),
+    ]),
+});
 
 /**
  * Handles of their own, above the registry's and the kernel's: an SC_HANDLE is
@@ -135,6 +193,35 @@ export function createServiceFunctions(host){
     const text = (address, maxLength)=>((address >>> 0) === 0
         ? null
         : host.readCString(address >>> 0, maxLength));
+
+    /**
+     * A string argument in the width the call was made in: null for NULL,
+     * and null too for a wide one when nothing here can read memory.
+     *
+     * @param {boolean} wide @param {number} address @param {number} maxLength
+     */
+    const textIn = (wide, address, maxLength)=>{
+        if (!wide)
+        {
+            return text(address, maxLength);
+        }
+        if ((address >>> 0) === 0 || !host.readMemory)
+        {
+            return null;
+        }
+        let read = '';
+        for (let at = address >>> 0; read.length < maxLength; at += 2)
+        {
+            const unit = host.readMemory(at, 2);
+            const code = unit[0] | unit[1] << 8;
+            if (code === 0)
+            {
+                break;
+            }
+            read += String.fromCharCode(code);
+        }
+        return read;
+    };
 
     /** The key every service lives under, made if this is the first ask. */
     const servicesKey = ()=>hive.create(
@@ -295,8 +382,6 @@ export function createServiceFunctions(host){
     const queryConfig = wide=>({
         argBytes: 16,
         handler: (/** @type {number[]} */ [service, buffer, size, needed])=>{
-            const ERROR_INSUFFICIENT_BUFFER = 122;
-            const ERROR_INVALID_ADDRESS = 487;
             const HEADER = 36;
             const object = held(service, 'service');
             const name = object ? /** @type {string} */ (object.name) : '';
@@ -443,6 +528,164 @@ export function createServiceFunctions(host){
         },
     });
 
+    /** CreateService in either width. @param {boolean} wide */
+    const createService = wide=>({
+        argBytes: 52,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [manager, nameAddress, displayAddress, , type, start,
+            errorControl, pathAddress, , , , startNameAddress])=>{
+            if (!held(manager, 'manager'))
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            const name = textIn(wide, nameAddress, MAX_SERVICE_NAME);
+            if (!name)
+            {
+                return fail(ERROR_INVALID_NAME);
+            }
+            if (serviceKey(name))
+            {
+                return fail(ERROR_SERVICE_EXISTS);
+            }
+            configure(hive.create(servicesKey(), name).key, {
+                type: type >>> 0,
+                start: start >>> 0,
+                errorControl: errorControl >>> 0,
+                imagePath: textIn(wide, pathAddress, MAX_TEXT),
+                displayName: textIn(wide, displayAddress, MAX_TEXT),
+                // A service with no account named runs as the system.
+                objectName: textIn(wide, startNameAddress, MAX_TEXT) ?? 'LocalSystem',
+            });
+            return open({ kind: 'service', name });
+        },
+    });
+
+    /** ChangeServiceConfig in either width. @param {boolean} wide */
+    const changeConfig = wide=>({
+        argBytes: 44,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [service, type, start, errorControl, pathAddress, , , ,
+            startNameAddress, , displayAddress])=>{
+            const object = held(service, 'service');
+            const key = object ? serviceKey(/** @type {string} */ (object.name)) : null;
+            if (!key)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            configure(key, {
+                type: type >>> 0,
+                start: start >>> 0,
+                errorControl: errorControl >>> 0,
+                imagePath: textIn(wide, pathAddress, MAX_TEXT),
+                displayName: textIn(wide, displayAddress, MAX_TEXT),
+                objectName: textIn(wide, startNameAddress, MAX_TEXT),
+            });
+            return 1;
+        },
+    });
+
+    /** ChangeServiceConfig2 in either width. @param {boolean} wide */
+    const changeConfig2 = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [service, level, info])=>{
+            const object = held(service, 'service');
+            const key = object ? serviceKey(/** @type {string} */ (object.name)) : null;
+            if (!key)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if (!CONFIG2_LEVELS.has(level >>> 0))
+            {
+                return fail(ERROR_INVALID_LEVEL);
+            }
+            if ((info >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_ADDRESS);
+            }
+            if ((level >>> 0) === SERVICE_CONFIG_DESCRIPTION)
+            {
+                // SERVICE_DESCRIPTION: one pointer to the text, NULL to leave it.
+                const description = textIn(wide, readDword(info), MAX_TEXT);
+                if (description !== null)
+                {
+                    hive.setValue(key, 'Description', REG_SZ, sz(description));
+                }
+            }
+            return 1;
+        },
+    });
+
+    /**
+     * StartService in either width. Nothing here can host a service process,
+     * so the start fails as one that never reported back would.
+     *
+     * @param {string} api
+     */
+    const startService = api=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [service])=>{
+            const object = held(service, 'service');
+            if (!object)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            host.divergence?.(api,
+                `${object.name}: no process hosts a service here; reported as timed out`);
+            return fail(ERROR_SERVICE_REQUEST_TIMEOUT);
+        },
+    });
+
+    /**
+     * The security SetServiceObjectSecurity gave each service by name; a
+     * service with none has the manager's default.
+     *
+     * @type {Map<string, ServiceSecurity>}
+     */
+    const security = new Map();
+
+    /**
+     * The parts of a descriptor the caller made, absolute -- pointers -- or
+     * self-relative -- offsets from its start -- or null for one that is
+     * not a descriptor. A DACL present with no list is the null DACL.
+     *
+     * @param {number} at
+     * @returns {ServiceSecurity | null}
+     */
+    const descriptorParts = at=>{
+        if (at === 0 || !host.readMemory)
+        {
+            return null;
+        }
+        const head = host.readMemory(at, SD_SIZE).slice();
+        if (head[0] !== SECURITY_DESCRIPTOR_REVISION)
+        {
+            return null;
+        }
+        const view = new DataView(head.buffer);
+        const control = view.getUint16(2, true);
+        const relative = (control & SE_SELF_RELATIVE) !== 0;
+        /** @param {number} slot */
+        const part = slot=>{
+            const value = view.getUint32(slot, true);
+            return value === 0 ? 0 : relative ? (at + value) >>> 0 : value;
+        };
+        /** @param {number} sid */
+        const sidAt = sid=>(sid === 0 ? undefined
+            : host.readMemory?.(sid, 8 + 4 * (host.readMemory?.(sid, 2)[1] ?? 0)).slice());
+        const dacl = part(16);
+        /** @type {ServiceSecurity} */
+        const parts = { owner: sidAt(part(4)), group: sidAt(part(8)) };
+        if ((control & SE_DACL_PRESENT) !== 0)
+        {
+            // An ACL says its own size in its header's third and fourth bytes.
+            const size = dacl === 0 ? 0 : readDword(dacl) >>> 16;
+            parts.dacl = dacl === 0 ? null : host.readMemory(dacl, size).slice();
+        }
+        return parts;
+    };
+
     return {
         /**
          * SC_HANDLE OpenSCManagerA(LPCSTR lpMachineName, LPCSTR lpDatabaseName,
@@ -499,66 +742,32 @@ export function createServiceFunctions(host){
          *   DWORD dwStartType, DWORD dwErrorControl, LPCSTR lpBinaryPathName,
          *   LPCSTR lpLoadOrderGroup, LPDWORD lpdwTagId, LPCSTR lpDependencies,
          *   LPCSTR lpServiceStartName, LPCSTR lpPassword)
+         * SC_HANDLE CreateServiceW(..., LPCWSTR ...)
          */
-        CreateServiceA: {
-            argBytes: 52,
-            /** @param {number[]} args */
-            handler: ([manager, nameAddress, displayAddress, , type, start, errorControl,
-                pathAddress, , , , startNameAddress])=>{
-                if (!held(manager, 'manager'))
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                const name = text(nameAddress, MAX_SERVICE_NAME);
-                if (!name)
-                {
-                    return fail(ERROR_INVALID_NAME);
-                }
-                if (serviceKey(name))
-                {
-                    return fail(ERROR_SERVICE_EXISTS);
-                }
-                configure(hive.create(servicesKey(), name).key, {
-                    type: type >>> 0,
-                    start: start >>> 0,
-                    errorControl: errorControl >>> 0,
-                    imagePath: text(pathAddress, MAX_TEXT),
-                    displayName: text(displayAddress, MAX_TEXT),
-                    // A service with no account named runs as the system.
-                    objectName: text(startNameAddress, MAX_TEXT) ?? 'LocalSystem',
-                });
-                return open({ kind: 'service', name });
-            },
-        },
+        CreateServiceA: createService(false),
+        CreateServiceW: createService(true),
 
         /**
          * BOOL ChangeServiceConfigA(SC_HANDLE hService, DWORD dwServiceType,
          *   DWORD dwStartType, DWORD dwErrorControl, LPCSTR lpBinaryPathName,
          *   LPCSTR lpLoadOrderGroup, LPDWORD lpdwTagId, LPCSTR lpDependencies,
          *   LPCSTR lpServiceStartName, LPCSTR lpPassword, LPCSTR lpDisplayName)
+         * BOOL ChangeServiceConfigW(..., LPCWSTR ...)
          */
-        ChangeServiceConfigA: {
-            argBytes: 44,
-            /** @param {number[]} args */
-            handler: ([service, type, start, errorControl, pathAddress, , , ,
-                startNameAddress, , displayAddress])=>{
-                const object = held(service, 'service');
-                const key = object ? serviceKey(/** @type {string} */ (object.name)) : null;
-                if (!key)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                configure(key, {
-                    type: type >>> 0,
-                    start: start >>> 0,
-                    errorControl: errorControl >>> 0,
-                    imagePath: text(pathAddress, MAX_TEXT),
-                    displayName: text(displayAddress, MAX_TEXT),
-                    objectName: text(startNameAddress, MAX_TEXT),
-                });
-                return 1;
-            },
-        },
+        ChangeServiceConfigA: changeConfig(false),
+        ChangeServiceConfigW: changeConfig(true),
+
+        /**
+         * BOOL ChangeServiceConfig2A(SC_HANDLE hService, DWORD dwInfoLevel, LPVOID lpInfo)
+         * BOOL ChangeServiceConfig2W(SC_HANDLE hService, DWORD dwInfoLevel, LPVOID lpInfo)
+         *
+         * The optional configuration. A description is kept where the
+         * manager keeps it, the key's `Description`, and a NULL one leaves it
+         * as it was; the other levels Windows defines are taken and, there
+         * being no service to fail, restart or start late, change nothing.
+         */
+        ChangeServiceConfig2A: changeConfig2(false),
+        ChangeServiceConfig2W: changeConfig2(true),
 
         /**
          * BOOL StartServiceA(SC_HANDLE hService, DWORD dwNumServiceArgs,
@@ -567,20 +776,10 @@ export function createServiceFunctions(host){
          * Nothing here can host a service process, so the start fails as one
          * that never reported back would.
          */
-        StartServiceA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([service])=>{
-                const object = held(service, 'service');
-                if (!object)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                host.divergence?.('StartServiceA',
-                    `${object.name}: no process hosts a service here; reported as timed out`);
-                return fail(ERROR_SERVICE_REQUEST_TIMEOUT);
-            },
-        },
+        StartServiceA: startService('StartServiceA'),
+
+        /** BOOL StartServiceW(SC_HANDLE hService, DWORD dwNumServiceArgs, LPCWSTR *lpServiceArgVectors) */
+        StartServiceW: startService('StartServiceW'),
 
         /**
          * BOOL ControlService(SC_HANDLE hService, DWORD dwControl,
@@ -607,7 +806,6 @@ export function createServiceFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([service, status])=>{
-                const ERROR_SERVICE_NEVER_STARTED = 1077;
                 const object = held(service, 'service');
                 if (!object)
                 {
@@ -624,6 +822,141 @@ export function createServiceFunctions(host){
                 view.setUint32(4, SERVICE_STOPPED, true);
                 view.setUint32(12, ERROR_SERVICE_NEVER_STARTED, true);
                 host.writeMemory?.(status >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL QueryServiceStatusEx(SC_HANDLE hService, SC_STATUS_TYPE InfoLevel,
+         *   LPBYTE lpBuffer, DWORD cbBufSize, LPDWORD pcbBytesNeeded)
+         *
+         * SERVICE_STATUS_PROCESS, the one level there is: QueryServiceStatus's
+         * answer with no process behind it and no flags. A buffer smaller
+         * than the record says how big it must be.
+         */
+        QueryServiceStatusEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([service, level, buffer, size, needed])=>{
+                const object = held(service, 'service');
+                if (!object)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((level >>> 0) !== SC_STATUS_PROCESS_INFO)
+                {
+                    return fail(ERROR_INVALID_LEVEL);
+                }
+                if ((size >>> 0) < SERVICE_STATUS_PROCESS_SIZE || (buffer >>> 0) === 0)
+                {
+                    if ((needed >>> 0) !== 0)
+                    {
+                        writeDword(needed, SERVICE_STATUS_PROCESS_SIZE);
+                    }
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                const key = serviceKey(/** @type {string} */ (object.name));
+                const bytes = new Uint8Array(SERVICE_STATUS_PROCESS_SIZE);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, key ? numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS)
+                    : SERVICE_WIN32_OWN_PROCESS, true);
+                view.setUint32(4, SERVICE_STOPPED, true);
+                view.setUint32(12, ERROR_SERVICE_NEVER_STARTED, true);
+                host.writeMemory?.(buffer >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL QueryServiceObjectSecurity(SC_HANDLE hService,
+         *   SECURITY_INFORMATION dwSecurityInformation,
+         *   PSECURITY_DESCRIPTOR lpSecurityDescriptor, DWORD cbBufSize,
+         *   LPDWORD pcbBytesNeeded)
+         *
+         * The service's descriptor, self-relative, with the parts asked for:
+         * the ones SetServiceObjectSecurity gave it, or the manager's default
+         * -- the administrators own it and, with the system, may do anything
+         * to it; interactive and service users may read it, ask its state and
+         * start it.
+         */
+        QueryServiceObjectSecurity: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([service, information, buffer, size, needed])=>{
+                const object = held(service, 'service');
+                if (!object)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const kept = security.get(/** @type {string} */ (object.name)) ?? defaultSecurity();
+                const asked = information >>> 0;
+                /** @type {{ owner?: Uint8Array, group?: Uint8Array, dacl?: Uint8Array | null }} */
+                const parts = {};
+                if ((asked & OWNER_SECURITY_INFORMATION) !== 0 && kept.owner)
+                {
+                    parts.owner = kept.owner;
+                }
+                if ((asked & GROUP_SECURITY_INFORMATION) !== 0 && kept.group)
+                {
+                    parts.group = kept.group;
+                }
+                if ((asked & DACL_SECURITY_INFORMATION) !== 0 && kept.dacl !== undefined)
+                {
+                    parts.dacl = kept.dacl;
+                }
+                const { bytes } = selfRelativeDescriptor(parts);
+                if ((needed >>> 0) !== 0)
+                {
+                    writeDword(needed, bytes.length);
+                }
+                if ((size >>> 0) < bytes.length || (buffer >>> 0) === 0)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory?.(buffer >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetServiceObjectSecurity(SC_HANDLE hService,
+         *   SECURITY_INFORMATION dwSecurityInformation,
+         *   PSECURITY_DESCRIPTOR lpSecurityDescriptor)
+         *
+         * The parts named, taken from the descriptor -- absolute or
+         * self-relative -- and kept for the service: what an installer that
+         * lets ordinary users start its service writes, and reads back.
+         */
+        SetServiceObjectSecurity: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([service, information, descriptor])=>{
+                const object = held(service, 'service');
+                if (!object)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const read = descriptorParts(descriptor >>> 0);
+                if (!read)
+                {
+                    return fail(ERROR_INVALID_SECURITY_DESCR);
+                }
+                const name = /** @type {string} */ (object.name);
+                const kept = { ...security.get(name) ?? defaultSecurity() };
+                const asked = information >>> 0;
+                if ((asked & OWNER_SECURITY_INFORMATION) !== 0)
+                {
+                    kept.owner = read.owner;
+                }
+                if ((asked & GROUP_SECURITY_INFORMATION) !== 0)
+                {
+                    kept.group = read.group;
+                }
+                if ((asked & DACL_SECURITY_INFORMATION) !== 0)
+                {
+                    kept.dacl = read.dacl;
+                }
+                security.set(name, kept);
                 return 1;
             },
         },
@@ -720,6 +1053,12 @@ export function createServiceFunctions(host){
             handler: ()=>fail(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT),
         },
 
+        /** The same, its table's names in UTF-16. */
+        StartServiceCtrlDispatcherW: {
+            argBytes: 4,
+            handler: ()=>fail(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT),
+        },
+
         /**
          * SERVICE_STATUS_HANDLE RegisterServiceCtrlHandlerA(LPCSTR lpServiceName,
          *                                                   LPHANDLER_FUNCTION lpHandlerProc)
@@ -729,6 +1068,27 @@ export function createServiceFunctions(host){
          */
         RegisterServiceCtrlHandlerA: {
             argBytes: 8,
+            handler: ()=>fail(ERROR_SERVICE_NOT_IN_EXE),
+        },
+
+        /** The same, the service's name in UTF-16. */
+        RegisterServiceCtrlHandlerW: {
+            argBytes: 8,
+            handler: ()=>fail(ERROR_SERVICE_NOT_IN_EXE),
+        },
+
+        /**
+         * SERVICE_STATUS_HANDLE RegisterServiceCtrlHandlerExA/W(LPCSTR lpServiceName,
+         *   LPHANDLER_FUNCTION_EX lpHandlerProc, LPVOID lpContext)
+         *
+         * The handler that takes a context: the same answer.
+         */
+        RegisterServiceCtrlHandlerExA: {
+            argBytes: 12,
+            handler: ()=>fail(ERROR_SERVICE_NOT_IN_EXE),
+        },
+        RegisterServiceCtrlHandlerExW: {
+            argBytes: 12,
             handler: ()=>fail(ERROR_SERVICE_NOT_IN_EXE),
         },
 

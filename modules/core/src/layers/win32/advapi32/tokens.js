@@ -163,8 +163,11 @@ const TokenUser = 1;
 const TokenGroups = 2;
 const TokenOwner = 4;
 const TokenPrimaryGroup = 5;
+const TokenDefaultDacl = 6;
 const TokenType = 8;
 const TokenSessionId = 12;
+const TokenVirtualizationEnabled = 24;
+const TokenIntegrityLevel = 25;
 
 /** TOKEN_TYPE: a process's own token, and one made to impersonate with. */
 const TOKEN_PRIMARY = 1;
@@ -840,9 +843,10 @@ export function createTokenFunctions(host){
                         ? TOKEN_PRIMARY : TOKEN_IMPERSONATION),
                     sids: [],
                 };
-            // The one interactive session there is: the console's, zero on NT 5.
+            // The one interactive session there is, the console's -- zero on
+            // NT 5 -- unless SetTokenInformation moved the token to another.
             case TokenSessionId:
-                return { fixed: dwordBytes(0), sids: [] };
+                return { fixed: dwordBytes(token?.sessionId ?? 0), sids: [] };
             case TokenGroups:
             {
                 const fixed = new Uint8Array(4 + SID_AND_ATTRIBUTES_SIZE * GROUP_SIDS.length);
@@ -2136,6 +2140,80 @@ export function createTokenFunctions(host){
                     process: token.process,
                     impersonationLevel: level >>> 0,
                 }));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL DuplicateTokenEx(HANDLE hExistingToken, DWORD dwDesiredAccess,
+         *     LPSECURITY_ATTRIBUTES lpTokenAttributes,
+         *     SECURITY_IMPERSONATION_LEVEL ImpersonationLevel, TOKEN_TYPE TokenType,
+         *     PHANDLE phNewToken)
+         *
+         * DuplicateToken with the kind chosen: a primary token, which a
+         * service hands CreateProcessAsUser, or an impersonation one at the
+         * level asked for. Either names the one account.
+         */
+        DuplicateTokenEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([existing, , , level, type, out])=>{
+                const token = isToken(existing)
+                    ? host.handles.resolve(existing >>> 0, 'token')
+                    : null;
+                if (!token)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((out >>> 0) === 0 || (type !== TOKEN_PRIMARY && type !== TOKEN_IMPERSONATION))
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                writeDword(out >>> 0, host.handles.open('token', {
+                    process: token.process,
+                    ...token.sessionId === undefined ? {} : { sessionId: token.sessionId },
+                    ...type === TOKEN_IMPERSONATION ? { impersonationLevel: level >>> 0 } : {},
+                }));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetTokenInformation(HANDLE TokenHandle,
+         *   TOKEN_INFORMATION_CLASS TokenInformationClass, LPVOID TokenInformation,
+         *   DWORD TokenInformationLength)
+         *
+         * The classes a token may be given rather than only asked: the
+         * session it runs in is kept and read back; an owner, a primary group,
+         * a default DACL, an integrity level or a virtualisation switch is
+         * taken, there being one account whose objects nothing checks. A
+         * class that is only ever read is ERROR_INVALID_PARAMETER, and less
+         * than a session id's four bytes ERROR_BAD_LENGTH.
+         */
+        SetTokenInformation: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, tokenClass, given, length])=>{
+                const ERROR_BAD_LENGTH = 24;
+                const token = isToken(handle) ? host.handles.resolve(handle >>> 0, 'token') : null;
+                if (!token)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const settable = [TokenOwner, TokenPrimaryGroup, TokenDefaultDacl, TokenSessionId,
+                    TokenVirtualizationEnabled, TokenIntegrityLevel];
+                if (!settable.includes(tokenClass >>> 0) || (given >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((tokenClass >>> 0) === TokenSessionId)
+                {
+                    if ((length >>> 0) < 4)
+                    {
+                        return fail(ERROR_BAD_LENGTH);
+                    }
+                    token.sessionId = readDword(given >>> 0);
+                }
                 return 1;
             },
         },

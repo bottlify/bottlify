@@ -13,6 +13,7 @@ import {
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_TOKEN = 1008;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
 const TOKEN_QUERY = 8;
 const TokenUser = 1;
 const TokenGroups = 2;
@@ -87,6 +88,42 @@ test('DuplicateToken hands a second token handle with the level it was given', (
     assert.deepEqual(errors, [ERROR_INVALID_HANDLE]);
 });
 
+test('DuplicateTokenEx makes the token kind asked for; SetTokenInformation moves its session', ()=>{
+    // A service starts a program in the user's session: a primary token
+    // duplicated from its own, moved to that session, handed to
+    // CreateProcessAsUser.
+    const { bytes, errors, fns, dword, table } = setup();
+    const TokenSessionId = 12;
+    const TokenType = 8;
+    assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
+    const token = dword(OUT);
+    assert.equal(fns.DuplicateTokenEx.argBytes, 24);
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0x2000000, 0, 2, 1, NEEDED]), 1);
+    const primary = dword(NEEDED);
+    assert.notEqual(primary, token);
+    assert.equal(fns.GetTokenInformation.handler([primary, TokenType, BUFFER, 4, OUT]), 1);
+    assert.equal(dword(BUFFER), 1, 'TokenPrimary');
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 3, 2, NEEDED]), 1);
+    assert.equal(table.get(dword(NEEDED))?.object.impersonationLevel, 3, 'SecurityDelegation');
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 2, 3, NEEDED]), 0, 'no third kind');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    const SESSION = 0x300;
+    new DataView(bytes.buffer).setUint32(SESSION, 1, true);
+    assert.equal(fns.SetTokenInformation.argBytes, 16);
+    assert.equal(fns.SetTokenInformation.handler([primary, TokenSessionId, SESSION, 4]), 1);
+    assert.equal(fns.GetTokenInformation.handler([primary, TokenSessionId, BUFFER, 4, OUT]), 1);
+    assert.equal(dword(BUFFER), 1, 'the session it was moved to');
+    assert.equal(fns.GetTokenInformation.handler([token, TokenSessionId, BUFFER, 4, OUT]), 1);
+    assert.equal(dword(BUFFER), 0, 'and the token it came from stays in the console\'s');
+    assert.equal(fns.SetTokenInformation.handler([primary, TokenSessionId, SESSION, 2]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(fns.SetTokenInformation.handler([primary, TokenType, SESSION, 4]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'a class only ever read');
+    assert.equal(fns.SetTokenInformation.handler([0x1234, TokenSessionId, SESSION, 4]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+});
+
 test('the sequence an installer asks whether it is an administrator with', ()=>{
     // OpenThreadToken has to fail with ERROR_NO_TOKEN and nothing else: that
     // is the code the program tests before it falls back to the process's
@@ -144,7 +181,6 @@ test('the owner, primary group, type and session of a token', ()=>{
     const TokenPrimaryGroup = 5;
     const TokenType = 8;
     const TokenSessionId = 12;
-    const ERROR_INVALID_PARAMETER = 87;
     const { bytes, errors, fns, dword } = setup();
     fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
     const token = dword(OUT);
