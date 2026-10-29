@@ -2021,3 +2021,65 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   recorded.
 - **Decision.** Left in: it is fewer instructions on every path that has such an access, and
   no workload measured here runs one hot; not measured apart on the others.
+
+### 2026-10-29: a cmovcc from a register as a select
+
+- **Idea.** Every 32-bit cmovcc as a `select` of the source and the destination under the
+  condition, where it was a branch over the write: V8 makes a conditional move of a select,
+  and the branch left two paths whose register merges a loop paid on both.
+- **Workload.** cork-bench, x87 images; `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64, `--predictable --no-liftoff
+  --no-wasm-dynamic-tiering`; machine instructions an iteration in V8's printed wasm code, one
+  run an arm (the base ran twice: the same count on every workload but vcall, 1,701,852 and
+  1,710,564). Base 3078203.
+- **Values.** Base, then every cmovcc a select: tree 2,848,928 -> 2,800,184 (-1.7 %), game
+  1,091,219 -> 1,138,179 (+4.3 %); vm, sort, fmath, str, crc, switch unchanged; vcall 1,699,241.
+- **Why.** game's clamp (`cmp eax, ecx; cmovg eax, ecx`, ecx 31) as a select had V8 hold the
+  constant in a register of its own across its loop and spill others for it: in the main
+  region's executed code (tools/wasm-grind.mjs listing, warm 1000 + 300 iterations) stack-slot
+  loads and stores rose from 129 M to 154 M and register moves from 109 M to 128 M. tree's
+  gain is a cmov from memory (`cmovae edi, [eax+4]`), whose read happens anyway.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Taken from memory only (4f54a94: tree -1.71 %, game unchanged); a cmovcc from a
+  register stays a branch.
+
+### 2026-10-29: an x87 integer store through the quadword saturating conversion
+
+- **Idea.** fist/fistp of a dword or a word without `precise`: the rounded value through
+  `i64.trunc_sat_f64_s`, its low half stored and its range tested as one unsigned compare of the
+  quadword, where `i32.trunc_sat_f64_s` and two compares of the double were.
+- **Workload.** The machine code V8 14.6 (node 26.12.1, x64) makes of `fldcw; fistp dword;
+  fldcw` (`tools/cork-asm.mjs --hex`), counted by hand. Not measured under valgrind.
+- **Values.** The quadword conversion is 8 instructions (a rounding, cvttsd2siq, its
+  conversion back, a compare into a mask, a move out of it, an and, a test, a branch) where the
+  dword one is 6; with the integer range test and the NaN's own compare, 19 for the store
+  against 17.
+- **Why.** V8 tests a quadword conversion for saturation by converting back, as it does the
+  dword one, and adds a mask's move out of the vector register.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU).
+- **Decision.** Not taken: the value plus 1.5 * 2^52 went in instead (1a635af, 11 instructions,
+  no branch; game -2.64 %).
+
+### 2026-10-29: a self-loop that only reads, hoisted as a loop with stores is
+
+- **Idea.** A self-loop whose streams only read, where reads go untested, hoisted as
+  `emitHoistedLoop` hoists one with a store stream: the window tested, a copy whose reads go
+  unwrapped for the turns it cleared, back to the test when they are spent, the checked copy
+  when it fails. Left unhoisted since bcd3a03a, before the unchecked copy counted its turns on
+  the budget (3441019).
+- **Workload.** As the entry above (`ir.sh`, one run an arm). Arms: on 4f54a94's cmov change
+  (unpublished then) with and without the hoisting; and on 1a635af with read streams tested
+  against RAM alone (ab41509's window, then still over a movs copy's source too), with and
+  without it.
+- **Values.** With the pages' flags as the window: crc 1,721,137 -> 1,659,826 (-3.6 %), str
+  2,959,943 -> 2,751,410 (-7.0 %), sort 2,639,133 -> 2,759,666 (+4.6 %). With the window a
+  compare against RAM: crc 1,716,203 -> 1,654,826 (-3.6 %), str 2,952,739 -> 2,708,935
+  (-8.3 %), sort 2,606,244 -> 2,679,031 (+2.8 %). The other workloads unchanged.
+- **Why.** sort's partition scans (`while (v[i] < p) i++`) run a few turns an entry, and an
+  entry paid the window, the turns' setup and two wasm loop heads, each V8's stack check and
+  the alignment padding before it, which the counts include (nops run 2.5 M times in qs).
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken in this shape; a loop that only reads is hoisted as one, with no
+  loop around the test (`emitReadLoop`, the change after this entry's).

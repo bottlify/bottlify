@@ -3084,15 +3084,21 @@ export class RegionEmitter {
         {
             relaxedFlagReads(block, this.relaxedReads);
         }
-        // A loop that only reads is left unhoisted where reads go untested: its
-        // unchecked copy saved one wrapping `and` a read and cost a turn counter
-        // and the window's test, which a short loop (a strlen, a hash of a
-        // name) never paid back: cork-bench sort -3.1 %, str -1.8 %, crc's
-        // long table walk +0.3 %.
+        // A loop that only reads, where reads go untested, is hoisted only as
+        // one (`emitReadLoop`): the hoisted loop's unchecked copy saved one
+        // wrapping `and` a read and cost a turn counter and the window's test,
+        // which a short loop (a strlen, a hash of a name) never paid back:
+        // cork-bench sort -3.1 %, str -1.8 %, crc's long table walk +0.3 %.
         const planned = this.selfLoop && !x.active && this.layout.codePages < 0
             ? planLoop(block.instructions, this.width.bits === 64) : null;
-        const streams = planned !== null && (planned.streams.some(stream=>stream.store)
+        const reads = planned !== null && this.readsOnlyLoop(block, planned);
+        const streams = planned !== null && (reads || planned.streams.some(stream=>stream.store)
             || !readsWrapped(this.context)) ? planned : null;
+        if (streams !== null && reads)
+        {
+            this.emitReadLoop(block, index, live, streams);
+            return;
+        }
         if (streams !== null)
         {
             this.emitHoistedLoop(block, index, live, streams);
@@ -3317,6 +3323,175 @@ export class RegionEmitter {
         }
         this.close(); // unchecked
         this.close(); // self
+        this.close(); // selfDone
+        this.selfLoop = false;
+        const [, notTaken] = block.exit.targets;
+        const after = this.following(index);
+        const next = after < 0 ? undefined : this.region.blocks[after];
+        if (next && next.start === notTaken)
+        {
+            this.fallInto(after);
+            return;
+        }
+        this.jumpTo(notTaken);
+    }
+
+    /**
+     * Whether a hoisted self-loop goes the way of a loop that only reads
+     * (`emitReadLoop`): reads left untested, no stream that stores, no other
+     * executor to answer (no interrupt word), and every instruction one that
+     * lowers inline and leaves only at the block's end -- so its unchecked
+     * copy, emitted first, never ends early.
+     *
+     * @param {import('../region.js').Block} block
+     * @param {{ streams: import('./memory.js').Stream[], forward: boolean }} streams
+     */
+    readsOnlyLoop(block, streams){
+        return this.width.bits === 32 && this.layout.interrupt === undefined
+            && readsWrapped(this.context) && this.context.precise !== true
+            && streams.streams.every(stream=>!stream.store)
+            && block.instructions.every(ins=>READ_LOOP_OPS.has(ins.op) && !ins.prefixes.lock
+                && !ins.prefixes.rep && !ins.prefixes.repne && !ins.prefixes.address
+                && ins.operands.every(operand=>operand.kind === 'reg' || operand.kind === 'imm'
+                    || operand.kind === 'rel'
+                    || operand.kind === 'mem' && operand.segment !== 4 && operand.segment !== 5));
+    }
+
+    /**
+     * A self-loop that only reads, its streams moved by fixed strides
+     * (`readsOnlyLoop`): the streams' reach for many turns tested once against
+     * RAM itself (a read there is the one wrapped into RAM), then a copy whose
+     * reads go unwrapped for as many turns as that cleared, then -- when the
+     * test fails, or the turns are spent with the loop still going -- the
+     * checked copy to the loop's end. No outer loop goes back to the test, as
+     * the hoisted loop's does (`emitHoistedLoop`): entering one is its stream
+     * test and two wasm loop heads, each the host's stack check and the
+     * padding it aligns the head with, which a short scan (a partition's
+     * `while (v[i] < p) i++`) did not pay back; the reach a range test
+     * clears runs to 64 Ki turns, where a page's flags cleared a page.
+     *
+     * @param {import('../region.js').Block} block @param {number} index
+     * @param {boolean[]} live
+     * @param {{ plan: Map<number, any>, streams: import('./memory.js').Stream[],
+     *     turns: number, forward: boolean, ranges: import('./memory.js').Range[] }} streams
+     */
+    emitReadLoop(block, index, live, streams){
+        const { b } = this;
+        const last = block.instructions[block.instructions.length - 1];
+        const turns = this.localTypes.length + STATE_PARAMS;
+        this.localTypes.push(ValType.i32);
+        const widest = Math.max(...streams.streams.map(stream=>Math.abs(stream.stride)));
+        const reach = Math.max(...streams.streams.map(stream=>stream.hi - stream.lo));
+        // Only a stream whose every read wraps is tested against RAM alone; a
+        // string instruction's is tested by its pages' flags, for the turns a
+        // page's reach allows.
+        const ranged = streams.streams.every(stream=>stream.tested !== true);
+        const many = ranged ? Math.max(streams.turns, Math.min(1 << 16, Math.floor(
+            (this.layout.ramSize / 4 - reach) / Math.max(1, widest)))) : streams.turns;
+        this.loops++;
+        this.open(`selfDone${index}`, EMPTY);
+        this.open(`toChecked${index}`, EMPTY);
+        emitStreamWindow(this, streams.streams, many, streams.forward, streams.ranges);
+        b.op(I32.eqz);
+        b.brIf(this.depthOf(`toChecked${index}`));
+        const paired = many >= 2 && block.instructions.length <= PAIRED_MAX;
+        const cleared = paired ? many & ~1 : many;
+        b.localGet(Local.budget).i32const(cleared * block.instructions.length)
+            .op(I32.sub).localTee(turns).i32const(0)
+            .localGet(turns).i32const(0).op(I32.gtS).select().localSet(turns);
+        this.openLoop(`unchecked${index}`);
+        this.blockDepth = this.controls.length;
+        this.blockRetired = 0;
+        const counted = this.instructions;
+        if (!this.emitInstructions(block, index, live, streams.plan))
+        {
+            throw new Error(`emit: block ${index}'s read loop ended early`);
+        }
+        this.instructions = counted;
+        if (this.blockRetired !== block.instructions.length)
+        {
+            // A turn charged less than its bound was made for would run past
+            // the reach the test cleared.
+            throw new Error(`emit: block ${index}'s unchecked turn charges`
+                + ` ${this.blockRetired}, not ${block.instructions.length}`);
+        }
+        const turn = this.blockRetired;
+        if (paired)
+        {
+            // The first turn's back edge into the second, its count owed into
+            // it; its fall-through charges it below.
+            this.pushBranchCondition(last);
+            this.openIf('taken');
+            this.payResultFor(block.start);
+            this.resultOwed = null;
+            this.pending = null;
+            this.fcmp = null;
+            this.emitInstructions(block, index, live,
+                new Map([...streams.plan].map(([i, slot])=>[i, { ...slot }])));
+            this.instructions = counted;
+            if (this.blockRetired !== 2 * turn)
+            {
+                throw new Error(`emit: block ${index}'s unchecked turns charge`
+                    + ` ${this.blockRetired}, not ${2 * turn}`);
+            }
+            this.charge();
+            this.blockRetired = 0;
+        }
+        else
+        {
+            this.charge();
+        }
+        this.pushBranchCondition(last);
+        this.openIf('taken');
+        b.localGet(Local.budget).localGet(turns).op(I32.leS);
+        this.openGuard('turnsDone');
+        this.spentTest();
+        this.openGuard('spent');
+        this.exitAt(block.start, Exit.BUDGET);
+        this.close();
+        this.payResultFor(block.start);
+        b.br(this.depthOf(`toChecked${index}`));
+        this.close();
+        this.payResultFor(block.start);
+        b.br(this.depthOf(`unchecked${index}`));
+        this.close();
+        this.payResultFor(block.exit.targets[1]);
+        b.br(this.depthOf(`selfDone${index}`));
+        if (paired)
+        {
+            this.close(); // taken
+            this.dead = false;
+            this.blockRetired = turn;
+            this.charge();
+            this.payResultFor(block.exit.targets[1]);
+            b.br(this.depthOf(`selfDone${index}`));
+        }
+        this.resultOwed = null;
+        this.close(); // unchecked
+        this.close(); // toChecked
+        // The checked copy, to the loop's end.
+        this.openLoop(`checked${index}`);
+        this.blockDepth = this.controls.length;
+        this.blockRetired = 0;
+        this.pending = null;
+        this.fcmp = null;
+        this.dead = false;
+        this.emitInstructions(block, index, live, planBlock(block.instructions));
+        this.instructions = counted;
+        this.charge();
+        this.pushBranchCondition(last);
+        this.openIf('taken');
+        this.spentTest();
+        this.openGuard('spent');
+        this.exitAt(block.start, Exit.BUDGET);
+        this.close();
+        this.payResultFor(block.start);
+        b.br(this.depthOf(`checked${index}`));
+        this.close();
+        this.payResultFor(block.exit.targets[1]);
+        this.resultOwed = null;
+        b.br(this.depthOf(`selfDone${index}`));
+        this.close(); // checked
         this.close(); // selfDone
         this.selfLoop = false;
         const [, notTaken] = block.exit.targets;
@@ -4677,6 +4852,12 @@ function flowsInto(blocks, labels){
     });
     return into;
 }
+
+/** What a loop that only reads may be made of (`readsOnlyLoop`): forms that lower inline. */
+const READ_LOOP_OPS = new Set(['mov', 'movzx', 'movsx', 'add', 'sub', 'adc', 'sbb', 'and', 'or',
+    'xor', 'cmp', 'test', 'inc', 'dec', 'neg', 'not', 'lea', 'shl', 'shr', 'sar', 'rol', 'ror',
+    'imul', 'jo', 'jno', 'jb', 'jae', 'je', 'jne', 'jbe', 'ja', 'js', 'jns', 'jp', 'jnp', 'jl',
+    'jge', 'jle', 'jg', 'lods', 'scas', 'cmps']);
 
 /** The longest block a hoisted loop's unchecked copy runs two turns a wasm turn. */
 const PAIRED_MAX = 32;
