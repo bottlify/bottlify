@@ -409,7 +409,9 @@ export function createWin32Module(){
             // its own. The one namespace a mutex, event, semaphore, timer and
             // file mapping all share is part of it.
             /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
-             *     objects?: any, fileSecurity?: Map<string, any> } | null} */
+             *     objects?: any, fileSecurity?: Map<string, any>,
+             *     sharedViews?: ReturnType<typeof import('./kernel32/shared-views.js')
+             *         .createSharedViews> } | null} */
             const system = config?.system ?? null;
             // Across a link the run's namespace is asked there, and the
             // objects here are stand-ins for the run's (`system-objects.js`).
@@ -2246,6 +2248,10 @@ export function createWin32Module(){
                         readWideString,
                         setLastError: setError,
                         namedObjects,
+                        // Views of one page-file section agree at the edges of
+                        // a turn, across the processes on this thread.
+                        sharedViews: system?.sharedViews
+                            ? { shared: system.sharedViews, process: processId } : undefined,
                         metrics: mappings,
                         /** @param {number} bytes @param {{ alignment?: number }} [options] */
                         allocate: (bytes, options)=>allocator.allocate(bytes, options),

@@ -116,6 +116,12 @@ differently raises a `divergence` event naming the API.
   run's, kept on the engine thread: a server COM starts runs in a worker of its own while the run
   has room for one, and otherwise beside the process that asked, in its worker; a call from one
   worker to another goes through the engine thread and back.
+- Views of one page-file section (a named or inherited `CreateFileMapping` of no file) agree
+  across the processes on the engine's thread at the edges of their turns: what one writes the
+  other reads from its next turn on, and two views in one process agree from one turn to the next,
+  not within one. Each turn compares the views of every section with two views or more, so its
+  cost grows with the bytes shared. A view of a file, and a process in a worker of its own, keep a
+  copy of their own.
 - Named pipes are the run's, between the processes on the engine's thread: byte and message
   pipes, overlapped reads and connects completed through their event and completion port, and a
   pipe end a child inherits (`bInheritHandles`, or a STARTUPINFOEX handle list) under its parent's

@@ -124,6 +124,10 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  * @property {{ peek: (args: number[]) => number | null }} [pipes]  PeekNamedPipe of a
  *           named pipe's end
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {{ shared: ReturnType<typeof import('./shared-views.js').createSharedViews>,
+ *     process: number }} [sharedViews]
+ *           The run's agreement between views of one page-file section, and
+ *           this process's name in it (`shared-views.js`).
  * @property {{ views: number, waited: number, failed: number }} [metrics]
  *           Counted in place: views mapped, views that waited for their
  *           bytes, views whose bytes never came.
@@ -164,7 +168,8 @@ export function createMappingFunctions(host){
      * release the memory has to be findable from the pointer alone.
      *
      * @type {Map<number, { mapping: any, offset: number, length: number,
-     *                      writable: boolean }>}
+     *                      writable: boolean,
+     *                      shared?: import('./shared-views.js').SharedView }>}
      */
     const views = new Map();
 
@@ -668,7 +673,18 @@ export function createMappingFunctions(host){
                     {
                         host.writeMemory(address, bytes);
                     }
-                    views.set(address, { mapping, offset, length: wanted, writable });
+                    /** @type {any} */
+                    const view = { mapping, offset, length: wanted, writable };
+                    // A page-file section's views see each other's writes,
+                    // across processes as within one.
+                    if (!mapping.node && host.sharedViews)
+                    {
+                        view.shared = { process: host.sharedViews.process, address,
+                            offset, length: wanted, read: host.readMemory,
+                            write: host.writeMemory };
+                        host.sharedViews.shared.attach(mapping, mapping.size, view.shared);
+                    }
+                    views.set(address, view);
                     if (metrics)
                     {
                         metrics.views++;
@@ -763,6 +779,10 @@ export function createMappingFunctions(host){
                 if (view.mapping.node)
                 {
                     host.files.close(view.mapping.node);
+                }
+                if (view.shared)
+                {
+                    host.sharedViews?.shared.detach(view.shared);
                 }
                 views.delete(address >>> 0);
                 host.release(address >>> 0);

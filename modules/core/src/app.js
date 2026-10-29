@@ -63,6 +63,7 @@ import { createRunRegistry } from './layers/win32/module.js';
 import { programInPlaceOf, systemProgramImage } from './layers/win32/programs/table.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { shareTransport } from './layers/win32/wsock32/transport.js';
+import { createSharedViews } from './layers/win32/kernel32/shared-views.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
@@ -3784,6 +3785,7 @@ function journalEvents(events, into){
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
  *     system?: { namedObjects: Map<string, any>, registry: any, bundle: any, windows?: any,
+ *         sharedViews?: any,
  *         ids: { thread: number, process: number }, volume: any },
  *     mainThreadId?: number,
  *     beside?: (request: any) => void,
@@ -7447,6 +7449,8 @@ async function buildApp(options){
             // the host, which are the same shape from here and want opposite
             // waits.
             let spun = 0;
+            const sharedViews = options.system?.sharedViews ?? null;
+            const turnProcess = options.processId ?? FIRST_PROCESS_ID;
             /**
              * The process's other executors' bell as the last turn left it
              * without waiting for them, a call waiting on the host: the idle
@@ -7471,6 +7475,9 @@ async function buildApp(options){
                 // sum of its occurrences is the run -- and its own self time is
                 // the loop's overhead and nothing else.
                 journal.begin('turn', journal.PhaseKind.HOST);
+                // The views this process shares with another are brought up
+                // to what the other wrote in its turns.
+                sharedViews?.enter(turnProcess);
                 try
                 {
                     // What passed since the last slice ended -- the yield, the
@@ -7849,6 +7856,12 @@ async function buildApp(options){
                 }
                 finally
                 {
+                    sharedViews?.leave(turnProcess);
+                    // A process that ended shares nothing from here on.
+                    if (sharedViews && (win32.exitCode() !== null || cpu.fault()))
+                    {
+                        sharedViews.forget(turnProcess);
+                    }
                     journal.end('turn');
                 }
             }
@@ -9601,7 +9614,7 @@ export async function createApp(options){
      * later process is handed rather than a copy of it.
      *
      * @type {{ namedObjects: Map<string, any>, registry: any, bundle: any, windows: any,
-     *     ids: { thread: number, process: number },
+     *     sharedViews?: any, ids: { thread: number, process: number },
      *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
      *         writables: Map<string, any>, watchers: Set<Function>, revisions?: Int32Array,
      *         sharing?: any, sharingMemory?: SharedArrayBuffer } }}
@@ -9609,6 +9622,9 @@ export async function createApp(options){
     // A process in a worker of its own is handed the run's across a link
     // (`system-link.js`), and joins it rather than making one.
     const system = options.system ?? { namedObjects, registry: null, bundle: null, windows: null,
+        // Views of one page-file section, kept agreeing at the edges of each
+        // process's turns (`shared-views.js`).
+        sharedViews: createSharedViews(),
         ids: { thread: 1, process: 0x2000 },
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set(), ...volumeMemory() } };
