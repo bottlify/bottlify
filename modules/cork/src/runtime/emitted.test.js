@@ -112,6 +112,7 @@ const EMITTED = {
     123: '6f675e82d193b500',
     124: '4ee4f0a7610e32ba',
     125: '901a681945380f76',
+    126: '7745de7f7c3ed3ed',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */

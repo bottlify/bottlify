@@ -1046,6 +1046,20 @@ export function emitInstruction(e, instruction, flagsLive){
             stackAccess(e, dst.size);
             {
                 const popped = dst.size === 8 ? Local.t64b : Local.t1;
+                const run = stackRun(e, 'pop');
+                if (run !== null)
+                {
+                    // A run of pops reads each off esp as the run found it,
+                    // which moves once, at the last (`stackRun`).
+                    b.localGet(registerLocal(e, 4))
+                        .load('i32', { offset: e.layout.ramBase + run.offset }).localSet(popped);
+                    if (run.last)
+                    {
+                        addStack(e, run.moves);
+                    }
+                    writeOp(e, dst, ()=>b.localGet(popped));
+                    return true;
+                }
                 b.localGet(Local.addr).load(dst.size === 8 ? 'i64'
                     : dst.size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
                     .localSet(popped);
@@ -2578,6 +2592,19 @@ export function push(e, size, pushValue){
     // which itself waits for the access check so a fault leaves esp as it was.
     pushValue();
     b.localSet(Local.t2);
+    const run = stackRun(e, 'push');
+    if (run !== null && looseStackStore(e, size))
+    {
+        // A run of pushes stores each below esp as the run found it, which
+        // moves once, at the last (`stackRun`).
+        b.localGet(run.base).localGet(Local.t2)
+            .store(storeKind(size), { offset: e.layout.ramBase + run.offset });
+        if (run.last)
+        {
+            b.localGet(run.base).localSet(registerLocal(e, 4));
+        }
+        return;
+    }
     b.localGet(registerLocal(e, 4)).i32const(size).op(I32.sub).localSet(Local.addr);
     if (!looseStackStore(e, size))
     {
@@ -2587,6 +2614,86 @@ export function push(e, size, pushValue){
     b.localGet(Local.addr).localGet(Local.t2)
         .store(storeKind(size), { offset: e.layout.ramBase });
     b.localGet(Local.addr).localSet(registerLocal(e, 4));
+}
+
+/** The shortest run of pushes or of pops `stackRun` moves esp once for. */
+const STACK_RUN = 3;
+
+/**
+ * Where the push or the pop being emitted stores or loads when it is one of a
+ * run of them that moves esp once: dword pushes of a register other than esp
+ * or of an immediate, ended by a direct call's push of its return address, or
+ * dword pops into a register other than esp, one instruction after another in
+ * the block, under loose stacks, none of them with a window test of the plan
+ * before it. Nothing in such a run can leave the region -- its accesses go
+ * untested, its values are registers and constants -- nor read esp, so esp
+ * between them is never seen: a push's store goes to its own offset off esp
+ * as it is after the run, taken once (`base`), and a pop's load to its own
+ * offset off esp as it was before it, which stays until the last moves it by
+ * the whole run (`moves`). Each access then adds its offset to one address
+ * the host's compiler makes for them all -- an arm64 store or load takes a
+ * register and a small offset -- where each moved esp first, an instruction
+ * an access. Null for any other push or pop.
+ *
+ * @param {E} e @param {'push' | 'pop'} kind
+ * @returns {{ base: number, offset: number, last: boolean, moves: number } | null}
+ */
+function stackRun(e, kind){
+    const { emitting } = e;
+    if (e.context.looseStacks !== true || isLong(e) || emitting === null)
+    {
+        return null;
+    }
+    let run = e.stackRun;
+    if (run === null || run.instructions !== emitting.instructions || run.kind !== kind
+        || e.at <= run.from || e.at >= run.from + run.length)
+    {
+        const length = stackRunLength(emitting.instructions, emitting.plan, e.at, kind);
+        if (length < STACK_RUN)
+        {
+            return null;
+        }
+        run = { instructions: emitting.instructions, kind, from: e.at, length,
+            base: kind === 'push' ? e.stackRunLocal() : registerLocal(e, 4) };
+        e.stackRun = run;
+        if (kind === 'push')
+        {
+            e.b.localGet(registerLocal(e, 4)).i32const(4 * length).op(I32.sub).localSet(run.base);
+        }
+    }
+    const j = e.at - run.from;
+    return { base: run.base, offset: 4 * (kind === 'push' ? run.length - 1 - j : j),
+        last: j === run.length - 1, moves: 4 * run.length };
+}
+
+/**
+ * How many instructions from `from` on make a run of `kind` (`stackRun`).
+ *
+ * @param {Instruction[]} instructions @param {Map<number, { checks: unknown[] }>} plan
+ * @param {number} from @param {'push' | 'pop'} kind
+ */
+function stackRunLength(instructions, plan, from, kind){
+    let j = from;
+    for (; j < instructions.length; j++)
+    {
+        const { op, operands: [operand] } = instructions[j];
+        if (j > from && (plan.get(j)?.checks.length ?? 0) > 0)
+        {
+            break;
+        }
+        if (kind === 'push' && op === 'call' && operand?.kind === 'rel')
+        {
+            j++;
+            break;
+        }
+        const plain = operand?.kind === 'reg' ? operand.reg !== 4
+            : kind === 'push' && operand?.kind === 'imm';
+        if (op !== kind || operand?.size !== 4 || !plain)
+        {
+            break;
+        }
+    }
+    return j - from;
 }
 
 // --- arithmetic ---

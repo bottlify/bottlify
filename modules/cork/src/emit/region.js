@@ -1269,6 +1269,23 @@ export class RegionEmitter {
         this.folded = null;
         /** The i32 local `folded` sums are kept in, -1 until made. */
         this.sumLocal = -1;
+        /**
+         * The block whose instructions are being emitted and their access
+         * plan, which a run of pushes or pops looks along (`stackRun` in
+         * integer.js).
+         * @type {{ instructions: import('../decode/decoder.js').Instruction[],
+         *     plan: Map<number, any> } | null}
+         */
+        this.emitting = null;
+        /**
+         * The run of pushes or pops the block's instructions are in
+         * (`stackRun`), or null.
+         * @type {{ instructions: object[], kind: 'push' | 'pop', from: number,
+         *     length: number, base: number } | null}
+         */
+        this.stackRun = null;
+        /** The i32 local a run of pushes keeps esp in, -1 until made. */
+        this.runLocal = -1;
         /** Instructions retired in the current block so far, to charge at its end. */
         this.blockRetired = 0;
         /** Each block's marks made so far, in a build that marks them (`markBlock`).
@@ -1434,6 +1451,16 @@ export class RegionEmitter {
                 this.pendingLows.delete(index);
             }
         }
+    }
+
+    /** The i32 local a run of pushes keeps esp as it is after the run in (`stackRun`). */
+    stackRunLocal(){
+        if (this.runLocal < 0)
+        {
+            this.runLocal = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(ValType.i32);
+        }
+        return this.runLocal;
     }
 
     /** The i32 local a read's wrapped sum is kept in (`folded`). */
@@ -3394,6 +3421,8 @@ export class RegionEmitter {
      * @param {boolean[]} live @param {Map<number, any>} plan
      */
     emitInstructions(block, index, live, plan){
+        this.emitting = { instructions: block.instructions, plan };
+        this.stackRun = null;
         if (this.pendingLows.size > 0)
         {
             throw new Error(`block ${index}: low lanes owed from the block before`);

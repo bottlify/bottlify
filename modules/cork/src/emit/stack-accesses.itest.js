@@ -12,19 +12,23 @@
  * of reads, stores and read-modify-writes off esp by every reader and writer
  * -- integer, x87, scalar SSE -- pushes and pops of registers and immediates,
  * a push of a slot off esp and a pop into one, `push esp`, esp moved by
- * `add`, `sub` and `lea`, a call to the next instruction, and blocks' ends
- * between them, translated without `precise` (whose stacks are not loose) and
- * judged against the instruction model.
+ * `add`, `sub` and `lea`, a call to the next instruction, accesses off another
+ * register (edi, which nothing moves), and blocks' ends between them, translated
+ * without `precise` (whose stacks are not loose) and judged against the
+ * instruction model, the stack and the data compared.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createJudge } from '../testing/sequences-judge.js';
-import { REGISTERS, random } from '../testing/sequences.js';
+import { DATA, REGISTERS, SPANS, random } from '../testing/sequences.js';
 import { features } from '../wasm/features.js';
 
-/** The stack the sequences push, pop and store onto, around the stack pointer they start with. */
-const STACK = [{ address: REGISTERS.esp - 0x200, length: 0x400 }];
+/**
+ * What the sequences store onto: the stack, around the stack pointer they start with, and the
+ * data edi points into.
+ */
+const STORED = [{ address: REGISTERS.esp - 0x200, length: 0x400 }, ...SPANS];
 
 /** @param {number} value */
 const at = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24];
@@ -42,7 +46,7 @@ const PREFIX = [
         bytes: [0xc7, 0x44, 0x24, 4 * k, ...at(0x3f810203 + k * 0x00213141)],
     })),
     { name: 'mov esi, 0x11223344', bytes: [0xbe, ...at(0x11223344)] },
-    { name: 'mov edi, 0x55667788', bytes: [0xbf, ...at(0x55667788)] },
+    { name: 'mov edi, data', bytes: [0xbf, ...at(DATA + 0x10)] },
     { name: 'mov ebp, 0x0badf00d', bytes: [0xbd, ...at(0x0badf00d)] },
 ];
 
@@ -55,7 +59,7 @@ const DRAWN = [
     { name: 'add edx, [esp+8]', bytes: [0x03, 0x54, 0x24, 0x08] },
     { name: 'cmp eax, [esp+0x1c]', bytes: [0x3b, 0x44, 0x24, 0x1c] },
     { name: 'movzx ebx, byte [esp+3]', bytes: [0x0f, 0xb6, 0x5c, 0x24, 0x03] },
-    { name: 'movsx edi, word [esp+0x16]', bytes: [0x0f, 0xbf, 0x7c, 0x24, 0x16] },
+    { name: 'movsx esi, word [esp+0x16]', bytes: [0x0f, 0xbf, 0x74, 0x24, 0x16] },
     { name: 'mov edx, [esp+0x104]', bytes: [0x8b, 0x94, 0x24, ...at(0x104)] },
     // stores and read-modify-writes off esp
     { name: 'mov [esp+8], eax', bytes: [0x89, 0x44, 0x24, 0x08] },
@@ -86,10 +90,14 @@ const DRAWN = [
     { name: 'push esp', bytes: [0x54] },
     { name: 'pop eax', bytes: [0x58] },
     { name: 'pop edx', bytes: [0x5a] },
-    { name: 'pop edi', bytes: [0x5f] },
+    { name: 'pop esi', bytes: [0x5e] },
     { name: 'pop ebp', bytes: [0x5d] },
     { name: 'pop [esp+4]', bytes: [0x8f, 0x44, 0x24, 0x04] },
     { name: 'pop word ax', bytes: [0x66, 0x58] },
+    // accesses off another register among them, which the plan may test as a group
+    { name: 'mov eax, [edi+4]', bytes: [0x8b, 0x47, 0x04] },
+    { name: 'mov [edi+8], ecx', bytes: [0x89, 0x4f, 0x08] },
+    { name: 'add [edi], edx', bytes: [0x01, 0x17] },
     // esp moved
     { name: 'add esp, 8', bytes: [0x83, 0xc4, 0x08] },
     { name: 'sub esp, 0xc', bytes: [0x83, 0xec, 0x0c] },
@@ -115,7 +123,7 @@ for (const [host, flags] of /** @type {const} */ ([
     test(`accesses through esp on loose stacks leave what the instruction model leaves (${host}`
         + ' host)', async()=>{
         const judge = createJudge({ pool: POOL, cork: { precise: false },
-            features: { ...features(), ...flags }, spans: STACK });
+            features: { ...features(), ...flags }, spans: STORED });
         const next = random(0x57ac);
         const prefix = PREFIX.map((_, i)=>i);
         let judged = 0;
