@@ -121,7 +121,9 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *           The error of a thread that is not the one running: a map that
  *           waited for its bytes answers on somebody else's turn.
  * @property {() => any} [currentThread]
- * @property {{ peek: (args: number[]) => number | null }} [pipes]  PeekNamedPipe of a
+ * @property {{ peek: (args: number[]) => number | null,
+ *     anonymous?: (attributes: number, size: number) => { read: number, write: number } | null }}
+ *     [pipes]  CreatePipe's pair as the named pipes make it, and PeekNamedPipe of a
  *           named pipe's end
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ shared: ReturnType<typeof import('./shared-views.js').createSharedViews>,
@@ -839,10 +841,19 @@ export function createMappingFunctions(host){
         CreatePipe: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([readHandle, writeHandle])=>{
+            handler: ([readHandle, writeHandle, attributes, size])=>{
                 if (readHandle === 0 || writeHandle === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
+                }
+                // A named pipe nobody can name, as Windows makes one: it reads,
+                // writes and breaks as the run's named pipes do.
+                const made = host.pipes?.anonymous?.(attributes >>> 0, (size >>> 0) || 4096);
+                if (made)
+                {
+                    writeDword(readHandle >>> 0, made.read);
+                    writeDword(writeHandle >>> 0, made.write);
+                    return 1;
                 }
                 /** @type {{ buffered: number[], writersOpen: boolean }} */
                 const pipe = { buffered: [], writersOpen: true };

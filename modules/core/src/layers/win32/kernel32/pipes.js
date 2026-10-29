@@ -1164,6 +1164,9 @@ export function createNamedPipes(host){
         },
     };
 
+    /** Numbers the unnamed pipes CreatePipe makes, the run's way Windows numbers them. */
+    let anonymousCount = 0;
+
     return {
         functions,
         read,
@@ -1171,6 +1174,36 @@ export function createNamedPipes(host){
         open,
         cancel,
         closed,
+
+        /**
+         * CreatePipe's pair, made as Windows makes it: a one-instance inbound
+         * byte pipe under a name nobody else knows (Win32Pipes.<process>.<n>),
+         * its server end the read handle and a client end opened for writing
+         * the write handle. So an anonymous pipe reads, writes, breaks, is
+         * duplicated and inherited as a named one does. Null where this
+         * process cannot reach the run's pipes (a worker of its own).
+         *
+         * @param {number} attributes  the SECURITY_ATTRIBUTES, for inheritance
+         * @param {number} size
+         * @returns {{ read: number, write: number } | null}
+         */
+        anonymous(attributes, size){
+            if (host.remote)
+            {
+                return null;
+            }
+            anonymousCount++;
+            const name = `\\\\.\\pipe\\Win32Pipes.${(host.processId ?? 0).toString(16)
+                .padStart(8, '0')}.${anonymousCount.toString(16).padStart(8, '0')}`;
+            const reader = createPipe(name, [PIPE_ACCESS_INBOUND, 0, 1, size, size, 0,
+                attributes]);
+            if ((reader >>> 0) === INVALID_HANDLE_VALUE)
+            {
+                return null;
+            }
+            const writer = open(name, GENERIC_WRITE, 0, attributes);
+            return 'handle' in writer ? { read: reader, write: writer.handle } : null;
+        },
 
         /**
          * PeekNamedPipe on an end, or null for a handle that is none: the bytes
