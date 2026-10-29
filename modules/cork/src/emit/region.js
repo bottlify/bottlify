@@ -1263,9 +1263,12 @@ export class RegionEmitter {
         /** The block emitted before this one, whose record's kind a guess may take. */
         this.lastEmitted = -1;
         /** The ranges being emitted, innermost last (`emitRange`).
-         * @type {{ lo: number, hi: number, loop: boolean,
-         *     items: { start: number, end: number, loop: boolean, copy?: boolean }[] }[]} */
+         * @type {{ lo: number, hi: number, loop: boolean, items: { start: number, end: number,
+         *     loop: boolean, copy?: boolean, pair?: boolean }[] }[]} */
         this.ranges = [];
+        /** The loop being emitted two turns a wasm turn, and which turn (`emitPairedRange`).
+         * @type {{ lo: number, hi: number, turn: number } | null} */
+        this.pairing = null;
         /** Whether the current block's remaining instructions are unreachable. */
         this.dead = false;
         /**
@@ -2755,6 +2758,95 @@ export class RegionEmitter {
     }
 
     /**
+     * Whether the loop of blocks `lo` to `hi` runs two turns a wasm turn
+     * (`emitPairedRange`): a loop of plain blocks -- none a loop of its own,
+     * none with an entry test, each leaving by a jump, a branch or falling
+     * through, none jumping back but to the head -- of no more than
+     * `PAIRED_MAX` instructions, in the region's own function.
+     *
+     * @param {number} lo @param {number} hi
+     */
+    pairs(lo, hi){
+        if (this.copyFunction || this.copying || hi <= lo || this.entered.has(lo))
+        {
+            return false;
+        }
+        let instructions = 0;
+        for (let i = lo; i <= hi; i++)
+        {
+            const block = this.region.blocks[i];
+            instructions += block.instructions.length;
+            if (i > lo && this.loopEnds.has(i) || this.entryTested(i)
+                || !PAIRED_EXITS.has(block.exit.kind) || this.loopsOntoItself(i))
+            {
+                return false;
+            }
+            for (const target of block.exit.targets)
+            {
+                const at = this.labels.get(target);
+                if (at !== undefined && at >= lo && at <= hi && at <= i && at !== lo)
+                {
+                    return false;
+                }
+            }
+        }
+        return instructions <= PAIRED_MAX;
+    }
+
+    /**
+     * A loop of plain blocks (`pairs`) emitted twice in its wasm loop: the
+     * first turn's jump back to the head goes on into the second turn's head,
+     * forward, with no look at the budget and no wasm loop head (the host's
+     * stack check), and the second's jumps back as any loop's. Each block
+     * charges as it always does, so every way out counts exactly; the budget
+     * is looked at every other turn, and a slice may run a turn past its
+     * budget, as a hoisted self-loop's paired turns do.
+     *
+     * @param {number} lo @param {number} hi
+     */
+    emitPairedRange(lo, hi){
+        const blocks = this.region.blocks;
+        /** @type {{ start: number, end: number, loop: boolean, pair?: boolean }[]} */
+        const first = [];
+        /** @type {{ start: number, end: number, loop: boolean, pair?: boolean }[]} */
+        const second = [];
+        for (let i = lo; i <= hi; i++)
+        {
+            if (i > lo)
+            {
+                first.push({ start: i, end: i, loop: false });
+            }
+            second.push({ start: i, end: i, loop: false, pair: true });
+        }
+        const range = { lo, hi, loop: true, items: first };
+        this.ranges.push(range);
+        for (let k = second.length - 1; k >= 0; k--)
+        {
+            this.open(`d${second[k].start}`, EMPTY);
+        }
+        for (let k = first.length - 1; k >= 0; k--)
+        {
+            this.open(`b${first[k].start}`, EMPTY);
+        }
+        this.pairing = { lo, hi, turn: 1 };
+        this.emitBlock(blocks[lo], lo);
+        for (const item of first)
+        {
+            this.close();
+            this.emitBlock(blocks[item.start], item.start);
+        }
+        this.pairing.turn = 2;
+        range.items = second;
+        for (const item of second)
+        {
+            this.close();
+            this.emitBlock(blocks[item.start], item.start);
+        }
+        this.pairing = null;
+        this.ranges.pop();
+    }
+
+    /**
      * The blocks `lo` to `hi` as the region's structure has them: each a wasm
      * block the code after its end follows, a loop among them as one item
      * whose blocks are a range of their own inside a wasm loop. A branch
@@ -2841,7 +2933,14 @@ export class RegionEmitter {
                 {
                     this.openLoop(`L${item.start}`);
                 }
-                this.emitRange(item.start, item.end, true);
+                if (this.pairs(item.start, item.end))
+                {
+                    this.emitPairedRange(item.start, item.end);
+                }
+                else
+                {
+                    this.emitRange(item.start, item.end, true);
+                }
                 this.close();
                 continue;
             }
@@ -2990,6 +3089,11 @@ export class RegionEmitter {
         if (this.copying)
         {
             return this.copies[this.copyAt + 1] ?? -1;
+        }
+        if (this.pairing?.turn === 1 && index === this.pairing.hi)
+        {
+            // The second turn's head follows, not the block after the loop.
+            return -1;
         }
         return index + 1 < this.region.blocks.length ? index + 1 : -1;
     }
@@ -4063,6 +4167,13 @@ export class RegionEmitter {
         {
             return;
         }
+        if (this.pairing?.turn === 1 && label === this.pairing.lo)
+        {
+            // The first turn's jump back: on into the second turn's head.
+            this.countMechanism(Mechanism.JUMP_LOOP);
+            b.br(this.depthOf(`d${label}`));
+            return;
+        }
         if (!this.copying && label > this.blockIndex)
         {
             // A forward edge cannot close a loop: a branch out of the item that
@@ -4072,14 +4183,16 @@ export class RegionEmitter {
             for (let k = this.ranges.length - 1; k >= 0; k--)
             {
                 const range = this.ranges[k];
-                /** @type {{ start: number, end: number, loop: boolean } | undefined} */
+                /** @type {{ start: number, end: number, loop: boolean, pair?: boolean }
+                 *     | undefined} */
                 const item = range.items.find(one=>!one.copy && one.start <= label
                     && label <= one.end);
                 if (label >= range.lo && label <= range.hi && item
                     && (!item.loop || item.start === label))
                 {
-                    b.br(this.depthOf(item.loop || this.takesFrom(label)
-                        || !this.entryTested(label) ? `b${item.start}` : `p${label}`));
+                    b.br(this.depthOf(item.pair === true ? `d${item.start}`
+                        : item.loop || this.takesFrom(label) || !this.entryTested(label)
+                            ? `b${item.start}` : `p${label}`));
                     return;
                 }
             }
@@ -4947,6 +5060,9 @@ const READ_LOOP_OPS = new Set(['mov', 'movzx', 'movsx', 'add', 'sub', 'adc', 'sb
     'xor', 'cmp', 'test', 'inc', 'dec', 'neg', 'not', 'lea', 'shl', 'shr', 'sar', 'rol', 'ror',
     'imul', 'jo', 'jno', 'jb', 'jae', 'je', 'jne', 'jbe', 'ja', 'js', 'jns', 'jp', 'jnp', 'jl',
     'jge', 'jle', 'jg', 'lods', 'scas', 'cmps']);
+
+/** How a block of a loop run two turns a wasm turn may leave (`pairs`). */
+const PAIRED_EXITS = new Set(['fallthrough', 'jump', 'jcc', 'loop']);
 
 /** The longest block a hoisted loop's unchecked copy runs two turns a wasm turn. */
 const PAIRED_MAX = 32;
