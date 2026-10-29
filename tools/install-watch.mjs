@@ -52,7 +52,8 @@
  * files a bottle would get;
  * `--collect-to DIR` also writes it there, a directory make-btl packs.
  *
- * `--bundle ID` runs an installed program instead, `--file HOST=GUEST` putting
+ * `--bundle ID` runs an installed program instead (its blocks kept in
+ * `bundles/ID/blocks`, or the folder `--blocks DIR` names, between runs), `--file HOST=GUEST` putting
  * a file of this disk on its volume first: the bundle in
  * `bundles/ID`, mounted where its installation put it, started at its entry
  * or at `--which`, a path in the bundle -- a launcher's dialog driven by the
@@ -81,6 +82,8 @@ import { Worker } from 'node:worker_threads';
 import { deflateSync } from 'node:zlib';
 import { openBundle } from './btl.mjs';
 import { relayFromArgv, rootsFromArgv } from './relay-option.mjs';
+import { diskDirectory } from './disk-directory.mjs';
+import { createOpfsStore } from '../modules/core/src/layers/filesystem/internal/opfs-store.js';
 import { isButtonClass, label } from './wizard-buttons.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
@@ -175,7 +178,13 @@ const mountBundle = async id=>{
                 await handle.read(buffer, 0, length, offset);
                 return new Uint8Array(buffer);
             },
-            store: null,
+            // The blocks read kept in a folder (`--blocks DIR`, the bundle's
+            // own by default) as a page keeps them in its origin's storage:
+            // in memory the pool holds 64 MiB, and a program whose libraries
+            // are larger than that fetches and inflates every block again on
+            // each pass the loader makes over them.
+            store: await createOpfsStore({ root: diskDirectory(argv.includes('--blocks')
+                ? argv[argv.indexOf('--blocks') + 1] : join(directory, 'blocks')) }),
             prefetch: false,
             prefix: placement.prefix,
         },
