@@ -621,6 +621,10 @@ export function createCpuModule(){
                 pop: ()=>activeFpu().pop(),
                 depth: ()=>activeFpu().depth(),
                 controlWord: ()=>activeFpu().controlWord(),
+                /** @param {number} word */
+                setControlWord: word=>activeFpu().setControlWord?.(word),
+                statusWord: ()=>activeFpu().statusWord?.() ?? 0,
+                clearExceptions: ()=>activeFpu().clearExceptions?.(),
             };
 
             current = state;
@@ -1041,6 +1045,20 @@ export function createCpuModule(){
                 readReg64: name=>started().readReg64(name),
                 /** @param {string} name @param {bigint} value */
                 writeReg64: (name, value)=>started().writeReg64(name, value),
+                /**
+                 * One XMM register's four lanes, low first, as their bit
+                 * patterns: where an x64 call passes a float argument.
+                 *
+                 * @param {number} index @returns {Uint32Array}
+                 */
+                readXmm: index=>started().readXmm(index),
+                /**
+                 * Sets an XMM register's lanes: where an x64 call answers a
+                 * float or a double, in XMM0.
+                 *
+                 * @param {number} index @param {Uint32Array} words
+                 */
+                writeXmm: (index, words)=>started().writeXmm(index, words),
                 /**
                  * A long-mode thread's state whole, as it stands on the
                  * processor: the sixteen general registers, the flags, the

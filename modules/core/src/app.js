@@ -4950,6 +4950,13 @@ async function buildApp(options){
                 write: (name, value)=>core.api('cpu').writeReg32(name, value),
                 /** A long-mode thread's registers whole (`longState`). */
                 long: ()=>core.api('cpu').longState(),
+                /**
+                 * Sets an XMM register's lanes, where an x64 function answers
+                 * a float or a double.
+                 *
+                 * @param {number} index @param {Uint32Array} words
+                 */
+                writeXmm: (index, words)=>core.api('cpu').writeXmm(index, words),
             },
             // A C runtime returns a double on the floating-point stack, not in
             // a register, so the functions that do are exported only when this
@@ -4960,6 +4967,13 @@ async function buildApp(options){
                 /** @param {number} index */
                 get: index=>core.api('cpu').fpu.get(index),
                 pop: ()=>core.api('cpu').fpu.pop(),
+                // The x87's words, for the runtime's floating-point functions
+                // a 64-bit process runs as host handlers rather than code.
+                controlWord: ()=>core.api('cpu').fpu.controlWord(),
+                /** @param {number} word */
+                setControlWord: word=>core.api('cpu').fpu.setControlWord(word),
+                statusWord: ()=>core.api('cpu').fpu.statusWord(),
+                clearExceptions: ()=>core.api('cpu').fpu.clearExceptions(),
             },
             arena: { base: HEAP_BASE, size: HEAP_SIZE },
             modules: {

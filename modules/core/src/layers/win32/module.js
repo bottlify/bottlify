@@ -131,6 +131,7 @@ import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createClassTable } from './ole32/remote.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
+import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
 
@@ -507,6 +508,21 @@ export function createWin32Module(){
             // needs them is exception handling, which hands a program a context and
             // continues execution from a changed one.
             const cpuRegisters = config?.registers ?? { read: ()=>0, write: ()=>{} };
+            /**
+             * Where a C function leaves a float or a double it answers: on the
+             * x87 stack in a 32-bit process, in XMM0 in a 64-bit one, as the
+             * x64 convention returns every floating-point value. Absent, the
+             * functions answering one are not exported.
+             *
+             * @type {import('./msvcrt/float.js').FloatHost | undefined}
+             */
+            // A 32-bit process's runtime runs as code what reads the x87's
+            // words; a 64-bit one has no i386 to run it as, and its handlers
+            // read them through here.
+            const floatResults = config?.fpu && pointerSize === 8 && cpuRegisters.writeXmm
+                ? { ...config.fpu, ...longFloatResults(cpuRegisters.writeXmm) }
+                : config?.fpu && { setResult: config.fpu.setResult, get: config.fpu.get,
+                    pop: config.fpu.pop };
 
             /**
              * Writes back a set of registers, for the entry points whose answer is
@@ -2281,7 +2297,7 @@ export function createWin32Module(){
                         // that is missing. Exported without it they would set a
                         // register the caller never reads and leave it storing
                         // whatever was on the floating-point stack already.
-                        fpu: config?.fpu,
+                        fpu: floatResults,
                         // The runtime's threads are kernel32's threads: made and
                         // ended by the same calls, read from the table at the
                         // moment of the call, once it exists.
