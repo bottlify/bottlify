@@ -31,8 +31,13 @@ function setup({ reply, wide = true } = {}){
     /** @type {number[]} */
     const freed = [];
     const fns = createResourceFunctions({
-        readCString: address=>address === 0x19000 ? 'MYNAME'
-            : address === 0x19100 ? '#101' : 'OTHER',
+        readCString: address=>{
+            if (address === 0x5dee7f10)
+            {
+                throw Object.assign(new Error('Unmapped read'), { code: 'GUEST_ACCESS' });
+            }
+            return address === 0x19000 ? 'MYNAME' : address === 0x19100 ? '#101' : 'OTHER';
+        },
         ...wide ? { readWideString: (/** @type {number} */ address)=>
             WIDE.get(address) ?? 'OTHER' } : {},
         setLastError: code=>{
@@ -287,4 +292,11 @@ test('the types of an image are enumerated once each, a string type placed for i
     const none = setup();
     assert.equal(none.fns.EnumResourceTypesA.handler([0, 0, 0]), 0);
     assert.deepEqual(none.errors, [1812], 'no callback: ERROR_RESOURCE_DATA_NOT_FOUND');
+});
+
+test('a name that is not there is ERROR_INVALID_PARAMETER, as the lookup catches the fault', ()=>{
+    const { fns, errors, asked } = setup();
+    assert.equal(fns.FindResourceA.handler([0x00400000, 0x5dee7f10, RT_BITMAP]), 0);
+    assert.deepEqual(errors, [87]);
+    assert.deepEqual(asked, [], 'and nothing was looked up');
 });

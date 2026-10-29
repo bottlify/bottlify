@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDriveFunctions } from './drives.js';
+import { createDriveFunctions, onVolume, volumeName } from './drives.js';
 import { decodeAnsi } from './locale.js';
 
 const DRIVE_NO_ROOT_DIR = 1;
@@ -16,8 +16,9 @@ const DRIVE_CDROM = 5;
 /**
  * @param {string[]} [mounted]
  * @param {Record<string, any>} [volumes]  What each letter says of itself.
+ * @param {Record<string, any>} [extra]  More of the host, for the calls that need it.
  */
-function setup(mounted = ['C'], volumes = {}){
+function setup(mounted = ['C'], volumes = {}, extra = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -52,6 +53,7 @@ function setup(mounted = ['C'], volumes = {}){
         },
         drives: ()=>mounted,
         volume: letter=>volumes[letter] ?? (mounted.includes(letter) ? { readOnly: false } : null),
+        ...extra,
     });
     return { fns, bytes, errors };
 }
@@ -380,13 +382,13 @@ test('a path\'s volume is its drive\'s root, in the namespace the path was writt
     plant(bytes, 0x100, `C:${bs}Program Files${bs}Steam${bs}htmlcache`);
     assert.equal(fns.GetVolumePathNameA.handler([0x100, 0x200, 64]), 1);
     assert.equal(read(0x200), `C:${bs}`);
-    plant(bytes, 0x100, `${bs}${bs}?${bs}d:${bs}data`);
+    plant(bytes, 0x100, `${bs}${bs}?${bs}D:${bs}data`);
     assert.equal(fns.GetVolumePathNameA.handler([0x100, 0x200, 64]), 1);
     assert.equal(read(0x200), `${bs}${bs}?${bs}D:${bs}`, 'the namespace kept');
     plant(bytes, 0x100, 'relative.txt');
     assert.equal(fns.GetVolumePathNameA.handler([0x100, 0x200, 64]), 1);
     assert.equal(read(0x200), `C:${bs}`, 'no drive: the current one');
-    assert.equal(fns.GetVolumePathNameA.handler([0x100, 0x200, 3]), 0, 'no room for C:\\');
+    assert.equal(fns.GetVolumePathNameA.handler([0x100, 0x200, 2]), 0, 'no room even for C:');
     assert.equal(errors.at(-1), 206, 'ERROR_FILENAME_EXCED_RANGE');
     assert.equal(fns.GetVolumePathNameW.argBytes, 12);
 });
@@ -429,4 +431,194 @@ test('a drive\'s root names its volume, the volume names the root, and the searc
     assert.equal(new Set(names).size, 2, 'two drives, two volumes');
     assert.equal(fns.FindVolumeClose.handler([search]), 1);
     assert.equal(fns.FindVolumeClose.handler([search]), 0);
+});
+
+/** @param {Uint8Array} bytes @param {number} at */
+const ansiAt = (bytes, at)=>String.fromCharCode(...bytes.subarray(at, bytes.indexOf(0, at)));
+
+/** @param {Uint8Array} bytes @param {number} at @param {number} [count] */
+const wideAt = (bytes, at, count)=>{
+    const units = new Uint16Array(bytes.slice(at, at + (count ?? 0x200) * 2).buffer);
+    const text = String.fromCharCode(...units);
+    return count === undefined ? text.slice(0, text.indexOf('\0')) : text;
+};
+
+test('each drive has one volume name, the same each time, that leads back to it', ()=>{
+    const name = volumeName('C');
+    assert.match(name, /^\\\\\?\\Volume\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}\\$/);
+    assert.equal(name.length, 49);
+    assert.equal(volumeName('c'), name);
+    assert.notEqual(volumeName('D'), name);
+    assert.deepEqual(onVolume(`${name}WINDOWS`), { letter: 'C', rest: 'WINDOWS' });
+    assert.deepEqual(onVolume(name.slice(0, -1)), { letter: 'C', rest: '' });
+    assert.equal(onVolume('C:\\WINDOWS'), null);
+    assert.deepEqual(onVolume(`\\\\.\\${name.slice(4, -1)}`), { letter: 'C', rest: '' },
+        'the device namespace\'s spelling');
+});
+
+test('FindFirstVolume and FindNextVolume walk the drives, then say there are no more', ()=>{
+    const { fns, bytes, errors } = setup(['C', 'D']);
+    const find = fns.FindFirstVolumeA.handler([0x100, 50]);
+    assert.notEqual(find, 0xffffffff);
+    assert.equal(ansiAt(bytes, 0x100), volumeName('C'));
+    assert.equal(fns.FindNextVolumeA.handler([find, 0x100, 49]), 0, 'no room for the terminator');
+    assert.equal(errors.at(-1), 206, 'ERROR_FILENAME_EXCED_RANGE');
+    assert.equal(fns.FindNextVolumeA.handler([find, 0x100, 50]), 1);
+    assert.equal(ansiAt(bytes, 0x100), volumeName('D'));
+    assert.equal(fns.FindNextVolumeA.handler([find, 0x100, 50]), 0);
+    assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
+    assert.equal(fns.FindVolumeClose.handler([find]), 1);
+    assert.equal(fns.FindVolumeClose.handler([find]), 0, 'closed once');
+    assert.equal(fns.FindFirstVolumeW.handler([0x100, 50]) >>> 0 !== 0xffffffff, true);
+    assert.equal(wideAt(bytes, 0x100), volumeName('C'));
+});
+
+test('a drive\'s root names its volume; anything that is no mount point is refused', ()=>{
+    const { fns, bytes, errors } = setup(['C'], {}, {
+        stat: (/** @type {string} */ path)=>({ exists: path === 'C:\\WINDOWS', isDirectory: true }) });
+    const ask = (/** @type {string} */ point, room = 50)=>{
+        plant(bytes, 0x10, point);
+        return fns.GetVolumeNameForVolumeMountPointA.handler([0x10, 0x200, room]);
+    };
+    assert.equal(ask('C:\\'), 1);
+    assert.equal(ansiAt(bytes, 0x200), volumeName('C'));
+    assert.equal(ask('C:/'), 1, 'a forward slash too');
+    assert.equal(ask(volumeName('C')), 1, 'the volume\'s own name');
+    assert.equal(ask('C:'), 0);
+    assert.equal(errors.at(-1), 123, 'ERROR_INVALID_NAME without the separator');
+    assert.equal(ask('C:\\', 49), 0);
+    assert.equal(errors.at(-1), 206);
+    assert.equal(ask('C:\\WINDOWS\\'), 0);
+    assert.equal(errors.at(-1), 4390, 'ERROR_NOT_A_REPARSE_POINT');
+    assert.equal(ask('Q:\\'), 0);
+    assert.equal(errors.at(-1), 2);
+});
+
+test('GetVolumePathName answers a path\'s drive root, kept in its own spelling when long', ()=>{
+    const { fns, bytes, errors } = setup(['C'], {}, { currentDirectory: ()=>'C:\\GAME' });
+    const ask = (/** @type {string} */ path, room = 0x100)=>{
+        plant(bytes, 0x10, path);
+        return fns.GetVolumePathNameA.handler([0x10, 0x200, room]) === 1
+            ? ansiAt(bytes, 0x200) : `error ${errors.at(-1)}`;
+    };
+    assert.equal(ask('c:\\windows\\system32'), 'C:\\');
+    assert.equal(ask('relative\\file'), 'C:\\', 'on the current directory\'s drive');
+    assert.equal(ask('\\\\?\\c:\\windows'), '\\\\?\\c:\\');
+    assert.equal(ask(`${volumeName('C')}x`), volumeName('C'));
+    assert.equal(ask('Q:\\x'), 'error 2');
+    assert.equal(ask('\\\\server\\share'), 'error 123');
+    assert.equal(ask('C:\\x', 4), 'C:\\');
+    assert.equal(ask('C:\\x', 3), 'C:', 'one short, the separator goes');
+    assert.equal(ask('C:\\x', 2), 'error 206');
+});
+
+test('a volume is mounted at its drive\'s root alone, in a list ended twice', ()=>{
+    const { fns, bytes, errors } = setup(['C']);
+    plant(bytes, 0x10, volumeName('C'));
+    assert.equal(fns.GetVolumePathNamesForVolumeNameA.handler([0x10, 0x200, 2, 0x300]), 0);
+    assert.equal(errors.at(-1), 234, 'ERROR_MORE_DATA');
+    assert.equal(dword(bytes, 0x300), 5);
+    assert.equal(fns.GetVolumePathNamesForVolumeNameA.handler([0x10, 0x200, 5, 0x300]), 1);
+    assert.deepEqual([...bytes.subarray(0x200, 0x205)], [...'C:\\\0\0'].map(c=>c.charCodeAt(0)));
+    plant(bytes, 0x10, 'C:\\');
+    assert.equal(fns.GetVolumePathNamesForVolumeNameA.handler([0x10, 0x200, 5, 0x300]), 0);
+    assert.equal(errors.at(-1), 123);
+});
+
+test('DefineDosDevice names a target QueryDosDevice reports; removing it uncovers the last', ()=>{
+    const { fns, bytes, errors } = setup(['C']);
+    plant(bytes, 0x10, 'BTLDEV');
+    plant(bytes, 0x40, 'C:/GAME');
+    assert.equal(fns.DefineDosDeviceA.handler([0, 0x10, 0x40]), 1);
+    plant(bytes, 0x40, '\\Device\\Raw');
+    assert.equal(fns.DefineDosDeviceA.handler([1, 0x10, 0x40]), 1, 'DDD_RAW_TARGET_PATH');
+    assert.equal(fns.QueryDosDeviceA.handler([0x10, 0x200, 0x100]) > 0, true);
+    assert.equal(ansiAt(bytes, 0x200), '\\Device\\Raw', 'the latest first');
+    assert.equal(fns.DefineDosDeviceA.handler([2, 0x10, 0]), 1, 'DDD_REMOVE_DEFINITION');
+    assert.equal(fns.QueryDosDeviceA.handler([0x10, 0x200, 0x100]) > 0, true);
+    assert.equal(ansiAt(bytes, 0x200), '\\??\\C:\\GAME', 'its slashes turned');
+    plant(bytes, 0x40, '\\??\\C:\\ELSE');
+    assert.equal(fns.DefineDosDeviceA.handler([2 | 4, 0x10, 0x40]), 0, 'no such target');
+    assert.equal(errors.at(-1), 2);
+    assert.equal(fns.DefineDosDeviceA.handler([2, 0x10, 0]), 1);
+    assert.equal(fns.QueryDosDeviceA.handler([0x10, 0x200, 0x100]), 0, 'gone');
+    assert.equal(fns.DefineDosDeviceA.handler([0, 0, 0x40]), 0);
+    assert.equal(errors.at(-1), 87);
+});
+
+test('no folder is a mount point: making one is refused and said, removing one finds none', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const { fns, errors } = setup(['C'], {}, {
+        divergence: (/** @type {string} */ api)=>said.push(api) });
+    assert.equal(/** @type {any} */ (fns.SetVolumeMountPointA).handler([0x10, 0x40]), 0);
+    assert.equal(errors.at(-1), 5);
+    assert.deepEqual(said, ['SetVolumeMountPointA']);
+    assert.equal(/** @type {any} */ (fns.DeleteVolumeMountPointW).handler([0x10]), 0);
+    assert.equal(errors.at(-1), 4390);
+});
+
+test('a volume is described the same by its handle, natively and by its root', ()=>{
+    const opened = { path: 'C:\\WINDOWS' };
+    const handles = { resolve: (/** @type {number} */ handle, /** @type {string} */ kind)=>{
+        if (handle === 0x44 && kind === 'file')
+        {
+            return opened;
+        }
+        throw new Error('no such handle');
+    } };
+    const { fns, bytes, errors } = setup(['C', 'D'], { D: { kind: 'cdrom', label: 'DISC',
+        serial: 0x1234, size: 2048 * 10, unicode: true } }, { handles });
+    const byHandle = fns.GetVolumeInformationByHandleW;
+    assert.equal(byHandle.argBytes, 32);
+    assert.equal(byHandle.handler([0xffffffff, 0x100, 20, 0x180, 0x184, 0x188, 0x190, 20]), 0);
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+    assert.equal(byHandle.handler([0x44, 0, 0, 0, 0, 0, 0, 0]), 1, 'nothing asked');
+    assert.equal(byHandle.handler([0x44, 0x100, 20, 0x180, 0x184, 0x188, 0x190, 20]), 1);
+    plant(bytes, 0x10, 'C:\\');
+    assert.equal(fns.GetVolumeInformationA.handler([0x10, 0x200, 20, 0x280, 0x284, 0x288,
+        0x290, 20]), 1);
+    assert.equal(wideAt(bytes, 0x100), ansiAt(bytes, 0x200), 'the label');
+    assert.equal(wideAt(bytes, 0x190), ansiAt(bytes, 0x290), 'the file system');
+    for (const at of [0, 4, 8])
+    {
+        assert.equal(dword(bytes, 0x180 + at), dword(bytes, 0x280 + at));
+    }
+    assert.equal(byHandle.handler([0x44, 0, 0, 0, 0x184, 0x188, 0x190, 2]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+
+    const query = /** @type {any} */ (byHandle).natives.NtQueryVolumeInformationFile;
+    assert.equal(query.argBytes, 20);
+    const system = ansiAt(bytes, 0x290);
+    assert.equal(query.handler([0x44, 0x300, 0x400, 50, 5]), 0, 'FileFsAttributeInformation');
+    assert.equal(dword(bytes, 0x400), dword(bytes, 0x288));
+    assert.equal(dword(bytes, 0x404), dword(bytes, 0x284));
+    assert.equal(dword(bytes, 0x408), system.length * 2);
+    assert.equal(wideAt(bytes, 0x40c, system.length), system);
+    assert.equal(dword(bytes, 0x304), 12 + system.length * 2);
+    const label = ansiAt(bytes, 0x200);
+    assert.equal(query.handler([0x44, 0x300, 0x400, 50, 1]), 0, 'FileFsVolumeInformation');
+    assert.equal(dword(bytes, 0x408), dword(bytes, 0x280), 'the serial');
+    assert.equal(dword(bytes, 0x40c), label.length * 2);
+    assert.equal(wideAt(bytes, 0x412, label.length), label);
+    assert.equal(query.handler([0x44, 0x300, 0x400, 20, 1]) >>> 0, 0x80000005,
+        'STATUS_BUFFER_OVERFLOW: part of the label');
+    assert.equal(dword(bytes, 0x304), 20);
+    assert.equal(query.handler([0x44, 0x300, 0x400, 17, 1]) >>> 0, 0xc0000004,
+        'STATUS_INFO_LENGTH_MISMATCH');
+    assert.equal(query.handler([0x44, 0x300, 0x400, 32, 7]), 0, 'FileFsFullSizeInformation');
+    assert.equal(dword(bytes, 0x418), 8, 'sectors per cluster');
+    assert.equal(dword(bytes, 0x41c), 512);
+    assert.equal(query.handler([0x44, 0x300, 0x400, 8, 4]), 0, 'FileFsDeviceInformation');
+    assert.equal(dword(bytes, 0x400), 7, 'FILE_DEVICE_DISK');
+    assert.equal(query.handler([0x44, 0x300, 0x400, 50, 2]) >>> 0, 0xc0000003);
+    assert.equal(query.handler([0x45, 0x300, 0x400, 50, 1]) >>> 0, 0xc0000008);
+
+    opened.path = 'D:\\SETUP.EXE';
+    assert.equal(query.handler([0x44, 0x300, 0x400, 8, 4]), 0);
+    assert.equal(dword(bytes, 0x400), 2, 'FILE_DEVICE_CD_ROM');
+    assert.equal(dword(bytes, 0x404), 0x23, 'mounted, removable, read-only');
+    assert.equal(query.handler([0x44, 0x300, 0x400, 24, 3]), 0, 'FileFsSizeInformation');
+    assert.equal(dword(bytes, 0x400), 10);
+    assert.equal(dword(bytes, 0x414), 2048);
 });

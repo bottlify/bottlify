@@ -254,6 +254,21 @@ test('a write replaces a key in place, adds what is missing, and removes with NU
         'a NULL section is refused');
 });
 
+test('a file\'s text ends at a NUL, which a rewrite does not carry on', ()=>{
+    // A program that writes its file as a C string writes the terminator too;
+    // the section added after it has to be readable, not hidden behind it.
+    const { memory, files, fns } = setup();
+    files.put('C:\\test.ini', '[TestApp]\r\nAnotherKey=asdf\r\n\0');
+    memory.put(FILE, 'C:\\test.ini');
+    memory.put(SECTION, 'AnotherApp');
+    memory.put(KEY, 'NewKey');
+    memory.put(VALUE, 'AValue');
+
+    assert.equal(fns.WritePrivateProfileStringA.handler([SECTION, KEY, VALUE, FILE]), 1);
+    assert.equal(files.text('C:\\test.ini'),
+        '[TestApp]\r\nAnotherKey=asdf\r\n[AnotherApp]\r\nNewKey=AValue\r\n');
+});
+
 test('a section is read back as its entries, key=value each, and win.ini is a fixed name', ()=>{
     const { memory, files, fns } = setup();
     files.put('C:\\WINDOWS\\TEMP\\setup.ini', INI);

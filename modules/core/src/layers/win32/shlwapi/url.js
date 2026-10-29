@@ -23,11 +23,19 @@
 
 import { hasScheme } from './path.js';
 import { dword, u32 } from './text.js';
+import { applyScheme, escapeUrl, hashData, parseUrl, urlPart, URL_ESCAPE_AS_UTF8 }
+    from './url-parts.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
 const E_POINTER = 0x80004003;
 const E_INVALIDARG = 0x80070057;
+const E_FAIL = 0x80004005 | 0;
+const E_NOTIMPL = 0x80004001 | 0;
+const URL_E_INVALID_SYNTAX = 0x80041001 | 0;
+/** PARSEDURL: its size, the protocol and its length, the suffix and its length, the scheme. */
+const PARSEDURL_SIZE = 24;
 
 const URL_ESCAPE_PERCENT = 0x00001000;
 const URL_UNESCAPE_INPLACE = 0x00100000;
@@ -146,41 +154,6 @@ export const parseScheme = url=>{
 };
 
 /**
- * A path with its `.` segments dropped and each `..` taking the segment before
- * it, never what `root` names; a path that ends in a dot segment keeps the
- * slash after the last segment left.
- *
- * @param {string} path @param {RegExp} root
- */
-const simplify = (path, root)=>{
-    const lead = root.exec(path)?.[0] ?? '';
-    const parts = path.slice(lead.length).split('/');
-    /** @type {string[]} */
-    const kept = [];
-    parts.forEach((part, index)=>{
-        if (part === '.' || part === '..')
-        {
-            if (part === '..')
-            {
-                kept.pop();
-            }
-            if (index === parts.length - 1)
-            {
-                kept.push('');
-            }
-            return;
-        }
-        kept.push(part);
-    });
-    return lead + kept.join('/');
-};
-
-/** A slash, or a drive and the slash after it, are what a path is rooted in. */
-const SLASH_ROOT = /^\//;
-const DRIVE_ROOT = /^\/[A-Za-z][:|](?:\/|$)|^\//;
-const NO_ROOT = /^(?!)/;
-
-/**
  * A URL made of a drive or UNC path: its backslashes slashes, a drive after
  * `file:///` and a server after `file://`, a relative path after `file:`.
  * Unsafe characters and the percent sign are escaped unless `escape` is
@@ -202,93 +175,504 @@ export const fileUrlOf = (path, escape)=>{
     return path.startsWith('\\') ? `file://${body}` : `file:${body}`;
 };
 
+const URL_FILE_USE_PATHURL = 0x00010000;
+const URL_WININET_COMPATIBILITY = 0x80000000;
+
+/**
+ * A `file:` URL's parts as UrlCanonicalize reads them: where the path is
+ * rooted -- at a server, at the volume's root, at a drive, or nowhere -- and
+ * the path after that root, its separators either slash.
+ *
+ * @typedef {Object} FileParts
+ * @property {'unc' | 'rooted' | 'drive' | 'relative'} kind
+ * @property {string} host   The server, for 'unc'.
+ * @property {string} drive  `x:` or `x|`, for 'drive'.
+ * @property {string} path   What follows the root, from its first separator on.
+ */
+
+/** @param {string} text  A drive's two characters, and nothing else, or not. */
+const isDrive = text=>/^[A-Za-z][:|]$/.test(text);
+
+/**
+ * The parts of what follows `file:`: no separator is a relative path, one
+ * or three are rooted at the volume, two name a server and four or more a
+ * server too; a drive wherever the root or the server would be is the root.
+ * `localhost` is no server in the path forms -- what follows it is read
+ * again, three separators naming a server and fewer the volume's root.
+ *
+ * @param {string} body @param {boolean} pathForm
+ * @returns {FileParts}
+ */
+const fileParts = (body, pathForm)=>{
+    const lead = /^[\\/]*/.exec(body)?.[0].length ?? 0;
+    const rest = body.slice(lead);
+    const drive = /^[A-Za-z][:|]/.exec(rest)?.[0];
+    const driveRooted = drive !== undefined && (rest.length === 2 || /^..[\\/]/.test(rest)
+        || lead !== 2);
+    if (drive !== undefined && driveRooted && lead !== 2)
+    {
+        return { kind: 'drive', host: '', drive, path: rest.slice(2) };
+    }
+    if (lead === 0)
+    {
+        return { kind: 'relative', host: '', drive: '', path: rest };
+    }
+    if (lead === 1 || lead === 3 || (lead >= 2 && rest === ''))
+    {
+        return { kind: 'rooted', host: '', drive: '', path: `/${rest}` };
+    }
+    const end = rest.search(pathForm ? /[\\/?]/ : /[\\/]/);
+    const host = end < 0 ? rest : rest.slice(0, end);
+    const path = end < 0 ? '' : rest.slice(end);
+    if (host === '')
+    {
+        return { kind: 'rooted', host: '', drive: '', path };
+    }
+    if (isDrive(host))
+    {
+        return { kind: 'drive', host: '', drive: host, path };
+    }
+    if (pathForm && host.toLowerCase() === 'localhost')
+    {
+        const again = /^[\\/]*/.exec(path)?.[0].length ?? 0;
+        const after = path.slice(again);
+        if (/^[A-Za-z][:|]/.test(after))
+        {
+            return { kind: 'drive', host: '', drive: after.slice(0, 2), path: after.slice(2) };
+        }
+        return again >= 3 ? fileParts(`//${after}`, pathForm)
+            : { kind: 'rooted', host: '', drive: '', path: after === '' && again === 0 ? ''
+                : `/${after}` };
+    }
+    return { kind: 'unc', host, drive: '', path };
+};
+
+/**
+ * Where a `file:` path stops being a path: a `#` straight after `.htm` or
+ * `.html` begins a fragment in every form, and in the path forms the first
+ * `?` a query. -1 when it does not stop.
+ *
+ * @param {string} path @param {boolean} pathForm
+ */
+const fileExtraAt = (path, pathForm)=>{
+    const fragment = /\.html?#/i.exec(path);
+    const at = fragment ? fragment.index + fragment[0].length - 1 : -1;
+    const query = pathForm ? path.indexOf('?') : -1;
+    return at < 0 ? query : query < 0 ? at : Math.min(at, query);
+};
+
+/**
+ * A `file:` path's dot elements resolved: `.` goes, `..` undoes the element
+ * before it but never the root; one with nothing to undo goes in the URL
+ * form and stays in the path forms. An element that is a dot and then a `#`
+ * or `?` is that dot in the URL form. A path whose last element was a dot
+ * ends in a separator, unless nothing at all is left of a relative one.
+ *
+ * @param {string[]} elements @param {{ keepExcess: boolean, splitMarks: boolean,
+ *     relative: boolean }} rules
+ */
+const resolveFileDots = (elements, rules)=>{
+    /** @type {string[]} */
+    const kept = [];
+    let excess = 0;
+    elements.forEach((element, index)=>{
+        const marked = rules.splitMarks ? /^(\.\.?)([#?].*)$/.exec(element) : null;
+        const dot = marked ? marked[1] : element;
+        const last = index === elements.length - 1 || marked !== null;
+        if (dot !== '.' && dot !== '..')
+        {
+            kept.push(element);
+            return;
+        }
+        if (dot === '..')
+        {
+            if (kept.length > excess)
+            {
+                kept.pop();
+            }
+            else if (rules.keepExcess)
+            {
+                kept.push('..');
+                excess++;
+            }
+        }
+        if (marked)
+        {
+            kept.push(marked[2]);
+        }
+        else if (last && !(rules.relative && kept.length === 0))
+        {
+            kept.push('');
+        }
+    });
+    return kept;
+};
+
+/**
+ * UrlCanonicalize's answer for a `file:` URL, or a path that becomes one
+ * (Wine's test_UrlCanonicalizeA file cases, against Windows). The URL form
+ * keeps slashes and leaves alone a path whose first element is a dot or
+ * that starts with a `#` or `?`; URL_FILE_USE_PATHURL and
+ * URL_WININET_COMPATIBILITY write the path the URL names, with
+ * backslashes, after `file://`, the first unescaped and without its query,
+ * the second keeping the query as it was.
+ *
+ * @param {string} input @param {number} flags
+ * @param {(code: number) => string} char
+ */
+const canonicalizeFileUrl = (input, flags, char)=>{
+    const url = trimmed(input);
+    const pathUrl = (flags & URL_FILE_USE_PATHURL) !== 0;
+    const wininet = (flags & URL_WININET_COMPATIBILITY) !== 0 && !pathUrl;
+    const pathForm = pathUrl || (flags & URL_WININET_COMPATIBILITY) !== 0;
+    const simplifying = (flags & URL_DONT_SIMPLIFY) === 0;
+    const fromPath = isDosPath(url) || /^[A-Za-z]\|/.test(url);
+    let body = fromPath ? url : url.slice(url.indexOf(':') + 1);
+    if (fromPath && /^[A-Za-z][:|]/.test(body))
+    {
+        body = `///${body}`;
+    }
+    if (fromPath && !pathForm && (flags & URL_UNESCAPE) === 0)
+    {
+        body = escapeWhere(body, unsafeOrPercent);
+    }
+    const parts = fileParts(body, pathForm);
+    let path = parts.path;
+    const extraAt = fileExtraAt(path, pathForm);
+    let extra = extraAt < 0 ? '' : path.slice(extraAt);
+    path = extraAt < 0 ? path : path.slice(0, extraAt);
+    // The URL form leaves a path alone whose first element is a dot, or that
+    // starts with a `#` or `?` within two separators of its root.
+    // A drive as a server's first element is the root after it.
+    const hostDrive = parts.kind === 'unc' ? /^[\\/][A-Za-z][:|](?=[\\/]|$)/.exec(path)?.[0] ?? ''
+        : '';
+    const guarded = !pathForm && parts.kind !== 'relative'
+        && (/^[\\/]{1,2}[#?]/.test(path) || /^[\\/](\.\.?)(?:[\\/]|$)/.test(path)
+            || (parts.kind === 'drive' && /^(\.\.?)(?:[\\/]|$)/.test(path))
+            || (hostDrive !== '' && /^[\\/](\.\.?)(?:[\\/]|$)/.test(path.slice(hostDrive.length))));
+    const mark = guarded ? path.search(/[#?]/) : -1;
+    if (mark >= 0)
+    {
+        extra = path.slice(mark) + extra;
+        path = path.slice(0, mark);
+    }
+    path = path.replace(/\\/g, '/');
+    if (pathForm && path.indexOf('#') >= 0)
+    {
+        // After a `#` that is the path's own, a backslash is a slash all the same.
+        path = path.replace(/\\/g, '/');
+    }
+    const rootless = parts.kind === 'relative' || (parts.kind === 'drive' && !path.startsWith('/'));
+    // A drive-relative path is rooted at its first element in the path forms.
+    const anchor = parts.kind === 'drive' && pathForm && rootless
+        ? /^[^/]*/.exec(path)?.[0] ?? '' : hostDrive.replace(/\\/g, '/');
+    let tail = path.slice(anchor.length);
+    const rooted = tail.startsWith('/');
+    const alone = tail === '/' || tail === '';
+    let elements = (rooted ? tail.slice(1) : tail).split('/');
+    if (tail === '' || (rooted && tail === '/'))
+    {
+        elements = [];
+    }
+    if (simplifying && !guarded)
+    {
+        elements = resolveFileDots(elements, { keepExcess: pathForm,
+            splitMarks: !pathForm, relative: rootless && anchor === '' });
+    }
+    else if (pathForm && /^\.\.?$/.test(elements.at(-1) ?? ''))
+    {
+        elements = [...elements, ''];
+    }
+    const hostRoot = parts.kind === 'unc';
+    tail = `${rooted || (hostRoot && elements.length > 0) ? '/' : ''}${elements.join('/')}`;
+    if (anchor !== '' && elements.length > 0 && !rooted)
+    {
+        tail = `/${tail}`;
+    }
+    path = anchor + tail;
+    // A drive in the path's first element is a root a `..` does not undo.
+    if (!pathForm)
+    {
+        let head;
+        switch (parts.kind)
+        {
+            case 'unc': head = `//${parts.host}`; break;
+            case 'rooted': head = '//'; break;
+            case 'drive': head = `///${parts.drive}`; break;
+            default: head = ''; break;
+        }
+        if (parts.kind === 'unc' || parts.kind === 'rooted')
+        {
+            path ||= '/';
+        }
+        /** @param {string} text */
+        const escaped = text=>{
+            let out = (flags & URL_UNESCAPE) !== 0 ? unescapeUrl(text, true, char) : text;
+            if ((flags & URL_ESCAPE_SPACES_ONLY) !== 0)
+            {
+                out = out.replace(/ /g, '%20');
+            }
+            else if ((flags & URL_ESCAPE_UNSAFE) !== 0)
+            {
+                const percent = (flags & URL_ESCAPE_PERCENT) !== 0;
+                out = escapeWhere(out, c=>isUnsafe(c) || (percent && c === '%'));
+            }
+            return out;
+        };
+        const extraOut = (flags & URL_DONT_ESCAPE_EXTRA_INFO) !== 0 ? extra : escaped(extra);
+        return `file:${escaped(head + path)}${extraOut}`;
+    }
+    let head;
+    switch (parts.kind)
+    {
+        case 'unc': head = `\\\\${parts.host}`; break;
+        case 'drive': head = parts.drive; break;
+        default: head = ''; break;
+    }
+    if (pathUrl && alone && !(simplifying && elements.length > 0) && parts.kind !== 'drive')
+    {
+        path = '';
+    }
+    else if (wininet && path === '' && parts.kind !== 'relative' && parts.kind !== 'drive')
+    {
+        path = '/';
+    }
+    // Past the first `#`, the host's own included, a slash stays a slash.
+    const whole = head + path;
+    const hash = whole.indexOf('#', head.startsWith('\\\\') ? 2 : 0);
+    const before = hash < 0 ? whole : whole.slice(0, hash);
+    const after = hash < 0 ? '' : whole.slice(hash);
+    let dos = before.replace(/\//g, '\\') + after;
+    // A fragment the path's `.html` began goes after the query that follows it.
+    const at = extra.startsWith('#') ? extra.indexOf('?') : 0;
+    const fragment = at < 0 ? extra : extra.slice(0, at);
+    const query = at < 0 ? '' : extra.slice(at);
+    if (pathUrl)
+    {
+        dos = unescapeUrl(dos, true, char);
+        return `file://${dos}`;
+    }
+    if ((flags & URL_UNESCAPE) !== 0)
+    {
+        dos = unescapeUrl(dos, true, char);
+    }
+    const prefix = parts.kind === 'relative' ? 'file:' : 'file://';
+    return `${prefix}${dos}${query}${fragment}`;
+};
+
+/** The schemes UrlCanonicalize reads a backslash in as a slash. */
+const CANON_SLASHED = new Set(['gopher', 'http', 'https', 'news', 'nntp', 'snews', 'telnet']);
+/** The schemes it keeps a backslash in, reading it as a separator all the same. */
+const CANON_BACKSLASHED = new Set(['ftp', 'local', 'res', 'wais']);
+
+/**
+ * @typedef {Object} DotRules
+ * @property {boolean | 'dots'} backslash
+ *           A backslash separates elements too, and is kept; 'dots', only
+ *           before a dot element that a slash or the end closes.
+ * @property {boolean} keepExcess  A `..` with nothing to undo stays, rather than going.
+ * @property {boolean} guarded     A first element that is a dot leaves the path as it is.
+ */
+
+/**
+ * A path's dot elements resolved: a `.` goes, a `..` undoes the element
+ * before it -- never one it could not undo, which stays or goes as the
+ * scheme's rules say -- and a path whose last element was a dot ends in a
+ * separator. Each element keeps the separator that followed it.
+ *
+ * @param {string} path  What follows the host, or the root, or the scheme.
+ * @param {DotRules} rules
+ * @param {boolean} simplifying  False for URL_DONT_SIMPLIFY: only the trailing separator.
+ */
+const resolveDots = (path, rules, simplifying)=>{
+    const parts = rules.backslash === true ? path.split(/(?<=[/\\])/)
+        : path.split(/(?<=\/)/).flatMap(part=>(rules.backslash === 'dots'
+            ? part.split(/(?<=\\)(?=\.\.?\/?$)/) : [part]));
+    /** @type {{ text: string, separator: string }[]} */
+    const elements = parts.map((part, at)=>{
+        // A backslash the 'dots' split left at a part's end is the separator
+        // before a dot; any other stays in the element's text.
+        const next = parts[at + 1]?.replace(/\/$/, '');
+        const backslash = rules.backslash === true
+            || (rules.backslash === 'dots' && (next === '.' || next === '..'));
+        const separator = part.endsWith('/') || (backslash && part.endsWith('\\'))
+            ? part.slice(-1) : '';
+        return { text: part.slice(0, part.length - separator.length), separator };
+    });
+    if (path === '')
+    {
+        return '';
+    }
+    const last = elements.at(-1);
+    const dotLast = last !== undefined && (last.text === '.' || last.text === '..')
+        && last.separator === '';
+    // The guard reads the first element between slashes, whatever a
+    // backslash in it does.
+    const first = path.split('/')[0];
+    if (!simplifying || (rules.guarded && (first === '.' || first === '..')))
+    {
+        return dotLast && rules.keepExcess ? `${path}/` : path;
+    }
+    /** @type {{ text: string, separator: string, fixed: boolean }[]} */
+    const kept = [];
+    elements.forEach(element=>{
+        if (element.text === '.')
+        {
+            return;
+        }
+        if (element.text === '..')
+        {
+            const top = kept.at(-1);
+            if (top && !top.fixed)
+            {
+                kept.pop();
+            }
+            else if (rules.keepExcess)
+            {
+                kept.push({ ...element, fixed: true });
+            }
+            return;
+        }
+        kept.push({ ...element, fixed: false });
+    });
+    const text = kept.map(element=>element.text + element.separator).join('');
+    const top = kept.at(-1);
+    return dotLast && top !== undefined && top.separator === '' ? `${text}/` : text;
+};
+
 /**
  * UrlCanonicalize's answer.
+ *
+ * Each scheme's family reads a path its own way (Wine's
+ * test_UrlCanonicalizeA, against Windows): one that is not known, or no
+ * scheme at all, keeps a `..` it cannot undo and moves a query before a
+ * fragment that came first; the hosted ones read a backslash as a slash,
+ * drop a `..` that would climb past the host and leave a path that starts
+ * with a dot alone; the ftp-like ones are those but keep a backslash, and a
+ * `file:` URL is a path's. The host of a `//` URL is never simplified, and a
+ * slash always follows it. After the first `?` or `#` nothing is simplified.
  *
  * @param {string} input @param {number} flags
  * @param {(code: number) => string} char
  */
 export const canonicalizeUrl = (input, flags, char)=>{
-    let url = trimmed(input);
-    const fromPath = isDosPath(url);
-    if (fromPath)
+    const url = trimmed(input.replace(/[\t\n\r]/g, ''));
+    const parsed = isDosPath(url) ? null : parseScheme(url);
+    if (isDosPath(url) || /^[A-Za-z]\|/.test(url) || parsed?.scheme === 'file')
     {
-        url = fileUrlOf(url, (flags & URL_UNESCAPE) === 0);
+        return canonicalizeFileUrl(url, flags, char);
     }
     const simplifying = (flags & URL_DONT_SIMPLIFY) === 0;
-    const parsed = parseScheme(url);
-    let head = '';
-    let main = url;
+    const scheme = parsed?.scheme ?? null;
+    const opaque = scheme !== null && OPAQUE.has(scheme);
+    const slashed = scheme !== null && CANON_SLASHED.has(scheme);
+    const backslashed = scheme !== null && CANON_BACKSLASHED.has(scheme);
+    const hosted = slashed || backslashed;
+    let rest = parsed ? parsed.rest : url;
+    let main = rest;
     let extra = '';
-    if (parsed)
+    if (scheme === 'mk')
     {
-        const { scheme, rest } = parsed;
-        head = `${scheme}:`;
-        main = rest;
-        if (!OPAQUE.has(scheme))
+        main = canonicalMk(rest, simplifying);
+    }
+    else if (!opaque)
+    {
+        const split = rest.search(/[?#]/);
+        main = split < 0 ? rest : rest.slice(0, split);
+        extra = split < 0 ? '' : rest.slice(split);
+        const query = extra.indexOf('?');
+        if (!hosted && extra.startsWith('#') && query > 0)
         {
-            const split = rest.search(/[?#]/);
-            main = split < 0 ? rest : rest.slice(0, split);
-            extra = split < 0 ? '' : rest.slice(split);
-            const file = scheme === 'file';
-            if (file || (HOSTED.has(scheme) && !KEEPS_BACKSLASH.has(scheme)))
-            {
-                main = main.replace(/\\/g, '/');
-            }
-            if (file && !main.startsWith('//') && (main.startsWith('/') || /^[A-Za-z]:/.test(main)))
-            {
-                main = main.startsWith('/') ? `//${main}` : `///${main}`;
-            }
-            if (main.startsWith('//'))
-            {
-                let tail = main.slice(2);
-                if (file)
-                {
-                    tail = tail.replace(/^\/{2,}/, '');
-                }
-                const end = tail.indexOf('/');
-                let host = end < 0 ? tail : tail.slice(0, end);
-                let path = end < 0 ? '' : tail.slice(end);
-                if (file && /^[A-Za-z][:|]$/.test(host))
-                {
-                    path = `/${host}${path}`;
-                    host = '';
-                }
-                if (HOSTED.has(scheme))
-                {
-                    host = host.toLowerCase();
-                }
-                path ||= '/';
-                main = `//${host}${simplifying ? simplify(path, file ? DRIVE_ROOT : SLASH_ROOT)
-                    : path}`;
-            }
-            else if (simplifying && (file || HOSTED.has(scheme)))
-            {
-                main = simplify(main, NO_ROOT);
-            }
+            extra = extra.slice(query) + extra.slice(0, query);
+        }
+        if (slashed)
+        {
+            main = main.replace(/\\/g, '/');
+        }
+        /** @type {DotRules} */
+        const rules = { backslash: backslashed, keepExcess: !hosted, guarded: hosted };
+        const twoSlashes = hosted ? /^[/\\]{2}/ : /^\/\//;
+        if (twoSlashes.test(main))
+        {
+            const after = main.slice(2);
+            const end = after.indexOf('/');
+            const host = end < 0 ? after : after.slice(0, end);
+            const path = end < 0 ? '' : after.slice(end + 1);
+            main = `${main.slice(0, 2)}${hosted ? host.toLowerCase() : host}/`
+                + resolveDots(path, rules, simplifying);
+        }
+        else if (main.startsWith('/'))
+        {
+            // A backslash right after the root is passed over: it is no separator.
+            const path = !hosted && main[1] === '\\' ? main.slice(2) : main.slice(1);
+            main = hosted ? resolveDots(main, rules, simplifying)
+                : `/${resolveDots(path, rules, simplifying)}`;
+        }
+        else if (scheme === null)
+        {
+            const resolved = resolveDots(main, rules, simplifying);
+            main = resolved === '' && main !== '' && simplifying ? '/' : resolved;
+        }
+        else if (hosted)
+        {
+            main = resolveDots(main, { ...rules, guarded: false }, simplifying);
+        }
+        else if (main === '.' && simplifying)
+        {
+            main = '';
         }
     }
-    else if (simplifying)
+    rest = main;
+    const head = parsed ? `${scheme}:` : '';
+    return `${head}${escapeParts(rest, flags, char, opaque)}`
+        + `${(flags & URL_DONT_ESCAPE_EXTRA_INFO) !== 0 ? extra
+            : escapeParts(extra, flags, char, opaque)}`;
+};
+
+/**
+ * What follows `mk:`: an `@` moniker's name up to the first slash is its
+ * host, never simplified and always followed by a slash; a path is
+ * simplified up to the first `?` or `#`, a `..` with nothing to undo
+ * dropped, and a backslash is a separator only before a dot element.
+ *
+ * @param {string} rest @param {boolean} simplifying
+ */
+const canonicalMk = (rest, simplifying)=>{
+    /** @type {DotRules} */
+    const rules = { backslash: 'dots', keepExcess: false, guarded: false };
+    if (rest.startsWith('@'))
     {
-        main = simplify(main, SLASH_ROOT) || (main === '' ? '' : '/');
+        const end = rest.indexOf('/');
+        const host = end < 0 ? rest : rest.slice(0, end);
+        const after = end < 0 ? '' : rest.slice(end + 1);
+        const split = after.search(/[?#]/);
+        const path = split < 0 ? after : after.slice(0, split);
+        return `${host}/${resolveDots(path, { ...rules, guarded: true }, simplifying)}`
+            + (split < 0 ? '' : after.slice(split));
     }
-    const opaque = parsed !== null && OPAQUE.has(parsed.scheme);
-    /** @param {string} text */
-    const escaped = text=>{
-        let out = (flags & URL_UNESCAPE) !== 0 ? unescapeUrl(text, true, char) : text;
-        if ((flags & URL_ESCAPE_SPACES_ONLY) !== 0 && !opaque)
-        {
-            out = out.replace(/ /g, '%20');
-        }
-        else if ((flags & URL_ESCAPE_UNSAFE) !== 0)
-        {
-            const percent = (flags & URL_ESCAPE_PERCENT) !== 0;
-            out = escapeWhere(out, c=>isUnsafe(c) || (percent && c === '%'));
-        }
-        return out;
-    };
-    const extraEscaped = (flags & URL_DONT_ESCAPE_EXTRA_INFO) !== 0 ? extra : escaped(extra);
-    return `${head}${escaped(main)}${extraEscaped}`;
+    const split = rest.search(/[?#]/);
+    const path = split < 0 ? rest : rest.slice(0, split);
+    return resolveDots(path, rules, simplifying) + (split < 0 ? '' : rest.slice(split));
+};
+
+/**
+ * The flags' escaping and unescaping of a part of a canonical URL.
+ *
+ * @param {string} text @param {number} flags @param {(code: number) => string} char
+ * @param {boolean} opaque
+ */
+const escapeParts = (text, flags, char, opaque)=>{
+    let out = (flags & URL_UNESCAPE) !== 0 ? unescapeUrl(text, true, char) : text;
+    if ((flags & URL_ESCAPE_SPACES_ONLY) !== 0 && !opaque)
+    {
+        out = out.replace(/ /g, '%20');
+    }
+    else if ((flags & URL_ESCAPE_UNSAFE) !== 0)
+    {
+        const percent = (flags & URL_ESCAPE_PERCENT) !== 0;
+        out = escapeWhere(out, c=>isUnsafe(c) || (percent && c === '%'));
+    }
+    return out;
 };
 
 /**
@@ -331,7 +715,9 @@ export const combineUrl = (base, relative, flags, char)=>{
         return canonical(to);
     }
     const scheme = `${origin.scheme}:`;
-    const split = origin.rest.search(/[?#]/);
+    // A file URL's `#` is part of its path but after `.htm` or `.html`.
+    const split = origin.scheme === 'file' ? fileExtraAt(origin.rest, false)
+        : origin.rest.search(/[?#]/);
     let main = split < 0 ? origin.rest : origin.rest.slice(0, split);
     const extra = split < 0 ? '' : origin.rest.slice(split);
     if (origin.scheme === 'file' || (HOSTED.has(origin.scheme)
@@ -345,6 +731,20 @@ export const combineUrl = (base, relative, flags, char)=>{
     if (to === '')
     {
         return canonical(from);
+    }
+    // An mk: URL's path starts after the `::` that ends its store; a
+    // relative URL naming a store of its own stands alone.
+    const store = origin.scheme === 'mk' ? main.indexOf('::') : -1;
+    if (store >= 0)
+    {
+        if (to.includes('::'))
+        {
+            return canonical(`${scheme}${to}`);
+        }
+        const root = main.slice(0, store + 2);
+        const inStore = main.slice(store + 2);
+        return canonical(/^[\\/]/.test(to) ? `${scheme}${root}${to}`
+            : `${scheme}${root}${inStore.slice(0, inStore.lastIndexOf('/') + 1)}${to}`);
     }
     if (to.startsWith('//') || to.startsWith('\\\\'))
     {
@@ -465,6 +865,39 @@ export function createUrlFunctions(host, { A, W }){
         return E_POINTER;
     };
 
+    /** Said once: HashData's table is not Windows'. */
+    let ownTable = false;
+    /** @param {Uint8Array} input @param {number} size */
+    const hash = (input, size)=>{
+        if (!ownTable)
+        {
+            ownTable = true;
+            host.divergence?.('HashData', 'a permutation of our own: the hash differs from '
+                + 'Windows\'');
+        }
+        return hashData(input, size);
+    };
+
+    /**
+     * An answer UrlGetPart and UrlApplyScheme count without the terminator
+     * on success and with it when the room is short; the buffer is left
+     * alone then.
+     *
+     * @param {import('./text.js').Width} width @param {string} text @param {number} buffer
+     * @param {number} count @param {number} success
+     */
+    const counted = (width, text, buffer, count, success)=>{
+        const room = /** @type {number} */ (countAt(count));
+        if (text.length >= room)
+        {
+            host.writeMemory(count >>> 0, dword(text.length + 1));
+            return E_POINTER;
+        }
+        host.writeMemory(buffer >>> 0, width.sz(text));
+        host.writeMemory(count >>> 0, dword(text.length));
+        return success;
+    };
+
     /** Said once, the first time a URL is asked a question not answered here. */
     let unanswered = false;
 
@@ -563,6 +996,148 @@ export function createUrlFunctions(host, { A, W }){
             const url = width.read(pointer);
             const at = url === null ? null : locationIndex(url);
             return at === null ? 0 : (pointer >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * HRESULT UrlApplySchemeA(LPCSTR pszIn, LPSTR pszOut, LPDWORD pcchOut, DWORD dwFlags)
+         *
+         * `applyScheme`'s URL; S_FALSE, all left as it was, when no scheme
+         * applies (Wine's test_UrlApplyScheme).
+         */
+        ...both('UrlApplyScheme', 16, (width, [input, buffer, count, flags])=>{
+            const url = width.read(input);
+            if (url === null || (buffer >>> 0) === 0 || countAt(count) === null)
+            {
+                return E_INVALIDARG;
+            }
+            const applied = applyScheme(url, flags >>> 0);
+            return applied === null ? S_FALSE : counted(width, applied, buffer, count, S_OK);
+        }),
+
+        /**
+         * HRESULT UrlEscapeA(LPCSTR pszUrl, LPSTR pszEscaped, LPDWORD pcchEscaped, DWORD dwFlags)
+         *
+         * `escapeUrl`'s text, the source read before the answer is written so
+         * the two may be one buffer. URL_ESCAPE_AS_UTF8 is the wide
+         * spelling's alone: E_NOTIMPL in the ANSI one (Wine's test_UrlEscapeA).
+         */
+        ...both('UrlEscape', 16, (width, [input, buffer, count, flags])=>{
+            const url = width.read(input);
+            const room = countAt(count);
+            if (url === null || (buffer >>> 0) === 0 || room === null || room === 0)
+            {
+                return E_INVALIDARG;
+            }
+            if (!width.wide && ((flags >>> 0) & URL_ESCAPE_AS_UTF8) !== 0)
+            {
+                return E_NOTIMPL;
+            }
+            return answer(width, escapeUrl(url, flags >>> 0), buffer, count, room);
+        }),
+
+        /**
+         * HRESULT UrlGetPartA(LPCSTR pszIn, LPSTR pszOut, LPDWORD pcchOut, DWORD dwPart,
+         *                     DWORD dwFlags)
+         *
+         * `urlPart`'s part. A part that is empty or absent where it could be
+         * is S_FALSE and an empty string in the ANSI spelling, S_OK in the
+         * wide one; a part the URL cannot have leaves all as it was (Wine's
+         * test_UrlGetPart).
+         */
+        ...both('UrlGetPart', 20, (width, [input, buffer, count, part, flags])=>{
+            const url = width.read(input);
+            const room = countAt(count);
+            if (url === null || (buffer >>> 0) === 0 || room === null || room === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const { kind, text } = urlPart(url, part >>> 0, flags >>> 0);
+            if (kind === 'none')
+            {
+                return E_FAIL;
+            }
+            if (kind === 'invalid')
+            {
+                return E_INVALIDARG;
+            }
+            if (kind === 'empty')
+            {
+                host.writeMemory(buffer >>> 0, width.sz(''));
+                host.writeMemory(count >>> 0, dword(0));
+                return width.wide ? S_OK : S_FALSE;
+            }
+            return counted(width, text, buffer, count, S_OK);
+        }),
+
+        /**
+         * HRESULT UrlHashA(LPCSTR pszUrl, LPBYTE pbHash, DWORD cbHash)
+         *
+         * HashData over the URL's ANSI bytes, the wide spelling's narrowed
+         * first, so both hash a URL alike (Wine's test_UrlHash).
+         */
+        ...both('UrlHash', 12, (width, [input, out, size])=>{
+            const url = width.read(input);
+            if (url === null || (out >>> 0) === 0 || (size >>> 0) === 0 || (size >>> 0) > 256)
+            {
+                return E_INVALIDARG;
+            }
+            host.writeMemory(out >>> 0, hash(encodeAnsi(url), size >>> 0));
+            return S_OK;
+        }),
+
+        /**
+         * HRESULT HashData(const BYTE *pbData, DWORD cbData, LPBYTE pbHash, DWORD cbHash)
+         *
+         * Neither pointer is looked at for nothing to hash, but either
+         * missing is E_INVALIDARG (Wine's test_HashData).
+         */
+        HashData: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([input, length, out, size])=>{
+                if ((input >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if ((length >>> 0) === 0 || (size >>> 0) === 0 || !host.readMemory)
+                {
+                    return S_OK;
+                }
+                host.writeMemory(out >>> 0, hash(host.readMemory(input >>> 0, length >>> 0),
+                    size >>> 0));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT ParseURLA(LPCSTR pcszURL, PARSEDURLA *ppu)
+         *
+         * The protocol and what follows its colon, as places in the caller's
+         * string, and the scheme's number; a string with no scheme is
+         * URL_E_INVALID_SYNTAX with the protocol cleared and the number left
+         * (Wine's test_ParseURL).
+         */
+        ...both('ParseURL', 8, (width, [input, parsed])=>{
+            const url = width.read(input);
+            if (url === null || (parsed >>> 0) === 0 || countAt(parsed) !== PARSEDURL_SIZE)
+            {
+                return E_INVALIDARG;
+            }
+            const result = parseUrl(url);
+            if (result === null)
+            {
+                host.writeMemory((parsed >>> 0) + 4, dword(0));
+                return URL_E_INVALID_SYNTAX;
+            }
+            const suffix = result.protocolLength + 1;
+            const fields = new Uint8Array(20);
+            fields.set(dword(input), 0);
+            fields.set(dword(result.protocolLength), 4);
+            fields.set(dword((input >>> 0) + suffix * width.unit), 8);
+            fields.set(dword(url.length - suffix), 12);
+            fields.set(dword(result.number), 16);
+            host.writeMemory((parsed >>> 0) + 4, fields);
+            return S_OK;
         }),
 
         /**

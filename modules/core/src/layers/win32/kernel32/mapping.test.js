@@ -116,7 +116,7 @@ function setup(names = {}){
     // Shaped as kernel32 keeps an open file: the volume's node is a field of
     // the record a handle resolves to, not the record itself.
     table.set(fileHandle, { type: 'file', object: { node: file, position: 0 } });
-    return { fns, bytes, errors, errorsFor, file, fileHandle, said };
+    return { fns, bytes, errors, errorsFor, file, fileHandle, said, table };
 }
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -135,6 +135,14 @@ test('a view starts on an allocation granule, as every view on Windows does', ()
     assert.deepEqual([first % 0x10000, second % 0x10000], [0, 0]);
     assert.notEqual(first, second);
     assert.equal(fns.UnmapViewOfFile.handler([second]), 1);
+});
+
+test('a directory opened for its handle has no bytes to map', ()=>{
+    const { fns, errors, table } = setup();
+    table.set(0x7000, { type: 'file',
+        object: { path: 'C:\\GAME', node: null, directory: true, position: 0 } });
+    assert.equal(fns.CreateFileMappingA.handler([0x7000, 0, PAGE_READWRITE, 0, 0x100, 0]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
 });
 
 test('a view of a file starts as that file, and is written back when unmapped', ()=>{
@@ -206,6 +214,23 @@ test('a read-only view is not written back', ()=>{
     bytes[view] = 0x77;
     fns.UnmapViewOfFile.handler([view]);
     assert.equal(file.data[0], 1, 'the file kept what it had');
+});
+
+test('a copy-on-write view is written in memory and never reaches its file', ()=>{
+    // PAGE_WRITECOPY and PAGE_EXECUTE_WRITECOPY give the process its own copy
+    // of each page it writes; the file, which may be open for reading alone,
+    // keeps what it had through the unmap and any flush.
+    for (const page of [0x08, 0x80])
+    {
+        const { fns, bytes, file, fileHandle } = setup();
+        const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, page, 0, 8, 0]);
+        const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 8]);
+        assert.notEqual(view, 0);
+        bytes[view] = 0x77;
+        assert.equal(fns.FlushViewOfFile.handler([view, 0]), 1);
+        assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
+        assert.equal(file.data[0], 1, `the file kept what it had (0x${page.toString(16)})`);
+    }
 });
 
 test('a mapping of a file with no size given is as large as the file', ()=>{
@@ -381,17 +406,6 @@ test('the other named-pipe calls are refused the same way, each popping its own 
         assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
         assert.match(said.at(-1) ?? '', new RegExp(`^${name}: `));
     }
-});
-
-test('CreateMailslot is refused, and says so', ()=>{
-    const { fns, errors, said } = setup();
-    for (const entry of [fns.CreateMailslotA, fns.CreateMailslotW])
-    {
-        assert.equal(entry.argBytes, 16);
-        assert.equal(entry.handler() >>> 0, 0xffffffff);
-        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
-    }
-    assert.match(said[1], /^CreateMailslotW: /);
 });
 
 const SEC_FILE = 0x800000;

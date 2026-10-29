@@ -86,7 +86,7 @@ export function createAdvpackFunctions(host){
         const count = head.getUint32(0, true);
         const entries = head.getUint32(4, true);
         const read = (/** @type {number} */ pointer)=>((pointer >>> 0) === 0 ? ''
-            : wide ? host.readWideString?.(pointer >>> 0, MAX_ENTRY) ?? ''
+            : wide ? host.readWideString?.(pointer >>> 0, MAX_ENTRY * 2) ?? ''
                 : host.readCString?.(pointer >>> 0, MAX_ENTRY) ?? '');
         /** @type {[string, string][]} */
         const found = [];
@@ -152,7 +152,7 @@ export function createAdvpackFunctions(host){
 
     /** @param {number} pointer @param {boolean} wide */
     const sectionAt = (pointer, wide)=>((pointer >>> 0) === 0 ? ''
-        : wide ? host.readWideString?.(pointer >>> 0, MAX_ENTRY) ?? ''
+        : wide ? host.readWideString?.(pointer >>> 0, MAX_ENTRY * 2) ?? ''
             : host.readCString?.(pointer >>> 0, MAX_ENTRY) ?? '');
 
     /** @type {{ argBytes: number, handler: (args: number[]) => number }} */

@@ -352,3 +352,35 @@ test('SetTextJustification and SetTextCharacterExtra widen what is measured and 
     assert.ok(right > plain, `ink reaches ${right}, past the unspaced width ${plain}`);
     assert.ok(right < plain + 16, 'and not past the spaced one');
 });
+
+test('an item drawn through a DC moved to its corner and clipped to it lands there alone'
+    + ' (comctl32 tab.c test_TCS_OWNERDRAWFIXED)', ()=>{
+    // WM_DRAWITEM of an owner-drawn tab: the parent is handed rcItem from
+    // (0,0) and paints in it as it likes; SaveDC, OffsetViewportOrgEx to the
+    // item's corner and IntersectClipRect to its size keep that inside the
+    // item, and RestoreDC gives the control its DC back as it was.
+    const machine = painted(100, 60);
+    const { fns, dc } = machine;
+    const WHITENESS = 0x00ff0062;
+    const saved = fns.SaveDC.handler([dc]);
+    assert.ok(saved > 0);
+    assert.equal(fns.OffsetViewportOrgEx.handler([dc, 20, 10, 0]), 1);
+    assert.equal(fns.IntersectClipRect.handler([dc, 0, 0, 30, 15]), SIMPLEREGION);
+    assert.deepEqual(clipBox(machine), { kind: SIMPLEREGION, box: [0, 0, 30, 15] },
+        'the item, from (0,0), in the parent\'s own units');
+    fns.PatBlt.handler([dc, -50, -50, 300, 300, WHITENESS]);
+    /** @type {[number, number, number][]} */
+    const probes = [[20, 10, 0xffffffff], [49, 24, 0xffffffff], [35, 17, 0xffffffff],
+        [19, 10, 0], [20, 9, 0], [50, 24, 0], [49, 25, 0], [0, 0, 0], [99, 59, 0]];
+    for (const [x, y, expected] of probes)
+    {
+        assert.equal(machine.pixel(x, y), expected, `(${x}, ${y})`);
+    }
+
+    assert.equal(fns.RestoreDC.handler([dc, -1]), 1);
+    assert.equal(fns.GetViewportOrgEx.handler([dc, SIZE_AT]), 1);
+    assert.deepEqual([0, 4].map(offset=>machine.view.getInt32(SIZE_AT + offset, true)), [0, 0],
+        'the origin back where the control had it');
+    assert.deepEqual(clipBox(machine), { kind: SIMPLEREGION, box: [0, 0, 100, 60] },
+        'and its clip');
+});

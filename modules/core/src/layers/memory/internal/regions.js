@@ -15,6 +15,8 @@
  * checked against the same map.
  */
 
+import { guestFault } from './faults.js';
+
 /** What a region holds. Drives permissions and, later, diagnostics. */
 export const RegionKind = {
     /** The first megabyte: real-mode leftovers and our boot ROM. */
@@ -244,20 +246,22 @@ export function createRegionMap(){
             const region = this.find(address);
             if (!region)
             {
-                throw new Error(
-                    `Unmapped ${mode} at 0x${address.toString(16)} (${length} bytes)`);
+                throw guestFault(
+                    `Unmapped ${mode} at 0x${address.toString(16)} (${length} bytes)`,
+                    address, length, mode);
             }
             if (address + length > region.base + region.size)
             {
-                throw new Error(
+                throw guestFault(
                     `${mode} of ${length} bytes at 0x${address.toString(16)}`
-                    + ` runs past the end of region "${region.name}"`);
+                    + ` runs past the end of region "${region.name}"`,
+                    region.base + region.size, length, mode);
             }
             if (!PERMITS[region.access][mode])
             {
-                throw new Error(
+                throw guestFault(
                     `Region "${region.name}" (${region.access}) does not permit ${mode}`
-                    + ` at 0x${address.toString(16)}`);
+                    + ` at 0x${address.toString(16)}`, address, length, mode);
             }
             return region;
         },

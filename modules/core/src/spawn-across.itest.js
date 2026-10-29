@@ -385,7 +385,7 @@ test('concurrency asked for where memory cannot be shared falls back to one proc
     const fallbacks = [];
     app.on('fallback', (/** @type {any} */ said)=>fallbacks.push(said));
     assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x105,
-        'the child ran in its parent\'s place');
+        'the child ran beside its parent, on one thread');
     assert.equal(fallbacks.length, 1);
     assert.deepEqual([fallbacks[0].mode, fallbacks[0].concurrency, fallbacks[0].asked],
         ['compatible', 1, { mode: 'compatible', concurrency: 4 }]);

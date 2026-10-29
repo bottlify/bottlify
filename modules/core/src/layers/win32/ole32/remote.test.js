@@ -6,7 +6,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REGCLS_MULTIPLEUSE, REGCLS_SUSPENDED, createClassTable } from './remote.js';
+import {
+    REGCLS_MULTIPLEUSE, REGCLS_SUSPENDED, createClassTable, createRemoting,
+} from './remote.js';
+
+const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 
 const CLSID = '{91814EC0-B5F0-11D2-80B9-00104B1F6CEA}';
 
@@ -102,4 +106,105 @@ test('an RPC endpoint is one process\'s: a second to claim it is refused, and it
     assert.equal(table.rpcServer('ncacn_np:\\pipe\\two'), null, 'what a process listened on goes');
     assert.equal(table.rpcServer('ncalrpc:three'), null);
     assert.equal(table.rpcServer('ncalrpc:one'), other, 'another process\'s stays');
+});
+
+/**
+ * One process's channel over a memory of its own, whose one object answers
+ * IUnknown's three and records the thread each call ran on.
+ *
+ * @param {{ exporter: string, worker?: boolean }} options
+ */
+function channel({ exporter, worker = true }){
+    const bytes = new Uint8Array(0x10000);
+    const view = new DataView(bytes.buffer);
+    const OBJECT = 0x1000;
+    view.setUint32(OBJECT, 0x2000, true);
+    [0x9000, 0x9001, 0x9002].forEach((method, slot)=>view.setUint32(0x2000 + slot * 4, method,
+        true));
+    let next = 0x4000;
+    const MTA = Symbol('MTA');
+    /** @type {[number, unknown][]} */
+    const calls = [];
+    /** @type {string[]} */
+    const reported = [];
+    let workers = 0;
+    const table = createClassTable();
+    const remoting = createRemoting({
+        table,
+        process: 'server',
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        heap: { allocate: size=>{
+            const at = next;
+            next += (size + 7) & ~7;
+            return at;
+        }, free: ()=>true },
+        call: async(method, args, thread)=>{
+            calls.push([method, thread]);
+            if (method === 0x9000)
+            {
+                view.setUint32(args[2], args[0], true);
+            }
+            return 0;
+        },
+        callerThread: ()=>exporter,
+        apartmentOf: thread=>(thread === 'sta' ? thread : MTA),
+        vtables: { publish: ()=>0 },
+        bstr: { allocate: ()=>0, free: ()=>true },
+        catalog: /** @type {any} */ ({}),
+        divergence: (_api, detail)=>reported.push(detail),
+        ...(worker ? { worker: (/** @type {(thread: unknown) => Promise<void>} */ body)=>{
+            workers++;
+            void body('rpc thread');
+            return true;
+        } } : {}),
+    });
+    return { remoting, table, calls, reported, OBJECT, workers: ()=>workers };
+}
+
+test('a call for an object of the multithreaded apartment runs on a thread of the server\'s'
+    + ' own, however its exporting thread waits', async()=>{
+    // ole_server.c: a server that registered from the MTA and sits in
+    // WaitForSingleObject(INFINITE) still serves its clients, as COM's RPC
+    // threads serve the MTA.
+    const { remoting, table, calls, OBJECT, workers } = channel({ exporter: 'main' });
+    const reference = await remoting.exportReference(OBJECT, IID_IUNKNOWN,
+        'main');
+    calls.length = 0;
+    const endpoint = table.endpoint(reference.endpoint);
+    assert.ok(endpoint);
+    await endpoint.deliver({ kind: 'addref', object: reference.object });
+    const release = { kind: 'release', object: reference.object, count: 1 };
+    assert.deepEqual(await endpoint.deliver(release), { hr: 0 });
+    assert.equal(calls.length, 0, 'a count of two leaves the object held');
+    assert.deepEqual(await endpoint.deliver(release), { hr: 0 });
+    assert.ok(calls.length > 0 && calls.every(([, thread])=>thread === 'rpc thread'),
+        'the last release runs on the worker');
+    assert.equal(workers(), 1, 'one worker for the process, started with the first call');
+});
+
+test('a single-threaded apartment\'s object is called on its own thread, never the worker\'s',
+    async()=>{
+        const { remoting, table, calls, reported, OBJECT, workers } = channel({ exporter: 'sta' });
+        const reference = await remoting.exportReference(OBJECT, IID_IUNKNOWN,
+            'sta');
+        calls.length = 0;
+        const endpoint = table.endpoint(reference.endpoint);
+        assert.equal((await endpoint?.deliver({ kind: 'release', object: reference.object,
+            count: 1 }))?.hr, 0x80010108 | 0,
+        'with no window to deliver through, RPC_E_DISCONNECTED');
+        assert.deepEqual(calls, []);
+        assert.equal(workers(), 0);
+        assert.match(reported.join('\n'), /no window/);
+    });
+
+test('a registered class object is held by the registration\'s count alone', async()=>{
+    // ole_server.c: once its clients are gone, a server's class object has
+    // the one count CoRegisterClassObject took; the channel takes none of
+    // its own until an activation hands the object out.
+    const { remoting, calls, OBJECT } = channel({ exporter: 'main' });
+    await remoting.registerClass(CLSID, OBJECT, REGCLS_MULTIPLEUSE, 7);
+    assert.deepEqual(calls, []);
+    assert.equal(await remoting.revokeClass(7), true);
+    assert.deepEqual(calls, [], 'and revoking it releases nothing the channel did not take');
 });

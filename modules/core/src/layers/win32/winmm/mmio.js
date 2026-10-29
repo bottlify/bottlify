@@ -41,6 +41,12 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
 const MMIO_READ = 0x0000;
 const MMIO_WRITE = 0x0001;
 const MMIO_READWRITE = 0x0002;
@@ -1218,7 +1224,7 @@ export function createMmioFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, info, flags])=>openFile(
-                (name >>> 0) === 0 ? null : host.readCString(name >>> 0, MAX_PATH),
+                (name >>> 0) === 0 ? null : host.readCString(name >>> 0, WHOLE_NAME),
                 info, flags >>> 0, false),
         },
 
@@ -1729,8 +1735,8 @@ export function createMmioFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([from, to, info])=>renameFile(
-                (from >>> 0) === 0 ? '' : host.readCString(from >>> 0, MAX_PATH),
-                (to >>> 0) === 0 ? '' : host.readCString(to >>> 0, MAX_PATH), info, false),
+                (from >>> 0) === 0 ? '' : host.readCString(from >>> 0, WHOLE_NAME),
+                (to >>> 0) === 0 ? '' : host.readCString(to >>> 0, WHOLE_NAME), info, false),
         },
         mmioRenameW: {
             argBytes: 16,

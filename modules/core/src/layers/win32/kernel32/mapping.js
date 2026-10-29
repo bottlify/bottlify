@@ -8,6 +8,12 @@ import { TAKEN } from './named-objects.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 
 /**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
+/**
  * The two things kernel32 lets a program treat as memory instead of as a
  * stream: a file mapping and a pipe.
  *
@@ -44,15 +50,14 @@ const ALLOCATION_GRANULARITY = 0x10000;
 /** INVALID_HANDLE_VALUE, which CreateFileMapping takes to mean "no file". */
 const INVALID_HANDLE_VALUE = 0xffffffff;
 
-/** A name is at most this long; longer is a pointer that is not a string. */
-const MAX_NAME = 260;
-
 /**
  * The PAGE_* half of flProtect, and the protections of it a view can be
  * written through. Everything else is read-only.
  */
 const PAGE_MASK = 0xff;
 const WRITABLE_PAGES = [0x04, 0x08, 0x40, 0x80];
+/** The protections whose writes reach the file: the copy-on-write ones never do. */
+const FILE_WRITING_PAGES = [0x04, 0x40];
 const PAGE_SIZE = 0x1000;
 
 /**
@@ -84,7 +89,9 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  * A mapping object: the file it is over (null for the page file's), whether a
  * view of it can be written back, its size, and its SEC_* attributes.
  *
- * @typedef {{ node: any, writable: boolean, size: number, attributes: number }} Section
+ * @typedef {{ node: any, writable: boolean, size: number, attributes: number,
+ *     writesFile?: boolean }} Section
+ *     `writesFile`: its views' writes reach the file, as a copy-on-write one's do not.
  */
 
 /**
@@ -132,13 +139,16 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *              write: (node: any, offset: number, bytes: Uint8Array) => number,
  *              size?: (node: any) => number,
  *              retain: (node: any) => void,
- *              close: (node: any) => void }} files
+ *              close: (node: any) => void,
+ *              section?: (node: any, kind: 'readonly' | 'readwrite' | 'image') => any }} files
  *           A promise when the bytes are not resident yet; the map then
  *           answers when they are, the caller parked meanwhile, as a read is.
  *           The size is what a mapping made without one is as large as.
  *           Every mapping handle and every view holds the file's node with
  *           `retain` and gives it back with `close`, which closes the node
- *           once nothing -- the file's own handle included -- holds it.
+ *           once nothing -- the file's own handle included -- holds it. A
+ *           section over a file holds a node of its own where `section` gives
+ *           one: the file held on the section's terms, not its handle's.
  */
 
 /**
@@ -213,8 +223,8 @@ export function createMappingFunctions(host){
         {
             return null;
         }
-        return (wide ? host.readWideString(pointer >>> 0, MAX_NAME * 2)
-            : host.readCString(pointer >>> 0, MAX_NAME)) || null;
+        return (wide ? host.readWideString(pointer >>> 0, WHOLE_NAME * 2)
+            : host.readCString(pointer >>> 0, WHOLE_NAME)) || null;
     };
 
     /**
@@ -285,14 +295,27 @@ export function createMappingFunctions(host){
         }
         // A size of zero over a file means the file's own size, which is
         // how a program maps a file whole without asking first.
-        return { node, writable, size: asked || length, attributes: SEC_FILE | caching };
+        return { node, writable, size: asked || length, attributes: SEC_FILE | caching,
+            writesFile: FILE_WRITING_PAGES.includes(page) };
     };
 
     /** @param {Section} section */
     const openSection = section=>{
         if (section.node)
         {
-            host.files.retain(section.node);
+            // The section's own hold, taken now, is the hold its handle gives
+            // back; without one it shares the file handle's node.
+            const kind = (section.attributes & SEC_IMAGE) !== 0 ? 'image'
+                : section.writesFile ? 'readwrite' : 'readonly';
+            const own = host.files.section?.(section.node, kind) ?? null;
+            if (own)
+            {
+                section.node = own;
+            }
+            else
+            {
+                host.files.retain(section.node);
+            }
         }
         return host.handles.open('mapping', section);
     };
@@ -345,6 +368,11 @@ export function createMappingFunctions(host){
             if (!anonymous && !opened)
             {
                 return fail(ERROR_INVALID_HANDLE);
+            }
+            // A directory has no bytes to map.
+            if (opened?.directory)
+            {
+                return fail(ERROR_ACCESS_DENIED);
             }
             // What a file handle resolves to is the open-file record -- path,
             // position, access -- and the volume's node is a field of it. The
@@ -639,7 +667,9 @@ export function createMappingFunctions(host){
                     return fail(placed === 0 ? ERROR_NOT_ENOUGH_MEMORY : ERROR_INVALID_ADDRESS);
                 }
 
-                const writable = mapping.writable
+                // A copy-on-write section's view is written in memory alone:
+                // its pages are the process's own copies, never the file's.
+                const writable = (mapping.node ? mapping.writesFile === true : mapping.writable)
                     && ((access >>> 0) & (FILE_MAP_WRITE | FILE_MAP_ALL_ACCESS)) !== 0;
                 const metrics = host.metrics;
                 /** @param {Uint8Array} bytes */
@@ -854,29 +884,6 @@ export function createMappingFunctions(host){
         SetNamedPipeHandleState: {
             argBytes: 16,
             handler: ()=>refusePipeCall('SetNamedPipeHandleState'),
-        },
-
-        /**
-         * HANDLE CreateMailslotA(LPCSTR lpName, DWORD nMaxMessageSize,
-         *   DWORD lReadTimeout, LPSECURITY_ATTRIBUTES lpSecurityAttributes)
-         * HANDLE CreateMailslotW(LPCWSTR, ...): the same in wide text
-         *
-         * No other process could open the slot to write to it, so it is
-         * refused as a pipe is, and the refusal reported.
-         */
-        CreateMailslotA: {
-            argBytes: 16,
-            handler: ()=>{
-                host.divergence?.('CreateMailslotA', 'there are no mailslots; refused');
-                return fail(ERROR_CALL_NOT_IMPLEMENTED, INVALID_HANDLE_VALUE);
-            },
-        },
-        CreateMailslotW: {
-            argBytes: 16,
-            handler: ()=>{
-                host.divergence?.('CreateMailslotW', 'there are no mailslots; refused');
-                return fail(ERROR_CALL_NOT_IMPLEMENTED, INVALID_HANDLE_VALUE);
-            },
         },
 
         /**

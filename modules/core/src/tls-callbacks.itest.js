@@ -507,7 +507,7 @@ function crowdedProgram(){
 }
 
 test('a library loaded at run time when the program holds the first 64 TlsAlloc slots takes a'
-    + ' slot past them, and its block is reached through fs:[0x2c]', { timeout: 120_000 }, async()=>{
+    + ' slot past them, its block reached through fs:[0x2c]', { timeout: 120_000 }, async()=>{
     // The Steam client's own libraries take more than 64 slots before it
     // loads one with thread-local storage of its own; the array behind
     // fs:[0x2c] held 64, and the library would not load.

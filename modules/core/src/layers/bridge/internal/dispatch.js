@@ -152,6 +152,25 @@ const CALL_RING = 4096;
 const KEPT_ARGS = 12;
 
 /** How a call ended, as the ring keeps it, by the number it keeps. */
+/**
+ * What a handler's call becomes in the guest rather than the end of the run,
+ * told by its code: this layer imports neither memory's nor win32's. Memory's
+ * refused guest access (`memory/internal/faults.js`), and an exception a
+ * handler raises on purpose (`win32/common/raise.js`).
+ *
+ * @typedef {Error & { code: 'GUEST_ACCESS', address: number, length: number,
+ *     mode: 'read' | 'write' | 'execute' }} GuestAccess
+ * @typedef {Error & { code: 'GUEST_EXCEPTION', status: number, flags: number,
+ *     parameters: number[] }} GuestException
+ * @typedef {GuestAccess | GuestException} GuestRaise
+ */
+
+/** @param {unknown} e @returns {e is GuestRaise} */
+const isGuestRaise = e=>{
+    const code = /** @type {{ code?: unknown }} */ (e)?.code;
+    return code === 'GUEST_ACCESS' || code === 'GUEST_EXCEPTION';
+};
+
 const KINDS = ['threw', 'answered', 'fellThrough', 'parked', 'waiting', 'forwarded'];
 const THREW = 0;
 const ANSWERED = 1;
@@ -530,6 +549,14 @@ class Dispatcher {
         // archives made up its mind thousands of calls earlier. A sink keeps
         // all of it, for whoever is willing to pay for the file.
         this.onCall = deps.onCall ?? null;
+        /**
+         * Raises a handler's refused guest access, or the exception it
+         * raised, in the guest, answering as the call would after it -- set
+         * by whoever has the exception dispatch, which is not this layer.
+         *
+         * @type {((raised: GuestRaise) => Promise<number>) | null}
+         */
+        this.guestFault = null;
         /** @type {((name: string) => boolean) | null} */
         this.wantsCall = null;
         /** @type {Int32Array | null} */
@@ -1484,12 +1511,35 @@ class Dispatcher {
             {
                 kinds[at] = WAITING;
                 late = true;
+                const raise = this.guestFault;
+                if (raise !== null && !entry.hook)
+                {
+                    // The same fault, met after the handler waited.
+                    result = /** @type {Promise<number>} */ (result).catch(
+                        (/** @type {unknown} */ e)=>(isGuestRaise(e) ? raise(e) : Promise.reject(e)));
+                }
             }
             else
             {
                 kinds[at] = ANSWERED;
                 this.answers[at] = Number(result);
             }
+        }
+        catch (e){
+            // A guest pointer the handler was handed and memory refused: on
+            // Windows the DLL's own instruction faults there and the
+            // program's handlers see STATUS_ACCESS_VIOLATION, so the call
+            // becomes that exception rather than the end of the run -- as
+            // does an exception the handler raises as Windows' function
+            // does. Nothing else is turned: any other error here is ours,
+            // and stops the run.
+            if (this.guestFault === null || entry.hook || !isGuestRaise(e))
+            {
+                throw e;
+            }
+            result = this.guestFault(e);
+            kinds[at] = WAITING;
+            late = true;
         }
         finally
         {

@@ -7,14 +7,12 @@
 /**
  * Child processes, as records rather than as machines.
  *
- * A child is not started alongside its parent -- it is recorded here, and
- * whoever drives the machine starts it once the parent has nothing left to
- * do: on a machine of its own beside the parent's when the parent is waiting
- * on it, so the parent goes on afterwards, or in the parent's place when the
- * parent has exited. Everything a child needs to exist until then is in the
- * record: the image, the command line the parent chose for it, the bytes the
- * parent wrote into it before it was ever mapped, the parent's threads waiting
- * on it, and an exit code that stays STILL_ACTIVE until it has run.
+ * A child is recorded here when its parent asks for it, and whoever drives the
+ * machine starts it at once, beside its parent, on a machine of its own -- one
+ * made suspended with its first thread waiting for ResumeThread. The record is
+ * what the parent holds of it: the image, the command line the parent chose
+ * for it, what the parent handed it, the event its exit sets, and an exit code
+ * that stays STILL_ACTIVE until it has ended.
  *
  * Nothing here schedules or executes. That is deliberate -- this layer's job is
  * to hold the request so that the decision about when to honour it is made in
@@ -22,16 +20,9 @@
  */
 
 /**
- * What GetExitCodeProcess reports for a process that has not exited: every
- * child until it has run and exited beside a parent that waited on it.
+ * What GetExitCodeProcess reports for a process that has not exited.
  */
 export const STILL_ACTIVE = 259;
-
-/**
- * @typedef {Object} MemoryPatch
- * @property {number} address
- * @property {Uint8Array} bytes
- */
 
 /**
  * @typedef {Object} ProcessRecord
@@ -39,23 +30,14 @@ export const STILL_ACTIVE = 259;
  * @property {number} threadId      Its initial thread's id.
  * @property {string} imagePath     Resolved against the volume by the caller.
  * @property {string} commandLine   What the child will believe it was started with.
- * @property {boolean} suspended    CREATE_SUSPENDED; cleared by ResumeThread.
+ * @property {boolean} suspended    CREATE_SUSPENDED: its first thread waits for ResumeThread.
  * @property {boolean} completed
  *           The child already ran and exited: a redistributable installer the
  *           engine itself plays the role of, so the request is answered as
  *           though it had run and left exit code 0. It is never handed over.
- * @property {boolean} started      Running beside its parent (`concurrency` above 1), so no
- *                                  longer waiting to take the parent's place.
- * @property {boolean} [polled]
- *           The parent asked whether it has exited while it had not yet run --
- *           its exit code, or a wait that does not block. A parent that polls
- *           its child in a loop that never blocks is waiting on it all the
- *           same, so the child runs in its place then, as it would when the
- *           parent blocked on its handle.
- * @property {MemoryPatch[]} patches
- *           Writes made into the child before its image exists, replayed once
- *           the PE is mapped. This is process hollowing implemented as a queue.
+ * @property {boolean} started      Its machine has been asked for; no longer pending.
  * @property {number} exitCode
+ * @property {any} [exited]  The event its exit sets (the kernel module's `create`).
  * @property {{ thread: any, result: number }[]} [waiters]
  *           The parent's threads blocked on this child, each with what its
  *           wait answers when the child exits.
@@ -98,22 +80,7 @@ export function takeId(ids, name, step){
 export function createProcessTable(ids = { process: FIRST_ID }){
     /** @type {ProcessRecord[]} */
     const records = [];
-    /** Whether this process's children run beside it (`runBeside`). */
-    let beside = false;
-
     return {
-        /**
-         * This process's children run beside it rather than in its place: a
-         * child is started at the parent's next turn, and a timed wait on it
-         * made before then is timed all the same -- the parent's clock goes on
-         * while the child runs.
-         *
-         * @param {boolean} on
-         */
-        runBeside(on){
-            beside = on;
-        },
-
         /**
          * @param {Object} options
          * @param {string} options.imagePath
@@ -135,11 +102,8 @@ export function createProcessTable(ids = { process: FIRST_ID }){
                 commandLine,
                 suspended,
                 completed,
-                /** @type {MemoryPatch[]} */
-                patches: [],
                 exitCode: completed ? 0 : STILL_ACTIVE,
                 started: false,
-                beside,
                 handle: 0,
                 threadHandle: 0,
             };
@@ -148,18 +112,14 @@ export function createProcessTable(ids = { process: FIRST_ID }){
         },
 
         /**
-         * The child that should take this process's place, if any.
-         *
-         * The first one that is not suspended: a parent that asked for a
-         * suspended child has told us it is not finished with it yet, and
-         * honouring the request before ResumeThread would run a child the
-         * parent had not finished writing into.
+         * The child asked for and not started yet, if any: started at the
+         * parent's next turn, a suspended one too, whose first thread waits
+         * for its parent's ResumeThread.
          *
          * @returns {ProcessRecord | null}
          */
         pending(){
-            return records.find(record=>!record.suspended && !record.completed
-                && !record.started) ?? null;
+            return records.find(record=>!record.completed && !record.started) ?? null;
         },
 
         /**

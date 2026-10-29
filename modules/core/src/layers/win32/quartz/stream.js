@@ -565,7 +565,7 @@ export function createStreaming(host){
                 {
                     return E_POINTER;
                 }
-                if ((id >>> 0) === 0 || host.readWideString(id, MAX_NAME) !== PIN_NAME)
+                if ((id >>> 0) === 0 || host.readWideString(id, MAX_NAME * 2) !== PIN_NAME)
                 {
                     writeU32(out, 0);
                     return VFW_E_NOT_FOUND;

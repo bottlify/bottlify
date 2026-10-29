@@ -25,6 +25,7 @@ import { blockLayouts } from '../kernel32/teb.js';
 import { STATUS } from './status.js';
 import { createProcessors } from '../kernel32/processor.js';
 import { verifyVersion, windowsVersion } from '../kernel32/versions.js';
+import { RTL_THREAD_ERROR_MODES } from '../kernel32/error-mode.js';
 
 /** RTL_OSVERSIONINFOW, and the extended form that also carries the service pack. */
 const OSVERSIONINFOW_SIZE = 276;
@@ -192,6 +193,10 @@ const ALL_ACCESS = 0x001fffff;
 
 /** NtCurrentProcess() and NtCurrentThread(), which name without a table entry. */
 const CURRENT_PROCESS = 0xffffffff;
+/** The first argument was refused. */
+const STATUS_INVALID_PARAMETER_1 = 0xc00000ef;
+/** The most a child is asked to write back for one query: no class is larger. */
+const MAX_ASKED = 0x10000;
 const CURRENT_THREAD = 0xfffffffe;
 
 /** Facts about the machine this engine presents, not preferences. */
@@ -233,6 +238,11 @@ const NORMAL_BASE_PRIORITY = 8;
  *           process's processors and its affinity, kernel32's own. Absent, one.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose thread and
  *           process blocks are the x64 ones; absent, 4.
+ * @property {(handle: number) => any} [processOf]  The child's record a process
+ *           handle names; null for this process or a handle that names none.
+ * @property {(record: any, call: import('../kernel32/cross-process.js').CrossCall)
+ *     => Promise<import('../kernel32/cross-process.js').CrossAnswer | null> | null} [askChild]
+ *           A call made in a child, answered there.
  */
 
 /**
@@ -325,6 +335,69 @@ export function createQueryFunctions(host){
     const peb = ()=>{
         const teb = host.teb() >>> 0;
         return teb === 0 ? 0 : readU32(teb + TEB.PEB);
+    };
+
+    /**
+     * NtQueryInformationProcess of a child: asked of the child, on its own
+     * pseudo-handle, its answer's bytes written here; or, the child gone,
+     * its basic information from its record.
+     *
+     * @param {any} child @param {number} wanted
+     * @param {number} buffer @param {number} length @param {number} returned
+     * @returns {number | Promise<number>}
+     */
+    const childInformation = (child, wanted, buffer, length, returned)=>{
+        const asked = child.completed || length > MAX_ASKED ? null
+            : host.askChild?.(child, { call: 'NtQueryInformationProcess', args: [CURRENT_PROCESS,
+                wanted, buffer === 0 ? 0 : { out: length }, length,
+                returned === 0 ? 0 : { out: 4 }] }) ?? null;
+        if (asked !== null)
+        {
+            return asked.then(answer=>{
+                if (!answer)
+                {
+                    return recorded(child, wanted, buffer, length, returned);
+                }
+                if (answer.outs[2] && buffer !== 0)
+                {
+                    host.writeMemory(buffer, answer.outs[2]);
+                }
+                if (answer.outs[4] && returned !== 0)
+                {
+                    host.writeMemory(returned, answer.outs[4]);
+                }
+                return answer.result >>> 0;
+            });
+        }
+        return recorded(child, wanted, buffer, length, returned);
+    };
+
+    /**
+     * What this process knows of a child it cannot ask.
+     *
+     * @param {any} child @param {number} wanted
+     * @param {number} buffer @param {number} length @param {number} returned
+     */
+    const recorded = (child, wanted, buffer, length, returned)=>{
+        if (wanted !== PROCESS_BASIC_INFORMATION)
+        {
+            return STATUS.INVALID_INFO_CLASS;
+        }
+        writeU32If(returned, PROCESS_BASIC.SIZE);
+        if (length < PROCESS_BASIC.SIZE || buffer === 0)
+        {
+            return STATUS.INFO_LENGTH_MISMATCH;
+        }
+        const struct = new Uint8Array(PROCESS_BASIC.SIZE);
+        const view = new DataView(struct.buffer);
+        // STILL_ACTIVE is STATUS_PENDING, for one that has not ended.
+        view.setUint32(PROCESS_BASIC.EXIT_STATUS, (child.exitCode ?? STATUS.PENDING) >>> 0, true);
+        view.setUint32(PROCESS_BASIC.AFFINITY_MASK, processors.processMask(), true);
+        view.setUint32(PROCESS_BASIC.BASE_PRIORITY, NORMAL_BASE_PRIORITY, true);
+        view.setUint32(PROCESS_BASIC.PROCESS_ID, (child.id ?? 0) >>> 0, true);
+        view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID, (child.parentId ?? 0) >>> 0, true);
+        host.writeMemory(buffer, struct);
+        return STATUS.SUCCESS;
     };
 
     /**
@@ -544,14 +617,23 @@ export function createQueryFunctions(host){
          *                                    ULONG ProcessInformationLength,
          *                                    PULONG ReturnLength)
          *
-         * The handle is not looked at. There is one process and no way to obtain
-         * a handle to another, so every handle a caller can hold names this one.
+         * A handle to a child is answered by the child, about itself, where it
+         * runs; one that has ended, or that the run cannot ask, from what this
+         * process knows of it: its id, its parent and its exit status, the
+         * block it had gone with it.
          */
         NtQueryInformationProcess: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([, infoClass, buffer, length, returnLength])=>{
+            handler: ([handle, infoClass, buffer, length, returnLength])=>{
                 const wanted = infoClass >>> 0;
+                const child = (handle >>> 0) === CURRENT_PROCESS ? null
+                    : host.processOf?.(handle >>> 0) ?? null;
+                if (child && !child.current)
+                {
+                    return childInformation(child, wanted, buffer >>> 0, length >>> 0,
+                        returnLength >>> 0);
+                }
                 if (wanted === PROCESS_BASIC_INFORMATION)
                 {
                     writeU32If(returnLength >>> 0, PROCESS_BASIC.SIZE);
@@ -571,8 +653,10 @@ export function createQueryFunctions(host){
                     view.setUint32(PROCESS_BASIC.BASE_PRIORITY, NORMAL_BASE_PRIORITY, true);
                     view.setUint32(PROCESS_BASIC.PROCESS_ID,
                         teb === 0 ? 0 : readU32(teb + TEB.PROCESS_ID), true);
-                    // Nothing started this process, so there is no parent to name.
-                    view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID, 0, true);
+                    // The process list names this process first, with the
+                    // process that started it; 0 where none did.
+                    view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID,
+                        (host.processes?.()[0]?.parent ?? 0) >>> 0, true);
                     host.writeMemory(buffer >>> 0, struct);
                     return STATUS.SUCCESS;
                 }
@@ -590,6 +674,39 @@ export function createQueryFunctions(host){
                     return STATUS.SUCCESS;
                 }
                 return STATUS.INVALID_INFO_CLASS;
+            },
+        },
+
+        /**
+         * DWORD RtlGetThreadErrorMode(void) and
+         * NTSTATUS RtlSetThreadErrorMode(DWORD mode, LPDWORD oldmode)
+         *
+         * The running thread's error mode, in RTL_SEM_* bits, from its block,
+         * where SetThreadErrorMode keeps it too.
+         */
+        RtlGetThreadErrorMode: {
+            argBytes: 0,
+            handler: ()=>{
+                const teb = host.teb() >>> 0;
+                return teb === 0 ? 0 : readU32(teb + TEB.HARD_ERROR_MODE);
+            },
+        },
+        RtlSetThreadErrorMode: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([mode, old])=>{
+                if (((mode >>> 0) & ~RTL_THREAD_ERROR_MODES) !== 0)
+                {
+                    return STATUS_INVALID_PARAMETER_1;
+                }
+                const teb = host.teb() >>> 0;
+                if (teb === 0)
+                {
+                    return STATUS.UNSUCCESSFUL;
+                }
+                writeU32If(old >>> 0, readU32(teb + TEB.HARD_ERROR_MODE));
+                writeU32If(teb + TEB.HARD_ERROR_MODE, mode >>> 0);
+                return STATUS.SUCCESS;
             },
         },
 
@@ -675,9 +792,6 @@ export function createQueryFunctions(host){
         /**
          * NTSTATUS NtOpenThread(PHANDLE Thread, ACCESS_MASK Access,
          *                       POBJECT_ATTRIBUTES Attributes, PCLIENT_ID Client)
-         * NTSTATUS NtQueryInformationThread(HANDLE Thread, THREADINFOCLASS Class,
-         *                                   PVOID Information, ULONG Length,
-         *                                   PULONG ReturnLength)
          * PRTL_DEBUG_INFORMATION RtlCreateQueryDebugBuffer(ULONG Size, BOOLEAN EventPair)
          * NTSTATUS RtlDestroyQueryDebugBuffer(PRTL_DEBUG_INFORMATION Buffer)
          * NTSTATUS RtlQueryProcessDebugInformation(ULONG Pid, ULONG Flags,
@@ -692,13 +806,6 @@ export function createQueryFunctions(host){
             argBytes: 16,
             handler: ()=>{
                 host.divergence?.('NtOpenThread', 'a thread cannot be opened by id; refused');
-                return STATUS.NOT_IMPLEMENTED;
-            },
-        },
-        NtQueryInformationThread: {
-            argBytes: 20,
-            handler: ()=>{
-                host.divergence?.('NtQueryInformationThread', 'refused');
                 return STATUS.NOT_IMPLEMENTED;
             },
         },

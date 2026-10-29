@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden, placePatches,
+    createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden,
     withReadAhead, withWindow, refetchedIn, windowFor, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES,
     resolveLibraryPath, startDirectoryOf, libraryCandidates, withLibraryExtension, timedWait,
     pagePacing,
@@ -836,27 +836,6 @@ test('a library that imports from the program is not given a second copy of the 
         assert.deepEqual(placed.map(one=>one.name), ['game.dll']);
         assert.ok(!emitted.some(([, payload])=>payload?.missing?.length > 0));
     });
-
-test('a parent\'s deferred writes land only inside the child it wrote them for', ()=>{
-    // A write that falls outside the image was addressing a mapping this
-    // process does not have. Putting the bytes down anyway corrupts whatever
-    // really is at that address, and the failure then looks like the child
-    // being wrong rather than the patch being misplaced.
-    /** @param {number} address @param {number} length */
-    const at = (address, length)=>({ address, bytes: new Uint8Array(length) });
-
-    const { applied, refused } = placePatches(
-        [at(0x401000, 4), at(0x400000, 1), at(0x3fffff, 1), at(0x401ffe, 4), at(0x500000, 1)],
-        0x400000, 0x2000);
-
-    assert.deepEqual(applied.map(patch=>patch.address), [0x401000, 0x400000]);
-    assert.deepEqual(refused.map(patch=>patch.address), [0x3fffff, 0x401ffe, 0x500000],
-        'below the base, straddling the end, and past it');
-});
-
-test('nothing to patch is not a patch of nothing', ()=>{
-    assert.deepEqual(placePatches([], 0x400000, 0x2000), { applied: [], refused: [] });
-});
 
 /**
  * Runs `body` as a browser would see the globals: no `setImmediate`, which

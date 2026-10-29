@@ -691,10 +691,22 @@ export function createPropVariantFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                /** @param {number} index @returns {number | Promise<number>} */
-                const clear = index=>(index >= (count >>> 0) ? S_OK
-                    : after(table.PropVariantClear.handler(
-                        [(rgvars >>> 0) + index * PROPVARIANT_SIZE]), ()=>clear(index + 1)));
+                // A loop while the clears answer at once, and a chain only
+                // from the first that waits on a Release: a count of millions
+                // must not cost a frame of stack each.
+                /** @param {number} start @returns {number | Promise<number>} */
+                const clear = start=>{
+                    for (let index = start; index < (count >>> 0); index++)
+                    {
+                        const answer = table.PropVariantClear.handler(
+                            [(rgvars >>> 0) + index * PROPVARIANT_SIZE]);
+                        if (answer instanceof Promise)
+                        {
+                            return answer.then(()=>clear(index + 1));
+                        }
+                    }
+                    return S_OK;
+                };
                 return clear(0);
             },
         },

@@ -222,12 +222,24 @@ test('a reallocated slot reads as zero rather than as its previous tenant', ()=>
 test('TlsAlloc reports exhaustion instead of handing out an index it does not have', ()=>{
     const { fns } = setup();
 
-    for (let i = 0; i < TLS_SLOTS; i++)
+    // Index 0 is the process's from the start.
+    for (let i = 1; i < TLS_SLOTS; i++)
     {
         assert.notEqual(fns.TlsAlloc.handler(), TLS_OUT_OF_INDEXES);
     }
 
     assert.equal(fns.TlsAlloc.handler(), TLS_OUT_OF_INDEXES);
+});
+
+test('TLS index 0 is reserved: never handed out, and reads as zero', ()=>{
+    const { fns } = setup();
+
+    assert.equal(fns.TlsGetValue.handler([0]), 0);
+    const slot = fns.TlsAlloc.handler();
+    assert.notEqual(slot, 0);
+    assert.notEqual(slot, TLS_OUT_OF_INDEXES);
+    fns.TlsSetValue.handler([slot, 1]);
+    assert.equal(fns.TlsGetValue.handler([0]), 0, 'another slot\'s value does not show through');
 });
 
 test('an index nobody allocated fails and says why', ()=>{
@@ -817,6 +829,47 @@ test('TlsSetValue and FlsSetValue are one routine in the guest, over the host\'s
     const slot = fns.TlsAlloc.handler();
     assert.equal(trap.trap.handler([slot, 0x77]), 1, 'which is the host\'s TlsSetValue');
     assert.equal(fns.TlsGetValue.handler([slot]), 0x77);
+});
+
+test('the process priority boost is set on every thread and read back on its own', ()=>{
+    const { fns, host } = setup();
+    /** @type {any} */ (host).allThreads = ()=>[host.threads.first, host.threads.second];
+    const thread = /** @type {any} */ (host.threads.first);
+
+    assert.equal(fns.GetProcessPriorityBoost.handler([0xffffffff, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0, 'boost is enabled until disabled');
+
+    assert.equal(fns.SetProcessPriorityBoost.handler([0xffffffff, 1]), 1);
+    assert.equal(thread.priorityBoostDisabled, true, 'and so is each thread\'s');
+    assert.equal(/** @type {any} */ (host.threads.second).priorityBoostDisabled, true);
+
+    // A thread setting its own back leaves the process's as it was.
+    thread.priorityBoostDisabled = false;
+    assert.equal(fns.GetProcessPriorityBoost.handler([0xffffffff, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 1);
+
+    assert.equal(fns.SetProcessPriorityBoost.handler([0xffffffff, 0]), 1);
+    assert.equal(fns.GetProcessPriorityBoost.handler([0xffffffff, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0);
+    assert.equal(fns.GetProcessPriorityBoost.handler([0xffffffff, 0]), 0, 'no place to answer');
+    assert.equal(fns.SetProcessPriorityBoost.argBytes, 8);
+    assert.equal(fns.GetProcessPriorityBoost.argBytes, 8);
+});
+
+test('the processors are counted in one group', ()=>{
+    const { fns, host } = setup();
+    for (const name of ['GetActiveProcessorCount', 'GetMaximumProcessorCount'])
+    {
+        assert.equal(fns[name].handler([0xffff]), 1, `${name}: ALL_PROCESSOR_GROUPS`);
+        assert.equal(fns[name].handler([0]), 1, 'group 0');
+        assert.equal(fns[name].handler([0x10000]), 1, 'a WORD');
+        assert.equal(fns[name].handler([1]), 0, 'no group 1');
+        assert.equal(fns.GetLastError.handler(), ERROR_INVALID_PARAMETER);
+        assert.equal(fns[name].argBytes, 4);
+    }
+    assert.equal(fns.GetActiveProcessorGroupCount.handler(), 1);
+    assert.equal(fns.GetMaximumProcessorGroupCount.handler(), 1);
+    void host;
 });
 
 test('the priority and affinity calls pop their own stdcall bytes', ()=>{

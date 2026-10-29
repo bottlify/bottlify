@@ -15,8 +15,11 @@
  */
 
 import { u32 } from './text.js';
+import { formatToString } from '../msvcrt/format.js';
 
 const S_OK = 0;
+const E_INVALIDARG = 0x80070057 | 0;
+const E_OUTOFMEMORY = 0x8007000e | 0;
 const E_FAIL = 0x80004005;
 
 /** CompareString's flag, and the locale shlwapi compares in. */
@@ -60,6 +63,98 @@ const searched = (width, code)=>{
     }
     return width.char(value);
 };
+
+/**
+ * Text with case ignored, folded a character at a time so that a place in the
+ * folded text is the same place in the caller's: a character whose capital is
+ * two (the German sharp s) stays as it is.
+ *
+ * @param {string} value
+ */
+const foldCase = value=>
+    Array.from(value, c=>(c.toUpperCase().length === 1 ? c.toUpperCase() : c)).join('');
+
+/**
+ * StrFromTimeInterval's text: the interval rounded to the second, then hours,
+ * minutes and seconds, each cut to the significant digits still left -- the
+ * leading unit is never zero, the ones after it appear while digits remain,
+ * and a unit's digits beyond the budget read as zeros (Wine's
+ * test_StrFromTimeIntervalA: 1 000 000 ms is " 10 min" to one digit,
+ * " 16 min 40 sec" to three).
+ *
+ * @param {number} milliseconds @param {number} digits
+ */
+export function timeInterval(milliseconds, digits){
+    const seconds = Math.floor(((milliseconds >>> 0) + 500) / 1000);
+    const units = /** @type {const} */ ([
+        [Math.floor(seconds / 3600), 'hr'], [Math.floor(seconds / 60) % 60, 'min'],
+        [seconds % 60, 'sec'],
+    ]);
+    let left = Math.max(1, digits | 0);
+    let text = '';
+    for (const [value, unit] of units)
+    {
+        if (left <= 0 || (text === '' && value === 0 && unit !== 'sec'))
+        {
+            continue;
+        }
+        const length = String(value).length;
+        const scale = length > left ? 10 ** (length - left) : 1;
+        left -= length;
+        text += ` ${Math.floor(value / scale) * scale} ${unit}`;
+    }
+    return text;
+}
+
+/** The units a size is shown in past its bytes, each 1024 of the one before. */
+const SIZE_UNITS = Object.freeze(['KB', 'MB', 'GB', 'TB', 'PB', 'EB']);
+
+/**
+ * A number with its thousands grouped, as the user's locale -- en-US's
+ * comma -- groups them.
+ *
+ * @param {bigint} value
+ */
+const grouped = value=>value.toString().replace(/\B(?=(\d{3})+$)/g, ',');
+
+/**
+ * StrFormatByteSize's text: bytes below 1024, else the first unit the size
+ * is under 1000 of, with three significant digits -- truncated, or rounded
+ * to the nearest when asked (Wine's test_StrFormatByteSize64A and
+ * test_StrFormatByteSizeEx).
+ *
+ * @param {bigint} size @param {boolean} [nearest]
+ */
+export function byteSize(size, nearest = false){
+    if (size < 1024n)
+    {
+        return `${size} bytes`;
+    }
+    let unit = 0;
+    let scale = 1024n;
+    while (unit < SIZE_UNITS.length - 1 && size >= 1000n * scale)
+    {
+        unit++;
+        scale *= 1024n;
+    }
+    const decimals = size * 10n < 100n * scale ? 2 : size < 100n * scale ? 1 : 0;
+    const factor = 10n ** BigInt(decimals);
+    const shown = nearest ? (size * factor * 2n + scale) / (scale * 2n) : size * factor / scale;
+    const whole = shown / factor;
+    const part = (shown % factor).toString().padStart(decimals, '0');
+    return `${whole}${decimals > 0 ? `.${part}` : ''} ${SIZE_UNITS[unit]}`;
+}
+
+/**
+ * StrFormatKBSize's text: the kilobytes the size takes, a part one counting
+ * whole, grouped; none for a size that is not above zero.
+ *
+ * @param {bigint} size
+ */
+export const kbSize = size=>`${grouped(size <= 0n ? 0n : (size + 1023n) / 1024n)} KB`;
+
+/** @param {number} low @param {number} high  A 64-bit argument's two words, signed. */
+const int64 = (low, high)=>BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(low >>> 0));
 
 /**
  * @param {StringHost} host
@@ -217,6 +312,19 @@ export function createStringFunctions(host, { A, W }){
         }),
 
         /**
+         * PSTR StrChrIA(PCSTR pszStart, WORD wMatch)
+         *
+         * StrChr with case ignored.
+         */
+        ...both('StrChrI', 8, (width, [start, code])=>{
+            const text = width.read(start);
+            const wanted = searched(width, code);
+            const at = text === null || wanted === null ? -1
+                : foldCase(text).indexOf(foldCase(wanted));
+            return at < 0 ? 0 : (start >>> 0) + at * width.unit;
+        }),
+
+        /**
          * PSTR StrRChrA(PCSTR pszStart, PCSTR pszEnd, WORD wMatch)
          *
          * The last place it is before pszEnd, or in the whole string for a
@@ -338,12 +446,45 @@ export function createStringFunctions(host, { A, W }){
          * empty search (Wine's test_StrStrIA).
          */
         ...both('StrStrI', 8, (width, [first, second])=>{
-            const fold = (/** @type {string} */ value)=>
-                Array.from(value, c=>(c.toUpperCase().length === 1 ? c.toUpperCase() : c)).join('');
             const text = width.read(first);
             const wanted = width.read(second);
-            const at = text === null || !wanted ? -1 : fold(text).indexOf(fold(wanted));
+            const at = text === null || !wanted ? -1 : foldCase(text).indexOf(foldCase(wanted));
             return at < 0 ? 0 : (first >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * PSTR StrRStrIA(PCSTR pszSource, PCSTR pszLast, PCSTR pszSrch)
+         *
+         * The last place the search starts before pszLast, case ignored; a
+         * match may run past pszLast, and a null pszLast is the whole string
+         * (Wine's test_StrRStrI).
+         */
+        ...both('StrRStrI', 12, (width, [source, last, search])=>{
+            const text = width.read(source);
+            const wanted = width.read(search);
+            if (text === null || !wanted)
+            {
+                return 0;
+            }
+            const stop = (last >>> 0) === 0 ? text.length
+                : Math.min(text.length, Math.floor(((last >>> 0) - (source >>> 0)) / width.unit));
+            const at = stop <= 0 ? -1 : foldCase(text).lastIndexOf(foldCase(wanted), stop - 1);
+            return at < 0 ? 0 : (source >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * int StrFromTimeIntervalA(PSTR pszOut, UINT cchMax, DWORD dwTimeMS, int digits)
+         *
+         * `timeInterval`'s text, cut to the buffer; the characters written.
+         */
+        ...both('StrFromTimeInterval', 16, (width, [buffer, room, milliseconds, digits])=>{
+            const text = timeInterval(milliseconds, digits);
+            if ((buffer >>> 0) === 0 || (room >>> 0) === 0)
+            {
+                return 0;
+            }
+            writeCut(width, buffer, text, room >>> 0);
+            return Math.min(text.length, (room >>> 0) - 1);
         }),
 
         /**
@@ -351,5 +492,267 @@ export function createStringFunctions(host, { A, W }){
          * HRESULT StrRetToBufW(STRRET *pstr, PCUITEMID_CHILD pidl, LPWSTR pszBuf, UINT cchBuf)
          */
         ...both('StrRetToBuf', 16, strRetToBuf),
+
+        /**
+         * HRESULT StrRetToBSTR(STRRET *pstr, PCUITEMID_CHILD pidl, BSTR *pbstr)
+         *
+         * StrRetToBuf's text as a BSTR the caller frees with SysFreeString.
+         */
+        StrRetToBSTR: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([strret, item, out])=>{
+                if ((out >>> 0) === 0 || !host.allocate)
+                {
+                    return E_INVALIDARG;
+                }
+                host.writeMemory(out >>> 0, Uint8Array.of(0, 0, 0, 0));
+                const scratch = host.allocate(0x2000);
+                if (!scratch)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                try
+                {
+                    const hr = strRetToBuf(W, [strret, item, scratch, 0x1000]);
+                    if (hr !== S_OK)
+                    {
+                        return hr;
+                    }
+                    const alloc = host.library?.('OLEAUT32.dll')?.SysAllocString;
+                    const bstr = alloc ? /** @type {number} */ (alloc.handler([scratch])) >>> 0 : 0;
+                    host.writeMemory(out >>> 0, Uint8Array.of(bstr & 0xff, bstr >>> 8 & 0xff,
+                        bstr >>> 16 & 0xff, bstr >>> 24 & 0xff));
+                    return bstr ? S_OK : E_OUTOFMEMORY;
+                }
+                finally
+                {
+                    host.free?.(scratch);
+                }
+            },
+        },
+
+        /**
+         * PWSTR StrChrNW(PCWSTR pszStart, WCHAR wMatch, UINT cchMax)
+         *
+         * StrChr within the first cchMax characters.
+         */
+        StrChrNW: one(W, 12, (width, [start, code, count])=>{
+            const text = width.read(start)?.slice(0, count >>> 0) ?? null;
+            const wanted = searched(width, code);
+            const at = text === null || wanted === null ? -1 : text.indexOf(wanted);
+            return at < 0 ? 0 : (start >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * PSTR StrPBrkA(PCSTR psz, PCSTR pszSet)
+         *
+         * The first character of the string that is in the set, or NULL.
+         */
+        ...both('StrPBrk', 8, (width, [text, set])=>{
+            const string = width.read(text);
+            const stops = width.read(set);
+            if (string === null || !stops)
+            {
+                return 0;
+            }
+            const at = [...string].findIndex(c=>stops.includes(c));
+            return at < 0 ? 0 : (text >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * PWSTR StrStrNW(PCWSTR pszFirst, PCWSTR pszSrch, UINT cchMax)
+         *
+         * StrStr where the match starts within the first cchMax characters,
+         * running past them if it must (Wine's test_StrStrNW); the I form
+         * ignores case.
+         */
+        StrStrNW: one(W, 12, (width, [first, second, count])=>{
+            const text = width.read(first);
+            const wanted = width.read(second);
+            const at = text === null || !wanted ? -1 : text.indexOf(wanted);
+            return at < 0 || at >= (count >>> 0) ? 0 : (first >>> 0) + at * width.unit;
+        }),
+        StrStrNIW: one(W, 12, (width, [first, second, count])=>{
+            const text = width.read(first);
+            const wanted = width.read(second);
+            const at = text === null || !wanted ? -1 : foldCase(text).indexOf(foldCase(wanted));
+            return at < 0 || at >= (count >>> 0) ? 0 : (first >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * DWORD StrCatChainW(PWSTR pszDst, DWORD cchDst, DWORD ichAt, PCWSTR pszSrc)
+         *
+         * The source copied in at a place in the buffer -- -1 is the end of
+         * what is there, the buffer's own end its last character -- cut to
+         * fit with its terminator; where the copy ends. A place past the
+         * buffer writes nothing (Wine's test_StrCatChainW).
+         */
+        StrCatChainW: one(W, 16, (width, [destination, size, place, source])=>{
+            const room = size >>> 0;
+            let at = (place | 0) === -1 ? (width.read(destination) ?? '').length : place >>> 0;
+            if ((destination >>> 0) === 0 || room === 0 || at > room)
+            {
+                return at;
+            }
+            if (at === room)
+            {
+                at--;
+            }
+            const text = (width.read(source) ?? '').slice(0, room - at - 1);
+            host.writeMemory((destination >>> 0) + at * width.unit, width.sz(text));
+            return at + text.length;
+        }),
+
+        /**
+         * PSTR StrCpyNXA(PSTR pszDst, PCSTR pszSrc, int cchMax)
+         *
+         * StrCpyN that answers where the copy's terminator went.
+         */
+        ...both('StrCpyNX', 12, (width, [destination, source, count])=>{
+            if ((destination >>> 0) === 0 || (count | 0) <= 0)
+            {
+                return destination >>> 0;
+            }
+            const text = (width.read(source) ?? '').slice(0, (count | 0) - 1);
+            host.writeMemory(destination >>> 0, width.sz(text));
+            return (destination >>> 0) + text.length * width.unit;
+        }),
+
+        /**
+         * DWORD SHAnsiToAnsi(LPCSTR lpszSrc, LPSTR lpszDst, int iLen)
+         * DWORD SHUnicodeToUnicode(LPCWSTR lpszSrc, LPWSTR lpszDst, int iLen)
+         *
+         * A copy cut to the buffer; the characters written, terminator and all.
+         */
+        SHAnsiToAnsi: one(A, 12, (width, [source, destination, count])=>{
+            const text = (width.read(source) ?? '').slice(0, Math.max(0, (count | 0) - 1));
+            if ((destination >>> 0) === 0 || (count | 0) <= 0)
+            {
+                return 0;
+            }
+            host.writeMemory(destination >>> 0, width.sz(text));
+            return text.length + 1;
+        }),
+        SHUnicodeToUnicode: one(W, 12, (width, [source, destination, count])=>{
+            const text = (width.read(source) ?? '').slice(0, Math.max(0, (count | 0) - 1));
+            if ((destination >>> 0) === 0 || (count | 0) <= 0)
+            {
+                return 0;
+            }
+            host.writeMemory(destination >>> 0, width.sz(text));
+            return text.length + 1;
+        }),
+
+        /**
+         * BOOL ChrCmpIA(WORD w1, WORD w2): zero when the two are one character
+         * whatever its case, as StrCmpI compares.
+         */
+        ...both('ChrCmpI', 8, (width, [first, second])=>{
+            const a = searched(width, first) ?? '';
+            const b = searched(width, second) ?? '';
+            return foldCase(a) === foldCase(b) ? 0 : 1;
+        }),
+
+        /**
+         * BOOL StrIsIntlEqualA(BOOL fCaseSens, LPCSTR pString1, LPCSTR pString2, int nChar)
+         * BOOL IntlStrEqWorkerA(BOOL fCaseSens, LPCSTR lpszStr, LPCSTR lpszComp, int iLen)
+         *
+         * Whether the first nChar characters of each are equal, as
+         * CompareString has them, with case or without.
+         */
+        ...both('StrIsIntlEqual', 16, (width, [sensitive, first, second, count])=>
+            (compare(width, first, second, sensitive ? 0 : NORM_IGNORECASE, count | 0) === 0
+                ? 1 : 0)),
+        ...both('IntlStrEqWorker', 16, (width, [sensitive, first, second, count])=>
+            (compare(width, first, second, sensitive ? 0 : NORM_IGNORECASE, count | 0) === 0
+                ? 1 : 0)),
+
+        /**
+         * PSTR StrFormatByteSizeA(DWORD dw, PSTR pszBuf, UINT cchBuf)
+         * PWSTR StrFormatByteSizeW(LONGLONG qdw, PWSTR pszBuf, UINT cchBuf)
+         * PSTR StrFormatByteSize64A(LONGLONG qdw, PSTR pszBuf, UINT cchBuf)
+         *
+         * `byteSize`'s text, cut to the buffer; the buffer.
+         */
+        StrFormatByteSizeA: one(A, 12, (width, [size, buffer, room])=>{
+            writeCut(width, buffer, byteSize(BigInt(size >>> 0)), room >>> 0);
+            return buffer >>> 0;
+        }),
+        StrFormatByteSizeW: one(W, 16, (width, [low, high, buffer, room])=>{
+            writeCut(width, buffer, byteSize(int64(low, high)), room >>> 0);
+            return buffer >>> 0;
+        }),
+        StrFormatByteSize64A: one(A, 16, (width, [low, high, buffer, room])=>{
+            writeCut(width, buffer, byteSize(int64(low, high)), room >>> 0);
+            return buffer >>> 0;
+        }),
+
+        /**
+         * HRESULT StrFormatByteSizeEx(ULONGLONG ull, SFBS_FLAGS flags, PWSTR pszBuf,
+         *                             UINT cchBuf)
+         *
+         * The same text, its last digit rounded (SFBS_FLAGS_ROUND_TO_NEAREST_DISPLAYED_DIGIT)
+         * or cut (SFBS_FLAGS_TRUNCATE_UNDISPLAYED_DECIMAL_DIGITS); any other
+         * flag, or no buffer, is E_INVALIDARG.
+         */
+        StrFormatByteSizeEx: one(W, 20, (width, [low, high, flags, buffer, room])=>{
+            if ((flags !== 1 && flags !== 2) || (room >>> 0) === 0 || (buffer >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const size = BigInt.asUintN(64, int64(low, high));
+            writeCut(width, buffer, byteSize(size, flags === 1), room >>> 0);
+            return S_OK;
+        }),
+
+        /**
+         * PSTR StrFormatKBSizeA(LONGLONG qdw, PSTR pszBuf, UINT cchBuf)
+         *
+         * `kbSize`'s text, cut to the buffer; the buffer.
+         */
+        ...both('StrFormatKBSize', 16, (width, [low, high, buffer, room])=>{
+            writeCut(width, buffer, kbSize(int64(low, high)), room >>> 0);
+            return buffer >>> 0;
+        }),
+
+        /**
+         * int wnsprintfA(PSTR pszDest, int cchDest, PCSTR pszFmt, ...)
+         *
+         * The C runtime's formatting, cut to the buffer with its terminator:
+         * the characters written, or -1 when the text did not fit. A buffer
+         * of no size takes nothing; one of a negative size only the
+         * terminator (Wine's test_StrXXX_overflows).
+         */
+        wnsprintfA: printer(A),
+        wnsprintfW: printer(W),
     };
+
+    /** @param {import('./text.js').Width} width */
+    function printer(width){
+        return {
+            convention: /** @type {'cdecl'} */ ('cdecl'),
+            argBytes: 12 + 4 * 32,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [destination, room, format, ...slots])=>{
+                const readString = (/** @type {number} */ at)=>(at >>> 0) === 0 ? '(null)'
+                    : A.read(at) ?? '';
+                const readWideString = (/** @type {number} */ at)=>(at >>> 0) === 0 ? '(null)'
+                    : W.read(at) ?? '';
+                const text = formatToString(width.read(format) ?? '', slots, readString,
+                    { readWideString, wide: width.wide });
+                if ((destination >>> 0) === 0 || (room | 0) === 0)
+                {
+                    return -1;
+                }
+                if ((room | 0) < 0)
+                {
+                    host.writeMemory(destination >>> 0, width.sz(''));
+                    return -1;
+                }
+                writeCut(width, destination, text, room | 0);
+                return text.length < (room | 0) ? text.length : -1;
+            },
+        };
+    }
 }

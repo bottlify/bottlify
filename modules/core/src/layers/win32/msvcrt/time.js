@@ -108,18 +108,40 @@ export const timeNamesOf = list=>({
 });
 
 /**
- * A GetDateFormat picture expanded for a moment: `d`..`dddd`, `M`..`MMMM`,
- * `y`, `yy`, `yyyy`, `h`/`hh`, `H`/`HH`, `m`/`mm`, `s`/`ss`, `t`/`tt`, text
- * in single quotes as itself (`''` a quote), and anything else as itself.
- * `noZeros` drops the leading zeros, as strftime's `#` flag asks.
+ * A struct tm's fields.
  *
- * @param {string} picture @param {Date} when @param {TimeNames} names
- * @param {boolean} [noZeros]
+ * @typedef {Object} BrokenDown
+ * @property {number} sec
+ * @property {number} min
+ * @property {number} hour
+ * @property {number} mday
+ * @property {number} mon
+ * @property {number} year   Since 1900.
+ * @property {number} wday
+ * @property {number} yday
+ * @property {number} isdst
  */
-function expandPicture(picture, when, names, noZeros = false){
+
+/**
+ * A GetDateFormat picture expanded from a struct tm's fields: `d`..`dddd`,
+ * `M`..`MMMM`, `yy`, `yyyy`, `h`/`hh`, `H`/`HH`, `m`/`mm`, `s`/`ss`, `t`
+ * (the marker's first character), `tt`, `a` and `A` (the whole marker), text
+ * in single quotes as itself (`''` a quote), and anything else as itself. A
+ * run longer than the longest form leaves its extra letters in front as
+ * text -- `hhh` is `h` and the hour in two digits, `ddddd` `d` and the day's
+ * name -- and a lone `y` is a letter. `noZeros` drops the leading zeros, as
+ * strftime's `#` flag asks. Null when a field the picture uses is out of
+ * its range.
+ *
+ * @param {string} picture @param {BrokenDown} tm @param {TimeNames} names
+ * @param {boolean} [noZeros]
+ * @returns {string | null}
+ */
+function expandPicture(picture, tm, names, noZeros = false){
     /** @param {number} value @param {number} width */
     const number = (value, width)=>(noZeros ? String(value) : pad(value, width));
-    const hours = when.getUTCHours();
+    /** @param {string} letter @param {number} run @param {number} longest */
+    const extra = (letter, run, longest)=>letter.repeat(Math.max(0, run - longest));
     let text = '';
     for (let at = 0; at < picture.length;)
     {
@@ -138,60 +160,73 @@ function expandPicture(picture, when, names, noZeros = false){
             run++;
         }
         at += run;
+        /** @type {string | null} */
+        let field;
         switch (letter)
         {
             case 'd':
-                text += run >= 4 ? names.days[when.getUTCDay()]
-                    : run === 3 ? names.shortDays[when.getUTCDay()]
-                        : number(when.getUTCDate(), run);
+                field = run >= 3 ? dayName(tm, run >= 4 ? names.days : names.shortDays)
+                    : inRange(tm.mday, 1, 31) ? number(tm.mday, run) : null;
                 break;
             case 'M':
-                text += run >= 4 ? names.months[when.getUTCMonth()]
-                    : run === 3 ? names.shortMonths[when.getUTCMonth()]
-                        : number(when.getUTCMonth() + 1, run);
+                field = run >= 3 ? monthName(tm, run >= 4 ? names.months : names.shortMonths)
+                    : inRange(tm.mon, 0, 11) ? number(tm.mon + 1, run) : null;
                 break;
             case 'y':
-                text += run >= 3 ? String(when.getUTCFullYear())
-                    : number(when.getUTCFullYear() % 100, run);
+                field = run === 1 ? 'y'
+                    : !inRange(tm.year, -1900, 8099) ? null
+                        : run >= 4 ? String(tm.year + 1900)
+                            : number((tm.year + 1900) % 100, 2);
+                text += extra(letter, run, run >= 4 ? 4 : 2);
                 break;
             case 'h':
-                text += number(hours % 12 === 0 ? 12 : hours % 12, Math.min(run, 2));
+                field = inRange(tm.hour, 0, 23)
+                    ? number(tm.hour % 12 === 0 ? 12 : tm.hour % 12, Math.min(run, 2)) : null;
                 break;
             case 'H':
-                text += number(hours, Math.min(run, 2));
+                field = inRange(tm.hour, 0, 23) ? number(tm.hour, Math.min(run, 2)) : null;
                 break;
             case 'm':
-                text += number(when.getUTCMinutes(), Math.min(run, 2));
+                field = inRange(tm.min, 0, 59) ? number(tm.min, Math.min(run, 2)) : null;
                 break;
             case 's':
-                text += number(when.getUTCSeconds(), Math.min(run, 2));
+                field = inRange(tm.sec, 0, 59) ? number(tm.sec, Math.min(run, 2)) : null;
                 break;
-            case 't': {
-                const marker = hours < 12 ? names.am : names.pm;
-                text += run === 1 ? marker.slice(0, 1) : marker;
+            case 't': case 'a': case 'A': {
+                const marker = !inRange(tm.hour, 0, 23) ? null
+                    : tm.hour < 12 ? names.am : names.pm;
+                field = marker !== null && letter === 't' && run === 1 ? marker.slice(0, 1)
+                    : marker;
                 break;
             }
             default:
-                text += letter.repeat(run);
+                field = letter.repeat(run);
         }
+        if (field === null)
+        {
+            return null;
+        }
+        if ('dM'.includes(letter))
+        {
+            text += extra(letter, run, 4);
+        }
+        else if ('hHms'.includes(letter))
+        {
+            text += extra(letter, run, 2);
+        }
+        text += field;
     }
     return text;
 }
 
-/**
- * A struct tm's fields.
- *
- * @typedef {Object} BrokenDown
- * @property {number} sec
- * @property {number} min
- * @property {number} hour
- * @property {number} mday
- * @property {number} mon
- * @property {number} year   Since 1900.
- * @property {number} wday
- * @property {number} yday
- * @property {number} isdst
- */
+/** @param {number} value @param {number} low @param {number} high */
+const inRange = (value, low, high)=>value >= low && value <= high;
+
+/** @param {BrokenDown} tm @param {string[]} list */
+const dayName = (tm, list)=>(inRange(tm.wday, 0, 6) ? list[tm.wday] : null);
+
+/** @param {BrokenDown} tm @param {string[]} list */
+const monthName = (tm, list)=>(inRange(tm.mon, 0, 11) ? list[tm.mon] : null);
 
 /** @param {number} year */
 const isLeap = year=>(year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
@@ -265,54 +300,66 @@ export function asctime(tm){
 }
 
 /**
- * strftime's text, with the names and pictures of a locale -- the C
- * locale's unless others are given, as `_Strftime` gives them. The `#`
- * flag is msvcrt's: `%#c` and `%#x` are the long date, and on a number it
- * drops the leading zeros.
+ * strftime's text of a struct tm, with the names and pictures of a locale --
+ * the C locale's unless others are given, as `_Strftime` gives them. Each
+ * conversion reads the fields as they are, unnormalised: the 30th of
+ * February is written as such, the weekday is `tm_wday` and the day of the
+ * year `tm_yday`. The `#` flag is msvcrt's: `%#c` and `%#x` are the long
+ * date, and on a number it drops the leading zeros. Null -- EINVAL, and
+ * nothing written -- for a conversion msvcrt does not know (C99's `%e`,
+ * `%D`, `%T`... among them), a field the conversion reads out of its range,
+ * or no struct at all when a conversion needs one; a format of plain text
+ * reads no struct.
  *
  * @param {string} format
- * @param {Date} when
+ * @param {BrokenDown | null} tm
  * @param {TimeNames} [names]
+ * @returns {string | null}
  */
-export function strftime(format, when, names = C_TIME_NAMES){
-    const dayOfYear = Math.floor(
-        (Date.UTC(when.getUTCFullYear(), when.getUTCMonth(), when.getUTCDate())
-            - Date.UTC(when.getUTCFullYear(), 0, 1)) / 86400000);
-    /** @param {number} firstDay */
-    const weekOfYear = firstDay=>pad(Math.floor(
-        (dayOfYear + 7 - (when.getUTCDay() - firstDay + 7) % 7) / 7));
+export function strftime(format, tm, names = C_TIME_NAMES){
     let alternate = false;
+    /** @param {number} value @param {number} low @param {number} high @param {number} [width] */
+    const number = (value, low, high, width = 2)=>(inRange(value, low, high)
+        ? (alternate ? String(value) : pad(value, width)) : null);
+    /** The week of the year, its weeks starting on `firstDay`. @param {number} firstDay */
+    const week = firstDay=>(/** @param {BrokenDown} t */ t=>(inRange(t.wday, 0, 6)
+        && inRange(t.yday, 0, 365)
+        ? number(Math.floor((t.yday + 7 - (t.wday - firstDay + 7) % 7) / 7), 0, 53) : null));
 
-    /** @type {Record<string, () => string>} */
+    /** @type {Record<string, (tm: BrokenDown) => string | null>} */
     const fields = {
-        a: ()=>names.shortDays[when.getUTCDay()],
-        A: ()=>names.days[when.getUTCDay()],
-        b: ()=>names.shortMonths[when.getUTCMonth()],
-        B: ()=>names.months[when.getUTCMonth()],
-        c: ()=>`${fields.x()} ${fields.X()}`,
-        d: ()=>pad(when.getUTCDate()),
-        H: ()=>pad(when.getUTCHours()),
-        I: ()=>pad(when.getUTCHours() % 12 === 0 ? 12 : when.getUTCHours() % 12),
-        j: ()=>pad(dayOfYear + 1, 3),
-        m: ()=>pad(when.getUTCMonth() + 1),
-        M: ()=>pad(when.getUTCMinutes()),
-        p: ()=>(when.getUTCHours() < 12 ? names.am : names.pm),
-        S: ()=>pad(when.getUTCSeconds()),
-        U: ()=>weekOfYear(0),
-        w: ()=>String(when.getUTCDay()),
-        W: ()=>weekOfYear(1),
-        x: ()=>expandPicture(alternate ? names.longDate : names.shortDate, when, names),
-        X: ()=>expandPicture(names.time, when, names),
-        y: ()=>pad(when.getUTCFullYear() % 100),
-        Y: ()=>String(when.getUTCFullYear()),
+        a: t=>dayName(t, names.shortDays),
+        A: t=>dayName(t, names.days),
+        b: t=>monthName(t, names.shortMonths),
+        B: t=>monthName(t, names.months),
+        c: t=>{
+            const date = fields.x(t);
+            const time = date === null ? null : fields.X(t);
+            return time === null ? null : `${date} ${time}`;
+        },
+        d: t=>number(t.mday, 1, 31),
+        H: t=>number(t.hour, 0, 23),
+        I: t=>(inRange(t.hour, 0, 23) ? number(t.hour % 12 === 0 ? 12 : t.hour % 12, 1, 12)
+            : null),
+        j: t=>number(t.yday + 1, 1, 366, 3),
+        m: t=>number(t.mon + 1, 1, 12),
+        M: t=>number(t.min, 0, 59),
+        p: t=>(!inRange(t.hour, 0, 23) ? null : t.hour < 12 ? names.am : names.pm),
+        S: t=>number(t.sec, 0, 59),
+        U: week(0),
+        w: t=>(inRange(t.wday, 0, 6) ? String(t.wday) : null),
+        W: week(1),
+        x: t=>expandPicture(alternate ? names.longDate : names.shortDate, t, names),
+        X: t=>expandPicture(names.time, t, names),
+        y: t=>number((t.year + 1900) % 100, 0, 99),
+        Y: t=>(inRange(t.year, -1900, 8099) ? String(t.year + 1900) : null),
         Z: ()=>'UTC',
-        '%': ()=>'%',
     };
 
     let text = '';
     for (let at = 0; at < format.length; at++)
     {
-        if (format[at] !== '%' || at + 1 === format.length)
+        if (format[at] !== '%')
         {
             text += format[at];
             continue;
@@ -323,14 +370,18 @@ export function strftime(format, when, names = C_TIME_NAMES){
             at++;
         }
         const letter = format[++at];
-        const field = fields[letter];
-        // An unknown specifier is undefined behaviour; msvcrt drops it, and
-        // dropping keeps the rest of the string in the positions the caller
-        // laid out.
-        const value = field ? field() : '';
-        text += alternate && 'dHIjmMSUWyY'.includes(letter)
-            ? value.replace(/^0+(?=\d)/, '')
-            : value;
+        if (letter === '%')
+        {
+            text += '%';
+            continue;
+        }
+        const field = Object.hasOwn(fields, letter) ? fields[letter] : null;
+        const value = field === null || tm === null ? null : field(tm);
+        if (value === null)
+        {
+            return null;
+        }
+        text += value;
     }
     return text;
 }
@@ -487,16 +538,36 @@ export function createTimeFunctions(host){
             isdst: at(TM.ISDST) };
     };
 
+    /** The struct tm strftime reads, or null for none. @param {number} block */
+    const tmAt = block=>((block >>> 0) === 0 ? null : readTm(block));
+
+    /** strftime of the wall clock's moment, for the fixed forms. @param {string} format */
+    const stampOf = format=>strftime(format,
+        breakDown(Math.floor(host.systemTimeMs() / 1000))) ?? '';
+
     /**
-     * The moment a struct tm names, its fields carried as mktime carries
-     * them: what the strftime family formats.
+     * The strftime family's ending: the text and its length when it fits
+     * in `max` with its terminator; otherwise an empty string where there
+     * is room for one and zero -- EINVAL for a format refused or no buffer,
+     * ERANGE for text too long.
      *
-     * @param {number} block
+     * @param {number} destination @param {number} max @param {string | null} text
+     * @param {(pointer: number, text: string) => void} write
      */
-    const momentOf = block=>{
-        const tm = readTm(block);
-        return new Date(utcSeconds(tm.year + 1900, tm.mon, tm.mday, tm.hour, tm.min, tm.sec)
-            * 1000);
+    const finishFormat = (destination, max, text, write)=>{
+        if ((destination >>> 0) === 0 || (max >>> 0) === 0)
+        {
+            fail(EINVAL);
+            return 0;
+        }
+        if (text === null || text.length + 1 > (max >>> 0))
+        {
+            write(destination, '');
+            fail(text === null ? EINVAL : ERANGE);
+            return 0;
+        }
+        write(destination, text);
+        return text.length;
     };
 
     /**
@@ -863,7 +934,7 @@ export function createTimeFunctions(host){
                 host.writeMemory(buffer, new Uint8Array(1));
                 return fail(ERANGE);
             }
-            writeString(buffer, strftime(format, new Date(host.systemTimeMs())));
+            writeString(buffer, stampOf(format));
             return 0;
         },
     });
@@ -1116,22 +1187,19 @@ export function createTimeFunctions(host){
          * size_t strftime(char *dest, size_t max, const char *format,
          *                 const struct tm *broken)
          *
-         * Nothing is written when the result would not fit, and the answer is
-         * zero -- not a truncated string. A caller cannot tell an overflow from
-         * an empty format, which is a defect in the interface rather than here.
+         * A result that does not fit is not truncated: the buffer is left
+         * empty and the answer is zero, as for a format refused. A caller
+         * cannot tell an overflow from an empty format, which is a defect in
+         * the interface rather than here.
          */
         strftime: {
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([destination, max, format, block])=>{
-                const text = strftime(host.readCString(format, MAX_STRING), momentOf(block));
-                if (text.length + 1 > (max >>> 0))
-                {
-                    return 0;
-                }
-                writeString(destination, text);
-                return text.length;
+                const text = (format >>> 0) === 0 ? null
+                    : strftime(host.readCString(format, MAX_STRING), tmAt(block));
+                return finishFormat(destination, max, text, writeString);
             },
         },
 
@@ -1139,7 +1207,7 @@ export function createTimeFunctions(host){
          * size_t wcsftime(wchar_t *dest, size_t max, const wchar_t *format,
          *                 const struct tm *broken)
          *
-         * strftime's text in UTF-16, `max` in characters, and nothing written
+         * strftime's text in UTF-16, `max` in characters, and an empty string
          * when it does not fit.
          */
         wcsftime: {
@@ -1147,13 +1215,9 @@ export function createTimeFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([destination, max, format, block])=>{
-                const text = strftime(wideStringAt(host.readMemory, format), momentOf(block));
-                if (text.length + 1 > (max >>> 0))
-                {
-                    return 0;
-                }
-                writeWide(destination, text);
-                return text.length;
+                const text = (format >>> 0) === 0 ? null
+                    : strftime(wideStringAt(host.readMemory, format), tmAt(block));
+                return finishFormat(destination, max, text, writeWide);
             },
         },
 
@@ -1170,14 +1234,10 @@ export function createTimeFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([destination, max, format, block, timeNames])=>{
-                const text = strftime(host.readCString(format, MAX_STRING), momentOf(block),
-                    (timeNames >>> 0) === 0 ? C_TIME_NAMES : readTimeNames(timeNames >>> 0));
-                if (text.length + 1 > (max >>> 0))
-                {
-                    return 0;
-                }
-                writeString(destination, text);
-                return text.length;
+                const text = (format >>> 0) === 0 ? null
+                    : strftime(host.readCString(format, MAX_STRING), tmAt(block),
+                        (timeNames >>> 0) === 0 ? C_TIME_NAMES : readTimeNames(timeNames >>> 0));
+                return finishFormat(destination, max, text, writeString);
             },
         },
 
@@ -1243,7 +1303,7 @@ export function createTimeFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                writeString(buffer, strftime('%m/%d/%y', new Date(host.systemTimeMs())));
+                writeString(buffer, stampOf('%m/%d/%y'));
                 return buffer;
             },
         },
@@ -1254,7 +1314,7 @@ export function createTimeFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                writeString(buffer, strftime('%H:%M:%S', new Date(host.systemTimeMs())));
+                writeString(buffer, stampOf('%H:%M:%S'));
                 return buffer;
             },
         },
@@ -1265,7 +1325,7 @@ export function createTimeFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                writeWide(buffer, strftime('%m/%d/%y', new Date(host.systemTimeMs())));
+                writeWide(buffer, stampOf('%m/%d/%y'));
                 return buffer;
             },
         },
@@ -1276,7 +1336,7 @@ export function createTimeFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                writeWide(buffer, strftime('%H:%M:%S', new Date(host.systemTimeMs())));
+                writeWide(buffer, stampOf('%H:%M:%S'));
                 return buffer;
             },
         },

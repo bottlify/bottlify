@@ -1115,6 +1115,27 @@ test('a thread whose slice ended on a host call goes on once it is answered', ()
     assert.equal(sched.runOnce().ran.name, 'audio', 'starved, it is not passed over again');
 });
 
+test('a call answered by another process is a wait: its answer does not go on ahead', ()=>{
+    // Wine's kernel32 sync.c test_apc_deadlock: a thread allocating in its
+    // child over and over held the processor through every answer, and the
+    // thread its event woke waited the whole starvation bound each round.
+    const cpu = fakeCpu();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), now: ()=>0,
+        quantum: 5000 });
+    const asker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'asker' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'woken' });
+    cpu.runSlice = ()=>{
+        asker.awaitingHost = true;
+        sched.answeredElsewhere(asker);
+        return 65;
+    };
+    assert.equal(sched.runOnce().ran.name, 'asker');
+    cpu.runSlice = max=>Math.min(max, 1000);
+    asker.awaitingHost = false;
+    assert.equal(sched.runOnce().ran.name, 'woken', 'the other ready thread runs first');
+    assert.equal(asker.answeredElsewhere, false, 'and the mark is the one call\'s');
+});
+
 /**
  * The cpu of a process on two executors: the other's slices never end on their
  * own, and the bell records the waits a turn takes for it.

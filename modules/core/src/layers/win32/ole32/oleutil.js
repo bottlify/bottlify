@@ -93,7 +93,10 @@ const READ_MAX = 1 << 20;
  *           Whether the thread is inside OleInitialize, not only CoInitialize.
  * @property {{ root: (id: number) => any, open: (key: any, path: string) => any,
  *              getValue: (key: any, name: string) => { data: Uint8Array } | null,
- *              subkeys?: (key: any) => string[] } | undefined} [hive]
+ *              subkeys?: (key: any) => string[],
+ *              create?: (key: any, path: string) => { key: any },
+ *              setValue?: (key: any, name: string, type: number, data: Uint8Array) => void }
+ *     | undefined} [hive]
  * @property {((library: string, name: string, args: number[], thread?: unknown)
  *     => number | Promise<number> | null) | undefined} [system]
  *           Another library's export, as ole32's import of it calls it.

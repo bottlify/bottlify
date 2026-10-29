@@ -12,12 +12,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatGuid, parseGuid } from './guid.js';
 import { createOle2Functions, decodeCompObj, encodeCompObj } from './ole2.js';
+import { createOleUtil } from './oleutil.js';
+import { createDataCaches } from './datacache.js';
+import { createDefaultHandlers } from './defhandler.js';
 import {
     E_INVALIDARG, IID_IUNKNOWN, REGDB_E_CLASSNOTREG, S_FALSE, S_OK, oleProcess,
 } from './ole2.fixture.js';
 
 const E_NOINTERFACE = 0x80004002 | 0;
-const E_OUTOFMEMORY = 0x8007000e | 0;
 const REGDB_E_KEYMISSING = 0x80040152 | 0;
 const CO_E_NOTINITIALIZED = 0x800401f0 | 0;
 const OLEOBJ_E_NOVERBS = 0x80040180 | 0;
@@ -29,6 +31,11 @@ const DV_E_CLIPFORMAT = 0x8004006a | 0;
 const DV_E_NOIVIEWOBJECT = 0x80040073 | 0;
 const STG_E_FILENOTFOUND = 0x80030002 | 0;
 const DRAGDROP_S_CANCEL = 0x00040101;
+const DRAGDROP_S_DROP = 0x00040100;
+const DRAGDROP_S_USEDEFAULTCURSORS = 0x00040102;
+const DROPEFFECT_NONE = 0;
+const DROPEFFECT_COPY = 1;
+const DROPEFFECT_MOVE = 2;
 const CONVERT10_E_OLESTREAM_FMT = 0x800401c2 | 0;
 const CONVERT10_E_STG_NO_STD_STREAM = 0x800401c5 | 0;
 
@@ -38,6 +45,8 @@ const IID_IOLEOBJECT = '{00000112-0000-0000-C000-000000000046}';
 const IID_IPERSISTSTORAGE = '{0000010A-0000-0000-C000-000000000046}';
 const IID_IOLECACHE = '{0000011E-0000-0000-C000-000000000046}';
 const IID_IDATAOBJECT = '{0000010E-0000-0000-C000-000000000046}';
+const IID_IDROPSOURCE = '{00000121-0000-0000-C000-000000000046}';
+const IID_IDROPTARGET = '{00000122-0000-0000-C000-000000000046}';
 const IID_IENUMFORMATETC = '{00000103-0000-0000-C000-000000000046}';
 
 const CLSID_OLD = '{12345678-1234-1234-1234-123456789ABC}';
@@ -140,8 +149,15 @@ function dataObject(p, formats){
 /** @param {{ system?: boolean }} [options] */
 function setup(options){
     const p = oleProcess(options);
+    // The data cache and the default handler, as ole32 gives them to these.
+    const util = createOleUtil(p.env);
+    p.env.dataCaches = createDataCaches({ ole: p.env, util });
     const fns = /** @type {Record<string, { argBytes: number, handler: Function }>} */ (
         createOle2Functions(p.env));
+    p.env.defaultHandlers = createDefaultHandlers({ ole: p.env, util,
+        caches: p.env.dataCaches,
+        callExport: async(name, guids, args)=>(await fns[name].handler(
+            args(guids.map(guid=>p.guid(guid))))) | 0 });
     /** @param {string} name @param {number[]} args */
     const run = async(name, args)=>(await fns[name].handler(args)) | 0;
     return { p, fns, run };
@@ -320,6 +336,9 @@ test('OleCreate makes the object in process and takes it through the steps ole2.
             return object.log;
         };
         assert.deepEqual(await create(0, 0), ['OleObjectPersistStg_InitNew']);
+        const clsidOut = p.out(0, 16);
+        assert.equal(p.storage.ReadClassStg.handler([storage, clsidOut]), S_OK);
+        assert.equal(p.guidAt(clsidOut), CLSID_OLD, 'the storage is made the class\'s');
         assert.deepEqual(await create(1, 0), ['OleObjectPersistStg_InitNew',
             'OleObjectRunnable_Run', 'OleObjectCache_Cache']);
         assert.deepEqual(await create(1, 0xdeadbeef), ['OleObject_GetMiscStatus',
@@ -363,9 +382,14 @@ test('OleLoad makes the storage\'s class and loads it, the site around the load'
 
     const other = p.docfile();
     assert.equal(p.storage.WriteClassStg.handler([other, p.guid(CLSID_NONE)]), S_OK);
-    assert.equal(await run('OleLoad', [other, p.guid(IID_IUNKNOWN), 0, out]),
-        REGDB_E_CLASSNOTREG);
-    assert.equal(p.u32(out), 0);
+    // A class with no server here is the default handler's to stand for
+    // (ole2.c test_OleLoad's presentations of an unregistered class).
+    assert.equal(await run('OleLoad', [other, p.guid(IID_IUNKNOWN), 0, out]), S_OK);
+    assert.notEqual(p.u32(out), 0);
+    const runnable = p.out();
+    assert.equal(await p.callMethod(p.u32(out), 0, [p.guid(IID_IRUNNABLEOBJECT), runnable]),
+        S_OK, 'a handler, not the object');
+    assert.equal(await p.callMethod(p.u32(runnable), 5, []), 0, 'which is not running');
     assert.equal(await run('OleLoad', [0, p.guid(IID_IUNKNOWN), 0, out]), E_INVALIDARG);
 });
 
@@ -466,7 +490,10 @@ test('OleGetAutoConvert and OleDoAutoConvert convert a storage as ole2.c records
     p.setKey(`CLSID\\${CLSID_OLD}`, 'Old');
     assert.equal(await run('OleDoAutoConvert', [storage, out]), REGDB_E_KEYMISSING);
     assert.equal(await run('OleGetAutoConvert', [old, out]), REGDB_E_KEYMISSING);
-    p.setKey(`CLSID\\${CLSID_OLD}\\AutoConvertTo`, CLSID_NEW);
+    // ole2.c: OleSetAutoConvert writes what OleGetAutoConvert reads.
+    assert.equal(await run('OleSetAutoConvert', [p.guid(CLSID_NEW), old]), REGDB_E_CLASSNOTREG,
+        'a class with no key of its own');
+    assert.equal(await run('OleSetAutoConvert', [old, p.guid(CLSID_NEW)]), S_OK);
     p.setKey(`CLSID\\${CLSID_NEW}`, 'New Thing');
     assert.equal(await run('OleGetAutoConvert', [old, out]), S_OK);
     assert.equal(p.guidAt(out), CLSID_NEW);
@@ -608,10 +635,10 @@ test('a menu descriptor holds the menu and its widths until it is destroyed', as
     assert.equal(await run('OleDestroyMenuDescriptor', [0]), S_OK);
 });
 
-test('DoDragDrop ends as a cancelled drop, after dragdrop.c\'s argument checks', async()=>{
+test('DoDragDrop answers dragdrop.c\'s argument checks', async()=>{
     const { p, run } = setup();
     const data = composite(p, { [IID_IDATAOBJECT]: {} });
-    const source = composite(p, { '{00000121-0000-0000-C000-000000000046}': {} });
+    const source = composite(p, { [IID_IDROPSOURCE]: {} });
     const effect = p.out(0xdeadbeef);
     p.thread.ole32.oleDepth = 0;
     assert.equal(await run('DoDragDrop', [0, 0, 0, 0]), CO_E_NOTINITIALIZED);
@@ -621,11 +648,138 @@ test('DoDragDrop ends as a cancelled drop, after dragdrop.c\'s argument checks',
     {
         assert.equal(await run('DoDragDrop', args), E_INVALIDARG);
     }
-    assert.equal(await run('DoDragDrop', [data.unknown, source.unknown, 1, effect]),
-        DRAGDROP_S_CANCEL);
-    assert.equal(p.u32(effect), 0, 'DROPEFFECT_NONE');
     assert.deepEqual([...data.log, ...source.log], [], 'the source is not run');
-    assert.equal(p.reported.length, 1);
+});
+
+/**
+ * A drag over one window with a drop target, the source answering in turn
+ * from `going` and the target with `effects` for DragEnter, DragOver and
+ * Drop, as dragdrop.c's call_lists drive them.
+ *
+ * @param {{ going: number[], enter?: number, over?: number, drop?: [number, number],
+ *     allowed: number, targetless?: boolean }} plan
+ */
+async function drag(plan){
+    const { p, run } = setup();
+    const data = composite(p, { [IID_IDATAOBJECT]: {} });
+    const going = [...plan.going];
+    /** Both objects' calls, in the order made. @type {string[]} */
+    const calls = [];
+    /**
+     * @param {string} name @param {(args: number[]) => number} body
+     * @returns {[string, (args: number[]) => number]}
+     */
+    const logged = (name, body)=>[name, args=>{
+        calls.push(name);
+        return body(args);
+    }];
+    const source = composite(p, { [IID_IDROPSOURCE]: {
+        3: logged('QueryContinueDrag', ()=>going.shift() ?? DRAGDROP_S_CANCEL),
+        4: logged('GiveFeedback', ([effect])=>{
+            feedback.push(effect);
+            return DRAGDROP_S_USEDEFAULTCURSORS;
+        }),
+    } });
+    /** @type {number[]} */
+    const feedback = [];
+    /** @type {number[]} */
+    const offered = [];
+    /** @param {number} answer @returns {(args: number[]) => number} */
+    const answering = answer=>args=>{
+        const at = args[args.length - 1];
+        offered.push(p.u32(at));
+        p.put(at, answer);
+        return S_OK;
+    };
+    const target = composite(p, { [IID_IDROPTARGET]: {
+        3: logged('DragEnter', answering(plan.enter ?? DROPEFFECT_COPY)),
+        4: logged('DragOver', answering(plan.over ?? DROPEFFECT_COPY)),
+        5: logged('DragLeave', ()=>S_OK),
+        6: logged('Drop', args=>{
+            const [hr, effect] = plan.drop ?? [S_OK, DROPEFFECT_COPY];
+            answering(effect)(args);
+            return hr;
+        }),
+    } });
+    const WINDOW = 0x800;
+    /** @type {number[]} */
+    const captured = [];
+    Object.assign(p.exports, {
+        'USER32.dll!CreateWindowExW': ()=>0x700,
+        'USER32.dll!SetCapture': (/** @type {number[]} */ [window])=>captured.push(window),
+        'USER32.dll!ReleaseCapture': ()=>captured.push(0),
+        'USER32.dll!DestroyWindow': ()=>1,
+        'USER32.dll!GetAsyncKeyState': ()=>0,
+        'USER32.dll!GetCursorPos': (/** @type {number[]} */ [at])=>{
+            p.put(at, 50);
+            p.put(at + 4, 60);
+            return 1;
+        },
+        'USER32.dll!WindowFromPoint': (/** @type {number[]} */ [x, y])=>(x === 50 && y === 60
+            ? WINDOW : 0),
+        'USER32.dll!GetPropW': (/** @type {number[]} */ [window, name])=>(!plan.targetless
+            && window === WINDOW && p.readWide(name) === 'OleDropTargetInterface'
+            ? target.unknown : 0),
+        'USER32.dll!GetAncestor': ()=>0,
+        'USER32.dll!MsgWaitForMultipleObjects': ()=>0,
+        'USER32.dll!PeekMessageW': ()=>0,
+    });
+    const effect = p.out(0xdeadbeef);
+    const hr = await run('DoDragDrop', [data.unknown, source.unknown, plan.allowed, effect]);
+    return { hr, effect: p.u32(effect), calls, feedback,
+        offered, captured };
+}
+
+test('DoDragDrop: a drop taken answers DRAGDROP_S_DROP, a failed one its error', async()=>{
+    const failed = await drag({ going: [DRAGDROP_S_DROP], allowed: DROPEFFECT_COPY,
+        drop: [0xbeefbeef | 0, DROPEFFECT_COPY] });
+    assert.deepEqual(failed.calls, ['QueryContinueDrag', 'DragEnter', 'GiveFeedback', 'Drop']);
+    assert.equal(failed.hr, 0xbeefbeef | 0, 'Drop\'s own answer');
+    assert.equal(failed.effect, DROPEFFECT_COPY, 'and its effect');
+    assert.deepEqual(failed.captured, [0x700, 0], 'a window of its own held the capture');
+
+    const several = await drag({ going: [DRAGDROP_S_DROP],
+        allowed: DROPEFFECT_COPY | DROPEFFECT_MOVE,
+        drop: [S_OK, DROPEFFECT_NONE] });
+    assert.equal(several.hr, DRAGDROP_S_DROP);
+    assert.equal(several.effect, DROPEFFECT_NONE, 'the effect Drop wrote');
+    assert.deepEqual(several.offered, [DROPEFFECT_COPY | DROPEFFECT_MOVE,
+        DROPEFFECT_COPY | DROPEFFECT_MOVE], 'every call is offered the allowed effects');
+    assert.deepEqual(several.feedback, [DROPEFFECT_COPY]);
+});
+
+test('DoDragDrop: a drop no allowed effect fits leaves the target', async()=>{
+    const none = await drag({ going: [DRAGDROP_S_DROP], allowed: DROPEFFECT_NONE });
+    assert.deepEqual(none.calls, ['QueryContinueDrag', 'DragEnter', 'GiveFeedback', 'DragLeave']);
+    assert.deepEqual(none.feedback, [DROPEFFECT_NONE], 'the target\'s COPY narrowed to none');
+    assert.equal(none.hr, DRAGDROP_S_DROP);
+    assert.equal(none.effect, DROPEFFECT_NONE);
+
+    const nowhere = await drag({ going: [DRAGDROP_S_DROP], allowed: DROPEFFECT_COPY,
+        targetless: true });
+    assert.deepEqual(nowhere.calls, ['QueryContinueDrag']);
+    assert.equal(nowhere.hr, DRAGDROP_S_DROP);
+    assert.equal(nowhere.effect, DROPEFFECT_NONE);
+});
+
+test('DoDragDrop: a drag goes on over the target, and a cancel ends it with no effect', async()=>{
+    const moved = await drag({ going: [S_OK, S_OK, DRAGDROP_S_DROP],
+        allowed: DROPEFFECT_COPY | DROPEFFECT_MOVE, drop: [S_OK, DROPEFFECT_NONE] });
+    assert.deepEqual(moved.calls, ['QueryContinueDrag', 'DragEnter', 'GiveFeedback', 'DragOver',
+        'GiveFeedback', 'QueryContinueDrag', 'DragOver', 'GiveFeedback', 'QueryContinueDrag',
+        'Drop']);
+    assert.equal(moved.hr, DRAGDROP_S_DROP);
+
+    const cancelled = await drag({ going: [DRAGDROP_S_CANCEL], allowed: DROPEFFECT_COPY });
+    assert.deepEqual(cancelled.calls, ['QueryContinueDrag'], 'no target is entered');
+    assert.equal(cancelled.hr, DRAGDROP_S_CANCEL);
+    assert.equal(cancelled.effect, DROPEFFECT_NONE);
+
+    const later = await drag({ going: [S_OK, DRAGDROP_S_CANCEL], allowed: DROPEFFECT_COPY });
+    assert.deepEqual(later.calls.slice(-2), ['QueryContinueDrag', 'DragLeave']);
+    assert.equal(later.hr, DRAGDROP_S_CANCEL);
+    assert.equal(later.effect, DROPEFFECT_NONE);
+    assert.deepEqual(later.captured, [0x700, 0]);
 });
 
 test('what a data object can be made into is read from its formats', async()=>{
@@ -663,9 +817,22 @@ test('what a data object can be made into is read from its formats', async()=>{
         E_INVALIDARG);
 });
 
-test('OleCreateStaticFromData checks as ole2.c does, and makes no picture object', async()=>{
+test('OleCreateStaticFromData checks as ole2.c does, and makes a static picture', async()=>{
     const { p, run } = setup();
-    const data = dataObject(p, [CF_DIB]);
+    // A data object whose GetData hands out a 1x1 DIB.
+    const data = composite(p, { [IID_IDATAOBJECT]: {
+        3: ['GetData', ([, medium])=>{
+            const dib = p.heap.allocate(44);
+            p.bytes.fill(0, dib, dib + 44);
+            [40, 1, 1].forEach((word, index)=>p.put(dib + index * 4, word));
+            p.bytes[dib + 12] = 1;
+            p.bytes[dib + 14] = 32;
+            p.put(medium, 1);
+            p.put(medium + 4, dib);
+            p.put(medium + 8, 0);
+            return S_OK;
+        }],
+    } });
     const storage = p.docfile();
     const out = p.out();
     const iid = p.guid(IID_IOLEOBJECT);
@@ -679,9 +846,28 @@ test('OleCreateStaticFromData checks as ole2.c does, and makes no picture object
     assert.equal(await run('OleCreateStaticFromData',
         [data.unknown, iid, 2, format, 0, storage, out]), DV_E_CLIPFORMAT);
     p.put(format, CF_DIB);
+    [1, -1, 1].forEach((word, index)=>p.put(format + 8 + index * 4, word));
     assert.equal(await run('OleCreateStaticFromData',
-        [data.unknown, iid, 2, format, 0, storage, out]), REGDB_E_CLASSNOTREG);
-    assert.equal(p.u32(out), 0);
+        [data.parts[IID_IDATAOBJECT].pointer, iid, 2, format, 0, storage, out]), S_OK);
+    assert.notEqual(p.u32(out), 0);
+    // ole2.c test_OleCreateStaticFromData: the storage is the static class's,
+    // with \1Ole, \1CompObj and the picture in CONTENTS behind its file header.
+    const clsid = p.out(0, 16);
+    assert.equal(p.storage.ReadClassStg.handler([storage, clsid]), S_OK);
+    assert.equal(p.guidAt(clsid), '{00000316-0000-0000-C000-000000000046}');
+    for (const name of ['\x01Ole', '\x01CompObj', 'CONTENTS'])
+    {
+        const stream = p.out();
+        assert.equal(await p.callMethod(storage, 4, [p.wide(name), 0, 0x10, 0, stream]), S_OK,
+            name);
+        if (name === 'CONTENTS')
+        {
+            const head = p.out(0, 2);
+            await p.callMethod(p.u32(stream), 3, [head, 2, 0]);
+            assert.equal(p.u16(head), 0x4d42, 'BM');
+        }
+        await p.callMethod(p.u32(stream), 2, []);
+    }
 });
 
 test('OleDuplicateData copies a global block and a metafile picture, not a GDI object',
@@ -715,7 +901,6 @@ test('the creation calls with no server here are refused as an unregistered clas
         OleCreateFromFile: [32, 7, REGDB_E_CLASSNOTREG],
         OleCreateLinkToFile: [28, 6, REGDB_E_CLASSNOTREG],
         OleCreateLink: [28, 6, REGDB_E_CLASSNOTREG],
-        CreateDataCache: [16, 3, E_OUTOFMEMORY],
     };
     for (const [name, [argBytes, outAt, answer]] of Object.entries(expected))
     {
@@ -731,9 +916,9 @@ test('the creation calls with no server here are refused as an unregistered clas
         CONVERT10_E_STG_NO_STD_STREAM);
     assert.equal(await run('OleConvertOLESTREAMToIStorage', [0x1000, 0x1000, 0]),
         CONVERT10_E_OLESTREAM_FMT);
-    assert.equal(p.reported.length, 7, 'each named once');
-    await run('CreateDataCache', [0, 0, 0, 0]);
-    assert.equal(p.reported.length, 7);
+    assert.equal(p.reported.length, 6, 'each named once');
+    await run('OleCreateFromFile', new Array(8).fill(0x1000));
+    assert.equal(p.reported.length, 6);
 });
 
 test('without user32, accelerators and registered formats are not reached, and that is said',

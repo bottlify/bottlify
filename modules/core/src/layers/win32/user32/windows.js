@@ -31,6 +31,7 @@ import { createRawInput } from './rawinput.js';
 import { createCaret } from './caret.js';
 import { createDirectoryListFunctions } from './dlgdir.js';
 import { createMdi } from './mdi.js';
+import { createWinEventHooks } from './hooks.js';
 import {
     WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, contains, createGeometry,
     createdStyles, edgeFor, frameOf, frameRings, intersect, isEmpty,
@@ -81,6 +82,11 @@ const WM_GETMINMAXINFO = 0x0024;
 const WM_WINDOWPOSCHANGED = 0x0047;
 /** In WM_WINDOWPOSCHANGED's flags: the client area kept its size, its place. */
 const SWP_NOCLIENTSIZE = 0x0800;
+/** WM_PARENTNOTIFY, and the style that keeps a child from sending it. */
+const WM_PARENTNOTIFY = 0x0210;
+const WM_RBUTTONUP = 0x0205;
+const WM_CONTEXTMENU = 0x007b;
+const WS_EX_NOPARENTNOTIFY = 0x00000004;
 const SWP_NOCLIENTMOVE = 0x1000;
 const WM_NCCREATE = 0x0081;
 const WM_CREATE = 0x0001;
@@ -208,11 +214,95 @@ const HOST_PROCEDURE_BASE = 0x7ff00000;
 const DT_WORDBREAK = 0x0010;
 const DT_NOPREFIX = 0x0800;
 
+/** The accessibility events the window manager raises, about a window or its client area. */
+const EVENT_SYSTEM_FOREGROUND = 0x0003;
+const EVENT_OBJECT_CREATE = 0x8000;
+const EVENT_OBJECT_DESTROY = 0x8001;
+const EVENT_OBJECT_FOCUS = 0x8005;
+const EVENT_OBJECT_NAMECHANGE = 0x800c;
+const EVENT_OBJECT_SHOW = 0x8002;
+const OBJID_WINDOW = 0;
+const OBJID_CLIENT = -4;
+const CHILDID_SELF = 0;
+
 /** The hook types this build calls. */
 const WH_CBT = 5;
 const WH_KEYBOARD = 2;
 const WH_MOUSE = 7;
 const WH_GETMESSAGE = 3;
+/** The types a hook may be, and those that hear every thread or none. */
+const WH_MIN = -1;
+const WH_MAX = 14;
+const WH_JOURNALRECORD = 0;
+const WH_JOURNALPLAYBACK = 1;
+const WH_SYSMSGFILTER = 6;
+const WH_KEYBOARD_LL = 13;
+const WH_MOUSE_LL = 14;
+
+/**
+ * What a low-level mouse hook is told a device's message is: a click, never
+ * the double-click the queue may later make of it.
+ *
+ * @param {'mouse' | 'keyboard'} kind @param {number} message
+ */
+const lowLevelMessage = (kind, message)=>{
+    const DOUBLE_CLICKS = new Map([[0x0203, 0x0201], [0x0206, 0x0204], [0x0209, 0x0207],
+        [0x020d, 0x020b]]);
+    return kind === 'mouse' ? DOUBLE_CLICKS.get(message) ?? message : message;
+};
+
+/**
+ * The MSLLHOOKSTRUCT or KBDLLHOOKSTRUCT a device's message is shown to a
+ * low-level hook with. A keyboard hook is told which shift, control or alt:
+ * the right shift by its scan code, the right control and alt by the
+ * extended flag. A mouse hook is told where the cursor is and, for the wheel
+ * and the extra buttons, the high word the message carries.
+ *
+ * @param {'mouse' | 'keyboard'} kind
+ * @param {{ message: number, wParam: number, lParam: number, time?: number,
+ *     x?: number, y?: number }} message
+ */
+const lowLevelStructure = (kind, message)=>{
+    const time = (message.time ?? 0) >>> 0;
+    if (kind === 'mouse')
+    {
+        const WM_MOUSEHWHEEL = 0x020e;
+        const carries = [WM_MOUSEWHEEL, WM_MOUSEHWHEEL, 0x020b, 0x020c, 0x020d]
+            .includes(message.message);
+        return new Uint8Array(new Uint32Array([(message.x ?? 0) >>> 0, (message.y ?? 0) >>> 0,
+            carries ? (message.wParam & 0xffff0000) >>> 0 : 0, 0, time, 0]).buffer);
+    }
+    const LLKHF_EXTENDED = 0x01, LLKHF_ALTDOWN = 0x20, LLKHF_UP = 0x80;
+    const VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_MENU = 0x12, RIGHT_SHIFT_SCAN = 0x36;
+    const scan = (message.lParam >>> 16) & 0xff;
+    const extended = ((message.lParam >>> 24) & 1) !== 0;
+    let vk = message.wParam & 0xff;
+    if (vk === VK_SHIFT)
+    {
+        vk = scan === RIGHT_SHIFT_SCAN ? 0xa1 : 0xa0;
+    }
+    else if (vk === VK_CONTROL)
+    {
+        vk = extended ? 0xa3 : 0xa2;
+    }
+    else if (vk === VK_MENU)
+    {
+        vk = extended ? 0xa5 : 0xa4;
+    }
+    const flags = (extended ? LLKHF_EXTENDED : 0)
+        | (((message.lParam >>> 29) & 1) !== 0 ? LLKHF_ALTDOWN : 0)
+        | ((message.lParam >>> 31) !== 0 ? LLKHF_UP : 0);
+    return new Uint8Array(new Uint32Array([vk, scan, flags, time, 0]).buffer);
+};
+const GLOBAL_ONLY_HOOKS = [WH_JOURNALRECORD, WH_JOURNALPLAYBACK, WH_SYSMSGFILTER, WH_KEYBOARD_LL,
+    WH_MOUSE_LL];
+const ERROR_INVALID_HOOK_HANDLE = 1404;
+/** How long, in milliseconds, input waits for another thread's low-level hook: Windows' default. */
+const LOW_LEVEL_HOOKS_TIMEOUT = 300;
+const ERROR_INVALID_HOOK_FILTER = 1426;
+const ERROR_INVALID_FILTER_PROC = 1427;
+const ERROR_HOOK_NEEDS_HMOD = 1428;
+const ERROR_GLOBAL_ONLY_HOOK = 1429;
 /** A keyboard hook's codes: the message is being taken, or only looked at. */
 const HC_ACTION = 0;
 const HC_NOREMOVE = 3;
@@ -221,6 +311,8 @@ const HCBT_MINMAX = 1;
 const HCBT_CREATEWND = 3;
 const HCBT_DESTROYWND = 4;
 const HCBT_ACTIVATE = 5;
+/** Hook calls one thread may be inside at once; a deeper one is passed over, as Wine passes it. */
+const HOOK_DEPTH = 25;
 const HCBT_SYSCOMMAND = 8;
 const HCBT_SETFOCUS = 9;
 
@@ -892,6 +984,64 @@ export function createWindowFunctions(host){
     const procedures = new Map();
     /** @type {Map<string, any>} lower-case name or atom spelling -> class */
     const systemClasses = new Map();
+
+    /**
+     * Window procedures read through the other encoding's call. A procedure
+     * set through SetWindowLongA reads ANSI text; GetWindowLongW answers a
+     * handle for it rather than its address, and CallWindowProcW converts
+     * the message on its way through that handle (win32u winproc.c's
+     * WINPROC_HANDLE, class.c test_wndproc_handles, win.c
+     * test_set_window_long). A procedure on this side reads either.
+     *
+     * @type {{ address: number, unicode: boolean }[]}
+     */
+    const winprocs = [];
+    const WINPROC_HANDLE = 0xffff0000;
+    /**
+     * What a window's procedure reads: the encoding it was set in, which a
+     * SetWindowLong of NULL leaves although IsWindowUnicode then answers the
+     * call's.
+     *
+     * @param {any} record
+     */
+    const procReads = record=>record.procUnicode ?? record.unicode === true;
+    /**
+     * How many handles there are room for. Past them, a procedure is answered
+     * as its address, as Windows answers it once its table is full (win.c
+     * test_winproc_limit).
+     */
+    const WINPROC_ROOM = 4096;
+    /** @param {number} address @param {boolean} unicode */
+    const procHandle = (address, unicode)=>{
+        let index = winprocs.findIndex(each=>each.address === address && each.unicode === unicode);
+        if (index < 0)
+        {
+            if (winprocs.length >= WINPROC_ROOM)
+            {
+                return address;
+            }
+            index = winprocs.length;
+            winprocs.push({ address, unicode });
+        }
+        return (WINPROC_HANDLE | index) >>> 0;
+    };
+    /**
+     * The procedure a handle stands for, or null for an address.
+     *
+     * @param {number} value
+     */
+    const procBehind = value=>(((value >>> 0) & 0xffff0000) >>> 0 === WINPROC_HANDLE
+        ? winprocs[value & 0xffff] ?? null : null);
+    /**
+     * A procedure as a call of one encoding reads it: its address when it
+     * reads that encoding or lives on this side, else its handle.
+     *
+     * @param {number} address @param {boolean} unicode  what the procedure reads
+     * @param {boolean} reader  whether the call reading it is the wide one
+     */
+    const procAs = (address, unicode, reader)=>((address >>> 0) === 0
+        || procedures.has(address >>> 0) || unicode === reader
+        ? address >>> 0 : procHandle(address >>> 0, unicode));
     /**
      * The procedure of each built-in class by name: the seven user32 ones and
      * whatever the common controls file beside them. Kept apart from the
@@ -932,7 +1082,7 @@ export function createWindowFunctions(host){
         // procedure named by its address, as CallWindowProc names one, is
         // handed the message as it came.
         const reads = unicode ?? (record && (address >>> 0) === record.wndProc
-            ? record.unicode === true : message.unicode === true);
+            ? procReads(record) : message.unicode === true);
         return translated(host, message, reads,
             text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)),
             record?.style);
@@ -1204,6 +1354,21 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Whether a message to a window runs its procedure on the calling thread
+     * now -- its own window, or one whose thread takes no messages -- rather
+     * than waiting in that thread's queue.
+     *
+     * @param {number} hwnd @param {unknown} [thread]
+     */
+    const answeredHere = (hwnd, thread)=>{
+        const record = live(hwnd);
+        const owner = record ? creatorOf(record) : null;
+        const self = threadIdOf(thread ?? host.callerThread?.());
+        return !record || owner === null || self === null || owner === self
+            || !queueing.has(owner);
+    };
+
+    /**
      * What activation and the focus moving tell a window: WM_NCACTIVATE,
      * WM_ACTIVATE, WM_ACTIVATEAPP, WM_KILLFOCUS, WM_SETFOCUS. A window of the
      * thread that moved them hears it now; a window of another thread hears it
@@ -1220,11 +1385,7 @@ export function createWindowFunctions(host){
      * @returns {number | Promise<number>}
      */
     const tellOwner = (hwnd, message, wParam, lParam, thread)=>{
-        const record = live(hwnd);
-        const owner = record ? creatorOf(record) : null;
-        const self = threadIdOf(thread ?? host.callerThread?.());
-        if (!record || owner === null || self === null || owner === self
-            || !queueing.has(owner))
+        if (answeredHere(hwnd, thread))
         {
             return send(hwnd, message, wParam, lParam, thread);
         }
@@ -1680,6 +1841,22 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * The window a handle names, or null with ERROR_INVALID_WINDOW_HANDLE as
+     * the last error: what the window long and word calls answer for a
+     * handle that is no window (Wine's shlwapi test_SHSetWindowBits).
+     *
+     * @param {number} hwnd @returns {any | null}
+     */
+    const windowNamed = hwnd=>{
+        const record = live(hwnd);
+        if (!record)
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+        }
+        return record;
+    };
+
+    /**
      * The thread that created a window, whose queue its messages wait in and
      * whose loop its procedure runs on; null when the bridge named none.
      *
@@ -1710,6 +1887,22 @@ export function createWindowFunctions(host){
 
     /** @param {any} record  Whether it is placed inside another window. */
     const isChild = record=>(record.style & WS_CHILD) !== 0;
+
+    /**
+     * Whether a window is somewhere under another, by parents.
+     *
+     * @param {any} record @param {any} ancestor
+     */
+    const isDescendant = (record, ancestor)=>{
+        for (let at = record; at && isChild(at); at = live(at.parent))
+        {
+            if (at.parent === ancestor.hwnd)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
 
     /** @param {any} record @returns {any} the top-level window it is inside */
     const topLevelOf = record=>{
@@ -1930,12 +2123,16 @@ export function createWindowFunctions(host){
      * @param {any} record
      * @param {boolean} [marks]  False when the caller marks what changed itself,
      *        as SetWindowPos does for the move it restacks with.
+     * @returns {boolean} whether it moved in the stacking
      */
     const raise = (record, marks = true)=>{
         const top = topLevelOf(record);
-        if (windows.get(top.hwnd) !== top || [...windows.keys()].at(-1) === top.hwnd)
+        // On top already when the last record is it or one of its own, which
+        // follow it.
+        const last = [...windows.values()].at(-1);
+        if (windows.get(top.hwnd) !== top || (last && topLevelOf(last) === top))
         {
-            return;
+            return false;
         }
         const watched = marks && shown(top) ? beforeChange(top) : null;
         // Its descendants follow it, so that a walk in record order still
@@ -1956,6 +2153,7 @@ export function createWindowFunctions(host){
         }
         tell(top);
         adoptOrder();
+        return true;
     };
 
     /**
@@ -1969,14 +2167,15 @@ export function createWindowFunctions(host){
      *
      * @param {any} record @param {number} after
      * @param {boolean} [marks]  As `raise`.
+     * @returns {boolean} whether it moved in the stacking
      */
     const restack = (record, after, marks = true)=>{
-        const HWND_BOTTOM = 1;
+        if (inPlace(record, after))
+        {
+            return false;
+        }
         const watched = marks && shown(record) ? beforeChange(record) : null;
-        const others = childrenOf({ hwnd: record.parent }).filter(each=>each !== record);
-        const sibling = others.findIndex(each=>each.hwnd === (after >>> 0));
-        const at = (after >>> 0) === HWND_BOTTOM ? others.length : sibling + 1;
-        const order = [...others.slice(0, at), record, ...others.slice(at)];
+        const order = stackingFor(record, after);
         const moved = new Set(order);
         /** @type {any[]} */
         const kept = [];
@@ -2003,6 +2202,45 @@ export function createWindowFunctions(host){
             afterChange(watched);
         }
         tell(record);
+        return true;
+    };
+
+    /**
+     * A child's siblings, itself among them, as `restack` would order them.
+     *
+     * @param {any} record @param {number} after
+     */
+    const stackingFor = (record, after)=>{
+        const HWND_BOTTOM = 1;
+        const others = childrenOf({ hwnd: record.parent }).filter(each=>each !== record);
+        const sibling = others.findIndex(each=>each.hwnd === (after >>> 0));
+        const at = (after >>> 0) === HWND_BOTTOM ? others.length : sibling + 1;
+        return [...others.slice(0, at), record, ...others.slice(at)];
+    };
+
+    /**
+     * Whether SetWindowPos's restacking would leave what shows as it is: a
+     * child already where hWndInsertAfter puts it; a top-level window with
+     * nothing shown over it, or sent to the bottom, which this build does not
+     * do. A top-level window raised over hidden ones is still raised.
+     *
+     * @param {any} record @param {number} after
+     */
+    const inPlace = (record, after)=>{
+        if (isChild(record))
+        {
+            const order = stackingFor(record, after);
+            const was = childrenOf({ hwnd: record.parent });
+            return was.length === order.length && was.every((each, index)=>each === order[index]);
+        }
+        const top = topLevelOf(record);
+        if ((after | 0) === 1 || windows.get(top.hwnd) !== top)
+        {
+            return true;
+        }
+        const records = [...windows.values()];
+        return records.slice(records.indexOf(top) + 1)
+            .every(each=>each.destroyed || !shown(each) || topLevelOf(each) === top);
     };
 
     /** @param {any} record  Whether it and every ancestor is shown. */
@@ -2032,6 +2270,11 @@ export function createWindowFunctions(host){
      * sliding in, the camera settling -- so the picture never stops arriving.
      */
     let active = 0;
+    /**
+     * The window of this program that held the focus when activation moved
+     * the run's foreground away from it, until the focus moves on.
+     */
+    let detached = 0;
     /**
      * Whether the run's foreground window is another process's: this one's
      * windows were told they lost it, and none of them is active until one is
@@ -2074,10 +2317,11 @@ export function createWindowFunctions(host){
      * its top-level windows hears WM_ACTIVATEAPP(1) first (WmCreatePopupSeq).
      *
      * @param {number} hwnd
-     * @param {{ thread?: unknown, how?: number,
+     * @param {{ thread?: unknown, how?: number, focus?: boolean,
      *     from?: { hwnd: number, thread: number } | null }} [options]
      *        `how` is WM_ACTIVATE's wParam for the window gaining it:
-     *        WA_CLICKACTIVE when a click did it.
+     *        WA_CLICKACTIVE when a click did it. `focus`: false when SetFocus
+     *        activates, which places the focus itself.
      * @returns {number | Promise<number>} once every procedure told has answered
      */
     const activate = (hwnd, options = {})=>{
@@ -2127,32 +2371,23 @@ export function createWindowFunctions(host){
      * The activation itself, once nothing has forbidden it.
      *
      * @param {number} hwnd
-     * @param {{ thread?: unknown, how?: number,
+     * @param {{ thread?: unknown, how?: number, focus?: boolean,
      *     from?: { hwnd: number, thread: number } | null }} options
      *     `from`: the window and thread of another program that had the
      *     foreground, when that program made this window the foreground one
      * @returns {number | Promise<number>}
      */
-    const activateNow = (hwnd, { thread, how = WA_ACTIVE, from = null })=>{
+    const activateNow = (hwnd, { thread, how = WA_ACTIVE, from = null, focus = true })=>{
         const record = live(hwnd);
         const previous = active;
         // The run's foreground window as it was, before the focus moving
         // into this one makes this one the run's.
         const runBefore = directory.foreground?.() ?? 0;
+        const focusBefore = focusWindow();
         active = record ? topLevelOf(record).hwnd : 0;
         if (record)
         {
             rootOwnerOf(record).lastActivePopup = active;
-        }
-        // The keyboard follows activation: a focus outside the window that
-        // became active is moved to it, as DefWindowProc's WM_ACTIVATE moves
-        // it. A caller that placed the focus itself -- SetFocus -- tells it.
-        const current = focusWindow();
-        const moved = active !== 0
-            && (current === 0 || topLevelOf(live(current)).hwnd !== active);
-        if (moved)
-        {
-            holdFocus(active);
         }
         if (active === previous)
         {
@@ -2188,6 +2423,13 @@ export function createWindowFunctions(host){
                 directory.setForeground?.(0);
             }
         }
+        // The run lets go of a focus outside the new foreground window at
+        // once; to this program it is still where it was until the focus
+        // moves and that window hears WM_KILLFOCUS.
+        if (focusBefore !== 0 && (directory.focus?.() ?? 0) === 0)
+        {
+            detached = focusBefore;
+        }
         /** @type {[number, number, number, number][]} */
         const told = [];
         if (previous !== 0)
@@ -2216,33 +2458,58 @@ export function createWindowFunctions(host){
             told.push([gained, WM_NCACTIVATE, 1, 0],
                 [gained, WM_ACTIVATE, how, previous !== 0 ? previous : foreign]);
         }
-        /** @param {number} index @returns {number | Promise<number>} */
-        const tell = index=>{
-            if (index >= told.length)
+        /**
+         * The messages from `index` up to `end`, one after another.
+         *
+         * @param {number} index @param {number} end
+         * @returns {number | Promise<number>}
+         */
+        const tell = (index, end)=>{
+            if (index >= end)
             {
                 return 0;
             }
             const [target, message, wParam, lParam] = told[index];
             return andThen(live(target) ? tellOwner(target, message, wParam, lParam, thread) : 0,
-                ()=>tell(index + 1));
+                ()=>tell(index + 1, end));
         };
-        if (!moved)
-        {
-            return tell(0);
-        }
-        // The focus follows as SetFocus moves it, a CBT hook first: one that
-        // forbids it leaves the focus where it was.
-        return andThen(tell(0), ()=>andThen(askCbt(HCBT_SETFOCUS, gained, current,
-            thread ?? host.callerThread?.()), refused=>{
-            if ((refused | 0) !== 0)
+        const SWP_RAISE = 0x0001 | 0x0002;
+        const deactivating = previous !== 0 ? 2 : 0;
+        // The order Windows tells it in: the window losing the activation,
+        // EVENT_SYSTEM_FOREGROUND, the one gaining it brought to the top
+        // (WM_WINDOWPOSCHANGING, and WM_WINDOWPOSCHANGED only if it moved in
+        // the stacking), the applications, the window gaining it -- whose
+        // WM_ACTIVATE gives it the focus in the default procedure -- and then,
+        // unless SetFocus asked, the focus put in it if it still has none
+        // (win32u set_active_window; msg.c WmSetFocus_1, WmShowNormal).
+        // The raise is the gaining window's own thread's to make: another
+        // thread's window hears only the notifications, which wait for nobody.
+        return andThen(tell(0, deactivating), ()=>andThen(programs(gained)
+            ? winEvent(EVENT_SYSTEM_FOREGROUND, gained, OBJID_WINDOW, thread) : 0,
+        ()=>andThen(programs(gained) && live(gained) && answeredHere(gained, thread)
+            ? placeWindow([gained, 0, 0, 0, 0, 0, SWP_RAISE], thread) : 0,
+        ()=>andThen(tell(deactivating, told.length), ()=>{
+            const current = focusWindow();
+            // Gone to the desktop or to nothing, the program keeps no focus.
+            if (!programs(gained) && current !== 0 && detached === current)
             {
-                holdFocus(current);
+                detached = 0;
+                return tellOwner(current, WM_KILLFOCUS, 0, 0, thread);
+            }
+            // Another thread's window answers WM_ACTIVATE -- and its default
+            // procedure takes the focus -- only when that thread looks at its
+            // queue; the focus is placed for it now, as SetFocus expects to
+            // find it (msg.c test_SetFocus, input attached).
+            if ((!focus && answeredHere(gained, thread)) || active !== gained || !programs(gained)
+                || !live(gained) || (current !== 0 && topLevelOf(live(current)).hwnd === gained))
+            {
                 return 0;
             }
-            return andThen(current !== 0 && live(current)
-                ? tellOwner(current, WM_KILLFOCUS, gained, 0, thread) : 0,
-            ()=>(live(gained) ? tellOwner(gained, WM_SETFOCUS, current, 0, thread) : 0));
-        }));
+            holdFocus(gained);
+            return andThen(current !== 0 ? tellOwner(current, WM_KILLFOCUS, gained, 0, thread) : 0,
+                ()=>andThen(winEvent(EVENT_OBJECT_FOCUS, gained, OBJID_CLIENT, thread),
+                    ()=>(live(gained) ? tellOwner(gained, WM_SETFOCUS, current, 0, thread) : 0)));
+        }))));
     };
 
     /**
@@ -2256,7 +2523,12 @@ export function createWindowFunctions(host){
     // cells). One of its windows has the focus when that word names it.
     const focusWindow = ()=>{
         const held = directory.focus?.() ?? 0;
-        return held !== 0 && live(held) ? held : 0;
+        if (held !== 0)
+        {
+            detached = 0;
+            return live(held) ? held : 0;
+        }
+        return detached !== 0 && live(detached) ? detached : 0;
     };
     /**
      * A window of this program takes the focus, from every window of every
@@ -2267,6 +2539,7 @@ export function createWindowFunctions(host){
      * @param {number} hwnd
      */
     const holdFocus = hwnd=>{
+        detached = 0;
         const record = live(hwnd);
         if (record)
         {
@@ -2284,31 +2557,101 @@ export function createWindowFunctions(host){
      * @returns {number | Promise<number>} the window that had it
      */
     const setFocus = (hwnd, thread)=>{
-        const previous = focusWindow();
+        const before = focusWindow();
         const target = hwnd >>> 0;
-        if (target !== 0 && !live(target))
+        const on = thread ?? host.callerThread?.();
+        const WS_POPUP_CHILD = WS_CHILD | 0x80000000;
+        if (target === 0)
+        {
+            // Taking the focus from everything: nothing to do with none.
+            if (before === 0)
+            {
+                return 0;
+            }
+            return andThen(askCbt(HCBT_SETFOCUS, 0, before, on), refused=>{
+                if ((refused | 0) !== 0)
+                {
+                    return 0;
+                }
+                holdFocus(0);
+                return andThen(tellOwner(before, WM_KILLFOCUS, 0, 0, on), ()=>before);
+            });
+        }
+        const record = live(target);
+        if (!record)
         {
             return 0;
         }
-        if (previous === target)
+        // The desktop, and a window of a thread whose input is not joined to
+        // the caller's, are not the caller's to focus (msg.c test_SetFocus).
+        if (record === desktop || heldByCaller(target) === 0)
         {
-            return previous;
+            host.setLastError?.(ERROR_ACCESS_DENIED);
+            return 0;
         }
-        const on = thread ?? host.callerThread?.();
+        if (before === target)
+        {
+            return before;
+        }
+        // Up to the top-level window, which is activated first: none on the
+        // way may be minimized or disabled, and a child must have a parent.
+        let top = record;
+        // A child whose parent is the desktop takes no focus, though the CBT
+        // hook still hears it asked for (msg.c WmSetFocus_3).
+        let orphan = false;
+        for (;;)
+        {
+            if ((top.style & (WS_MINIMIZE | WS_DISABLED)) !== 0)
+            {
+                return 0;
+            }
+            if ((top.style & WS_POPUP_CHILD) !== WS_CHILD)
+            {
+                break;
+            }
+            const parent = live(top.parent);
+            if (!parent || parent === desktop)
+            {
+                orphan = true;
+                break;
+            }
+            top = parent;
+        }
         // A CBT hook hears first, and may forbid it: then nothing moves.
-        return andThen(askCbt(HCBT_SETFOCUS, target, previous, on), refused=>{
+        return andThen(askCbt(HCBT_SETFOCUS, target, before, on), refused=>{
             if ((refused | 0) !== 0)
             {
                 return 0;
             }
-            holdFocus(target);
-            // Activation is told first, then the focus: a window gaining both
-            // hears WM_ACTIVATE before WM_SETFOCUS.
-            const activated = target !== 0 ? activate(target, { thread: on }) : 0;
-            return andThen(activated, ()=>
-                andThen(previous !== 0 ? tellOwner(previous, WM_KILLFOCUS, target, 0, on) : 0,
-                    ()=>andThen(target !== 0 ? tellOwner(target, WM_SETFOCUS, previous, 0, on) : 0,
+            if (orphan)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            // Activation is told first, the top-level window taking the focus
+            // with it; then the focus moves on, from whatever has it by then,
+            // which is what the call answers.
+            const activated = top.hwnd !== active
+                ? activate(top.hwnd, { thread: on, focus: false }) : 0;
+            return andThen(activated, ()=>{
+                if (!live(target) || active !== top.hwnd)
+                {
+                    return 0;
+                }
+                const previous = focusWindow();
+                if (previous === target)
+                {
+                    return previous;
+                }
+                holdFocus(target);
+                // EVENT_OBJECT_FOCUS between the one losing it hearing so and
+                // the one gaining it.
+                return andThen(previous !== 0
+                    ? tellOwner(previous, WM_KILLFOCUS, target, 0, on) : 0,
+                ()=>andThen(winEvent(EVENT_OBJECT_FOCUS, target, OBJID_CLIENT, on),
+                    ()=>andThen(tellOwner(target, WM_SETFOCUS, previous, 0, on),
                         ()=>previous)));
+            });
         });
     };
 
@@ -2320,7 +2663,9 @@ export function createWindowFunctions(host){
      * A window the calling thread's input holds, or zero: the active window
      * and the focus are a thread's own, as Windows keeps them per message
      * queue, and another thread asking is answered NULL unless
-     * AttachThreadInput joined the two (input.c test_attach_input). A setup
+     * AttachThreadInput joined the two, directly or through other threads
+     * joined to both: attached threads share one input state (input.c
+     * test_attach_input, test_AttachThreadInput). A setup
      * that made its wizard while a please-wait dialog of another thread was
      * active had it owned by that dialog, and gone with it.
      *
@@ -2334,7 +2679,24 @@ export function createWindowFunctions(host){
         {
             return hwnd;
         }
-        return attachedInput.get(caller)?.has(owner) ? hwnd : 0;
+        const reached = new Set([caller]);
+        const pending = [caller];
+        for (let at = pending.pop(); at !== undefined; at = pending.pop())
+        {
+            for (const next of attachedInput.get(at) ?? [])
+            {
+                if (next === owner)
+                {
+                    return hwnd;
+                }
+                if (!reached.has(next))
+                {
+                    reached.add(next);
+                    pending.push(next);
+                }
+            }
+        }
+        return 0;
     };
 
     /** The window that has the mouse, or zero. */
@@ -2381,10 +2743,21 @@ export function createWindowFunctions(host){
             return 0;
         }
         const atom = nextAtom++;
-        classes.set(name, { ...fields, name, atom, unicode });
+        // A handle registers the procedure behind it, reading what it reads.
+        const behind = procBehind(fields.wndProc);
+        classes.set(name, { ...fields, name, atom, unicode,
+            ...behind ? { wndProc: behind.address, unicode: behind.unicode } : {} });
         atoms.set(atom, name);
         return atom;
     };
+
+    /**
+     * A class with its procedure as a call of one encoding reads it.
+     *
+     * @param {any} cls @param {boolean} reader
+     */
+    const procRead = (cls, reader)=>({ ...cls,
+        wndProc: procAs(cls.wndProc, cls.unicode === true, reader) });
 
     /**
      * Forgets a class, which only a class with no window left may be.
@@ -2479,8 +2852,27 @@ export function createWindowFunctions(host){
         // with it. A run whose foreground and focus went with the window sent
         // the keyboard to nobody -- a game's loader brought a popup forward
         // and destroyed it at once, and no key reached the game after.
-        const handing = record.hwnd === active ? activateOther(record, on) : 0;
-        return andThen(handing, ()=>andThen(tell(WM_DESTROY), ()=>{
+        // Before it hears WM_DESTROY, as DestroyWindow takes it down
+        // (msg.c WmDestroyChildSeq, WmDestroyOverlappedSeq): a child's
+        // parents are told, a child is told it is hidden, a visible window is
+        // hidden -- which hands the activation on, and a child's focus to its
+        // parent -- and EVENT_OBJECT_DESTROY. A window that was never made to
+        // its procedure is spared all of it.
+        const SWP_HIDING = 0x0080 | 0x0010 | 0x0004 | 0x0002 | 0x0001;
+        const aChild = (record.style & WS_CHILD) !== 0;
+        const hide = ()=>andThen(aChild ? send(record.hwnd, WM_SHOWWINDOW, 0, 0, on) : 0,
+            ()=>((record.style & WS_VISIBLE) !== 0
+                ? placeWindow([record.hwnd, 0, 0, 0, 0, 0, SWP_HIDING], on) : 0));
+        const focus = focusWindow();
+        const holdsFocus = aChild && focus !== 0 && (focus === record.hwnd
+            || isDescendant(live(focus), record));
+        const before = told !== 'all' ? (record.hwnd === active ? activateOther(record, on) : 0)
+            : andThen(aChild ? parentNotify(record, WM_DESTROY, on) : 0, ()=>andThen(hide(),
+                ()=>andThen(record.hwnd === active ? activateOther(record, on) : 0,
+                    ()=>andThen(holdsFocus && live(record.parent)
+                        ? setFocus(record.parent, on) : 0,
+                    ()=>winEvent(EVENT_OBJECT_DESTROY, record.hwnd, OBJID_WINDOW, on)))));
+        return andThen(before, ()=>andThen(tell(WM_DESTROY), ()=>{
             // Its children and the windows it owns go with it.
             const children = [...windows.values()].filter(child=>child !== record
                 && !child.destroyed
@@ -2579,11 +2971,14 @@ export function createWindowFunctions(host){
         }
     };
 
-    /** @param {any} record @param {number} index */
-    const readLong = (record, index)=>{
+    /**
+     * @param {any} record @param {number} index
+     * @param {boolean} [unicode]  Read through GetWindowLongW.
+     */
+    const readLong = (record, index, unicode = false)=>{
         switch (index | 0){
             case GWL_WNDPROC:
-                return record.wndProc;
+                return procAs(record.wndProc, procReads(record), unicode);
             case GWL_HINSTANCE:
                 return record.instance;
             case GWL_HWNDPARENT:
@@ -2655,26 +3050,56 @@ export function createWindowFunctions(host){
      * @param {any} record @param {number} index @param {number} value
      * @param {boolean} [unicode]  Set through SetWindowLongW: a procedure set
      *     so reads wide text, and one set through the ANSI form reads bytes.
+     * @returns {boolean | undefined} false when the change is refused
      */
     const writeLong = (record, index, value, unicode = false)=>{
         switch (index | 0){
-            case GWL_WNDPROC:
-                record.wndProc = value >>> 0;
-                record.unicode = unicode;
+            case GWL_WNDPROC: {
+                // A handle sets the procedure behind it, reading what it
+                // reads; NULL keeps the procedure and only switches the
+                // encoding (win.c test_set_window_long).
+                const behind = procBehind(value);
+                if ((value >>> 0) === 0)
+                {
+                    record.procUnicode = procReads(record);
+                    record.unicode = unicode;
+                    return;
+                }
+                delete record.procUnicode;
+                record.wndProc = behind ? behind.address : value >>> 0;
+                record.unicode = behind ? behind.unicode : unicode;
                 return;
-            case GWL_HWNDPARENT:
-                // A window on the desktop is given an owner this way; any
-                // other is moved to another parent.
+            }
+            case GWL_HWNDPARENT: {
+                // A window whose parent is the desktop is given an owner this
+                // way, never itself; any other is moved to another parent, the
+                // desktop making it one of the desktop's (win.c
+                // test_parent_owner). Neither may close a loop.
+                const target = live(value >>> 0);
+                const toDesktop = (value >>> 0) === 0 || target === desktop;
+                if (record === desktop || ((value >>> 0) !== 0 && !target))
+                {
+                    return false;
+                }
                 if (record.parent === 0)
                 {
-                    record.owner = value >>> 0;
+                    if (target === record)
+                    {
+                        return false;
+                    }
+                    record.owner = toDesktop ? 0 : target.hwnd;
                 }
                 else
                 {
-                    record.parent = value >>> 0;
+                    if (!toDesktop && (target === record || isDescendant(target, record)))
+                    {
+                        return false;
+                    }
+                    record.parent = toDesktop ? 0 : target.hwnd;
                 }
                 tell(record);
-                return;
+                return true;
+            }
             case GWL_ID:
                 record.id = value >>> 0;
                 return;
@@ -2794,9 +3219,70 @@ export function createWindowFunctions(host){
      * global ones, newest first: the last of a thread's own passes on to the
      * newest global hook.
      *
-     * @type {{ handle: number, type: number, proc: number, thread: number }[]}
+     * @type {{ handle: number, type: number, proc: number, thread: number,
+     *     owner?: number | null }[]}
      */
     const hooks = [];
+
+    /**
+     * The accessibility events (hooks.js), which the window manager raises
+     * where Windows does: a window made, shown, hidden, moved, destroyed,
+     * given the focus or brought to the foreground, and its text set
+     * (user32:msg's sequences place each among the messages).
+     */
+    const winEvents = createWinEventHooks(host, {
+        windowThread: hwnd=>{
+            const record = live(hwnd);
+            return record ? threadIdOf(record.thread) : null;
+        },
+        later: (owner, run)=>{
+            listOf(inbox, owner).push(/** @type {any} */ ({ run }));
+            host.queue.sent?.(owner);
+        },
+    });
+
+    /**
+     * @param {number} event @param {number} hwnd @param {number} object
+     * @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const winEvent = (event, hwnd, object, thread)=>winEvents.notify(event, hwnd >>> 0, object,
+        CHILDID_SELF, thread);
+
+    /**
+     * WM_PARENTNOTIFY up a child's line of parents: each is told, the low
+     * word the event, the high word the id of the window under it and lParam
+     * that window, as long as the window under it is a child without
+     * WS_EX_NOPARENTNOTIFY (msg.c WmCreateChildSeq, WmDestroyChildSeq).
+     *
+     * @param {any} record @param {number} message  WM_CREATE or WM_DESTROY.
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const parentNotify = (record, message, thread)=>{
+        /** @type {[number, number, number][]} */
+        const told = [];
+        for (let below = record; below && (below.style & WS_CHILD) !== 0
+            && (below.exStyle & WS_EX_NOPARENTNOTIFY) === 0;)
+        {
+            const above = live(below.parent);
+            if (!above || above === desktop)
+            {
+                break;
+            }
+            told.push([above.hwnd, ((below.id & 0xffff) << 16 | message) >>> 0, below.hwnd]);
+            below = above;
+        }
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>(at >= told.length ? 0
+            : andThen(send(told[at][0], WM_PARENTNOTIFY, told[at][1], told[at][2], thread),
+                ()=>next(at + 1)));
+        return next(0);
+    };
+
+    /** How deep each thread is in hook calls, by thread identifier. */
+    /** @type {Map<number, number>} */
+    const hookDepth = new Map();
 
     /**
      * Whether a hook hears what a thread does. A caller the bridge names
@@ -2832,8 +3318,126 @@ export function createWindowFunctions(host){
         // A hook not in this thread's chain has nothing after it here.
         const next = after === null ? chain[0] : chain.findIndex(hook=>hook.handle === after) < 0
             ? undefined : chain[chain.findIndex(hook=>hook.handle === after) + 1];
-        return next && host.call ? host.call(next.proc, args, thread) : 0;
+        if (!next || !host.call)
+        {
+            return 0;
+        }
+        // A hook whose own work sets off what it hooks -- a CBT hook clicking
+        // a button, whose focus activates the window the hook is hearing
+        // about -- would call itself without end; past a depth the thread's
+        // hooks are passed over and what they hook goes on (Wine's
+        // dialog.c msgbox_hook_proc).
+        const id = threadIdOf(thread ?? host.callerThread?.()) ?? 0;
+        const depth = hookDepth.get(id) ?? 0;
+        if (depth >= HOOK_DEPTH)
+        {
+            return 0;
+        }
+        hookDepth.set(id, depth + 1);
+        /** @param {any} answer */
+        const out = answer=>{
+            hookDepth.set(id, (hookDepth.get(id) ?? 1) - 1);
+            return answer;
+        };
+        /** @type {any} */
+        let answer;
+        try
+        {
+            answer = host.call(next.proc, args, thread);
+        }
+        catch (e){
+            out(0);
+            throw e;
+        }
+        return typeof answer?.then === 'function' ? answer.then(out, (/** @type {unknown} */ e)=>{
+            out(0);
+            throw e;
+        }) : out(answer);
     };
+
+    /**
+     * Shows an input event to the low-level hooks of a type before it is
+     * queued: the newest WH_KEYBOARD_LL or WH_MOUSE_LL hook, which reaches
+     * the older ones through CallNextHookEx, is called on the thread that
+     * installed it with the event's structure in guest memory. A hook of the
+     * thread putting the event in is called there and then; one of another
+     * thread is called as that thread next looks at its queue, and the
+     * thread putting the event in waits for it -- for LowLevelHooksTimeout
+     * at most, after which the event goes in as if nobody had objected.
+     * Either way an answer other than zero takes the event away. With no
+     * such hook nothing is made.
+     *
+     * @param {number} type @param {number} wParam  The message the event makes.
+     * @param {() => Uint8Array} structure  The MSLLHOOKSTRUCT or KBDLLHOOKSTRUCT.
+     * @param {unknown} [thread]  The thread putting the event in.
+     * @param {boolean} [device]  The event is the device's, put in by no
+     *     thread of the program: every hook is called on its own thread.
+     * @returns {number | Promise<number>}
+     */
+    const lowLevelHook = (type, wParam, structure, thread, device = false)=>{
+        const on = device ? null : thread ?? host.callerThread?.();
+        const hook = chainOf(type, on)[0];
+        if (!hook || !host.call || !host.allocate)
+        {
+            return 0;
+        }
+        const call = host.call;
+        const allocate = host.allocate;
+        const bytes = structure();
+        /** @param {unknown} who */
+        const run = who=>{
+            const at = allocate(bytes.length);
+            host.writeMemory(at, bytes);
+            return andThen(call(hook.proc, [HC_ACTION, wParam >>> 0, at], who), answer=>{
+                host.release?.(at);
+                return answer;
+            });
+        };
+        const caller = threadIdOf(on);
+        if (hook.owner === undefined || hook.owner === null
+            || (!device && (caller === null || hook.owner === caller)))
+        {
+            return run(on);
+        }
+        const owner = hook.owner;
+        return new Promise(resolve=>{
+            let settled = false;
+            /** @param {number} answer */
+            const settle = answer=>{
+                if (!settled)
+                {
+                    settled = true;
+                    resolve(answer);
+                }
+            };
+            listOf(inbox, owner).push(/** @type {any} */ ({ run: (/** @type {unknown} */ who)=>
+                andThen(run(who), (/** @type {number} */ answer)=>{
+                    settle(answer);
+                    return 0;
+                }) }));
+            host.queue.sent?.(owner);
+            if (!host.later?.(LOW_LEVEL_HOOKS_TIMEOUT, ()=>settle(0)))
+            {
+                // No clock to time it out by: the event goes in now.
+                settle(0);
+            }
+        });
+    };
+
+    // Device input, from the input layer, is shown to the low-level hooks
+    // through the queue it is posted to. With no such hook nothing is asked
+    // and the input layer posts as it always did.
+    if (host.queue && 'lowLevel' in host.queue)
+    {
+        /** @param {'mouse' | 'keyboard'} kind */
+        const typeOf = kind=>(kind === 'mouse' ? WH_MOUSE_LL : WH_KEYBOARD_LL);
+        host.queue.lowLevel = {
+            hooked: kind=>hooks.some(hook=>hook.type === typeOf(kind)),
+            show: (kind, message)=>lowLevelHook(typeOf(kind),
+                lowLevelMessage(kind, message.message), ()=>lowLevelStructure(kind, message),
+                null, true),
+        };
+    }
 
     /**
      * Asks a thread's CBT hooks about what is about to happen to a window;
@@ -3270,28 +3874,38 @@ export function createWindowFunctions(host){
             record.style = created.style;
             record.exStyle = created.exStyle;
         };
-        /** Visible now, when it was asked to be: the last thing CreateWindowEx does. */
+        /**
+         * Visible now, when it was asked to be: the last thing CreateWindowEx
+         * does, and EVENT_OBJECT_SHOW with it.
+         *
+         * @returns {number | Promise<number>}
+         */
         const reveal = ()=>{
             if ((style & WS_VISIBLE) !== 0 && (record.style & WS_VISIBLE) === 0
                 && live(record.hwnd))
             {
                 record.style = (record.style | WS_VISIBLE) >>> 0;
                 appear(record);
+                return winEvent(EVENT_OBJECT_SHOW, record.hwnd, OBJID_WINDOW, thread);
             }
+            return 0;
         };
+        /** EVENT_OBJECT_CREATE, once WM_CREATE has let the window be. */
+        const made = ()=>winEvent(EVENT_OBJECT_CREATE, record.hwnd, OBJID_WINDOW, thread);
         /**
          * The window, shown and then activated when it was created visible.
          * Made without being told its size, it is told when first shown.
          */
         const activated = ()=>{
             record.needsSize = (style & WS_VISIBLE) === 0;
-            reveal();
-            return andThen(activateCreated(record, thread),
-                ()=>andThen(eraseShown(thread), ()=>record.hwnd));
+            return andThen(reveal(), ()=>andThen(activateCreated(record, thread),
+                ()=>andThen(eraseShown(thread), ()=>record.hwnd)));
         };
         // A procedure on this side reads no CREATESTRUCT: what it needs of one
         // is on the record.
-        const onThisSide = ()=>(record.wndProc === 0 ? activated()
+        /** EVENT_OBJECT_CREATE, then the parents told of the child. */
+        const told = ()=>andThen(made(), ()=>parentNotify(record, WM_CREATE, thread));
+        const onThisSide = ()=>(record.wndProc === 0 ? andThen(told(), activated)
             : andThen(callProcedure(record.wndProc, {
                 hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
             }, thread), created=>{
@@ -3299,7 +3913,7 @@ export function createWindowFunctions(host){
                 {
                     return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
-                return activated();
+                return andThen(told(), activated);
             }));
         /** Whether the window's procedure is still one this side runs. */
         const systemProcedure = ()=>record.wndProc === 0 || procedures.has(record.wndProc);
@@ -3399,11 +4013,8 @@ export function createWindowFunctions(host){
             // WM_NCCREATE before WM_CREATE, with the same structure: a
             // procedure that keeps lpCreateParams takes it from the first.
             return andThen(tell(WM_NCCREATE), accepted=>((accepted | 0) === 0 ? refuse()
-                : andThen(placedThenCreated(), created=>{
-                    if ((created | 0) === -1)
-                    {
-                        return refuse();
-                    }
+                : andThen(placedThenCreated(), created=>((created | 0) === -1 ? refuse()
+                    : andThen(made(), ()=>{
                     // A child or a popup hears its own size and its place
                     // once WM_CREATE has been answered, shown or not, as the
                     // real CreateWindowEx sends them: a framework lays out
@@ -3415,25 +4026,25 @@ export function createWindowFunctions(host){
                     // measures the screen it lays itself out and rasterises
                     // its text for from the size it is told here -- and is
                     // activated.
-                    const visible = (style & WS_VISIBLE) !== 0;
-                    if (!visible && (record.style & (WS_CHILD | WS_POPUP)) === 0)
-                    {
-                        record.needsSize = true;
-                        return done(record.hwnd);
-                    }
-                    const client = geometry.clientRect(record);
-                    return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
-                        ((((client.bottom - client.top) & 0xffff) << 16)
+                        const visible = (style & WS_VISIBLE) !== 0;
+                        if (!visible && (record.style & (WS_CHILD | WS_POPUP)) === 0)
+                        {
+                            record.needsSize = true;
+                            return done(record.hwnd);
+                        }
+                        const client = geometry.clientRect(record);
+                        return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                            ((((client.bottom - client.top) & 0xffff) << 16)
                             | ((client.right - client.left) & 0xffff)) >>> 0, thread),
-                    ()=>andThen(send(record.hwnd, WM_MOVE, 0,
-                        (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
-                    ()=>(!visible ? done(record.hwnd)
-                        : andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread), ()=>{
-                            reveal();
-                            return andThen(activateCreated(record, thread),
-                                ()=>andThen(eraseShown(thread), ()=>done(record.hwnd)));
-                        }))));
-                })));
+                        ()=>andThen(send(record.hwnd, WM_MOVE, 0,
+                            (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
+                        ()=>andThen(parentNotify(record, WM_CREATE, thread), ()=>(!visible
+                            ? done(record.hwnd)
+                            : andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
+                                ()=>andThen(reveal(), ()=>andThen(activateCreated(record, thread),
+                                    ()=>andThen(eraseShown(thread),
+                                        ()=>done(record.hwnd)))))))));
+                    })))));
         });
     };
 
@@ -3861,12 +4472,20 @@ export function createWindowFunctions(host){
         {
             windows.set(each.hwnd, each);
         }
-        for (const [index, hwnd] of wanted.entries())
-        {
+        // Only a window that moved among those shown shows anything new: one
+        // raised over hidden windows keeps its pixels.
+        /** @param {number} hwnd */
+        const visible = hwnd=>{
             const record = windows.get(hwnd);
-            if (index !== current.indexOf(hwnd) && record && shown(record))
+            return Boolean(record) && shown(record);
+        };
+        const wantedShown = wanted.filter(visible);
+        const currentShown = current.filter(visible);
+        for (const [index, hwnd] of wantedShown.entries())
+        {
+            if (index !== currentShown.indexOf(hwnd))
             {
-                appear(record);
+                appear(windows.get(hwnd));
             }
         }
     };
@@ -4037,10 +4656,11 @@ export function createWindowFunctions(host){
             }
             if (each === record && how.sized)
             {
-                // Its frame is drawn where its edges now are.
+                // Its frame is drawn where its edges now are, at its next
+                // paint: SetWindowPos sends no WM_NCPAINT for a window it
+                // only resizes (comctl32's updown test, add_updown_with_edit_seq).
                 record.ncDirty = true;
                 host.queue.dirtied?.(creatorOf(record));
-                unerased.add(record);
             }
             exposeIn(each, subtractAreas(sightOf(each), offsetArea(before.sight, dx, dy)));
         }
@@ -5215,6 +5835,20 @@ export function createWindowFunctions(host){
                     answer=>((answer >>> 0) !== 0 ? answer : MA_ACTIVATE));
                 }
                 return MA_ACTIVATE;
+            case WM_RBUTTONUP: {
+                // The right button let go over the client area asks for the
+                // context menu, at the point on the screen.
+                const origin = geometry.clientOrigin(record);
+                const x = ((message.lParam & 0xffff) << 16 >> 16) + origin.x;
+                const y = (message.lParam >> 16) + origin.y;
+                return andThen(send(record.hwnd, WM_CONTEXTMENU, record.hwnd,
+                    ((y & 0xffff) << 16 | x & 0xffff) >>> 0, thread), ()=>0);
+            }
+            case WM_CONTEXTMENU:
+                // A child that has no menu of its own asks its parent.
+                return isChild(record) && live(record.parent)
+                    ? send(record.parent, WM_CONTEXTMENU, message.wParam, message.lParam, thread)
+                    : 0;
             case WM_SETTEXT: {
                 const address = message.lParam >>> 0;
                 record.title = address === 0 ? '' : host.readCString(address, MAX_WINDOW_TEXT);
@@ -5224,7 +5858,8 @@ export function createWindowFunctions(host){
                 {
                     paintFrame(record);
                 }
-                return 1;
+                return andThen(winEvent(EVENT_OBJECT_NAMECHANGE, record.hwnd, OBJID_WINDOW, thread),
+                    ()=>1);
             }
             case WM_GETTEXT: {
                 const room = message.wParam >>> 0;
@@ -5261,6 +5896,15 @@ export function createWindowFunctions(host){
                     ? send(record.parent, WM_MOUSEWHEEL, message.wParam, message.lParam, thread)
                     : 0;
             case WM_ACTIVATE:
+                // A window being activated, and not minimized, takes the focus
+                // -- if it is still the active one: another thread's window
+                // hears its activation from its queue, possibly after the
+                // activation moved on, and taking it back then would have
+                // two threads hand it to each other for good.
+                return (message.wParam & 0xffff) !== WA_INACTIVE
+                    && (record.style & WS_MINIMIZE) === 0
+                    && topLevelOf(record).hwnd === active
+                    ? andThen(setFocus(record.hwnd, thread), ()=>0) : 0;
             case WM_NCACTIVATE:
             case WM_SHOWWINDOW:
             default:
@@ -5550,6 +6194,8 @@ export function createWindowFunctions(host){
         callProcedure,
         post: message=>host.queue.post(message),
         defWindowProc,
+        winEvent: (event, hwnd, object, child, thread)=>winEvents.notify(event, hwnd, object, child,
+            thread),
         // A control paints and measures in the font it was given, as the
         // real ones select it before drawing; a fresh context carries the
         // system font, which is only right for a control given none.
@@ -6744,11 +7390,13 @@ export function createWindowFunctions(host){
         });
     };
 
+
     // Named, because a message for a window with no procedure of its own is
     // handed to the default procedure in this table by `deliver` above.
     const table = {
         ...paint.table,
         ...caret.table,
+        ...winEvents.table,
         // The focus, the capture and the geometry live with the windows, so
         // the system half answers from them through a view of the host that
         // carries them.
@@ -6756,7 +7404,7 @@ export function createWindowFunctions(host){
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
-                heldByCaller,
+                heldByCaller, lowLevelHook, winEvent, procAs, procBehind,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
                 appear, beforeChange, afterChange, eraseShown, wholeOnScreen, moveBits, dragging,
@@ -6771,7 +7419,7 @@ export function createWindowFunctions(host){
                 },
                 activateOther,
                 calcClient,
-                shown, raise, restack, tell, desktop: desktopWindow, showWindow,
+                shown, raise, restack, inPlace, tell, desktop: desktopWindow, showWindow,
                 // What the run answers for every process's windows.
                 runForeground: ()=>directory.foreground?.() ?? 0,
                 /**
@@ -6965,7 +7613,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClass(host, out, cls, L);
+                writeWindowClass(host, out, procRead(cls, false), L);
                 return 1;
             },
         },
@@ -6986,7 +7634,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClass(host, out, { ...cls, className: className >>> 0 }, L);
+                writeWindowClass(host, out,
+                    { ...procRead(cls, true), className: className >>> 0 }, L);
                 return 1;
             },
         },
@@ -7001,7 +7650,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClass(host, out >>> 0, { ...cls, className: className >>> 0 }, L,
+                writeWindowClass(host, out >>> 0,
+                    { ...procRead(cls, true), className: className >>> 0 }, L,
                     L.WNDCLASSEXA);
                 return 1;
             },
@@ -7023,7 +7673,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeWindowClass(host, out >>> 0, cls, L, L.WNDCLASSEXA);
+                writeWindowClass(host, out >>> 0, procRead(cls, false), L, L.WNDCLASSEXA);
                 return 1;
             },
         },
@@ -7434,7 +8084,7 @@ export function createWindowFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 return record ? readLong(record, index) : 0;
             },
         },
@@ -7444,14 +8094,13 @@ export function createWindowFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 if (!record)
                 {
                     return 0;
                 }
                 const previous = readLong(record, index);
-                writeLong(record, index, value);
-                return previous;
+                return writeLong(record, index, value) === false ? 0 : previous;
             },
         },
 
@@ -7497,7 +8146,10 @@ export function createWindowFunctions(host){
         GetWindowLongW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: args=>table.GetWindowLongA.handler(args),
+            handler: ([hwnd, index])=>{
+                const record = windowNamed(hwnd);
+                return record ? readLong(record, index, true) : 0;
+            },
         },
 
         /** LONG SetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong) */
@@ -7505,14 +8157,13 @@ export function createWindowFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 if (!record)
                 {
                     return 0;
                 }
-                const previous = readLong(record, index);
-                writeLong(record, index, value, true);
-                return previous;
+                const previous = readLong(record, index, true);
+                return writeLong(record, index, value, true) === false ? 0 : previous;
             },
         },
 
@@ -7583,7 +8234,7 @@ export function createWindowFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 const at = index | 0;
                 return record && at >= 0 && at + 2 <= record.extra.byteLength
                     ? record.extra.getUint16(at, true)
@@ -7595,7 +8246,7 @@ export function createWindowFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
-                const record = live(hwnd);
+                const record = windowNamed(hwnd);
                 const at = index | 0;
                 if (!record || at < 0 || at + 2 > record.extra.byteLength)
                 {
@@ -7619,23 +8270,51 @@ export function createWindowFunctions(host){
          *                         DWORD dwThreadId)
          *
          * Every type is accepted, because a program installs its hooks at
-         * start-up and treats a refusal as fatal; a CBT, a keyboard, a mouse
-         * and a GetMessage hook are called, and the others say so once
+         * start-up and treats a refusal as fatal; a CBT, a keyboard, a mouse,
+         * a GetMessage hook and the two low-level ones (for the input a
+         * program puts in itself) are called, and the others say so once
          * rather than failing silently.
+         *
+         * What Windows refuses whatever the type is refused here too: a type
+         * that is none (ERROR_INVALID_HOOK_FILTER), no procedure
+         * (ERROR_INVALID_FILTER_PROC), a hook for every thread whose procedure
+         * is in no module (ERROR_HOOK_NEEDS_HMOD; a low-level hook is called
+         * in the installer's own process, and needs none), and a thread named
+         * for a type that hears every thread or none (ERROR_GLOBAL_ONLY_HOOK).
          */
         SetWindowsHookExA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([type, proc, , thread])=>{
-                if ((proc >>> 0) === 0)
+            handler: ([type, proc, module, thread])=>{
+                const kind = type | 0;
+                if (kind < WH_MIN || kind > WH_MAX)
                 {
+                    host.setLastError?.(ERROR_INVALID_HOOK_FILTER);
                     return 0;
                 }
-                const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0 };
+                if ((proc >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_FILTER_PROC);
+                    return 0;
+                }
+                if ((thread >>> 0) === 0 && (module >>> 0) === 0 && kind !== WH_KEYBOARD_LL
+                    && kind !== WH_MOUSE_LL)
+                {
+                    host.setLastError?.(ERROR_HOOK_NEEDS_HMOD);
+                    return 0;
+                }
+                if ((thread >>> 0) !== 0 && GLOBAL_ONLY_HOOKS.includes(kind))
+                {
+                    host.setLastError?.(ERROR_GLOBAL_ONLY_HOOK);
+                    return 0;
+                }
+                const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0,
+                    owner: threadIdOf(host.callerThread?.()) };
                 hook.handle = host.handles.open('hook', hook);
                 hooks.push(hook);
                 if (hook.type !== WH_CBT && hook.type !== WH_KEYBOARD && hook.type !== WH_MOUSE
-                    && hook.type !== WH_GETMESSAGE)
+                    && hook.type !== WH_GETMESSAGE && hook.type !== WH_KEYBOARD_LL
+                    && hook.type !== WH_MOUSE_LL)
                 {
                     host.divergence?.('SetWindowsHookExA',
                         `hook type ${hook.type} is installed but never called`);
@@ -7644,7 +8323,43 @@ export function createWindowFunctions(host){
             },
         },
 
-        /** BOOL UnhookWindowsHookEx(HHOOK hhk) */
+        /**
+         * HHOOK SetWindowsHookA(int nFilterType, HOOKPROC pfnFilterProc)
+         *
+         * The form from before SetWindowsHookEx: a hook for the calling
+         * thread alone.
+         */
+        SetWindowsHookA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([type, proc])=>table.SetWindowsHookExA.handler(
+                [type, proc, 0, threadIdOf(host.callerThread?.()) ?? 0]),
+        },
+        /** HHOOK SetWindowsHookW(...), as the ANSI form. */
+        SetWindowsHookW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>table.SetWindowsHookA.handler(args),
+        },
+
+        /**
+         * BOOL UnhookWindowsHook(int nCode, HOOKPROC pfnFilterProc)
+         *
+         * Removes the calling thread's newest hook of that type and procedure;
+         * FALSE when it has none.
+         */
+        UnhookWindowsHook: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([type, proc])=>{
+                const id = threadIdOf(host.callerThread?.());
+                const hook = [...hooks].reverse().find(each=>each.type === (type | 0)
+                    && each.proc === (proc >>> 0) && (id === null || each.thread === id));
+                return hook ? table.UnhookWindowsHookEx.handler([hook.handle]) : 0;
+            },
+        },
+
+        /** BOOL UnhookWindowsHookEx(HHOOK hhk): ERROR_INVALID_HOOK_HANDLE for one not installed. */
         UnhookWindowsHookEx: {
             argBytes: 4,
             /** @param {number[]} args */
@@ -7652,6 +8367,7 @@ export function createWindowFunctions(host){
                 const at = hooks.findIndex(hook=>hook.handle === (handle >>> 0));
                 if (at < 0)
                 {
+                    host.setLastError?.(ERROR_INVALID_HOOK_HANDLE);
                     return 0;
                 }
                 hooks.splice(at, 1);
@@ -7676,7 +8392,7 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 // At 64 bits the next hook is handed the LPARAM as a message's
-                // is (decision A54): what this handler reads is its low half.
+                // is (decision A63): what this handler reads is its low half.
                 return callHook(hook.type, hook.handle, [code, wParam >>> 0, lParam | 0],
                     host.callerThread?.());
             },
@@ -7689,12 +8405,15 @@ export function createWindowFunctions(host){
          * the other's active window and focus (`heldByCaller`). A thread
          * attached to itself, one that does not exist, or one that has no
          * message queue yet -- no window made, no look at a queue -- is
-         * ERROR_INVALID_PARAMETER.
+         * ERROR_INVALID_PARAMETER. The calling thread has one by calling,
+         * as any call into user32 gives a thread its queue (input.c
+         * test_AttachThreadInput_thread attaches before it makes a window).
          */
         AttachThreadInput: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([from, to, attach])=>{
+                hasQueue(host.callerThread?.());
                 const one = from >>> 0;
                 const other = to >>> 0;
                 const exists = (/** @type {number} */ id)=>(host.threadExists

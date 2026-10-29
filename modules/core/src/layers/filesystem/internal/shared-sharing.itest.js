@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { createSharing } from './handles.js';
+import { createSharing, removal } from './handles.js';
 import { SLOTS, createSharingMemory, openSharedSharing } from './shared-sharing.js';
 
 /** @param {number} seed */
@@ -61,8 +61,9 @@ for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
             {
                 const key = pick(KEYS);
                 const terms = { key, path: key,
-                    access: { read: next() < 0.8, write: next() < 0.4 },
-                    share: { read: next() < 0.7, write: next() < 0.4 },
+                    access: { read: next() < 0.7, write: next() < 0.4, delete: next() < 0.25,
+                        image: next() < 0.1 },
+                    share: { read: next() < 0.7, write: next() < 0.4, delete: next() < 0.5 },
                     inherited: next() < 0.05 };
                 const one = outcome(()=>kept.admit(terms));
                 const two = outcome(()=>shared.admit(terms));
@@ -87,6 +88,14 @@ for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
                     // A close said twice: the slot may be another open's by now.
                     shared.release(open.shared);
                 }
+            }
+            else if (roll < 0.93)
+            {
+                // What a rename or a deletion asks: settled, and let go at once.
+                const key = pick(KEYS);
+                const one = outcome(()=>kept.release(kept.admit(removal(key, key))));
+                const two = outcome(()=>shared.release(shared.admit(removal(key, key))));
+                assert.equal(two[0], one[0], `step ${step}: removal of ${key}`);
             }
             else
             {

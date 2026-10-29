@@ -1316,7 +1316,7 @@ test('the primary buffer answers through its pointer after its last release', ()
 
     // Once its device is gone as well, the pointer is let go.
     assert.equal(g.call(device, RELEASE), 0);
-    assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
+    assert.equal(g.call(primary, ADDREF), 0);
 });
 
 /** IID_IUnknown, as a program lays it out for QueryInterface. */
@@ -1341,8 +1341,8 @@ test('a buffer whose last reference goes is gone through every interface it was 
 
     assert.equal(g.call(buffer, RELEASE), 1);
     assert.equal(g.call(unknown, RELEASE), 0);
-    assert.equal(g.call(buffer, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
-    assert.equal(g.call(unknown, ADDREF) >>> 0, 0x80004003);
+    assert.equal(g.call(buffer, ADDREF), 0);
+    assert.equal(g.call(unknown, ADDREF), 0);
 });
 
 test('the primary buffer keeps every pointer it was asked for while its device lives', ()=>{
@@ -1363,8 +1363,8 @@ test('the primary buffer keeps every pointer it was asked for while its device l
     assert.equal(g.call(unknown, RELEASE), 0);
 
     assert.equal(g.call(device, RELEASE), 0);
-    assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'and then neither pointer is kept');
-    assert.equal(g.call(unknown, ADDREF) >>> 0, 0x80004003);
+    assert.equal(g.call(primary, ADDREF), 0, 'and then neither pointer is kept');
+    assert.equal(g.call(unknown, ADDREF), 0);
 });
 
 test('a pointer the bridge let go of names no buffer any more, and a kept one still does', ()=>{

@@ -81,10 +81,10 @@ export function createRegistryService(hive){
         },
 
         /**
-         * @param {number} key @param {string | null} [path]
+         * @param {number} key @param {string | null} [path] @param {string} [keyClass]
          * @returns {{ key: number, created: boolean }}
          */
-        create(key, path){
+        create(key, path, keyClass = ''){
             const at = keyOf(key);
             if (!at)
             {
@@ -92,7 +92,7 @@ export function createRegistryService(hive){
                 // not a key that went away: a deleted key keeps its number.
                 throw new Error(`registry: no key numbered ${key}`);
             }
-            const made = hive.create(at, path);
+            const made = hive.create(at, path, keyClass);
             return { key: /** @type {number} */ (numberOf(made.key)), created: made.created };
         },
 
@@ -109,6 +109,18 @@ export function createRegistryService(hive){
         subkeys(key){
             const at = keyOf(key);
             return at ? hive.subkeys(at) : [];
+        },
+
+        /** @param {number} key @returns {string} the key's class, "" for none */
+        classOf(key){
+            const at = keyOf(key);
+            return at ? hive.classOf(at) : '';
+        },
+
+        /** @param {number} key @returns {number} the longest immediate-subkey class length */
+        maxSubkeyClassLength(key){
+            const at = keyOf(key);
+            return at ? hive.maxSubkeyClassLength(at) : 0;
         },
 
         /** @param {number} key @returns {import('./registry.js').RegistryValue[]} */

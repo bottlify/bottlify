@@ -200,6 +200,9 @@ export function createAdapter(state, interfaces, destroy){
             return methods ? { id: asked, methods } : null;
         },
         addRef: ()=>++references,
+        get refCount(){
+            return references;
+        },
         release(){
             references--;
             if (references === 0)
@@ -384,6 +387,9 @@ function writeElemDesc(block, at, type, flags){
  * @property {(id: string) => { id: string, methods: readonly any[] } | null} interfaceFor
  * @property {() => number} addRef
  * @property {() => number} release
+ * @property {number} refCount  The references held: the bridge's Release reads it.
+ * @property {(() => Promise<unknown>) | undefined} [lastRelease]
+ *     Made and waited for inside the last Release, as `ole32/objects.js` has it.
  * @property {boolean} destroyed  Whether the last reference has gone.
  */
 
@@ -400,6 +406,8 @@ function writeElemDesc(block, at, type, flags){
  *
  * @typedef {Object} LoadedTypeInfo
  * @property {(names: number, count: number, out: number) => number} getIDsOfNames
+ * @property {TypeLibrary} library  the library the type is described in
+ * @property {TypeInfoDescription} description
  */
 
 /**
@@ -1252,7 +1260,8 @@ export function createTypeLibraryObjects(host){
             const state = typeInfosByPointer.get(pointer >>> 0);
             return state
                 ? { getIDsOfNames: (names, count, out)=>
-                    getIDsOfNames(state.owner.library, state.description, names, count, out) }
+                    getIDsOfNames(state.owner.library, state.description, names, count, out),
+                library: state.owner.library, description: state.description }
                 : null;
         },
     };

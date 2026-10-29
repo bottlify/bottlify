@@ -235,7 +235,98 @@ test('the native token calls open and adjust the same tokens, with statuses', ()
     assert.deepEqual(errors, [], 'the last error is left alone');
     assert.deepEqual(Object.fromEntries(Object.entries(natives)
         .map(([name, entry])=>[name, entry.argBytes])),
-    { NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24 });
+    { NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24,
+        NtSetSecurityObject: 12, NtQuerySecurityObject: 20, NtAccessCheck: 32,
+        NtDuplicateToken: 24 });
+});
+
+test('NtDuplicateToken clones a token, its level from the SecurityQualityOfService', ()=>{
+    const { fns, dword, bytes, table } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 0);
+    const token = dword(OUT);
+
+    // No OBJECT_ATTRIBUTES: an impersonation token at SecurityAnonymous (0).
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, 0, 0, 2, OUT]), 0, 'STATUS_SUCCESS');
+    const anonymous = dword(OUT);
+    assert.notEqual(anonymous, token, 'a handle of its own');
+    assert.equal(table.get(anonymous)?.object?.impersonationLevel, 0);
+
+    // A SECURITY_QUALITY_OF_SERVICE at QOS naming SecurityIdentification (2),
+    // pointed at by the OBJECT_ATTRIBUTES at ATTR (its field at +20).
+    const ATTR = 0x700;
+    const QOS = 0x740;
+    bytes.fill(0, ATTR, ATTR + 24);
+    new DataView(bytes.buffer).setUint32(ATTR + 20, QOS, true);
+    new DataView(bytes.buffer).setUint32(QOS + 4, 2, true);
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, ATTR, 0, 2, OUT]), 0);
+    assert.equal(table.get(dword(OUT))?.object?.impersonationLevel, 2, 'SecurityIdentification');
+
+    // A primary token (type 1) carries no impersonation level at all.
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, ATTR, 0, 1, OUT]), 0);
+    assert.equal(table.get(dword(OUT))?.object?.impersonationLevel, undefined);
+
+    assert.equal(natives.NtDuplicateToken.handler([0x1234, 0, 0, 0, 2, OUT]), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, 0, 0, 2, 0]), 0xc0000005,
+        'nowhere to put it: STATUS_ACCESS_VIOLATION');
+});
+
+test('the native security calls set, query and check a kernel object, as NTSTATUS', ()=>{
+    // ntdll's NtSetSecurityObject/NtQuerySecurityObject keep and hand back
+    // the same descriptor the win32 pair do, and NtAccessCheck answers the
+    // walk as a status with an NTSTATUS *AccessStatus, not a BOOL.
+    const { bytes, fns, dword, table } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    const object = {};
+    table.set(0x40, { type: 'event', object });
+    table.set(0x44, { type: 'event', object });
+    // A self-relative descriptor with a present DACL of one ACE allowing
+    // BUILTIN\Administrators 0x1 (as the win32 kernel-object test builds).
+    const sd = BUFFER;
+    bytes.fill(0, sd, sd + 40);
+    bytes[sd] = 1;
+    bytes.set([0x14, 0x80], sd + 2);
+    const dacl = sd + 20;
+    new DataView(bytes.buffer).setUint32(sd + 16, dacl - sd, true);
+    bytes.set([2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0, 1, 0, 0, 0,
+        1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0], dacl);
+
+    assert.equal(natives.NtSetSecurityObject.handler([0x9999, 0x4, sd]), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(natives.NtSetSecurityObject.handler([0x40, 0x4, 0]), 0xc0000005,
+        'no descriptor: STATUS_ACCESS_VIOLATION');
+    assert.equal(natives.NtSetSecurityObject.handler([0x40, 0x4, sd]), 0, 'STATUS_SUCCESS');
+
+    // Query it back on the other handle: sized first, then written.
+    const OUT_SIZE = 0x600;
+    assert.equal(natives.NtQuerySecurityObject.handler([0x44, 0x4, 0x800, 0, OUT_SIZE]),
+        0xc0000023, 'STATUS_BUFFER_TOO_SMALL');
+    const size = dword(OUT_SIZE);
+    assert.ok(size > 20);
+    assert.equal(natives.NtQuerySecurityObject.handler([0x44, 0x4, 0x800, size, OUT_SIZE]), 0);
+    const control = bytes[0x800 + 2] | bytes[0x800 + 3] << 8;
+    assert.equal(control & 0x8004, 0x8004, 'self-relative, with a DACL');
+    assert.equal(natives.NtQuerySecurityObject.handler([0x9999, 0x4, 0x800, size, OUT_SIZE]),
+        0xc0000008, 'STATUS_INVALID_HANDLE');
+
+    // Check the token the setup grants against that descriptor. The mapping
+    // is identity; the granted mask and the NTSTATUS verdict are written out.
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 0);
+    const token = dword(OUT);
+    const MAPPING = 0x900;
+    bytes.set([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x1f], MAPPING);
+    const GRANTED = 0xa00;
+    const STATUS = 0xa10;
+    const PRIV = 0xa20;
+    const PRIVLEN = 0xa80;
+    new DataView(bytes.buffer).setUint32(PRIVLEN, 0x40, true);
+    assert.equal(natives.NtAccessCheck.handler([sd, token, 0x1, MAPPING, PRIV, PRIVLEN,
+        GRANTED, STATUS]), 0, 'STATUS_SUCCESS: the check ran');
+    assert.equal(dword(STATUS), 0, 'STATUS_SUCCESS: access granted');
+    assert.equal(dword(GRANTED), 0x1);
+    assert.equal(natives.NtAccessCheck.handler([sd, token, 0x1, MAPPING, PRIV, PRIVLEN,
+        GRANTED, 0]), 0xc0000005, 'nowhere for the status: STATUS_ACCESS_VIOLATION');
 });
 
 test('CopySid copies a SID that fits and refuses one that does not', ()=>{
@@ -441,9 +532,38 @@ test('a denied ACE ahead of an allowed one keeps its rights from the account', (
 
     assert.equal(fns.AddAccessDeniedAce.handler([ACL_AT, 2, 1, SID]), 0);
     assert.equal(errors.at(-1), 1344, 'ERROR_ALLOTTED_SPACE_EXCEEDED');
-    assert.equal(fns.SetSecurityInfo.handler(), 0);
     assert.equal(fns.SetSecurityInfo.argBytes, 28);
-    assert.equal(fns.SetKernelObjectSecurity.handler(), 1);
+    assert.equal(fns.SetKernelObjectSecurity.handler([0x7777, 4, 0]), 0, 'no such object');
+    assert.equal(errors.at(-1), 6);
+});
+
+test('a kernel object keeps the DACL and the label set on it, for every handle onto it', ()=>{
+    const { bytes, fns, dword, table } = setup();
+    const object = {};
+    table.set(0x40, { type: 'event', object });
+    table.set(0x44, { type: 'event', object });
+    // An absolute descriptor at BUFFER: a present DACL of one ACE, and a SACL
+    // with a label (0x11) and an allowed ACE, of revision 3.
+    const sd = BUFFER;
+    bytes.fill(0, sd, sd + 20);
+    bytes[sd] = 1;
+    bytes.set([0x14, 0], sd + 2);
+    const dacl = 0x300;
+    const sacl = 0x380;
+    bytes.set([2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0, 1, 0, 0, 0,
+        1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], dacl);
+    bytes.set([3, 0, 48, 0, 2, 0, 0, 0, 0x11, 0, 20, 0, 1, 0, 0, 0,
+        1, 1, 0, 0, 0, 0, 0, 16, 0, 0x10, 0, 0,
+        0, 0, 20, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], sacl);
+    new DataView(bytes.buffer).setUint32(sd + 12, sacl, true);
+    new DataView(bytes.buffer).setUint32(sd + 16, dacl, true);
+    assert.equal(fns.SetKernelObjectSecurity.handler([0x40, 0x4 | 0x10, sd]), 1);
+    assert.equal(fns.GetKernelObjectSecurity.handler([0x44, 0x10, 0x500, 0x200, NEEDED]), 1);
+    const at = 0x500 + dword(0x500 + 12);
+    assert.deepEqual([bytes[at], bytes[at + 4]], [3, 1], 'the label alone, in its revision');
+    assert.equal(bytes[at + 8], 0x11);
+    assert.equal(fns.GetKernelObjectSecurity.handler([0x44, 0x4, 0x500, 0x200, NEEDED]), 1);
+    assert.equal(bytes[0x500 + dword(0x500 + 16) + 4], 1, 'the DACL set: one ACE');
 });
 
 test('GetKernelObjectSecurity sizes, then writes a self-relative descriptor of the parts asked '
@@ -1053,3 +1173,114 @@ test('ConvertStringSecurityDescriptorToSecurityDescriptor lays out the descripto
         assert.equal(convert([putWide(bytes, 0x300, 'D:(A;;GA;;;WD)'), 2, OUT, 0]), 0);
         assert.deepEqual(errors.filter(code=>code !== 0), [87, 1305]);
     });
+
+test('an ACL takes the highest revision an ACE was added with; one past the last stops it', ()=>{
+    const { bytes, errors, fns } = setup();
+    const acl = 0x300;
+    bytes.set([1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], SID); // S-1-1-0
+    assert.equal(fns.InitializeAcl.handler([acl, 256, 3]), 1, 'revision 3 is one');
+    assert.equal(fns.InitializeAcl.handler([acl, 256, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAceEx.handler([acl, 4, 0x4, 0x10, SID]), 1);
+    assert.equal(bytes[acl], 4);
+    assert.equal(bytes[acl + 8 + 1], 0x4, 'the ACE keeps its flags');
+    const ace = bytes.slice(acl + 8, acl + 8 + 20);
+    bytes.set(ace, 0x500);
+    assert.equal(fns.AddAce.handler([acl, 5, 0xffffffff, 0x500, 20]), 1);
+    assert.equal(bytes[acl], 5, 'written as given');
+    assert.equal(fns.AddAce.handler([acl, 2, 0xffffffff, 0x500, 20]), 0);
+    assert.equal(errors.at(-1), 87);
+});
+
+test('AddMandatoryAce takes only the three policies, as a label ACE', ()=>{
+    const { bytes, errors, fns } = setup();
+    const acl = 0x300;
+    bytes.set([1, 1, 0, 0, 0, 0, 0, 16, 0, 0x10, 0, 0], SID); // S-1-16-4096
+    fns.InitializeAcl.handler([acl, 256, 2]);
+    assert.equal(fns.AddMandatoryAce.handler([acl, 2, 0, 0x1234, SID]), 0);
+    assert.equal(errors.at(-1), 87);
+    assert.equal(fns.AddMandatoryAce.handler([acl, 2, 0, 1, SID]), 1);
+    assert.deepEqual([...bytes.subarray(acl + 8, acl + 12)], [0x11, 0, 20, 0]);
+});
+
+test('DuplicateTokenEx makes a primary token or an impersonation one, as asked', ()=>{
+    const { errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 2, 2, OUT]), 1);
+    assert.equal(fns.GetTokenInformation.handler([dword(OUT), 9, BUFFER, 4, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 2, 'SecurityImpersonation');
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 2, 1, OUT]), 1);
+    assert.equal(fns.GetTokenInformation.handler([dword(OUT), 9, BUFFER, 4, NEEDED]), 0,
+        'a primary token has no impersonation level');
+    assert.equal(errors.at(-1), 87);
+});
+
+test('TokenPrivileges lists the held privileges, change-notify enabled', ()=>{
+    const { errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    assert.equal(fns.GetTokenInformation.handler([token, 3, 0, 0, NEEDED]), 0);
+    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    const count = (dword(NEEDED) - 4) / 12;
+    errors.length = 0;
+    assert.equal(fns.GetTokenInformation.handler([token, 3, BUFFER, dword(NEEDED), NEEDED]), 1);
+    assert.equal(errors.length, 0, 'a success leaves the last error alone');
+    assert.equal(dword(BUFFER), count);
+    const changeNotify = Array.from({ length: count }, (_, at)=>BUFFER + 4 + at * 12)
+        .find(at=>dword(at) === 23);
+    assert.ok(changeNotify !== undefined);
+    assert.equal(dword(changeNotify + 8), 3);
+});
+
+test('the default DACL can be set to none, and is answered so', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    assert.equal(fns.SetTokenInformation.handler([token, 6, 0, 0]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(fns.SetTokenInformation.handler([token, 6, 0, 4]), 0);
+    assert.equal(errors.at(-1), 998, 'ERROR_NOACCESS');
+    bytes.fill(0, BUFFER, BUFFER + 4);
+    assert.equal(fns.SetTokenInformation.handler([token, 6, BUFFER, 4]), 1);
+    assert.equal(fns.GetTokenInformation.handler([token, 6, BUFFER, 64, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 0);
+    assert.equal(dword(NEEDED), 4);
+});
+
+test('AccessCheck reads a self-relative descriptor; a null DACL grants the mapping\'s all', ()=>{
+    const { bytes, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    const { bytes: descriptor } = selfRelativeDescriptor({ dacl: null });
+    bytes.set(descriptor, BUFFER);
+    const mapping = 0x500;
+    [0x120001, 0x120002, 0x120004, 0x1f0001]
+        .forEach((value, at)=>new DataView(bytes.buffer).setUint32(mapping + at * 4, value, true));
+    new DataView(bytes.buffer).setUint32(NEEDED, 64, true);
+    assert.equal(fns.IsValidSecurityDescriptor.handler([BUFFER]), 1);
+    assert.equal(fns.AccessCheck.handler([BUFFER, token, 0x02000000, mapping, 0x580, NEEDED,
+        0x5c0, 0x5c4]), 1);
+    assert.equal(dword(0x5c4), 1);
+    assert.equal(dword(0x5c0), 0x1f0001);
+});
+
+test('LookupAccountName finds a service account by the name without its space', ()=>{
+    const { bytes, fns, dword } = setup();
+    bytes.set([...'LocalService'].map(c=>c.charCodeAt(0)).concat(0), 0x300);
+    new DataView(bytes.buffer).setUint32(NEEDED, 64, true);
+    new DataView(bytes.buffer).setUint32(0x5f0, 64, true);
+    assert.equal(fns.LookupAccountNameA.handler([0, 0x300, SID, NEEDED, 0x400, 0x5f0, 0x5f4]), 1);
+    assert.deepEqual([...bytes.subarray(SID, SID + 12)], [1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0]);
+    assert.equal(dword(0x5f4), 5, 'SidTypeWellKnownGroup');
+});
+
+test('ConvertStringSidToSid reads hex anywhere, and wants a sub-authority', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    bytes.set([...'S-0x1-0XC-0x1a'].map(c=>c.charCodeAt(0)).concat(0), 0x300);
+    assert.equal(fns.ConvertStringSidToSidA.handler([0x300, OUT]), 1);
+    assert.deepEqual([...bytes.subarray(dword(OUT), dword(OUT) + 12)],
+        [1, 1, 0, 0, 0, 0, 0, 12, 26, 0, 0, 0]);
+    bytes.set([...'S-1-5'].map(c=>c.charCodeAt(0)).concat(0), 0x300);
+    assert.equal(fns.ConvertStringSidToSidA.handler([0x300, OUT]), 0);
+    assert.equal(errors.at(-1), 1337);
+});

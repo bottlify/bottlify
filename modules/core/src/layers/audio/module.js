@@ -143,7 +143,10 @@ export function createAudioModule(){
             // DirectSound buffers are read out. Whoever drives the machine reaches
             // the mixer directly, so hooking this anywhere else in this module
             // would leave it never called.
-            const mixer = createMixer({
+            // A process beside another on an output with no arena to lend
+            // mixes onto that one's (`borrow`), its buffers read out there.
+            const borrowed = config?.borrow?.({ fill: ()=>feedBuffers() }) ?? null;
+            const mixer = borrowed ?? createMixer({
                 sampleRate: config?.sampleRate,
                 fill: ()=>feedBuffers(),
                 // The output a machine that replaced this program's predecessor
@@ -159,7 +162,15 @@ export function createAudioModule(){
                 // A process beside another on the same output, not in its place.
                 beside: config?.beside,
             });
-            closeOnDispose = config?.beside ? ()=>mixer.close?.() : ()=>{};
+            // What this process held on an output another stands on too goes
+            // with it; one that lent its output to another leaves it sounding.
+            closeOnDispose = config?.beside || borrowed ? ()=>mixer.close?.()
+                : ()=>{
+                    if (/** @type {any} */ (mixer).lent?.())
+                    {
+                        /** @type {any} */ (mixer).retire();
+                    }
+                };
             /** The sound device, when there is one: the shared backend opens voices. @type {any} */
             const output = mixer;
 

@@ -24,7 +24,9 @@
  *   hexadecimal bytes; a DWORD's is one number field, or four such bytes.
  * - NOCLOBBER leaves a value that exists; OVERWRITEONLY sets only one that
  *   does; KEYONLY makes the key and sets nothing; APPEND adds a MULTI_SZ's
- *   strings that the value lacks; DELVAL deletes, as a DelReg line does.
+ *   strings that the value lacks, and a value of another type there ends
+ *   the install with ERROR_INVALID_DATA, untouched; DELVAL deletes, as a
+ *   DelReg line does.
  * - A DelReg line deletes the value it names, or, naming none -- or with
  *   KEYONLY_COMMON -- the key and everything under it; MULTI_SZ_DELSTRING
  *   takes one string out of a MULTI_SZ value. A key that is not there is
@@ -36,6 +38,9 @@ import {
     REG_BINARY, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_NONE, REG_SZ,
 } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+
+const ERROR_SUCCESS = 0;
+const ERROR_INVALID_DATA = 13;
 
 /** @typedef {ReturnType<typeof import('../advapi32/registry.js').createHive>} Hive */
 /** @typedef {import('./inf.js').Inf} Inf */
@@ -128,6 +133,7 @@ const removeTree = (hive, parent, path)=>{
  *
  * @param {Hive} hive @param {InfLine} line @param {boolean} deleting
  * @param {RegistryOptions} options
+ * @returns {number | void} an error that ends the install
  */
 function applyLine(hive, line, deleting, options){
     // A registry line has a key only when it is a lone field -- the key and
@@ -213,8 +219,11 @@ function applyLine(hive, line, deleting, options){
             if ((flags & FLG_ADDREG_APPEND) !== 0)
             {
                 const existing = hive.getValue(key, name);
-                const had = existing && existing.type === REG_MULTI_SZ
-                    ? multiSzStrings(existing.data) : [];
+                if (existing && existing.type !== REG_MULTI_SZ)
+                {
+                    return ERROR_INVALID_DATA;
+                }
+                const had = existing ? multiSzStrings(existing.data) : [];
                 const lower = new Set(had.map(text=>text.toLowerCase()));
                 hive.setValue(key, name, REG_MULTI_SZ, multiSz([...had,
                     ...strings.filter(text=>!lower.has(text.toLowerCase()))]));
@@ -251,6 +260,7 @@ const namedSections = (inf, section, directive)=>section.lines
  *
  * @param {Hive} hive @param {Inf} inf @param {import('./inf.js').InfSection} section
  * @param {RegistryOptions} [options]
+ * @returns {number} ERROR_SUCCESS, or the error the line that ended it met
  */
 export function installRegistry(hive, inf, section, options = {}){
     for (const [directive, deleting] of /** @type {const} */ ([['delreg', true],
@@ -260,8 +270,13 @@ export function installRegistry(hive, inf, section, options = {}){
         {
             for (const line of /** @type {import('./inf.js').InfSection} */ (named).lines)
             {
-                applyLine(hive, line, deleting, options);
+                const error = applyLine(hive, line, deleting, options);
+                if (error)
+                {
+                    return error;
+                }
             }
         }
     }
+    return ERROR_SUCCESS;
 }

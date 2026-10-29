@@ -159,3 +159,13 @@ Joliet specification.
   small C library, a driver and a script: original work under the MPL); a benchmark workload,
   not part of any module and not distributed with the product
 - License: MIT, whose full text is `tools/cork-bench/src/lua/COPYRIGHT-lua-5.1.5.txt`
+
+## CLDR's Windows time zone mapping: which IANA zone each Windows zone is
+
+- Source: the Unicode Common Locale Data Repository, `common/supplemental/windowsZones.xml`
+  (https://github.com/unicode-org/cldr), its territory "001" rows: each Windows time zone's
+  registry key and the IANA zone it corresponds to
+- Location in this repository: `modules/core/src/layers/win32/kernel32/timezones.js`, the
+  `WINDOWS_ZONES` table, as the key and zone names alone; the rules of each zone are not copied
+  but read at run time from the platform's own zone data
+- License: Unicode License v3 (https://www.unicode.org/license.txt)

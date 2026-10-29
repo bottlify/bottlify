@@ -138,3 +138,25 @@ test('what a process reads of a drive from afar it keeps until the drive changes
         'a write here is read there');
     assert.equal(asked.filter(name=>name === 'read').length, first);
 });
+
+test('a process on the run\'s volume from afar links a file as one standing on it does: one file'
+    + ' under both names, for both of them', async()=>{
+    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+        watchers: new Set() };
+    const layer = createFilesystemModule();
+    const local = await layer.create({ volume: run });
+    const handlers = volumeHandlers(run);
+    const farLayer = createFilesystemModule();
+    const far = await farLayer.create({ volume: remoteVolume((method, args)=>
+        /** @type {any} */ (handlers.volume)[method](...args)) });
+    const made = far.open('C:\\a.txt', { write: true, disposition: far.Disposition.CREATE_NEW });
+    far.write(made, bytes('one'));
+    far.close(made);
+    far.link('C:\\b.txt', 'C:\\a.txt');
+    assert.deepEqual(far.namesOf('C:\\b.txt'), local.namesOf('C:\\b.txt'));
+    assert.deepEqual(local.namesOf('C:\\b.txt').sort(), ['C:\\a.txt', 'C:\\b.txt']);
+    assert.equal(far.stat('C:\\b.txt').links, 2);
+    assert.equal(far.stat('C:\\a.txt').identity, local.stat('C:\\b.txt').identity);
+    await farLayer.dispose();
+    await layer.dispose();
+});

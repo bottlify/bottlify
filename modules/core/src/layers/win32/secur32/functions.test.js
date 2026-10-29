@@ -25,8 +25,9 @@ function machine(){
         /** @param {number} code */
         setLastError: code=>errors.push(code),
     };
-    return { memory, view, errors, sspi: createSecur32Functions(host),
-        ncrypt: createNcryptFunctions(host) };
+    // Every export takes the whole argument array, as the bridge hands it over.
+    return { memory, view, errors, sspi: /** @type {any} */ (createSecur32Functions(host)),
+        ncrypt: /** @type {any} */ (createNcryptFunctions(host)) };
 }
 
 test('no security package: no credentials, so every context call is an invalid handle', ()=>{
@@ -56,8 +57,8 @@ test('GetUserNameEx gives a local account\'s two names and maps no other', ()=>{
     assert.equal(view.getUint32(0x100, true), wanted.length + 1, 'with its terminator');
     assert.equal(sspi.GetUserNameExW.handler([2, 0x200, 0x100]), 1);
     assert.equal(view.getUint32(0x100, true), wanted.length, 'without it');
-    assert.equal(new TextDecoder('utf-16le').decode(memory.subarray(0x200, 0x200 + wanted.length * 2)),
-        wanted);
+    const written = memory.subarray(0x200, 0x200 + wanted.length * 2);
+    assert.equal(new TextDecoder('utf-16le').decode(written), wanted);
     view.setUint32(0x100, 64, true);
     assert.equal(sspi.GetUserNameExA.handler([3, 0x300, 0x100]), 1);
     assert.equal(String.fromCharCode(...memory.subarray(0x300, 0x304)), 'User');

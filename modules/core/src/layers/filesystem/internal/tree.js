@@ -45,6 +45,20 @@ import { bytesOf } from './memory-store.js';
  * @property {Map<string, Node>} children  Keyed by folded name.
  * @property {number} modified    Milliseconds since the epoch; when it was last written.
  * @property {boolean} hidden     The source records it as hidden.
+ * @property {Body | null} body   For a file with more than one name: what its names share.
+ */
+
+/**
+ * A file with more than one name -- a hard link made it one. Each name is a
+ * node of its own, in its own directory; the bytes are the writable store's
+ * once, at the path of the name that `owner` is, and every store operation
+ * on any of the names goes there. A name going away takes the bytes with it
+ * only when it is the last: the owner's leaving moves them to another name's
+ * path first, so the store never holds bytes under a name nobody sees.
+ *
+ * @typedef {Object} Body
+ * @property {Node} owner
+ * @property {Set<Node>} names  the owner among them
  */
 
 /**
@@ -56,6 +70,8 @@ import { bytesOf } from './memory-store.js';
  * @property {number} modified  Milliseconds since the epoch.
  * @property {boolean} hidden
  * @property {boolean} readOnly  On a volume nothing can be written to.
+ * @property {number} links  How many names the file has.
+ * @property {string} identity  What the file is known by under any of its names.
  */
 
 /**
@@ -84,12 +100,25 @@ function makeNode(parent, name){
         children: new Map(),
         modified: SOURCE_MODIFIED_MS,
         hidden: false,
+        body: null,
     };
 }
 
+/**
+ * The path the stores hold a file's bytes under: its own, or its owner's.
+ * Also what the file is known by under any of its names: always one of its
+ * live names, so no other file can have it.
+ *
+ * @param {Node} node
+ */
+const storePath = node=>(node.body?.owner ?? node).path;
+
+/** Every name a file has: itself alone, or its body's. @param {Node} node @returns {Node[]} */
+const namesOf = node=>(node.body ? [...node.body.names] : [node]);
+
 /** What changes a drive: everything else of it only reads. */
 const CHANGES = /** @type {const} */ (['setModified', 'replace', 'write', 'truncate', 'createFile',
-    'createDirectory', 'moveFile', 'removeFile', 'removeDirectory']);
+    'createDirectory', 'moveFile', 'removeFile', 'removeDirectory', 'link', 'restoreLinks']);
 
 /**
  * @param {Object} options
@@ -241,7 +270,33 @@ export function createOverlay({
             return 0;
         }
         const store = node.inWritable ? writable : node.inSource ? source : null;
-        return store?.stat(node.path)?.size ?? 0;
+        return store?.stat(storePath(node))?.size ?? 0;
+    };
+
+    /**
+     * Stamps a file's time on every name it has: the time is the file's,
+     * not a name's.
+     *
+     * @param {Node} node @param {number} time
+     */
+    const stamp = (node, time)=>{
+        for (const name of namesOf(node))
+        {
+            name.modified = time;
+        }
+    };
+
+    /**
+     * Announces a write to a file under every name it has: a reader watching
+     * any of them sees it change.
+     *
+     * @param {Node} node
+     */
+    const written = node=>{
+        for (const name of namesOf(node))
+        {
+            changed(name.path, 'written');
+        }
     };
 
     /**
@@ -331,7 +386,11 @@ export function createOverlay({
      * @param {Node} node
      */
     const forget = node=>{
-        if (node.inWritable)
+        if (node.body)
+        {
+            unname(node);
+        }
+        else if (node.inWritable)
         {
             writable.remove(node.path);
             node.inWritable = false;
@@ -342,6 +401,118 @@ export function createOverlay({
             return;
         }
         node.parent?.children.delete(foldName(node.name));
+    };
+
+    /**
+     * Takes one name off a file with several: the bytes stay for the others,
+     * moved to one of their paths first when they lived at this one's, and a
+     * file left with one name is an ordinary file again.
+     *
+     * @param {Node} node
+     */
+    const unname = node=>{
+        const body = /** @type {Body} */ (node.body);
+        body.names.delete(node);
+        node.body = null;
+        node.inWritable = false;
+        const [heir] = body.names;
+        if (body.owner === node)
+        {
+            relocate(node.path, heir.path);
+            body.owner = heir;
+        }
+        if (body.names.size === 1)
+        {
+            heir.body = null;
+        }
+    };
+
+    /**
+     * Moves a file's bytes in the writable store from one path to another,
+     * by the store's own move where it has one.
+     *
+     * @param {string} from @param {string} to
+     */
+    const relocate = (from, to)=>{
+        if (writable.move)
+        {
+            writable.move(from, to);
+            return;
+        }
+        const size = writable.stat(from)?.size ?? 0;
+        writable.truncate(to, 0);
+        writable.write(to, 0, writable.read(from, 0, size));
+        writable.remove(from);
+    };
+
+    /**
+     * Gives an existing file one more name. The file is copied up first if
+     * the source holds it, as a write would: the names share bytes only the
+     * writable layer can keep.
+     *
+     * @param {Node} node @param {Node} parent @param {string} name
+     */
+    const addName = (node, parent, name)=>{
+        copyUp(node);
+        const body = node.body ?? { owner: node, names: new Set([node]) };
+        node.body = body;
+        const target = childFor(parent, name);
+        target.directory = false;
+        materialiseParents(target);
+        target.inWritable = true;
+        target.body = body;
+        target.modified = node.modified;
+        body.names.add(target);
+        return target;
+    };
+
+    /**
+     * Moves one name of a file with several to another place in the drive:
+     * the other names stay, and the bytes move only when they were kept at
+     * this name's path.
+     *
+     * @param {Node} node @param {string[]} to
+     * @returns {boolean}
+     */
+    const renameName = (node, to)=>{
+        const parent = parentOf(to);
+        const name = to[to.length - 1];
+        if (name === undefined)
+        {
+            throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
+        }
+        const existing = parent.children.get(foldName(name));
+        if (existing && !existing.tombstone)
+        {
+            throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
+        }
+        const body = /** @type {Body} */ (node.body);
+        const target = childFor(parent, name);
+        target.directory = false;
+        materialiseParents(target);
+        target.inWritable = true;
+        target.modified = node.modified;
+        target.body = body;
+        body.names.add(target);
+        if (body.owner === node)
+        {
+            relocate(node.path, target.path);
+            body.owner = target;
+        }
+        body.names.delete(node);
+        node.body = null;
+        node.inWritable = false;
+        if (node.inSource)
+        {
+            node.tombstone = true;
+        }
+        else
+        {
+            node.parent?.children.delete(foldName(node.name));
+        }
+        changed(node.path, 'removed');
+        changed(target.path, 'written');
+        return true;
     };
 
     const overlay = {
@@ -359,6 +530,8 @@ export function createOverlay({
                     modified: node.modified,
                     hidden: node.hidden,
                     readOnly,
+                    links: node.body?.names.size ?? 1,
+                    identity: storePath(node),
                 }
                 : null;
         },
@@ -372,7 +545,7 @@ export function createOverlay({
          */
         setModified(components, modified){
             mustBeWritable(components);
-            mustFind(components).modified = modified;
+            stamp(mustFind(components), modified);
         },
 
         /**
@@ -405,6 +578,8 @@ export function createOverlay({
                     modified: child.modified,
                     hidden: child.hidden,
                     readOnly,
+                    links: child.body?.names.size ?? 1,
+                    identity: storePath(child),
                 });
             }
             return entries;
@@ -426,7 +601,7 @@ export function createOverlay({
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
             const store = node.inWritable ? writable : node.inSource ? source : null;
-            return store ? store.read(node.path, offset, length) : new Uint8Array(0);
+            return store ? store.read(storePath(node), offset, length) : new Uint8Array(0);
         },
 
         /**
@@ -443,7 +618,7 @@ export function createOverlay({
             }
             if (node.inWritable && writable.share)
             {
-                return writable.share(node.path);
+                return writable.share(storePath(node));
             }
             return this.read(components, 0, sizeOf(node));
         },
@@ -459,7 +634,7 @@ export function createOverlay({
         contentsOf(components){
             const node = mustFind(components);
             return !node.directory && node.inWritable && writable.contents
-                ? writable.contents(node.path)
+                ? writable.contents(storePath(node))
                 : null;
         },
 
@@ -484,25 +659,26 @@ export function createOverlay({
                 materialiseParents(node);
                 node.inWritable = true;
             }
+            const at = storePath(node);
             if (contents && writable.adoptContents)
             {
-                writable.adoptContents(node.path, contents);
+                writable.adoptContents(at, contents);
             }
             else
             {
                 const whole = bytes ?? (contents ? bytesOf(contents) : new Uint8Array(0));
                 if (writable.adopt)
                 {
-                    writable.adopt(node.path, whole);
+                    writable.adopt(at, whole);
                 }
                 else
                 {
-                    writable.truncate(node.path, 0);
-                    writable.write(node.path, 0, whole);
+                    writable.truncate(at, 0);
+                    writable.write(at, 0, whole);
                 }
             }
-            node.modified = now();
-            changed(node.path, 'written');
+            stamp(node, now());
+            written(node);
         },
 
         /** @param {string[]} components @param {number} offset @param {Uint8Array} bytes */
@@ -514,9 +690,9 @@ export function createOverlay({
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
             copyUp(node);
-            writable.write(node.path, offset, bytes);
-            node.modified = now();
-            changed(node.path, 'written');
+            writable.write(storePath(node), offset, bytes);
+            stamp(node, now());
+            written(node);
         },
 
         /** @param {string[]} components @param {number} size */
@@ -538,9 +714,9 @@ export function createOverlay({
             {
                 copyUp(node);
             }
-            writable.truncate(node.path, size);
-            node.modified = now();
-            changed(node.path, 'written');
+            writable.truncate(storePath(node), size);
+            stamp(node, now());
+            written(node);
         },
 
         /**
@@ -570,7 +746,7 @@ export function createOverlay({
             node.modified = now();
             changed(node.path, 'written');
             return { name: node.name, path: node.path, directory: false, size: 0,
-                modified: node.modified, hidden: false, readOnly };
+                modified: node.modified, hidden: false, readOnly, links: 1, identity: node.path };
         },
 
         /**
@@ -625,6 +801,10 @@ export function createOverlay({
         moveFile(from, to){
             mustBeWritable(from);
             const node = mustFind(from);
+            if (node.body)
+            {
+                return renameName(node, to);
+            }
             if (node.directory || node.inSource || !node.inWritable || !writable.move)
             {
                 return false;
@@ -691,6 +871,118 @@ export function createOverlay({
         },
 
         /**
+         * Gives the file at `from` the further name `to`, in this drive: the
+         * names share the file's bytes, times and identity from then on. A
+         * directory has no second name (ACCESS_DENIED), and a name taken is
+         * ALREADY_EXISTS.
+         *
+         * @param {string[]} from @param {string[]} to
+         * @returns {Entry}
+         */
+        link(from, to){
+            mustBeWritable(to);
+            const node = mustFind(from);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED, `"${node.path}" is a directory`);
+            }
+            const parent = parentOf(to);
+            const name = to[to.length - 1];
+            if (name === undefined)
+            {
+                throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
+            }
+            const existing = parent.children.get(foldName(name));
+            if (existing && !existing.tombstone)
+            {
+                throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
+            }
+            const target = addName(node, parent, name);
+            changed(target.path, 'written');
+            return /** @type {Entry} */ (this.stat(to));
+        },
+
+        /**
+         * Every name the file at `components` has, as paths: itself alone
+         * unless it is linked.
+         *
+         * @param {string[]} components @returns {string[]}
+         */
+        namesOf(components){
+            return namesOf(mustFind(components)).map(name=>name.path);
+        },
+
+        /**
+         * The files with more than one name, each as the path its bytes are
+         * kept under and its other names: what a session carries besides the
+         * files themselves. Empty for a drive with no links.
+         *
+         * @returns {{ owner: string, names: string[] }[]}
+         */
+        links(){
+            /** @type {Set<Body>} */
+            const bodies = new Set();
+            /** @param {Node} node */
+            const walk = node=>{
+                for (const child of node.children.values())
+                {
+                    if (child.body)
+                    {
+                        bodies.add(child.body);
+                    }
+                    if (child.directory)
+                    {
+                        walk(child);
+                    }
+                }
+            };
+            walk(root);
+            return [...bodies].map(body=>({ owner: body.owner.path,
+                names: [...body.names].filter(name=>name !== body.owner).map(name=>name.path) }));
+        },
+
+        /**
+         * Gives files back the further names a session recorded for them,
+         * once the files themselves are on the drive. A name that a file
+         * already holds is taken over: the session is what the program left.
+         *
+         * @param {{ owner: string, names: string[] }[]} records
+         */
+        restoreLinks(records){
+            for (const record of records)
+            {
+                const owner = find(record.owner.split('\\').filter(part=>part.length > 0));
+                if (!owner || owner.directory)
+                {
+                    continue;
+                }
+                for (const path of record.names)
+                {
+                    const components = path.split('\\').filter(part=>part.length > 0);
+                    const present = find(components);
+                    if (present && (present.directory || present.body === owner.body
+                        && owner.body !== null))
+                    {
+                        continue;
+                    }
+                    if (present)
+                    {
+                        forget(present);
+                    }
+                    for (let depth = 1; depth < components.length; depth++)
+                    {
+                        if (!find(components.slice(0, depth)))
+                        {
+                            overlay.createDirectory(components.slice(0, depth));
+                        }
+                    }
+                    addName(owner, parentOf(components),
+                        /** @type {string} */ (components[components.length - 1]));
+                }
+            }
+        },
+
+        /**
          * Every file that lives in the writable layer: what the program itself
          * has produced, and therefore what a session is made of. Nothing from
          * the source is in it -- a bundle is fetched by digest, never uploaded.
@@ -712,7 +1004,7 @@ export function createOverlay({
                     {
                         walk(child);
                     }
-                    else if (child.inWritable)
+                    else if (child.inWritable && (!child.body || child.body.owner === child))
                     {
                         found.push({
                             path: child.path,

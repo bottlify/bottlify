@@ -1943,7 +1943,8 @@ export function createScheduler(options){
         account(next, instructions, began, from, cpu.eip?.() ?? 0, asked);
         // A slice that ended on a host call still answering: the answer is the
         // thread's own call, and once it comes the thread goes on (`pick`).
-        next.hostContinues = next.awaitingHost === true;
+        next.hostContinues = next.awaitingHost === true && !next.answeredElsewhere;
+        next.answeredElsewhere = false;
         return { ran: next, instructions, switched };
     };
 
@@ -2431,6 +2432,12 @@ export function createScheduler(options){
                  * a thread is ready in every other sense and has nothing to run.
                  */
                 awaitingHost: false,
+                /**
+                 * Set while the host call it waits on is answered by another
+                 * process: a wait on that process, not part of one call, so
+                 * the answer does not let it go on ahead of the others.
+                 */
+                answeredElsewhere: false,
                 // A thread is a waitable object in its own right: a program
                 // joins one by waiting on its handle, and it becomes signalled
                 // when it ends and stays that way. Carried here rather than in
@@ -2447,6 +2454,32 @@ export function createScheduler(options){
 
         /** @returns {any} the thread on the CPU, or null */
         current: ()=>current,
+
+        /**
+         * Runs `fn` between turns with no thread on the CPU: the one there is
+         * switched away from as a turn's end would, its registers saved, and
+         * whichever runs next is put back from its own. A call another process
+         * makes in this one (`cross-process.js`) is no thread's call, and a
+         * thread it suspends or whose registers it reads or replaces is one
+         * that stopped where its saved state says.
+         *
+         * @template T
+         * @param {() => T} fn
+         * @returns {T}
+         */
+        outside(fn){
+            if (current)
+            {
+                current.context = cpu.captureContext(current.context);
+                if (current.state === ThreadState.RUNNING)
+                {
+                    current.state = ThreadState.READY;
+                    current.readySince = now();
+                }
+                current = null;
+            }
+            return fn();
+        },
 
         /**
          * Code a slice is not to end inside: a routine of the host's that
@@ -2547,6 +2580,21 @@ export function createScheduler(options){
                 }
             }
             return playedBy(0);
+        },
+
+        /**
+         * The host call `thread` is making is answered by another process of
+         * the run: on Windows a wait on that process, during which every other
+         * ready thread runs. So its answer puts it among the ready threads
+         * rather than straight back on the processor.
+         *
+         * @param {any} thread
+         */
+        answeredElsewhere(thread){
+            if (thread)
+            {
+                thread.answeredElsewhere = true;
+            }
         },
 
         /**

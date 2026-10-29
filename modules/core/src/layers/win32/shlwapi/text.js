@@ -17,8 +17,13 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
-/** As long as a string a program hands these may be, terminator included. */
-export const MAX_LENGTH = 0x1000;
+/**
+ * How far a string a program hands these is looked through for its
+ * terminator: as far as its memory goes. Windows bounds a string by its
+ * terminator alone, and a cap of its own failed StrChrW on a string of
+ * 16 384 characters.
+ */
+export const MAX_LENGTH = 0x7fffffff;
 
 /**
  * @typedef {Object} Width

@@ -15,6 +15,8 @@
  * would otherwise have been caught.
  */
 
+import { guestFault, unterminated } from './faults.js';
+
 /**
  * @typedef {Object} RawMemory
  * @property {(address: number, bytes: Uint8Array) => void} [writeData]
@@ -199,8 +201,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
                 }
             }
         }
-        throw new Error(
-            `No wide NUL within ${limit} bytes of 0x${address.toString(16)}`);
+        throw unended('wide NUL', address, limit & ~1, span, 2);
     };
 
     /**
@@ -218,6 +219,20 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         const region = regions.find(address);
         return region ? Math.min(limit, region.base + region.size - address) : limit;
     };
+
+    /**
+     * Why a scan found no terminator: its region ended first -- the next
+     * byte is a fault, as the processor would have taken it -- or the limit
+     * did, and the string is only longer than the caller would look.
+     *
+     * @param {string} what @param {number} address @param {number} limit
+     * @param {number} span  How far the scan read. @param {number} unit
+     */
+    const unended = (what, address, limit, span, unit)=>(span < limit
+        ? guestFault(`No ${what} before the end of the region, from 0x${address.toString(16)}`,
+            address + span, unit, 'read')
+        : unterminated(`No ${what} within ${limit} bytes of 0x${address.toString(16)}`,
+            address, limit));
 
     /**
      * @param {number} address
@@ -259,17 +274,19 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         {
             return;
         }
+        // Refused before anything is made: a buffer the length of a span
+        // that is not there -- a program's memset of a stray pointer and
+        // size -- is gigabytes the host would allocate only to throw away.
+        regions.assert(address, length, 'write');
         // An executable target has the emulator's compiler to tell, and the
         // write path is what tells it. That is a guest code page rather than a
         // heap block, so it is rare, and a buffer there costs nothing worth
-        // saving. An unmapped address lands here too, and is refused by the
-        // same assertion a write would have made.
+        // saving.
         if (!raw.fillData || regions.executable(address))
         {
             write(address, new Uint8Array(length).fill(value & 0xff));
             return;
         }
-        regions.assert(address, length, 'write');
         if (charge)
         {
             // Once for the range, as the equivalent write would be charged.
@@ -507,8 +524,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             }
             if (length === -1)
             {
-                throw new Error(
-                    `No NUL within ${limit} bytes of 0x${address.toString(16)}`);
+                throw unended('NUL', address, limit, span, 1);
             }
             return decodeAnsiBytes(read(address, length));
         },
@@ -544,8 +560,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
                     }
                 }
             }
-            throw new Error(
-                `No NUL within ${limit} bytes of 0x${address.toString(16)}`);
+            throw unended('NUL', address, limit, span, 1);
         },
 
         /**

@@ -177,6 +177,24 @@ test('_statusfp and _clearfp: the flags raised, and the flags cleared', ()=>{
     }
 });
 
+test('_statusfp and _clearfp fold in MXCSR\'s flags, and _clearfp clears both units', ()=>{
+    // Wine's kernel32 test_thread_fpu_cw: the invalid flag raised in MXCSR
+    // alone is _SW_INVALID. MXCSR's six flags are laid out as the x87's.
+    for (let sse = 0; sse < 0x40; sse++)
+    {
+        for (const x87 of [0, 0x1, 0x20])
+        {
+            const expected = abstract(sse | x87) & 0x8001f;
+            const mxcsr = 0x1f80 | sse;
+            assert.equal(same('_statusfp', { status: x87, mxcsr, control: 0x27f }).eax >>> 0,
+                expected);
+            assert.equal(same('_clearfp', { status: x87, mxcsr, control: 0x27f }).eax >>> 0,
+                expected, 'the MXCSR it leaves is checked against the reference');
+        }
+    }
+    assert.equal(same('_statusfp', { mxcsr: 0x1f81 }).eax >>> 0, 0x10, '_SW_INVALID');
+});
+
 test('_isnan, _finite and _fpclass read the bits of every kind of double', ()=>{
     const next = random(42);
     /** @type {Record<number, (low: number, high: number) => boolean>} */

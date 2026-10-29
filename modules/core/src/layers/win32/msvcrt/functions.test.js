@@ -199,6 +199,37 @@ test('strncmp stops after n bytes, and n of zero compares nothing', ()=>{
         'the terminator against a letter');
 });
 
+test('under the C locale each collating comparison is its ordinal one, narrow and wide', ()=>{
+    const { host, fns: table, put } = setup();
+    const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (table));
+    /** @param {number} address @param {string} text */
+    const putWide = (address, text)=>{
+        [...text, '\0'].forEach((c, at)=>{
+            host.bytes[address + at * 2] = c.charCodeAt(0);
+            host.bytes[address + at * 2 + 1] = 0;
+        });
+        return address;
+    };
+    /** @type {[string, string, string, number | null, number][]} */
+    const cases = [['_strncoll', 'ABC', 'ABCD', 3, 0], ['_strncoll', 'ABC', 'ABCD', 10, -1],
+        ['_strncoll', 'ABCD', 'ABC', 10, 1], ['_strncoll', 'AB D', 'AB-D', 4, -1],
+        ['_strnicoll', 'abc', 'ABCD', 3, 0], ['_strnicoll', 'abc', 'ABCD', 10, -1],
+        ['_strnicoll', 'abcd', 'ABC', 10, 1], ['_strnicoll', 'abce', 'ABCf', 3, 0],
+        ['_stricoll', 'abcd', 'ABCD', null, 0], ['_stricoll', 'abc', 'ABCD', null, -1]];
+    for (const [name, left, right, count, sign] of cases)
+    {
+        const narrowArgs = [put(0x100, left), put(0x140, right), ...count === null ? [] : [count]];
+        const wideArgs = [putWide(0x200, left), putWide(0x280, right),
+            ...count === null ? [] : [count]];
+        const wideName = name.replace('_str', '_wcs');
+        assert.equal(Math.sign(fns[name].handler(narrowArgs) | 0), sign, `${name} ${left}`);
+        assert.equal(Math.sign(fns[wideName].handler(wideArgs) | 0), sign, `${wideName} ${left}`);
+    }
+    assert.equal(Math.sign(fns.wcscoll.handler([putWide(0x200, 'ABC'), putWide(0x280, 'ABCD')])
+        | 0), -1);
+});
+
 test('_stricmp ignores case, and only for ASCII letters', ()=>{
     const { fns, put } = setup();
     assert.equal(fns._stricmp.handler([put(0x100, 'Hello'), put(0x110, 'hELLO')]), 0);
@@ -576,6 +607,90 @@ test('vswprintf is swprintf from a list: no count, the text and its terminator',
     assert.equal(units(0x200, 8), 'w\u3042|n|-5\0');
 });
 
+test('the wide printers of Wine\'s test_vswprintf, test_vscwprintf and test_vsnwprintf_s', ()=>{
+    const { fns, host } = setup();
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address @param {string} text */
+    const wide = (address, text)=>{
+        [...text, '\0'].forEach((c, at)=>view.setUint16(address + at * 2, c.charCodeAt(0), true));
+        return address;
+    };
+    /** @param {number} address */
+    const read = address=>{
+        let text = '';
+        for (let at = address; view.getUint16(at, true) !== 0; at += 2)
+        {
+            text += String.fromCharCode(view.getUint16(at, true));
+        }
+        return text;
+    };
+    const list = 0x180;
+    view.setUint32(list, wide(0x100, 'number'), true);
+    view.setUint32(list + 4, 123, true);
+    const format = wide(0x140, '%s %d');
+    assert.equal(fns._vswprintf.handler([0x200, format, list]), 10);
+    assert.equal(read(0x200), 'number 123');
+    assert.equal(fns._vswprintf_l.handler([0x200, format, 0, list]), 10);
+    assert.equal(fns._vswprintf_c.handler([0x200, 20, format, list]), 10);
+    assert.equal(fns._vswprintf_c.handler([0x200, 10, format, list]), -1);
+    assert.equal(read(0x200), 'number 12', 'what fits, terminated');
+    assert.equal(fns._vswprintf_c_l.handler([0x200, 20, format, 0, list]), 10);
+    assert.equal(fns._vswprintf_p_l.handler([0x200, 20, wide(0x160, '%2$d %1$s'), 0, list]), 10);
+    assert.equal(read(0x200), '123 number');
+    view.setUint32(list + 4, 1, true);
+    assert.equal(fns._vscwprintf.handler([format, list]), 8);
+
+    view.setUint32(list, 123, true);
+    const counted = wide(0x140, 'AB%uC');
+    for (const [size, answer, text] of /** @type {[number, number, string][]} */ ([
+        [14, 6, 'AB123C'], [12, 6, 'AB123C'], [7, 6, 'AB123C'], [6, -1, 'AB123'], [2, -1, 'A'],
+        [1, -1, '']]))
+    {
+        assert.equal(fns._vsnwprintf_s.handler([0x200, size, 0xffffffff, counted, list]), answer);
+        assert.equal(read(0x200), text, `${size}`);
+    }
+});
+
+test('_vsprintf_p reads the arguments by the positions the format names', ()=>{
+    // Wine's msvcrt test_vsprintf_p.
+    const { fns, host, put, at } = setup();
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number[]} values */
+    const list = values=>{
+        values.forEach((value, i)=>view.setUint32(0x180 + i * 4, value, true));
+        return 0x180;
+    };
+    const word = put(0x100, 'test');
+    for (const [format, values, answer, text] of
+        /** @type {[string, number[], number, string][]} */ ([
+            ['%s %d', [word, 1234], 9, 'test 1234'], ['%1$d', [1234, word], 4, '1234'],
+            ['%2$s %1$d', [1234, word], 9, 'test 1234'],
+            ['%2$*3$s %2$.*1$s', [2, word, 3], 7, 'test te'],
+        ]))
+    {
+        assert.equal(fns._vsprintf_p.handler([0x200, 1024, put(0x140, format), list(values)]),
+            answer, format);
+        assert.equal(at(0x200), text, format);
+    }
+});
+
+test('_set_output_format makes the exponent two digits at least', ()=>{
+    // Wine's msvcrt test__get_output_format.
+    const { fns, put, at } = setup();
+    const bytes = new DataView(new ArrayBuffer(8));
+    bytes.setFloat64(0, 1.23, true);
+    const slots = [bytes.getUint32(0, true), bytes.getUint32(4, true)];
+    const format = put(0x140, '%E');
+    assert.equal(fns._get_output_format.handler(), 0);
+    assert.equal(fns.sprintf.handler([0x200, format, ...slots]), 13);
+    assert.equal(at(0x200), '1.230000E+000');
+    assert.equal(fns._set_output_format.handler([1]), 0);
+    assert.equal(fns.sprintf.handler([0x200, format, ...slots]), 12);
+    assert.equal(at(0x200), '1.230000E+00');
+    assert.equal(fns._get_output_format.handler(), 1);
+    assert.equal(fns._set_output_format.handler([1]), 1);
+});
+
 test('_snprintf and _vsnprintf terminate only when the text is shorter than the count', ()=>{
     // Wine's ntdll test__snprintf, whose _snprintf is this one: "hello world"
     // into 11 leaves the X after it, "test" into 4 leaves the byte after it
@@ -727,6 +842,12 @@ test('setlocale carries the C locale, and only the C locale', ()=>{
         'a locale with no data behind it fails, rather than lying about it');
     assert.equal(divergences.length, 1);
     assert.equal(divergences[0][0], 'setlocale');
+    assert.equal(fns.setlocale.handler([20, memory.put('C')]), 0,
+        'no category 20: Wine\'s test_setlocale');
+    assert.equal(fns.setlocale.handler([5, memory.put('C')]), queried, 'LC_TIME is one');
+    assert.equal(fns.___mb_cur_max_func.handler([]), 1);
+    const cell = fns.__p___mb_cur_max.handler([]);
+    assert.equal(memory.u32(cell), 1, 'a byte, the C locale\'s widest character');
 });
 
 test('rand draws this runtime own sequence, and srand starts it where told', ()=>{
@@ -995,4 +1116,59 @@ test('rand_s fills an unsigned int from the random source and refuses no pointer
     const { fns } = setup();
     assert.equal(fns.rand_s.handler([0x300]), 0);
     assert.equal(fns.rand_s.handler([0]), 22);
+});
+
+test('_get_fmode and _set_fmode read and set _fmode, refusing a mode that is none', ()=>{
+    const { host, fns: table } = setup();
+    const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (table));
+    const out = 0x300;
+    assert.equal(fns._get_fmode.handler([out]), 0);
+    assert.equal(new DataView(host.bytes.buffer).getInt32(out, true), 0);
+    assert.equal(fns._set_fmode.handler([0x8000]), 0);
+    assert.equal(fns._get_fmode.handler([out]), 0);
+    assert.equal(new DataView(host.bytes.buffer).getInt32(out, true), 0x8000);
+    assert.equal(fns._set_fmode.handler([0x1234]), 22);
+    assert.equal(fns._get_fmode.handler([0]), 22);
+    assert.equal(fns._setmaxstdio.handler([19]), -1);
+    assert.equal(fns._setmaxstdio.handler([2049]), -1);
+    assert.equal(fns._setmaxstdio.handler([1024]), 1024);
+    assert.equal(fns._getmaxstdio.handler([]), 1024);
+});
+
+test('__crtGetStringTypeW is the system\'s GetStringTypeW behind an argument of its own', ()=>{
+    /** @type {number[][]} */
+    const asked = [];
+    const fns = /** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(), write: ()=>{},
+        callGuest: async()=>0,
+        stringTypes: (type, source, count, types)=>{
+            asked.push([type, source, count, types]);
+            return type === 1 ? 1 : 0;
+        } }));
+    assert.equal(fns.__crtGetStringTypeW.handler([0x1234, 1, 0x5000, 1, 0x6000]), 1);
+    assert.equal(fns.__crtGetStringTypeW.handler([0, 3, 0x5000, -1, 0x6000]), 0,
+        'what the system refuses, refused');
+    assert.deepEqual(asked, [[1, 0x5000, 1, 0x6000], [3, 0x5000, -1, 0x6000]]);
+    assert.equal(fns.__crtGetStringTypeW.argBytes, 20);
+    const without = /** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(),
+        write: ()=>{}, callGuest: async()=>0 }));
+    assert.equal(without.__crtGetStringTypeW, undefined, 'unexported without the system\'s');
+});
+
+test('every function the runtime exports is cdecl, a C++ member\'s thiscall aside', ()=>{
+    // A stdcall entry pops its arguments a cdecl caller pops again: _popen
+    // made from a stdcall refusal unbalanced every caller's stack. Code the
+    // guest runs as it is (`_EH_prolog`, `_chkesp`) has no convention.
+    const fns = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
+        ...fakeMemory(), write: ()=>{}, callGuest: async()=>0,
+        currentThread: ()=>({ id: 1 }), setRegisters: ()=>{},
+        threads: { start: ()=>0, exit: ()=>0, sleep: ()=>0 },
+        commandLine: ()=>'game.exe', imagePath: ()=>'C:\\game.exe', stringTypes: ()=>0,
+        launch: ()=>0, exitProcess: ()=>0, exit: ()=>{}, closeHandle: ()=>{},
+    }));
+    const wrong = Object.entries(fns).filter(([name, entry])=>!('data' in entry)
+        && !(name.startsWith('?') && entry.convention === 'thiscall')
+        && !(entry.convention === undefined && 'code' in entry && !('handler' in entry))
+        && entry.convention !== 'cdecl').map(([name])=>name);
+    assert.deepEqual(wrong, []);
 });

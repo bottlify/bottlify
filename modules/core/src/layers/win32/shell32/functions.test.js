@@ -64,11 +64,39 @@ test('DllGetVersion answers the shell of Windows XP SP3 in either structure', ()
     assert.equal(shell.DllGetVersion.handler([0]), E_INVALIDARG);
 });
 
-/** The machine above with a heap and the folder table, for the special folders. */
-function machineWithFolders(){
+/**
+ * The machine above with a heap and the folder table, for the special folders;
+ * `strings` gives it the string readers the shell's later calls need too.
+ *
+ * @param {boolean} [strings]
+ */
+function machineWithFolders(strings = false){
     const memory = new Uint8Array(0x1000).fill(0xaa);
     let free = 0x800;
+    /** @param {number} at @param {number} unit */
+    const textAt = (at, unit)=>{
+        let text = '';
+        for (let code = memory[at] | (unit === 2 ? memory[at + 1] << 8 : 0); code !== 0;
+            at += unit, code = memory[at] | (unit === 2 ? memory[at + 1] << 8 : 0))
+        {
+            text += String.fromCharCode(code);
+        }
+        return text;
+    };
     const host = {
+        ...strings ? {
+            readCString: (/** @type {number} */ a)=>textAt(a, 1),
+            readWideString: (/** @type {number} */ a)=>textAt(a, 2),
+            free: ()=>{},
+            // The task allocator, as ole32 answers for it.
+            library: (/** @type {string} */ name)=>(name === 'ole32.dll' ? {
+                CoTaskMemAlloc: { handler: (/** @type {number[]} */ [bytes])=>{
+                    const at = free;
+                    free += bytes;
+                    return at;
+                } },
+            } : undefined),
+        } : {},
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
         allocate: (/** @type {number} */ bytes)=>{
@@ -358,7 +386,7 @@ test('the extended launch starts the program whatever the flags that change noth
         }
     });
 
-test('the extended launch refuses a record that names a list or a class rather than a file',
+test('the extended launch refuses a record that names a list, or asks for a class it does not name',
     ()=>{
         for (const mask of [0x4, 0x1])
         {
@@ -374,6 +402,19 @@ test('the extended launch refuses a record that names a list or a class rather t
             assert.deepEqual(m.launched, []);
         }
     });
+
+/** A volume with the executables and documents the FindExecutable tests name. */
+const PATHS = Object.freeze({ volume: {
+    files: new Set(['c:\\app\\setup.exe', 'c:\\games\\doom.exe', 'd:\\other\\setup.exe',
+        'c:\\app\\readme.txt']),
+    /** @param {string} path */
+    stat(path){
+        return { exists: this.files.has(path.toLowerCase()), isDirectory: false, size: 0 };
+    },
+    open: ()=>null,
+    read: ()=>new Uint8Array(0),
+    close: ()=>{},
+} });
 
 /**
  * The machine above with an ANSI string reader and a path resolver, which is
@@ -423,7 +464,7 @@ test('finding an executable that cannot be read reports no association', ()=>{
 });
 
 test('an executable is associated with itself, qualified against the directory', ()=>{
-    const m = machineWithPaths('C:\\App');
+    const m = machineWithPaths('C:\\App', PATHS);
     m.put('setup.exe', 0x100);
     const answer = m.shell.FindExecutableA.handler([0x100, 0, 0x200]);
     assert.ok(answer > 32, 'success is a value above 32');
@@ -433,7 +474,7 @@ test('an executable is associated with itself, qualified against the directory',
 });
 
 test('a qualified executable is answered as itself, and a directory overrides', ()=>{
-    const m = machineWithPaths('C:\\App');
+    const m = machineWithPaths('C:\\App', PATHS);
     m.put('C:\\Games\\doom.exe', 0x100);
     assert.ok(m.shell.FindExecutableA.handler([0x100, 0, 0x200]) > 32);
     assert.equal(m.string(0x200), 'C:\\Games\\doom.exe');
@@ -445,19 +486,31 @@ test('a qualified executable is answered as itself, and a directory overrides', 
         'a relative name resolves against the directory it was given');
 });
 
+test('FindExecutable looks for the file before its type: missing is not found', ()=>{
+    const m = machineWithPaths('C:\\App', PATHS);
+    m.put('missing.exe', 0x100);
+    assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 2, 'SE_ERR_FNF');
+    assert.equal(m.memory[0x200], 0);
+    m.put('file:///C|/App/setup.exe', 0x100);
+    assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 2, 'a URL is no file name');
+    m.put('C:\\App\\setup.exe.', 0x100);
+    assert.ok(m.shell.FindExecutableA.handler([0x100, 0, 0x200]) > 32, 'a trailing dot is no part');
+    assert.equal(m.string(0x200), 'C:\\App\\setup.exe');
+});
+
 test('a document still reports no association, and clears the buffer', ()=>{
-    const m = machineWithPaths('C:\\App');
+    const m = machineWithPaths('C:\\App', PATHS);
     m.put('readme.txt', 0x100);
     assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 31,
         'this build has no document-handler registry to consult');
     assert.equal(m.memory[0x200], 0);
 });
 
-test('a window may accept drops, and no files are ever dropped on it', ()=>{
+test('a window may accept drops, and a handle that is no drop holds no files', async()=>{
     const m = machine();
     assert.equal(m.shell.DragAcceptFiles.handler([0x40, 1]), 0);
     assert.equal(m.shell.DragAcceptFiles.handler([0x40, 0]), 0);
-    assert.equal(m.shell.DragQueryFileA.handler([0, 0xffffffff, 0, 0]), 0,
+    assert.equal(await m.shell.DragQueryFileA.handler([0, 0xffffffff, 0, 0]), 0,
         'the count a caller loops over is zero, which runs no times');
 });
 
@@ -507,18 +560,34 @@ test('a shell file operation is refused as not implemented and marked aborted', 
         .map(fn=>fn.argBytes), [4, 16, 20]);
 });
 
-test('a notification icon is refused, with both arguments popped', ()=>{
-    const fns = createShellFunctions({ writeMemory: ()=>{} });
-    assert.equal(fns.Shell_NotifyIconA.argBytes, 8);
-    assert.equal(fns.Shell_NotifyIconA.handler(), 0);
-    assert.equal(fns.Shell_NotifyIconW.argBytes, 8);
-    assert.equal(fns.Shell_NotifyIconW.handler(), 0);
-});
-
-test('DragFinish pops the drop it is handed', ()=>{
-    const fns = createShellFunctions({ writeMemory: ()=>{} });
-    assert.equal(fns.DragFinish.argBytes, 4);
-    assert.equal(fns.DragFinish.handler(), 0);
+test('a notification icon is kept by its window and id until it is deleted', ()=>{
+    const memory = new Uint8Array(0x100);
+    const view = new DataView(memory.buffer);
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createShellFunctions({ writeMemory: (at, bytes)=>memory.set(bytes, at),
+        readMemory: (at, length)=>memory.slice(at, at + length),
+        setLastError: code=>errors.push(code) });
+    const [NIM_ADD, NIM_MODIFY, NIM_DELETE] = [0, 1, 2];
+    /** @param {number} size @param {number} id */
+    const icon = (size, id)=>{
+        view.setUint32(0x40, size, true);
+        view.setUint32(0x44, 0x10, true);
+        view.setUint32(0x48, id, true);
+        return 0x40;
+    };
+    assert.equal(fns.Shell_NotifyIconW.handler([NIM_MODIFY, icon(152, 1)]), 0, 'not there yet');
+    assert.equal(fns.Shell_NotifyIconW.handler([NIM_ADD, icon(152, 1)]), 1);
+    assert.deepEqual(errors, [0]);
+    assert.equal(fns.Shell_NotifyIconA.handler([NIM_ADD, icon(88, 1)]), 0, 'once');
+    assert.equal(fns.Shell_NotifyIconA.handler([NIM_ADD, icon(88, 2)]), 1, 'another id');
+    assert.equal(fns.Shell_NotifyIconA.handler([NIM_MODIFY, icon(88, 2)]), 1);
+    assert.equal(fns.Shell_NotifyIconW.handler([NIM_DELETE, icon(3, 1)]), 1,
+        'a wrong size still names the icon');
+    assert.equal(fns.Shell_NotifyIconW.handler([NIM_DELETE, icon(152, 1)]), 0);
+    assert.equal(errors.at(-1), 0x80004005, 'E_FAIL');
+    assert.equal(fns.Shell_NotifyIconA.handler([NIM_ADD, 0]), 0);
+    assert.deepEqual([fns.Shell_NotifyIconA.argBytes, fns.Shell_NotifyIconW.argBytes], [8, 8]);
 });
 
 /**
@@ -873,8 +942,8 @@ test('SHPathPrepareForWrite with no volume finds no path', ()=>{
     assert.equal(m.shell.SHPathPrepareForWriteA.handler([0, 0, 0x100, 1]) | 0, 0x80070003 | 0);
 });
 
-test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no drop', ()=>{
-    const m = machineWithPaths('C:\\App');
+test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no drop', async()=>{
+    const m = machineWithPaths('C:\\App', PATHS);
     /** @param {string} text @param {number} at */
     const wide = (text, at)=>{
         [...text, '\0'].forEach((c, i)=>{
@@ -899,7 +968,7 @@ test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no d
     assert.equal(read(0x200), '', 'cleared');
     assert.equal(m.shell.FindExecutableW.argBytes, 12);
 
-    assert.equal(m.shell.DragQueryFileW.handler([0, 0xffffffff, 0, 0]), 0);
+    assert.equal(await m.shell.DragQueryFileW.handler([0, 0xffffffff, 0, 0]), 0);
     assert.equal(m.shell.DragQueryFileW.argBytes, 16);
     assert.equal(m.shell.DragQueryFile, m.shell.DragQueryFileA, 'the bare name is the ANSI one');
     assert.equal(m.shell.ShellExecuteEx, m.shell.ShellExecuteExA);
@@ -919,44 +988,43 @@ test('a name without an extension is looked for as a program', ()=>{
         'and a name with no program by it is a file not found');
 });
 
-test('SHGetKnownFolderPath answers a known folder\'s path in a block of the task allocator', ()=>{
+test('SHGetKnownFolderPath answers a known folder\'s path in a block of the task allocator',
+    async()=>{
     // KnownFolders.h's GUIDs; Wine's shell32 shellpath test_knownFolders reads
     // FOLDERID_ProgramFiles back as SHGetFolderPath's CSIDL_PROGRAM_FILES.
-    const m = machineWithFolders();
-    const view = new DataView(m.memory.buffer);
-    /** @param {number} at @param {string} text */
-    const putGuid = (at, text)=>{
-        const [a, b, c, d, e] = text.split('-');
-        view.setUint32(at, parseInt(a, 16), true);
-        view.setUint16(at + 4, parseInt(b, 16), true);
-        view.setUint16(at + 6, parseInt(c, 16), true);
-        m.memory.set(Buffer.from(d + e, 'hex'), at + 8);
-    };
-    const wideAt = (/** @type {number} */ at)=>{
-        let text = '';
-        for (let unit = view.getUint16(at, true); unit !== 0; unit = view.getUint16(at, true))
-        {
-            text += String.fromCharCode(unit);
-            at += 2;
-        }
-        return text;
-    };
-    assert.equal(m.shell.SHGetKnownFolderPath.argBytes, 16);
-    putGuid(0x100, '905e63b6-c1bf-494e-b29c-65b732d3d21a');
-    assert.equal(m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]), 0);
-    assert.equal(wideAt(view.getUint32(0x120, true)), 'C:\\Program Files');
-    // FOLDERID_ProgramFilesX86 on a 32-bit system is the same folder.
-    putGuid(0x100, '7c5a40ef-a0fb-4bfc-874a-c0f2e0b9fa8e');
-    assert.equal(m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]), 0);
-    assert.equal(wideAt(view.getUint32(0x120, true)), 'C:\\Program Files');
+        const m = machineWithFolders(true);
+        const view = new DataView(m.memory.buffer);
+        /** @param {number} at @param {string} text */
+        const putGuid = (at, text)=>{
+            const [a, b, c, d, e] = text.split('-');
+            view.setUint32(at, parseInt(a, 16), true);
+            view.setUint16(at + 4, parseInt(b, 16), true);
+            view.setUint16(at + 6, parseInt(c, 16), true);
+            m.memory.set(Buffer.from(d + e, 'hex'), at + 8);
+        };
+        const wideAt = (/** @type {number} */ at)=>{
+            let text = '';
+            for (let unit = view.getUint16(at, true); unit !== 0; unit = view.getUint16(at, true))
+            {
+                text += String.fromCharCode(unit);
+                at += 2;
+            }
+            return text;
+        };
+        assert.equal(m.shell.SHGetKnownFolderPath.argBytes, 16);
+        putGuid(0x100, '905e63b6-c1bf-494e-b29c-65b732d3d21a');
+        assert.equal(await m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]), 0);
+        assert.equal(wideAt(view.getUint32(0x120, true)), 'C:\\Program Files');
 
-    // FOLDERID_Fonts: a folder this machine's table does not hold.
-    putGuid(0x100, 'fd228cb7-ae11-4ae3-864c-16f3910ab8fe');
-    assert.equal(m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]) | 0, 0x80070057 | 0);
-    assert.equal(view.getUint32(0x120, true), 0, 'and NULL where the path would go');
-    putGuid(0x100, '00000000-0000-0000-0000-000000000001');
-    assert.equal(m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]) | 0, 0x80070057 | 0);
-});
+        // FOLDERID_Fonts: a folder this machine's table does not hold.
+        putGuid(0x100, 'fd228cb7-ae11-4ae3-864c-16f3910ab8fe');
+        assert.equal(await m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]) | 0,
+            0x80070057 | 0);
+        assert.equal(view.getUint32(0x120, true), 0, 'and NULL where the path would go');
+        putGuid(0x100, '00000000-0000-0000-0000-000000000001');
+        assert.equal(await m.shell.SHGetKnownFolderPath.handler([0x100, 0, 0, 0x120]) | 0,
+            0x80070057 | 0);
+    });
 
 test('IsUserAnAdmin is shell32\'s ordinal 680 and says the one user is the administrator', ()=>{
     const m = machineWithFolders();
@@ -966,7 +1034,7 @@ test('IsUserAnAdmin is shell32\'s ordinal 680 and says the one user is the admin
 });
 
 test('SetCurrentProcessExplicitAppUserModelID takes an ID of up to 128 characters', ()=>{
-    const m = machineWithFolders();
+    const m = machineWithFolders(true);
     const put = (/** @type {string} */ text)=>m.memory.set(
         new Uint8Array(Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer), 0x100);
     put('Valve.Steam.Client');
@@ -975,4 +1043,27 @@ test('SetCurrentProcessExplicitAppUserModelID takes an ID of up to 128 character
     assert.equal(m.shell.SetCurrentProcessExplicitAppUserModelID.handler([0x100]) | 0,
         0x80070057 | 0);
     assert.equal(m.shell.SetCurrentProcessExplicitAppUserModelID.handler([0]) | 0, 0x80070057 | 0);
+});
+
+test('DragAcceptFiles sets and clears the window\'s WS_EX_ACCEPTFILES', ()=>{
+    let style = 0x100;
+    /** @type {number[][]} */
+    const set = [];
+    const shell = /** @type {any} */ (createShellFunctions({ writeMemory: ()=>{},
+        library: name=>(name === 'USER32.dll' ? {
+            GetWindowLongA: { handler: ([window, index])=>(window === 0x40 && index === -20
+                ? style : 0) },
+            SetWindowLongA: { handler: ([window, index, value])=>{
+                set.push([window, index, value]);
+                style = value;
+                return 0;
+            } },
+        } : undefined) }));
+    assert.equal(shell.DragAcceptFiles.handler([0x40, 1]), 0);
+    assert.equal(style, 0x110);
+    shell.DragAcceptFiles.handler([0x40, 1]);
+    assert.equal(set.length, 1, 'set once');
+    shell.DragAcceptFiles.handler([0x40, 0]);
+    assert.equal(style, 0x100);
+    assert.deepEqual(set.at(-1), [0x40, -20, 0x100]);
 });

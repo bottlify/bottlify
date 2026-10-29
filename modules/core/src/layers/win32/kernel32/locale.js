@@ -8,6 +8,15 @@ import { UI_LANGUAGE } from '../../loader/internal/resources.js';
 import { createRefusals } from '../common/refusal.js';
 import { verLanguageName } from './languages.js';
 import { STATUS } from '../ntdll/status.js';
+import { decodeUtf7, encodeUtf7 } from './utf7.js';
+import { bestFit, codePage } from './codepages.js';
+import { ALTERNATE_SORTS, LOCALES, lcidOfName, localeByLcid, localeByName } from './locales.js';
+import { renderDate, renderTime } from './datetime-format.js';
+import { compareText, isSymbol, sortKey } from './collation.js';
+import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, validMapFlags }
+    from './lcmap.js';
+import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
+    from './locale-data.js';
 
 /**
  * Code pages and the string conversions built on them.
@@ -33,6 +42,7 @@ const GEOID_UNITED_STATES = 244;
 /** The pages this build understands. CP_ACP and CP_OEMCP are selectors, not pages. */
 const CP_ACP = 0;
 const CP_OEMCP = 1;
+const CP_THREAD_ACP = 3;
 const CP_UTF8 = 65001;
 const CP_WINDOWS_1252 = 1252;
 const CP_OEM_437 = 437;
@@ -45,6 +55,17 @@ const OEM_CODE_PAGE = CP_OEM_437;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_INVALID_FLAGS = 1004;
+/** UTF-7 and the symbol page, which take no default character. */
+const CP_UTF7 = 65000;
+const CP_SYMBOL = 42;
+/** MB_PRECOMPOSED, MB_COMPOSITE, MB_USEGLYPHCHARS, MB_ERR_INVALID_CHARS; no other bit. */
+const MB_FLAGS = 0x0f;
+/**
+ * WC_DISCARDNS, WC_SEPCHARS, WC_DEFAULTCHAR, WC_ERR_INVALID_CHARS,
+ * WC_COMPOSITECHECK, WC_NO_BEST_FIT_CHARS: any other bit is refused.
+ */
+const WC_FLAGS = 0x6f0;
+const WC_NO_BEST_FIT_CHARS = 0x400;
 const ERROR_NO_UNICODE_TRANSLATION = 1113;
 const ERROR_GEN_FAILURE = 31;
 
@@ -76,10 +97,6 @@ const C1_CNTRL = 0x0020;
 const C1_BLANK = 0x0040;
 const C1_XDIGIT = 0x0080;
 const C1_ALPHA = 0x0100;
-
-/** LCMapString's two cases. Everything else is a copy. */
-const LCMAP_LOWERCASE = 0x00000100;
-const LCMAP_UPPERCASE = 0x00000200;
 
 /**
  * The sixteen positions where Windows-1252 is not Latin-1.
@@ -148,24 +165,40 @@ const LOCALE_SMONTHNAME13 = 0x100E;
 
 /** CompareString's answers. Note that none of them is zero: zero is failure. */
 const CSTR_LESS_THAN = 1;
-const CSTR_EQUAL = 2;
 const CSTR_GREATER_THAN = 3;
 
-/** The one CompareString flag honoured. */
-const NORM_IGNORECASE = 0x00000001;
+/**
+ * A UTF-16 unit in upper case, as Windows' one-to-one table has it.
+ *
+ * @param {number} unit
+ */
+const upcaseUnit = unit=>{
+    const upper = String.fromCharCode(unit).toUpperCase();
+    return upper.length === 1 ? upper.charCodeAt(0) : unit;
+};
 
-/** Which picture GetDateFormat and GetTimeFormat use when given none. */
+/** CompareString's flags: the NORM_, LINGUISTIC_ and SORT_ ones, and LOCALE_USE_CP_ACP. */
+const SORT_DIGITSASNUMBERS = 0x00000008;
+const COMPARE_FLAGS = 0x01 | 0x02 | 0x04 | SORT_DIGITSASNUMBERS | 0x10 | 0x20 | 0x1000
+    | 0x10000 | 0x20000 | 0x08000000 | 0x40000000;
+
+/** Which picture GetDateFormat uses when given none. */
 const DATE_LONGDATE = 0x00000002;
-const TIME_NOSECONDS = 0x00000002;
 
 const SHORT_DATE = 'M/d/yyyy';
 const LONG_DATE = 'dddd, MMMM dd, yyyy';
-const LONG_TIME = 'h:mm:ss tt';
-const SHORT_TIME = 'h:mm tt';
 
 /** The time formats EnumTimeFormats enumerates, the locale's own first. */
-const TIME_FORMATS = ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss', 'HH:mm:ss',
-    'h:mm tt', 'hh:mm tt', 'H:mm', 'HH:mm'];
+const TIME_FORMATS = ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss', 'HH:mm:ss'];
+/** And with TIME_NOSECONDS, the locale's short ones. */
+const SHORT_TIME_FORMATS = ['h:mm tt', 'hh:mm tt', 'H:mm', 'HH:mm'];
+/** EnumTimeFormatsW's one kind. */
+const TIME_NOSECONDS = 0x00000002;
+/**
+ * The LCTYPEs only the wide GetLocaleInfo answers: the shortest day names,
+ * the short time and the shortest time markers came after the ANSI form.
+ */
+const WIDE_ONLY_TYPES = [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x79, 0x7e, 0x7f];
 
 /** And the date formats EnumDateFormats does, by kind, the locale's own first. */
 const YEAR_MONTH = 'MMMM, yyyy';
@@ -177,42 +210,65 @@ const YEAR_MONTH_FORMATS = [YEAR_MONTH];
 /** EnumDateFormats' kinds besides DATE_LONGDATE: DATE_SHORTDATE, DATE_YEARMONTH. */
 const DATE_SHORTDATE = 0x00000001;
 const DATE_YEARMONTH = 0x00000008;
+const DATE_MONTHDAY = 0x00000080;
+/** DATE_USE_ALT_CALENDAR, DATE_LTRREADING, DATE_RTLREADING, DATE_AUTOLAYOUT besides the kinds. */
+const DATE_FLAGS = 0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80
+    | 0x80000000 | 0x40000000;
+/** TIME_NOMINUTESORSECONDS to TIME_FORCE24HOURFORMAT, and the two locale flags. */
+const TIME_FLAGS = 0x0f | 0x80000000 | 0x40000000;
 
 /** sizeof(SYSTEMTIME), which the date and time formats are given one of. */
 const SYSTEMTIME_SIZE = 16;
 
 /**
+ * How the integer digits are grouped, from the point leftwards: each size
+ * in turn, a size of 0 an empty group, and the last one again and again when
+ * `repeat` says so.
+ *
+ * @typedef {{ sizes: number[], repeat: boolean }} Grouping
+ */
+
+/**
+ * The grouping a NUMBERFMT's number says: its decimal digits are the sizes,
+ * the last repeated unless it is 0 (3 is 1,234,567; 32 is 12,34,567; 30 is
+ * 1234,567).
+ *
+ * @param {number} grouping @returns {Grouping}
+ */
+const groupingOfNumber = grouping=>{
+    const sizes = [...String(grouping >>> 0)].map(Number);
+    const repeat = sizes[sizes.length - 1] !== 0;
+    return repeatless({ sizes: repeat ? sizes : sizes.slice(0, -1), repeat });
+};
+
+/**
+ * The grouping an SGROUPING string says: its sizes between semicolons, a
+ * last 0 making the size before it repeat ("3;0" is 1,234,567, "3" is
+ * 1234,567).
+ *
+ * @param {string} text @returns {Grouping}
+ */
+const groupingOfText = text=>{
+    const sizes = text.split(';').map(part=>Number(part) || 0);
+    const repeat = sizes.length > 1 && sizes[sizes.length - 1] === 0;
+    return repeatless({ sizes: repeat ? sizes.slice(0, -1) : sizes, repeat });
+};
+
+/** A 0 repeated is no more groups at all. @param {Grouping} grouping @returns {Grouping} */
+const repeatless = grouping=>(grouping.repeat && grouping.sizes[grouping.sizes.length - 1] === 0
+    ? { sizes: grouping.sizes.slice(0, -1), repeat: false } : grouping);
+
+/**
  * @typedef {Object} NumberPicture   A NUMBERFMT, read or defaulted.
  * @property {number} digits         Decimal places.
  * @property {number} leadingZero    Whether 0.5 is written with its zero.
- * @property {number} grouping       Digits to a group, 0 for none.
+ * @property {Grouping} grouping
  * @property {string} decimal
  * @property {string} thousand
  * @property {number} negativeOrder  Where the sign goes, 0..4 (0..15 for money).
  * @property {number} [positiveOrder] Where a currency symbol goes, 0..3.
  * @property {string} [symbol]       The currency's.
  */
-
-/**
- * How GetNumberFormat writes a number when handed no NUMBERFMT of its own:
- * the locale's own picture, which for this one is two decimals, a leading
- * zero, groups of three, and a minus sign in front.
- *
- * @type {Readonly<NumberPicture>}
- */
-const NUMBER_DEFAULTS = Object.freeze({
-    digits: 2, leadingZero: 1, grouping: 3, decimal: '.', thousand: ',', negativeOrder: 1,
-});
-
-/**
- * GetCurrencyFormat's picture when handed none: the number's, with a dollar
- * sign in front and a negative amount in parentheses.
- *
- * @type {Readonly<NumberPicture>}
- */
-const CURRENCY_DEFAULTS = Object.freeze({
-    ...NUMBER_DEFAULTS, negativeOrder: 0, positiveOrder: 0, symbol: '$',
-});
 
 /** sizeof(NUMBERFMTA): six DWORD-sized fields, two of them pointers. */
 const NUMBERFMTA_SIZE = 24;
@@ -232,6 +288,7 @@ const PAGE_NAMES = Object.freeze({
     1252: '1252  (ANSI - Latin I)',
     437: '437   (OEM - United States)',
     65001: '65001 (UTF-8)',
+    65000: '65000 (UTF-7)',
 });
 /** Where CodePageName starts in CPINFOEXA and CPINFOEXW, and its characters. */
 const CPINFOEX_NAME = 24;
@@ -325,82 +382,108 @@ const fold = (text, flags)=>{
 };
 
 /** The pages this build can actually convert; IsValidCodePage answers from it. */
-const KNOWN_PAGES = [CP_WINDOWS_1252, CP_OEM_437, CP_UTF8];
-
-const MONTHS = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December',
-];
-
-const DAYS = [
-    'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
-];
-
-/**
- * What GetLocaleInfo answers, by LCTYPE.
- *
- * Only the values a C runtime and a program's own formatting actually ask for.
- * An LCTYPE not here fails rather than returning an empty string: a caller
- * given "" for the decimal separator formats every number wrongly and never
- * finds out, where a failure sends it to its own default. The two empty
- * strings below are the locale's real answers, not placeholders.
- */
-const LOCALE_STRINGS = Object.freeze({
-    0x00000002: 'English (United States)', // SLANGUAGE
-    0x00000003: 'ENU',                     // SABBREVLANGNAME
-    0x00000004: 'English',                 // SNATIVELANGNAME
-    0x00000006: 'United States',           // SCOUNTRY
-    0x00000007: 'USA',                     // SABBREVCTRYNAME
-    0x00000008: 'United States',           // SNATIVECTRYNAME
-    0x0000000C: ',',                       // SLIST
-    0x0000000E: '.',                       // SDECIMAL
-    0x0000000F: ',',                       // STHOUSAND
-    0x00000010: '3;0',                     // SGROUPING
-    0x00000013: '0123456789',              // SNATIVEDIGITS
-    0x00000014: '$',                       // SCURRENCY
-    0x00000015: 'USD',                     // SINTLSYMBOL
-    0x00000016: '.',                       // SMONDECIMALSEP
-    0x00000017: ',',                       // SMONTHOUSANDSEP
-    0x00000018: '3;0',                     // SMONGROUPING
-    0x0000001D: '/',                       // SDATE
-    0x0000001E: ':',                       // STIME
-    0x0000001F: SHORT_DATE,                // SSHORTDATE
-    0x00000020: LONG_DATE,                 // SLONGDATE
-    0x00001006: YEAR_MONTH,                // SYEARMONTH
-    0x00000028: 'AM',                      // S1159
-    0x00000029: 'PM',                      // S2359
-    // SDAYNAME1..7 and SABBREVDAYNAME1..7 start the week on Monday.
-    ...Object.fromEntries([...DAYS.slice(1), DAYS[0]].flatMap((day, at)=>[
-        [0x2A + at, day], [0x31 + at, day.slice(0, 3)],
-    ])),
-    // SMONTHNAME1..12 and SABBREVMONTHNAME1..12; the thirteenth month of a
-    // twelve-month calendar is there and empty.
-    ...Object.fromEntries(MONTHS.flatMap((month, at)=>[
-        [0x38 + at, month], [0x44 + at, month.slice(0, 3)],
-    ])),
-    0x0000100E: '',                        // SMONTHNAME13
-    0x0000100F: '',                        // SABBREVMONTHNAME13
-    0x00000050: '',                        // SPOSITIVESIGN
-    0x00000051: '-',                       // SNEGATIVESIGN
-    0x00000059: 'en',                      // SISO639LANGNAME
-    0x0000005A: 'US',                      // SISO3166CTRYNAME
-    0x0000005C: 'en-US',                   // SNAME
-    0x00001001: 'English',                 // SENGLANGUAGE
-    0x00001002: 'United States',           // SENGCOUNTRY
-    0x00001003: LONG_TIME,                 // STIMEFORMAT
-    0x00001007: 'US Dollar',               // SENGCURRNAME
-    0x00001008: 'US Dollar',               // SNATIVECURRNAME
-});
+const KNOWN_PAGES = [CP_WINDOWS_1252, CP_OEM_437, CP_UTF8, CP_UTF7];
 
 /**
  * The languages a preferred-UI-language list can name, by LANGID: the one this
  * machine has, so a list naming only others is refused as naming none.
  */
-const LANGUAGE_NAMES = new Map([[UI_LANGUAGE, LOCALE_STRINGS[0x0000005C]]]);
+const LANGUAGE_NAMES = new Map([[UI_LANGUAGE, 'en-US']]);
+
+/** LOCALE_CUSTOM_DEFAULT, LOCALE_CUSTOM_UNSPECIFIED, LOCALE_CUSTOM_UI_DEFAULT. */
+const LOCALE_CUSTOM_DEFAULTS = [0x0c00, 0x1000, 0x1400];
+
+/** The invariant locale's identity, LOCALE_INVARIANT's. */
+const INVARIANT_LOCALE = Object.freeze({ lcid: LOCALE_INVARIANT, name: '', ansi: 1252, oem: 437,
+    mac: 10000, neutral: false, specific: LOCALE_INVARIANT });
+
+/** The machine's own locale. */
+const MACHINE_LOCALE = /** @type {import('./locales.js').Locale} */ (localeByLcid(LCID_EN_US));
+
+/**
+ * Whether an LCID is one of the placeholders for the user's or the system's
+ * locale: LOCALE_NEUTRAL among them, which Windows takes as the user's, as
+ * ConvertDefaultLocale does. A C runtime asks GetLocaleInfoW(0, ...) to see
+ * whether the wide functions work.
+ *
+ * @param {number} lcid
+ */
+const isDefault = lcid=>lcid === 0 || lcid === LOCALE_USER_DEFAULT
+    || lcid === LOCALE_SYSTEM_DEFAULT || LOCALE_CUSTOM_DEFAULTS.includes(lcid);
+
+/**
+ * The locale an LCID names, as GetLocaleInfo and the formats read it: a
+ * placeholder is the machine's, a language's neutral LCID its default
+ * locale's, LOCALE_INVARIANT the invariant locale; null for an LCID no
+ * locale has.
+ *
+ * @param {number} lcid
+ * @returns {import('./locales.js').Locale | null}
+ */
+function localeOf(lcid){
+    const asked = lcid >>> 0;
+    if (asked === LOCALE_INVARIANT)
+    {
+        return INVARIANT_LOCALE;
+    }
+    if (isDefault(asked))
+    {
+        return MACHINE_LOCALE;
+    }
+    const found = localeByLcid(asked);
+    return found === null || !found.neutral ? found : localeByLcid(found.specific);
+}
+
+/**
+ * An LCID's locale name, or null for one no locale has: the defaults are
+ * this machine's, the invariant locale's is empty, an alternate sort's is
+ * its locale's with the sort after an underscore, and a language's neutral
+ * LCID is that language -- alone when `neutral` allows it, else its default
+ * locale.
+ *
+ * @param {number} locale @param {boolean} neutral
+ */
+function localeTagOf(locale, neutral){
+    const asked = locale >>> 0;
+    if (asked === LOCALE_INVARIANT)
+    {
+        return '';
+    }
+    if (isDefault(asked))
+    {
+        return MACHINE_LOCALE.name;
+    }
+    const sorted = ALTERNATE_SORTS.get(asked);
+    if (sorted !== undefined)
+    {
+        return sorted;
+    }
+    const found = localeByLcid(asked);
+    if (found === null)
+    {
+        return null;
+    }
+    return !found.neutral || neutral ? found.name : localeByLcid(found.specific)?.name ?? null;
+}
 
 /** CAL_RETURN_NUMBER, and the CALTYPEs that are numbers: ICALINTVALUE, ITWODIGITYEARMAX. */
 const CAL_RETURN_NUMBER = 0x20000000;
 const CALENDAR_NUMBERS = [1, 48];
+const CAL_ITWODIGITYEARMAX = 48;
+
+/**
+ * The year a two-digit year stops before, by CALID, as Windows defaults it:
+ * a Gregorian one's, then the Japanese and Taiwanese eras', the Korean
+ * Tangun, Hijri, Thai Buddhist and Hebrew years', and Um al-Qura's.
+ *
+ * @type {ReadonlyMap<number, string>}
+ */
+const TWO_DIGIT_YEAR_MAX = new Map([
+    [1, '2049'], [2, '2049'], [3, '99'], [4, '99'], [5, '4382'], [6, '1451'], [7, '2572'],
+    [8, '5810'], [9, '2049'], [10, '2049'], [11, '2049'], [12, '2049'], [13, '2049'],
+    [14, '2049'], [15, '2049'], [16, '2049'], [17, '2049'], [18, '2049'], [19, '2049'],
+    [20, '2049'], [21, '2049'], [22, '2049'], [23, '1451'],
+]);
 
 /** The GEOTYPEs Windows XP answers. */
 const GEO_NATION = 1;
@@ -433,14 +516,15 @@ const CAL_FLAGS = 0x80000000 | 0x40000000 | 0x20000000;
 
 /**
  * The Gregorian calendar's answers by CALTYPE (winnls.h): its number and
- * name, its date pictures, its day names -- Monday first, as CAL_SDAYNAME1
- * is -- and month names, and the year a two-digit year stops before.
+ * name, its era -- A.D., the year as it stands -- its date pictures, its day
+ * names, Monday first as CAL_SDAYNAME1 is, and month names, and the year a
+ * two-digit year stops before.
  *
  * @type {Readonly<Record<number, string>>}
  */
 const CALENDAR_INFO = Object.freeze({
-    1: '1', 2: 'Gregorian Calendar', 5: SHORT_DATE, 6: LONG_DATE, 47: YEAR_MONTH, 48: '2049',
-    56: 'MMMM d', 33: '', 46: '',
+    1: '1', 2: 'Gregorian Calendar', 3: '0', 4: 'A.D.', 5: SHORT_DATE, 6: LONG_DATE,
+    47: YEAR_MONTH, 48: '2049', 56: 'MMMM d', 57: 'AD', 33: '', 46: '',
     ...Object.fromEntries([1, 2, 3, 4, 5, 6, 0].flatMap((day, at)=>[
         [7 + at, DAYS[day]], [14 + at, DAYS[day].slice(0, 3)], [49 + at, DAYS[day].slice(0, 2)],
     ])),
@@ -449,48 +533,17 @@ const CALENDAR_INFO = Object.freeze({
     ])),
 });
 
-/**
- * The LCTYPEs whose value is a number: answered as its digits, or with
- * LOCALE_RETURN_NUMBER as the DWORD itself.
- */
-const LOCALE_NUMBERS = Object.freeze({
-    0x00000001: LCID_EN_US,                // ILANGUAGE
-    0x00000005: 1,                         // ICOUNTRY
-    0x00000009: LCID_EN_US,                // IDEFAULTLANGUAGE
-    0x0000000A: 1,                         // IDEFAULTCOUNTRY
-    0x0000000B: 437,                       // IDEFAULTCODEPAGE
-    0x0000000D: 1,                         // IMEASURE, non-metric
-    0x00000011: 2,                         // IDIGITS
-    0x00000012: 1,                         // ILZERO
-    0x00000019: 2,                         // ICURRDIGITS
-    0x0000001A: 2,                         // IINTLCURRDIGITS
-    0x0000001B: 0,                         // ICURRENCY, "$1.1"
-    0x0000001C: 0,                         // INEGCURR, "($1.1)"
-    0x00000021: 0,                         // IDATE, month first
-    0x00000022: 0,                         // ILDATE
-    0x00000023: 0,                         // ITIME, twelve hours
-    0x00000024: 1,                         // ICENTURY
-    0x00000025: 0,                         // ITLZERO
-    0x00000026: 0,                         // IDAYLZERO
-    0x00000027: 0,                         // IMONLZERO
-    0x00000052: 3,                         // IPOSSIGNPOSN
-    0x00000053: 0,                         // INEGSIGNPOSN
-    0x00000054: 1,                         // IPOSSYMPRECEDES
-    0x00000055: 0,                         // IPOSSEPBYSPACE
-    0x00000056: 1,                         // INEGSYMPRECEDES
-    0x00000057: 0,                         // INEGSEPBYSPACE
-    0x00001004: 1252,                      // IDEFAULTANSICODEPAGE
-    0x00001005: 0,                         // ITIMEMARKPOSN
-    0x00001009: 1,                         // ICALENDARTYPE, Gregorian
-    0x0000100A: 1,                         // IPAPERSIZE, letter
-    0x0000100C: 6,                         // IFIRSTDAYOFWEEK, Sunday first
-    0x0000100D: 0,                         // IFIRSTWEEKOFYEAR
-    0x00001010: 1,                         // INEGNUMBER
-    0x00001011: 10000,                     // IDEFAULTMACCODEPAGE
-});
-
-/** The two numbers written as hex, four digits: a language is read as one. */
-const HEX_NUMBERS = [0x0001, 0x0009];
+/** The LCTYPEs SetLocaleInfo changes: the user's choices of format. */
+const USER_SETTABLE = new Set(/** @type {number[]} */ ([
+    LCTYPE.ICALENDARTYPE, LCTYPE.ICURRDIGITS, LCTYPE.ICURRENCY, LCTYPE.IDIGITS,
+    LCTYPE.IDIGITSUBSTITUTION, LCTYPE.IFIRSTDAYOFWEEK, LCTYPE.IFIRSTWEEKOFYEAR, LCTYPE.ILZERO,
+    LCTYPE.IMEASURE, LCTYPE.INEGCURR, LCTYPE.INEGNUMBER, LCTYPE.IPAPERSIZE, LCTYPE.ITIME,
+    LCTYPE.S1159, LCTYPE.S2359, LCTYPE.SCURRENCY, LCTYPE.SDATE, LCTYPE.SDECIMAL,
+    LCTYPE.SGROUPING, LCTYPE.SLIST, LCTYPE.SLONGDATE, LCTYPE.SMONDECIMALSEP,
+    LCTYPE.SMONGROUPING, LCTYPE.SMONTHOUSANDSEP, LCTYPE.SNATIVEDIGITS, LCTYPE.SNEGATIVESIGN,
+    LCTYPE.SPOSITIVESIGN, LCTYPE.SSHORTDATE, LCTYPE.SSHORTTIME, LCTYPE.STHOUSAND, LCTYPE.STIME,
+    LCTYPE.STIMEFORMAT, LCTYPE.SYEARMONTH, LCTYPE.SINTLSYMBOL,
+]));
 
 /** The byte a character outside the page becomes. */
 const DEFAULT_CHAR = 0x3f;
@@ -498,8 +551,8 @@ const DEFAULT_CHAR = 0x3f;
 /** @param {number} page */
 const resolvePage = page=>{
     const wanted = page >>> 0;
-    // CP_THREAD_ACP: the thread's locale's ANSI page, and there is one locale.
-    if (wanted === CP_ACP || wanted === 3)
+    // CP_THREAD_ACP where no thread's locale is at hand: the machine's.
+    if (wanted === CP_ACP || wanted === CP_THREAD_ACP)
     {
         return ANSI_CODE_PAGE;
     }
@@ -542,50 +595,66 @@ const decodeSingleByte = (bytes, page)=>{
 };
 
 /**
+ * A character's byte in a single-byte page, or -1 where it has none.
+ *
+ * @param {number} code @param {number[]} high
+ */
+const singleByteOf = (code, high)=>{
+    if (code < 0x80)
+    {
+        return code;
+    }
+    const found = high.indexOf(code);
+    if (found !== -1)
+    {
+        return 0x80 + found;
+    }
+    // A position the page leaves undefined decodes as its own code point,
+    // and goes back as its own byte.
+    if (code < 0x80 + high.length && high[code - 0x80] === 0)
+    {
+        return code;
+    }
+    // A table that stops short of the top of the page leaves the rest of
+    // it Latin-1, exactly as decoding reads it: an accented letter is a
+    // byte of its own there, not the default character.
+    return code >= 0x80 + high.length && code <= 0xff ? code : -1;
+};
+
+/**
  * Text encoded into a single-byte page. Anything the page cannot hold becomes
  * the default character, which is what Windows does and what a caller asking
- * for lpUsedDefaultChar is trying to find out.
+ * for lpUsedDefaultChar is trying to find out -- or, when `fit` allows it,
+ * the page's letter it is an accented or compatibility form of.
  *
  * @param {string} text @param {number} page
- * @returns {{ bytes: Uint8Array, usedDefault: boolean }}
+ * @param {number} [substitute] The default character's byte.
+ * @param {boolean} [fit]
+ * @returns {{ bytes: Uint8Array, usedDefault: boolean, firstDefault: number }}
  */
-const encodeSingleByte = (text, page)=>{
+const encodeSingleByte = (text, page, substitute = DEFAULT_CHAR, fit = false)=>{
     const high = highHalf(page);
     const bytes = new Uint8Array(text.length);
-    let usedDefault = false;
+    let firstDefault = -1;
     for (let at = 0; at < text.length; at++)
     {
         const code = text.charCodeAt(at);
-        if (code < 0x80)
+        let byte = code < 0x80 ? code : singleByteOf(code, high);
+        if (byte === -1 && fit)
         {
-            bytes[at] = code;
-            continue;
+            byte = bestFit(text[at], unit=>singleByteOf(unit, high)) ?? -1;
         }
-        const found = high.indexOf(code);
-        if (found !== -1)
+        if (byte === -1)
         {
-            bytes[at] = 0x80 + found;
-            continue;
+            byte = substitute;
+            if (firstDefault === -1)
+            {
+                firstDefault = at;
+            }
         }
-        // A position the page leaves undefined decodes as its own code point,
-        // and goes back as its own byte.
-        if (code < 0x80 + high.length && high[code - 0x80] === 0)
-        {
-            bytes[at] = code;
-            continue;
-        }
-        // A table that stops short of the top of the page leaves the rest of
-        // it Latin-1, exactly as decoding reads it: an accented letter is a
-        // byte of its own there, not the default character.
-        if (code >= 0x80 + high.length && code <= 0xff)
-        {
-            bytes[at] = code;
-            continue;
-        }
-        bytes[at] = DEFAULT_CHAR;
-        usedDefault = true;
+        bytes[at] = byte;
     }
-    return { bytes, usedDefault };
+    return { bytes, usedDefault: firstDefault !== -1, firstDefault };
 };
 
 /**
@@ -714,20 +783,13 @@ const characterType = code=>{
 
 /**
  * CompareString's three-valued answer -- CSTR_LESS_THAN, CSTR_EQUAL or
- * CSTR_GREATER_THAN, 1 to 3 -- for an ordinal comparison, case-insensitive
- * under NORM_IGNORECASE: the order every comparison of text in this build
- * agrees on (see CompareStringA).
+ * CSTR_GREATER_THAN, 1 to 3 -- in Windows' word sort (`collation.js`),
+ * under the NORM_ and SORT_ flags given.
  *
  * @param {string} first @param {string} second @param {number} flags
  */
 export function compareStrings(first, second, flags){
-    const left = (flags & NORM_IGNORECASE) !== 0 ? first.toLowerCase() : first;
-    const right = (flags & NORM_IGNORECASE) !== 0 ? second.toLowerCase() : second;
-    if (left < right)
-    {
-        return CSTR_LESS_THAN;
-    }
-    return left > right ? CSTR_GREATER_THAN : CSTR_EQUAL;
+    return compareText(first, second, flags) + 2;
 }
 
 /**
@@ -742,6 +804,17 @@ export function createLocaleFunctions(host){
      */
     const threadLocales = new Map();
     const threadKey = ()=>host.callerThread?.() ?? null;
+
+    /**
+     * A code page selector or page as the conversions read it: CP_THREAD_ACP
+     * is the ANSI page of the thread's locale, the machine's for a locale
+     * that has none.
+     *
+     * @param {number} page
+     */
+    const pageOf = page=>((page >>> 0) === CP_THREAD_ACP
+        ? localeOf(threadLocales.get(threadKey()) ?? LCID_EN_US)?.ansi || ANSI_CODE_PAGE
+        : resolvePage(page));
 
     /**
      * The source of a conversion, as characters.
@@ -805,7 +878,201 @@ export function createLocaleFunctions(host){
         return readWide(address, wanted);
     };
 
-    const compare = compareStrings;
+    /**
+     * A wide string of a count, or to its terminator for a negative one, as
+     * far as memory lets it be read: the comparisons stop at the first
+     * difference, so a string running into memory it cannot read compares
+     * as far as it goes, as Windows' does.
+     *
+     * @param {number} address @param {number} count
+     */
+    const readWideCounted = (address, count)=>{
+        const wanted = count < 0 ? host.stringLength(address, 2) : count;
+        let text = '';
+        for (let at = 0; at < wanted; at += 512)
+        {
+            try
+            {
+                text += readWide(address + at * 2, Math.min(512, wanted - at));
+            }
+            catch (e){
+                void e;
+                for (let unit = at; unit < Math.min(at + 512, wanted); unit++)
+                {
+                    try
+                    {
+                        text += readWide(address + unit * 2, 1);
+                    }
+                    catch (_e){
+                        void _e;
+                        return text;
+                    }
+                }
+            }
+        }
+        return text;
+    };
+
+    /**
+     * An ANSI string of a count, or to its terminator for a negative one, in a
+     * code page.
+     *
+     * @param {number} address @param {number} count @param {number} page
+     */
+    const readAnsiIn = (address, count, page)=>{
+        const bytes = host.readMemory(address, count < 0 ? host.stringLength(address, 1) : count);
+        return codePage(page)?.decode(bytes, false) ?? decodeSingleByte(bytes, page);
+    };
+
+    /**
+     * LCMapString's body for a locale found: a sort key (`collation.js`) or
+     * the text mapped (`lcmap.js`). A sort key's room is in bytes at either
+     * width, and one too small is filled with the whole levels it holds; a
+     * text's is in characters, and one too small is refused. Only a change
+     * of case may map a buffer onto itself.
+     *
+     * @param {import('./locales.js').Locale} record @param {number} flags
+     * @param {number} source @param {number} sourceChars
+     * @param {number} destination @param {number} room @param {boolean} wide
+     */
+    const mapString = (record, flags, source, sourceChars, destination, room, wide)=>{
+        if (source === 0 || sourceChars === 0 || room < 0 || (destination === 0 && room !== 0))
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        // The A form has no title case: both cases at once are two.
+        if (!validMapFlags(flags) || (!wide && (flags & LCMAP_TITLECASE) === LCMAP_TITLECASE))
+        {
+            return refuse(ERROR_INVALID_FLAGS);
+        }
+        if (source === destination && (flags & ~(LCMAP_TITLECASE | LOCALE_USE_CP_ACP
+            | LCMAP_LINGUISTIC_CASING)) !== 0)
+        {
+            return refuse(ERROR_INVALID_FLAGS);
+        }
+        const page = (flags & LOCALE_USE_CP_ACP) !== 0 ? ANSI_CODE_PAGE
+            : record.ansi || ANSI_CODE_PAGE;
+        const span = sourceSpan(source, anyNegative(sourceChars), wide ? 2 : 1);
+        const text = wide ? readWide(source, span.length)
+            : readAnsiIn(source, span.length, page);
+        if ((flags & LCMAP_SORTKEY) !== 0)
+        {
+            const key = sortKey(text, flags);
+            if (room === 0)
+            {
+                return key.length;
+            }
+            if (key.length > room)
+            {
+                let fits = 0;
+                key.forEach((byte, at)=>{
+                    if (byte === 1 && at < room)
+                    {
+                        fits = at + 1;
+                    }
+                });
+                host.writeMemory(destination, key.subarray(0, fits));
+                return refuse(ERROR_INSUFFICIENT_BUFFER);
+            }
+            host.writeMemory(destination, key);
+            return key.length;
+        }
+        const turkish = /^(tr|az)(-|$)/.test(record.name);
+        const mapped = mapText(text, flags, isSymbol, turkish);
+        const bytes = wide ? null : encodeIn(page, mapped, 0, 0).bytes;
+        const length = bytes === null ? mapped.length : bytes.length;
+        if (room === 0)
+        {
+            return length;
+        }
+        if (length > room)
+        {
+            return refuse(ERROR_INSUFFICIENT_BUFFER);
+        }
+        if (bytes === null)
+        {
+            writeWide(destination, mapped);
+        }
+        else
+        {
+            host.writeMemory(destination, bytes);
+        }
+        return length;
+    };
+
+    /**
+     * CompareString's body: the flags checked against those the form takes,
+     * both strings read, and compared.
+     *
+     * @param {number} flags @param {number} allowed
+     * @param {number} first @param {number} firstLength
+     * @param {number} second @param {number} secondLength
+     * @param {(address: number, count: number) => string} read
+     */
+    const compareSpans = (flags, allowed, first, firstLength, second, secondLength, read)=>{
+        if (first === 0 || second === 0)
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        if ((flags & ~allowed) !== 0)
+        {
+            return refuse(ERROR_INVALID_FLAGS);
+        }
+        return compareStrings(read(first, firstLength), read(second, secondLength), flags);
+    };
+
+    /**
+     * A conversion's source length: every negative one, not only -1, means
+     * "up to and with the terminator".
+     *
+     * @param {number} declared
+     */
+    const anyNegative = declared=>((declared | 0) < 0 ? -1 : declared);
+
+    /**
+     * Text in a page, as WideCharToMultiByte writes it: with the caller's
+     * default character when it gives one, and how much of it a short
+     * buffer takes.
+     *
+     * @param {number} page @param {string} text @param {number} flags
+     * @param {number} defaultChar  The caller's default character, or 0.
+     * @returns {{ bytes: Uint8Array, fit: (room: number) => number,
+     *             usedDefault: (written: number) => boolean }}
+     */
+    const encodeIn = (page, text, flags, defaultChar)=>{
+        const whole = (/** @type {number} */ room)=>room;
+        if (page === CP_UTF8)
+        {
+            return { bytes: new TextEncoder().encode(text), fit: whole, usedDefault: ()=>false };
+        }
+        if (page === CP_UTF7)
+        {
+            return { ...encodeUtf7(text), usedDefault: ()=>false };
+        }
+        const given = defaultChar === 0 ? null : Array.from(host.readMemory(defaultChar, 2));
+        const bestFits = (flags & WC_NO_BEST_FIT_CHARS) === 0;
+        const table = codePage(page);
+        if (table !== null)
+        {
+            const fallback = given === null ? null
+                : table.isLead(given[0]) && given[1] !== 0 ? given : [given[0]];
+            return table.encode(text, flags, fallback);
+        }
+        const { bytes, firstDefault } = encodeSingleByte(text, page,
+            given?.[0] ?? DEFAULT_CHAR, bestFits);
+        return { bytes, fit: whole,
+            usedDefault: written=>firstDefault !== -1 && firstDefault < written };
+    };
+
+    /**
+     * Whether this machine converts a page.
+     *
+     * @param {number} page
+     */
+    const isCarried = page=>KNOWN_PAGES.includes(page) || codePage(page) !== null;
+
+    /** UTF-7 and the symbol page refuse every conversion flag. @param {number} page */
+    const takesNoFlags = page=>page === CP_UTF7 || page === CP_SYMBOL;
 
     /**
      * What EnumSystemLocales hands out for its flags: the locale's LCID as
@@ -814,22 +1081,17 @@ export function createLocaleFunctions(host){
      * @param {number} flags
      * @returns {string[]}
      */
-    const systemLocales = flags=>((flags & ~LCID_ALTERNATE_SORTS) === 0 && flags !== 0 ? []
-        : [LCID_EN_US.toString(16).toUpperCase().padStart(8, '0')]);
+    const systemLocales = flags=>{
+        const hex = (/** @type {number} */ lcid)=>lcid.toString(16).toUpperCase().padStart(8, '0');
+        const alternates = (flags & LCID_ALTERNATE_SORTS) !== 0
+            ? [...ALTERNATE_SORTS.keys()].map(hex) : [];
+        const defaults = (flags & ~LCID_ALTERNATE_SORTS) === 0 && flags !== 0 ? []
+            : LOCALES.filter(locale=>!locale.neutral).map(locale=>hex(locale.lcid));
+        return [...defaults, ...alternates];
+    };
 
-    /**
-     * The locale there is, under its own LCID or a placeholder for the default
-     * -- LOCALE_NEUTRAL (0) among them, which Windows takes as the user's, as
-     * ConvertDefaultLocale does. A C runtime asks GetLocaleInfoW(0, ...) to see
-     * whether the wide functions work, and a failure there sent it to ask again
-     * at every call.
-     *
-     * @param {number} locale
-     */
-    const isOurLocale = locale=>locale === LCID_EN_US
-        || locale === LOCALE_USER_DEFAULT
-        || locale === LOCALE_SYSTEM_DEFAULT
-        || locale === 0;
+    /** @param {number} locale */
+    const isOurLocale = locale=>localeOf(locale) !== null;
 
     /**
      * The two-call protocol these three share: with a count of zero, the room
@@ -840,28 +1102,32 @@ export function createLocaleFunctions(host){
      * real and a caller of both has to know which it is holding.
      *
      * @param {string} text @param {number} buffer @param {number} count
-     * @param {boolean} isWide
+     * @param {boolean} isWide @param {number} [page]  The ANSI form's code page.
      */
-    const writeAnswer = (text, buffer, count, isWide)=>{
-        const needed = text.length + 1;
+    const writeAnswer = (text, buffer, count, isWide, page = ANSI_CODE_PAGE)=>{
+        const encoded = isWide ? null : encodeIn(page, `${text}\0`, 0, 0);
+        const needed = encoded === null ? text.length + 1 : encoded.bytes.length;
         if (count === 0)
         {
             return needed;
+        }
+        // A buffer too small is filled as far as it goes, and refused.
+        const room = Math.min(needed, Math.max(count, 0));
+        if (buffer !== 0 && room > 0)
+        {
+            if (encoded === null)
+            {
+                writeWide(buffer, `${text}\0`.slice(0, room));
+            }
+            else
+            {
+                host.writeMemory(buffer, encoded.bytes.subarray(0, encoded.fit(room)));
+            }
         }
         if (buffer === 0 || needed > count)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
-        }
-        if (isWide)
-        {
-            writeWide(buffer, text + String.fromCharCode(0));
-        }
-        else
-        {
-            const { bytes } = encodeSingleByte(text + String.fromCharCode(0),
-                ANSI_CODE_PAGE);
-            host.writeMemory(buffer, bytes);
         }
         return needed;
     };
@@ -912,7 +1178,8 @@ export function createLocaleFunctions(host){
                 }
             }
             host.free?.(block);
-            return answer;
+            void answer;
+            return 1;
         };
         return run();
     };
@@ -942,12 +1209,26 @@ export function createLocaleFunctions(host){
      * picture when the caller passed none.
      *
      * @param {number} address @param {boolean} wide @param {boolean} currency
+     * @param {import("./locales.js").Locale} record @param {number} flags
      * @returns {Readonly<NumberPicture> | null} null for a picture Windows refuses
      */
-    const numberPicture = (address, wide, currency)=>{
+    const numberPicture = (address, wide, currency, record, flags)=>{
         if (address === 0)
         {
-            return currency ? CURRENCY_DEFAULTS : NUMBER_DEFAULTS;
+            const own = flags & LOCALE_NOUSEROVERRIDE;
+            const text = (/** @type {number} */ type)=>String(valueOf(record, own | type) ?? '');
+            const number = (/** @type {number} */ type)=>Number(valueOf(record, own | type) ?? 0);
+            return currency ? {
+                digits: number(LCTYPE.ICURRDIGITS), leadingZero: number(LCTYPE.ILZERO),
+                grouping: groupingOfText(text(LCTYPE.SMONGROUPING)),
+                decimal: text(LCTYPE.SMONDECIMALSEP), thousand: text(LCTYPE.SMONTHOUSANDSEP),
+                negativeOrder: number(LCTYPE.INEGCURR), positiveOrder: number(LCTYPE.ICURRENCY),
+                symbol: text(LCTYPE.SCURRENCY),
+            } : {
+                digits: number(LCTYPE.IDIGITS), leadingZero: number(LCTYPE.ILZERO),
+                grouping: groupingOfText(text(LCTYPE.SGROUPING)), decimal: text(LCTYPE.SDECIMAL),
+                thousand: text(LCTYPE.STHOUSAND), negativeOrder: number(LCTYPE.INEGNUMBER),
+            };
         }
         const view = new DataView(host.readMemory(address,
             currency ? CURRENCYFMTA_SIZE : NUMBERFMTA_SIZE).slice().buffer);
@@ -965,36 +1246,33 @@ export function createLocaleFunctions(host){
         return {
             digits: view.getUint32(0, true),
             leadingZero: view.getUint32(4, true),
-            grouping: view.getUint32(8, true),
+            grouping: groupingOfNumber(view.getUint32(8, true)),
             decimal, thousand, negativeOrder, positiveOrder, symbol,
         };
     };
 
     /**
-     * The integer digits in groups, as a Grouping number says: its decimal
-     * digits are the group sizes from the point leftwards, the last repeated
-     * -- unless it is 0, which leaves the rest in one run (3 is 1,234,567;
-     * 32 is 12,34,567; 30 is 1234,567).
+     * The integer digits in groups, as a grouping says: a group of 0 at the
+     * start is none, one further on an empty group; the digits left when the
+     * sizes run out are the last group.
      *
-     * @param {string} whole @param {number} grouping @param {string} separator
+     * @param {string} whole @param {Grouping} grouping @param {string} separator
      */
     const group = (whole, grouping, separator)=>{
-        const text = String(grouping);
-        const repeats = !text.endsWith('0');
-        const sizes = [...(repeats ? text : text.slice(0, -1))].map(Number);
+        const { sizes, repeat } = grouping;
         const parts = [];
         let rest = whole;
-        for (let at = 0; rest.length > 0; at++)
+        for (let at = sizes[0] === 0 ? 1 : 0; rest.length > 0; at++)
         {
-            const size = sizes[Math.min(at, sizes.length - 1)] ?? 0;
-            if (size === 0 || (!repeats && at >= sizes.length) || rest.length <= size)
+            const size = at < sizes.length ? sizes[at] : repeat ? sizes[sizes.length - 1] : -1;
+            if (size < 0 || rest.length <= size)
             {
-                parts.unshift(rest);
                 break;
             }
             parts.unshift(rest.slice(rest.length - size));
             rest = rest.slice(0, rest.length - size);
         }
+        parts.unshift(rest);
         return parts.join(separator);
     };
 
@@ -1067,8 +1345,9 @@ export function createLocaleFunctions(host){
     const userValues = new Map();
 
     /**
-     * SetLocaleInfo in either width: a string the locale holds, replaced for
-     * this user.
+     * SetLocaleInfo in either width: one of the values a user may change,
+     * replaced for this user. The rest are the locale's and refused as a bad
+     * flag (Wine's locale.c test_SetLocaleInfo walks every type).
      *
      * @param {number} locale @param {number} type @param {string | null} value
      */
@@ -1079,7 +1358,7 @@ export function createLocaleFunctions(host){
             return 0;
         }
         const wanted = type & ~LOCALE_USE_CP_ACP;
-        if (/** @type {Record<number, string>} */ (LOCALE_STRINGS)[wanted] === undefined)
+        if (!USER_SETTABLE.has(wanted))
         {
             host.setLastError(ERROR_INVALID_FLAGS);
             return 0;
@@ -1089,38 +1368,88 @@ export function createLocaleFunctions(host){
     };
 
     /**
+     * A locale's answer to an LCTYPE, as text or with LOCALE_RETURN_NUMBER as a
+     * number, and null where it has none: the user's own value first for the
+     * machine's locale unless LOCALE_NOUSEROVERRIDE asks past it, and with
+     * LOCALE_RETURN_GENITIVE_NAMES a month as a date names it.
+     *
+     * @param {import('./locales.js').Locale} record @param {number} type
+     * @returns {string | number | null}
+     */
+    const valueOf = (record, type)=>{
+        const wanted = type & ~LOCALE_FLAGS;
+        const values = localeValues(record);
+        const own = record === MACHINE_LOCALE && (type & LOCALE_NOUSEROVERRIDE) === 0
+            ? userValues.get(wanted) : undefined;
+        const asNumber = (type & LOCALE_RETURN_NUMBER) !== 0;
+        if (isNumberType(wanted))
+        {
+            const number = own === undefined ? values.numbers.get(wanted) : Number(own);
+            if (number === undefined)
+            {
+                return null;
+            }
+            if (asNumber)
+            {
+                return number;
+            }
+            return own ?? (HEX_TYPES.includes(wanted) ? number.toString(16).padStart(4, '0')
+                : wanted === LCTYPE.IDEFAULTEBCDICCODEPAGE ? String(number).padStart(3, '0')
+                    : String(number));
+        }
+        if (asNumber)
+        {
+            return null;
+        }
+        const text = own ?? values.strings.get(wanted);
+        if (text === undefined)
+        {
+            return null;
+        }
+        if ((type & LOCALE_RETURN_GENITIVE_NAMES) !== 0 && wanted >= LOCALE_SMONTHNAME1
+            && wanted < LOCALE_SMONTHNAME1 + 12)
+        {
+            return values.strings.get(GENITIVE + wanted - LOCALE_SMONTHNAME1) ?? text;
+        }
+        return text;
+    };
+
+    /**
      * @param {number} locale @param {number} type @param {number} buffer
      * @param {number} count @param {boolean} isWide
      */
     const localeInfo = (locale, type, buffer, count, isWide)=>{
-        if (!isOurLocale(locale))
+        const record = localeOf(locale);
+        if (record === null)
         {
             host.setLastError(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        // The high bit asks for the unaltered system value rather than whatever
-        // the user changed in the control panel. There is no user here, so both
-        // answers are the same one and the bit is simply ignored.
+        return answerInfo(record, type, buffer, count, isWide);
+    };
+
+    /**
+     * GetLocaleInfo's answer for a locale found, by LCID or by name.
+     *
+     * @param {import('./locales.js').Locale} record @param {number} type
+     * @param {number} buffer @param {number} count @param {boolean} isWide
+     */
+    const answerInfo = (record, type, buffer, count, isWide)=>{
         const wanted = type & ~LOCALE_FLAGS;
-        const number = /** @type {Record<number, number>} */ (LOCALE_NUMBERS)[wanted];
-        const text = ((type & LOCALE_NOUSEROVERRIDE) === 0 ? userValues.get(wanted) : undefined)
-            ?? /** @type {Record<number, string>} */ (LOCALE_STRINGS)[wanted];
         const genitive = (type & LOCALE_RETURN_GENITIVE_NAMES) !== 0;
-        const asNumber = (type & LOCALE_RETURN_NUMBER) !== 0;
+        const answer = valueOf(record, type);
         // What the type cannot be asked for is a bad flag rather than a bad
         // parameter, and a caller that tells the two apart retries without
         // the flag: a string has no number, and only the wide form carries
         // the genitive month names.
-        const refused = (number === undefined && text === undefined)
-            || (asNumber && number === undefined)
+        if (answer === null || (!isWide && WIDE_ONLY_TYPES.includes(wanted))
             || (genitive && (!isWide || wanted < LOCALE_SMONTHNAME1
-                || (wanted > LOCALE_SMONTHNAME1 + 11 && wanted !== LOCALE_SMONTHNAME13)));
-        if (refused)
+            || (wanted > LOCALE_SMONTHNAME1 + 11 && wanted !== LOCALE_SMONTHNAME13))))
         {
             host.setLastError(ERROR_INVALID_FLAGS);
             return 0;
         }
-        if (asNumber)
+        if (typeof answer === 'number')
         {
             const bytes = 4;
             const needed = isWide ? bytes / 2 : bytes;
@@ -1134,14 +1463,11 @@ export function createLocaleFunctions(host){
                 return 0;
             }
             const value = new Uint8Array(bytes);
-            new DataView(value.buffer).setUint32(0, number, true);
+            new DataView(value.buffer).setUint32(0, answer, true);
             host.writeMemory(buffer, value);
             return needed;
         }
-        const answer = text ?? (HEX_NUMBERS.includes(wanted)
-            ? number.toString(16).padStart(4, '0')
-            : String(number));
-        return writeAnswer(answer, buffer, count, isWide);
+        return writeAnswer(answer, buffer, count, isWide, record.ansi || ANSI_CODE_PAGE);
     };
 
     /**
@@ -1183,72 +1509,6 @@ export function createLocaleFunctions(host){
             minute: now.getUTCMinutes(),
             second: now.getUTCSeconds(),
         };
-    };
-
-    /**
-     * A date or time picture, rendered.
-     *
-     * The tokens are matched longest first, which is the whole of the
-     * difference between a correct renderer and one that turns "yyyy" into four
-     * copies of the year. Anything not a token is copied through, so a picture
-     * carrying separators or literal text comes out with them.
-     *
-     * @param {string} picture
-     * @param {{ year: number, month: number, day: number, weekday: number,
-     *           hour: number, minute: number, second: number }} when
-     */
-    const render = (picture, when)=>{
-        const pad = (/** @type {number} */ value, /** @type {number} */ width)=>
-            String(value).padStart(width, '0');
-        const hour12 = when.hour % 12 === 0 ? 12 : when.hour % 12;
-        /** @type {[string, string][]} */
-        const tokens = [
-            ['yyyy', pad(when.year, 4)],
-            ['yy', pad(when.year % 100, 2)],
-            ['MMMM', MONTHS[when.month - 1] ?? ''],
-            ['MMM', (MONTHS[when.month - 1] ?? '').slice(0, 3)],
-            ['MM', pad(when.month, 2)],
-            ['M', String(when.month)],
-            ['dddd', DAYS[when.weekday] ?? ''],
-            ['ddd', (DAYS[when.weekday] ?? '').slice(0, 3)],
-            ['dd', pad(when.day, 2)],
-            ['d', String(when.day)],
-            ['HH', pad(when.hour, 2)],
-            ['H', String(when.hour)],
-            ['hh', pad(hour12, 2)],
-            ['h', String(hour12)],
-            ['mm', pad(when.minute, 2)],
-            ['m', String(when.minute)],
-            ['ss', pad(when.second, 2)],
-            ['s', String(when.second)],
-            ['tt', when.hour < 12 ? 'AM' : 'PM'],
-            ['t', when.hour < 12 ? 'A' : 'P'],
-        ];
-
-        let out = '';
-        let at = 0;
-        while (at < picture.length)
-        {
-            // Text in single quotes is written as it stands, and two quotes
-            // together, in or out of them, are one.
-            if (picture[at] === '\'')
-            {
-                const quoted = /^'((?:[^']|'')*)'?/.exec(picture.slice(at)) ?? ['\'', ''];
-                out += quoted[0] === '\'\'' ? '\'' : quoted[1].replace(/''/g, '\'');
-                at += quoted[0].length;
-                continue;
-            }
-            const found = tokens.find(([token])=>picture.startsWith(token, at));
-            if (found)
-            {
-                out += found[1];
-                at += found[0].length;
-                continue;
-            }
-            out += picture[at];
-            at++;
-        }
-        return out;
     };
 
     /** @param {number} address */
@@ -1402,24 +1662,26 @@ export function createLocaleFunctions(host){
     };
 
     /**
-     * The locale a name names, or 0 for one this machine does not have: no
-     * name is the user's, "" the invariant locale, and
-     * LOCALE_NAME_SYSTEM_DEFAULT the system's.
+     * The locale a name names, or null for one this machine does not have:
+     * no name is the user's, "" the invariant locale, and
+     * LOCALE_NAME_SYSTEM_DEFAULT the system's; a neutral name is its own
+     * locale, as the name-based calls read it.
      *
      * @param {number} address
+     * @returns {import('./locales.js').Locale | null}
      */
     const localeOfName = address=>{
         if (address === 0)
         {
-            return LCID_EN_US;
+            return MACHINE_LOCALE;
         }
-        const name = readWideSpan(address, -1).toLowerCase();
+        const name = readWideSpan(address, -1);
         if (name === '')
         {
-            return LOCALE_INVARIANT;
+            return INVARIANT_LOCALE;
         }
-        return name === LOCALE_STRINGS[0x0000005C].toLowerCase()
-            || name === '!x-sys-default-locale' ? LCID_EN_US : 0;
+        return name.toLowerCase() === '!x-sys-default-locale' ? MACHINE_LOCALE
+            : localeByName(name);
     };
 
     /**
@@ -1477,12 +1739,18 @@ export function createLocaleFunctions(host){
         argBytes: 24,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [locale, calendar, type, buffer, count, value])=>{
-            if (!isOurLocale(locale >>> 0) || (calendar >>> 0) !== CAL_GREGORIAN)
+            const kind = (type >>> 0) & ~CAL_FLAGS;
+            // Every calendar Windows has answers its two-digit-year limit,
+            // whatever calendars the locale uses; anything else only the
+            // locale's own does.
+            const limit = kind === CAL_ITWODIGITYEARMAX
+                ? TWO_DIGIT_YEAR_MAX.get(calendar >>> 0) : undefined;
+            if (!isOurLocale(locale >>> 0)
+                || ((calendar >>> 0) !== CAL_GREGORIAN && limit === undefined))
             {
                 return refuse(ERROR_INVALID_PARAMETER);
             }
-            const kind = (type >>> 0) & ~CAL_FLAGS;
-            const text = CALENDAR_INFO[kind];
+            const text = limit ?? CALENDAR_INFO[kind];
             if (text === undefined)
             {
                 return refuse(ERROR_INVALID_FLAGS);
@@ -1539,7 +1807,7 @@ export function createLocaleFunctions(host){
                 [GEO_NATION]: String(location | 0),
                 [GEO_ISO2]: place.iso2,
                 [GEO_ISO3]: place.iso3,
-                [GEO_RFC1766]: `${LOCALE_STRINGS[0x00000059]}-${place.iso2}`.toLowerCase(),
+                [GEO_RFC1766]: `en-${place.iso2}`.toLowerCase(),
                 [GEO_LCID]: asked.toString(16).toUpperCase().padStart(8, '0'),
                 [GEO_FRIENDLYNAME]: place.name,
                 [GEO_OFFICIALNAME]: place.official,
@@ -1643,17 +1911,21 @@ export function createLocaleFunctions(host){
      * @param {number} page @param {number} info @param {boolean | null} wide
      */
     const pageInfo = (page, info, wide)=>{
-        const resolved = resolvePage(page);
-        if (!KNOWN_PAGES.includes(resolved))
+        const resolved = pageOf(page);
+        if (!isCarried(resolved))
         {
             return refuse(ERROR_INVALID_PARAMETER);
         }
-        const name = PAGE_NAMES[/** @type {keyof typeof PAGE_NAMES} */ (resolved)];
+        const table = codePage(resolved);
+        const name = table?.name ?? PAGE_NAMES[/** @type {keyof typeof PAGE_NAMES} */ (resolved)];
         const bytes = new Uint8Array(wide === null ? CPINFO_SIZE
             : CPINFOEX_NAME + MAX_PATH * (wide ? 2 : 1));
         const view = new DataView(bytes.buffer);
-        view.setUint32(0, resolved === CP_UTF8 ? 4 : 1, true);
+        view.setUint32(0, resolved === CP_UTF8 ? 4 : resolved === CP_UTF7 ? 5
+            : table?.maxCharSize ?? 1, true);
         bytes[4] = DEFAULT_CHAR;
+        // LeadByte: up to five ranges, the sixth pair left zero to end them.
+        bytes.set((table?.leadRanges ?? []).slice(0, 10), 6);
         if (wide !== null)
         {
             view.setUint16(CPINFO_SIZE, 0xfffd, true);
@@ -1695,28 +1967,94 @@ export function createLocaleFunctions(host){
     const whenFormat = (wide, date)=>({
         argBytes: 24,
         /** @param {number[]} args */
-        handler: (/** @type {number[]} */ [, flags, time, format, buffer, count])=>{
-            const asked = flags >>> 0;
-            if ((buffer >>> 0) === 0 && (count | 0) !== 0)
-            {
-                return refuse(ERROR_INVALID_PARAMETER);
-            }
-            if ((format >>> 0) !== 0 && (date ? asked : asked & LOCALE_NOUSEROVERRIDE) !== 0)
-            {
-                return refuse(ERROR_INVALID_FLAGS);
-            }
-            const when = timeOf(time >>> 0);
-            if (!when || !(date ? isDate(when) : isTimeOfDay(when)))
-            {
-                return refuse(ERROR_INVALID_PARAMETER);
-            }
-            const picture = (format >>> 0) !== 0
-                ? (wide ? readWideSpan : readAnsiSpan)(format >>> 0, -1)
-                : date ? ((asked & DATE_LONGDATE) !== 0 ? LONG_DATE : SHORT_DATE)
-                    : ((asked & TIME_NOSECONDS) !== 0 ? SHORT_TIME : LONG_TIME);
-            return writeAnswer(render(picture, when), buffer >>> 0, count | 0, wide);
+        handler: (/** @type {number[]} */ [locale, flags, time, format, buffer, count])=>{
+            const record = localeOf(locale >>> 0);
+            return record === null ? refuse(ERROR_INVALID_PARAMETER)
+                : formatWhen(record, flags >>> 0, time >>> 0, format >>> 0, buffer >>> 0,
+                    count | 0, wide, date);
         },
     });
+
+    /**
+     * The ANSI text at an address in a code page: what an A call is handed
+     * in its locale's page.
+     *
+     * @param {number} address @param {number} page
+     */
+    const readTextIn = (address, page)=>{
+        const bytes = host.readMemory(address, host.stringLength(address, 1));
+        return codePage(page)?.decode(bytes, false) ?? decodeSingleByte(bytes, page);
+    };
+
+    /**
+     * The names a locale's dates and times are written with.
+     *
+     * @param {import('./locales.js').Locale} record
+     * @returns {import('./datetime-format.js').CalendarNames}
+     */
+    const calendarNamesOf = record=>{
+        const text = (/** @type {number} */ type)=>String(valueOf(record, type) ?? '');
+        /** Sunday first, from LCTYPEs that start on Monday. */
+        const week = (/** @type {number} */ first)=>[6, 0, 1, 2, 3, 4, 5].map(day=>text(first + day));
+        const months = Array.from({ length: 12 }, (_, at)=>text(LOCALE_SMONTHNAME1 + at));
+        const genitive = months.map((month, at)=>text(LOCALE_SMONTHNAME1 + at
+            | LOCALE_RETURN_GENITIVE_NAMES));
+        return {
+            days: week(LCTYPE.SDAYNAME1),
+            shortDays: week(LCTYPE.SABBREVDAYNAME1),
+            months,
+            shortMonths: Array.from({ length: 12 }, (_, at)=>text(LCTYPE.SABBREVMONTHNAME1 + at)),
+            genitive: genitive.some((name, at)=>name !== months[at]) ? genitive : null,
+            am: text(LCTYPE.S1159),
+            pm: text(LCTYPE.S2359),
+            era: CALENDAR_INFO[4],
+        };
+    };
+
+    /**
+     * GetDateFormat's or GetTimeFormat's answer for a locale found.
+     *
+     * A date's flags pick its picture -- short, long, year and month, month
+     * and day, one at most -- and come with no picture of the caller's; a
+     * time's take fields out and may come with one, LOCALE_NOUSEROVERRIDE
+     * apart. A date's time of day is not looked at, nor a time's date. An A
+     * call's text is in the locale's own ANSI page unless LOCALE_USE_CP_ACP.
+     *
+     * @param {import('./locales.js').Locale} record @param {number} flags
+     * @param {number} time @param {number} format @param {number} buffer
+     * @param {number} count @param {boolean} wide @param {boolean} date
+     */
+    const formatWhen = (record, flags, time, format, buffer, count, wide, date)=>{
+        if (buffer === 0 && count !== 0)
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        const kinds = flags & (DATE_SHORTDATE | DATE_LONGDATE | DATE_YEARMONTH | DATE_MONTHDAY);
+        const allowed = date ? DATE_FLAGS : TIME_FLAGS;
+        if ((flags & ~allowed) !== 0 || (date && (kinds & (kinds - 1)) !== 0)
+            || (format !== 0 && (flags & (date ? allowed & ~LOCALE_USE_CP_ACP
+                : LOCALE_NOUSEROVERRIDE)) !== 0))
+        {
+            return refuse(ERROR_INVALID_FLAGS);
+        }
+        const page = (flags & LOCALE_USE_CP_ACP) !== 0 ? ANSI_CODE_PAGE
+            : record.ansi || ANSI_CODE_PAGE;
+        const when = timeOf(time);
+        if (!when || !(date ? isDate(when) : isTimeOfDay(when)))
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        const own = (flags & LOCALE_NOUSEROVERRIDE) !== 0 ? LOCALE_NOUSEROVERRIDE : 0;
+        const picture = format !== 0 ? (wide ? readWideSpan(format, -1) : readTextIn(format, page))
+            : String(valueOf(record, own | (!date ? LCTYPE.STIMEFORMAT
+                : kinds === DATE_LONGDATE ? LCTYPE.SLONGDATE
+                    : kinds === DATE_YEARMONTH ? LCTYPE.SYEARMONTH
+                        : kinds === DATE_MONTHDAY ? LCTYPE.SMONTHDAY : LCTYPE.SSHORTDATE)) ?? '');
+        const names = calendarNamesOf(record);
+        const text = date ? renderDate(picture, when, names)
+            : renderTime(picture, when, names, flags);
+        return writeAnswer(text, buffer, count, wide, page);
+    };
 
     /**
      * GetNumberFormat or GetCurrencyFormat, at either width:
@@ -1734,7 +2072,8 @@ export function createLocaleFunctions(host){
         argBytes: 24,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [locale, flags, value, format, buffer, count])=>{
-            if (!isOurLocale(locale >>> 0) || ((buffer >>> 0) === 0 && (count | 0) !== 0))
+            const record = localeOf(locale >>> 0);
+            if (record === null || ((buffer >>> 0) === 0 && (count | 0) !== 0))
             {
                 return refuse(ERROR_INVALID_PARAMETER);
             }
@@ -1742,11 +2081,11 @@ export function createLocaleFunctions(host){
             {
                 return refuse(ERROR_INVALID_FLAGS);
             }
-            const picture = numberPicture(format >>> 0, wide, currency);
+            const picture = numberPicture(format >>> 0, wide, currency, record, flags >>> 0);
             const text = picture && formatNumber(
                 (wide ? readWideSpan : readAnsiSpan)(value >>> 0, -1), picture, currency);
             return text === null ? refuse(ERROR_INVALID_PARAMETER)
-                : writeAnswer(text, buffer >>> 0, count | 0, wide);
+                : writeAnswer(text, buffer >>> 0, count | 0, wide, record.ansi || ANSI_CODE_PAGE);
         },
     });
 
@@ -1791,9 +2130,12 @@ export function createLocaleFunctions(host){
             /** @param {number[]} args */
             handler: ([locale])=>{
                 const asked = locale >>> 0;
-                threadLocales.set(threadKey(),
-                    asked === LOCALE_USER_DEFAULT || asked === LOCALE_SYSTEM_DEFAULT
-                        ? LCID_EN_US : asked);
+                if (localeOf(asked) === null)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                threadLocales.set(threadKey(), isDefault(asked) ? LCID_EN_US : asked);
                 return 1;
             },
         },
@@ -1801,16 +2143,86 @@ export function createLocaleFunctions(host){
         /**
          * LCID ConvertDefaultLocale(LCID Locale)
          *
-         * The two placeholders for "the default" become the one locale there
-         * is; any other locale is already itself.
+         * A placeholder for "the default" becomes the user's locale, and a
+         * language's neutral LCID -- without a sort of its own -- the locale
+         * Windows stands for it; any other LCID is already itself.
          */
         ConvertDefaultLocale: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([locale])=>{
                 const asked = locale >>> 0;
-                return asked === LOCALE_SYSTEM_DEFAULT || asked === LOCALE_USER_DEFAULT
-                    || asked === 0 ? LCID_EN_US : asked;
+                if (isDefault(asked))
+                {
+                    return LCID_EN_US;
+                }
+                const found = (asked >>> 16) === 0 ? localeByLcid(asked) : null;
+                return found !== null && found.neutral ? found.specific : asked;
+            },
+        },
+
+        /**
+         * int LCIDToLocaleName(LCID Locale, LPWSTR lpName, int cchName, DWORD dwFlags)
+         *
+         * The locale's name with its terminator, the room it needs when asked
+         * with none: the defaults are this machine's, the invariant locale's
+         * name is empty, and a language's neutral LCID is its language alone
+         * with LOCALE_ALLOW_NEUTRAL_NAMES -- its default region's without.
+         */
+        LCIDToLocaleName: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([locale, buffer, room, flags])=>{
+                const name = localeTagOf(locale >>> 0,
+                    ((flags >>> 0) & LOCALE_ALLOW_NEUTRAL_NAMES) !== 0);
+                if (name === null)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((room | 0) === 0)
+                {
+                    return name.length + 1;
+                }
+                if ((room | 0) < name.length + 1 || (buffer >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                writeWide(buffer >>> 0, `${name}\0`);
+                return name.length + 1;
+            },
+        },
+
+        /**
+         * LCID LocaleNameToLCID(LPCWSTR lpName, DWORD dwFlags)
+         *
+         * 0 for a name no locale has; a neutral name is its default locale's
+         * LCID unless LOCALE_ALLOW_NEUTRAL_NAMES asks for its own.
+         */
+        LocaleNameToLCID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([name, flags])=>{
+                if ((name >>> 0) === 0)
+                {
+                    return LCID_EN_US;
+                }
+                const asked = readWide(name >>> 0, host.stringLength(name >>> 0, 2));
+                if (asked === '')
+                {
+                    return LOCALE_INVARIANT;
+                }
+                if (asked.toLowerCase() === '!x-sys-default-locale')
+                {
+                    return LCID_EN_US;
+                }
+                const lcid = lcidOfName(asked, ((flags >>> 0) & LOCALE_ALLOW_NEUTRAL_NAMES) !== 0);
+                if (lcid === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                }
+                return lcid;
             },
         },
 
@@ -1985,7 +2397,7 @@ export function createLocaleFunctions(host){
         IsValidCodePage: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([page])=>KNOWN_PAGES.includes(resolvePage(page)) ? 1 : 0,
+            handler: ([page])=>(isCarried(pageOf(page)) ? 1 : 0),
         },
 
         /**
@@ -2003,45 +2415,113 @@ export function createLocaleFunctions(host){
         /**
          * BOOL IsDBCSLeadByteEx(UINT CodePage, BYTE TestChar)
          *
-         * Never. Both pages this build carries are single-byte, so no byte
-         * begins a two-byte character -- and a caller that believed otherwise
-         * would skip the byte after it.
+         * Only in a double-byte page; never in the machine's own two, which
+         * are single-byte -- a caller told otherwise would skip the byte after.
          */
         IsDBCSLeadByteEx: {
             argBytes: 8,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([page, byte])=>(codePage(pageOf(page))?.isLead(byte) ? 1 : 0),
         },
 
         /**
          * int CompareStringA(LCID, DWORD dwCmpFlags, LPCSTR, int, LPCSTR, int)
          *
-         * An ordinal comparison, optionally case-insensitive. It is not the
-         * locale-aware collation Windows performs: this build has no collation
-         * table, and one invented here would sort a list into an order no other
-         * part of the system agrees with. For the alphabet these code pages
-         * cover the two orders differ only in where accented letters fall.
-         *
-         * The return values are 1, 2 and 3 rather than the -1, 0 and 1 every
-         * other comparison in the world uses -- a caller subtracts 2 to get the
-         * familiar sign, and a function returning 0 here means it failed.
+         * Windows' word sort (`collation.js`), the text read in the locale's
+         * ANSI page. The answers are 1, 2 and 3 rather than the -1, 0 and 1
+         * every other comparison in the world uses -- a caller subtracts 2 to
+         * get the familiar sign, and 0 here means the call failed.
          */
         CompareStringA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, flags, first, firstLength, second, secondLength])=>compare(
-                readAnsiSpan(first >>> 0, firstLength),
-                readAnsiSpan(second >>> 0, secondLength),
-                flags >>> 0),
+            handler: ([locale, flags, first, firstLength, second, secondLength])=>{
+                const record = localeOf(locale >>> 0);
+                if (record === null)
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                const page = ((flags >>> 0) & LOCALE_USE_CP_ACP) !== 0 ? ANSI_CODE_PAGE
+                    : record.ansi || ANSI_CODE_PAGE;
+                return compareSpans(flags >>> 0, COMPARE_FLAGS & ~SORT_DIGITSASNUMBERS,
+                    first >>> 0, firstLength | 0, second >>> 0, secondLength | 0,
+                    (address, length)=>readAnsiIn(address, length, page));
+            },
         },
 
         /** int CompareStringW(LCID, DWORD, LPCWSTR, int, LPCWSTR, int) */
         CompareStringW: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, flags, first, firstLength, second, secondLength])=>compare(
-                readWideSpan(first >>> 0, firstLength),
-                readWideSpan(second >>> 0, secondLength),
-                flags >>> 0),
+            handler: ([locale, flags, first, firstLength, second, secondLength])=>(
+                localeOf(locale >>> 0) === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : compareSpans(flags >>> 0, COMPARE_FLAGS, first >>> 0, firstLength | 0,
+                        second >>> 0, secondLength | 0, readWideCounted)),
+        },
+
+        /**
+         * int CompareStringEx(LPCWSTR lpLocaleName, DWORD dwCmpFlags, LPCWCH, int,
+         *     LPCWCH, int, LPNLSVERSIONINFO, LPVOID lpReserved, LPARAM lParam)
+         */
+        CompareStringEx: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([name, flags, first, firstLength, second, secondLength])=>(
+                localeOfName(name >>> 0) === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : compareSpans(flags >>> 0, COMPARE_FLAGS, first >>> 0, firstLength | 0,
+                        second >>> 0, secondLength | 0, readWideCounted)),
+        },
+
+        /**
+         * int CompareStringOrdinal(LPCWCH lpString1, int cchCount1, LPCWCH lpString2,
+         *     int cchCount2, BOOL bIgnoreCase)
+         *
+         * Code unit by code unit, NUL included; ignoring case upper-cases
+         * both first, as Windows' ordinal comparisons do.
+         */
+        CompareStringOrdinal: {
+            argBytes: 20,
+            natives: {
+                /**
+                 * WCHAR RtlUpcaseUnicodeChar(WCHAR Source) and its downcase
+                 * twin: the one-to-one case table, a character whose other
+                 * case is longer than one unit left as it is.
+                 */
+                RtlUpcaseUnicodeChar: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([unit])=>upcaseUnit(unit & 0xffff),
+                },
+                RtlDowncaseUnicodeChar: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([unit])=>{
+                        const lower = String.fromCharCode(unit & 0xffff).toLowerCase();
+                        return lower.length === 1 ? lower.charCodeAt(0) : unit & 0xffff;
+                    },
+                },
+            },
+            /** @param {number[]} args */
+            handler: ([first, firstLength, second, secondLength, ignoreCase])=>{
+                if ((first >>> 0) === 0 || (second >>> 0) === 0 || (ignoreCase >>> 0) > 1)
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                const upper = (/** @type {string} */ text)=>((ignoreCase >>> 0) === 0 ? text
+                    : String.fromCharCode(...Array.from(text,
+                        unit=>upcaseUnit(unit.charCodeAt(0)))));
+                const left = upper(readWideCounted(first >>> 0, firstLength | 0));
+                const right = upper(readWideCounted(second >>> 0, secondLength | 0));
+                for (let at = 0; at < Math.min(left.length, right.length); at++)
+                {
+                    if (left.charCodeAt(at) !== right.charCodeAt(at))
+                    {
+                        return left.charCodeAt(at) < right.charCodeAt(at)
+                            ? CSTR_LESS_THAN : CSTR_GREATER_THAN;
+                    }
+                }
+                return Math.sign(left.length - right.length) + 2;
+            },
         },
 
         /** int GetLocaleInfoA(LCID Locale, LCTYPE LCType, LPSTR lpLCData, int cchData) */
@@ -2132,12 +2612,17 @@ export function createLocaleFunctions(host){
         EnumTimeFormatsA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([proc])=>enumerateFormats(proc, TIME_FORMATS, false),
+            handler: ([proc, , flags])=>((flags >>> 0) & ~LOCALE_USE_CP_ACP) !== 0
+                ? refuse(ERROR_INVALID_FLAGS) : enumerateFormats(proc, TIME_FORMATS, false),
         },
         EnumTimeFormatsW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([proc])=>enumerateFormats(proc, TIME_FORMATS, true),
+            handler: ([proc, , flags])=>{
+                const kind = (flags >>> 0) & ~LOCALE_USE_CP_ACP;
+                return kind !== 0 && kind !== TIME_NOSECONDS ? refuse(ERROR_INVALID_FLAGS)
+                    : enumerateFormats(proc, kind === 0 ? TIME_FORMATS : SHORT_TIME_FORMATS, true);
+            },
         },
 
         /** GetDateFormatA/W and GetTimeFormatA/W: see whenFormat. */
@@ -2193,17 +2678,23 @@ export function createLocaleFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([page, flags, source, sourceBytes, destination, destinationChars])=>{
-                const resolved = resolvePage(page);
+                const resolved = pageOf(page);
                 // A NULL source is refused before it is measured: measuring
                 // reads it, and a read of address zero is a fault where
                 // Windows answers with an error code. A negative destination
                 // size is refused with it, before anything is written: unlike
                 // the source's, it has no "up to the terminator" meaning.
                 const span = (source >>> 0) === 0
-                    ? { length: 0 } : sourceSpan(source >>> 0, sourceBytes, 1);
-                if (span.length === 0 || (destinationChars | 0) < 0)
+                    ? { length: 0 } : sourceSpan(source >>> 0, anyNegative(sourceBytes), 1);
+                if (span.length === 0 || (destinationChars | 0) < 0 || resolved > 0xffff
+                    || ((destination >>> 0) === 0 && (destinationChars | 0) !== 0))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((flags & ~MB_FLAGS) !== 0 || (flags !== 0 && takesNoFlags(resolved)))
+                {
+                    host.setLastError(ERROR_INVALID_FLAGS);
                     return 0;
                 }
                 const raw = host.readMemory(source >>> 0, span.length);
@@ -2223,9 +2714,21 @@ export function createLocaleFunctions(host){
                         return 0;
                     }
                 }
+                else if (resolved === CP_UTF7)
+                {
+                    text = decodeUtf7(raw);
+                }
                 else
                 {
-                    text = decodeSingleByte(raw, resolved);
+                    const carried = codePage(resolved);
+                    const decoded = carried === null ? decodeSingleByte(raw, resolved)
+                        : carried.decode(raw, (flags & MB_ERR_INVALID_CHARS) !== 0);
+                    if (decoded === null)
+                    {
+                        host.setLastError(ERROR_NO_UNICODE_TRANSLATION);
+                        return 0;
+                    }
+                    text = decoded;
                 }
 
                 // Zero is the measuring call, and it must not write.
@@ -2261,35 +2764,47 @@ export function createLocaleFunctions(host){
             handler(args){
                 const [page, flags, source, sourceChars, destination, destinationBytes] = args;
                 const usedDefaultOut = args[7] >>> 0;
-                void flags;
-                const resolved = resolvePage(page);
+                const resolved = pageOf(page);
                 const span = (source >>> 0) === 0
-                    ? { length: 0 } : sourceSpan(source >>> 0, sourceChars, 2);
-                if (span.length === 0 || (destinationBytes | 0) < 0)
+                    ? { length: 0 } : sourceSpan(source >>> 0, anyNegative(sourceChars), 2);
+                // A destination of NULL is only the measuring call's, with a
+                // size of zero; UTF-7 and the symbol page have no default
+                // character to report or replace with.
+                if (span.length === 0 || (destinationBytes | 0) < 0 || resolved > 0xffff
+                    || ((destination >>> 0) === 0 && (destinationBytes | 0) !== 0)
+                    || ((resolved === CP_UTF7 || resolved === CP_SYMBOL)
+                        && ((args[6] >>> 0) !== 0 || usedDefaultOut !== 0)))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
+                if ((flags & ~WC_FLAGS) !== 0 || (flags !== 0 && takesNoFlags(resolved)))
+                {
+                    host.setLastError(ERROR_INVALID_FLAGS);
+                    return 0;
+                }
                 const text = readWide(source >>> 0, span.length);
-                const encoded = resolved === CP_UTF8
-                    ? { bytes: new TextEncoder().encode(text), usedDefault: false }
-                    : encodeSingleByte(text, resolved);
+                const encoded = encodeIn(resolved, text, flags, args[6] >>> 0);
+                const room = destinationBytes | 0;
+                const short = room !== 0 && encoded.bytes.length > room;
+                const written = short ? encoded.fit(room) : encoded.bytes.length;
 
+                // What was written is what the answer is about: a buffer that
+                // ends before the character the page lacks never used it.
                 if (usedDefaultOut !== 0)
                 {
                     host.writeMemory(usedDefaultOut,
-                        new Uint8Array([encoded.usedDefault ? 1 : 0, 0, 0, 0]));
+                        new Uint8Array([encoded.usedDefault(written) ? 1 : 0, 0, 0, 0]));
                 }
-                if ((destinationBytes | 0) === 0)
+                if (room === 0)
                 {
                     return encoded.bytes.length;
                 }
                 // Filled as far as it goes, for the reason MultiByteToWideChar
-                // gives.
-                if (encoded.bytes.length > (destinationBytes | 0))
+                // gives -- but never with half a character.
+                if (short)
                 {
-                    host.writeMemory(destination >>> 0,
-                        encoded.bytes.subarray(0, destinationBytes | 0));
+                    host.writeMemory(destination >>> 0, encoded.bytes.subarray(0, written));
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
@@ -2358,31 +2873,17 @@ export function createLocaleFunctions(host){
         /**
          * int LCMapStringA(LCID Locale, DWORD dwMapFlags, LPCSTR lpSrcStr, int cchSrc,
          *                  LPSTR lpDestStr, int cchDest)
+         *
+         * LCMapStringW's answer over the text in the locale's ANSI page.
          */
         LCMapStringA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([locale, mapFlags, source, sourceChars, destination, destinationChars])=>{
-                void locale;
-                const span = sourceSpan(source >>> 0, sourceChars, 1);
-                const raw = host.readMemory(source >>> 0, span.length);
-                const text = decodeSingleByte(raw, ANSI_CODE_PAGE);
-                const mapped = (mapFlags >>> 0) & LCMAP_UPPERCASE
-                    ? text.toUpperCase()
-                    : (mapFlags >>> 0) & LCMAP_LOWERCASE ? text.toLowerCase() : text;
-                const { bytes } = encodeSingleByte(mapped, ANSI_CODE_PAGE);
-
-                if ((destinationChars | 0) === 0)
-                {
-                    return bytes.length;
-                }
-                if (bytes.length > (destinationChars | 0))
-                {
-                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
-                    return 0;
-                }
-                host.writeMemory(destination >>> 0, bytes);
-                return bytes.length;
+            handler: ([locale, flags, source, sourceChars, destination, destinationChars])=>{
+                const record = localeOf(locale >>> 0);
+                return record === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : mapString(record, flags >>> 0, source >>> 0, sourceChars | 0,
+                        destination >>> 0, destinationChars | 0, false);
             },
         },
 
@@ -2393,25 +2894,30 @@ export function createLocaleFunctions(host){
         LCMapStringW: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([locale, mapFlags, source, sourceChars, destination, destinationChars])=>{
-                void locale;
-                const span = sourceSpan(source >>> 0, sourceChars, 2);
-                const text = readWide(source >>> 0, span.length);
-                const mapped = (mapFlags >>> 0) & LCMAP_UPPERCASE
-                    ? text.toUpperCase()
-                    : (mapFlags >>> 0) & LCMAP_LOWERCASE ? text.toLowerCase() : text;
+            handler: ([locale, flags, source, sourceChars, destination, destinationChars])=>{
+                const record = localeOf(locale >>> 0);
+                return record === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : mapString(record, flags >>> 0, source >>> 0, sourceChars | 0,
+                        destination >>> 0, destinationChars | 0, true);
+            },
+        },
 
-                if ((destinationChars | 0) === 0)
-                {
-                    return mapped.length;
-                }
-                if (mapped.length > (destinationChars | 0))
-                {
-                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
-                    return 0;
-                }
-                writeWide(destination >>> 0, mapped);
-                return mapped.length;
+        /**
+         * int LCMapStringEx(LPCWSTR lpLocaleName, DWORD dwMapFlags, LPCWSTR lpSrcStr,
+         *     int cchSrc, LPWSTR lpDestStr, int cchDest, LPNLSVERSIONINFO,
+         *     LPVOID lpReserved, LPARAM sortHandle)
+         */
+        LCMapStringEx: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([name, flags, source, sourceChars, destination, destinationChars])=>{
+                // Only case and sort keys are a locale's; kana and widths are
+                // mapped whatever the name.
+                const record = localeOfName(name >>> 0)
+                    ?? ((flags & (LCMAP_TITLECASE | LCMAP_SORTKEY)) === 0 ? MACHINE_LOCALE : null);
+                return record === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : mapString(record, flags >>> 0, source >>> 0, sourceChars | 0,
+                        destination >>> 0, destinationChars | 0, true);
             },
         },
 
@@ -2480,7 +2986,7 @@ export function createLocaleFunctions(host){
         EnumDateFormatsExEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([proc, name, flags, parameter])=>(localeOfName(name >>> 0) === 0
+            handler: ([proc, name, flags, parameter])=>(localeOfName(name >>> 0) === null
                 ? refuse(ERROR_INVALID_PARAMETER)
                 : enumerateDateFormats(proc, flags >>> 0, true, [CAL_GREGORIAN, parameter >>> 0])),
         },

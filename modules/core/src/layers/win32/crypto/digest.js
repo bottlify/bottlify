@@ -5,8 +5,8 @@
  */
 
 /**
- * MD5, SHA-1 and SHA-256 as streaming digests, written out against their
- * published definitions (RFC 1321, FIPS 180). They run synchronously, because a
+ * MD4, MD5, SHA-1 and SHA-256 as streaming digests, written out against their
+ * published definitions (RFC 1320, RFC 1321, FIPS 180). They run synchronously, because a
  * call into the guest cannot await Web Crypto, and they are shared by every
  * library that hashes: the CryptoAPI provider and the Authenticode verifier.
  */
@@ -59,6 +59,7 @@ const rotr = (x, s)=>(((x >>> s) | (x << (32 - s))) >>> 0);
  * @property {(bytes: Uint8Array) => void} update
  * @property {() => Uint8Array} digest
  * @property {() => Digest} clone
+ * @property {() => HashSnapshot} snapshot  Where it stands, to resume from later.
  */
 
 /**
@@ -82,6 +83,50 @@ const MD5_K = new Uint32Array(64);
 for (let i = 0; i < 64; i++)
 {
     MD5_K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0;
+}
+
+/**
+ * MD4's compression (RFC 1320): three rounds of sixteen steps over the
+ * block's words, the second and third with their constants and orders.
+ *
+ * @param {Uint32Array} st @param {Uint8Array} b @param {number} o
+ */
+function md4Compress(st, b, o){
+    const X = new Uint32Array(16);
+    for (let i = 0; i < 16; i++)
+    {
+        X[i] = readU32LE(b, o + i * 4);
+    }
+    let [a, bb, c, d] = st;
+    /** @param {number} x @param {number} y @param {number} z */
+    const F = (x, y, z)=>(x & y) | (~x & z);
+    /** @param {number} x @param {number} y @param {number} z */
+    const G = (x, y, z)=>(x & y) | (x & z) | (y & z);
+    /** @param {number} x @param {number} y @param {number} z */
+    const H = (x, y, z)=>x ^ y ^ z;
+    const rounds = [
+        { f: F, add: 0, order: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            shifts: [3, 7, 11, 19] },
+        { f: G, add: 0x5a827999, order: [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15],
+            shifts: [3, 5, 9, 13] },
+        { f: H, add: 0x6ed9eba1, order: [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15],
+            shifts: [3, 9, 11, 15] },
+    ];
+    for (const { f, add, order, shifts } of rounds)
+    {
+        for (let step = 0; step < 16; step++)
+        {
+            const t = rotl((a + f(bb, c, d) + X[order[step]] + add) >>> 0, shifts[step % 4]);
+            a = d;
+            d = c;
+            c = bb;
+            bb = t;
+        }
+    }
+    st[0] = (st[0] + a) >>> 0;
+    st[1] = (st[1] + bb) >>> 0;
+    st[2] = (st[2] + c) >>> 0;
+    st[3] = (st[3] + d) >>> 0;
 }
 
 /** @param {Uint32Array} st @param {Uint8Array} b @param {number} o */
@@ -254,6 +299,14 @@ function sha256Compress(st, b, o){
 }
 
 /** @type {BlockHashConfig} */
+const MD4_CONFIG = {
+    blockSize: 64,
+    initial: [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476],
+    compress: md4Compress,
+    littleEndian: true,
+};
+
+/** @type {BlockHashConfig} */
 const MD5_CONFIG = {
     blockSize: 64,
     initial: [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476],
@@ -379,8 +432,15 @@ function createBlockHash(config, snapshot){
 
     const clone = ()=>createBlockHash(config, { state, block, blockLen, total });
 
-    return { update, digest, clone };
+    /** @returns {HashSnapshot} */
+    const taken = ()=>({ state: Uint32Array.from(state), block: block.slice(), blockLen,
+        total });
+
+    return { update, digest, clone, snapshot: taken };
 }
+
+/** @returns {Digest} */
+export const createMd4 = ()=>createBlockHash(MD4_CONFIG);
 
 /** @returns {Digest} */
 export const createMd5 = ()=>createBlockHash(MD5_CONFIG);
@@ -390,3 +450,13 @@ export const createSha1 = ()=>createBlockHash(SHA1_CONFIG);
 
 /** @returns {Digest} */
 export const createSha256 = ()=>createBlockHash(SHA256_CONFIG);
+
+/**
+ * A digest taken up where a snapshot left it: what a caller that keeps the
+ * state itself -- MD5Init's context in a program's memory -- carries on from.
+ *
+ * @param {'md4' | 'md5' | 'sha1' | 'sha256'} kind @param {HashSnapshot} snapshot
+ * @returns {Digest}
+ */
+export const resumeDigest = (kind, snapshot)=>createBlockHash({ md4: MD4_CONFIG, md5: MD5_CONFIG,
+    sha1: SHA1_CONFIG, sha256: SHA256_CONFIG }[kind], snapshot);

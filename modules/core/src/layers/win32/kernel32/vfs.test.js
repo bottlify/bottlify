@@ -231,3 +231,158 @@ test('attributes a program set follow the name through a rename and go with a de
     assert.equal(vol.stat('C:\\moved\\a.txt')?.attributes, undefined);
     assert.equal(vol.setAttributes('C:\\nothing', 1), false, 'no name, nothing to carry them');
 });
+
+test('a watch is told what happened to which name, below the directory it watches', async()=>{
+    const { volume: vol } = await volume();
+    assert.ok(vol.mkdir('C:\\Watched'));
+    /** @type {{ action: number, name: string }[][]} */
+    const told = [];
+    const all = 0x1f;
+    const watch = vol.watch('C:\\watched', true, all, (/** @type {any} */ records)=>{
+        told.push(records);
+    }, ()=>true);
+
+    assert.ok(vol.mkdir('C:\\Watched\\Sub'));
+    const node = vol.open('C:\\Watched\\Sub\\Save.dat', { read: true, write: true, create: true });
+    vol.write(node, 0, new Uint8Array([1]));
+    vol.close(node);
+    assert.ok(vol.rename('C:\\Watched\\Sub\\Save.dat', 'C:\\Watched\\Save.dat'));
+    assert.ok(vol.rename('C:\\Watched\\Save.dat', 'C:\\Elsewhere.dat'));
+    assert.equal(vol.remove('C:\\Watched\\Sub'), true);
+    assert.deepEqual(told, [
+        [{ action: 1, name: 'Sub' }],
+        [{ action: 1, name: 'Sub\\Save.dat' }],
+        [{ action: 3, name: 'Sub\\Save.dat' }],
+        [{ action: 4, name: 'Sub\\Save.dat' }, { action: 5, name: 'Save.dat' }],
+        [{ action: 2, name: 'Save.dat' }],
+        [{ action: 2, name: 'Sub' }],
+    ], 'added, modified, a rename by both names, a rename out of the watch as a removal');
+    watch.close();
+
+    const own = /** @type {any[]} */ ([]);
+    vol.watch('C:\\Watched', false, 0x2, (/** @type {any} */ records)=>own.push(records),
+        ()=>true);
+    assert.ok(vol.rename('C:\\Watched', 'C:\\Moved'));
+    assert.deepEqual(own, [], 'the watched directory moved is not told');
+});
+
+test('a hard link is one file: bytes, attributes, count and identity shared', async()=>{
+    const { volume: vol } = await volume();
+    const node = vol.open('C:\\A.DAT', { read: true, write: true, create: true });
+    vol.write(node, 0, Uint8Array.of(1, 2, 3));
+    vol.close(node);
+    assert.equal(vol.link('C:\\B.DAT', 'C:\\A.DAT'), null);
+    const a = vol.stat('C:\\A.DAT');
+    const b = vol.stat('C:\\b.dat');
+    assert.deepEqual([a?.links, b?.links, a?.identity === b?.identity], [2, 2, true]);
+    vol.setAttributes('C:\\B.DAT', 0x21);
+    assert.equal(vol.stat('C:\\A.DAT')?.attributes, 0x21, 'the attributes are the file\'s');
+
+    const other = vol.open('C:\\B.DAT', { read: true, write: true });
+    vol.write(other, 0, Uint8Array.of(9));
+    vol.close(other);
+    const reader = vol.open('C:\\A.DAT', { read: true });
+    assert.deepEqual([...(/** @type {Uint8Array} */ (vol.read(reader, 0, 3)))], [9, 2, 3]);
+    vol.close(reader);
+
+    assert.equal(vol.link('C:\\A.DAT', 'C:\\B.DAT'), 'ALREADY_EXISTS');
+    assert.equal(vol.link('C:\\C.DAT', 'C:\\NONE.DAT'), 'NOT_FOUND');
+    vol.mkdir('C:\\DIR');
+    assert.equal(vol.link('C:\\D.DAT', 'C:\\DIR'), 'ACCESS_DENIED');
+    assert.equal(vol.remove('C:\\A.DAT'), true);
+    assert.deepEqual([vol.stat('C:\\B.DAT')?.links, vol.stat('C:\\B.DAT')?.size], [undefined, 3],
+        'one name left: an ordinary file');
+});
+
+test('a file is renamed or deleted only while every open with access shares deletion', async()=>{
+    const { volume: vol, fs } = await volume();
+    const made = vol.open('C:\\F.DAT', { read: true, write: true, create: true });
+    vol.close(made);
+
+    const holding = vol.open('C:\\F.DAT', { read: true, delete: true, shareDelete: false });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), 'SHARING_VIOLATION');
+    assert.throws(()=>fs.rename('C:\\F.DAT', 'C:\\G.DAT'), { code: 'SHARING_VIOLATION' });
+    assert.throws(()=>fs.deleteFile('C:\\F.DAT'), { code: 'SHARING_VIOLATION' });
+    assert.equal(vol.isOpen('C:\\F.DAT'), true);
+    vol.close(holding);
+
+    // Sharing deletion, or holding no access at all, keeps nobody out.
+    const sharing = vol.open('C:\\F.DAT', { read: true, shareDelete: true });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), null);
+    vol.close(sharing);
+    const layerReader = vol.open('C:\\F.DAT', { read: true });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), null,
+        'a reader that says nothing of deletion, a layer\'s own, shares it');
+    vol.close(layerReader);
+    const refusing = vol.open('C:\\F.DAT', { read: true, shareDelete: false });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), 'SHARING_VIOLATION');
+    vol.close(refusing);
+    const attributesOnly = fs.open('C:\\F.DAT', { read: false, shareRead: false });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), null);
+    const second = fs.open('C:\\F.DAT', { read: true, write: true });
+    assert.notEqual(second, null, 'an open with no access refuses nothing, nor is refused');
+    fs.close(second);
+    fs.close(attributesOnly);
+    assert.equal(vol.rename('C:\\F.DAT', 'C:\\G.DAT'), true);
+    assert.equal(vol.isOpen('C:\\G.DAT'), false);
+});
+
+test('a section holds its file on its own terms once the file\'s handle is closed', async()=>{
+    const { volume: vol } = await volume();
+    const made = vol.open('C:\\M.DAT', { read: true, write: true, create: true });
+    vol.write(made, 0, Uint8Array.of(0x4d, 0x5a, 0, 0));
+    vol.close(made);
+    /** @param {'readonly' | 'readwrite' | 'image'} kind */
+    const mapped = kind=>{
+        const file = vol.open('C:\\M.DAT', { read: true, write: true, shareRead: false });
+        const own = vol.section(file, kind);
+        vol.close(file);
+        return own;
+    };
+    /** @param {any} mode */
+    const opens = mode=>{
+        const node = vol.open('C:\\M.DAT', mode);
+        if (node)
+        {
+            vol.close(node);
+        }
+        return node !== null || vol.openRefusal();
+    };
+
+    let section = mapped('readonly');
+    assert.equal(vol.mappedAs('C:\\M.DAT'), 'readonly');
+    assert.equal(opens({ read: true, write: true, shareRead: false }), true,
+        'a read-only section refuses nobody, the handle it came from gone');
+    assert.deepEqual([...(/** @type {Uint8Array} */ (vol.read(section, 0, 2)))], [0x4d, 0x5a]);
+    vol.close(section);
+    assert.equal(vol.mappedAs('C:\\M.DAT'), null);
+
+    section = mapped('readwrite');
+    assert.equal(opens({ read: true }), 'SHARING_VIOLATION', 'it writes: others share writing');
+    assert.equal(opens({ read: true, shareWrite: true }), true);
+    vol.close(section);
+
+    section = mapped('image');
+    assert.equal(opens({ read: true, shareRead: false }), true, 'an image refuses only writers');
+    assert.equal(opens({ read: true, write: true, shareWrite: true }), 'SHARING_VIOLATION');
+    vol.close(section);
+});
+
+test('a name renamed to itself in other letters is respelled, its contents kept', async()=>{
+    const { volume: vol } = await volume();
+    const made = vol.open('C:\\Remove Me', { read: true, write: true, create: true });
+    vol.write(made, 0, Uint8Array.of(7));
+    vol.close(made);
+    assert.equal(vol.rename('C:\\Remove Me', 'C:\\Remove Me'), true, 'its own name: nothing to do');
+    assert.equal(vol.rename('C:\\Remove Me', 'C:\\remove me'), true);
+    assert.deepEqual(vol.list('C:\\', '*').map((/** @type {any} */ entry)=>entry.name),
+        ['remove me']);
+    assert.equal(vol.stat('C:\\REMOVE ME')?.size, 1);
+
+    assert.equal(vol.mkdir('C:\\Dir'), true);
+    const inside = vol.open('C:\\Dir\\F', { write: true, create: true });
+    vol.close(inside);
+    assert.equal(vol.rename('C:\\Dir', 'C:\\DIR'), true);
+    assert.deepEqual(vol.list('C:\\', 'd*').map((/** @type {any} */ entry)=>entry.name), ['DIR']);
+    assert.equal(vol.stat('C:\\dir\\f')?.exists, true, 'what was in it, still in it');
+});

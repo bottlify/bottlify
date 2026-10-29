@@ -11,10 +11,13 @@ import { fakeMemory, doubleSlots, fakeFpu } from './harness.test.js';
 
 const build = (/** @type {any} */ fpu = undefined)=>{
     const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
     return {
         memory,
+        errno,
         table: /** @type {Record<string, any>} */ (
-            createConversionFunctions({ ...memory, fpu })),
+            createConversionFunctions({ ...memory, fpu, errno: code=>errno.push(code) })),
     };
 };
 
@@ -216,11 +219,54 @@ test('_ecvt and _fcvt hand back the same buffer every time', ()=>{
     assert.equal(first, second, 'documented to be overwritten by the next call');
 });
 
-test('_gcvt writes a whole number into the caller\'s buffer', ()=>{
-    const { memory, table } = build();
+test('_gcvt writes a whole number into the caller\'s buffer, its fraction\'s zeros dropped', ()=>{
+    // Wine's msvcrt test_gcvt: 1.2 to five digits is "1.2"; the
+    // documentation's -3.1415e5 to seven is "-314150.".
+    const { memory, table, errno } = build();
     const buffer = memory.allocate(64);
-    table._gcvt.handler([...doubleSlots(-3.25), 6, buffer]);
-    assert.equal(memory.text(buffer), '-3.25000');
+    for (const [value, digits, text] of /** @type {[number, number, string][]} */ ([
+        [-3.25, 6, '-3.25'], [1.2, 5, '1.2'], [-314150, 7, '-314150.'],
+        [123456, 2, '1.2e+005'], [0.0001234, 3, '0.000123'], [1.5e-7, 4, '1.5e-007'],
+    ]))
+    {
+        assert.equal(table._gcvt.handler([...doubleSlots(value), digits, buffer]), buffer);
+        assert.equal(memory.text(buffer), text, `${value} ${digits}`);
+    }
+    assert.equal(table._gcvt.handler([...doubleSlots(1.2), -1, buffer]), 0);
+    assert.equal(table._gcvt.handler([...doubleSlots(1.2), 5, 0]), 0);
+    assert.deepEqual(errno, [34, 22]);
+    assert.equal(table._gcvt_s.handler([buffer, 5, ...doubleSlots(1.2), 10]), 34);
+    assert.equal(memory.text(buffer), '');
+    assert.equal(table._gcvt_s.handler([buffer, 4, ...doubleSlots(123456), 2]), 34);
+    assert.equal(table._gcvt_s.handler([buffer, 16, ...doubleSlots(1.2), 5]), 0);
+    assert.equal(memory.text(buffer), '1.2');
+});
+
+test('_atodbl reads into the caller\'s double and says when it is out of range', ()=>{
+    // Wine's msvcrt test__atodbl: _UNDERFLOW 4 for a denormal, _OVERFLOW 3.
+    const { memory, table } = build();
+    const value = memory.allocate(8);
+    const read = ()=>new DataView(memory.bytes.buffer).getFloat64(value, true);
+    for (const [text, answer, number] of /** @type {[string, number, number][]} */ ([
+        ['', 0, 0], ['t', 0, 0], ['0', 0, 0], ['123', 0, 123], ['1e-309', 4, 1e-309],
+        ['1e309', 3, Infinity],
+    ]))
+    {
+        assert.equal(table._atodbl.handler([value, memory.put(text)]), answer, text);
+        assert.equal(read(), number, text);
+        assert.equal(table._atodbl_l.handler([value, memory.put(text), 0]), answer, text);
+        assert.equal(read(), number, `${text}, in the C locale`);
+    }
+    assert.equal(table._atodbl_l.argBytes, 12);
+    // Every simple normal double as Wine's test reads it: the nearest double.
+    for (let j = -307; j <= 308; j++)
+    {
+        for (let i = 1; i <= 9; i++)
+        {
+            table._atodbl.handler([value, memory.put(`${i}e${j}`)]);
+            assert.equal(read(), Number(`${i}e${j}`), `${i}e${j}`);
+        }
+    }
 });
 
 test('the double-returning conversions appear only with an FPU seam', ()=>{
@@ -422,4 +468,116 @@ test('wcstod reads strtod\'s number from a wide string, its end two bytes a char
     assert.equal(fpu.result, 0);
     assert.equal(memory.u32(end), none, 'nothing read leaves the end at the start');
     assert.equal(build().table.wcstod, undefined, 'no FPU, no export');
+});
+
+test('_ecvt_s and _fcvt_s write _ecvt\'s and _fcvt\'s digits into the caller\'s buffer', ()=>{
+    // Wine's msvcrt test_xcvt and test_fcvt.
+    const { memory, table } = build(fakeFpu());
+    const buffer = memory.allocate(64);
+    const point = memory.allocate(4);
+    const sign = memory.allocate(4);
+    for (const [name, value, count, digits, at, negative] of
+        /** @type {[string, number, number, string, number, number][]} */ ([
+            ['_ecvt_s', 45, 2, '45', 2, 0], ['_fcvt_s', 45, 2, '4500', 2, 0],
+            ['_ecvt_s', -111.0001, 5, '11100', 3, 1], ['_fcvt_s', 0.0063, 2, '1', -1, 0],
+            ['_fcvt_s', -123.0001, -1, '12', 3, 1], ['_ecvt_s', 0.6, 0, '', 1, 0],
+        ]))
+    {
+        assert.equal(table[name].handler([buffer, 64, ...doubleSlots(value), count, point, sign]),
+            0, `${name} ${value}`);
+        assert.equal(memory.text(buffer), digits, `${name} ${value}`);
+        assert.equal(memory.u32(point) | 0, at);
+        assert.equal(memory.u32(sign), negative);
+    }
+    assert.equal(table._fcvt_s.handler([0, 0, ...doubleSlots(0), 0, point, sign]), 22);
+    assert.equal(table._fcvt_s.handler([buffer, 0, ...doubleSlots(0), 0, point, sign]), 22);
+    assert.equal(table._fcvt_s.handler([buffer, 1, ...doubleSlots(0), 0, 0, sign]), 22);
+    assert.equal(table._fcvt_s.handler([buffer, 1, ...doubleSlots(0), 0, point, 0]), 22);
+    assert.equal(table._fcvt_s.handler([buffer, 0xffffffff, ...doubleSlots(0), 0, point, sign]),
+        0);
+    assert.equal(table._ecvt_s.handler([buffer, 3, ...doubleSlots(45), 5, point, sign]), 34,
+        'five digits do not fit in three');
+    assert.equal(memory.text(buffer), '');
+});
+
+test('_ecvt_s and _fcvt_s take the double in two slots: seven of them', ()=>{
+    const { table } = build(fakeFpu());
+    assert.deepEqual([table._ecvt_s.argBytes, table._fcvt_s.argBytes], [28, 28]);
+});
+
+test('_strtoi64 and _strtoui64 read 64 bits, the high half in EDX, out of range clamped', ()=>{
+    // Wine's msvcrt test__strtoi64.
+    const memory = fakeMemory();
+    let edx = 0;
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+        ...memory, errno: code=>errno.push(code), setRegisters: values=>{
+            edx = values.edx;
+        } }));
+    const end = memory.allocate(4);
+    /** @param {string} name @param {string} text @param {number} base */
+    const read = (name, text, base)=>{
+        const at = memory.put(text);
+        const low = table[name].handler([at, end, base]) >>> 0;
+        return { value: BigInt.asIntN(64, BigInt(edx >>> 0) << 32n | BigInt(low)),
+            read: memory.u32(end) - at };
+    };
+    for (const [text, base, value, read_] of /** @type {[string, number, bigint, number][]} */ ([
+        ['31923', 10, 31923n, 5], ['-213312', 10, -213312n, 7], ['12aa', 10, 12n, 2],
+        ['abc12', 10, 0n, 0], ['0x123', 10, 0n, 1], ['000123', 10, 123n, 6],
+        ['        12 212.31', 10, 12n, 10], ['31923', 16, 203043n, 5], ['abc12', 16, 703506n, 5],
+        ['0x123', 16, 291n, 5], ['0x123', 36, 1541019n, 5], ['-213312', 0, -213312n, 7],
+    ]))
+    {
+        assert.deepEqual(read('_strtoi64', text, base), { value, read: read_ }, `${text} ${base}`);
+    }
+    assert.deepEqual(errno, []);
+    read('_strtoi64', '-1', 10);
+    assert.equal(read('_strtoi64', ' ', 10).value, 0n, 'nothing read: EDX zero too');
+    assert.equal(read('_strtoi64', '99999999999999999999', 10).value, 0x7fffffffffffffffn);
+    assert.equal(read('_strtoi64', '-99999999999999999999', 10).value, -0x8000000000000000n);
+    assert.equal(BigInt.asUintN(64, read('_strtoui64', '99999999999999999999', 10).value),
+        0xffffffffffffffffn);
+    assert.equal(read('_strtoui64', '-99999999999999999999', 10).value, 1n);
+    assert.equal(BigInt.asUintN(64, read('_strtoui64', '-213312', 0).value),
+        BigInt.asUintN(64, -213312n));
+    assert.deepEqual(errno, [34, 34, 34, 34]);
+    const wide = memory.putWide('-1234567890123');
+    assert.equal(table._wcstoi64.handler([wide, 0, 10]) >>> 0,
+        Number(BigInt.asUintN(32, -1234567890123n)));
+    assert.equal(edx >>> 0, Number(BigInt.asUintN(64, -1234567890123n) >> 32n));
+});
+
+test('atof, strtod and their _l forms of no text are zero and EINVAL, the end null', ()=>{
+    // Wine's msvcrt test__strtod and test_atof.
+    const fpu = fakeFpu();
+    const { memory, table, errno } = build(fpu);
+    const end = memory.allocate(4);
+    memory.setU32(end, 0xdeadbeef);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([['atof', [0]],
+        ['strtod', [0, end]], ['_atof_l', [0, 0]], ['_strtod_l', [0, 0, 0]],
+        ['wcstod', [0, 0]]]))
+    {
+        table[name].handler(args);
+        assert.equal(fpu.result, 0, name);
+    }
+    assert.equal(memory.u32(end), 0);
+    assert.deepEqual(errno, [22, 22, 22, 22, 22]);
+    table._strtod_l.handler([memory.put('12.5'), end, 0]);
+    assert.equal(fpu.result, 12.5);
+});
+
+test('a long run of digits reads to its end, past every limit, at a step a digit', ()=>{
+    // A number written out in 64 KiB of digits still ends where the digits
+    // do and is past the 64 bits any conversion clamps at; it no longer
+    // costs a multiplication of its whole length per digit.
+    const digits = '9'.repeat(1 << 16);
+    const started = performance.now();
+    const scanned = scanInteger(`${digits}x`, 10);
+    assert.equal(scanned?.end, digits.length);
+    assert.ok((scanned?.magnitude ?? 0n) > (1n << 64n));
+    assert.ok(performance.now() - started < 1000, 'linear in the digits');
+    assert.equal(scanInteger('18446744073709551615', 10)?.magnitude, (1n << 64n) - 1n,
+        'below the cap every digit counts');
 });
