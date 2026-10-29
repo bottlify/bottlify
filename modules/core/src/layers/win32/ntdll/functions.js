@@ -37,7 +37,7 @@ import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
 import { STATUS, toDosError } from './status.js';
 import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
-import { TOKEN_NATIVES } from '../advapi32/tokens.js';
+import { TOKEN_NATIVES, USER_SID_TEXT } from '../advapi32/tokens.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -174,6 +174,11 @@ const TEB_PEB = 0x30;
 /** @param {Uint8Array} bytes  Four of them, little-endian. */
 const readU32 = bytes=>(bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
 
+/** TEB.LastStatusValue: where the last status turned into an error is kept. */
+const LAST_STATUS = { 4: 0xbf4, 8: 0x1250 };
+/** The option bits NtOpenKeyEx knows: REG_OPTION_BACKUP_RESTORE and REG_OPTION_OPEN_LINK. */
+const OPEN_KEY_OPTIONS = 0x4 | 0x8;
+
 /** The user flags a heap block may carry, HEAP_SETTABLE_USER_FLAGS, and a new block's. */
 const SETTABLE_USER_FLAGS = 0xe00;
 const DEFAULT_USER_FLAGS = 0x200;
@@ -288,6 +293,7 @@ export function createNtdllFunctions(host){
     // hands a caller has to be what RtlFreeHeap and HeapFree both take back, and
     // a block allocated outside that heap belongs to neither.
     const processHeap = kernel32.GetProcessHeap.handler([]) >>> 0;
+    const lastStatusOffset = LAST_STATUS[host.pointerSize === 8 ? 8 : 4];
 
     /** @param {number} bytes */
     const allocate = bytes=>kernel32.HeapAlloc.handler([processHeap, 0, bytes]) >>> 0;
@@ -509,8 +515,79 @@ export function createNtdllFunctions(host){
         RtlNtStatusToDosError: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([status])=>toDosError(status),
+            handler: ([status])=>{
+                // The status is kept in the thread's block as it is turned
+                // into an error, which RtlGetLastNtStatus reads back.
+                const teb = host.teb();
+                if (teb !== 0)
+                {
+                    host.writeMemory(teb + lastStatusOffset, Uint8Array.of(status & 0xff,
+                        status >>> 8 & 0xff, status >>> 16 & 0xff, status >>> 24 & 0xff));
+                }
+                return toDosError(status);
+            },
         },
+
+        /** NTSTATUS RtlGetLastNtStatus(void): the status the last error was made from. */
+        RtlGetLastNtStatus: {
+            argBytes: 0,
+            handler: ()=>{
+                const teb = host.teb();
+                return teb === 0 ? 0 : readU32(host.readMemory(teb + lastStatusOffset, 4));
+            },
+        },
+
+        /**
+         * NTSTATUS RtlFormatCurrentUserKeyPath(PUNICODE_STRING CurrentUserKeyPath)
+         *
+         * \REGISTRY\USER\ and the user's SID, in a buffer of the process
+         * heap that RtlFreeUnicodeString gives back.
+         */
+        RtlFormatCurrentUserKeyPath: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                const text = `\\REGISTRY\\USER\\${USER_SID_TEXT}`;
+                const bytes = new Uint8Array(text.length * 2 + 2);
+                for (let at = 0; at < text.length; at++)
+                {
+                    bytes[at * 2] = text.charCodeAt(at);
+                }
+                const buffer = allocate(bytes.length);
+                if (buffer === 0)
+                {
+                    return STATUS.NO_MEMORY;
+                }
+                host.writeMemory(buffer, bytes);
+                const descriptor = new Uint8Array(8);
+                const view = new DataView(descriptor.buffer);
+                view.setUint16(0, text.length * 2, true);
+                view.setUint16(2, bytes.length, true);
+                view.setUint32(4, buffer, true);
+                host.writeMemory(out >>> 0, descriptor);
+                return STATUS.SUCCESS;
+            },
+        },
+
+        /**
+         * NTSTATUS NtOpenKeyEx(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess,
+         *     POBJECT_ATTRIBUTES ObjectAttributes, ULONG OpenOptions)
+         *
+         * NtOpenKey with the open options Windows 7 added: backup-restore
+         * and opening a link itself change nothing for a key here; any other
+         * bit is STATUS_INVALID_PARAMETER.
+         */
+        ...(registry?.entries?.NtOpenKey
+            ? {
+                NtOpenKeyEx: {
+                    argBytes: 16,
+                    /** @param {number[]} args */
+                    handler: ([out, access, attributes, options])=>(
+                        ((options >>> 0) & ~OPEN_KEY_OPTIONS) !== 0 ? STATUS.INVALID_PARAMETER
+                            : registry.entries.NtOpenKey.handler([out, access, attributes])),
+                },
+            }
+            : {}),
 
         /**
          * PIMAGE_NT_HEADERS RtlImageNtHeader(PVOID BaseOfImage)

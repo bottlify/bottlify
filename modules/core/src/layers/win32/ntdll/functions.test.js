@@ -431,3 +431,45 @@ test('ntdll\'s printers are the runtime\'s own, the wide one with them', ()=>{
     assert.equal(fns._snwprintf, /** @type {any} */ (host.crt)._snwprintf,
         'msvcrt\'s formatting, entry and convention');
 });
+
+test('the status an error was made from is the thread\'s to read back', ()=>{
+    const host = { ...fakeHost(), teb: ()=>0x400 };
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.RtlGetLastNtStatus.argBytes, 0);
+    assert.equal(fns.RtlNtStatusToDosError.handler([0xc0000034 | 0]), 2);
+    assert.equal(fns.RtlGetLastNtStatus.handler([]) >>> 0, 0xc0000034,
+        'kept in TEB.LastStatusValue');
+    assert.equal(new DataView(host.bytes.buffer).getUint32(0x400 + 0xbf4, true), 0xc0000034);
+});
+
+test('the current user\'s key path names the user\'s SID under \\REGISTRY\\USER', ()=>{
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.RtlFormatCurrentUserKeyPath.handler([0x40]), STATUS.SUCCESS);
+    const view = new DataView(host.bytes.buffer);
+    const length = view.getUint16(0x40, true);
+    assert.equal(view.getUint16(0x42, true), length + 2, 'room for the terminator');
+    assert.equal(view.getUint32(0x44, true), 0x900, 'from the process heap');
+    const text = new TextDecoder('utf-16le').decode(host.bytes.subarray(0x900, 0x900 + length));
+    assert.match(text, /^\\REGISTRY\\USER\\S-1-5-21-\d+-\d+-\d+-1000$/);
+    assert.deepEqual(host.allocations, [PROCESS_HEAP]);
+});
+
+test('NtOpenKeyEx is NtOpenKey with the open options it knows', async()=>{
+    const { REGISTRY_NATIVES } = await import('../advapi32/functions.js');
+    /** @type {number[][]} */
+    const opened = [];
+    const host = { ...fakeHost(), advapi32: { [REGISTRY_NATIVES]: { entries: {
+        NtOpenKey: { argBytes: 12, handler: (/** @type {number[]} */ args)=>{
+            opened.push(args);
+            return 0;
+        } },
+    } } } };
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.NtOpenKeyEx.argBytes, 16);
+    assert.equal(fns.NtOpenKeyEx.handler([0x10, 0x20019, 0x30, 0x8]), 0);
+    assert.deepEqual(opened, [[0x10, 0x20019, 0x30]]);
+    assert.equal(fns.NtOpenKeyEx.handler([0x10, 0x20019, 0x30, 0x1]) >>> 0,
+        STATUS.INVALID_PARAMETER);
+    assert.equal(fns.ZwOpenKeyEx, fns.NtOpenKeyEx);
+});
