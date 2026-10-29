@@ -3768,6 +3768,90 @@ export class RegionEmitter {
     }
 
     /**
+     * Whether a block's `cmp index, N; ja default` is a switch's bound test
+     * that the switch's own `br_table` can take (`emitFusedSwitch`): the block
+     * after it, its fall-through, is the switch's jump alone through a table
+     * of N + 1 entries off that index, read untested (`casesByEntry` in
+     * integer.js) and lying in RAM; no x87 in play, whose edges the switch's
+     * own block settles.
+     *
+     * @param {import('../region.js').Block} block
+     * @param {import('../region.js').Block} next
+     */
+    fusesSwitch(block, next){
+        const table = next.exit.table;
+        const { instructions } = block;
+        const [compare, branch] = instructions.slice(-2);
+        if (table === undefined || next.instructions.length !== 1 || this.width.bits !== 32
+            || this.x87.active || this.context.precise === true || !readsWrapped(this.context)
+            || this.layout.codePages >= 0 || branch?.op !== 'ja' || compare?.op !== 'cmp'
+            || table.address + 4 * table.entries.length > this.layout.ramSize)
+        {
+            return false;
+        }
+        const [into, by] = compare.operands;
+        return into.kind === 'reg' && into.size === 4 && into.reg === table.index
+            && by.kind === 'imm' && (/** @type {number} */ (by.value) >>> 0) + 1
+                === table.entries.length
+            && table.entries.some(target=>this.labels.has(target));
+    }
+
+    /**
+     * A switch's bound test and its jump as one `br_table` on the index
+     * (`fusesSwitch`): an index past the bound takes the test's branch, one
+     * within it picks its table entry, read at its own address and compared
+     * with the case it named when the region was formed -- the jump's
+     * instruction charged there -- and anything else (an entry written
+     * since, one naming no case) goes on into the switch's own block, which
+     * reads and jumps as it does for any other way in. Where the test was a
+     * compare and a branch, and then the `br_table`'s own bound test.
+     *
+     * @param {import('../region.js').Block} block @param {number} after
+     * @param {import('../region.js').Block} next  the switch's block, `after`
+     */
+    emitFusedSwitch(block, after, next){
+        const { b } = this;
+        const [taken, notTaken] = block.exit.targets;
+        const table = /** @type {NonNullable<typeof next.exit.table>} */ (next.exit.table);
+        const arms = table.entries.map((_, i)=>i).filter(i=>this.labels.has(table.entries[i]));
+        this.open('switchOn', EMPTY);
+        this.open('switchPast', EMPTY);
+        for (let k = arms.length - 1; k >= 0; k--)
+        {
+            this.open(`entry${k}`, EMPTY);
+        }
+        b.localGet(this.width.regLocal[table.index]);
+        b.brTable(table.entries.map((_, i)=>{
+            const k = arms.indexOf(i);
+            return k < 0 ? this.depthOf('switchOn') : this.depthOf(`entry${k}`);
+        }), this.depthOf('switchPast'));
+        for (let k = 0; k < arms.length; k++)
+        {
+            this.close();
+            const target = table.entries[arms[k]];
+            b.i32const(table.address + 4 * arms[k]).load('i32', { offset: this.layout.ramBase })
+                .i32const(target | 0).op(I32.eq);
+            this.openIf('case');
+            // The switch's jump, retired here.
+            b.localGet(Local.budget).i32const(1).op(I32.sub).localSet(Local.budget);
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile)
+            {
+                this.countBlock(next.start);
+            }
+            this.payResultFor(target);
+            this.jumpTo(target);
+            this.close();
+            b.br(this.depthOf('switchOn'));
+        }
+        this.close(); // switchPast
+        this.payResultFor(taken);
+        this.jumpTo(taken);
+        this.close(); // switchOn
+        this.payResultFor(notTaken);
+        this.fallThrough(after, notTaken);
+    }
+
+    /**
      * @param {import('../region.js').Block} block
      * @param {number} index
      */
@@ -3819,6 +3903,11 @@ export class RegionEmitter {
                         return;
                     }
                     this.jumpTo(notTaken);
+                    return;
+                }
+                if (next && next.start === notTaken && this.fusesSwitch(block, next))
+                {
+                    this.emitFusedSwitch(block, after, next);
                     return;
                 }
                 this.pushBranchCondition(last);

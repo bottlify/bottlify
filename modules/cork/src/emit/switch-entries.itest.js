@@ -6,11 +6,14 @@
 
 /**
  * The gate of a switch's cases picked by its index before the table is read
- * (`casesByEntry`, reads untested): seeded switch loops whose cases rewrite
- * the table as they run -- an entry pointed at another case, at code the
- * region did not form, back again -- run translated and on the model from the
- * same start, every register, the flags and the memory the program wrote
- * compared. Under `precise` the jump reads its target first; both are run.
+ * (`casesByEntry`, reads untested), and of its bound test taken into that
+ * `br_table` (`emitFusedSwitch` in region.js): seeded switch loops, the
+ * index masked or bounded by `cmp; ja`, whose cases rewrite the table as they
+ * run -- an entry pointed at another case, at code the region did not form,
+ * back again -- run translated and on the model from the same start, every
+ * register, the flags, the memory the program wrote and the instructions it
+ * retired compared. Under `precise` the jump reads its target first; both are
+ * run.
  */
 
 import { test } from 'node:test';
@@ -173,6 +176,7 @@ test('a switch\'s cases picked before its table is read: seeded loops rewriting 
             const what = `seed ${seed}${precise ? ' precise' : ''}`;
             assert.equal(exit.kind, 3, `${what}: halted`);
             assert.ok(state.halted, `${what}: the model halted`);
+            assert.equal(exit.retired, state.retired, `${what}: the instructions retired`);
             for (let r = 0; r < 8; r++)
             {
                 assert.equal(m.reg(NAMES[r]), state.reg[r], `${what}: ${NAMES[r]}`);
