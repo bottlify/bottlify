@@ -4057,6 +4057,12 @@ export class RegionEmitter {
         for (let k = 0; k < arms.length; k++)
         {
             this.close();
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
+            {
+                // An arm runs the switch's jump: its code is the switch block's,
+                // each arm a copy of it, not more of the bound test's.
+                this.markBlock(this.formedIndex?.get(next.start) ?? after);
+            }
             const target = table.entries[arms[k]];
             b.i32const(table.address + 4 * arms[k]).load('i32', { offset: this.layout.ramBase })
                 .i32const(target | 0).op(I32.eq);
