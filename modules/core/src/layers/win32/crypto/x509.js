@@ -144,6 +144,133 @@ function readPublicKey(info){
 }
 
 /**
+ * An RSAPublicKey (RFC 8017 A.1.1) out of a key's BIT STRING bytes, or null
+ * when they are not one.
+ *
+ * @param {Uint8Array} bits
+ * @returns {RsaKey | null}
+ */
+export function rsaKeyFromBits(bits){
+    try
+    {
+        const [modulus, exponent] = childrenOf(expect(readNode(bits), TAG.SEQUENCE, 'a key'));
+        const n = readUnsigned(modulus);
+        return { n: beToBigInt(n), e: beToBigInt(readUnsigned(exponent)), size: n.length };
+    }
+    catch (e){
+        if (e instanceof DerError)
+        {
+            return null;
+        }
+        throw e;
+    }
+}
+
+/**
+ * @typedef {Object} NameAttribute
+ * @property {string} oid
+ * @property {number} tag       The string type it was encoded as.
+ * @property {string} value
+ * @property {Uint8Array} raw   The value's contents octets.
+ */
+
+/**
+ * A Name, as encoded, read into its RDNs in order, each the attributes of
+ * its SET.
+ *
+ * @param {Uint8Array} encoded
+ * @returns {NameAttribute[][]}
+ * @throws {DerError} when it is not one.
+ */
+export function readName(encoded){
+    return childrenOf(expect(readNode(encoded), TAG.SEQUENCE, 'a Name')).map(set=>
+        childrenOf(expect(set, TAG.SET, 'an RDN')).map(pair=>{
+            const [type, value] = childrenOf(expect(pair, TAG.SEQUENCE, 'an attribute'));
+            return { oid: readOid(type), tag: value.tag, value: readString(value),
+                raw: contents(value) };
+        }));
+}
+
+/**
+ * @typedef {Object} GeneralName
+ * @property {number} choice  The GeneralName's [n] (RFC 5280 4.2.1.6).
+ * @property {Uint8Array} raw The contents octets.
+ * @property {Uint8Array} encoded The whole of it.
+ */
+
+/**
+ * The GeneralNames of a SubjectAltName or IssuerAltName value.
+ *
+ * @param {Uint8Array} value  The extension's OCTET STRING contents.
+ * @returns {GeneralName[]}
+ * @throws {DerError}
+ */
+export function readGeneralNames(value){
+    return childrenOf(expect(readNode(value), TAG.SEQUENCE, 'GeneralNames')).map(name=>({
+        choice: name.tag & 0x1f, raw: contents(name), encoded: encoding(name),
+    }));
+}
+
+/**
+ * A DER element: tag, definite length, contents.
+ *
+ * @param {number} tag @param {...Uint8Array} parts
+ * @returns {Uint8Array}
+ */
+export function derElement(tag, ...parts){
+    const length = parts.reduce((total, part)=>total + part.length, 0);
+    /** @type {number[]} */
+    const head = [tag];
+    if (length < 0x80)
+    {
+        head.push(length);
+    }
+    else
+    {
+        /** @type {number[]} */
+        const octets = [];
+        for (let left = length; left > 0; left = Math.floor(left / 256))
+        {
+            octets.unshift(left & 0xff);
+        }
+        head.push(0x80 | octets.length, ...octets);
+    }
+    const out = new Uint8Array(head.length + length);
+    out.set(head);
+    let at = head.length;
+    for (const part of parts)
+    {
+        out.set(part, at);
+        at += part.length;
+    }
+    return out;
+}
+
+/**
+ * An OBJECT IDENTIFIER's contents octets for a dotted string.
+ *
+ * @param {string} oid
+ * @returns {Uint8Array}
+ */
+export function oidContents(oid){
+    const arcs = oid.split('.').map(arc=>BigInt(arc));
+    const values = [arcs[0] * 40n + (arcs[1] ?? 0n), ...arcs.slice(2)];
+    /** @type {number[]} */
+    const out = [];
+    for (const value of values)
+    {
+        /** @type {number[]} */
+        const septets = [Number(value & 0x7fn)];
+        for (let rest = value >> 7n; rest > 0n; rest >>= 7n)
+        {
+            septets.unshift(Number(rest & 0x7fn) | 0x80);
+        }
+        out.push(...septets);
+    }
+    return Uint8Array.from(out);
+}
+
+/**
  * Reads a DER certificate.
  *
  * @param {Uint8Array} der

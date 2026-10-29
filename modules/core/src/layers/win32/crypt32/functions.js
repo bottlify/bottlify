@@ -17,6 +17,7 @@
  */
 
 import { createCertificateFunctions } from './certificates.js';
+import { createEncodingFunctions } from './encoding.js';
 
 const ERROR_INVALID_PARAMETER = 87;
 /** What Windows sets when the blob is damaged or the entropy is not the one it was sealed with. */
@@ -45,7 +46,8 @@ const HEADER = 16;
  * @param {Crypt32Host | Crypt32FullHost} host
  */
 export function createCrypt32Functions(host){
-    const certificates = 'localFree' in host ? createCertificateFunctions(host) : {};
+    const certificates = 'localFree' in host
+        ? { ...createCertificateFunctions(host), ...createEncodingFunctions(host) } : {};
     /** @param {number} address */
     const dword = address=>{
         const bytes = host.readMemory(address, 4);

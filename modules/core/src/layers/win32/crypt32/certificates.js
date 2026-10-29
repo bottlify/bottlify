@@ -29,9 +29,15 @@
  * certificates' distribution points.
  */
 
-import { DerError } from '../crypto/der.js';
-import { isSelfIssued, isSignedBy, parseCertificate, sameBytes, USAGE, TLS_USAGE }
-    from '../crypto/x509.js';
+import { childrenOf, contents as contentsOf, DerError, encoding as encodingOf, expect,
+    readBitString, readNode, readOid, TAG } from '../crypto/der.js';
+import { createMd5, createSha1, createSha256 } from '../crypto/digest.js';
+import { parseSignedData } from '../crypto/pkcs7.js';
+import { verifySigned } from '../crypto/signature.js';
+import { isSelfIssued, isSignedBy, parseCertificate, readGeneralNames, readName,
+    rsaKeyFromBits, sameBytes, USAGE, TLS_USAGE } from '../crypto/x509.js';
+import { readSubject } from '../wintrust/subject.js';
+import { nameToString, NAME_STR } from './names.js';
 
 /** @typedef {import('../crypto/x509.js').Certificate} Certificate */
 
@@ -43,6 +49,60 @@ const CRYPT_E_NOT_FOUND = 0x80092004;
 const CRYPT_E_EXISTS = 0x80092005;
 const CRYPT_E_ASN1_BADTAG = 0x8009310b;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_MORE_DATA = 234;
+const ERROR_CALL_NOT_IMPLEMENTED = 120;
+const NTE_BAD_DATA = 0x80090005;
+const NTE_BAD_SIGNATURE = 0x80090006;
+const NTE_BAD_ALGID = 0x80090008;
+const NTE_NOT_SUPPORTED = 0x80090029;
+const CRYPT_E_NO_MATCH = 0x80092009;
+const CRYPT_E_NO_KEY_PROPERTY = 0x8009200b;
+const CRYPT_E_INVALID_MSG_TYPE = 0x80091004;
+const CRYPT_E_INVALID_INDEX = 0x80091008;
+
+/** Context properties, wincrypt.h's CERT_*_PROP_ID. */
+export const PROP = Object.freeze({ KEY_PROV_INFO: 2, SHA1_HASH: 3, MD5_HASH: 4,
+    FRIENDLY_NAME: 11, ACCESS_STATE: 14, KEY_IDENTIFIER: 20, SHA256_HASH: 107 });
+const ACCESS_STATE_SYSTEM_STORE = 0x2;
+/** CRYPT_KEY_PROV_INFO, 32-bit. */
+const KEY_PROV_INFO_SIZE = 28;
+
+/** CertGetNameString's types and flag. */
+const NAME_TYPE = Object.freeze({ EMAIL: 1, RDN: 2, ATTR: 3, SIMPLE_DISPLAY: 4,
+    FRIENDLY_DISPLAY: 5, DNS: 6, URL: 7 });
+const CERT_NAME_ISSUER_FLAG = 0x1;
+
+/** CertFindCertificateInStore: a find type is a comparison << 16 | the CERT_INFO field. */
+const COMPARE = Object.freeze({ ANY: 0, SHA1_HASH: 1, NAME: 2, MD5_HASH: 4, PUBLIC_KEY: 6,
+    NAME_STR_A: 7, NAME_STR_W: 8, ENHKEY_USAGE: 10, SUBJECT_CERT: 11, ISSUER_OF: 12,
+    EXISTING: 13, KEY_IDENTIFIER: 15, HAS_PRIVATE_KEY: 21 });
+const CERT_INFO_ISSUER_FLAG = 4;
+const CERT_FIND_OR_ENHKEY_USAGE_FLAG = 0x10;
+const CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG = 0x2;
+const CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG = 0x4;
+
+/** CertControlStore's controls. */
+const STORE_CTRL = Object.freeze({ RESYNC: 1, NOTIFY_CHANGE: 2, COMMIT: 3, AUTO_RESYNC: 4,
+    CANCEL_NOTIFY: 5 });
+
+/** CryptQueryObject's objects, content types and formats (each flag is 1 << its number). */
+const QUERY_OBJECT = Object.freeze({ FILE: 1, BLOB: 2 });
+const CONTENT = Object.freeze({ CERT: 1, PKCS7_SIGNED: 8, PKCS7_SIGNED_EMBED: 10 });
+const FORMAT = Object.freeze({ BINARY: 1, BASE64: 2 });
+const PKCS_7_ASN_ENCODING = 0x10000;
+
+/** CryptMsgGetParam's parameters, and the message type a SignedData is. */
+const MSG_PARAM = Object.freeze({ TYPE: 1, CONTENT: 2, SIGNER_COUNT: 5, SIGNER_CERT_INFO: 7,
+    CERT_COUNT: 11, CERT: 12 });
+const CMSG_SIGNED = 2;
+
+/** CryptVerifyCertificateSignatureEx's subject and issuer kinds. */
+const VERIFY_SUBJECT = Object.freeze({ BLOB: 1, CERT: 2 });
+const VERIFY_ISSUER = Object.freeze({ PUBKEY: 1, CERT: 2, CHAIN: 3 });
+
+/** Chain engine and message handles, opaque and numbered apart from the stores'. */
+const ENGINE_BASE = 0x5c800000;
+const MESSAGE_BASE = 0x5c900000;
 
 /** Trust policy errors, wincrypt.h's and winerror.h's numbers. */
 const TRUST_E_CERT_SIGNATURE = 0x80096004;
@@ -129,6 +189,8 @@ const STORE_BASE = 0x5c000000;
  * @property {() => number} now  The guest's wall clock, ms since 1970 UTC.
  * @property {() => Uint8Array[]} trustedRoots  The machine's root store, as DER.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(path: string) => Uint8Array | null} [readFile]  A file's bytes, for
+ *           CryptQueryObject's CERT_QUERY_OBJECT_FILE; absent, no file is found.
  */
 
 /**
@@ -203,6 +265,25 @@ const fileTime = ms=>{
 };
 
 /**
+ * A string as UTF-16 with its terminator; nothing for null.
+ *
+ * @param {string | null} text
+ */
+const wideBytes = text=>{
+    if (text === null)
+    {
+        return new Uint8Array(0);
+    }
+    const out = new Uint8Array(text.length * 2 + 2);
+    for (let i = 0; i < text.length; i++)
+    {
+        out[i * 2] = text.charCodeAt(i) & 0xff;
+        out[i * 2 + 1] = text.charCodeAt(i) >> 8;
+    }
+    return out;
+};
+
+/**
  * Whether `host` is what `pattern` names: case aside, and a wildcard only as
  * the whole leftmost label of a name with at least two labels after it.
  *
@@ -244,6 +325,7 @@ export function createCertificateFunctions(host){
      * @property {Certificate} certificate
      * @property {number} refs
      * @property {number} store  The store handle it belongs to (0 for none).
+     * @property {Map<number, any>} [properties]  Its context properties, by id.
      */
     /** @type {Map<number, Context>} */
     const contexts = new Map();
@@ -415,14 +497,22 @@ export function createCertificateFunctions(host){
         return [...store.held, ...(store.members ?? []).flatMap(member=>membersOf(member, seen))];
     };
 
-    /** The ROOT store's contexts, the trust anchors. */
-    const anchors = ()=>{
-        const handle = systemStore('ROOT');
+    /**
+     * The trust anchors: the ROOT store's contexts, or those of the store an
+     * engine trusts instead.
+     *
+     * @param {number} [exclusive]  That store's handle.
+     */
+    const anchors = exclusive=>{
+        const handle = exclusive || systemStore('ROOT');
         const out = membersOf(handle).flatMap(address=>{
             const certificate = contexts.get(address)?.certificate;
             return certificate ? [{ address, certificate }] : [];
         });
-        closeStore(handle);
+        if (!exclusive)
+        {
+            closeStore(handle);
+        }
         return out;
     };
 
@@ -453,9 +543,10 @@ export function createCertificateFunctions(host){
      * @param {number} time
      * @param {{ and: boolean, usages: string[] }} usage
      * @param {number} flags
+     * @param {number} [exclusiveRoot]  An engine's own root store.
      */
-    const buildChain = (leafAddress, pool, time, usage, flags)=>{
-        const roots = anchors();
+    const buildChain = (leafAddress, pool, time, usage, flags, exclusiveRoot)=>{
+        const roots = anchors(exclusiveRoot);
         /** @param {Certificate} certificate */
         const trusted = certificate=>roots.some(root=>
             sameBytes(root.certificate.encoded, certificate.encoded));
@@ -752,6 +843,480 @@ export function createCertificateFunctions(host){
         }
     };
 
+    /** Chain engines, by handle: their extra stores and the root store they trust. */
+    /** @type {Map<number, { additional: number[], exclusiveRoot: number }>} */
+    const engines = new Map();
+    let nextEngine = ENGINE_BASE;
+
+    /** Messages CryptQueryObject opened, by handle. */
+    /** @type {Map<number, import('../crypto/pkcs7.js').SignedData & { der: Uint8Array }>} */
+    const messages = new Map();
+    let nextMessage = MESSAGE_BASE;
+
+    /** A context's certificate, or null. @param {number} address */
+    const certificateAt = address=>contexts.get(address >>> 0)?.certificate ?? null;
+
+    /** @param {number} address @returns {Map<number, any>} */
+    const propertiesOf = address=>{
+        const context = /** @type {Context} */ (contexts.get(address));
+        context.properties ??= new Map();
+        return context.properties;
+    };
+
+    /** @param {Uint8Array} bytes @param {() => import('../crypto/digest.js').Digest} make */
+    const hashOf = (bytes, make)=>{
+        const digest = make();
+        digest.update(bytes);
+        return digest.digest();
+    };
+
+    /**
+     * A property's bytes as the getter hands them out, laid at `at` (the
+     * key provider record holds pointers into itself); null when the
+     * context has none.
+     *
+     * @param {number} address @param {number} id @param {number} at
+     * @returns {Uint8Array | null}
+     */
+    const propertyBytes = (address, id, at)=>{
+        const certificate = /** @type {Certificate} */ (certificateAt(address));
+        const kept = propertiesOf(address).get(id);
+        if (kept instanceof Uint8Array)
+        {
+            return kept;
+        }
+        if (id === PROP.KEY_PROV_INFO && kept)
+        {
+            // CRYPT_KEY_PROV_INFO: container, provider, type, flags, no
+            // parameters, key spec; the two names behind it.
+            const container = wideBytes(kept.container);
+            const provider = wideBytes(kept.provider);
+            const out = new Uint8Array(KEY_PROV_INFO_SIZE + container.length + provider.length);
+            const view = new DataView(out.buffer);
+            view.setUint32(0, kept.container === null ? 0 : at + KEY_PROV_INFO_SIZE, true);
+            view.setUint32(4, kept.provider === null ? 0
+                : at + KEY_PROV_INFO_SIZE + container.length, true);
+            view.setUint32(8, kept.type, true);
+            view.setUint32(12, kept.flags, true);
+            view.setUint32(24, kept.keySpec, true);
+            out.set(container, KEY_PROV_INFO_SIZE);
+            out.set(provider, KEY_PROV_INFO_SIZE + container.length);
+            return out;
+        }
+        switch (id)
+        {
+            case PROP.SHA1_HASH: return hashOf(certificate.encoded, createSha1);
+            case PROP.MD5_HASH: return hashOf(certificate.encoded, createMd5);
+            case PROP.SHA256_HASH: return hashOf(certificate.encoded, createSha256);
+            case PROP.KEY_IDENTIFIER: {
+                // The subject key identifier's value where the certificate has
+                // one, the SHA-1 of the key's bits otherwise (RFC 5280's method 1).
+                const extension = certificate.extensions.find(one=>one.id === '2.5.29.14');
+                if (extension)
+                {
+                    try
+                    {
+                        return contentsOf(readNode(extension.value)).slice();
+                    }
+                    catch (e){
+                        if (!(e instanceof DerError))
+                        {
+                            throw e;
+                        }
+                    }
+                }
+                return hashOf(certificate.publicKeyBits.bits, createSha1);
+            }
+            case PROP.ACCESS_STATE: {
+                // Writable for a store a program made; a system store's
+                // certificates are the machine's.
+                const store = stores.get(/** @type {Context} */ (contexts.get(address)).store);
+                return Uint8Array.of(store?.system ? ACCESS_STATE_SYSTEM_STORE : 0, 0, 0, 0);
+            }
+            default:
+                return null;
+        }
+    };
+
+    /**
+     * The name a CertGetNameString type asks for, or '' when there is none.
+     *
+     * @param {number} address @param {number} type @param {number} flags @param {number} para
+     */
+    const nameOf = (address, type, flags, para)=>{
+        const certificate = /** @type {Certificate} */ (certificateAt(address));
+        const issuer = (flags & CERT_NAME_ISSUER_FLAG) !== 0;
+        const encoded = issuer ? certificate.issuer : certificate.subject;
+        /** @type {import('../crypto/x509.js').NameAttribute[]} */
+        let attributes = [];
+        try
+        {
+            attributes = readName(encoded).flat();
+        }
+        catch (e){
+            if (!(e instanceof DerError))
+            {
+                throw e;
+            }
+        }
+        const alternative = certificate.extensions.find(one=>one.id
+            === (issuer ? '2.5.29.18' : '2.5.29.17'));
+        /** @type {import('../crypto/x509.js').GeneralName[]} */
+        let alternatives = [];
+        try
+        {
+            alternatives = alternative ? readGeneralNames(alternative.value) : [];
+        }
+        catch (e){
+            if (!(e instanceof DerError))
+            {
+                throw e;
+            }
+        }
+        /** @param {number} choice */
+        const altText = choice=>{
+            const found = alternatives.find(one=>one.choice === choice);
+            return found ? String.fromCharCode(...found.raw) : null;
+        };
+        /** @param {string} oid */
+        const attribute = oid=>attributes.find(one=>one.oid === oid)?.value ?? null;
+        const EMAIL = '1.2.840.113549.1.9.1';
+        switch (type)
+        {
+            case NAME_TYPE.EMAIL:
+                return altText(1) ?? attribute(EMAIL) ?? '';
+            case NAME_TYPE.RDN:
+                return nameToString(encoded, para === 0 ? NAME_STR.X500 : dword(para));
+            case NAME_TYPE.ATTR:
+                return attribute(para === 0 ? '2.5.4.3' : host.readCString(para, 128)) ?? '';
+            case NAME_TYPE.FRIENDLY_DISPLAY: {
+                const friendly = propertiesOf(address).get(PROP.FRIENDLY_NAME);
+                if (friendly instanceof Uint8Array && friendly.length >= 2)
+                {
+                    let text = '';
+                    for (let i = 0; i + 1 < friendly.length; i += 2)
+                    {
+                        const code = friendly[i] | (friendly[i + 1] << 8);
+                        if (code === 0)
+                        {
+                            break;
+                        }
+                        text += String.fromCharCode(code);
+                    }
+                    return text;
+                }
+            }
+            // falls through: no friendly name is the simple display name
+            case NAME_TYPE.SIMPLE_DISPLAY:
+                return attribute('2.5.4.3') ?? attribute('2.5.4.11') ?? attribute('2.5.4.10')
+                    ?? attribute(EMAIL) ?? altText(1) ?? attributes[0]?.value ?? '';
+            case NAME_TYPE.DNS:
+                return altText(2) ?? attribute('2.5.4.3') ?? '';
+            case NAME_TYPE.URL:
+                return altText(6) ?? '';
+            default:
+                return '';
+        }
+    };
+
+    /**
+     * CertFindCertificateInStore's test for one certificate, or null for a
+     * find type not provided.
+     *
+     * @param {number} type @param {number} para @param {number} flags
+     * @returns {((address: number) => boolean) | null}
+     */
+    const matcherFor = (type, para, flags)=>{
+        const compare = type >>> 16;
+        const which = type & 0xffff;
+        /** @param {Certificate} certificate */
+        const nameOfInfo = certificate=>(which === CERT_INFO_ISSUER_FLAG
+            ? certificate.issuer : certificate.subject);
+        /** @param {number} at */
+        const blob = at=>{
+            const size = dword(at);
+            return size === 0 ? new Uint8Array(0) : host.readMemory(dword(at + 4), size).slice();
+        };
+        switch (compare)
+        {
+            case COMPARE.ANY:
+                return ()=>true;
+            case COMPARE.SHA1_HASH:
+            case COMPARE.MD5_HASH:
+            case COMPARE.KEY_IDENTIFIER: {
+                const wanted = blob(para);
+                const id = compare === COMPARE.SHA1_HASH ? PROP.SHA1_HASH
+                    : compare === COMPARE.MD5_HASH ? PROP.MD5_HASH : PROP.KEY_IDENTIFIER;
+                return address=>{
+                    const bytes = propertyBytes(address, id, 0);
+                    return bytes !== null && sameBytes(bytes, wanted);
+                };
+            }
+            case COMPARE.NAME: {
+                const wanted = blob(para);
+                return address=>sameBytes(nameOfInfo(
+                    /** @type {Certificate} */ (certificateAt(address))), wanted);
+            }
+            case COMPARE.NAME_STR_A:
+            case COMPARE.NAME_STR_W: {
+                const wanted = (compare === COMPARE.NAME_STR_W
+                    ? host.readWideString(para, 1024 * 2) : host.readCString(para, 1024))
+                    .toLowerCase();
+                return address=>{
+                    try
+                    {
+                        return readName(nameOfInfo(/** @type {Certificate} */ (
+                            certificateAt(address)))).flat()
+                            .some(attribute=>attribute.value.toLowerCase().includes(wanted));
+                    }
+                    catch (e){
+                        if (!(e instanceof DerError))
+                        {
+                            throw e;
+                        }
+                        return false;
+                    }
+                };
+            }
+            case COMPARE.EXISTING: {
+                const existing = certificateAt(para);
+                return address=>existing !== null && sameBytes(
+                    /** @type {Certificate} */ (certificateAt(address)).encoded, existing.encoded);
+            }
+            case COMPARE.ISSUER_OF: {
+                const subject = certificateAt(para);
+                return address=>{
+                    const candidate = /** @type {Certificate} */ (certificateAt(address));
+                    return subject !== null && sameBytes(candidate.subject, subject.issuer)
+                        && isSignedBy(subject, candidate.publicKey);
+                };
+            }
+            case COMPARE.SUBJECT_CERT: {
+                // A CERT_INFO naming the certificate by issuer and serial number.
+                const issuer = blob(para + 24);
+                const serial = blob(para + 4).reverse();
+                return address=>{
+                    const candidate = /** @type {Certificate} */ (certificateAt(address));
+                    return sameBytes(candidate.issuer, issuer)
+                        && sameBytes(candidate.serial, serial);
+                };
+            }
+            case COMPARE.PUBLIC_KEY: {
+                const bits = blob(para + 12);
+                return address=>sameBytes(
+                    /** @type {Certificate} */ (certificateAt(address)).publicKeyBits.bits, bits);
+            }
+            case COMPARE.ENHKEY_USAGE: {
+                const count = para === 0 ? 0 : dword(para);
+                const list = para === 0 ? 0 : dword(para + 4);
+                const usages = Array.from({ length: Math.min(count, 64) },
+                    (_, i)=>host.readCString(dword(list + i * 4), 128));
+                return address=>{
+                    const allowed = /** @type {Certificate} */ (certificateAt(address))
+                        .extendedKeyUsage;
+                    if (allowed === null)
+                    {
+                        // No extension is valid for every usage, unless only
+                        // the extension's say is asked for.
+                        return (flags & CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG) === 0;
+                    }
+                    return (flags & CERT_FIND_OR_ENHKEY_USAGE_FLAG) !== 0
+                        ? usages.some(one=>allowed.includes(one))
+                        : usages.every(one=>allowed.includes(one));
+                };
+            }
+            case COMPARE.HAS_PRIVATE_KEY:
+                return address=>propertiesOf(address).has(PROP.KEY_PROV_INFO);
+            default:
+                return null;
+        }
+    };
+
+    /**
+     * Lays out a CERT_ENHKEY_USAGE: the count, the array inline after it, the
+     * strings after that, its pointers made absolute for `at`.
+     *
+     * @param {string[]} usages @param {number} at
+     */
+    const enhancedKeyUsage = (usages, at)=>{
+        const strings = usages.map(usage=>Uint8Array.from([...usage, '\0'],
+            ch=>ch.charCodeAt(0)));
+        const head = 8 + usages.length * 4;
+        const out = new Uint8Array(head + strings.reduce((total, one)=>total + one.length, 0));
+        const view = new DataView(out.buffer);
+        view.setUint32(0, usages.length, true);
+        view.setUint32(4, usages.length === 0 ? 0 : at + 8, true);
+        let offset = head;
+        strings.forEach((one, index)=>{
+            view.setUint32(8 + index * 4, at + offset, true);
+            out.set(one, offset);
+            offset += one.length;
+        });
+        return out;
+    };
+
+    /**
+     * Writes `bytes` under the size protocol: no buffer asks the size, a
+     * buffer too small is ERROR_MORE_DATA with the size written.
+     *
+     * @param {Uint8Array | ((at: number) => Uint8Array)} bytes @param {number} out
+     * @param {number} size
+     */
+    const answer = (bytes, out, size)=>{
+        const length = (typeof bytes === 'function' ? bytes(0) : bytes).length;
+        if (out === 0)
+        {
+            setDword(size, length);
+            return 1;
+        }
+        if (dword(size) < length)
+        {
+            setDword(size, length);
+            return fail(ERROR_MORE_DATA);
+        }
+        host.writeMemory(out, typeof bytes === 'function' ? bytes(out) : bytes);
+        setDword(size, length);
+        return 1;
+    };
+
+    /**
+     * A signed structure's parts -- to-be-signed, algorithm, signature -- or
+     * null when the bytes are not one.
+     *
+     * @param {Uint8Array} bytes
+     */
+    const signedParts = bytes=>{
+        try
+        {
+            const [tbs, algorithm, signature] = childrenOf(expect(readNode(bytes), TAG.SEQUENCE,
+                'a signed structure'));
+            return { tbs: encodingOf(tbs), algorithm: readOid(childrenOf(algorithm)[0]),
+                signature: readBitString(signature).bits };
+        }
+        catch (e){
+            if (e instanceof DerError)
+            {
+                return null;
+            }
+            throw e;
+        }
+    };
+
+    /**
+     * What a CryptQueryObject object holds, as one of the content types it
+     * names: a certificate (DER or PEM), a PKCS #7 SignedData, or the one a
+     * signed PE image carries.
+     *
+     * @param {Uint8Array} bytes @param {number} wanted  The content type flags allowed.
+     * @param {number} formats  The format flags allowed.
+     */
+    const queryContent = (bytes, wanted, formats)=>{
+        /** @type {{ der: Uint8Array, format: number }[]} */
+        const forms = [];
+        if ((formats & (1 << FORMAT.BINARY)) !== 0)
+        {
+            forms.push({ der: bytes, format: FORMAT.BINARY });
+        }
+        if ((formats & (1 << FORMAT.BASE64)) !== 0)
+        {
+            const text = String.fromCharCode(...bytes.subarray(0, 0x100000));
+            const pem = /-----BEGIN [^-]+-----([\s\S]*?)-----END/.exec(text);
+            try
+            {
+                const body = (pem ? pem[1] : text).replace(/\s/g, '');
+                if (/^[A-Za-z0-9+/]+={0,2}$/.test(body))
+                {
+                    forms.push({ der: Uint8Array.from(atob(body), ch=>ch.charCodeAt(0)),
+                        format: FORMAT.BASE64 });
+                }
+            }
+            catch {
+                // not base64
+            }
+        }
+        for (const { der, format } of forms)
+        {
+            if ((wanted & (1 << CONTENT.CERT)) !== 0)
+            {
+                try
+                {
+                    return { type: CONTENT.CERT, format, certificate: parseCertificate(der) };
+                }
+                catch (e){
+                    if (!(e instanceof DerError))
+                    {
+                        throw e;
+                    }
+                }
+            }
+            if ((wanted & (1 << CONTENT.PKCS7_SIGNED)) !== 0)
+            {
+                try
+                {
+                    return { type: CONTENT.PKCS7_SIGNED, format, message: der,
+                        signed: parseSignedData(der) };
+                }
+                catch (e){
+                    if (!(e instanceof DerError))
+                    {
+                        throw e;
+                    }
+                }
+            }
+        }
+        if ((wanted & (1 << CONTENT.PKCS7_SIGNED_EMBED)) !== 0
+            && (formats & (1 << FORMAT.BINARY)) !== 0)
+        {
+            const subject = readSubject(bytes);
+            if (subject?.signature)
+            {
+                try
+                {
+                    return { type: CONTENT.PKCS7_SIGNED_EMBED, format: FORMAT.BINARY,
+                        message: subject.signature, signed: parseSignedData(subject.signature) };
+                }
+                catch (e){
+                    if (!(e instanceof DerError))
+                    {
+                        throw e;
+                    }
+                }
+            }
+        }
+        return null;
+    };
+
+    /** @param {boolean} wide */
+    const getNameString = wide=>({
+        argBytes: 24,
+        handler: (/** @type {number[]} */ [address, type, flags, para, out, count])=>{
+            if (!contexts.has(address >>> 0))
+            {
+                return fail(E_INVALIDARG);
+            }
+            const text = nameOf(address >>> 0, type >>> 0, flags >>> 0, para >>> 0);
+            if ((out >>> 0) === 0 || (count >>> 0) === 0)
+            {
+                return text.length + 1;
+            }
+            const kept = text.slice(0, (count >>> 0) - 1);
+            host.writeMemory(out >>> 0, wide ? wideBytes(kept)
+                : Uint8Array.from([...kept, '\0'], ch=>ch.charCodeAt(0) & 0xff));
+            return kept.length + 1;
+        },
+    });
+
+    /** @param {number} address */
+    const freeChain = address=>{
+        const chain = chains.get(address);
+        if (chain && --chain.refs <= 0)
+        {
+            chains.delete(address);
+            chain.elements.forEach(release);
+            host.localFree(address);
+        }
+    };
+
     return {
         /**
          * HCERTSTORE CertOpenStore(LPCSTR lpszStoreProvider, DWORD dwEncodingType,
@@ -937,8 +1502,8 @@ export function createCertificateFunctions(host){
          */
         CertGetCertificateChain: {
             argBytes: 32,
-            handler: (/** @type {number[]} */ [, address, timePointer, additional, parameters,
-                flags, , out])=>{
+            handler: (/** @type {number[]} */ [engineHandle, address, timePointer, additional,
+                parameters, flags, , out])=>{
                 const context = contexts.get(address >>> 0);
                 if (!context || (out >>> 0) === 0 || (parameters >>> 0) === 0)
                 {
@@ -961,11 +1526,16 @@ export function createCertificateFunctions(host){
                 {
                     usages.push(host.readCString(dword(list + i * 4), 128));
                 }
+                // HCCE_CURRENT_USER and HCCE_LOCAL_MACHINE (0 and 1) are the
+                // default engine; one CertCreateCertificateChainEngine made
+                // adds its stores and may trust a root store of its own.
+                const engine = engines.get(engineHandle >>> 0);
                 const pool = [...membersOf(context.store),
-                    ...(additional >>> 0) === 0 ? [] : membersOf(additional >>> 0)];
+                    ...(additional >>> 0) === 0 ? [] : membersOf(additional >>> 0),
+                    ...(engine?.additional ?? []).flatMap(one=>membersOf(one))];
                 const { elements, chainError } = buildChain(address >>> 0,
                     pool.filter(one=>one !== (address >>> 0)), time,
-                    { and: kind === 0, usages }, flags >>> 0);
+                    { and: kind === 0, usages }, flags >>> 0, engine?.exclusiveRoot);
                 // The leaf's element holds a reference of its own, as the others do.
                 duplicate(address >>> 0);
                 const chain = makeChainContext(elements, chainError, flags >>> 0);
@@ -997,13 +1567,7 @@ export function createCertificateFunctions(host){
         CertFreeCertificateChain: {
             argBytes: 4,
             handler: (/** @type {number[]} */ [address])=>{
-                const chain = chains.get(address >>> 0);
-                if (chain && --chain.refs <= 0)
-                {
-                    chains.delete(address >>> 0);
-                    chain.elements.forEach(release);
-                    host.localFree(address >>> 0);
-                }
+                freeChain(address >>> 0);
                 return 0;
             },
         },
@@ -1105,6 +1669,600 @@ export function createCertificateFunctions(host){
                 setDword((status >>> 0) + 8, verdict[0] === 0 || verdict[1] < 0 ? -1 : 0);
                 setDword((status >>> 0) + 12, verdict[0] === 0 ? -1 : verdict[1]);
                 return 1;
+            },
+        },
+        /**
+         * PCCERT_CONTEXT CertFindCertificateInStore(HCERTSTORE hCertStore,
+         *     DWORD dwCertEncodingType, DWORD dwFindFlags, DWORD dwFindType,
+         *     const void *pvFindPara, PCCERT_CONTEXT pPrevCertContext)
+         *
+         * The search goes on after the previous context, which is freed.
+         */
+        CertFindCertificateInStore: {
+            argBytes: 24,
+            handler: (/** @type {number[]} */ [handle, , flags, type, para, previous])=>{
+                if (!storeOf(handle))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const matches = matcherFor(type >>> 0, para >>> 0, flags >>> 0);
+                if (!matches)
+                {
+                    host.divergence?.('CertFindCertificateInStore',
+                        `find type 0x${(type >>> 0).toString(16)} is not provided`);
+                    if ((previous >>> 0) !== 0)
+                    {
+                        release(previous >>> 0);
+                    }
+                    return fail(CRYPT_E_NOT_FOUND);
+                }
+                const members = membersOf(handle >>> 0);
+                let at = 0;
+                if ((previous >>> 0) !== 0)
+                {
+                    const was = members.indexOf(previous >>> 0);
+                    release(previous >>> 0);
+                    at = was < 0 ? members.length : was + 1;
+                }
+                for (; at < members.length; at++)
+                {
+                    if (matches(members[at]))
+                    {
+                        return duplicate(members[at]);
+                    }
+                }
+                return fail(CRYPT_E_NOT_FOUND);
+            },
+        },
+
+        /**
+         * DWORD CertGetNameStringA(PCCERT_CONTEXT pCertContext, DWORD dwType,
+         *     DWORD dwFlags, void *pvTypePara, LPSTR pszNameString, DWORD cchNameString)
+         *
+         * The count of characters with the terminator; a name not there is
+         * the empty string and 1.
+         */
+        CertGetNameStringA: getNameString(false),
+        CertGetNameStringW: getNameString(true),
+
+        /**
+         * BOOL CertGetCertificateContextProperty(PCCERT_CONTEXT pCertContext,
+         *     DWORD dwPropId, void *pvData, DWORD *pcbData)
+         */
+        CertGetCertificateContextProperty: {
+            argBytes: 16,
+            handler: (/** @type {number[]} */ [address, id, out, size])=>{
+                if (!contexts.has(address >>> 0) || (size >>> 0) === 0)
+                {
+                    return fail(E_INVALIDARG);
+                }
+                const bytes = propertyBytes(address >>> 0, id >>> 0, out >>> 0);
+                if (!bytes)
+                {
+                    return fail(CRYPT_E_NOT_FOUND);
+                }
+                return answer(at=>/** @type {Uint8Array} */ (
+                    propertyBytes(address >>> 0, id >>> 0, at)), out >>> 0, size >>> 0);
+            },
+        },
+
+        /**
+         * BOOL CertSetCertificateContextProperty(PCCERT_CONTEXT pCertContext,
+         *     DWORD dwPropId, DWORD dwFlags, const void *pvData)
+         *
+         * A NULL pvData removes the property. Every property is a
+         * CRYPT_DATA_BLOB but the key provider record, which is kept by its
+         * fields so its pointers can be laid out again where it is read.
+         */
+        CertSetCertificateContextProperty: {
+            argBytes: 16,
+            handler: (/** @type {number[]} */ [address, id, , data])=>{
+                if (!contexts.has(address >>> 0))
+                {
+                    return fail(E_INVALIDARG);
+                }
+                const properties = propertiesOf(address >>> 0);
+                if ((data >>> 0) === 0)
+                {
+                    properties.delete(id >>> 0);
+                    return 1;
+                }
+                if ((id >>> 0) === PROP.KEY_PROV_INFO)
+                {
+                    const at = data >>> 0;
+                    const text = (/** @type {number} */ pointer)=>(pointer === 0 ? null
+                        : host.readWideString(pointer, 1024 * 2));
+                    properties.set(PROP.KEY_PROV_INFO, { container: text(dword(at)),
+                        provider: text(dword(at + 4)), type: dword(at + 8),
+                        flags: dword(at + 12), keySpec: dword(at + 24) });
+                    return 1;
+                }
+                const length = dword(data >>> 0);
+                properties.set(id >>> 0, length === 0 ? new Uint8Array(0)
+                    : host.readMemory(dword((data >>> 0) + 4), length).slice());
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL CertCompareCertificateName(DWORD dwCertEncodingType,
+         *     PCERT_NAME_BLOB pCertName1, PCERT_NAME_BLOB pCertName2)
+         */
+        CertCompareCertificateName: {
+            argBytes: 12,
+            handler: (/** @type {number[]} */ [, first, second])=>{
+                /** @param {number} at */
+                const blob = at=>host.readMemory(dword(at + 4), dword(at)).slice();
+                return sameBytes(blob(first >>> 0), blob(second >>> 0)) ? 1 : 0;
+            },
+        },
+
+        /**
+         * LONG CertVerifyTimeValidity(LPFILETIME pTimeToVerify, PCERT_INFO pCertInfo)
+         *
+         * -1 before the certificate's validity, 1 after it, 0 inside; NULL is now.
+         */
+        CertVerifyTimeValidity: {
+            argBytes: 8,
+            handler: (/** @type {number[]} */ [timePointer, info])=>{
+                const ticksAt = (/** @type {number} */ at)=>BigInt(dword(at))
+                    | (BigInt(dword(at + 4)) << 32n);
+                const now = (timePointer >>> 0) !== 0 ? ticksAt(timePointer >>> 0)
+                    : (BigInt(Math.round(host.now())) + 11644473600000n) * 10000n;
+                if (now < ticksAt((info >>> 0) + 32))
+                {
+                    return -1;
+                }
+                return now > ticksAt((info >>> 0) + 40) ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL CertGetEnhancedKeyUsage(PCCERT_CONTEXT pCertContext, DWORD dwFlags,
+         *     PCERT_ENHKEY_USAGE pUsage, DWORD *pcbUsage)
+         *
+         * A certificate with no usage restriction answers an empty list and
+         * CRYPT_E_NOT_FOUND in the last error: valid for every usage.
+         */
+        CertGetEnhancedKeyUsage: {
+            argBytes: 16,
+            handler: (/** @type {number[]} */ [address, flags, out, size])=>{
+                const certificate = certificateAt(address);
+                if (!certificate || (size >>> 0) === 0)
+                {
+                    return fail(E_INVALIDARG);
+                }
+                const fromExtension = ((flags >>> 0) & CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG) !== 0
+                    ? null : certificate.extendedKeyUsage;
+                const usages = fromExtension ?? [];
+                const result = answer(at=>enhancedKeyUsage(usages, at), out >>> 0, size >>> 0);
+                if (result === 1 && fromExtension === null)
+                {
+                    host.setLastError(CRYPT_E_NOT_FOUND);
+                }
+                return result;
+            },
+        },
+
+        /**
+         * BOOL CertGetIntendedKeyUsage(DWORD dwCertEncodingType, PCERT_INFO pCertInfo,
+         *     BYTE *pbKeyUsage, DWORD cbKeyUsage)
+         *
+         * The key usage extension's bits, from the CERT_INFO's extensions; FALSE
+         * with no error when the certificate has none.
+         */
+        CertGetIntendedKeyUsage: {
+            argBytes: 16,
+            handler: (/** @type {number[]} */ [, info, out, length])=>{
+                const count = dword((info >>> 0) + 104);
+                const list = dword((info >>> 0) + 108);
+                for (let i = 0; i < Math.min(count, 256); i++)
+                {
+                    const at = list + i * 16;
+                    if (host.readCString(dword(at), 64) !== '2.5.29.15')
+                    {
+                        continue;
+                    }
+                    const value = host.readMemory(dword(at + 12), dword(at + 8)).slice();
+                    let bits;
+                    try
+                    {
+                        bits = readBitString(readNode(value)).bits;
+                    }
+                    catch (e){
+                        if (!(e instanceof DerError))
+                        {
+                            throw e;
+                        }
+                        return fail(CRYPT_E_ASN1_BADTAG);
+                    }
+                    const written = new Uint8Array(length >>> 0);
+                    written.set(bits.subarray(0, written.length));
+                    host.writeMemory(out >>> 0, written);
+                    return 1;
+                }
+                if ((length >>> 0) > 0)
+                {
+                    host.writeMemory(out >>> 0, new Uint8Array(length >>> 0));
+                }
+                host.setLastError(0);
+                return 0;
+            },
+        },
+
+        /**
+         * PCERT_EXTENSION CertFindExtension(LPCSTR pszObjId, DWORD cExtensions,
+         *     CERT_EXTENSION rgExtensions[])
+         */
+        CertFindExtension: {
+            argBytes: 12,
+            handler: (/** @type {number[]} */ [oid, count, list])=>{
+                if ((oid >>> 0) === 0)
+                {
+                    return fail(E_INVALIDARG);
+                }
+                const wanted = host.readCString(oid >>> 0, 128);
+                for (let i = 0; i < Math.min(count >>> 0, 256); i++)
+                {
+                    const at = (list >>> 0) + i * 16;
+                    if (host.readCString(dword(at), 128) === wanted)
+                    {
+                        return at;
+                    }
+                }
+                return fail(CRYPT_E_NOT_FOUND);
+            },
+        },
+
+        /**
+         * BOOL CertControlStore(HCERTSTORE hCertStore, DWORD dwFlags, DWORD dwCtrlType,
+         *     void const *pvCtrlPara)
+         *
+         * Nothing changes a store from outside here, so resynchronising has
+         * nothing to do and a change notification is never signalled.
+         */
+        CertControlStore: {
+            argBytes: 16,
+            handler: (/** @type {number[]} */ [handle, , control])=>{
+                if (!storeOf(handle))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                return /** @type {number[]} */ (Object.values(STORE_CTRL)).includes(control >>> 0)
+                    ? 1 : fail(ERROR_CALL_NOT_IMPLEMENTED);
+            },
+        },
+
+        /**
+         * BOOL CertCreateCertificateChainEngine(PCERT_CHAIN_ENGINE_CONFIG pConfig,
+         *     HCERTCHAINENGINE *phChainEngine)
+         *
+         * The engine's additional stores join every chain built with it; an
+         * exclusive root store (Windows 7's field) stands in for ROOT.
+         */
+        CertCreateCertificateChainEngine: {
+            argBytes: 8,
+            handler: (/** @type {number[]} */ [config, out])=>{
+                if ((config >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return fail(E_INVALIDARG);
+                }
+                const at = config >>> 0;
+                const size = dword(at);
+                const count = dword(at + 16);
+                const list = dword(at + 20);
+                const hold = (/** @type {number} */ handle)=>{
+                    const store = storeOf(handle);
+                    if (!store)
+                    {
+                        return 0;
+                    }
+                    store.refs++;
+                    return handleOf(store);
+                };
+                const additional = Array.from({ length: Math.min(count, 64) },
+                    (_, i)=>hold(dword(list + i * 4))).filter(handle=>handle !== 0);
+                const exclusiveRoot = size >= 44 && dword(at + 40) !== 0 ? hold(dword(at + 40)) : 0;
+                const engine = nextEngine;
+                nextEngine += 4;
+                engines.set(engine, { additional, exclusiveRoot });
+                setDword(out >>> 0, engine);
+                return 1;
+            },
+        },
+
+        /** VOID CertFreeCertificateChainEngine(HCERTCHAINENGINE hChainEngine) */
+        CertFreeCertificateChainEngine: {
+            argBytes: 4,
+            handler: (/** @type {number[]} */ [handle])=>{
+                const engine = engines.get(handle >>> 0);
+                if (engine)
+                {
+                    engines.delete(handle >>> 0);
+                    [...engine.additional, engine.exclusiveRoot].filter(one=>one !== 0)
+                        .forEach(closeStore);
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * PCCERT_CHAIN_CONTEXT CertFindChainInStore(HCERTSTORE hCertStore,
+         *     DWORD dwCertEncodingType, DWORD dwFindFlags, DWORD dwFindType,
+         *     const void *pvFindPara, PCCERT_CHAIN_CONTEXT pPrevChainContext)
+         *
+         * The one find type is a client certificate with a private key, and no
+         * certificate here has one.
+         */
+        CertFindChainInStore: {
+            argBytes: 24,
+            handler: (/** @type {number[]} */ [, , , , , previous])=>{
+                if ((previous >>> 0) !== 0)
+                {
+                    freeChain(previous >>> 0);
+                }
+                return fail(CRYPT_E_NOT_FOUND);
+            },
+        },
+
+        /**
+         * BOOL CryptAcquireCertificatePrivateKey(PCCERT_CONTEXT pCert, DWORD dwFlags,
+         *     void *pvParameters, HCRYPTPROV_OR_NCRYPT_KEY_HANDLE *phCryptProvOrNCryptKey,
+         *     DWORD *pdwKeySpec, BOOL *pfCallerFreeProvOrNCryptKey)
+         *
+         * No key container holds a private key on this machine.
+         */
+        CryptAcquireCertificatePrivateKey: {
+            argBytes: 24,
+            handler: ()=>fail(CRYPT_E_NO_KEY_PROPERTY),
+        },
+
+        /**
+         * PCCERT_CONTEXT CertCreateSelfSignCertificate(HCRYPTPROV_OR_NCRYPT_KEY_HANDLE,
+         *     PCERT_NAME_BLOB, DWORD, PCRYPT_KEY_PROV_INFO, PCRYPT_ALGORITHM_IDENTIFIER,
+         *     PSYSTEMTIME, PSYSTEMTIME, PCERT_EXTENSIONS)
+         *
+         * Making one needs a key pair this machine cannot generate.
+         */
+        CertCreateSelfSignCertificate: {
+            argBytes: 32,
+            handler: ()=>{
+                host.divergence?.('CertCreateSelfSignCertificate',
+                    'no key pair can be generated: refused as a provider without the algorithm');
+                return fail(NTE_NOT_SUPPORTED);
+            },
+        },
+
+        /**
+         * HCERTSTORE PFXImportCertStore(CRYPT_DATA_BLOB *pPFX, LPCWSTR szPassword, DWORD dwFlags)
+         *
+         * A PFX's bags are sealed with password-based ciphers this build does
+         * not carry, so none is opened.
+         */
+        PFXImportCertStore: {
+            argBytes: 12,
+            handler: ()=>{
+                host.divergence?.('PFXImportCertStore', 'PKCS #12 files are not opened');
+                return fail(NTE_BAD_DATA);
+            },
+        },
+
+        /**
+         * BOOL CryptQueryObject(DWORD dwObjectType, const void *pvObject,
+         *     DWORD dwExpectedContentTypeFlags, DWORD dwExpectedFormatTypeFlags,
+         *     DWORD dwFlags, DWORD *pdwMsgAndCertEncodingType, DWORD *pdwContentType,
+         *     DWORD *pdwFormatType, HCERTSTORE *phCertStore, HCRYPTMSG *phMsg,
+         *     const void **ppvContext)
+         *
+         * A certificate (DER or base64), a PKCS #7 SignedData, or the one a
+         * signed PE image carries; the store holds the certificates found and
+         * the message answers CryptMsgGetParam.
+         */
+        CryptQueryObject: {
+            argBytes: 44,
+            handler: (/** @type {number[]} */ [objectType, object, contentTypes, formatTypes, ,
+                encodingOut, contentOut, formatOut, storeOut, messageOut, contextOut])=>{
+                /** @type {Uint8Array | null} */
+                let bytes;
+                if ((objectType >>> 0) === QUERY_OBJECT.BLOB)
+                {
+                    const size = dword(object >>> 0);
+                    bytes = size === 0 ? new Uint8Array(0)
+                        : host.readMemory(dword((object >>> 0) + 4), size).slice();
+                }
+                else if ((objectType >>> 0) === QUERY_OBJECT.FILE)
+                {
+                    bytes = host.readFile?.(host.readWideString(object >>> 0, 1024 * 2)) ?? null;
+                    if (!bytes)
+                    {
+                        return fail(ERROR_FILE_NOT_FOUND);
+                    }
+                }
+                else
+                {
+                    return fail(E_INVALIDARG);
+                }
+                const found = queryContent(bytes, contentTypes >>> 0, formatTypes >>> 0);
+                if (!found)
+                {
+                    return fail(CRYPT_E_NO_MATCH);
+                }
+                /** @param {number} at @param {number} value */
+                const put = (at, value)=>{
+                    if ((at >>> 0) !== 0)
+                    {
+                        setDword(at >>> 0, value);
+                    }
+                };
+                put(encodingOut, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING);
+                put(contentOut, found.type);
+                put(formatOut, found.format);
+                const certificates = 'certificate' in found && found.certificate
+                    ? [found.certificate] : found.signed?.certificates ?? [];
+                if ((storeOut >>> 0) !== 0)
+                {
+                    const store = handleOf({ refs: 1, held: [] });
+                    for (const certificate of certificates)
+                    {
+                        const address = makeContext(certificate, store);
+                        if (address !== 0)
+                        {
+                            /** @type {Store} */ (storeOf(store)).held.push(address);
+                        }
+                    }
+                    setDword(storeOut >>> 0, store);
+                }
+                if ((messageOut >>> 0) !== 0)
+                {
+                    if (found.signed && found.message)
+                    {
+                        const handle = nextMessage;
+                        nextMessage += 4;
+                        messages.set(handle, { ...found.signed, der: found.message });
+                        setDword(messageOut >>> 0, handle);
+                    }
+                    else
+                    {
+                        setDword(messageOut >>> 0, 0);
+                    }
+                }
+                if ((contextOut >>> 0) !== 0)
+                {
+                    setDword(contextOut >>> 0, found.type === CONTENT.CERT
+                        ? makeContext(certificates[0], 0) : 0);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL CryptMsgGetParam(HCRYPTMSG hCryptMsg, DWORD dwParamType, DWORD dwIndex,
+         *     void *pvData, DWORD *pcbData)
+         *
+         * The message's type, content, counts, its certificates by index and a
+         * signer's issuer and serial number (CERT_INFO with those two filled).
+         */
+        CryptMsgGetParam: {
+            argBytes: 20,
+            handler: (/** @type {number[]} */ [handle, type, index, out, size])=>{
+                const message = messages.get(handle >>> 0);
+                if (!message || (size >>> 0) === 0)
+                {
+                    return fail(E_INVALIDARG);
+                }
+                const word = (/** @type {number} */ value)=>{
+                    const bytes = new Uint8Array(4);
+                    new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+                    return bytes;
+                };
+                switch (type >>> 0)
+                {
+                    case MSG_PARAM.TYPE:
+                        return answer(word(CMSG_SIGNED), out >>> 0, size >>> 0);
+                    case MSG_PARAM.CONTENT:
+                        return answer(message.content ? contentsOf(message.content)
+                            : new Uint8Array(0), out >>> 0, size >>> 0);
+                    case MSG_PARAM.SIGNER_COUNT:
+                        return answer(word(message.signers.length), out >>> 0, size >>> 0);
+                    case MSG_PARAM.CERT_COUNT:
+                        return answer(word(message.certificates.length), out >>> 0, size >>> 0);
+                    case MSG_PARAM.CERT: {
+                        const certificate = message.certificates[index >>> 0];
+                        return certificate ? answer(certificate.encoded, out >>> 0, size >>> 0)
+                            : fail(CRYPT_E_INVALID_INDEX);
+                    }
+                    case MSG_PARAM.SIGNER_CERT_INFO: {
+                        const signer = message.signers[index >>> 0];
+                        if (!signer)
+                        {
+                            return fail(CRYPT_E_INVALID_INDEX);
+                        }
+                        return answer(at=>{
+                            const serial = Uint8Array.from(signer.serial).reverse();
+                            const out2 = new Uint8Array(CERT_INFO_SIZE + serial.length
+                                + signer.issuer.length);
+                            const view = new DataView(out2.buffer);
+                            view.setUint32(4, serial.length, true);
+                            view.setUint32(8, at + CERT_INFO_SIZE, true);
+                            view.setUint32(24, signer.issuer.length, true);
+                            view.setUint32(28, at + CERT_INFO_SIZE + serial.length, true);
+                            out2.set(serial, CERT_INFO_SIZE);
+                            out2.set(signer.issuer, CERT_INFO_SIZE + serial.length);
+                            return out2;
+                        }, out >>> 0, size >>> 0);
+                    }
+                    default:
+                        host.divergence?.('CryptMsgGetParam',
+                            `parameter ${type >>> 0} is not kept`);
+                        return fail(CRYPT_E_INVALID_MSG_TYPE);
+                }
+            },
+        },
+
+        /** BOOL CryptMsgClose(HCRYPTMSG hCryptMsg); TRUE for NULL. */
+        CryptMsgClose: {
+            argBytes: 4,
+            handler: (/** @type {number[]} */ [handle])=>{
+                messages.delete(handle >>> 0);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL CryptVerifyCertificateSignatureEx(HCRYPTPROV_LEGACY hCryptProv,
+         *     DWORD dwCertEncodingType, DWORD dwSubjectType, void *pvSubject,
+         *     DWORD dwIssuerType, void *pvIssuer, DWORD dwFlags, void *pvExtra)
+         *
+         * The subject an encoded signed structure or a certificate context;
+         * the issuer a public key, a certificate or a chain's next element.
+         * RSA signatures only.
+         */
+        CryptVerifyCertificateSignatureEx: {
+            argBytes: 32,
+            handler: (/** @type {number[]} */ [, , subjectType, subject, issuerType, issuer])=>{
+                /** @type {Uint8Array | null} */
+                let signed = null;
+                if ((subjectType >>> 0) === VERIFY_SUBJECT.BLOB)
+                {
+                    signed = host.readMemory(dword((subject >>> 0) + 4),
+                        dword(subject >>> 0)).slice();
+                }
+                else if ((subjectType >>> 0) === VERIFY_SUBJECT.CERT)
+                {
+                    signed = certificateAt(subject)?.encoded ?? null;
+                }
+                const parts = signed ? signedParts(signed) : null;
+                if (!parts)
+                {
+                    return fail(E_INVALIDARG);
+                }
+                /** @type {import('../crypto/signature.js').RsaKey | null} */
+                let key;
+                switch (issuerType >>> 0)
+                {
+                    case VERIFY_ISSUER.PUBKEY: {
+                        // CERT_PUBLIC_KEY_INFO: the algorithm (12 bytes), then the key's bits.
+                        const bits = host.readMemory(dword((issuer >>> 0) + 16),
+                            dword((issuer >>> 0) + 12)).slice();
+                        key = rsaKeyFromBits(bits);
+                        break;
+                    }
+                    case VERIFY_ISSUER.CERT:
+                        key = certificateAt(issuer)?.publicKey ?? null;
+                        break;
+                    case VERIFY_ISSUER.CHAIN:
+                        // CERT_CHAIN_ELEMENT: its context at +4.
+                        key = certificateAt(dword((issuer >>> 0) + 4))?.publicKey ?? null;
+                        break;
+                    default:
+                        return fail(E_INVALIDARG);
+                }
+                if (!key)
+                {
+                    return fail(NTE_BAD_ALGID);
+                }
+                return verifySigned(key, parts.algorithm, parts.tbs, parts.signature)
+                    ? 1 : fail(NTE_BAD_SIGNATURE);
             },
         },
     };
