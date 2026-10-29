@@ -1827,7 +1827,8 @@ export function prepare(e, operand, options){
     if (operand.kind === 'mem')
     {
         e.folded = null;
-        if (wrappedFirst(e, operand, options?.store === true))
+        if (wrappedFirst(e, operand, options?.store === true)
+            || boundedRead(e, operand, options?.store === true))
         {
             return;
         }
@@ -1893,6 +1894,150 @@ function wrappedFirst(e, operand, store){
     }
     b.localSet(Local.addr);
     e.folded = { operand, local, offset: disp - low };
+    return true;
+}
+
+/** By block, the registers' bounds before each of its instructions (`registerBounds`). @type {WeakMap<object, number[][]>} */
+const boundsByBlock = new WeakMap();
+
+/** Operations that write no general register, the flags and memory aside. */
+const WRITE_NO_REGISTER = new Set(['cmp', 'test', 'nop', 'bt', 'clc', 'stc', 'cmc', 'cld', 'std']);
+
+/**
+ * The largest value each general register can hold before each instruction of
+ * a block, from what the block itself wrote: a zero extension of a byte or a
+ * word, an `and` with a constant, a shift right by one, a constant moved in,
+ * a register cleared, a copy of one already bounded. -1 where nothing bounds
+ * it -- every register at the block's start, any write not followed here, and
+ * all of them after an operation that may write registers it does not name.
+ *
+ * @param {import('../region.js').Block} block
+ * @returns {number[][]}  by instruction, the eight registers' bounds before it
+ */
+function registerBounds(block){
+    let found = boundsByBlock.get(block);
+    if (found !== undefined)
+    {
+        return found;
+    }
+    found = [];
+    let bounds = new Array(8).fill(-1);
+    for (const instruction of block.instructions)
+    {
+        found.push(bounds);
+        bounds = bounds.slice();
+        const { op, operands, prefixes } = instruction;
+        const [dst, src] = operands;
+        const reg = dst?.kind === 'reg' ? /** @type {number} */ (dst.reg) : -1;
+        const whole = reg >= 0 && dst.size === 4;
+        const value = src?.kind === 'imm' ? /** @type {number} */ (src.value) >>> 0
+            : src?.kind === 'reg' && src.size === 4 ? bounds[/** @type {number} */ (src.reg)] : -1;
+        if (prefixes.lock || prefixes.rep || prefixes.repne)
+        {
+            bounds.fill(-1);
+            continue;
+        }
+        if (WRITE_NO_REGISTER.has(op) || op.startsWith('j') || dst?.kind === 'mem'
+            && (op === 'mov' || INT_RMW.has(op)))
+        {
+            continue;
+        }
+        if (!whole || !BOUND_WRITES.has(op) || operands.length > 2)
+        {
+            if (reg >= 0 && dst.size === 1 && !dst.high && op === 'mov' && bounds[reg] >= 0)
+            {
+                // A low byte written over a bounded register.
+                bounds[reg] = (bounds[reg] | 0xff) >>> 0;
+                continue;
+            }
+            if (reg >= 0 && (dst.size < 4 || BOUND_WRITES.has(op)) && SINGLE_WRITES.has(op))
+            {
+                bounds[reg] = -1;
+                continue;
+            }
+            bounds.fill(-1);
+            continue;
+        }
+        const known = (/** @type {number} */ bound)=>(bound < 0 ? 0xffffffff : bound);
+        switch (op)
+        {
+            case 'movzx':
+                bounds[reg] = src.size === 1 ? 0xff : 0xffff;
+                break;
+            case 'mov':
+                bounds[reg] = value;
+                break;
+            case 'and':
+                bounds[reg] = Math.min(known(bounds[reg]), known(value)) >>> 0;
+                bounds[reg] = bounds[reg] === 0xffffffff ? -1 : bounds[reg];
+                break;
+            case 'shr':
+                bounds[reg] = src?.kind === 'imm'
+                    ? Math.floor(known(bounds[reg]) / 2 ** (/** @type {number} */ (src.value) & 31))
+                    : -1;
+                break;
+            case 'xor': case 'sub':
+                bounds[reg] = src?.kind === 'reg' && src.reg === reg ? 0 : -1;
+                break;
+            default:
+                bounds[reg] = -1;
+        }
+    }
+    boundsByBlock.set(block, found);
+    return found;
+}
+
+/** Writes of a whole register `registerBounds` follows. */
+const BOUND_WRITES = new Set(['movzx', 'mov', 'and', 'shr', 'xor', 'sub']);
+/** Integer operations whose memory destination is read and written. */
+const INT_RMW = new Set(['add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'inc', 'dec', 'not',
+    'neg', 'shl', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr']);
+/** Operations that write their first operand, a register, and no other. */
+const SINGLE_WRITES = new Set([...INT_RMW, 'mov', 'movzx', 'movsx', 'lea', 'imul', 'bsf', 'bsr',
+    'bswap', 'shld', 'shrd']);
+
+/**
+ * A read left untested (`wrapsRead`) whose registers the block bounded
+ * (`registerBounds`) so that every byte it can reach lies in RAM: its address
+ * is then the one the wrap into RAM leaves as it is, so none is made, and the
+ * displacement becomes the load's own offset -- a table read through a zero
+ * extended byte (a CRC's, a decoder's), one index masked. Only a scaled index
+ * and a base the block bounded, a displacement not negative.
+ *
+ * @param {E} e @param {Operand} operand @param {boolean} store
+ * @returns {boolean}  whether the address is in `addr`, the read's test made
+ */
+function boundedRead(e, operand, store){
+    const index = operand.index ?? -1;
+    const base = operand.base ?? -1;
+    if (isLong(e) || index < 0 && base < 0 || operand.addressSize === 16 || operand.segment === 4
+        || operand.segment === 5 || e.memPlan?.access != null || !wrapsRead(e, store))
+    {
+        return false;
+    }
+    const block = e.region.blocks[e.blockIndex];
+    if (block.instructions[e.at] !== e.current)
+    {
+        // Emitted outside the block's own walk (a copy loop's element).
+        return false;
+    }
+    const bounds = registerBounds(block)[e.at];
+    const disp = operand.disp ?? 0;
+    if (disp < 0 || base >= 0 && bounds[base] < 0 || index >= 0 && bounds[index] < 0)
+    {
+        return false;
+    }
+    const reach = disp + (base >= 0 ? bounds[base] : 0)
+        + (index >= 0 ? bounds[index] * (operand.scale ?? 1) : 0) + Math.max(operand.size, 1);
+    if (reach > e.layout.ramSize)
+    {
+        return false;
+    }
+    const { b } = e;
+    const local = e.foldedSumLocal();
+    emitAddress(e, { ...operand, disp: 0 }, false);
+    b.localTee(local).i32const(disp).op(I32.add).localSet(Local.addr);
+    e.folded = { operand, local, offset: disp };
     return true;
 }
 
