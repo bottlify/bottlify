@@ -14,6 +14,7 @@
  * otherwise (roots.js). Its time is the machine's clock.
  */
 
+import { createCatalogFunctions } from './catalog.js';
 import { DerError } from '../crypto/der.js';
 import { parseCertificate } from '../crypto/x509.js';
 import { TRUST, verifyAuthenticode } from './authenticode.js';
@@ -268,6 +269,19 @@ export function createWintrustFunctions(host){
     };
 
     return {
+        // The catalog administrator hashes the file a handle is open on.
+        ...createCatalogFunctions({ ...host,
+            fileBytes: handle=>{
+                let file;
+                try
+                {
+                    file = host.handles.resolve(handle, 'file');
+                }
+                catch {
+                    return null;
+                }
+                return file?.path ? readWhole(file.path) : null;
+            } }),
         WinVerifyTrust: { argBytes: 12, handler: verifyTrust },
 
         /**
