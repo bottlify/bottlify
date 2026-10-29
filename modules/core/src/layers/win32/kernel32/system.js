@@ -102,6 +102,8 @@ const STILL_ACTIVE = 259;
 
 /** The pseudo-handle for the running process; -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
+/** Where a 64-bit Windows keeps its 32-bit system libraries. */
+const WOW64_DIRECTORY = 'C:\\WINDOWS\\SysWOW64';
 
 /** 100ns units between the FILETIME epoch (1601-01-01) and the Unix one. */
 const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
@@ -290,7 +292,36 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  *           Absent, one.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose SYSTEM_INFO
  *           is laid out for it and names the x64 processor; absent, 4.
+ * @property {boolean} [machine64]  The machine is a 64-bit Windows (`roadmap/x64.md`,
+ *           WOW64): a 32-bit process on it runs under WOW64, and the WOW64
+ *           directory is there. Absent, a 32-bit Windows.
+ * @property {(process: any) => number | null | Promise<number | null>} [imageBitsOf]
+ *           Whether another process's image is a 32- or a 64-bit one, read off
+ *           its headers; null when it cannot be read.
  */
+
+/**
+ * An image's width off its first bytes: the PE signature at the header's
+ * offset, then the optional header's magic -- 0x10b a 32-bit image's,
+ * 0x20b a 64-bit one's. Null for what is not a PE image.
+ *
+ * @param {Uint8Array} head  the file's first bytes, its headers among them
+ * @returns {32 | 64 | null}
+ */
+export function imageBits(head){
+    if (head.length < 0x40 || head[0] !== 0x4d || head[1] !== 0x5a)
+    {
+        return null;
+    }
+    const view = new DataView(head.buffer, head.byteOffset, head.byteLength);
+    const at = view.getUint32(0x3c, true);
+    if (at + 26 > head.length || view.getUint32(at, true) !== 0x4550)
+    {
+        return null;
+    }
+    const magic = view.getUint16(at + 24, true);
+    return magic === 0x20b ? 64 : magic === 0x10b ? 32 : null;
+}
 
 /**
  * @template {Record<string, unknown>} T
@@ -838,16 +869,25 @@ export function createSystemFunctions(host){
         return BigInt(milliseconds) * 10_000n + FILETIME_AT_UNIX_EPOCH;
     };
 
-    /** GetSystemInfo, and GetNativeSystemInfo, which on a 32-bit system is the same. */
-    const systemInfo = {
+    /** The process runs under WOW64: a 32-bit one on a 64-bit machine. */
+    const wow64 = host.machine64 === true && host.pointerSize !== 8;
+    /**
+     * GetSystemInfo, and GetNativeSystemInfo (`native`), which differ only
+     * under WOW64: there the machine beneath is the x64 one, in the 32-bit
+     * process's layout.
+     *
+     * @param {boolean} native
+     */
+    const systemInfoOf = native=>({
         argBytes: 4,
         /** @param {number[]} args */
-        handler: ([info])=>{
+        handler: (/** @type {number[]} */ [info])=>{
             const wide = host.pointerSize === 8;
+            const x64 = wide || (native && wow64);
             const layout = systemInfoLayout(wide ? 8 : 4);
             const bytes = new Uint8Array(layout.SIZE);
             const view = new DataView(bytes.buffer);
-            view.setUint16(0, wide ? PROCESSOR_ARCHITECTURE_AMD64 : PROCESSOR_ARCHITECTURE_INTEL,
+            view.setUint16(0, x64 ? PROCESSOR_ARCHITECTURE_AMD64 : PROCESSOR_ARCHITECTURE_INTEL,
                 true);
             view.setUint32(4, PAGE_SIZE, true);
             // The same span in a 64-bit process: its memory is the window
@@ -858,7 +898,7 @@ export function createSystemFunctions(host){
             // narrowed to: dwActiveProcessorMask, then dwNumberOfProcessors.
             view.setUint32(layout.ACTIVE_MASK, processors.systemMask(), true);
             view.setUint32(layout.PROCESSORS, processors.count(), true);
-            view.setUint32(layout.PROCESSOR_TYPE, wide ? PROCESSOR_AMD_X8664
+            view.setUint32(layout.PROCESSOR_TYPE, x64 ? PROCESSOR_AMD_X8664
                 : PROCESSOR_INTEL_PENTIUM, true);
             view.setUint32(layout.GRANULARITY, ALLOCATION_GRANULARITY, true);
             // The family and the model and stepping, as CPUID gives them.
@@ -867,7 +907,7 @@ export function createSystemFunctions(host){
             host.writeMemory(info >>> 0, bytes);
             return 0;
         },
-    };
+    });
 
     /**
      * The machine's processors as GetLogicalProcessorInformation lists them:
@@ -911,16 +951,38 @@ export function createSystemFunctions(host){
         return bytes;
     };
 
-    /** GetSystemWow64Directory in either form: the buffer is never written. */
-    const wow64Directory = {
+    /**
+     * GetSystemWow64Directory in either form. A 32-bit Windows has no WOW64
+     * directory: zero, and ERROR_CALL_NOT_IMPLEMENTED, the buffer never
+     * written. A 64-bit one answers its SysWOW64 to a process of either
+     * width, as GetSystemDirectory answers: the characters written without
+     * the terminator, or the room needed with it.
+     *
+     * @param {boolean} wide  the W form
+     */
+    const wow64Directory = wide=>({
         argBytes: 8,
         /** @param {number[]} args */
-        handler: args=>{
-            void args;
-            host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
-            return 0;
+        handler: (/** @type {number[]} */ [buffer, size])=>{
+            if (host.machine64 !== true)
+            {
+                host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
+                return 0;
+            }
+            if ((size >>> 0) < WOW64_DIRECTORY.length + 1)
+            {
+                return WOW64_DIRECTORY.length + 1;
+            }
+            const text = `${WOW64_DIRECTORY}\0`;
+            const bytes = new Uint8Array(text.length * (wide ? 2 : 1));
+            for (let at = 0; at < text.length; at++)
+            {
+                bytes[wide ? at * 2 : at] = text.charCodeAt(at);
+            }
+            host.writeMemory(buffer >>> 0, bytes);
+            return WOW64_DIRECTORY.length;
         },
-    };
+    });
 
     /** Both time queries answer the same thing; see GetLocalTime. */
     const nowAsSystemTime = ()=>systemTimeFrom(
@@ -941,7 +1003,7 @@ export function createSystemFunctions(host){
         },
 
         /** VOID GetSystemInfo(LPSYSTEM_INFO lpSystemInfo) */
-        GetSystemInfo: systemInfo,
+        GetSystemInfo: systemInfoOf(false),
 
         /**
          * VOID GetNativeSystemInfo(LPSYSTEM_INFO lpSystemInfo)
@@ -949,7 +1011,7 @@ export function createSystemFunctions(host){
          * What the machine is beneath WOW64; with no WOW64 on a 32-bit
          * system, the same machine GetSystemInfo reports.
          */
-        GetNativeSystemInfo: systemInfo,
+        GetNativeSystemInfo: systemInfoOf(true),
 
         /**
          * BOOL GetLogicalProcessorInformation(
@@ -1002,20 +1064,33 @@ export function createSystemFunctions(host){
         /**
          * BOOL IsWow64Process(HANDLE hProcess, PBOOL Wow64Process)
          *
-         * FALSE for every process: this is a 32-bit system, and a process
-         * runs under WOW64 only on a 64-bit one.
+         * Whether the process is a 32-bit one on a 64-bit machine. FALSE for
+         * every process of a 32-bit system, and for a 64-bit one; another
+         * process is judged by its image's headers.
          */
         IsWow64Process: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, answer])=>{
-                if ((handle >>> 0) !== CURRENT_PROCESS && !object(handle, 'process'))
+                const current = (handle >>> 0) === CURRENT_PROCESS;
+                const other = current ? null : object(handle, 'process');
+                if (!current && !other)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                host.writeMemory(answer >>> 0, new Uint8Array(4));
-                return 1;
+                /** @param {boolean} under */
+                const say = under=>{
+                    host.writeMemory(answer >>> 0, Uint8Array.of(under ? 1 : 0, 0, 0, 0));
+                    return 1;
+                };
+                if (current || host.machine64 !== true)
+                {
+                    return say(current && wow64);
+                }
+                const bits = host.imageBitsOf?.(other) ?? null;
+                return bits instanceof Promise ? bits.then(read=>say(read === 32))
+                    : say(bits === 32);
             },
         },
 
@@ -1027,8 +1102,8 @@ export function createSystemFunctions(host){
          * zero, and ERROR_CALL_NOT_IMPLEMENTED -- the documented answer a
          * program takes for "this is not a 64-bit system".
          */
-        GetSystemWow64DirectoryA: wow64Directory,
-        GetSystemWow64DirectoryW: wow64Directory,
+        GetSystemWow64DirectoryA: wow64Directory(false),
+        GetSystemWow64DirectoryW: wow64Directory(true),
 
         /**
          * int MulDiv(int nNumber, int nNumerator, int nDenominator)

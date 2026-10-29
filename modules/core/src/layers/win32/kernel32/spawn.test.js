@@ -265,6 +265,20 @@ test('PROCESS_INFORMATION comes back filled in with usable handles', ()=>{
     assert.equal(host.kernel.handles.resolve(child.threadHandle, 'process-thread'), child);
 });
 
+test('a 64-bit process\'s PROCESS_INFORMATION has its handles eight bytes wide', ()=>{
+    // processthreadsapi.h under _WIN64: hProcess 0, hThread 8, the ids at 16
+    // and 20, 24 bytes in all, the handles' high halves zero.
+    const host = { ...fakeHost({ files: ['C:\\App\\child.exe'] }), pointerSize: 8 };
+    const fns = createSpawnFunctions(host);
+    const information = 0x300;
+    host.bytes.fill(0xee, information, information + 24);
+    assert.equal(fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, information]), 1);
+    const child = pending(host);
+    assert.deepEqual([0, 4, 8, 12, 16, 20].map(at=>host.view.getUint32(information + at, true)),
+        [child.handle, 0, child.threadHandle, 0, child.id, child.threadId]);
+});
+
 test('OpenProcess finds the program itself and the children it made, and nothing else', ()=>{
     const host = fakeHost({ files: ['C:\\App\\child.exe'] });
     const fns = createSpawnFunctions(host);

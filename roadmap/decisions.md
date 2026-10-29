@@ -516,6 +516,17 @@ reaches the procedure whole and -1 is -1; a value that needs the high half of a 
 it. Carrying quadwords through the queue would change every handler that reads a message;
 revisit when a program is found that passes one. *2026-10-29.*
 
+**A55. A run is on a 64-bit Windows when its first program is a 64-bit one.** A 64-bit process
+needs a 64-bit Windows beneath it, and a 32-bit process started on that machine runs under WOW64:
+it reads x86 from `GetSystemInfo` and x64 from `GetNativeSystemInfo`, `IsWow64Process` is TRUE
+of it, the WOW64 directory is `C:\WINDOWS\SysWOW64`, and its environment sets
+`PROCESSOR_ARCHITEW6432`. Every process of the run sees the one machine, its children in workers
+too. A run whose first program is 32-bit stays on a 32-bit Windows, as every run was, unless the
+caller asks for `machine: 'amd64'`: a 32-bit title that asks whether it is under WOW64 then
+answers as on the machines it was written for, the ones of its era. The file system and the
+registry are not redirected (no `System32` to `SysWOW64`, no `Wow6432Node`, no
+`Program Files (x86)`). *2026-10-29.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

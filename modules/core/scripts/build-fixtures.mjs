@@ -69,7 +69,8 @@ const IMPORTS = {
             'FlsGetValue@4', 'FlsSetValue@8', 'EncodePointer@4', 'DecodePointer@4',
             'GetProcessHeap@0', 'HeapAlloc@12', 'HeapFree@12', 'HeapSize@12', 'HeapReAlloc@16',
             'GlobalAlloc@8', 'GlobalFree@4', 'lstrlenA@4', 'lstrlenW@4', 'lstrcpyA@8',
-            'EnumSystemLocalesA@8',
+            'EnumSystemLocalesA@8', 'IsWow64Process@8', 'GetNativeSystemInfo@4',
+            'GetSystemWow64DirectoryA@8', 'GetEnvironmentVariableA@12', 'GetStartupInfoA@4',
         ],
     },
     'SHELL32.dll': {
@@ -205,6 +206,8 @@ const PROGRAMS = [
     { name: 'hook64', source: 'hook64.c', cxx: false, x64: true },
     { name: 'd3d9_64', source: 'd3d9_64.c', cxx: false, x64: true },
     { name: 'gl64', source: 'gl64.c', cxx: false, x64: true },
+    { name: 'wow64', source: 'wow64.c', cxx: false, x64: true },
+    { name: 'wow64_child', source: 'wow64_child.c', cxx: false },
     { name: 'cxxeh64', source: 'cxxeh64.cpp', cxx: true, x64: true,
         guestHandler: 'via_guest_handler' },
     { name: 'cxxeh64fh4', source: 'cxxeh64.cpp', cxx: true, x64: true, fh4: true,

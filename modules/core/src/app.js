@@ -213,6 +213,13 @@ const hashText = (hash, text)=>{
  *     the profile folders the registry, the shell and the environment name.
  *     Windows 10 tells a program whose manifest does not declare it 6.2, as
  *     the real one does. Default `winxp`; any other name is refused.
+ * @property {'x86' | 'amd64'} [machine]
+ *     Whether the machine is a 32-bit or a 64-bit Windows. On a 64-bit one a
+ *     32-bit process runs under WOW64 (IsWow64Process, GetNativeSystemInfo,
+ *     the SysWOW64 directory and the environment say so). Default: the
+ *     width of the run's first program, so a run started with a 64-bit one is
+ *     on a 64-bit machine and its 32-bit children under WOW64. A process in a
+ *     worker of its own is handed the run's.
  * @property {import('./mode.js').RunMode} [mode]
  *     How much rides on shared memory: `isolated` shares the guest's memory with the
  *     graphics worker, `compatible` keeps it the engine thread's own and copies what
@@ -4761,6 +4768,8 @@ async function buildApp(options){
         win32: {
             // A 64-bit process's structures hold 8-byte pointers.
             bits: long ? 64 : 32,
+            // And the machine it runs on (`AppOptions.machine`).
+            machine: long ? 'amd64' : options.machine ?? 'x86',
             // The Windows the machine is, and what the program says it knows,
             // which is all Windows 10 needs to decide what to tell it.
             windows: options.windows,
@@ -9631,9 +9640,30 @@ export async function createApp(options){
     /** What a machine's translator is told where the run lends it its translators. */
     const lentConfig = translationPool ? { worker: true, translators: 0 } : {};
 
+    /**
+     * The machine every process of the run is on (`AppOptions.machine`): as
+     * the caller says, else as wide as the run's first program. An image that
+     * cannot be read here is left for its own build to refuse.
+     *
+     * @type {'x86' | 'amd64'}
+     */
+    const runMachine = options.machine ?? (()=>{
+        try
+        {
+            return options.executable && programImage(options.executable).bits === 64
+                ? 'amd64' : 'x86';
+        }
+        catch {
+            return 'x86';
+        }
+    })();
+
     /** @param {any} [extra] */
     const machine = extra=>({
         ...options,
+        // One machine for every process of the run: a 32-bit child of a 64-bit
+        // program runs under WOW64 on it.
+        machine: runMachine,
         cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
             ...lentConfig } },
         events,
@@ -10514,6 +10544,8 @@ export async function createApp(options){
                     display: display?.port2 ?? null,
                     options: {
                         ...portableOptions(options),
+                        // The run's machine, whatever this process's own width.
+                        machine: runMachine,
                         executable: image,
                         imagePath: request.imagePath,
                         commandLine: request.commandLine,

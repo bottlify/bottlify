@@ -26,7 +26,7 @@ import { createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment 
     from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
-import { createSystemFunctions } from './kernel32/system.js';
+import { createSystemFunctions, imageBits } from './kernel32/system.js';
 import { PROCESSOR, createProcessors } from './kernel32/processor.js';
 import { createPdhFunctions, createPowrprofFunctions } from './power/functions.js';
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
@@ -357,6 +357,10 @@ export function createWin32Module(){
             const reported = reportedVersion(windows, config?.compatibility);
             const folders = shellFolders(windows);
             const pointerSize = config?.bits === 64 ? 8 : 4;
+            // The machine is a 64-bit Windows when the run says so, which its
+            // 64-bit processes always do: a 32-bit process on it runs under
+            // WOW64 (`roadmap/x64.md`).
+            const machine64 = config?.machine === 'amd64' || pointerSize === 8;
             // The thread and process blocks a handler reads, at that width.
             const blocks = blockLayouts(pointerSize);
 
@@ -382,7 +386,8 @@ export function createWin32Module(){
             };
             /** The variables the process starts with: its parent's, or the machine's. */
             const startingEnvironment = ()=>config?.environment
-                ?? defaultEnvironment(windows, folders, processors.count());
+                ?? defaultEnvironment(windows, folders, processors.count(), {
+                    long: pointerSize === 8, wow64: machine64 && pointerSize === 4 });
 
             // What the run's processes share, as one Windows does: handed in
             // from outside when there is a process beside or after this one
@@ -2053,6 +2058,7 @@ export function createWin32Module(){
                             sink(handle, text),
                     }),
                     ...createEnvironmentFunctions({
+                        pointerSize,
                         readCString,
                         readWideString,
                         writeMemory,
@@ -2066,6 +2072,28 @@ export function createWin32Module(){
                     ...createSystemFunctions({
                         processors,
                         pointerSize,
+                        machine64,
+                        // Another process's width, off its image's headers: the
+                        // machine of the optional header's magic.
+                        imageBitsOf: async(/** @type {any} */ process)=>{
+                            const path = process?.imagePath;
+                            const entry = typeof path === 'string' ? volume.stat(path) : null;
+                            const node = entry && !entry.isDirectory
+                                ? volume.open(path, { read: true }) : null;
+                            if (!entry || !node)
+                            {
+                                return null;
+                            }
+                            try
+                            {
+                                const head = await volume.read(node, 0, Math.min(entry.size, 4096));
+                                return imageBits(head);
+                            }
+                            finally
+                            {
+                                volume.close(node);
+                            }
+                        },
                         // TerminateProcess wakes whoever waits on the child it ends.
                         wake: (/** @type {any} */ thread, /** @type {number} */ result)=>
                             kernel.wake(thread, result),
@@ -2111,6 +2139,7 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         spawned: request=>config?.spawned?.(request),
                         spawner,
+                        pointerSize,
                         patchMemory: (address, bytes)=>
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
                     }),

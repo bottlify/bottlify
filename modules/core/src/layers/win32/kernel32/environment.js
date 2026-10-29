@@ -29,8 +29,9 @@ import {
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
 
-/** sizeof(STARTUPINFOA). */
+/** sizeof(STARTUPINFOA), and in a 64-bit process, whose pointers and handles are eight bytes. */
 const STARTUPINFOA_SIZE = 68;
+const STARTUPINFOA_SIZE64 = 104;
 
 /** Where Windows lives, as a program of this era expects to find it. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -45,6 +46,7 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  * @property {(code: number) => void} setLastError
  * @property {() => string} commandLine
  * @property {() => Record<string, string>} environment
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -65,16 +67,20 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  * @param {import('./versions.js').WindowsVersion} windows
  * @param {Readonly<Record<string, string>>} folders  That Windows's shell folders.
  * @param {number} [processors]  How many the machine has; absent, one.
+ * @param {{ long?: boolean, wow64?: boolean }} [process]  A 64-bit process sees
+ *        its own architecture; a 32-bit one on a 64-bit machine sees x86, and
+ *        the machine's in PROCESSOR_ARCHITEW6432, as WOW64 sets them.
  * @returns {Record<string, string>}
  */
-export function defaultEnvironment(windows, folders, processors = 1){
+export function defaultEnvironment(windows, folders, processors = 1, process = {}){
     const { allUsers, public: shared } = windows.profiles;
     return {
         ALLUSERSPROFILE: allUsers,
         APPDATA: folders.AppData,
         ...shared === null ? {} : { LOCALAPPDATA: folders['Local AppData'] },
         NUMBER_OF_PROCESSORS: String(processors),
-        PROCESSOR_ARCHITECTURE: 'x86',
+        PROCESSOR_ARCHITECTURE: process.long ? 'AMD64' : 'x86',
+        ...process.wow64 ? { PROCESSOR_ARCHITEW6432: 'AMD64' } : {},
         PROCESSOR_IDENTIFIER: `${PROCESSOR_IDENTIFIER}, ${PROCESSOR.vendor}`,
         PROCESSOR_LEVEL: String(PROCESSOR_LEVEL),
         PROCESSOR_REVISION: PROCESSOR_REVISION.toString(16).padStart(4, '0'),
@@ -223,8 +229,9 @@ export function createEnvironmentFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([info])=>{
-            const bytes = new Uint8Array(STARTUPINFOA_SIZE);
-            new DataView(bytes.buffer).setUint32(0, STARTUPINFOA_SIZE, true);
+            const size = host.pointerSize === 8 ? STARTUPINFOA_SIZE64 : STARTUPINFOA_SIZE;
+            const bytes = new Uint8Array(size);
+            new DataView(bytes.buffer).setUint32(0, size, true);
             host.writeMemory(info >>> 0, bytes);
             return 0;
         },
