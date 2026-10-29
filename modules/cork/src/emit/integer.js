@@ -2308,11 +2308,13 @@ function fieldsRead(e){
     if (fields === undefined)
     {
         fields = new Map();
-        /** Registers some access other than a plain read goes through. */
-        const written = new Set();
         for (const instruction of block.instructions)
         {
-            const reads = readsOnly(instruction);
+            if (!readsOnly(instruction))
+            {
+                // Tested whole, whatever else goes through its registers.
+                continue;
+            }
             for (const operand of instruction.operands)
             {
                 if (operand.kind !== 'mem')
@@ -2320,19 +2322,10 @@ function fieldsRead(e){
                     continue;
                 }
                 const key = /** @type {string} */ (fieldKey(e, instruction, operand));
-                if (!reads)
-                {
-                    written.add(key);
-                    continue;
-                }
                 const disps = fields.get(key) ?? new Set();
                 disps.add(operand.disp ?? 0);
                 fields.set(key, disps);
             }
-        }
-        for (const key of written)
-        {
-            fields.delete(key);
         }
         fieldsByBlock.set(block, fields);
     }
