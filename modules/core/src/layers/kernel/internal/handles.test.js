@@ -100,3 +100,15 @@ test('diagnostics account for every handle', ()=>{
     assert.deepEqual(diag.byType, { event: 2 });
     assert.deepEqual(table.list().map(e=>e.type), ['event', 'event']);
 });
+
+test('a handle adopted at a number keeps it, and fresh ones step past it', ()=>{
+    const table = createHandleTable();
+    assert.equal(table.adopt(0x48, 'pipe', 'inherited'), true);
+    assert.equal(table.adopt(0x48, 'pipe', 'again'), false, 'a number taken');
+    assert.equal(table.adopt(0x49, 'pipe', 'odd'), false, 'not a handle\'s number');
+    assert.equal(table.resolve(0x48, 'pipe'), 'inherited');
+    const first = table.open('event', 'a');
+    const second = table.open('event', 'b');
+    const third = table.open('event', 'c');
+    assert.deepEqual([first, second, third], [0x40, 0x44, 0x4c]);
+});

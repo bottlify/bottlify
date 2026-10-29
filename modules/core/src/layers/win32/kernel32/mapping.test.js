@@ -378,37 +378,6 @@ test('a section in the global namespace is not the program\'s to make, not being
         [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x1000, LOCAL]), 0);
 });
 
-test('CreateNamedPipe is refused as Windows 9x refuses it, and says so', ()=>{
-    // With no namespace for a client to open the other end in, a server end
-    // would be a handle nothing can ever connect to.
-    const { fns, errors, said } = setup();
-    for (const entry of [fns.CreateNamedPipeA, fns.CreateNamedPipeW])
-    {
-        assert.equal(entry.argBytes, 32);
-        assert.equal(entry.handler() >>> 0, 0xffffffff);
-        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
-    }
-    assert.equal(said.length, 2);
-    assert.match(said[1], /^CreateNamedPipeW: /);
-});
-
-test('the other named-pipe calls are refused the same way, each popping its own arguments', ()=>{
-    // Wine's kernel32 process.c connects the pipe it could not create.
-    const { fns, errors, said } = setup();
-    const table = /** @type {Record<string, any>} */ (fns);
-    for (const [name, argBytes] of /** @type {[string, number][]} */ ([
-        ['ConnectNamedPipe', 8], ['DisconnectNamedPipe', 4], ['WaitNamedPipeA', 8],
-        ['WaitNamedPipeW', 8], ['TransactNamedPipe', 28], ['GetNamedPipeInfo', 20],
-        ['GetNamedPipeHandleStateA', 28], ['SetNamedPipeHandleState', 16],
-        ['GetNamedPipeClientProcessId', 8], ['GetNamedPipeServerProcessId', 8]]))
-    {
-        assert.equal(table[name].argBytes, argBytes, name);
-        assert.equal(table[name].handler(), 0, name);
-        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
-        assert.match(said.at(-1) ?? '', new RegExp(`^${name}: `));
-    }
-});
-
 const SEC_FILE = 0x800000;
 const SEC_IMAGE = 0x1000000;
 const SEC_RESERVE = 0x4000000;

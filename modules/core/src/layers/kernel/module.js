@@ -969,6 +969,14 @@ export function createKernelModule(){
                     open: (type, object, access)=>live()
                         ? state.handles.open(type, object, access) : 0,
                     /**
+                     * An object under a number chosen elsewhere: an inherited
+                     * handle keeps its parent's.
+                     *
+                     * @param {number} handle @param {string} type @param {any} object
+                     */
+                    adopt: (handle, type, object)=>live()
+                        ? state.handles.adopt(handle, type, object) : false,
+                    /**
                      * The rights a handle was granted, null for all of them.
                      *
                      * @param {number} handle

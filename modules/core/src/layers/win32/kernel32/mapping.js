@@ -28,8 +28,9 @@ const WHOLE_NAME = 32767;
  * single read-only view, and refusing it outright would stop a program that
  * would otherwise work.
  *
- * A **pipe** is a byte queue with two handles onto it. That is all an anonymous
- * pipe is on Windows too, so this one is not a compromise.
+ * An anonymous **pipe** is a byte queue with two handles onto it. That is all
+ * an anonymous pipe is on Windows too, so this one is not a compromise; named
+ * pipes are pipes.js's.
  */
 
 /** Codes this surface reports. */
@@ -38,8 +39,6 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
-/** What CreateNamedPipe answers where there are no named pipes, as on Windows 9x. */
-const ERROR_CALL_NOT_IMPLEMENTED = 120;
 /** What a read that failed after the caller was parked answers. */
 const ERROR_IO_DEVICE = 1117;
 const ERROR_INVALID_ADDRESS = 487;
@@ -122,6 +121,8 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *           The error of a thread that is not the one running: a map that
  *           waited for its bytes answers on somebody else's turn.
  * @property {() => any} [currentThread]
+ * @property {{ peek: (args: number[]) => number | null }} [pipes]  PeekNamedPipe of a
+ *           named pipe's end
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ views: number, waited: number, failed: number }} [metrics]
  *           Counted in place: views mapped, views that waited for their
@@ -183,17 +184,6 @@ export function createMappingFunctions(host){
     const fail = (code, result = 0)=>{
         host.setLastError(code);
         return result;
-    };
-
-    /** @param {string} api */
-    const refuseNamedPipe = api=>{
-        host.divergence?.(api, 'there are no named pipes; refused as Windows 9x refuses it');
-        return fail(ERROR_CALL_NOT_IMPLEMENTED, INVALID_HANDLE_VALUE);
-    };
-    /** @param {string} api */
-    const refusePipeCall = api=>{
-        host.divergence?.(api, 'there are no named pipes; refused as Windows 9x refuses it');
-        return fail(ERROR_CALL_NOT_IMPLEMENTED, 0);
     };
 
     /** @param {number} address @param {number} value */
@@ -839,64 +829,6 @@ export function createMappingFunctions(host){
         },
 
         /**
-         * HANDLE CreateNamedPipeA(LPCSTR lpName, DWORD dwOpenMode, DWORD dwPipeMode,
-         *   DWORD nMaxInstances, DWORD nOutBufferSize, DWORD nInBufferSize,
-         *   DWORD nDefaultTimeOut, LPSECURITY_ATTRIBUTES lpSecurityAttributes)
-         * HANDLE CreateNamedPipeW(LPCWSTR, ...): the same in wide text
-         *
-         * There is no pipe namespace a client could open the other end in, so
-         * the server end is refused the way Windows 9x refuses it, which a
-         * caller of the era already handles; NT would create it, so the
-         * refusal is reported.
-         */
-        CreateNamedPipeA: {
-            argBytes: 32,
-            handler: ()=>refuseNamedPipe('CreateNamedPipeA'),
-        },
-        CreateNamedPipeW: {
-            argBytes: 32,
-            handler: ()=>refuseNamedPipe('CreateNamedPipeW'),
-        },
-
-        /**
-         * The rest of the named-pipe calls, refused the same way, since no
-         * handle can be a named pipe's:
-         *
-         *   BOOL ConnectNamedPipe(HANDLE, LPOVERLAPPED)
-         *   BOOL DisconnectNamedPipe(HANDLE)
-         *   BOOL WaitNamedPipeA/W(LPCTSTR lpNamedPipeName, DWORD nTimeOut)
-         *   BOOL TransactNamedPipe(HANDLE, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPOVERLAPPED)
-         *   BOOL GetNamedPipeInfo(HANDLE, LPDWORD, LPDWORD, LPDWORD, LPDWORD)
-         *   BOOL GetNamedPipeHandleStateA(HANDLE, LPDWORD, LPDWORD, LPDWORD, LPDWORD,
-         *                                 LPSTR, DWORD)
-         *   BOOL SetNamedPipeHandleState(HANDLE, LPDWORD, LPDWORD, LPDWORD)
-         *   BOOL GetNamedPipeClientProcessId(HANDLE Pipe, PULONG ClientProcessId)
-         *   BOOL GetNamedPipeServerProcessId(HANDLE Pipe, PULONG ServerProcessId)
-         */
-        ConnectNamedPipe: { argBytes: 8, handler: ()=>refusePipeCall('ConnectNamedPipe') },
-        DisconnectNamedPipe: { argBytes: 4, handler: ()=>refusePipeCall('DisconnectNamedPipe') },
-        WaitNamedPipeA: { argBytes: 8, handler: ()=>refusePipeCall('WaitNamedPipeA') },
-        WaitNamedPipeW: { argBytes: 8, handler: ()=>refusePipeCall('WaitNamedPipeW') },
-        TransactNamedPipe: { argBytes: 28, handler: ()=>refusePipeCall('TransactNamedPipe') },
-        GetNamedPipeInfo: { argBytes: 20, handler: ()=>refusePipeCall('GetNamedPipeInfo') },
-        GetNamedPipeHandleStateA: {
-            argBytes: 28,
-            handler: ()=>refusePipeCall('GetNamedPipeHandleStateA'),
-        },
-        SetNamedPipeHandleState: {
-            argBytes: 16,
-            handler: ()=>refusePipeCall('SetNamedPipeHandleState'),
-        },
-        GetNamedPipeClientProcessId: {
-            argBytes: 8,
-            handler: ()=>refusePipeCall('GetNamedPipeClientProcessId'),
-        },
-        GetNamedPipeServerProcessId: {
-            argBytes: 8,
-            handler: ()=>refusePipeCall('GetNamedPipeServerProcessId'),
-        },
-
-        /**
          * BOOL PeekNamedPipe(HANDLE hNamedPipe, LPVOID lpBuffer, DWORD nBufferSize,
          *   LPDWORD lpBytesRead, LPDWORD lpTotalBytesAvail, LPDWORD lpBytesLeftThisMessage)
          *
@@ -908,6 +840,12 @@ export function createMappingFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([handle, buffer, size, read, available, left])=>{
+                // A named pipe's end is the pipes' to look into.
+                const named = host.pipes?.peek([handle, buffer, size, read, available, left]);
+                if (named !== undefined && named !== null)
+                {
+                    return named;
+                }
                 const pipe = object(handle, 'pipe-read');
                 if (!pipe)
                 {

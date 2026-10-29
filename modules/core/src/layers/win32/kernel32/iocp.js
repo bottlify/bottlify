@@ -29,6 +29,8 @@
  * association makes the next file's completions land in somebody else's port.
  */
 
+import { toDosError } from '../ntdll/status.js';
+
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
@@ -70,6 +72,8 @@ const HANG_AFTER_MS = 10_000;
  * @property {number} transferred
  * @property {number} key
  * @property {number} overlapped
+ * @property {number} [error]  the Win32 error of an operation that did not
+ *           succeed: GetQueuedCompletionStatus answers FALSE with it
  */
 
 /**
@@ -228,10 +232,10 @@ export function createIoCompletionPorts(host){
         {
             const waiter = port.waiters.shift();
             answer(waiter.out, packet);
-            host.setLastErrorFor(waiter.thread, ERROR_SUCCESS);
+            host.setLastErrorFor(waiter.thread, packet.error ?? ERROR_SUCCESS);
             // A thread that is no longer blocked -- terminated while parked --
             // takes nothing with it: the packet goes to whoever is next.
-            if (kernel.wake(waiter.thread, 1))
+            if (kernel.wake(waiter.thread, packet.error ? 0 : 1))
             {
                 return;
             }
@@ -356,8 +360,10 @@ export function createIoCompletionPorts(host){
                 if (queued)
                 {
                     answer(out, queued);
-                    host.setLastError(ERROR_SUCCESS);
-                    return 1;
+                    // A packet of a failed operation is still dequeued: FALSE,
+                    // its error, and its OVERLAPPED written.
+                    host.setLastError(queued.error ?? ERROR_SUCCESS);
+                    return queued.error ? 0 : 1;
                 }
 
                 // A caller reads lpOverlapped to tell a timeout from a failed
@@ -400,32 +406,39 @@ export function createIoCompletionPorts(host){
         /**
          * Finishes an overlapped operation: the OVERLAPPED's own status fields,
          * then its event, then a packet on whichever port the handle is bound to.
+         * An operation that ended in an error status still posts, and the
+         * packet answers FALSE with its error; `skip` is what the handle's
+         * completion modes leave out of one that succeeded at once.
          *
          * @param {number} file @param {number} transferred @param {number} overlapped
+         * @param {number} [status]  NTSTATUS, success by default
+         * @param {{ port?: boolean, event?: boolean }} [skip]
          * @returns {boolean} whether a packet was posted -- false when the handle
          *   belongs to no port, which is the ordinary case rather than a failure
          */
-        completed(file, transferred, overlapped){
+        completed(file, transferred, overlapped, status = 0, skip = {}){
             const pointer = overlapped >>> 0;
             if (pointer !== 0)
             {
-                writeDword(pointer + OVERLAPPED_INTERNAL, ERROR_SUCCESS);
+                writeDword(pointer + OVERLAPPED_INTERNAL, status >>> 0);
                 writeDword(pointer + OVERLAPPED_INTERNAL_HIGH, transferred >>> 0);
                 const event = readDword(pointer + OVERLAPPED_EVENT);
-                if (event !== 0)
+                if (event !== 0 && !skip.event)
                 {
                     host.signalEvent(event);
                 }
             }
             const association = associations.get(file >>> 0);
-            if (!association)
+            if (!association || skip.port)
             {
                 return false;
             }
+            const error = (status >>> 0) === 0 ? 0 : toDosError(status >>> 0);
             post(association.port, {
                 transferred: transferred >>> 0,
                 key: association.key,
                 overlapped: pointer,
+                ...error !== 0 ? { error } : {},
             });
             return true;
         },

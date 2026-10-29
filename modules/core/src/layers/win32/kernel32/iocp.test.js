@@ -359,6 +359,24 @@ test('a finished operation fills its OVERLAPPED and signals its event', ()=>{
     assert.equal(memory.dword(OUT_OVERLAPPED), OVERLAPPED);
 });
 
+test('an operation that failed posts all the same, and its packet answers FALSE', ()=>{
+    // A pipe read cancelled or broken: the OVERLAPPED holds the status, the
+    // event is set, and GetQueuedCompletionStatus dequeues it as FALSE with
+    // the status's Win32 error, the OVERLAPPED written so the caller knows which.
+    const { fns, ports, memory, main } = setup();
+    const port = makePort(fns);
+    const file = 0x40;
+    fns.CreateIoCompletionPort.handler([file, port, 7, 0]);
+    assert.equal(ports.completed(file, 0, OVERLAPPED, 0xc0000120), true);
+    assert.equal(memory.dword(OVERLAPPED), 0xc0000120);
+    assert.equal(
+        fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, 0]), 0);
+    assert.equal(main.error, 995, 'ERROR_OPERATION_ABORTED');
+    assert.equal(memory.dword(OUT_OVERLAPPED), OVERLAPPED);
+    assert.equal(ports.completed(file, 4, OVERLAPPED, 0, { port: true }), false,
+        'a completion mode that skips the port');
+});
+
 test('an operation on a handle bound to nothing posts nothing, and is not an error', ()=>{
     const { ports, memory } = setup();
     assert.equal(ports.completed(0x40, 8, OVERLAPPED), false);

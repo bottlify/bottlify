@@ -51,6 +51,7 @@ import { createProfileFunctions } from './kernel32/profile.js';
 import { createDriveFunctions } from './kernel32/drives.js';
 import { createMappingFunctions } from './kernel32/mapping.js';
 import { createMailslots } from './kernel32/mailslots.js';
+import { createNamedPipes } from './kernel32/pipes.js';
 import { createIoCompletionPorts } from './kernel32/iocp.js';
 import { createFileTimeFunctions } from './kernel32/filetime.js';
 import { createConsoleIoFunctions } from './kernel32/consoleio.js';
@@ -872,6 +873,40 @@ export function createWin32Module(){
                 /** @param {string} text */
                 trace: text=>trace(text),
             });
+
+            // Named pipes, in the run's namespace: their own calls, and ReadFile,
+            // WriteFile, CreateFile, CloseHandle and CancelIo hand theirs on.
+            const pipes = createNamedPipes({
+                kernel,
+                handles,
+                readMemory,
+                writeMemory,
+                readCString,
+                readWideString,
+                setLastError: setError,
+                setLastErrorFor: setErrorOn,
+                currentThread: ()=>kernel.currentThread(),
+                park: ()=>bridge.park(),
+                table: system?.namedObjects ?? null,
+                // A process in a worker of its own holds stand-ins of the
+                // run's objects, never the objects a pipe's ends are.
+                remote: Boolean(system?.objects),
+                processId,
+                completed: (file, transferred, overlapped, status, skip)=>
+                    ports.completed(file, transferred, overlapped, status, skip),
+                divergence: config?.divergence,
+            });
+
+            // The pipe ends a parent started this process with, under the
+            // numbers it has them by and told this one on its command line.
+            for (const inherited of config?.inheritedHandles ?? [])
+            {
+                if (inherited.type === 'pipe'
+                    && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
+                {
+                    pipes.adopted(inherited.handle, inherited.object);
+                }
+            }
 
             // Mailslots: their own calls, and ReadFile, WriteFile and
             // CreateFile hand their handles and names on to them.
@@ -1916,6 +1951,7 @@ export function createWin32Module(){
                     }),
                     ...createThreadingFunctions({
                         kernel,
+                        pipes,
                         // A thread made in a child, and one waited on there.
                         askChild,
                         setLastErrorFor: setErrorOn,
@@ -2203,6 +2239,7 @@ export function createWin32Module(){
                     }),
                     ...createMappingFunctions({
                         readMemory,
+                        pipes,
                         divergence: config?.divergence,
                         writeMemory,
                         readCString,
@@ -2243,6 +2280,8 @@ export function createWin32Module(){
                     }),
                     ...mailslots.functions,
                     ...ports.table,
+                    // After the mapping's table, whose anonymous pipes these leave be.
+                    ...pipes.functions,
                     ...createFileTimeFunctions({
                         readMemory,
                         writeMemory,
@@ -2348,6 +2387,9 @@ export function createWin32Module(){
                         setLastError: setError,
                     }),
                     ...createSpawnFunctions({
+                        // A child started with bInheritHandles takes this
+                        // process's inheritable pipe ends, by their numbers.
+                        inheritedHandles: only=>pipes.inherited(only),
                         kernel,
                         processId,
                         readMemory,
@@ -2463,8 +2505,9 @@ export function createWin32Module(){
                         directories: shellFolderDirectories(windows),
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,
-                        streams: [mailslots],
+                        streams: [mailslots, pipes],
                         mailslots,
+                        pipes,
                         writeConsole: (handle, text)=>sink(handle, text),
                         // As the ports' signalEvent: a stale hEvent is the
                         // program's mistake, and starting the I/O does not fault on it.

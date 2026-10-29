@@ -116,6 +116,13 @@ differently raises a `divergence` event naming the API.
   run's, kept on the engine thread: a server COM starts runs in a worker of its own while the run
   has room for one, and otherwise beside the process that asked, in its worker; a call from one
   worker to another goes through the engine thread and back.
+- Named pipes are the run's, between the processes on the engine's thread: byte and message
+  pipes, overlapped reads and connects completed through their event and completion port, and a
+  pipe end a child inherits (`bInheritHandles`, or a STARTUPINFOEX handle list) under its parent's
+  number. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
+  Windows 9x refuses it). Writes are never held back by a full buffer, `DuplicateHandle` into
+  another process duplicates into the caller's own, and `GetOverlappedResult` on a pipe operation
+  whose OVERLAPPED has no event waits on nothing.
 - A child in a worker of its own shares the run's registry, files, window directory (it finds,
   reads, posts and sends to every other process's windows, and they to its), ids, bundle (a block
   it misses is fetched for it), named events, semaphores and mutexes, and the position of a file

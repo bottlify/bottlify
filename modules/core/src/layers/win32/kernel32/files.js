@@ -37,6 +37,7 @@ import { readToTerminator } from '../common/scan-windows.js';
 import { mountPointsOf, onVolume } from './drives.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
+import { isPipeName } from './pipes.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -357,7 +358,7 @@ const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_NOT_FOUND = 1168;
 
-const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
+const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'pipe']);
 
 /**
  * @typedef {Object} OpenMode
@@ -424,9 +425,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  * @typedef {Object} FileHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {{ read: (handle: number, buffer: number, length: number, out: number,
- *     native?: boolean) => any,
+ *     native?: boolean, overlapped?: number) => any,
  *     write: (handle: number, buffer: number, length: number, out: number,
- *     native?: boolean) => any }[]} [streams]
+ *     native?: boolean, overlapped?: number) => any }[]} [streams]
  *           Handles the reads and writes hand on before taking them for files:
  *           each answers the call, or null for a handle that is not its own.
  *           `native` asks for NtReadFile's answers: `out` is the IO_STATUS_BLOCK.
@@ -434,6 +435,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *     information: (handle: number, kind: number) => Uint8Array | 'unknown class' | null }}
  *     [mailslots]  Opens a client of the mailslot CreateFile is given the name of, and
  *     answers NtQueryInformationFile of a mailslot handle (null: not one).
+ * @property {ReturnType<typeof import('./pipes.js').createNamedPipes>} [pipes]
+ *           Named pipes: CreateFile opens a client end by a pipe's name, a closed
+ *           end is told, CancelIo and CancelIoEx cancel what waits on one.
  * @property {(address: number, length: number) => Uint8Array} [windowMemory]
  *           The guest's own bytes, not a copy, valid until the guest runs again:
  *           what a write hands a volume that keeps a copy of what it is given.
@@ -2090,6 +2094,17 @@ export function createFileFunctions(host){
             host.setLastError(ERROR_SUCCESS);
             return host.handles.open('device', { device: 'nul' });
         }
+        // A pipe's name opens a client end of an instance that listens.
+        if (name !== 0 && host.pipes && isPipeName(text.raw(name)))
+        {
+            const client = host.pipes.open(text.raw(name), access, flags, attributes);
+            if ('error' in client)
+            {
+                return fail(client.error, INVALID_HANDLE_VALUE);
+            }
+            host.setLastError(ERROR_SUCCESS);
+            return client.handle;
+        }
         // A mailslot's name opens its client end.
         if (name !== 0 && host.mailslots && isMailslotName(text.raw(name)))
         {
@@ -2443,6 +2458,11 @@ export function createFileFunctions(host){
             // is reading, and a thread parked on a port that has just
             // closed waits on something nothing can reach.
             host.ports?.closed(handle, closed);
+            // A pipe end goes with its last handle, in whichever process.
+            if (type === 'pipe')
+            {
+                host.pipes?.closed(handle, closed);
+            }
             return true;
         }
         catch (e){
@@ -3338,7 +3358,7 @@ export function createFileFunctions(host){
                 }
                 for (const stream of streams)
                 {
-                    const answer = stream.read(handle, buffer, length, read);
+                    const answer = stream.read(handle, buffer, length, read, false, overlapped);
                     if (answer !== null)
                     {
                         return answer;
@@ -3430,7 +3450,8 @@ export function createFileFunctions(host){
                 }
                 for (const stream of streams)
                 {
-                    const answer = stream.write(handle, buffer, length, written);
+                    const answer = stream.write(handle, buffer, length, written, false,
+                        overlapped);
                     if (answer !== null)
                     {
                         return answer;
@@ -3776,7 +3797,8 @@ export function createFileFunctions(host){
         FlushFileBuffers: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE),
+            handler: ([handle])=>(object(handle, 'file') || host.pipes?.isPipe(handle)
+                ? 1 : fail(ERROR_INVALID_HANDLE)),
         },
 
         /**
@@ -4425,16 +4447,23 @@ export function createFileFunctions(host){
         /**
          * BOOL CancelIo(HANDLE hFile)
          *
-         * Every read and write here has finished by the time its call
-         * answers -- a parked one answers before its thread runs again -- so
-         * the calling thread has nothing outstanding on any handle and there
-         * is nothing to cancel. A handle that is no file object is refused,
-         * as NtCancelIoFile refuses one.
+         * A file's reads and writes have finished by the time their calls
+         * answer -- a parked one answers before its thread runs again -- so
+         * on a file the calling thread has nothing outstanding and there is
+         * nothing to cancel; a pipe's waiting reads and connects are. A
+         * handle that is no file object is refused, as NtCancelIoFile
+         * refuses one.
          */
         CancelIo: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
+                // A pipe's waiting reads and connects are the only I/O here
+                // that outlives its call: the calling thread's end cancelled.
+                if (host.pipes?.cancel(handle, { thread: host.currentThread?.() }) != null)
+                {
+                    return 1;
+                }
                 const kind = isStandardHandle(handle >>> 0) ? 'file'
                     : host.handles.typeOf?.(handle >>> 0);
                 return kind && FILE_OBJECTS.has(kind) ? 1 : fail(ERROR_INVALID_HANDLE);
@@ -4444,15 +4473,22 @@ export function createFileFunctions(host){
         /**
          * BOOL CancelIoEx(HANDLE hFile, LPOVERLAPPED lpOverlapped)
          *
-         * Every read and write here has finished by the time its call
-         * returns or completes, so there is nothing of the handle's left to
-         * cancel (ERROR_NOT_FOUND), as Windows answers when the request has
-         * already completed.
+         * A file's reads and writes have finished by the time their calls
+         * return, so there is nothing of a file's left to cancel
+         * (ERROR_NOT_FOUND), as Windows answers when the request has already
+         * completed. A pipe's waiting operations, the one OVERLAPPED's or all
+         * of the handle's, end cancelled.
          */
         CancelIoEx: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>{
+            handler: ([handle, overlapped])=>{
+                const cancelled = host.pipes?.cancel(handle, (overlapped >>> 0) === 0 ? {}
+                    : { overlapped: overlapped >>> 0 });
+                if (cancelled != null)
+                {
+                    return cancelled > 0 ? 1 : fail(ERROR_NOT_FOUND);
+                }
                 const kind = isStandardHandle(handle >>> 0) ? 'file'
                     : host.handles.typeOf?.(handle >>> 0);
                 return fail(kind && FILE_OBJECTS.has(kind) ? ERROR_NOT_FOUND

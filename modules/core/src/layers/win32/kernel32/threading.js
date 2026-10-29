@@ -166,6 +166,8 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           What kind of object a handle names. The kernel's handle table
  *           knows; it is not forwarded through the kernel API yet, and
  *           without it DuplicateHandle refuses rather than guessing.
+ * @property {{ setInheritable: (handle: number, on: boolean) => void }} [pipes]
+ *           Told what a pipe handle's inheritance is set to, which a child reads.
  */
 
 /** PROCESSENTRY32, as a caller of the era declares it: 296 bytes. */
@@ -1317,8 +1319,15 @@ export function createThreadingFunctions(host){
                 {
                     host.retainNode?.(held.node);
                 }
+                // A pipe end counts its handles in every process: it breaks
+                // the pipe with the last of them, not the first.
+                if (kind === 'pipe' && !closesSource)
+                {
+                    held.retain();
+                }
                 const duplicate = kernel.handles.open(kind, held);
                 handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
+                host.pipes?.setInheritable(duplicate, inherit !== 0);
                 host.writeMemory(target >>> 0, new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
                     duplicate >>> 16 & 0xff, duplicate >>> 24 & 0xff,
@@ -1370,6 +1379,11 @@ export function createThreadingFunctions(host){
                 const kept = HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE;
                 handleFlags.set(key, ((handleFlags.get(key) ?? 0) & ~(mask & kept))
                     | (flags & mask & kept));
+                // What a child inherits of the pipes is read from the pipes.
+                if ((mask & HANDLE_FLAG_INHERIT) !== 0)
+                {
+                    host.pipes?.setInheritable(key, (flags & HANDLE_FLAG_INHERIT) !== 0);
+                }
                 return 1;
             },
         },

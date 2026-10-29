@@ -350,6 +350,9 @@ const hashText = (hash, text)=>{
  * @property {import('./layers/win32/kernel32/startup-info.js').StartupRecord | null} [startup]
  *           The STARTUPINFO a child's parent handed CreateProcess, which its
  *           GetStartupInfo answers.
+ * @property {{ handle: number, type: string, object: any }[]} [inheritedHandles]
+ *           The handles a child inherits from its parent on this thread, under
+ *           the parent's numbers: pipe ends.
  * @property {number} [parentProcessId]  The process that started this one, 0 for none.
  * @property {Record<string, string>} [environment]
  *           The variables a process starts with: a child's are the block its
@@ -4858,6 +4861,8 @@ async function buildApp(options){
             system: options.system,
             processId: options.processId,
             standardFiles: options.standardFiles,
+            // The handles a parent's CreateProcess handed down (pipe ends).
+            inheritedHandles: options.inheritedHandles,
             startup: options.startup,
             // A child's variables, as its parent handed them on; absent, the
             // machine's own.
@@ -10758,7 +10763,10 @@ export async function createApp(options){
                 link.callWaiting('parent', 'setPosition', [asked.id, which, at]);
             },
         });
-        const request = { ...asked, standardFiles: asked.standardFiles && Object.fromEntries(
+        // Inherited handles are objects of this thread's and do not cross.
+        const values = { ...asked };
+        delete values.inheritedHandles;
+        const request = { ...values, standardFiles: asked.standardFiles && Object.fromEntries(
             Object.keys(asked.standardFiles).map(which=>[which, handedOn(which)])) };
         startAcross({
             // Read from the run's volume, where the parent found it: a launcher
@@ -10920,6 +10928,8 @@ export async function createApp(options){
                         processId: request.id,
                         mainThreadId: request.threadId,
                         standardFiles: request.standardFiles,
+                        // Objects, which only a child on this thread can hold.
+                        inheritedHandles: request.inheritedHandles,
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,

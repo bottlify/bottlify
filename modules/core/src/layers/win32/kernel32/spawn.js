@@ -102,6 +102,10 @@ export function writeThroughProtection(memory, address, bytes){
 /** A PROC_THREAD_ATTRIBUTE_LIST's header and each attribute after it, in bytes. */
 const ATTRIBUTE_LIST_HEADER = 20;
 const ATTRIBUTE_ENTRY = 12;
+/** The attribute that names the handles a child inherits, and none else. */
+const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x20002;
+/** CreateProcess's flag: the STARTUPINFO is a STARTUPINFOEX, its attribute list behind it. */
+const EXTENDED_STARTUPINFO_PRESENT = 0x80000;
 /**
  * The attributes a list takes, each with the sizes its value may have: the
  * parent process and a pseudo-console are a handle, a handle or job list
@@ -516,6 +520,9 @@ export function createSpawner(host){
  *           A call made in a child where it runs; absent, no child is reached.
  * @property {() => any} [currentThread]
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
+ * @property {(only: number[] | null) => { handle: number, type: string, object: any }[]}
+ *     [inheritedHandles]  The handles a child started with bInheritHandles takes:
+ *     every inheritable one, or of those the ones a handle list names.
  * @property {() => Record<string, string>} [environment]
  *           This process's variables as they are now, which a child given no
  *           block inherits.
@@ -731,15 +738,47 @@ export function createSpawnFunctions(host){
     };
 
     /**
+     * The handles a STARTUPINFOEX's PROC_THREAD_ATTRIBUTE_HANDLE_LIST names,
+     * or null where none does: then every inheritable handle is inherited.
+     *
+     * @param {number} startup @param {number} flags
+     * @returns {number[] | null}
+     */
+    const handleList = (startup, flags)=>{
+        if (startup === 0 || (flags & EXTENDED_STARTUPINFO_PRESENT) === 0)
+        {
+            return null;
+        }
+        const list = readDword(startup + STARTUPINFO.SIZE);
+        if (list === 0)
+        {
+            return null;
+        }
+        const used = readDword(list + 8);
+        for (let at = 0; at < used; at++)
+        {
+            const entry = list + ATTRIBUTE_LIST_HEADER + at * ATTRIBUTE_ENTRY;
+            if (readDword(entry) === PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+            {
+                const value = readDword(entry + 8);
+                return Array.from({ length: readDword(entry + 4) >>> 2 },
+                    (_, index)=>readDword(value + index * 4));
+            }
+        }
+        return null;
+    };
+
+    /**
      * @param {string | null} named  null where no application name was given.
      * @param {string} line
      * @param {number} flags @param {number} information @param {number} [startup]
      * @param {string} [directory]
      * @param {boolean} [wide]  CreateProcessW's, whose STARTUPINFO's strings are wide.
      * @param {number} [environment]  lpEnvironment.
+     * @param {boolean} [inherit]  bInheritHandles.
      */
     const create = (named, line, flags, information, startup = 0, directory = '', wide = false,
-        environment = 0)=>
+        environment = 0, inherit = false)=>
     {
         // Cleared first: a call that fails leaves no handle or id in it.
         if ((information >>> 0) !== 0)
@@ -766,6 +805,11 @@ export function createSpawnFunctions(host){
             // The block asked for, or this process's variables as they are now.
             environment: (environment >>> 0) === 0 ? host.environment?.() ?? null
                 : environmentBlock(environment >>> 0, (flags & CREATE_UNICODE_ENVIRONMENT) !== 0),
+            // The handles it inherits, under the numbers this process has
+            // them by: the pipes' ends, which every process of the run on this
+            // thread holds alike. A child in a worker of its own takes none.
+            inheritedHandles: inherit && host.inheritedHandles
+                ? host.inheritedHandles(handleList(startup >>> 0, flags)) : [],
         });
         if (!made)
         {
@@ -801,23 +845,23 @@ export function createSpawnFunctions(host){
         CreateProcessA: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, environment, directory, startup,
-                information])=>create(
+            handler: ([application, commandLine, , , inherit, flags, environment, directory,
+                startup, information])=>create(
                 (application >>> 0) === 0 ? null : host.readCString(application >>> 0, WHOLE_NAME),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readCString(commandLine >>> 0, MAX_COMMAND_LINE),
                 flags >>> 0, information, startup,
                 (directory >>> 0) === 0 ? '' : host.readCString(directory >>> 0, WHOLE_NAME),
-                false, environment),
+                false, environment, inherit !== 0),
         },
 
         /** BOOL CreateProcessW(...) — the same call, read as wide strings. */
         CreateProcessW: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, environment, directory, startup,
-                information])=>create(
+            handler: ([application, commandLine, , , inherit, flags, environment, directory,
+                startup, information])=>create(
                 (application >>> 0) === 0 ? null
                     : host.readWideString(application >>> 0, WHOLE_NAME * 2),
                 (commandLine >>> 0) === 0
@@ -825,7 +869,7 @@ export function createSpawnFunctions(host){
                     : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE * 2),
                 flags >>> 0, information, startup,
                 (directory >>> 0) === 0 ? '' : host.readWideString(directory >>> 0, WHOLE_NAME * 2),
-                true, environment),
+                true, environment, inherit !== 0),
         },
 
         /**

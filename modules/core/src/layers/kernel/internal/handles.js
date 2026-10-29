@@ -64,6 +64,11 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
          */
         open(type, object, access = null){
             let handle;
+            // Past the numbers a handle was adopted at.
+            while (next <= limit && entries.has(next))
+            {
+                next += HANDLE_STRIDE;
+            }
             if (next <= limit)
             {
                 handle = next;
@@ -81,6 +86,26 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
             opened++;
             watch?.opened(handle, type, object, access);
             return handle;
+        },
+
+        /**
+         * Files an object under a handle number chosen elsewhere: a handle a
+         * child inherits has its parent's number, which the parent told it on
+         * its command line. Refused for a number taken or not a handle's.
+         *
+         * @param {number} handle @param {string} type @param {any} object
+         * @returns {boolean}
+         */
+        adopt(handle, type, object){
+            if (entries.has(handle) || handle < FIRST_HANDLE || handle % HANDLE_STRIDE !== 0
+                || handle > limit)
+            {
+                return false;
+            }
+            entries.set(handle, { type, object, access: null });
+            opened++;
+            watch?.opened(handle, type, object, null);
+            return true;
         },
 
         /**

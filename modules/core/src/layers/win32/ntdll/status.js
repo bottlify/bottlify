@@ -75,6 +75,12 @@ export const STATUS = Object.freeze({
     RESOURCE_LANG_NOT_FOUND: 0xc0000204,
     /** A message table that holds no message by that number. */
     MESSAGE_NOT_FOUND: 0xc0000109,
+    /** A pipe's: its other end gone, cut off, still listening, closing; an I/O cancelled. */
+    PIPE_BROKEN: 0xc000014b,
+    PIPE_DISCONNECTED: 0xc00000b0,
+    PIPE_LISTENING: 0xc00000b3,
+    PIPE_CLOSING: 0xc00000b1,
+    CANCELLED: 0xc0000120,
 });
 
 /** The Win32 errors this table produces. */
@@ -115,6 +121,11 @@ const ERROR = Object.freeze({
     FILE_INVALID: 1006,
     REVISION_MISMATCH: 1306,
     NO_SYSTEM_RESOURCES: 1450,
+    BROKEN_PIPE: 109,
+    NO_DATA: 232,
+    PIPE_NOT_CONNECTED: 233,
+    PIPE_LISTENING: 536,
+    OPERATION_ABORTED: 995,
 });
 
 /**
@@ -174,6 +185,11 @@ const TO_DOS_ERROR = new Map([
     [STATUS.RESOURCE_NAME_NOT_FOUND, ERROR.RESOURCE_NAME_NOT_FOUND],
     [STATUS.RESOURCE_LANG_NOT_FOUND, ERROR.RESOURCE_LANG_NOT_FOUND],
     [STATUS.MESSAGE_NOT_FOUND, ERROR.MR_MID_NOT_FOUND],
+    [STATUS.PIPE_BROKEN, ERROR.BROKEN_PIPE],
+    [STATUS.PIPE_DISCONNECTED, ERROR.PIPE_NOT_CONNECTED],
+    [STATUS.PIPE_LISTENING, ERROR.PIPE_LISTENING],
+    [STATUS.PIPE_CLOSING, ERROR.NO_DATA],
+    [STATUS.CANCELLED, ERROR.OPERATION_ABORTED],
 ]);
 
 /** What an unmapped status becomes, and the one code that means "no mapping". */

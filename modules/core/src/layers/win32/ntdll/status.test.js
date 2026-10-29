@@ -120,6 +120,11 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.RESOURCE_NAME_NOT_FOUND, 1814],
         [STATUS.RESOURCE_LANG_NOT_FOUND, 1815],
         [STATUS.MESSAGE_NOT_FOUND, 317],
+        [STATUS.PIPE_BROKEN, 109],
+        [STATUS.PIPE_DISCONNECTED, 233],
+        [STATUS.PIPE_LISTENING, 536],
+        [STATUS.PIPE_CLOSING, 232],
+        [STATUS.CANCELLED, 995],
     ];
     for (const [status, expected] of rows)
     {
