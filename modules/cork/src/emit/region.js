@@ -2436,7 +2436,23 @@ export class RegionEmitter {
         if (this.resultOwed !== null && this.pending?.kind === Kind.SUB && cc >> 1 === 2)
         {
             // je/jne of a compare: its operands equal or not, the result unmade.
-            this.b.localGet(Local.op1).localGet(Local.op2).op((cc & 1) === 0 ? I32.eq : I32.ne);
+            // Long mode's narrower operands compared as the i32s they were: an
+            // i64 compare of the zero-extended pair costs V8 a move to extend.
+            if (this.width.bits === 64 && this.resultOwed === 8)
+            {
+                this.b.localGet(Local.op1).localGet(Local.op2)
+                    .op((cc & 1) === 0 ? I64.eq : I64.ne);
+                return;
+            }
+            for (const operand of [Local.op1, Local.op2])
+            {
+                this.b.localGet(operand);
+                if (this.width.bits === 64)
+                {
+                    this.b.op(I64.wrap);
+                }
+            }
+            this.b.op((cc & 1) === 0 ? I32.eq : I32.ne);
             return;
         }
         if (this.fcmp !== null)
@@ -2588,7 +2604,7 @@ export class RegionEmitter {
      */
     owesTo(block){
         const last = block.instructions.at(-1);
-        return block.exit.kind === 'jcc' && this.width.bits === 32 && last?.cc !== undefined
+        return block.exit.kind === 'jcc' && last?.cc !== undefined
             && [1, 2, 3, 6, 7].includes(last.cc >> 1);
     }
 
@@ -2641,10 +2657,31 @@ export class RegionEmitter {
         {
             return;
         }
-        this.b.localGet(Local.op1).localGet(Local.op2).op(I32.sub);
+        // As `record` leaves it: long mode's narrower result zero-extended.
+        const wide = this.width.bits === 64;
+        if (wide && size === 8)
+        {
+            this.b.localGet(Local.op1).localGet(Local.op2).op(I64.sub).localSet(Local.res);
+            return;
+        }
+        this.b.localGet(Local.op1);
+        if (wide)
+        {
+            this.b.op(I64.wrap);
+        }
+        this.b.localGet(Local.op2);
+        if (wide)
+        {
+            this.b.op(I64.wrap);
+        }
+        this.b.op(I32.sub);
         if (size < 4)
         {
             this.b.i32const(MASKS[widthCode(size)]).op(I32.and);
+        }
+        if (wide)
+        {
+            this.b.op(I64_EXTEND_U);
         }
         this.b.localSet(Local.res);
     }

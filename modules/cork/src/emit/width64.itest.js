@@ -138,6 +138,23 @@ test('a float compare fused with its branch over stores and arithmetic between t
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
 
+test('a compare whose result its branch leaves unmade has the flags it makes on the way on and'
+    + ' at the exit, as interpreted', ()=>{
+    // cmp of each width, a branch the operands answer, past a flag reader;
+    // the flags read again where the region leaves.
+    const compares = ['4839c8', '39c8', '6639c8', '38c8', '4c39c0', '483b0424', '4881f9ffffff7f'];
+    const conditions = ['72', '73', '74', '75', '76', '77', '7c', '7d', '7e', '7f'];
+    const codes = compares.flatMap(first=>conditions.map(cc=>`${first}${cc}030f9cc2`));
+    const cases = edges(codes, [0, 1, -1, 0x7fffffff, 0x80000000, 0xffffffff, 0x100000000,
+        -0x8000000000000000n, 0x7fffffffffffffffn, 0xfedcba9876543210n]);
+    for (const budget of [1, 7])
+    {
+        const { failures, stats } = compare(cases, { budget, makeRunner: shared });
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+    }
+});
+
 test('lea under the address-size prefix keeps the address\'s low 32 bits in the shared'
     + ' emitter\'s regions, as interpreted', ()=>{
     const cases = edges([

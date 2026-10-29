@@ -2021,3 +2021,23 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   recorded.
 - **Decision.** Left in: it is fewer instructions on every path that has such an access, and
   no workload measured here runs one hot; not measured apart on the others.
+
+### 2026-10-29: long mode's owed compare result answered for je/jne by an i64 compare
+
+- **Idea.** With a `cmp` whose result its block's final branch leaves unmade at 64 bits too
+  (`oweResult`, `owesTo`), a `je` or `jne` compares the record's two operands: as i64, the
+  record holding a narrower compare's operands zero-extended, so one compare serves every width.
+- **Workload.** cork-bench x86-64 images, `tools/cork-bench/ir.sh` with `WASM=1 CLOCK=0.001
+  ITERS=1000`, node 26.13.0 (V8 14.6) x64, machine instructions an iteration in V8's printed wasm
+  code; one run an arm (the column repeats to the instruction run to run). Arms: the tree at
+  8740b9eb with the float-compare fusion over instructions between (this branch's first change),
+  without and with the owed result at 64 bits.
+- **Values.** Without, then with the i64 compare: tree 3,117,594 -> 3,160,406 (+1.4 %); sort
+  4,029,716 -> 3,793,562 (-5.9 %); crc 1,991,978 -> 1,991,020; vm 2,434,503 -> 2,434,503.
+- **Why.** tree's hot `cmp r32, r32; je`: V8 extends the dword operand into a register of its own
+  before a 64-bit compare (`movl r12, r11; cmpq rsi, r12`) where the made result's
+  `i32.eqz` had been one `cmpl`.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken as such: a narrower compare's operands are wrapped and compared as i32,
+  a quadword's as i64 (tree 3,117,594, its base; sort 3,791,850).
