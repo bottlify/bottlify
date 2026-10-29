@@ -59,6 +59,7 @@ export const ProtoBufHeader = {
     target_job_name: [12, 'string'],
     eresult: [13, 'int32'],
     error_message: [14, 'string'],
+    realm: [32, 'uint32'],
 };
 
 /** @type {Schema} */
@@ -160,6 +161,7 @@ export const Authentication = Object.freeze({
             device_friendly_name: [1, 'string'],
             platform_type: [2, 'int32'],
             os_type: [3, 'int32'],
+            gaming_device_type: [4, 'uint32'],
         }],
         website_id: [4, 'string'],
     },
@@ -192,3 +194,9 @@ export const PLATFORM_STEAM_CLIENT = 1;
 
 /** EOSType of Windows 10, what the client says it runs on. */
 export const OS_WINDOWS_10 = 16;
+
+/** The gaming device type of a PC, as a desktop client gives it. */
+export const GAMING_DEVICE_PC = 1;
+
+/** The realm of the global Steam universe, as a call outside a session names it. */
+export const REALM_GLOBAL = 1;

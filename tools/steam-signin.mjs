@@ -124,9 +124,16 @@ if (tokenPath && existsSync(tokenPath))
     console.log(`using the kept token for ${signedIn?.accountName}`);
 }
 const deadline = Date.now() + minutes * 60000;
-// A manager drops a connection that has not logged on after a minute or so,
-// and the sign-in with it: a new one begins, with a new code, until the time
-// is up.
+/** The open connection, or a new one when it has closed. */
+const current = async()=>{
+    if (connection.closed)
+    {
+        connection = await connect();
+    }
+    return connection;
+};
+// A code that expires or is turned down ends the sign-in: a new one begins,
+// with a new code, until the time is up.
 while (!signedIn)
 {
     const abort = new AbortController();
@@ -134,11 +141,7 @@ while (!signedIn)
         Math.max(0, deadline - Date.now()));
     try
     {
-        if (connection.closed)
-        {
-            connection = await connect();
-        }
-        signedIn = await signInWithQr(connection, {
+        signedIn = await signInWithQr(current, {
             signal: abort.signal,
             onScanned: ()=>console.log(`scanned, awaiting approval, ${new Date().toISOString()}`),
             onChallenge: url=>{

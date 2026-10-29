@@ -19,7 +19,7 @@
 import { decode, encode } from './protobuf.js';
 import {
     ClientHeartBeat, ClientHello, EMsg, EResult, Multi, PROTO_MASK, PROTOCOL_VERSION,
-    ProtoBufHeader,
+    ProtoBufHeader, REALM_GLOBAL,
 } from './messages.js';
 
 /** @typedef {import('./protobuf.js').Schema} Schema */
@@ -305,14 +305,20 @@ export function connectCm({ endpoint, socket, timeout = 30000 }){
          * @param {Schema} requestSchema @param {Record<string, any>} request
          * @param {Schema} responseSchema
          * @param {{ authed?: boolean }} [options]  A method called before a
-         *        logon goes as a non-authenticated call.
+         *        logon goes as a non-authenticated call: from no one (Steam ID
+         *        and session zero) in the global realm. Sent from the account
+         *        a logon would start with, the Authentication service took an
+         *        approved sign-in's poll for another session and answered
+         *        FileNotFound.
          * @returns {Promise<{ eresult: number, body: Record<string, any>, message?: string }>}
          */
         async call(method, requestSchema, request, responseSchema, { authed = false } = {}){
             const answer = await connection.request(
                 authed ? EMsg.ServiceMethodCallFromClient
                     : EMsg.ServiceMethodCallFromClientNonAuthed,
-                requestSchema, request, { target_job_name: method });
+                requestSchema, request, authed ? { target_job_name: method } : {
+                    target_job_name: method, steamid: 0n, client_sessionid: 0, realm: REALM_GLOBAL,
+                });
             const eresult = answer.header.eresult ?? EResult.Fail;
             return {
                 eresult,

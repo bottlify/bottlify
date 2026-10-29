@@ -16,7 +16,9 @@
  * SteamClient one, which is what a client logs on with.
  */
 
-import { Authentication, EResult, OS_WINDOWS_10, PLATFORM_STEAM_CLIENT } from './messages.js';
+import {
+    Authentication, EResult, GAMING_DEVICE_PC, OS_WINDOWS_10, PLATFORM_STEAM_CLIENT,
+} from './messages.js';
 
 /** @typedef {import('./connection.js').CmConnection} CmConnection */
 
@@ -39,7 +41,10 @@ const pause = (ms, signal)=>new Promise((resolve, reject)=>{
 /**
  * Signs in by QR code; resolves once the person has approved it.
  *
- * @param {CmConnection} connection
+ * @param {() => Promise<CmConnection>} connect  An open connection, a new
+ *        one when the last has closed: a manager drops a connection that has
+ *        not logged on after a minute or so, and the sign-in, which the
+ *        service keeps, goes on over the next.
  * @param {Object} options
  * @param {(challengeUrl: string) => void} options.onChallenge  Show this as a
  *        QR code; called again when the code changes.
@@ -50,18 +55,19 @@ const pause = (ms, signal)=>new Promise((resolve, reject)=>{
  * @param {AbortSignal} [options.signal]
  * @returns {Promise<SignedIn>}
  */
-export async function signInWithQr(connection, options){
+export async function signInWithQr(connect, options){
     const { onChallenge, onScanned, deviceName = 'Bottlify', signal } = options;
-    const begun = await connection.call('Authentication.BeginAuthSessionViaQR#1',
+    const begun = await (await connect()).call('Authentication.BeginAuthSessionViaQR#1',
         Authentication.BeginAuthSessionViaQRRequest, {
-            device_friendly_name: deviceName,
-            platform_type: PLATFORM_STEAM_CLIENT,
+            // The device alone, as a desktop client describes itself; a
+            // website named beside it made the app show the sign-in as a
+            // browser's.
             device_details: {
                 device_friendly_name: deviceName,
                 platform_type: PLATFORM_STEAM_CLIENT,
                 os_type: OS_WINDOWS_10,
+                gaming_device_type: GAMING_DEVICE_PC,
             },
-            website_id: 'Client',
         }, Authentication.BeginAuthSessionViaQRResponse);
     if (begun.eresult !== EResult.OK)
     {
@@ -74,7 +80,7 @@ export async function signInWithQr(connection, options){
     for (;;)
     {
         await pause(interval, signal);
-        const polled = await connection.call('Authentication.PollAuthSessionStatus#1',
+        const polled = await (await connect()).call('Authentication.PollAuthSessionStatus#1',
             Authentication.PollAuthSessionStatusRequest,
             { client_id: clientId, request_id: requestId },
             Authentication.PollAuthSessionStatusResponse);
