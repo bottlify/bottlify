@@ -59,6 +59,9 @@
  * same keys, clicks and pictures as a wizard's. `--attended` leaves a message
  * box on the desktop for those to answer rather than answering it unseen.
  *
+ * `--windows win2000|winxp|win7|win10` is the Windows the machine is, over
+ * the one a bundle's manifest names (XP when neither does).
+ *
  * `--worker` plays the devices' calls in a graphics worker over the fake GPU,
  * as a page does; `--unshared` keeps guest memory out of a SharedArrayBuffer,
  * as on a page that is not cross-origin isolated; `--cork JSON` sets cork's
@@ -152,6 +155,7 @@ const mountBundle = async id=>{
     });
     return {
         executable,
+        windows: manifest.windows,
         imagePath: placement.imagePath,
         storage: seeded.length > 0 ? { files: seeded } : null,
         bundle: {
@@ -244,6 +248,12 @@ const app = await createApp({
     storage: prefix.storage,
     ...'bundle' in prefix ? { bundle: prefix.bundle } : {},
     engine: 'cork',
+    // `--windows NAME`: the Windows the machine is, over the one a bundle's
+    // manifest names -- a program that refuses an old one says so first.
+    ...argv.includes('--windows') || prefix.windows
+        ? { windows: argv.includes('--windows')
+            ? argv[argv.indexOf('--windows') + 1] : prefix.windows }
+        : {},
     // `--concurrency N`: processes at once, each child in a worker of its
     // own, as a page with concurrency runs them.
     ...argv.includes('--concurrency')
@@ -278,8 +288,12 @@ const app = await createApp({
     ...journalAt > 0 ? { log: {
         capacity: Math.max(100000, number('--trace-lines', 0)),
         bytes: Math.max(1 << 20, number('--trace-lines', 0) * 512),
+        // Every call area, as the header promises: a program that stops over
+        // its sockets or its sound leaves nothing to read otherwise.
         categories: {
             'call.cpu': 'trace', 'call.com': 'trace', 'call.gpu': 'trace', 'call.input': 'trace',
+            'call.net': 'trace', 'call.audio': 'trace', 'call.video': 'trace',
+            'call.hook': 'trace',
         },
     } } : {},
 });
