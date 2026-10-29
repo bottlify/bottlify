@@ -1093,6 +1093,9 @@ export class RegionEmitter {
             (region.bytes ?? 0) * 16)))));
         /** @type {Map<number, number>} */
         this.labels = new Map(this.region.blocks.map((block, index)=>[block.start, index]));
+        /** By block start, its index in the region as formed, for a diagnostic build's marks. */
+        this.formedIndex = import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.markBlocks
+            ? new Map(region.blocks.map((block, index)=>[block.start, index])) : null;
         /** @type {string[]} the open control labels, innermost last */
         this.controls = [];
         /** @type {Map<string, number[]>} by label, where in `controls` it is open */
@@ -3405,7 +3408,10 @@ export class RegionEmitter {
         this.lows.clear();
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
         {
-            this.markBlock(index);
+            // By the block's place in the region as formed, which its reader
+            // (`tools/cork-asm.mjs`) knows: a structured region emits them in
+            // another order.
+            this.markBlock(this.formedIndex?.get(block.start) ?? index);
         }
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile)
         {
