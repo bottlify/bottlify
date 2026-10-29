@@ -2195,3 +2195,25 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
   recorded.
 - **Decision.** Neither taken: a jump back only, nothing on its way clearing the local.
+
+### 2026-10-29 -- invalidated: arm64 executed counts of `tools/cork-asm.mjs` read before ab02ac9
+
+- **What.** On arm64 V8 prints x27 as `cp`, and a block mark built in it (`movz cp, #...;
+  movk cp, #0x6b5a, lsl #16`) was not read: where that mark was the end mark, the epilogue and
+  every cold path after it were weighed as the code of the block before; where it was a block's,
+  that block's code was weighed as the block before it. A block ending in a switch formed in was
+  weighed with all its case arms, and a switch fused with its bound test with its arms in the
+  bound-test block. Fixed in 0b6ac60 and ab02ac9.
+- **Size.** On the cork-bench lua image (40 hottest regions, node 26.13.0 arm64 under
+  qemu-aarch64 8.2.2, `--no-wasm-bounds-checks --atomic`): 11.10 machine instructions an
+  executed guest instruction, 29.6 % of them stack-slot accesses, read as 3.25 and 1.6 % once
+  fixed; one 7-instruction block had been weighed as 13,840.
+- **Invalidated.** The arm64 table in 0b6ac60's message (measured with the end-mark misreading
+  still in); the switch rows of it (+107 % read for the fused switch) already by 0b6ac60 itself.
+  The arm64 executed figures of the 2026-10-28 and 2026-10-29 entries above that used
+  `cork-asm --blocks` on the Crysis timedemo may carry the same misreading: not re-measured (the
+  profile and images are not in this container), so not to be cited until they are.
+- **Still approximate.** The executed weighing keeps a block's cheapest copy and attributes a
+  loop's preheader and V8's stack check to the block whose mark precedes them: sort's partition
+  read loop weighs 38 instructions a turn of 3 x86 instructions, most of them the spills around
+  the stack guard's call that run once an entry. Compare arms on it, not absolute shares.
