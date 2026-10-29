@@ -223,6 +223,8 @@ export const STATE_PARAMS = 6;
 
 /** The mark of the region's end, before its epilogue (`markBlock`). */
 export const BLOCK_MARK_END = 0xfff;
+/** The copy a switch's case arm is marked with (`markArm`): one arm runs a turn, not all. */
+export const BLOCK_MARK_ARM = 0xf;
 
 /**
  * A block's mark as a diagnostic build stores it (`markBlocks`): a constant no
@@ -3778,6 +3780,22 @@ export class RegionEmitter {
         // state block, in the 64-bit one's unused tail.
         atState(this.context, this.b).i32const(blockMark(index, copy))
             .store('i32', { offset: this.layout.regs + 1020 });
+    }
+
+    /**
+     * In a build that marks blocks, a mark at the start of one of the current
+     * block's switch arms (`BLOCK_MARK_ARM`): a run of the block runs one
+     * arm, and its reader weighs the block as its code before the arms and
+     * its cheapest arm.
+     */
+    markArm(){
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
+        {
+            const index = this.formedIndex?.get(this.region.blocks[this.blockIndex].start)
+                ?? this.blockIndex;
+            atState(this.context, this.b).i32const(blockMark(index, BLOCK_MARK_ARM))
+                .store('i32', { offset: this.layout.regs + 1020 });
+        }
     }
 
     /**

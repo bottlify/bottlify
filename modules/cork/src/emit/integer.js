@@ -5051,6 +5051,7 @@ function casesByEntry(e){
     for (let k = 0; k < arms.length; k++)
     {
         e.close();
+        e.markArm();
         const target = table.entries[arms[k]];
         b.i32const(table.address + 4 * arms[k]).load('i32', { offset: e.layout.ramBase })
             .i32const(target | 0).op(I32.eq);
@@ -5106,6 +5107,7 @@ function switchCases(e){
     for (let k = 0; k < cases.length; k++)
     {
         e.close();
+        e.markArm();
         if (isLong(e))
         {
             b.localGet(LONG_WIDE).i64const(BigInt(cases[k])).op(I64.eq);
