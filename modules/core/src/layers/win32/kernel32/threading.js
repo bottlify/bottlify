@@ -1519,6 +1519,63 @@ export function createThreadingFunctions(host){
         },
 
         /**
+         * DWORD GetProcessId(HANDLE Process)
+         *
+         * The id of the process a handle names: this one's for its own
+         * pseudo-handle, a child's as CreateProcess reported it. A handle to
+         * no process is zero and ERROR_INVALID_HANDLE.
+         */
+        GetProcessId: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const found = object(handle >>> 0, 'process');
+                if (!found)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                return (found.current ? host.processId ?? 0x1000 : found.id) >>> 0;
+            },
+        },
+
+        /**
+         * DWORD GetThreadId(HANDLE Thread) and DWORD GetProcessIdOfThread(HANDLE Thread)
+         *
+         * A thread's id, and the id of the process it runs in: a thread of
+         * this process, or a child's first thread through the handle
+         * CreateProcess gave for it.
+         */
+        GetThreadId: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const own = object(handle >>> 0, 'thread');
+                const child = own ? null : object(handle >>> 0, 'process-thread');
+                if (!own && !child)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                return (own ? own.id : child.threadId) >>> 0;
+            },
+        },
+        GetProcessIdOfThread: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const own = object(handle >>> 0, 'thread');
+                const child = own ? null : object(handle >>> 0, 'process-thread');
+                if (!own && !child)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                return (own ? host.processId ?? 0x1000 : child.id) >>> 0;
+            },
+        },
+
+        /**
          * BOOL Process32First(HANDLE, LPPROCESSENTRY32) and Process32Next: the
          * snapshot's processes in turn.
          */

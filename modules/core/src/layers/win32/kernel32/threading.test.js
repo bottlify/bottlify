@@ -1391,6 +1391,32 @@ test("OpenThread opens a live thread or a child's first, and refuses any other",
     assert.equal(fns.OpenThread.argBytes, 12);
 });
 
+test('GetProcessId, GetThreadId and GetProcessIdOfThread read the ids behind handles', ()=>{
+    // A launcher keeps the id of the child it started (tier0's
+    // ThreadIsProcessActive in the Steam client asks for it at once).
+    const { fns, host, errors } = setup();
+    const kernel = /** @type {any} */ (host.kernel);
+    /** @type {any} */ (host).processId = 0x1234;
+    const live = { id: 0x10, state: 'blocked' };
+    const child = { id: 0x300, threadId: 0x304, exitCode: 259 };
+    kernel.threads = ()=>[live];
+    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
+    const process = kernel.handles.open('process', child);
+    const childThread = fns.OpenThread.handler([0x1f03ff, 0, 0x304]);
+    const ownThread = fns.OpenThread.handler([0x1f03ff, 0, 0x10]);
+    assert.equal(fns.GetProcessId.handler([process]), 0x300);
+    assert.equal(fns.GetProcessId.handler([0xffffffff]), 0x1234, 'the pseudo-handle is this one');
+    assert.equal(fns.GetThreadId.handler([childThread]), 0x304);
+    assert.equal(fns.GetThreadId.handler([ownThread]), 0x10);
+    assert.equal(fns.GetProcessIdOfThread.handler([childThread]), 0x300);
+    assert.equal(fns.GetProcessIdOfThread.handler([ownThread]), 0x1234);
+    assert.equal(fns.GetProcessId.handler([ownThread]), 0, 'a thread is no process');
+    assert.equal(fns.GetThreadId.handler([0x7777]), 0);
+    assert.deepEqual(errors.slice(-2), [6, 6]);
+    assert.deepEqual([fns.GetProcessId, fns.GetThreadId, fns.GetProcessIdOfThread]
+        .map(one=>one.argBytes), [4, 4, 4]);
+});
+
 test('a handle reads back the flags a duplicate or SetHandleInformation gave it', ()=>{
     // Wine's kernel32 process.c test_DuplicateHandle: GetHandleInformation was missing.
     const { fns, host, errors } = setup();
