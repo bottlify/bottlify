@@ -1417,6 +1417,25 @@ test('a handle reads back the flags a duplicate or SetHandleInformation gave it'
         [8, 12]);
 });
 
+test('a socket takes handle flags as a kernel object does', ()=>{
+    // A SOCKET is a handle on Windows: a program keeps its sockets from the
+    // children it starts with SetHandleInformation(s, HANDLE_FLAG_INHERIT, 0),
+    // and one that is told the handle is invalid gives up on its network.
+    const { fns, host, errors } = setup();
+    const bytes = new Uint8Array(0x1000);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.writeMemory = (address, data)=>bytes.set(data, address);
+    /** @type {any} */ (host).isSocket = (/** @type {number} */ handle)=>handle === 3;
+    assert.equal(fns.SetHandleInformation.handler([3, 1, 0]), 1);
+    assert.equal(fns.GetHandleInformation.handler([3, 0x200]), 1);
+    assert.equal(bytes[0x200], 0);
+    assert.equal(fns.SetHandleInformation.handler([3, 1, 1]), 1);
+    assert.equal(fns.GetHandleInformation.handler([3, 0x200]), 1);
+    assert.equal(bytes[0x200], 1, 'HANDLE_FLAG_INHERIT reads back');
+    assert.equal(fns.SetHandleInformation.handler([5, 1, 0]), 0, 'not a socket, not an object');
+    assert.deepEqual(errors.slice(-1), [6]);
+});
+
 test('Process32FirstW and Process32NextW walk the same processes into a PROCESSENTRY32W', ()=>{
     // 556 bytes: the narrow entry's 36 before the name, then MAX_PATH wide
     // characters for it.

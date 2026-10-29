@@ -76,6 +76,19 @@ const SERVENT = { s_name: 0, s_aliases: 4, s_port: 8, s_proto: 12, SIZE: 16 };
 const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
 
 /**
+ * The extension functions SIO_GET_EXTENSION_FUNCTION_POINTER names by GUID
+ * (mswsock.h), each the mswsock export of the same name: a program built for
+ * completion ports asks for these before it opens a connection.
+ */
+const EXTENSION_GUIDS = Object.freeze({
+    'b5367df1-cbac-11cf-95ca-00805f48a192': 'AcceptEx',
+    'b5367df2-cbac-11cf-95ca-00805f48a192': 'GetAcceptExSockaddrs',
+    'b5367df0-cbac-11cf-95ca-00805f48a192': 'TransmitFile',
+    '25a207b9-ddf3-4660-8ee9-76e58c74063e': 'ConnectEx',
+    '7fda2e11-8630-436f-a031-f536a6eec157': 'DisconnectEx',
+});
+
+/**
  * The protocols of the protocol file Windows ships, each with its number and
  * the alias that file gives it.
  *
@@ -129,7 +142,25 @@ const TRANSMIT_CHUNK = 0x10000;
  *           TransmitFile reads its file through ReadFile. Absent, those
  *           calls are refused.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(name: string) => number | Promise<number>} [extension]
+ *           Where mswsock's export of this name is, mswsock loaded first if
+ *           it is not yet, as ws2_32 loads it for its provider; zero for one
+ *           it does not export. Absent, the extension lookup is refused.
  */
+
+/**
+ * A GUID as its text, lower case, from the sixteen bytes a structure holds.
+ *
+ * @param {Uint8Array} bytes
+ */
+const guidText = bytes=>{
+    const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
+    const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>
+        value.toString(16).padStart(digits, '0');
+    const tail = [...bytes.subarray(8, 16)].map(byte=>hex(byte, 2)).join('');
+    return `${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
+        + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}`;
+};
 
 /**
  * @param {WinsockHost} host
@@ -1474,21 +1505,52 @@ export function createWinsockFunctions(host){
          *
          * The two commands ioctlsocket takes, in the buffered form: FIONBIO
          * reads its flag from the input buffer, FIONREAD writes its count to
-         * the output one. The extension-function lookup is refused as not
-         * supported, which is what a stack without those extensions says and
-         * what sends a program to the plain calls it also has.
+         * the output one. SIO_GET_EXTENSION_FUNCTION_POINTER answers a GUID
+         * mswsock.h names with the address of mswsock's export of that
+         * function, as the provider does; a GUID it does not know is
+         * WSAEINVAL, and with no mswsock to point into, the lookup is refused
+         * as a stack without the extensions refuses it.
          */
         WSAIoctl: {
             argBytes: 36,
             /** @param {number[]} args */
-            handler: ([handle, command, input, , output, outputSize, returned])=>{
+            handler: ([handle, command, input, inputSize, output, outputSize, returned])=>{
                 if (!socketOf(handle))
                 {
                     return fail(WSAENOTSOCK);
                 }
                 if ((command >>> 0) === SIO_GET_EXTENSION_FUNCTION_POINTER)
                 {
-                    return fail(WSAEOPNOTSUPP);
+                    if (!host.extension)
+                    {
+                        return fail(WSAEOPNOTSUPP);
+                    }
+                    if ((inputSize >>> 0) < 16 || (input >>> 0) === 0
+                        || (outputSize >>> 0) < 4 || (output >>> 0) === 0)
+                    {
+                        return fail(WSAEFAULT);
+                    }
+                    const name = EXTENSION_GUIDS[
+                        /** @type {keyof typeof EXTENSION_GUIDS} */ (
+                            guidText(host.readMemory(input >>> 0, 16)))];
+                    if (!name)
+                    {
+                        return fail(WSAEINVAL);
+                    }
+                    const answer = (/** @type {number} */ address)=>{
+                        if (address === 0)
+                        {
+                            return fail(WSAEINVAL);
+                        }
+                        writeDword(output, address);
+                        if ((returned >>> 0) !== 0)
+                        {
+                            writeDword(returned, 4);
+                        }
+                        return ok(0);
+                    };
+                    const address = host.extension(name);
+                    return address instanceof Promise ? address.then(answer) : answer(address);
                 }
                 if ((command >>> 0) === FIONBIO)
                 {

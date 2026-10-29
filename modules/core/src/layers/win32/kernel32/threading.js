@@ -138,6 +138,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           The modules the process has loaded, the image first, for a snapshot's
  *           module list.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(handle: number) => boolean} [isSocket]
+ *           Whether winsock holds a socket by this number, which the handle
+ *           flags are kept for as for a kernel object's.
  * @property {(node: any) => void} [retainNode]
  *           One more hold on an open file's node, given back when the handle
  *           that holds it is closed: what a duplicate of a file or mapping
@@ -458,6 +461,14 @@ export function createThreadingFunctions(host){
      * @type {Map<number, number>}
      */
     const handleFlags = new Map();
+
+    /**
+     * Whether a handle is one GetHandleInformation and SetHandleInformation
+     * keep flags for: a kernel object's, or a socket's.
+     *
+     * @param {number} handle
+     */
+    const flagged = handle=>Boolean(object(handle)) || (host.isSocket?.(handle) ?? false);
 
     /**
      * What kind of object a handle names, the pseudo-handles included.
@@ -1150,13 +1161,16 @@ export function createThreadingFunctions(host){
          * BOOL GetHandleInformation(HANDLE hObject, LPDWORD lpdwFlags) and
          * BOOL SetHandleInformation(HANDLE hObject, DWORD dwMask, DWORD dwFlags):
          * a handle's inheritance and protection flags, which nothing here
-         * acts on but which read back as they were set.
+         * acts on but which read back as they were set. A socket is a handle
+         * on Windows, and a program that keeps its sockets from children
+         * clears their inherit flag through these, so winsock's sockets
+         * answer too.
          */
         GetHandleInformation: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                if (pseudo(handle) || !object(handle >>> 0) || (out >>> 0) === 0)
+                if (pseudo(handle) || !flagged(handle >>> 0) || (out >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
@@ -1170,7 +1184,7 @@ export function createThreadingFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, mask, flags])=>{
-                if (pseudo(handle) || !object(handle >>> 0))
+                if (pseudo(handle) || !flagged(handle >>> 0))
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;

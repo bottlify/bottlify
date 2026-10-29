@@ -1003,6 +1003,18 @@ export function createWin32Module(){
                 /** @param {string} name */
                 kernel32: name=>libraries['KERNEL32.dll']?.[name]?.handler,
                 divergence: config?.divergence,
+                // The extension functions are mswsock's exports, which ws2_32
+                // loads for its provider whether the program imports it or not.
+                /** @param {string} name */
+                extension: name=>{
+                    const address = ()=>modules.find('mswsock.dll')?.addressOf?.(name) ?? 0;
+                    if (modules.find('mswsock.dll'))
+                    {
+                        return address();
+                    }
+                    const loaded = modules.load?.('mswsock.dll') ?? 0;
+                    return loaded instanceof Promise ? loaded.then(address) : address();
+                },
                 writeMemory,
                 readCString,
                 heap,
@@ -1765,6 +1777,8 @@ export function createWin32Module(){
                         threadBlock: threadMade,
                         /** @param {number} handle */
                         handleType: handle=>kernel.handles.typeOf(handle),
+                        /** @param {number} handle */
+                        isSocket: handle=>sockets.isValid(handle),
                         /** @param {any} node */
                         retainNode: node=>volume.retain(node),
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),

@@ -644,6 +644,72 @@ test('WSAIoctl is ioctlsocket with buffers, and refuses the extension lookup', (
     assert.equal(fx.call('WSAGetLastError'), 10038, 'WSAENOTSOCK');
 });
 
+test('SIO_GET_EXTENSION_FUNCTION_POINTER answers mswsock\'s export for each GUID mswsock.h names',
+    async()=>{
+        /** @type {string[]} */
+        const asked = [];
+        const exports = { AcceptEx: 0x7100, ConnectEx: 0x7110, GetAcceptExSockaddrs: 0x7120,
+            DisconnectEx: 0x7130, TransmitFile: 0x7140 };
+        const fx = fixture({
+            /** @param {string} name */
+            extension: name=>{
+                asked.push(name);
+                // ConnectEx as a library still loading answers it.
+                return name === 'ConnectEx' ? Promise.resolve(exports[name])
+                    : exports[/** @type {keyof typeof exports} */ (name)] ?? 0;
+            },
+        });
+        const handle = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        const GUID = 0x930, POINTER = 0x940, RETURNED = 0x950;
+        const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
+        /** A GUID laid out as the structure holds it. @param {string} text */
+        const putGuid = text=>{
+            const [a, b, c, d, e] = text.split('-');
+            const bytes = new Uint8Array(16);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(0, parseInt(a, 16), true);
+            view.setUint16(4, parseInt(b, 16), true);
+            view.setUint16(6, parseInt(c, 16), true);
+            bytes.set(Buffer.from(d + e, 'hex'), 8);
+            fx.host.writeMemory(GUID, bytes);
+        };
+        const lookup = ()=>fx.call('WSAIoctl',
+            [handle, SIO_GET_EXTENSION_FUNCTION_POINTER, GUID, 16, POINTER, 4, RETURNED, 0, 0]);
+        const guids = {
+            AcceptEx: 'b5367df1-cbac-11cf-95ca-00805f48a192',
+            GetAcceptExSockaddrs: 'b5367df2-cbac-11cf-95ca-00805f48a192',
+            TransmitFile: 'b5367df0-cbac-11cf-95ca-00805f48a192',
+            DisconnectEx: '7fda2e11-8630-436f-a031-f536a6eec157',
+        };
+        for (const [name, guid] of Object.entries(guids))
+        {
+            putGuid(guid);
+            fx.setDword(RETURNED, 0);
+            assert.equal(lookup(), 0, name);
+            assert.equal(fx.dword(POINTER), exports[/** @type {keyof typeof exports} */ (name)], name);
+            assert.equal(fx.dword(RETURNED), 4, 'a pointer\'s size comes back');
+        }
+        putGuid('25a207b9-ddf3-4660-8ee9-76e58c74063e');
+        assert.equal(await lookup(), 0, 'ConnectEx, once mswsock has loaded');
+        assert.equal(fx.dword(POINTER), 0x7110);
+        assert.deepEqual(asked, ['AcceptEx', 'GetAcceptExSockaddrs', 'TransmitFile',
+            'DisconnectEx', 'ConnectEx']);
+
+        // WSARecvMsg's GUID: an extension this provider does not have.
+        putGuid('f689d7c8-6f1f-436b-8a53-e54fe351c322');
+        assert.equal(lookup(), SOCKET_ERROR);
+        assert.equal(fx.call('WSAGetLastError'), 10022, 'WSAEINVAL for a GUID it does not know');
+        putGuid(guids.AcceptEx);
+        assert.equal(fx.call('WSAIoctl',
+            [handle, SIO_GET_EXTENSION_FUNCTION_POINTER, GUID, 16, POINTER, 2, RETURNED, 0, 0]),
+        SOCKET_ERROR);
+        assert.equal(fx.call('WSAGetLastError'), 10014, 'WSAEFAULT: no room for the pointer');
+        assert.equal(fx.call('WSAIoctl',
+            [handle, SIO_GET_EXTENSION_FUNCTION_POINTER, GUID, 8, POINTER, 4, RETURNED, 0, 0]),
+        SOCKET_ERROR);
+        assert.equal(fx.call('WSAGetLastError'), 10014, 'WSAEFAULT: half a GUID');
+    });
+
 /**
  * Readiness as a window message. `wParam` is always the socket; `lParam` is
  * WSAMAKESELECTREPLY(event, error) -- the event in the low word, the error
