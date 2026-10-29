@@ -59,6 +59,12 @@
  * same keys, clicks and pictures as a wizard's. `--attended` leaves a message
  * box on the desktop for those to answer rather than answering it unseen.
  *
+ * `--network ws://host:port/` puts the run on a relay's network
+ * (`modules/networking`): Winsock's connections and names go through it, in
+ * room `harness`, as game.mjs's do. Without it the machine has the loopback
+ * adapter alone. `--roots FILE` adds a PEM bundle's certificates to the
+ * machine's trusted roots (tools/relay-option.mjs).
+ *
  * `--windows win2000|winxp|win7|win10` is the Windows the machine is, over
  * the one a bundle's manifest names (XP when neither does).
  *
@@ -74,6 +80,7 @@ import { basename, dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { deflateSync } from 'node:zlib';
 import { openBundle } from './btl.mjs';
+import { relayFromArgv, rootsFromArgv } from './relay-option.mjs';
 import { isButtonClass, label } from './wizard-buttons.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
@@ -237,9 +244,13 @@ const graphicsDevice = ()=>{
         },
     };
 };
+const network = await relayFromArgv(argv);
+const roots = rootsFromArgv(argv);
 const started = Date.now();
 const seconds = ()=>((Date.now() - started) / 1000).toFixed(1);
 const app = await createApp({
+    win32: { ...network ? { network } : {},
+        ...roots ? { trustedRoots: roots } : {} },
     executable: prefix.executable,
     imagePath: prefix.imagePath,
     // `--args '...'`: what follows the program's own path on its command line.

@@ -43,6 +43,12 @@ test('a proxy is taken as http://host:port and nothing else', ()=>{
     assert.throws(()=>parseArguments(['--proxy', 'http://host:1/path']), /wants http/);
 });
 
+test('--log is a switch', ()=>{
+    assert.equal(parseArguments([]).log, false);
+    assert.equal(parseArguments(['--log', '--port', '1']).log, true);
+    assert.equal(parseArguments(['--log', '--port', '1']).port, 1);
+});
+
 test('a resume window that is not a number is an error', ()=>{
     assert.throws(()=>parseArguments(['--resume-seconds', 'soon']), /wants a number/);
 });

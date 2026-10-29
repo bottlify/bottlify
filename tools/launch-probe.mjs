@@ -20,6 +20,10 @@
  * far enough to run at all.
  *
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
+ *         [--network ws://host:port/]
+ *
+ * `--network` puts the program on a relay's network (tools/relay-option.mjs);
+ * without it the machine has the loopback adapter alone.
  */
 
 import { ENGINE } from './chromium-v8.mjs';
@@ -34,6 +38,7 @@ import { createDirectoryTranslationStore }
 import { peekBytes } from '../modules/core/src/trace.js';
 import { placementOf } from '../modules/installer/src/prefix.js';
 import { modeOf } from './play/modes.js';
+import { relayFromArgv, rootsFromArgv } from './relay-option.mjs';
 
 const BUNDLES = new URL('../bundles/', import.meta.url);
 
@@ -576,7 +581,11 @@ async function main(){
         console.log(`  translation store: ${translationStore}`);
     }
     let dumped = false;
+    const network = await relayFromArgv(process.argv.slice(2));
+    const roots = rootsFromArgv(process.argv.slice(2));
     const app = await createApp({
+        win32: { ...network ? { network } : {},
+            ...roots ? { trustedRoots: roots } : {} },
         executable: new Uint8Array(executable),
         // Where the bundle is mounted and the program started from: where its
         // installation put it, when the manifest says, as the launcher does.
