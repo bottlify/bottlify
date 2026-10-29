@@ -1036,10 +1036,12 @@ export function emitInstruction(e, instruction, flagsLive){
                     .localSet(popped);
                 if (dst.kind === 'mem')
                 {
-                    prepare(e, dst.base === 4
-                        ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 } : dst,
-                    { store: true });
-                    writeOp(e, dst, ()=>b.localGet(popped));
+                    // The same operand to both: its address, the incremented
+                    // esp's, is the one the store goes to however it is taken.
+                    const moved = dst.base === 4
+                        ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 } : dst;
+                    prepare(e, moved, { store: true });
+                    writeOp(e, moved, ()=>b.localGet(popped));
                     addStack(e, dst.size);
                     return true;
                 }
@@ -1925,8 +1927,51 @@ export function readAddress(e, operand){
         e.b.localGet(folded.local);
         return e.layout.ramBase + folded.offset;
     }
-    e.b.localGet(Local.addr);
-    return e.layout.ramBase;
+    return accessAddress(e, operand);
+}
+
+/**
+ * Pushes the address an access of `operand`, its address in `addr`, loads or
+ * stores at and answers the offset the access takes: off esp alone, where the
+ * plan's window test covered it (`stackOffset`), esp itself and the
+ * displacement as the access's own offset; `addr` otherwise.
+ *
+ * @param {E} e @param {Operand} operand
+ * @returns {number}
+ */
+function accessAddress(e, operand){
+    const disp = stackOffset(e, operand);
+    if (disp === null)
+    {
+        e.b.localGet(Local.addr);
+        return e.layout.ramBase;
+    }
+    e.b.localGet(registerLocal(e, 4));
+    return e.layout.ramBase + disp;
+}
+
+/**
+ * The displacement an access off esp alone takes as its own offset, or null:
+ * one the memory plan took (`planned`), whose address is the sum `prepare`
+ * left in `addr` and nothing more, its displacement under 64 KiB and not
+ * negative. Every such access then adds its displacement to one address the
+ * host's compiler makes of esp for all of them -- an arm64 load or store
+ * takes a register and a small offset, not two registers and an offset --
+ * where each added it to esp first, an instruction an access. The sum is not
+ * wrapped at 4 GiB: it differs from the processor's only with esp in the top
+ * 64 KiB, which no thread's stack is. Off another register it would differ
+ * for a pointer in the top 64 KiB too, where a read finds the null page
+ * through a wrapped sum and this one would trap.
+ *
+ * @param {E} e @param {Operand} operand
+ * @returns {number | null}
+ */
+function stackOffset(e, operand){
+    const disp = operand.disp ?? 0;
+    return operand.kind === 'mem' && operand.base === 4 && (operand.index ?? -1) < 0
+        && operand.addressSize !== 16 && operand.segment !== 4 && operand.segment !== 5
+        && !isLong(e) && e.memPlan?.access != null && disp >= 0 && disp < WRAPPED_DISPLACEMENT
+        ? disp : null;
 }
 
 /**
@@ -2338,9 +2383,11 @@ export function writeOp(e, operand, pushValue, exact = false){
                 orderedStore(e, operand.size, pushValue);
                 return;
             }
-            b.localGet(Local.addr);
-            pushValue();
-            b.store(storeKind(operand.size), { offset: e.layout.ramBase });
+            {
+                const offset = accessAddress(e, operand);
+                pushValue();
+                b.store(storeKind(operand.size), { offset });
+            }
             return;
         default:
             throw new Error(`emit: cannot write a ${operand.kind} operand`);
