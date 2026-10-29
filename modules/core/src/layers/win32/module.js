@@ -111,6 +111,7 @@ import { createSyssetupFunctions } from './syssetup/functions.js';
 import { createDbghelpFunctions } from './dbghelp/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createDhcpFunctions, createWinhttpFunctions } from './winhttp/functions.js';
+import { createImageCertificateFunctions } from './dbghelp/image-certificates.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
 import { DPLAYX_ORDINALS, createDplayFunctions, registerDplayClasses } from './dplayx/functions.js';
@@ -1976,6 +1977,10 @@ export function createWin32Module(){
                     ...apcs.table,
                     ...createThreadPool({
                         kernel,
+                        // A timer's due time and a wait's time-out are read
+                        // from the caller's FILETIME, against the wall clock.
+                        readMemory,
+                        wallClock: ()=>kernel.clock.wallClock(),
                         register: (name, fn)=>bridge.register(name, fn),
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
@@ -2115,6 +2120,7 @@ export function createWin32Module(){
                     }),
                     ...createSyncFunctions({
                         pointerSize,
+                        processId,
                         kernel,
                         processors,
                         // A child's first thread, reached where the child runs.
@@ -2980,6 +2986,26 @@ export function createWin32Module(){
                     now: ()=>kernel.clock.wallClock(),
                     // The system store ROOT is the machine's trusted roots, the
                     // ones WinVerifyTrust judges a signature by.
+                    // CryptQueryObject's files: what is here already; a file
+                    // still to come from a bundle reads as one not found.
+                    readFile: (/** @type {string} */ path)=>{
+                        const entry = volume.stat(path);
+                        const node = entry && !entry.isDirectory
+                            ? volume.open(path, { read: true }) : null;
+                        if (!entry || !node)
+                        {
+                            return null;
+                        }
+                        try
+                        {
+                            const bytes = volume.read(node, 0, entry.size);
+                            return bytes instanceof Uint8Array ? bytes : null;
+                        }
+                        finally
+                        {
+                            volume.close(node);
+                        }
+                    },
                     trustedRoots: ()=>(config?.trustedRoots ?? defaultTrustedRoots()).map((
                         /** @type {Uint8Array | string} */ root)=>
                         (typeof root === 'string'
@@ -4060,8 +4086,23 @@ export function createWin32Module(){
             // Visual C++ 2005's, likewise, with the names that runtime added.
             // imagehlp, the older library dbghelp grew out of: the same
             // functions under the names it had then.
-            libraries['IMAGEHLP.dll'] = Object.fromEntries(Object.entries(libraries['DBGHELP.dll'])
-                .filter(([name])=>IMAGEHLP_EXPORTS.has(name)));
+            libraries['IMAGEHLP.dll'] = {
+                ...Object.fromEntries(Object.entries(libraries['DBGHELP.dll'])
+                    .filter(([name])=>IMAGEHLP_EXPORTS.has(name))),
+                // A PE file's certificate table, through the file a handle names.
+                ...createImageCertificateFunctions({ readMemory, writeMemory,
+                    setLastError: setError,
+                    fileOf: handle=>{
+                        try
+                        {
+                            return handles.resolve(handle, 'file') ?? null;
+                        }
+                        catch {
+                            return null;
+                        }
+                    },
+                    files: volume }),
+            };
             libraries['MSVCR80.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
                 { readMemory, writeMemory });
             // And its C++ library, over that runtime's operator new and delete.
