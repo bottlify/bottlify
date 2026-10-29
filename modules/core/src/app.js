@@ -62,6 +62,7 @@ import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
 import { programInPlaceOf, systemProgramImage } from './layers/win32/programs/table.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
+import { shareTransport } from './layers/win32/wsock32/transport.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
@@ -9717,9 +9718,18 @@ export async function createApp(options){
         }
     })();
 
+    // The network is the run's, one link for every process; each process's
+    // sockets are a view of it, so what arrives reaches the process it is for.
+    // An address space of the embedder's own (an adapter, which binds) is
+    // the processes' to share as it is.
+    const supplied = options.win32?.network;
+    const sharedNetwork = supplied && typeof supplied.bind !== 'function'
+        ? shareTransport(supplied) : null;
+
     /** @param {any} [extra] */
     const machine = extra=>({
         ...options,
+        ...sharedNetwork ? { win32: { ...options.win32, network: sharedNetwork.view() } } : {},
         // One machine for every process of the run: a 32-bit child of a 64-bit
         // program runs under WOW64 on it.
         machine: runMachine,

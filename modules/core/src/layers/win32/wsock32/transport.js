@@ -151,3 +151,149 @@ export function asNetwork(supplied){
 
 /** The error a transport reports when the link it needed has gone. */
 export const TRANSPORT_LOST = WSAENETDOWN;
+
+/**
+ * One transport shared by every process of a run: each process's sockets get
+ * a view of it of their own.
+ *
+ * A transport has one inbound -- `attach` keeps the last registry that asked
+ * -- and stream ids its caller chooses. Handed as it is to several processes,
+ * the last process to load Winsock took every arriving byte, the others'
+ * connections went silent, and two processes' first streams had the same id.
+ * The share chooses the ids the transport sees, keeps which view and which of
+ * its ids each one is, and hands what arrives to the view it belongs to: a
+ * stream's bytes and its end to the view that dialled or accepted it, an
+ * accepted stream or a datagram to the view listening on the port, the loss
+ * of the network to every view.
+ *
+ * @param {NetworkTransport} supplied
+ */
+export function shareTransport(supplied){
+    const transport = asTransport(supplied);
+    /**
+     * @typedef {{ inbound: TransportInbound | null, toShared: Map<number, number> }} View
+     */
+    /** @type {Map<number, { view: View, local: number }>} the transport's id -> its owner */
+    const owners = new Map();
+    /** @type {Map<string, View>} `stream:port` -> the view listening */
+    const listeners = new Map();
+    /** @type {Set<View>} */
+    const views = new Set();
+    let nextShared = 1;
+    const portKey = (/** @type {boolean} */ stream, /** @type {number} */ port)=>
+        `${stream ? 'tcp' : 'udp'}:${port}`;
+    /** @param {number} shared */
+    const forget = shared=>{
+        const owner = owners.get(shared);
+        if (owner)
+        {
+            owners.delete(shared);
+            owner.view.toShared.delete(owner.local);
+        }
+    };
+
+    transport.attach({
+        accepted(port, shared, remote){
+            const view = listeners.get(portKey(true, port));
+            if (!view?.inbound)
+            {
+                transport.disconnect(shared, false);
+                return;
+            }
+            // The transport's id for a stream it opened is kept as the
+            // view's own: the transport keeps those apart from the ones it
+            // is given, as it does for one registry.
+            owners.set(shared, { view, local: shared });
+            view.toShared.set(shared, shared);
+            view.inbound.accepted(port, shared, remote);
+        },
+        received(shared, bytes){
+            const owner = owners.get(shared);
+            owner?.view.inbound?.received(owner.local, bytes);
+        },
+        disconnected(shared, error){
+            const owner = owners.get(shared);
+            if (!owner)
+            {
+                return;
+            }
+            // Without an error it is a half close: the stream still sends.
+            if (error === undefined)
+            {
+                owner.view.inbound?.disconnected(owner.local);
+                return;
+            }
+            forget(shared);
+            owner.view.inbound?.disconnected(owner.local, error);
+        },
+        datagram(port, from, bytes){
+            listeners.get(portKey(false, port))?.inbound?.datagram(port, from, bytes);
+        },
+        lost(error){
+            for (const view of views)
+            {
+                view.inbound?.lost(error);
+            }
+        },
+    });
+
+    return {
+        /** A transport for one process's sockets. @returns {NetworkTransport} */
+        view(){
+            /** @type {View} */
+            const view = { inbound: null, toShared: new Map() };
+            views.add(view);
+            return {
+                attach: inbound=>{
+                    view.inbound = inbound;
+                },
+                localAddress: ()=>transport.localAddress(),
+                connect: (local, to)=>{
+                    const shared = nextShared++;
+                    owners.set(shared, { view, local });
+                    view.toShared.set(local, shared);
+                    return transport.connect(shared, to).then(opened=>{
+                        if (opened.error)
+                        {
+                            forget(shared);
+                        }
+                        return opened;
+                    });
+                },
+                send: (local, bytes)=>{
+                    const shared = view.toShared.get(local);
+                    if (shared !== undefined)
+                    {
+                        transport.send(shared, bytes);
+                    }
+                },
+                disconnect: (local, half)=>{
+                    const shared = view.toShared.get(local);
+                    if (shared === undefined)
+                    {
+                        return;
+                    }
+                    transport.disconnect(shared, half);
+                    if (!half)
+                    {
+                        forget(shared);
+                    }
+                },
+                sendTo: (from, to, bytes)=>transport.sendTo(from, to, bytes),
+                listen: (stream, port)=>{
+                    listeners.set(portKey(stream, port), view);
+                    transport.listen(stream, port);
+                },
+                release: (stream, port)=>{
+                    if (listeners.get(portKey(stream, port)) === view)
+                    {
+                        listeners.delete(portKey(stream, port));
+                        transport.release(stream, port);
+                    }
+                },
+                resolve: transport.resolve,
+                diagnostics: ()=>transport.diagnostics(),
+            };
+        },
+    };
+}
