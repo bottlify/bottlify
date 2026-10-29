@@ -1585,6 +1585,23 @@ export function emitInstruction(e, instruction, flagsLive){
                     prepare(e, src);
                     readOp(e, src);
                     b.localSet(Local.t1);
+                    if (src.kind === 'mem')
+                    {
+                        // A select of what the read loaded anyway: the host makes
+                        // a conditional move of it, where a branch over the write
+                        // left two paths whose register merges a loop paid on
+                        // both (cork-bench tree -1.7 %). From a register it stays
+                        // a branch: the host holds the source live for its move
+                        // across the loop, a clamp's constant too, and spilled
+                        // others for it (game +4.3 %).
+                        writeOp(e, dst, ()=>{
+                            b.localGet(Local.t1);
+                            readOp(e, dst);
+                            e.pushCondition(/** @type {number} */ (instruction.cc));
+                            b.select();
+                        });
+                        return true;
+                    }
                     e.pushCondition(/** @type {number} */ (instruction.cc));
                     e.openIf('move', EMPTY);
                     writeOp(e, dst, ()=>b.localGet(Local.t1));
