@@ -2195,3 +2195,64 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
   recorded.
 - **Decision.** Neither taken: a jump back only, nothing on its way clearing the local.
+
+### 2026-10-29: a guest call's ways out storing what a way to them wrote, through a chain of stores
+
+- **Idea.** The first form of `planPaths` (region.js): a way out of a region stores only the
+  registers, record fields and flags word some way to it wrote since the state block last held
+  them, so a call's return reloads only what is read after it. The ways out share one epilogue,
+  so the stores were one chain there, each link the locals the same ways out need, and a way out
+  entered the chain at the first link holding a local it needs: one more block around `$out` a
+  link, no store repeated.
+- **Workload.** cork-bench (x87 images), `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300 (lua ITERS=100, WARM=50), node 26.12.1 (V8 14.6) x64, the "in wasm" column; base
+  a9c1412, one run an arm.
+- **Values** (machine instructions an iteration in wasm, base -> chain): lua 33,683,014 ->
+  33,181,426 (-1.49 %); calls512-scatter 5,251,383 -> 5,035,611 (-4.11 %); calls8-order
+  3,905,189 -> 3,774,075 (-3.36 %); tree 2,723,213 -> 2,710,818 (-0.46 %); vcall 1,673,846 ->
+  1,690,999 (+1.02 %); str 2,556,224 -> 2,606,042 (+1.95 %); game, vm, sort, switch within
+  0.25 %.
+- **Why.** str's hottest way out (710,862 runs in the profile, `ir-hot.sh`) ran 158 machine
+  instructions against 117: at every link's join V8 reconciled the registers of the locals still
+  to store, forty-one moves more on that way alone.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken in this form: the epilogue stores a few kinds of set instead
+  (`EXIT_KINDS`), each in a block of its own, joining once after its stores. Measured the same
+  way: four kinds, lua 33,482,101 (-0.60 %), str 2,559,255 (+0.12 %), calls512-scatter
+  4,976,283 (-5.24 %); eight kinds, lua 33,062,735 (-1.84 %), str 2,555,104 (-0.04 %), taken.
+
+### 2026-10-29: callees of a few instructions formed in past the region's caps
+
+- **Idea.** A direct call to a callee of at most 2 blocks and 32 bytes that makes no call (a
+  getter, a setter), left a wasm call because its region was full (`APART_FULL`), formed in all
+  the same, such callees sharing 16 blocks and 256 bytes past the caps (past the room the
+  entry's own function may take).
+- **Workload.** cork-bench, x87 images, the runtime's mechanism counts over 10 iterations after
+  50 (`blockProfile`, CLOCK 0.001), node 22.22.0; on top of the path stores above.
+- **Values.** lua: `APART_FULL` 2,587.5 an iteration with it and without, every other count the
+  same; tree, str, game, sort, vm, crc, switch: no count changed. 201 to 300 callees met in lua's
+  forming were that small; every one was formed in already.
+- **Why.** A callee that small is a leaf, and a leaf is formed in at any depth within the leaf
+  caps; the calls a full region leaves out in lua are to larger functions. Crysis's 107.5 M
+  region-full calls (the entry of 2026-10-23) were not measured for size.
+- **Machine.** As the entry above.
+- **Decision.** Not taken.
+
+### 2026-10-29: a `ret` back to its call without the empty stack's test
+
+- **Idea.** A `ret` that may answer the wasm call waiting for it (`returnToCall`) tests the
+  depth before it reads the stack's top; with a word below the stack no return address can
+  equal, the read alone would do, one compare and branch less a `ret`.
+- **Workload.** As the entries above; measured as a hack on the chain form of the path
+  stores (the depth not tested, the word below the stack the state block's zero, which no
+  run of these workloads returns to), against that form.
+- **Values** (in wasm, without -> with): lua 33,181,426 -> 33,078,109 (-0.31 %);
+  calls512-scatter 5,035,611 -> 4,970,089 (-1.30 %); tree 2,710,818 -> 2,714,033 (+0.12 %).
+- **Why not now.** No 32-bit word is one a `ret` cannot pop: the word below the stack needs
+  a form no address takes (eight-byte entries, a tag in the upper half, the stack twice its
+  1 KiB in a state page whose room past it is not mapped out here), or a way back for the
+  `ret` that matched it with no call waiting, exact for the host, with a gate. A third of a
+  per cent of lua does not pay for either in this change.
+- **Machine.** As the entries above.
+- **Decision.** Not taken.

@@ -202,6 +202,17 @@ export class Body {
          * @type {Set<number> | null}
          */
         this.seen = null;
+        /**
+         * Where the locals read before this point's code wrote them are added
+         * too, when given, and the locals it wrote at `mustDepth` -- code no
+         * branch inside the block skips -- into `must`: the region emitter's
+         * account of what a block needs from before it (`planReloads`).
+         * @type {Set<number> | null}
+         */
+        this.exposed = null;
+        /** @type {Set<number> | null} */
+        this.must = null;
+        this.mustDepth = -1;
     }
 
     /** Whether the body reads or writes a local. @param {number} index */
@@ -227,6 +238,14 @@ export class Body {
         if (how === 3)
         {
             this.written?.add(index);
+            if (this.depth === this.mustDepth)
+            {
+                this.must?.add(index);
+            }
+        }
+        else if (this.must !== null && !this.must.has(index))
+        {
+            this.exposed?.add(index);
         }
     }
 
