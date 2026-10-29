@@ -30,6 +30,7 @@ import { createSystemFunctions, imageBits } from './kernel32/system.js';
 import { PROCESSOR, createProcessors } from './kernel32/processor.js';
 import { createPdhFunctions, createPowrprofFunctions } from './power/functions.js';
 import { createBcryptFunctions } from './bcrypt/functions.js';
+import { createNcryptFunctions, createSecur32Functions } from './secur32/functions.js';
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
@@ -2700,6 +2701,12 @@ export function createWin32Module(){
                 'pdh.dll': createPdhFunctions({ writeMemory }),
                 // CNG's generator, where a program built for Vista on takes its seeds.
                 'bcrypt.dll': createBcryptFunctions({ writeMemory, readMemory }),
+                // No security package and no key storage provider: what a library
+                // that offers the system's TLS or a proxy sign-in falls back from.
+                'Secur32.dll': createSecur32Functions({ writeMemory, readMemory,
+                    setLastError: setError }),
+                'ncrypt.dll': createNcryptFunctions({ writeMemory, readMemory,
+                    setLastError: setError }),
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
                 'HID.DLL': createHidFunctions({ writeMemory, setLastError: setError }),
