@@ -1161,6 +1161,16 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 return true; // the block's exit does the jump
             }
+            if (casesByEntry(e))
+            {
+                // The way out of the cases: the target read as before.
+                prepare(e, dst);
+                readOp(e, dst);
+                b.localSet(Local.eip);
+                e.exitDynamic(Exit.UNTRANSLATED);
+                e.dead = true;
+                return true;
+            }
             prepare(e, dst);
             readOp(e, dst);
             if (isLong(e) && e.region.blocks[e.blockIndex].exit.table !== undefined)
@@ -4689,6 +4699,61 @@ function stringInstruction(e, instruction){
         }
         e.pending = null;
     }
+    return true;
+}
+
+/**
+ * A switch's jump at 32 bits whose table read goes untested (`wrapsRead`) and
+ * lies in RAM: the index picks its table entry by a `br_table` before any
+ * read, and each entry that named a case when the region was formed is read
+ * at its own address, a constant, and compared with that case -- where the
+ * target read first took the index's sum, its wrap into RAM and a load, and
+ * then the `br_table`. The read is the processor's: an entry inside the
+ * table is the address the wrapped one reads. An index past the table, an
+ * entry written since, or one naming no case leaves the cases for the jump's
+ * own read and exit, which the caller emits after. False, and nothing
+ * emitted, for any other jump.
+ *
+ * @param {E} e
+ */
+function casesByEntry(e){
+    const { b } = e;
+    const table = e.region.blocks[e.blockIndex].exit.table;
+    if (table === undefined || isLong(e) || !wrapsRead(e, false)
+        || table.address + 4 * table.entries.length > e.layout.ramSize)
+    {
+        return false;
+    }
+    const taken = table.entries.map(target=>e.labels.has(target));
+    if (!taken.some(Boolean))
+    {
+        return false;
+    }
+    // Charged once, at the block's depth, for every way out below.
+    e.charge();
+    e.open('switchOut', EMPTY);
+    const arms = table.entries.map((_, i)=>i).filter(i=>taken[i]);
+    for (let k = arms.length - 1; k >= 0; k--)
+    {
+        e.open(`entry${k}`, EMPTY);
+    }
+    b.localGet(registerLocal(e, table.index));
+    b.brTable(table.entries.map((_, i)=>{
+        const k = arms.indexOf(i);
+        return k < 0 ? e.depthOf('switchOut') : e.depthOf(`entry${k}`);
+    }), e.depthOf('switchOut'));
+    for (let k = 0; k < arms.length; k++)
+    {
+        e.close();
+        const target = table.entries[arms[k]];
+        b.i32const(table.address + 4 * arms[k]).load('i32', { offset: e.layout.ramBase })
+            .i32const(target | 0).op(I32.eq);
+        e.openIf('case');
+        e.jumpTo(target);
+        e.close();
+        b.br(e.depthOf('switchOut'));
+    }
+    e.close();
     return true;
 }
 
