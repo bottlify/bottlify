@@ -66,6 +66,8 @@
  * adapter alone. `--roots FILE` adds a PEM bundle's certificates to the
  * machine's trusted roots (tools/relay-option.mjs).
  *
+ * `--debug-strings` prints what the programs say through OutputDebugString.
+ *
  * `--windows win2000|winxp|win7|win10` is the Windows the machine is, over
  * the one a bundle's manifest names (XP when neither does).
  *
@@ -322,7 +324,10 @@ const app = await createApp({
     } } : {},
 });
 for (const name of ['process-create', 'process-started', 'process-resumed', 'process-server',
-    'process-server-exit', 'error', 'exit', 'divergence', 'message-box', 'unimplemented'])
+    'process-server-exit', 'error', 'exit', 'divergence', 'message-box', 'unimplemented',
+    // `--debug-strings`: what the programs say through OutputDebugString --
+    // a client's own log and its assertions, which name where it gave up.
+    ...argv.includes('--debug-strings') ? ['debug'] : []])
 {
     app.on(name, (/** @type {any} */ event)=>console.log(seconds(), name,
         JSON.stringify(event, (key, value)=>(key === 'error' && value
@@ -784,6 +789,12 @@ if (collectable && (argv.includes('--collect') || collectTo))
             const to = join(collectTo, ...one.path.split('\\'));
             mkdirSync(dirname(to), { recursive: true });
             writeFileSync(to, one.bytes);
+        }
+        // The directories left empty too: a program that checks its tree (an
+        // updater verifying its install) finds one missing as damage.
+        for (const path of collectTo ? collected.directories ?? [] : [])
+        {
+            mkdirSync(join(collectTo, ...path.split('\\')), { recursive: true });
         }
     }
     catch (e){
