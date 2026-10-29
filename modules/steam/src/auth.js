@@ -73,17 +73,28 @@ export async function signInWithQr(connect, options){
     {
         throw new Error(`steam: a QR sign-in could not begin (EResult ${begun.eresult})`);
     }
-    let clientId = /** @type {bigint} */ (begun.body.client_id);
+    // Every client id the session has had, the newest last. The service
+    // replaces the code every twenty seconds or so, a scan included: a code
+    // scanned just before it was replaced is approved under the id it had,
+    // and the newer one is then answered FileNotFound.
+    const first = /** @type {bigint} */ (begun.body.client_id);
+    const clientIds = [first];
     const requestId = /** @type {Uint8Array} */ (begun.body.request_id);
     const interval = Math.max(1, begun.body.interval ?? 5) * 1000;
     onChallenge(begun.body.challenge_url);
     for (;;)
     {
         await pause(interval, signal);
+        const clientId = clientIds[clientIds.length - 1];
         const polled = await (await connect()).call('Authentication.PollAuthSessionStatus#1',
             Authentication.PollAuthSessionStatusRequest,
             { client_id: clientId, request_id: requestId },
             Authentication.PollAuthSessionStatusResponse);
+        if (polled.eresult === EResult.FileNotFound && clientIds.length > 1)
+        {
+            clientIds.pop();
+            continue;
+        }
         if (polled.eresult !== EResult.OK)
         {
             const expired = polled.eresult === EResult.Expired
@@ -97,9 +108,9 @@ export async function signInWithQr(connect, options){
         {
             onScanned?.();
         }
-        if (body.new_client_id)
+        if (body.new_client_id && body.new_client_id !== clientId)
         {
-            clientId = body.new_client_id;
+            clientIds.push(body.new_client_id);
         }
         if (body.new_challenge_url)
         {
