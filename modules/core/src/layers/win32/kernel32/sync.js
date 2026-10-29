@@ -14,6 +14,7 @@ import { createChangeNotifications } from './changes.js';
 import { SELECTORS } from './seh.js';
 import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
 import { createThreadInfoFunctions } from './thread-info.js';
+import { createProcessPolicyFunctions } from './process-policy.js';
 import { askChild, threadArg, threadEnd } from './cross-process.js';
 import { SYNCHRONIZE, allows } from './access.js';
 
@@ -140,6 +141,7 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {import('./processor.js').Processors} [processors]  The process's
  *           processors and its affinity, which every other interface that
  *           counts or sets them shares. Absent, the kernel's alone.
+ * @property {number} [processId]  This process's id, which a job's list names.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose critical
  *           sections are 40 bytes and taken by traps; absent, 4.
  * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
@@ -597,6 +599,20 @@ export function createSyncFunctions(host){
     };
 
     return {
+        // Jobs, policies, power requests, the cycle counters and the stack:
+        // what a sandboxing browser asks before anything else.
+        ...createProcessPolicyFunctions({
+            kernel,
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            setLastError: host.setLastError,
+            currentThread: host.currentThread,
+            registers: host.registers,
+            pointerSize: host.pointerSize,
+            processId: host.processId,
+            threadOf,
+            objectOf: object,
+        }),
         ...createThreadInfoFunctions({
             kernel,
             processors,

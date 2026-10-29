@@ -1196,6 +1196,44 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * VirtualQuery's MEMORY_BASIC_INFORMATION for an address below the top of
+     * the user's space, as its seven fields in order.
+     *
+     * @param {number} at
+     * @returns {[number, number, number, number, number, number, number]}
+     */
+    const regionAnswer = at=>{
+        const page = (at & ~(PAGE_SIZE - 1)) >>> 0;
+        const arenaEnd = host.arena.base + host.arena.size;
+        const inArena = page >= host.arena.base && page < arenaEnd;
+        const region = inArena ? null : host.regionAt ? host.regionAt(at) : null;
+        if (inArena)
+        {
+            return arenaAnswer(page, arenaEnd);
+        }
+        if (region && region.kind === 'image')
+        {
+            return [page, region.base, PAGE_EXECUTE_READWRITE,
+                region.base + region.size - page, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
+                MEM_IMAGE];
+        }
+        if (region)
+        {
+            return [at, region.base, PAGE_EXECUTE_READWRITE,
+                region.base + region.size - at, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
+                MEM_PRIVATE];
+        }
+        const next = host.nextRegionAfter ? host.nextRegionAfter(at) : null;
+        let limit = next ? next.base : USER_ADDRESS_SPACE_TOP;
+        if (host.arena.base > at && host.arena.base < limit)
+        {
+            limit = host.arena.base;
+        }
+        return [page, page, PAGE_NOACCESS, limit - page, MEM_RESERVE, 0, MEM_PRIVATE];
+    };
+
+
+    /**
      * The block at `address`, but only if it belongs to `heap`. Windows leaves
      * a cross-heap free undefined; refusing it turns a bug that would otherwise
      * surface as unrelated corruption into a FALSE the caller can see.
@@ -2336,39 +2374,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const page = (at & ~(PAGE_SIZE - 1)) >>> 0;
-                const arenaEnd = host.arena.base + host.arena.size;
-                const inArena = page >= host.arena.base && page < arenaEnd;
-                const region = inArena ? null : host.regionAt ? host.regionAt(at) : null;
-                /** @type {[number, number, number, number, number, number, number]} */
-                let answer;
-                if (inArena)
-                {
-                    answer = arenaAnswer(page, arenaEnd);
-                }
-                else if (region && region.kind === 'image')
-                {
-                    answer = [page, region.base, PAGE_EXECUTE_READWRITE,
-                        region.base + region.size - page, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
-                        MEM_IMAGE];
-                }
-                else if (region)
-                {
-                    answer = [at, region.base, PAGE_EXECUTE_READWRITE,
-                        region.base + region.size - at, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
-                        MEM_PRIVATE];
-                }
-                else
-                {
-                    const next = host.nextRegionAfter ? host.nextRegionAfter(at) : null;
-                    let limit = next ? next.base : USER_ADDRESS_SPACE_TOP;
-                    if (host.arena.base > at && host.arena.base < limit)
-                    {
-                        limit = host.arena.base;
-                    }
-                    answer = [page, page, PAGE_NOACCESS, limit - page, MEM_RESERVE, 0,
-                        MEM_PRIVATE];
-                }
+                const answer = regionAnswer(at);
                 const data = new Uint8Array(MEMORY_BASIC_INFORMATION.SIZE);
                 const view = new DataView(data.buffer);
                 const [base, allocationBase, allocationProtect, size, state, protect, type]
@@ -2383,6 +2389,68 @@ export function createHeapFunctions(host){
                 view.setUint32(MEMORY_BASIC_INFORMATION.Type, type, true);
                 host.writeMemory(buffer >>> 0, data);
                 return MEMORY_BASIC_INFORMATION.SIZE;
+            },
+        },
+
+        /**
+         * BOOL K32QueryWorkingSetEx(HANDLE hProcess, PVOID pv, DWORD cb)
+         *
+         * Each PSAPI_WORKING_SET_EX_INFORMATION's page, as VirtualQuery sees
+         * it: a committed page is resident -- there is no paging, guest
+         * memory is one buffer always present -- with its protection, an
+         * image's shared once; any other is not valid. Only this process's.
+         */
+        K32QueryWorkingSetEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([process, entries, length])=>{
+                if ((process >>> 0) !== CURRENT_PROCESS)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const count = Math.floor((length >>> 0) / 8);
+                if ((entries >>> 0) === 0 || count === 0)
+                {
+                    host.setLastError(ERROR_BAD_LENGTH);
+                    return 0;
+                }
+                const records = host.readMemory(entries >>> 0, count * 8).slice();
+                const view = new DataView(records.buffer);
+                for (let index = 0; index < count; index++)
+                {
+                    const at = view.getUint32(index * 8, true);
+                    const [, , , , state, protect, type] = at >= USER_ADDRESS_SPACE_TOP
+                        ? [0, 0, 0, 0, 0, 0, 0] : regionAnswer(at);
+                    const shared = type === MEM_IMAGE;
+                    const attributes = state !== MEM_COMMIT ? 0
+                        : 1 | (shared ? 1 << 1 : 0) | (protect & 0x7ff) << 4
+                            | (shared ? 1 << 15 : 0);
+                    view.setUint32(index * 8 + 4, attributes >>> 0, true);
+                }
+                host.writeMemory(entries >>> 0, records);
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD DiscardVirtualMemory(PVOID VirtualAddress, SIZE_T Size)
+         *
+         * A promise not to need the contents again, kept by keeping them: a
+         * committed range answers ERROR_SUCCESS, anything else
+         * ERROR_INVALID_PARAMETER.
+         */
+        DiscardVirtualMemory: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([address, size])=>{
+                const at = address >>> 0;
+                if ((size >>> 0) === 0 || at >= USER_ADDRESS_SPACE_TOP
+                    || regionAnswer(at)[4] !== MEM_COMMIT)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                return 0;
             },
         },
 

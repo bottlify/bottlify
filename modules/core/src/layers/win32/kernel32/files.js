@@ -324,6 +324,39 @@ export const WIN32_FIND_DATAA = Object.freeze({
  */
 
 /** The handle kinds that are file objects: what CancelIo takes. */
+/** GetFinalPathNameByHandle's namespaces. */
+const VOLUME_NAME_DOS = 0x0;
+const VOLUME_NAME_NT = 0x2;
+const VOLUME_NAME_NONE = 0x4;
+
+/** FILE_INFO_BY_HANDLE_CLASS: the classes SetFileInformationByHandle takes here. */
+const FILE_INFO = Object.freeze({ BASIC: 0, RENAME: 3, DISPOSITION: 4, ALLOCATION: 5,
+    END_OF_FILE: 6, IO_PRIORITY_HINT: 12, DISPOSITION_EX: 21, RENAME_EX: 22 });
+/**
+ * Their least sizes on a 32-bit process: FILE_BASIC_INFO's four LARGE_INTEGERs
+ * and a DWORD, padded; FILE_RENAME_INFO's flag word, root handle, name length
+ * and first character.
+ *
+ * @type {Map<number, number>}
+ */
+const FILE_INFO_SIZES = new Map([[FILE_INFO.BASIC, 40], [FILE_INFO.RENAME, 16],
+    [FILE_INFO.DISPOSITION, 1], [FILE_INFO.ALLOCATION, 8], [FILE_INFO.END_OF_FILE, 8],
+    [FILE_INFO.IO_PRIORITY_HINT, 4], [FILE_INFO.DISPOSITION_EX, 4], [FILE_INFO.RENAME_EX, 16]]);
+const FILE_DISPOSITION_FLAG_DELETE = 0x1;
+const FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1;
+/** Milliseconds between 1601 and 1970, what a FILETIME counts from. */
+const FILETIME_EPOCH_MS = 11644473600000;
+
+/** GetBinaryType's kinds. */
+const SCS_32BIT_BINARY = 0;
+const SCS_DOS_BINARY = 1;
+const SCS_WOW_BINARY = 2;
+const SCS_64BIT_BINARY = 6;
+const IMAGE_FILE_DLL = 0x2000;
+const ERROR_BAD_EXE_FORMAT = 193;
+const ERROR_BAD_LENGTH = 24;
+const ERROR_NOT_FOUND = 1168;
+
 const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
 
 /**
@@ -3019,6 +3052,246 @@ export function createFileFunctions(host){
         return 1;
     });
 
+    /**
+     * The path an open file or directory handle stands for, or null for a
+     * handle that is none (a pipe has no name on a volume).
+     *
+     * @param {number} handle
+     */
+    const handlePath = handle=>{
+        const type = host.handles.typeOf?.(handle >>> 0);
+        if (type !== 'file' && type !== 'directory')
+        {
+            return null;
+        }
+        return object(handle, type)?.path ?? null;
+    };
+
+    /**
+     * GetFinalPathNameByHandle in either width. The name is the one the file
+     * was opened by -- a volume's names are its own spelling, with no links
+     * to resolve -- in the namespace the flags ask for: the drive's
+     * (`\\?\C:\...`), the volume's device (`\Device\HarddiskVolumeN\...`,
+     * the drives numbered from C as QueryDosDevice names them), or none (the
+     * path below the root). A volume GUID path is not one this answers.
+     *
+     * @param {TextForm} text
+     */
+    const finalPathName = text=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([handle, buffer, room, flags])=>{
+            const path = handlePath(handle);
+            if (path === null)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            const volumeName = (flags >>> 0) & 0x7;
+            if (((flags >>> 0) & ~0xf) !== 0 || (volumeName !== VOLUME_NAME_DOS
+                && volumeName !== VOLUME_NAME_NT && volumeName !== VOLUME_NAME_NONE))
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const below = path.slice(2);
+            const index = path.toUpperCase().charCodeAt(0) - 'C'.charCodeAt(0) + 1;
+            const name = volumeName === VOLUME_NAME_DOS ? `\\\\?\\${path}`
+                : volumeName === VOLUME_NAME_NT
+                    ? `\\Device\\HarddiskVolume${Math.max(index, 1)}${below}` : below;
+            if ((room >>> 0) < name.length + 1 || (buffer >>> 0) === 0)
+            {
+                return name.length + 1;
+            }
+            text.write(buffer >>> 0, room >>> 0, name);
+            return name.length;
+        },
+    });
+
+    /**
+     * The name a FILE_RENAME_INFO asks for: a full path as it is, a bare
+     * name in the directory the file is in.
+     *
+     * @param {string} current @param {string} asked
+     */
+    const renameTarget = (current, asked)=>(/^[A-Za-z]:|^\\/.test(asked) ? fullPath(asked)
+        : `${current.slice(0, current.lastIndexOf('\\'))}\\${asked}`);
+
+    /**
+     * SetFileInformationByHandle's classes a C++ runtime sets: the basic
+     * times and attributes, the end of the file and its allocation, a
+     * rename, deletion on close. Each the size the class has, at least.
+     *
+     * @param {number} handle @param {number} type @param {number} from @param {number} length
+     */
+    const setInformationByHandle = (handle, type, from, length)=>{
+        const kind = host.handles.typeOf?.(handle >>> 0);
+        const file = kind === 'file' || kind === 'directory' ? object(handle, kind) : null;
+        if (!file)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        const size = FILE_INFO_SIZES.get(type);
+        if (size === undefined)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        if (length < size || from === 0)
+        {
+            return fail(ERROR_BAD_LENGTH);
+        }
+        const bytes = host.readMemory(from, Math.max(length, size)).slice();
+        const view = new DataView(bytes.buffer);
+        switch (type)
+        {
+            case FILE_INFO.BASIC: {
+                if (!(file.writeAttributes ?? file.write ?? true))
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                const written = view.getBigInt64(16, true);
+                if (written > 0n)
+                {
+                    files.setModified?.(file.path,
+                        Number(written / 10000n) - FILETIME_EPOCH_MS);
+                }
+                const attributes = view.getUint32(32, true);
+                if (attributes !== 0)
+                {
+                    files.setAttributes?.(file.path, attributes & SETTABLE_ATTRIBUTES);
+                }
+                return 1;
+            }
+            case FILE_INFO.END_OF_FILE:
+            case FILE_INFO.ALLOCATION: {
+                if (kind !== 'file' || !file.write)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                const at = Number(view.getBigInt64(0, true));
+                if (at < 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const current = files.stat(file.path)?.size ?? 0;
+                // An allocation only ever cuts a file shorter: room reserved
+                // past its end is not part of it.
+                if (type === FILE_INFO.END_OF_FILE || at < current)
+                {
+                    files.truncate(file.node, at);
+                }
+                return 1;
+            }
+            case FILE_INFO.DISPOSITION:
+            case FILE_INFO.DISPOSITION_EX: {
+                const deleting = type === FILE_INFO.DISPOSITION ? bytes[0] !== 0
+                    : (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_DELETE) !== 0;
+                if (deleting)
+                {
+                    const entry = files.stat(file.path);
+                    if (readOnlyFile(entry) || onReadOnlyMedia(file.path))
+                    {
+                        return fail(ERROR_ACCESS_DENIED);
+                    }
+                    if (entry?.isDirectory && files.list(file.path, '*')
+                        .some(each=>each.name !== '.' && each.name !== '..'))
+                    {
+                        return fail(ERROR_DIR_NOT_EMPTY);
+                    }
+                }
+                file.deleteOnClose = deleting;
+                return 1;
+            }
+            case FILE_INFO.RENAME:
+            case FILE_INFO.RENAME_EX: {
+                const replace = type === FILE_INFO.RENAME ? bytes[0] !== 0
+                    : (view.getUint32(0, true) & FILE_RENAME_FLAG_REPLACE_IF_EXISTS) !== 0;
+                const nameBytes = view.getUint32(8, true);
+                if (12 + nameBytes > Math.max(length, size) || nameBytes === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const units = host.readMemory(from + 12, nameBytes);
+                let asked = '';
+                for (let at = 0; at + 1 < units.length; at += 2)
+                {
+                    asked += String.fromCharCode(units[at] | units[at + 1] << 8);
+                }
+                const target = renameTarget(file.path, asked);
+                const answer = renamePath(file.path, target, replace);
+                if (answer === 1)
+                {
+                    file.path = target;
+                }
+                return answer;
+            }
+            default:
+                // FileIoPriorityHintInfo: a hint with nothing to prioritise.
+                return 1;
+        }
+    };
+
+    /**
+     * GetBinaryType in either width: what kind of program a file is, read
+     * from its headers. A PE image's machine word says 32 or 64 bits, a
+     * library is no program (ERROR_BAD_EXE_FORMAT, as Windows answers one),
+     * an NE image is a Windows 3.x one, a bare MZ one MS-DOS's, as is a
+     * `.com` with no header at all.
+     *
+     * @param {number} name @param {number} out @param {TextForm} text
+     */
+    const binaryType = async(name, out, text)=>{
+        const path = text.path(name);
+        const entry = files.stat(path);
+        if (!entry?.exists || entry.isDirectory)
+        {
+            return fail(entry?.isDirectory ? ERROR_ACCESS_DENIED : missing(path));
+        }
+        const node = files.open(path, { read: true, shareRead: true, shareWrite: true,
+            shareDelete: true });
+        if (!node)
+        {
+            return fail(ERROR_ACCESS_DENIED);
+        }
+        /** @type {Uint8Array} */
+        let head;
+        try
+        {
+            head = await files.read(node, 0, Math.min(entry.size, 0x1000));
+        }
+        finally
+        {
+            files.close(node);
+        }
+        const view = new DataView(head.buffer, head.byteOffset, head.byteLength);
+        /** @type {number | null} */
+        let kind = null;
+        if (head.length >= 2 && head[0] === 0x4d && head[1] === 0x5a)
+        {
+            kind = SCS_DOS_BINARY;
+            const at = head.length >= 0x40 ? view.getUint32(0x3c, true) : head.length;
+            if (at + 26 <= head.length && view.getUint32(at, true) === 0x4550)
+            {
+                const characteristics = view.getUint16(at + 22, true);
+                const magic = view.getUint16(at + 24, true);
+                kind = (characteristics & IMAGE_FILE_DLL) !== 0 ? null
+                    : magic === 0x20b ? SCS_64BIT_BINARY : SCS_32BIT_BINARY;
+            }
+            else if (at + 2 <= head.length && head[at] === 0x4e && head[at + 1] === 0x45)
+            {
+                kind = SCS_WOW_BINARY;
+            }
+        }
+        else if (/\.com$/i.test(path))
+        {
+            kind = SCS_DOS_BINARY;
+        }
+        if (kind === null)
+        {
+            return fail(ERROR_BAD_EXE_FORMAT);
+        }
+        writeDwordIf(out >>> 0, kind);
+        return 1;
+    };
+
     const table = {
         /**
          * HANDLE CreateFile(LPCSTR, DWORD dwDesiredAccess, DWORD dwShareMode,
@@ -4159,6 +4432,58 @@ export function createFileFunctions(host){
                     : host.handles.typeOf?.(handle >>> 0);
                 return kind && FILE_OBJECTS.has(kind) ? 1 : fail(ERROR_INVALID_HANDLE);
             },
+        },
+
+        /**
+         * BOOL CancelIoEx(HANDLE hFile, LPOVERLAPPED lpOverlapped)
+         *
+         * Every read and write here has finished by the time its call
+         * returns or completes, so there is nothing of the handle's left to
+         * cancel (ERROR_NOT_FOUND), as Windows answers when the request has
+         * already completed.
+         */
+        CancelIoEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const kind = isStandardHandle(handle >>> 0) ? 'file'
+                    : host.handles.typeOf?.(handle >>> 0);
+                return fail(kind && FILE_OBJECTS.has(kind) ? ERROR_NOT_FOUND
+                    : ERROR_INVALID_HANDLE);
+            },
+        },
+
+        /**
+         * DWORD GetFinalPathNameByHandleA/W(HANDLE hFile, LPTSTR lpszFilePath,
+         *     DWORD cchFilePath, DWORD dwFlags)
+         *
+         * The length written, its terminator not counted; with too little
+         * room, the room it needs, its terminator counted.
+         */
+        GetFinalPathNameByHandleA: finalPathName(ANSI),
+        GetFinalPathNameByHandleW: finalPathName(WIDE),
+
+        /**
+         * BOOL SetFileInformationByHandle(HANDLE hFile,
+         *     FILE_INFO_BY_HANDLE_CLASS FileInformationClass, LPVOID, DWORD dwBufferSize)
+         */
+        SetFileInformationByHandle: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, type, from, length])=>
+                setInformationByHandle(handle >>> 0, type >>> 0, from >>> 0, length >>> 0),
+        },
+
+        /** BOOL GetBinaryTypeA/W(LPCTSTR lpApplicationName, LPDWORD lpBinaryType) */
+        GetBinaryTypeA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([name, out])=>binaryType(name, out, ANSI),
+        },
+        GetBinaryTypeW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([name, out])=>binaryType(name, out, WIDE),
         },
 
         // The serial port calls, refused on a machine with no serial port.

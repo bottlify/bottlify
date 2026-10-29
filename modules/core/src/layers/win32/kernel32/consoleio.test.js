@@ -181,3 +181,12 @@ test('a console title is a console\'s, and there is none to have one', ()=>{
     assert.equal(fns.SetConsoleTitleA.argBytes, 4);
     assert.equal(fns.GetConsoleTitleA.argBytes, 8);
 });
+
+test('no console: no group to signal and no display mode', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.GenerateConsoleCtrlEvent.handler(), 0);
+    assert.equal(fns.GetConsoleDisplayMode.handler(), 0);
+    assert.deepEqual(errors, [6, 6]);
+    assert.equal(fns.GenerateConsoleCtrlEvent.argBytes, 8);
+    assert.equal(fns.GetConsoleDisplayMode.argBytes, 4);
+});

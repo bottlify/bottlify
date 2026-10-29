@@ -1579,3 +1579,29 @@ test('GlobalMemoryStatus answers a commit limit past memory, as a machine that p
     assert.ok(view.getUint32(at + 20, true) > view.getUint32(at + 12, true),
         'and what is free of it past free memory');
 });
+
+test('QueryWorkingSetEx: a committed page is resident with its protection, an image\'s shared',
+    ()=>{
+        const host = regionHost([
+            { base: 0x10000, size: 0x1000 },
+            { base: 0x20000, size: 0x1000, kind: 'image' },
+        ]);
+        const fns = createHeapFunctions(host);
+        const at = host.arena.base;
+        const view = new DataView(host.bytes.buffer);
+        [0x10010, 0x20020, 0x30000].forEach((address, index)=>{
+            view.setUint32(at + index * 8, address, true);
+            view.setUint32(at + index * 8 + 4, 0xffffffff, true);
+        });
+        assert.equal(fns.K32QueryWorkingSetEx.handler([0xffffffff, at, 24]), 1);
+        assert.equal(view.getUint32(at + 4, true), 1 | 0x40 << 4, 'valid, read-write-execute');
+        assert.equal(view.getUint32(at + 12, true), 1 | 1 << 1 | 0x40 << 4 | 1 << 15,
+            'an image\'s page is shared');
+        assert.equal(view.getUint32(at + 20, true), 0, 'a reserved gap is not valid');
+        assert.equal(view.getUint32(at, true), 0x10010, 'the address is left as it was');
+        assert.equal(fns.K32QueryWorkingSetEx.handler([0xffffffff, at, 4]), 0);
+        assert.equal(fns.K32QueryWorkingSetEx.handler([0x44, at, 24]), 0);
+
+        assert.equal(fns.DiscardVirtualMemory.handler([0x10000, 0x1000]), 0);
+        assert.equal(fns.DiscardVirtualMemory.handler([0x30000, 0x1000]), 87);
+    });

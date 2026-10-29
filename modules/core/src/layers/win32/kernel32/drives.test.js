@@ -193,6 +193,23 @@ test('GetComputerName reports the length it wrote, and the length it needed', ()
         'BOTTLIFY\0');
 });
 
+test('GetComputerNameEx names a host in a workgroup, its domain empty', ()=>{
+    const { fns, bytes, errors } = setup();
+    bytes.set([4, 0, 0, 0], 0x104);
+    assert.equal(fns.GetComputerNameExA.handler([1, 0x140, 0x104]), 0);
+    assert.equal(errors.at(-1), 234, 'ERROR_MORE_DATA');
+    assert.equal(dword(bytes, 0x104), 9);
+    assert.equal(fns.GetComputerNameExW.handler([3, 0x180, 0x104]), 1, 'fully qualified');
+    assert.equal(dword(bytes, 0x104), 8);
+    assert.equal(String.fromCharCode(...new Uint16Array(bytes.slice(0x180, 0x190).buffer)),
+        'BOTTLIFY');
+    bytes.set([4, 0, 0, 0], 0x104);
+    assert.equal(fns.GetComputerNameExW.handler([2, 0x180, 0x104]), 1, 'the DNS domain');
+    assert.equal(dword(bytes, 0x104), 0);
+    assert.equal(fns.GetComputerNameExA.handler([8, 0x140, 0x104]), 0);
+    assert.equal(errors.at(-1), 87, 'ComputerNameMax is no name');
+});
+
 test('a label set on a volume is the one its information reads back', ()=>{
     const { fns, bytes, errors } = setup(['C']);
     plant(bytes, 0x100, 'C:\\');

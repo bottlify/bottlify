@@ -399,7 +399,8 @@ test('the other named-pipe calls are refused the same way, each popping its own 
     for (const [name, argBytes] of /** @type {[string, number][]} */ ([
         ['ConnectNamedPipe', 8], ['DisconnectNamedPipe', 4], ['WaitNamedPipeA', 8],
         ['WaitNamedPipeW', 8], ['TransactNamedPipe', 28], ['GetNamedPipeInfo', 20],
-        ['GetNamedPipeHandleStateA', 28], ['SetNamedPipeHandleState', 16]]))
+        ['GetNamedPipeHandleStateA', 28], ['SetNamedPipeHandleState', 16],
+        ['GetNamedPipeClientProcessId', 8], ['GetNamedPipeServerProcessId', 8]]))
     {
         assert.equal(table[name].argBytes, argBytes, name);
         assert.equal(table[name].handler(), 0, name);

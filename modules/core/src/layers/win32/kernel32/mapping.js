@@ -870,6 +870,8 @@ export function createMappingFunctions(host){
          *   BOOL GetNamedPipeHandleStateA(HANDLE, LPDWORD, LPDWORD, LPDWORD, LPDWORD,
          *                                 LPSTR, DWORD)
          *   BOOL SetNamedPipeHandleState(HANDLE, LPDWORD, LPDWORD, LPDWORD)
+         *   BOOL GetNamedPipeClientProcessId(HANDLE Pipe, PULONG ClientProcessId)
+         *   BOOL GetNamedPipeServerProcessId(HANDLE Pipe, PULONG ServerProcessId)
          */
         ConnectNamedPipe: { argBytes: 8, handler: ()=>refusePipeCall('ConnectNamedPipe') },
         DisconnectNamedPipe: { argBytes: 4, handler: ()=>refusePipeCall('DisconnectNamedPipe') },
@@ -884,6 +886,14 @@ export function createMappingFunctions(host){
         SetNamedPipeHandleState: {
             argBytes: 16,
             handler: ()=>refusePipeCall('SetNamedPipeHandleState'),
+        },
+        GetNamedPipeClientProcessId: {
+            argBytes: 8,
+            handler: ()=>refusePipeCall('GetNamedPipeClientProcessId'),
+        },
+        GetNamedPipeServerProcessId: {
+            argBytes: 8,
+            handler: ()=>refusePipeCall('GetNamedPipeServerProcessId'),
         },
 
         /**

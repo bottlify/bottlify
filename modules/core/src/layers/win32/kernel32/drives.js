@@ -1028,6 +1028,39 @@ export function createDriveFunctions(host){
         },
     });
 
+    /**
+     * GetComputerNameEx in either width. The machine is in a workgroup, not a
+     * domain: its DNS domain is empty and its fully qualified name its host
+     * name, and the physical names are the same as the logical ones, there
+     * being no cluster. A name that does not fit is ERROR_MORE_DATA, with
+     * the room it needs, its terminator counted.
+     *
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const computerNameEx = encode=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([type, buffer, size])=>{
+            const format = type >>> 0;
+            if (format > 7 || (size >>> 0) === 0)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const name = (format & 3) === 2 ? '' : COMPUTER_NAME;
+            const room = readDword(size >>> 0);
+            if ((buffer >>> 0) === 0 || name.length + 1 > room)
+            {
+                writeDword(size >>> 0, name.length + 1);
+                host.setLastError(ERROR_MORE_DATA);
+                return 0;
+            }
+            host.writeMemory(buffer >>> 0, encode(`${name}\0`));
+            writeDword(size >>> 0, name.length);
+            return 1;
+        },
+    });
+
     /** @param {string} letter */
     const deviceOf = letter=>deviceName(letters(), other=>host.volume?.(other)?.kind === 'cdrom',
         letter);
@@ -1347,5 +1380,12 @@ export function createDriveFunctions(host){
 
         /** BOOL GetComputerNameW(LPWSTR lpBuffer, LPDWORD nSize): the size in characters. */
         GetComputerNameW: computerName(encodeWide),
+
+        /**
+         * BOOL GetComputerNameExA/W(COMPUTER_NAME_FORMAT NameType, LPTSTR lpBuffer,
+         *     LPDWORD nSize)
+         */
+        GetComputerNameExA: computerNameEx(encodeAnsi),
+        GetComputerNameExW: computerNameEx(encodeWide),
     };
 }

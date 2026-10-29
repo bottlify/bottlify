@@ -1416,3 +1416,91 @@ test('GetNumberFormat groups by a NUMBERFMT\'s number or the locale\'s SGROUPING
         assert.equal(text, expected, grouping);
     }
 });
+
+test('the name-based forms answer as the LCID forms for the locale the name names', async()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    // LOCALE_SENGLANGUAGE (0x1001) of French by its name, and by no name the user's.
+    host.plantWide(0x200, 'fr-FR');
+    assert.equal(fns.GetLocaleInfoEx.handler([0x200, 0x1001, 0x300, 32]),
+        fns.GetLocaleInfoW.handler([0x040c, 0x1001, 0x400, 32]));
+    assert.equal(host.readWide(0x300, 6), 'French');
+    assert.equal(fns.GetLocaleInfoEx.handler([0, 0x5c, 0x300, 32]), 6, 'LOCALE_SNAME');
+    assert.equal(host.readWide(0x300, 5), 'en-US');
+    host.plantWide(0x200, 'xx-YY');
+    assert.equal(fns.GetLocaleInfoEx.handler([0x200, 0x1001, 0x300, 32]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    assert.equal(fns.GetUserDefaultLocaleName.handler([0x300, 85]), 6);
+    assert.equal(host.readWide(0x300, 5), 'en-US');
+    assert.equal(fns.GetUserDefaultLocaleName.handler([0x300, 3]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+
+    // A SYSTEMTIME of 2024-03-05.
+    host.bytes.set([0xe8, 0x07, 3, 0, 2, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0x500);
+    host.plantWide(0x200, 'en-US');
+    const wanted = fns.GetDateFormatW.handler([0x0409, 0, 0x500, 0, 0x600, 64]);
+    assert.equal(fns.GetDateFormatEx.handler([0x200, 0, 0x500, 0, 0x700, 64, 0]), wanted);
+    assert.equal(host.readWide(0x700, wanted), host.readWide(0x600, wanted));
+    assert.equal(fns.GetDateFormatEx.argBytes, 28);
+    host.plantWide(0x520, '1234.5');
+    assert.equal(fns.GetNumberFormatEx.handler([0x200, 0, 0x520, 0, 0x700, 64]),
+        fns.GetNumberFormatW.handler([0x0409, 0, 0x520, 0, 0x600, 64]));
+    assert.equal(fns.GetCurrencyFormatEx.handler([0x200, 0, 0x520, 0, 0x700, 64]),
+        fns.GetCurrencyFormatW.handler([0x0409, 0, 0x520, 0, 0x600, 64]));
+    assert.ok(fns.GetTimeFormatEx.handler([0x200, 0, 0x500, 0, 0x700, 64]) > 0);
+});
+
+test('ResolveLocaleName finds the best specific locale, the invariant one for nothing', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    host.plantWide(0x200, 'de');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 85]), 6);
+    assert.equal(host.readWide(0x300, 5), 'de-DE');
+    host.plantWide(0x200, 'fr-XX');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 85]), 6, 'the language\'s');
+    assert.equal(host.readWide(0x300, 5), 'fr-FR');
+    host.plantWide(0x200, 'qq');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 85]), 1);
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0, 0]), 1, 'the room it needs');
+    host.plantWide(0x200, 'de-DE');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 3]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+});
+
+test('EnumSystemLocalesEx hands out names with their kind and the lParam', async()=>{
+    const host = fakeHost();
+    /** @type {[string, number, number][]} */
+    const seen = [];
+    let next = 0x800;
+    const fns = /** @type {any} */ (createLocaleFunctions({
+        ...host,
+        callerThread: ()=>({ id: 1 }),
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 8;
+            return at;
+        },
+        free: ()=>{},
+        /** @param {number} entry @param {number[]} args */
+        call: async(entry, [buffer, kind, parameter])=>{
+            void entry;
+            let length = 0;
+            while (host.bytes[buffer + length * 2] !== 0)
+            {
+                length++;
+            }
+            seen.push([host.readWide(buffer, length), kind, parameter]);
+            return seen.length < 1000 ? 1 : 0;
+        },
+    }));
+    assert.equal(await fns.EnumSystemLocalesEx.handler([0x1234, 0, 0x77, 0]), 1);
+    assert.ok(seen.some(([name, kind])=>name === 'en-US' && kind === 0x21));
+    assert.ok(seen.some(([name, kind])=>name === 'en' && kind === 0x11));
+    assert.ok(seen.every(([, , parameter])=>parameter === 0x77));
+    seen.length = 0;
+    assert.equal(await fns.EnumSystemLocalesEx.handler([0x1234, 0x20, 0, 0]), 1);
+    assert.ok(seen.length > 0 && seen.every(([, kind])=>kind === 0x21), 'specific alone');
+    assert.equal(fns.EnumSystemLocalesEx.handler([0, 0, 0, 0]), 0);
+});

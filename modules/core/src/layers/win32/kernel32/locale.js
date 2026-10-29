@@ -54,6 +54,8 @@ const OEM_CODE_PAGE = CP_OEM_437;
 /** Error codes this file can produce. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+/** The longest locale name, its terminator counted (winnls.h). */
+const LOCALE_NAME_MAX_LENGTH = 85;
 const ERROR_INVALID_FLAGS = 1004;
 /** UTF-7 and the symbol page, which take no default character. */
 const CP_UTF7 = 65000;
@@ -2992,10 +2994,187 @@ export function createLocaleFunctions(host){
         },
     };
 
+    /**
+     * A name-based call made through its LCID form: the locale the name
+     * names, or ERROR_INVALID_PARAMETER for one this machine does not have.
+     *
+     * @param {number} name @param {(lcid: number) => number | Promise<number>} answer
+     */
+    const byName = (name, answer)=>{
+        const record = localeOfName(name >>> 0);
+        return record === null ? refuse(ERROR_INVALID_PARAMETER) : answer(record.lcid);
+    };
+
+    /**
+     * The best specific locale for a name: itself, its language's default
+     * region for a neutral one, the language's for a tag of a region this
+     * machine does not know. Nothing at all resolves to the invariant
+     * locale's empty name.
+     *
+     * @param {string} name
+     */
+    const resolvedName = name=>{
+        const exact = localeByName(name);
+        const record = exact ?? localeByName(name.split(/[-_]/)[0]);
+        if (!record)
+        {
+            return '';
+        }
+        return record.neutral ? localeByLcid(record.specific)?.name ?? record.name : record.name;
+    };
+
+    /**
+     * EnumSystemLocalesEx's walk: each locale's name, its LOCALE_WINDOWS
+     * kind and the caller's lParam, until the callback answers FALSE.
+     *
+     * @param {number} proc @param {number} flags @param {number} parameter
+     */
+    const enumerateLocaleNames = (proc, flags, parameter)=>{
+        if (!host.call || !host.allocate || (proc >>> 0) === 0)
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        const LOCALE_WINDOWS = 0x01;
+        const LOCALE_NEUTRALDATA = 0x10;
+        const LOCALE_SPECIFICDATA = 0x20;
+        const wanted = flags & (LOCALE_WINDOWS | LOCALE_NEUTRALDATA | LOCALE_SPECIFICDATA);
+        const listed = LOCALES.filter(locale=>wanted === 0 || (wanted & LOCALE_WINDOWS) !== 0
+            || (wanted & (locale.neutral ? LOCALE_NEUTRALDATA : LOCALE_SPECIFICDATA)) !== 0);
+        const call = host.call;
+        const thread = host.callerThread?.();
+        const block = host.allocate((LOCALE_NAME_MAX_LENGTH + 1) * 2);
+        if (block === 0)
+        {
+            return 0;
+        }
+        const run = async()=>{
+            for (const locale of listed)
+            {
+                writeWide(block, `${locale.name}\0`);
+                const kind = LOCALE_WINDOWS
+                    | (locale.neutral ? LOCALE_NEUTRALDATA : LOCALE_SPECIFICDATA);
+                if (((await call(proc >>> 0, [block, kind, parameter >>> 0], thread)) | 0) === 0)
+                {
+                    break;
+                }
+            }
+            host.free?.(block);
+            return 1;
+        };
+        return run();
+    };
+
     // GetStringTypeExA is GetStringTypeA with the locale made explicit in the
     // name: same five arguments, same answer.
     return {
         ...table,
+
+        /**
+         * int GetUserDefaultLocaleName(LPWSTR lpLocaleName, int cchLocaleName):
+         * LCIDToLocaleName's answer for the user's locale.
+         */
+        GetUserDefaultLocaleName: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, room])=>
+                table.LCIDToLocaleName.handler([LCID_EN_US, buffer, room, 0]),
+        },
+
+        /** int GetSystemDefaultLocaleName(LPWSTR, int): the same machine. */
+        GetSystemDefaultLocaleName: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, room])=>
+                table.LCIDToLocaleName.handler([LCID_EN_US, buffer, room, 0]),
+        },
+
+        /** int GetLocaleInfoEx(LPCWSTR lpLocaleName, LCTYPE, LPWSTR lpLCData, int cchData) */
+        GetLocaleInfoEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([name, type, buffer, count])=>byName(name, lcid=>
+                table.GetLocaleInfoW.handler([lcid, type, buffer, count])),
+        },
+
+        /**
+         * int GetDateFormatEx(LPCWSTR lpLocaleName, DWORD dwFlags, const SYSTEMTIME *,
+         *     LPCWSTR lpFormat, LPWSTR lpDateStr, int cchDate, LPCWSTR lpCalendar)
+         * and int GetTimeFormatEx(LPCWSTR, DWORD, const SYSTEMTIME *, LPCWSTR, LPWSTR, int):
+         * the W forms for the locale the name names.
+         */
+        GetDateFormatEx: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([name, ...rest])=>byName(name, lcid=>
+                table.GetDateFormatW.handler([lcid, ...rest.slice(0, 5)])),
+        },
+        GetTimeFormatEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([name, ...rest])=>byName(name, lcid=>
+                table.GetTimeFormatW.handler([lcid, ...rest])),
+        },
+
+        /**
+         * int GetNumberFormatEx(LPCWSTR lpLocaleName, DWORD, LPCWSTR lpValue,
+         *     const NUMBERFMTW *, LPWSTR, int) and GetCurrencyFormatEx, the same
+         * with a CURRENCYFMTW.
+         */
+        GetNumberFormatEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([name, ...rest])=>byName(name, lcid=>
+                table.GetNumberFormatW.handler([lcid, ...rest])),
+        },
+        GetCurrencyFormatEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([name, ...rest])=>byName(name, lcid=>
+                table.GetCurrencyFormatW.handler([lcid, ...rest])),
+        },
+
+        /**
+         * int ResolveLocaleName(LPCWSTR lpNameToResolve, LPWSTR lpLocaleName,
+         *     int cchLocaleName)
+         *
+         * The best specific locale's name with its terminator, or the room it
+         * needs with no buffer; too little room is ERROR_INSUFFICIENT_BUFFER.
+         */
+        ResolveLocaleName: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([name, buffer, room])=>{
+                const resolved = (name >>> 0) === 0 ? MACHINE_LOCALE.name
+                    : resolvedName(readWideSpan(name >>> 0, -1));
+                if ((buffer >>> 0) === 0)
+                {
+                    return resolved.length + 1;
+                }
+                if ((room | 0) < resolved.length + 1)
+                {
+                    return refuse(ERROR_INSUFFICIENT_BUFFER);
+                }
+                writeWide(buffer >>> 0, `${resolved}\0`);
+                return resolved.length + 1;
+            },
+        },
+
+        /**
+         * BOOL EnumSystemLocalesEx(LOCALE_ENUMPROCEX lpLocaleEnumProcEx, DWORD dwFlags,
+         *     LPARAM lParam, LPVOID lpReserved)
+         *
+         * Every locale this machine has, neutral and specific, by name: the
+         * callback is handed the name, LOCALE_WINDOWS with LOCALE_NEUTRALDATA
+         * or LOCALE_SPECIFICDATA, and the lParam. LOCALE_NEUTRALDATA or
+         * LOCALE_SPECIFICDATA alone asks for that kind; there are no
+         * supplemental locales and no alternate sorts by name.
+         */
+        EnumSystemLocalesEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([proc, flags, parameter])=>
+                enumerateLocaleNames(proc, flags >>> 0, parameter),
+        },
         GetStringTypeExA: table.GetStringTypeA,
 
         /**

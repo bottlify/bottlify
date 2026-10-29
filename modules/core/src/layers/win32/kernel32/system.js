@@ -1651,6 +1651,12 @@ export function createSystemFunctions(host){
             },
         },
 
+        /** UINT GetErrorMode(void): what SetErrorMode last set, without setting it. */
+        GetErrorMode: {
+            argBytes: 0,
+            handler: ()=>errorMode,
+        },
+
         /**
          * DWORD GetThreadErrorMode(void) and
          * BOOL SetThreadErrorMode(DWORD dwNewMode, LPDWORD lpOldMode)

@@ -52,3 +52,17 @@ test('a thread\'s error mode is its own, in its block, read alike by kernel32 an
     assert.equal(ntdll.RtlSetThreadErrorMode.handler([0x30, 0x204]), 0);
     assert.equal(kernel32.GetThreadErrorMode.handler(), 3);
 });
+
+test('GetErrorMode reads back what SetErrorMode set, and sets nothing', ()=>{
+    const bytes = new Uint8Array(0x100);
+    const kernel32 = createSystemFunctions(/** @type {any} */ ({
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.subarray(at, at + length),
+        writeMemory: ()=>{},
+        setLastError: ()=>{}, currentThread: ()=>null, resolveHandle: ()=>null,
+        systemTimeMs: ()=>0 }));
+    assert.equal(kernel32.GetErrorMode.handler(), 0);
+    assert.equal(kernel32.SetErrorMode.handler([0x8003]), 0);
+    assert.equal(kernel32.GetErrorMode.handler(), 0x8003);
+    assert.equal(kernel32.GetErrorMode.handler(), 0x8003, 'reading does not change it');
+});

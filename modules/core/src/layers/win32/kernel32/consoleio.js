@@ -352,6 +352,14 @@ export function createConsoleIoFunctions(host){
         SetConsoleCursorInfo: noConsole('SetConsoleCursorInfo', 8),
         SetConsoleActiveScreenBuffer: noConsole('SetConsoleActiveScreenBuffer', 4),
 
+        /**
+         * BOOL GenerateConsoleCtrlEvent(DWORD dwCtrlEvent, DWORD dwProcessGroupId)
+         * and BOOL GetConsoleDisplayMode(LPDWORD lpModeFlags): a process with no
+         * console has no group to signal and no display mode to report.
+         */
+        GenerateConsoleCtrlEvent: noConsole('GenerateConsoleCtrlEvent', 8),
+        GetConsoleDisplayMode: noConsole('GetConsoleDisplayMode', 4),
+
         /** BOOL GetNumberOfConsoleInputEvents(HANDLE, LPDWORD lpcNumberOfEvents) */
         GetNumberOfConsoleInputEvents: {
             argBytes: 8,

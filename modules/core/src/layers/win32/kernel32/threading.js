@@ -211,6 +211,11 @@ const HANDLE_FLAG_PROTECT_FROM_CLOSE = 0x2;
 const NORMAL_PRIORITY_BASE = 8;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+/** What GetMappedFileName answers for memory no file backs. */
+const ERROR_UNEXP_NET_ERR = 59;
+/** CreateWaitableTimerEx's flags. */
+const CREATE_WAITABLE_TIMER_MANUAL_RESET = 0x1;
+const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
 
 /**
  * @typedef {{ id: number, parent: number, threads: number, path: string }} SnapshotProcess
@@ -771,6 +776,96 @@ export function createThreadingFunctions(host){
             timer.name = `#${handle.toString(16)}`;
         }
         return handle;
+    });
+
+    /**
+     * The Ex form: the manual-reset BOOL arrives as a flag, beside the
+     * high-resolution one, which asks for a timer the guest's clock already
+     * keeps to the millisecond. Any other flag is refused.
+     */
+    const createWaitableTimerEx = bothNamedForms(16, ([security, namePointer, flags], wide)=>{
+        if (((flags >>> 0) & ~(CREATE_WAITABLE_TIMER_MANUAL_RESET
+            | CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)) !== 0)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        return (wide ? createWaitableTimer.wide : createWaitableTimer.ansi).handler(
+            [security, flags & CREATE_WAITABLE_TIMER_MANUAL_RESET, namePointer]);
+    });
+
+    /**
+     * The file an address of this process is mapped from, in the device's
+     * namespace: an image's path with its drive as the volume's device.
+     * The drives are numbered from C, the first hard drive's volume, as
+     * QueryDosDevice names them.
+     *
+     * @param {number} address
+     */
+    const mappedFileOf = address=>{
+        const module = (host.modules?.() ?? []).find(each=>each.path && each.size
+            && address >= each.base && address < each.base + each.size);
+        if (!module?.path || !/^[A-Za-z]:\\/.test(module.path))
+        {
+            return null;
+        }
+        const index = module.path.toUpperCase().charCodeAt(0) - 'C'.charCodeAt(0) + 1;
+        return `\\Device\\HarddiskVolume${Math.max(index, 1)}${module.path.slice(2)}`;
+    };
+
+    /**
+     * DWORD K32GetMappedFileNameA/W(HANDLE hProcess, LPVOID lpv, LPSTR/LPWSTR
+     *     lpFilename, DWORD nSize)
+     *
+     * The characters written, the terminator not counted; a name that does
+     * not fit is cut to the room and ERROR_INSUFFICIENT_BUFFER said. Memory
+     * that no file backs is ERROR_UNEXP_NET_ERR, as Windows answers a heap
+     * address; another process's memory is not this one's to read.
+     *
+     * @param {boolean} wide
+     */
+    const mappedFileName = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([process, address, buffer, size])=>{
+            if ((process >>> 0) !== CURRENT_PROCESS)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const name = mappedFileOf(address >>> 0);
+            if (name === null)
+            {
+                host.setLastError(ERROR_UNEXP_NET_ERR);
+                return 0;
+            }
+            const room = size >>> 0;
+            if ((buffer >>> 0) === 0 || room === 0)
+            {
+                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                return 0;
+            }
+            const written = name.slice(0, room - 1);
+            const bytes = new Uint8Array((written.length + 1) * (wide ? 2 : 1));
+            for (let at = 0; at < written.length; at++)
+            {
+                if (wide)
+                {
+                    bytes[at * 2] = written.charCodeAt(at) & 0xff;
+                    bytes[at * 2 + 1] = written.charCodeAt(at) >> 8;
+                }
+                else
+                {
+                    bytes[at] = written.charCodeAt(at) & 0xff;
+                }
+            }
+            host.writeMemory(buffer >>> 0, bytes);
+            if (written.length < name.length)
+            {
+                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+            }
+            return written.length;
+        },
     });
 
     /**
@@ -1424,6 +1519,14 @@ export function createThreadingFunctions(host){
          */
         CreateWaitableTimerA: createWaitableTimer.ansi,
         CreateWaitableTimerW: createWaitableTimer.wide,
+        /**
+         * HANDLE CreateWaitableTimerExA/W(LPSECURITY_ATTRIBUTES, LPCSTR/LPCWSTR,
+         *     DWORD dwFlags, DWORD dwDesiredAccess)
+         */
+        CreateWaitableTimerExA: createWaitableTimerEx.ansi,
+        CreateWaitableTimerExW: createWaitableTimerEx.wide,
+        K32GetMappedFileNameA: mappedFileName(false),
+        K32GetMappedFileNameW: mappedFileName(true),
 
         SetWaitableTimer: {
             argBytes: 24,

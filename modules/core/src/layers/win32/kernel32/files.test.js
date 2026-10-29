@@ -2867,3 +2867,111 @@ test('names and dispositions Windows refuses before it looks for the file', ()=>
     assert.equal(error.code, ERROR_ACCESS_DENIED, 'an image section keeps its file');
     assert.equal(files.stat('C:\\GAME\\SAVE.DAT')?.exists, true);
 });
+
+test('CancelIoEx finds nothing left to cancel on a file', ()=>{
+    const { fns, error, open } = setup();
+    const file = open('C:\\GAME\\cancel.dat', CREATE_ALWAYS);
+    assert.equal(fns.CancelIoEx.handler([file, 0]), 0);
+    assert.equal(error.code, 1168, 'ERROR_NOT_FOUND');
+    assert.equal(fns.CancelIoEx.handler([0x7770, 0]), 0);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+});
+
+test('GetFinalPathNameByHandle names the file in the namespace asked for', ()=>{
+    const { memory, fns, open, error } = setup();
+    const file = open('C:\\GAME\\SAVE.DAT', CREATE_ALWAYS);
+    const dos = '\\\\?\\C:\\GAME\\SAVE.DAT';
+    assert.equal(fns.GetFinalPathNameByHandleW.handler([file, 0x400, 64, 0]), dos.length);
+    assert.equal(wideAt(memory, 0x400), dos);
+    assert.equal(fns.GetFinalPathNameByHandleA.handler([file, 0x400, 64, 2]),
+        '\\Device\\HarddiskVolume1\\GAME\\SAVE.DAT'.length);
+    assert.equal(memory.string(0x400), '\\Device\\HarddiskVolume1\\GAME\\SAVE.DAT');
+    assert.equal(fns.GetFinalPathNameByHandleA.handler([file, 0x400, 64, 4]), 14);
+    assert.equal(memory.string(0x400), '\\GAME\\SAVE.DAT');
+    assert.equal(fns.GetFinalPathNameByHandleW.handler([file, 0x400, 5, 0]), dos.length + 1,
+        'too little room: the room it needs, terminator counted');
+    assert.equal(fns.GetFinalPathNameByHandleW.handler([file, 0x400, 64, 1]), 0);
+    assert.equal(error.code, ERROR_INVALID_PARAMETER, 'no volume GUID path');
+    assert.equal(fns.GetFinalPathNameByHandleW.handler([0x7770, 0x400, 64, 0]), 0);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+});
+
+test('SetFileInformationByHandle renames, deletes on close and moves the end', ()=>{
+    const { memory, files, fns, open, error } = setup();
+    files.put('C:\\GAME\\a.tmp', 'abcdef');
+    const file = open('C:\\GAME\\a.tmp', OPEN_EXISTING);
+    const view = new DataView(memory.bytes.buffer);
+    view.setBigInt64(0x800, 3n, true);
+    assert.equal(fns.SetFileInformationByHandle.handler([file, 6, 0x800, 8]), 1);
+    assert.equal(files.text('C:\\GAME\\a.tmp'), 'abc', 'FileEndOfFileInfo');
+    view.setBigInt64(0x800, 10n, true);
+    assert.equal(fns.SetFileInformationByHandle.handler([file, 5, 0x800, 8]), 1);
+    assert.equal(files.text('C:\\GAME\\a.tmp'), 'abc', 'an allocation past the end adds nothing');
+
+    // FILE_RENAME_INFO: replace if there, no root, the name in bytes, a bare name.
+    files.put('C:\\GAME\\b.dat', 'old');
+    memory.bytes.fill(0, 0x800, 0x840);
+    view.setUint32(0x800, 0, true);
+    view.setUint32(0x808, 10, true);
+    putWide(memory, 0x80c, 'b.dat');
+    assert.equal(fns.SetFileInformationByHandle.handler([file, 3, 0x800, 24]), 0);
+    assert.equal(error.code, ERROR_ALREADY_EXISTS);
+    view.setUint32(0x800, 1, true);
+    assert.equal(fns.SetFileInformationByHandle.handler([file, 3, 0x800, 24]), 1);
+    assert.equal(files.text('C:\\GAME\\b.dat'), 'abc');
+    assert.ok(!files.nodes.has('C:\\GAME\\a.tmp'));
+
+    // FileDispositionInfo: gone with its last handle.
+    memory.bytes[0x800] = 1;
+    assert.equal(fns.SetFileInformationByHandle.handler([file, 4, 0x800, 1]), 1);
+    assert.ok(files.nodes.has('C:\\GAME\\b.dat'), 'not before the handle closes');
+    assert.equal(fns.CloseHandle.handler([file]), 1);
+    assert.ok(!files.nodes.has('C:\\GAME\\b.dat'));
+
+    const other = open('C:\\GAME\\c.dat', CREATE_ALWAYS);
+    assert.equal(fns.SetFileInformationByHandle.handler([other, 6, 0x800, 4]), 0);
+    assert.equal(error.code, 24, 'ERROR_BAD_LENGTH');
+    assert.equal(fns.SetFileInformationByHandle.handler([other, 30, 0x800, 64]), 0);
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+    // FileBasicInfo: attributes set, zero times left alone.
+    memory.bytes.fill(0, 0x800, 0x840);
+    view.setUint32(0x820, 0x2, true);
+    assert.equal(fns.SetFileInformationByHandle.handler([other, 0, 0x800, 40]), 1);
+    assert.equal(files.stat('C:\\GAME\\c.dat')?.attributes, 0x2);
+});
+
+test('GetBinaryType tells programs apart by their headers, and refuses a library', async()=>{
+    const { memory, files, fns, error } = setup();
+    /** @param {number} characteristics @param {number} magic */
+    const image = (characteristics, magic)=>{
+        const bytes = new Uint8Array(0x100);
+        const view = new DataView(bytes.buffer);
+        bytes.set([0x4d, 0x5a]);
+        view.setUint32(0x3c, 0x80, true);
+        view.setUint32(0x80, 0x4550, true);
+        view.setUint16(0x80 + 22, characteristics, true);
+        view.setUint16(0x80 + 24, magic, true);
+        return String.fromCharCode(...bytes);
+    };
+    files.put('C:\\GAME\\app.exe', image(0x102, 0x10b));
+    files.put('C:\\GAME\\app64.exe', image(0x22, 0x20b));
+    files.put('C:\\GAME\\lib.dll', image(0x2102, 0x10b));
+    files.put('C:\\GAME\\dos.exe', 'MZ' + '\0'.repeat(0x3e));
+    files.put('C:\\GAME\\tool.com', '\xb4\x4c\xcd\x21');
+    files.put('C:\\GAME\\readme.txt', 'hello');
+    for (const [name, kind] of /** @type {[string, number][]} */ ([['app.exe', 0],
+        ['app64.exe', 6], ['dos.exe', 1], ['tool.com', 1]]))
+    {
+        memory.putString(NAME, `C:\\GAME\\${name}`);
+        assert.equal(await fns.GetBinaryTypeA.handler([NAME, OUT_COUNT]), 1, name);
+        assert.equal(memory.dword(OUT_COUNT), kind, name);
+    }
+    memory.putString(NAME, 'C:\\GAME\\lib.dll');
+    assert.equal(await fns.GetBinaryTypeA.handler([NAME, OUT_COUNT]), 0);
+    assert.equal(error.code, 193, 'ERROR_BAD_EXE_FORMAT');
+    putWide(memory, NAME, 'C:\\GAME\\readme.txt');
+    assert.equal(await fns.GetBinaryTypeW.handler([NAME, OUT_COUNT]), 0);
+    putWide(memory, NAME, 'C:\\GAME\\none.exe');
+    assert.equal(await fns.GetBinaryTypeW.handler([NAME, OUT_COUNT]), 0);
+    assert.equal(error.code, 2);
+});
