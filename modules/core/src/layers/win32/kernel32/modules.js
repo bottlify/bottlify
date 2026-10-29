@@ -22,6 +22,12 @@
 
 import { encodeAnsi } from './locale.js';
 
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
 /** A module name is at most this long; longer is a pointer that is not a string. */
 const MAX_NAME = 260;
 
@@ -181,6 +187,12 @@ export function createModuleFunctions(host){
             }
             return base;
         };
+        // An empty name names no file; the search would find the program's
+        // own directory and answer with whatever it holds.
+        if (name.trim() === '')
+        {
+            return settle(0);
+        }
         const answer = loadOnce(name, flags);
         // The directory SetDllDirectory named, for a bare name nothing else
         // found. Windows looks there before the system directories rather
@@ -310,6 +322,12 @@ export function createModuleFunctions(host){
         return text.length;
     };
 
+    /** A NULL name, or the reserved file handle given: no library, and nothing read. */
+    const noName = ()=>{
+        host.setLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+
     /** @param {number} handle */
     const freeLibrary = handle=>{
         const module = host.byBase(handle >>> 0) ?? host.dataFile?.(handle >>> 0) ?? null;
@@ -335,7 +353,8 @@ export function createModuleFunctions(host){
         LoadLibraryA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>load(host.readCString(name >>> 0, MAX_NAME)),
+            handler: ([name])=>((name >>> 0) === 0 ? noName()
+                : load(host.readCString(name >>> 0, WHOLE_NAME))),
         },
 
         /**
@@ -350,24 +369,22 @@ export function createModuleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, file, flags])=>{
-                if ((file >>> 0) !== 0)
+                if ((file >>> 0) !== 0 || (name >>> 0) === 0)
                 {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
+                    return noName();
                 }
-                return load(host.readCString(name >>> 0, MAX_NAME), flags >>> 0);
+                return load(host.readCString(name >>> 0, WHOLE_NAME), flags >>> 0);
             },
         },
         LoadLibraryExW: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, file, flags])=>{
-                if ((file >>> 0) !== 0)
+                if ((file >>> 0) !== 0 || (name >>> 0) === 0)
                 {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
+                    return noName();
                 }
-                return load(host.readWideString(name >>> 0, MAX_NAME * 2), flags >>> 0);
+                return load(host.readWideString(name >>> 0, WHOLE_NAME * 2), flags >>> 0);
             },
         },
 
@@ -385,7 +402,7 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>{
-                dllDirectory = (path >>> 0) === 0 ? null : host.readCString(path >>> 0, MAX_NAME);
+                dllDirectory = (path >>> 0) === 0 ? null : host.readCString(path >>> 0, WHOLE_NAME);
                 return 1;
             },
         },
@@ -515,7 +532,7 @@ export function createModuleFunctions(host){
 
                 const wanted = isOrdinal(name >>> 0)
                     ? `#${name >>> 0}`
-                    : host.readCString(name >>> 0, MAX_NAME);
+                    : host.readCString(name >>> 0, WHOLE_NAME);
                 const address = isOrdinal(name >>> 0)
                     ? module.addressOfOrdinal(name >>> 0)
                     : module.addressOf(wanted);
@@ -534,7 +551,8 @@ export function createModuleFunctions(host){
         LoadLibraryW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>load(host.readWideString(name >>> 0, MAX_NAME * 2)),
+            handler: ([name])=>((name >>> 0) === 0 ? noName()
+                : load(host.readWideString(name >>> 0, MAX_NAME * 2))),
         },
 
         /**

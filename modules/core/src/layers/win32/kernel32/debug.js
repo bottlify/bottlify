@@ -44,7 +44,7 @@ export function createDebugFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                host.say(host.readWideString(text >>> 0, MAX_TRACE));
+                host.say(host.readWideString(text >>> 0, MAX_TRACE * 2));
                 return 0;
             },
         },

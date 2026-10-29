@@ -2022,6 +2022,180 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Decision.** Left in: it is fewer instructions on every path that has such an access, and
   no workload measured here runs one hot; not measured apart on the others.
 
+### 2026-10-29: the flag record not taken back after a guest call, measured again on the arm64 model
+
+- **Idea.** The idea of the 2026-10-28 entry (measured there on x64): after a guest call made as
+  a wasm call the region reloads the callee's flag record for every field its body uses; where
+  the code at the return address writes every arithmetic flag before it reads one or leaves
+  (`flagsLiveAt(next)` has no arithmetic flag), take back the flags word alone (it holds DF)
+  and empty the record's locals (`clearRecord`, kind EAGER).
+- **Workload.** cork-asm on the Crysis timedemo's 21 main-thread regions (n14 block profile),
+  macOS arm64 model: node 26.12.1 arm64 (V8 14.6) under qemu-aarch64 8.2.2,
+  `--no-wasm-bounds-checks`, `--atomic`, RAM at 0; machine instructions an executed guest
+  instruction, deterministic (one run an arm).
+- **Values.** On cork2-x64 at 8740b9eb with the linked call's single load (an earlier form of
+  fe40382e): 5.413 without, 5.411 with (-0.04 %). Record loads after a call 0.038 -> 0.016 an
+  executed guest instruction; the "after the call" part 10.8 -> 12.0 instructions a call.
+- **Why.** Under the macOS model (no explicit bounds checks) V8 already drops a reload whose
+  value nothing reads; the reloads left are live through the shared epilogue's stores, and the
+  zeros put in their place cost a move each at the joins after the call, about what the loads
+  did.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), shared with other runs.
+- **Decision.** Not taken.
+
+### 2026-10-29: a guest call's depth and budget tests as one condition
+
+- **Idea.** Before a guest call made as a wasm call, `depth >= LIMIT` and `budget <= 0` were
+  two branches to the plain way out; or'ed into one condition V8 makes a cmp, a ccmp and one
+  branch on arm64. Tried as `geU` and as `depth & -LIMIT` (LIMIT a power of two).
+- **Workload.** As the entry above (cork-asm, arm64 model, 21 regions, n14 profile).
+- **Values.** At the same tree: 5.413 with two branches; one condition by `geU` 5.417
+  (+0.07 %), by the mask 5.418 (+0.09 %). The call site's test stays four instructions either
+  way: V8 moves 256 into a register to compare it (`geU`), or makes an `and` and a `cmp` of the
+  mask, before the ccmp.
+- **Machine.** As above.
+- **Decision.** Not taken. (The linked call's key and top tests as one condition did pay on
+  arm64, fe40382e: both compare against a register or a small immediate.)
+
+### 2026-10-29: every planned access off a lone register takes its displacement as its offset
+
+- **Idea.** cfd605d0 gives a planned access off esp alone esp as its address and the
+  displacement (0 to 64 KiB) as the load's or store's own offset, so V8 makes one address of esp
+  for all of them. The same for any lone base register (ebp frames, struct pointers).
+- **Workload.** As the entries above.
+- **Values.** At the same tree with the esp form: 5.385 -> 5.384 (-0.02 %).
+- **Why.** The hot planned accesses off other registers are few here; reads are mostly wrapped
+  (`wrappedFirst` already shares a wrapped sum among a block's fields).
+- **Machine.** As above.
+- **Decision.** Not taken: off a pointer in the top 64 KiB the sum, not wrapped at 4 GiB, would
+  trap where a wrapped sum reads the null page, for 0.02 %.
+
+### 2026-10-29: a cmovcc from a register as a select
+
+- **Idea.** Every 32-bit cmovcc as a `select` of the source and the destination under the
+  condition, where it was a branch over the write: V8 makes a conditional move of a select,
+  and the branch left two paths whose register merges a loop paid on both.
+- **Workload.** cork-bench, x87 images; `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64, `--predictable --no-liftoff
+  --no-wasm-dynamic-tiering`; machine instructions an iteration in V8's printed wasm code, one
+  run an arm (the base ran twice: the same count on every workload but vcall, 1,701,852 and
+  1,710,564). Base 3078203.
+- **Values.** Base, then every cmovcc a select: tree 2,848,928 -> 2,800,184 (-1.7 %), game
+  1,091,219 -> 1,138,179 (+4.3 %); vm, sort, fmath, str, crc, switch unchanged; vcall 1,699,241.
+- **Why.** game's clamp (`cmp eax, ecx; cmovg eax, ecx`, ecx 31) as a select had V8 hold the
+  constant in a register of its own across its loop and spill others for it: in the main
+  region's executed code (tools/wasm-grind.mjs listing, warm 1000 + 300 iterations) stack-slot
+  loads and stores rose from 129 M to 154 M and register moves from 109 M to 128 M. tree's
+  gain is a cmov from memory (`cmovae edi, [eax+4]`), whose read happens anyway.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Taken from memory only (4f54a94: tree -1.71 %, game unchanged); a cmovcc from a
+  register stays a branch.
+
+### 2026-10-29: an x87 integer store through the quadword saturating conversion
+
+- **Idea.** fist/fistp of a dword or a word without `precise`: the rounded value through
+  `i64.trunc_sat_f64_s`, its low half stored and its range tested as one unsigned compare of the
+  quadword, where `i32.trunc_sat_f64_s` and two compares of the double were.
+- **Workload.** The machine code V8 14.6 (node 26.12.1, x64) makes of `fldcw; fistp dword;
+  fldcw` (`tools/cork-asm.mjs --hex`), counted by hand. Not measured under valgrind.
+- **Values.** The quadword conversion is 8 instructions (a rounding, cvttsd2siq, its
+  conversion back, a compare into a mask, a move out of it, an and, a test, a branch) where the
+  dword one is 6; with the integer range test and the NaN's own compare, 19 for the store
+  against 17.
+- **Why.** V8 tests a quadword conversion for saturation by converting back, as it does the
+  dword one, and adds a mask's move out of the vector register.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU).
+- **Decision.** Not taken: the value plus 1.5 * 2^52 went in instead (1a635af, 11 instructions,
+  no branch; game -2.64 %).
+
+### 2026-10-29: a self-loop that only reads, hoisted as a loop with stores is
+
+- **Idea.** A self-loop whose streams only read, where reads go untested, hoisted as
+  `emitHoistedLoop` hoists one with a store stream: the window tested, a copy whose reads go
+  unwrapped for the turns it cleared, back to the test when they are spent, the checked copy
+  when it fails. Left unhoisted since bcd3a03a, before the unchecked copy counted its turns on
+  the budget (3441019).
+- **Workload.** As the entry above (`ir.sh`, one run an arm). Arms: on 4f54a94's cmov change
+  (unpublished then) with and without the hoisting; and on 1a635af with read streams tested
+  against RAM alone (ab41509's window, then still over a movs copy's source too), with and
+  without it.
+- **Values.** With the pages' flags as the window: crc 1,721,137 -> 1,659,826 (-3.6 %), str
+  2,959,943 -> 2,751,410 (-7.0 %), sort 2,639,133 -> 2,759,666 (+4.6 %). With the window a
+  compare against RAM: crc 1,716,203 -> 1,654,826 (-3.6 %), str 2,952,739 -> 2,708,935
+  (-8.3 %), sort 2,606,244 -> 2,679,031 (+2.8 %). The other workloads unchanged.
+- **Why.** sort's partition scans (`while (v[i] < p) i++`) run a few turns an entry, and an
+  entry paid the window, the turns' setup and two wasm loop heads, each V8's stack check and
+  the alignment padding before it, which the counts include (nops run 2.5 M times in qs).
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken in this shape; a loop that only reads is hoisted as one, with no
+  loop around the test (`emitReadLoop`, the change after this entry's).
+
+### 2026-10-29: a single read off a register through the register's wrapped sum
+
+- **Idea.** `wrappedFirst` shares the sum of a read's registers, wrapped into RAM, among the
+  block's reads of fields off them, each displacement the load's offset; a read alone in its
+  spread had its whole address wrapped. Taking a lone read with a small displacement (0 up to
+  64 KiB) through the wrapped sum too costs the same where it stands (an `and` of the register,
+  the displacement in the load, against a `lea` and an `and`), and the host may share that sum
+  with another block's reads off the register -- tree's lookup reads `[eax+8]` in one block
+  and `[eax]`, `[eax+4]` in the next.
+- **Workload.** cork-bench, x87 images, `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64; one run an arm. Arms: on the read-stream window (then
+  unpublished, a stream of string reads still under it) every small displacement; and on
+  8513591 with the copy run's peel and the read loops in place, any displacement but 0.
+- **Values.** Every small displacement: crc 1,716,203 -> 1,744,169 (+1.6 %), str 2,952,739 ->
+  2,958,363 (+0.2 %), tree 2,800,184 -> 2,747,558 (-1.9 %), switch 471,331 -> 468,593
+  (-0.6 %), vcall 1,701,852 -> 1,714,252 (+0.7 %), game +0.1 %; vm, sort, fmath unchanged.
+  Any but 0: crc 1,630,190 -> 1,658,177 (+1.7 %), str 2,630,056 -> 2,658,590 (+1.1 %), tree
+  -1.9 %, switch -0.6 %, vcall +0.7 %, game +0.1 %.
+- **Why.** Where the sum is shared the host has one more value live across the code between,
+  and its register allocation moved and spilled others for it (crc's literal loop: the same
+  instructions, other registers, a spill more a turn).
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken: a lone read keeps its address wrapped whole.
+
+### 2026-10-29: a loop of several blocks paired up to 64 instructions
+
+- **Idea.** A small loop of several blocks runs two turns a wasm turn (`emitPairedRange`)
+  when its blocks hold at most `PAIRED_MAX` (32) instructions; twice that takes in more loops.
+- **Workload.** cork-bench, x87 images, `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64; one run an arm, on 30c1205.
+- **Values.** The loops it adds: one in switch, one in vcall, none in the others. switch
+  447,918 -> 447,918, fmath 623,156 -> 623,156, tree 2,756,671 -> 2,756,671, vcall 1,701,852
+  -> 1,713,971 (+0.7 %).
+- **Why.** Not measured; the larger body did not take V8's turn test off enough turns to pay
+  for its size.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken: the limit stays 32.
+
+### 2026-10-29: entry-test locals for jumps forward, and locals cleared in shallower loops
+
+- **Idea.** The local that lets a jump pass a block's entry test it passed before
+  (`planTestedOnce`) given also (a) to blocks only a jump forward reaches past their test, and
+  (b) to blocks whose way back to such a jump runs through a block that changes the test's
+  registers or reaches the host, that block clearing it, where every such block lay in fewer
+  of the program's loops (jumps to an address no higher, calls and returns aside) than the
+  block itself.
+- **Workload.** cork-bench, x87 images, `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64; one run an arm, on 30c1205.
+- **Values.** Taken (jumps back, nothing cleared): game 1,062,421 -> 1,030,109, the others
+  unchanged. With (a): game the same, sort 2,605,293 -> 2,661,731 (+2.2 %), crc 1,630,190 ->
+  1,628,053 (-0.1 %). With (a) and (b): crc 1,550,288 (-4.9 %), game 1,021,043 (-3.9 %), sort
+  2,724,988 (+4.6 %); with every clearing block allowed, sort +5.2 %. Other workloads
+  unchanged in every arm.
+- **Why.** Sort: one more local live across a large function, and V8 spilled and moved others
+  for it, the jumps forward rarely passing a test; with (b) the locals of its partition's
+  blocks cleared by the recursive call's pushes and pops. Not measured which of crc's locals
+  gave its 4.9 %; its one cleared local sits on a cold path, so it may be the same
+  allocation's luck the other way.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Neither taken: a jump back only, nothing on its way clearing the local.
+
 ### 2026-10-29: long mode's owed compare result answered for je/jne by an i64 compare
 
 - **Idea.** With a `cmp` whose result its block's final branch leaves unmade at 64 bits too

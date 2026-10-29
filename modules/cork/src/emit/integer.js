@@ -422,74 +422,88 @@ function linkedCall(e, target){
     // any top, as a function that does something -- its top and empty code
     // read as one halfword, which is `ANY_TOP` only then. An empty slot's
     // halfword is 0 and a removed one's has the top 0xff (`entries.js`), so
-    // neither passes for a call to address 0 or all ones. Two branches, not
-    // one condition: V8 makes a flag of each comparison it ors.
+    // neither passes for a call to address 0 or all ones. The index, the
+    // label and that halfword come in one load: a direct call's slot is a
+    // constant address past what an arm64 load's offset holds, which V8 moves
+    // into a register, two instructions, for each load from it. On an arm64
+    // host the two tests are one condition, which V8 makes a compare and a
+    // conditional compare before one branch; an x64 host has no conditional
+    // compare, and V8 makes a flag of each comparison it ors, so there they
+    // are two branches, another key straight to the transfer.
+    const key = ()=>(target === null ? b.localGet(Local.eip) : b.i32const(target | 0));
+    const oneTest = context.features?.armHost === true;
     e.open('linked', ValType.i32);
+    e.open('through', EMPTY);
     e.open('anyTop', EMPTY);
+    b.localGet(Local.t2).load('i64', { offset: 4, align: 2 }).localTee(Local.t64);
     b.localGet(Local.t2).load('i32');
-    if (target === null)
+    key();
+    b.op(I32.ne);
+    if (!oneTest)
     {
-        b.localGet(Local.eip);
+        b.unlikely().brIf(e.depthOf('through'));
     }
-    else
+    b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap).i32const(ANY_TOP).op(I32.ne);
+    if (oneTest)
     {
-        b.i32const(target | 0);
+        b.op(I32.or);
     }
-    b.op(I32.ne).unlikely().brIf(e.depthOf('anyTop'));
-    b.localGet(Local.t2).load('i32_16u', { offset: 10 }).i32const(ANY_TOP).op(I32.ne)
-        .unlikely().brIf(e.depthOf('anyTop'));
-    countLinked(e);
-    b.localGet(Local.t2).load('i32_16u', { offset: 8 });
-    for (let local = Local.budget; local < STATE_PARAMS; local++)
-    {
-        b.localGet(local);
-    }
-    b.localGet(Local.t2).load('i32', { offset: 4 });
-    b.callIndirect(context.regionType, 0);
+    b.unlikely().brIf(e.depthOf('anyTop'));
+    linkedCallOf(e);
     b.br(e.depthOf('linked'));
     e.close();
-    // Anything else, out of the way: a slot holding the target compiled for
-    // the top the machine has is called the same way, the rest goes through
-    // the transfer. The index, the label, the top and the empty code in one
-    // word, the call taking two of them: with an empty code of 0 the top two
-    // bytes are the top.
-    b.localGet(Local.t2)
-        .load('i64', { offset: 4, align: 2 }).localTee(Local.t64)
-        .i64const(48n).op(I64.shrU).op(I64.wrap).localTee(Local.t0);
-    b.i32const(ANY_TOP).op(I32.eq).localGet(Local.t0);
+    // Out of the way: a slot holding the target compiled for the top the
+    // machine has is called the same way, the rest goes through the
+    // transfer. Under one test the key is read again, as the low half of a
+    // quadword: read as above, V8 would take the one read and the comparison
+    // a value kept for both ways, made with a `cset` on the way nearly every
+    // call goes.
+    if (oneTest)
+    {
+        b.localGet(Local.t2).load('i64').op(I64.wrap);
+        key();
+        b.op(I32.ne).brIf(e.depthOf('through'));
+    }
+    // With an empty code of 0 the halfword is the top.
+    b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap);
     atState(context, b).load('i32_8u', { offset: layout.x87Top });
-    b.op(I32.eq).op(I32.or);
-    b.localGet(Local.t2).load('i32');
+    b.op(I32.eq);
     if (target === null)
     {
         // An empty slot's key is 0 and a removed one's all ones: a call to
         // either address goes through the transfer, which faults it.
-        b.localGet(Local.eip).op(I32.eq).op(I32.and)
-            .localGet(Local.eip).i32const(1).op(I32.add).i32const(1).op(I32.gtU).op(I32.and);
+        b.localGet(Local.eip).i32const(1).op(I32.add).i32const(1).op(I32.gtU).op(I32.and);
     }
-    else
-    {
-        b.i32const(target | 0).op(I32.eq).op(I32.and);
-    }
-    b.op(I32.eqz);
-    e.openIf('unlinked', ValType.i32);
+    b.op(I32.eqz).brIf(e.depthOf('through'));
+    linkedCallOf(e);
+    b.br(e.depthOf('linked'));
+    e.close();
     b.localGet(Local.eip);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
         b.localGet(local);
     }
     b.call(/** @type {number} */ (context.transfer));
-    b.else();
+    e.close();
+}
+
+/**
+ * The slot's function called through the table, its index and label taken
+ * from the word `linkedCall` read into `t64`.
+ *
+ * @param {E} e
+ */
+function linkedCallOf(e){
+    const { b, context } = e;
     countLinked(e);
-    b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).i32const(0xffff).op(I32.and);
+    // Masked as a quadword: V8 takes the shift and the mask as one `ubfx`.
+    b.localGet(Local.t64).i64const(32n).op(I64.shrU).i64const(0xffffn).op(I64.and).op(I64.wrap);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
         b.localGet(local);
     }
     b.localGet(Local.t64).op(I64.wrap);
     b.callIndirect(context.regionType, 0);
-    e.close();
-    e.close();
 }
 
 /**
@@ -1032,15 +1046,31 @@ export function emitInstruction(e, instruction, flagsLive){
             stackAccess(e, dst.size);
             {
                 const popped = dst.size === 8 ? Local.t64b : Local.t1;
+                const run = stackRun(e, 'pop');
+                if (run !== null)
+                {
+                    // A run of pops reads each off esp as the run found it,
+                    // which moves once, at the last (`stackRun`).
+                    b.localGet(registerLocal(e, 4))
+                        .load('i32', { offset: e.layout.ramBase + run.offset }).localSet(popped);
+                    if (run.last)
+                    {
+                        addStack(e, run.moves);
+                    }
+                    writeOp(e, dst, ()=>b.localGet(popped));
+                    return true;
+                }
                 b.localGet(Local.addr).load(dst.size === 8 ? 'i64'
                     : dst.size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
                     .localSet(popped);
                 if (dst.kind === 'mem')
                 {
-                    prepare(e, dst.base === 4
-                        ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 } : dst,
-                    { store: true });
-                    writeOp(e, dst, ()=>b.localGet(popped));
+                    // The same operand to both: its address, the incremented
+                    // esp's, is the one the store goes to however it is taken.
+                    const moved = dst.base === 4
+                        ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 } : dst;
+                    prepare(e, moved, { store: true });
+                    writeOp(e, moved, ()=>b.localGet(popped));
                     addStack(e, dst.size);
                     return true;
                 }
@@ -1160,6 +1190,16 @@ export function emitInstruction(e, instruction, flagsLive){
             if (dst.kind === 'rel')
             {
                 return true; // the block's exit does the jump
+            }
+            if (casesByEntry(e))
+            {
+                // The way out of the cases: the target read as before.
+                prepare(e, dst);
+                readOp(e, dst);
+                b.localSet(Local.eip);
+                e.exitDynamic(Exit.UNTRANSLATED);
+                e.dead = true;
+                return true;
             }
             prepare(e, dst);
             readOp(e, dst);
@@ -1585,6 +1625,23 @@ export function emitInstruction(e, instruction, flagsLive){
                     prepare(e, src);
                     readOp(e, src);
                     b.localSet(Local.t1);
+                    if (src.kind === 'mem')
+                    {
+                        // A select of what the read loaded anyway: the host makes
+                        // a conditional move of it, where a branch over the write
+                        // left two paths whose register merges a loop paid on
+                        // both (cork-bench tree -1.7 %). From a register it stays
+                        // a branch: the host holds the source live for its move
+                        // across the loop, a clamp's constant too, and spilled
+                        // others for it (game +4.3 %).
+                        writeOp(e, dst, ()=>{
+                            b.localGet(Local.t1);
+                            readOp(e, dst);
+                            e.pushCondition(/** @type {number} */ (instruction.cc));
+                            b.select();
+                        });
+                        return true;
+                    }
                     e.pushCondition(/** @type {number} */ (instruction.cc));
                     e.openIf('move', EMPTY);
                     writeOp(e, dst, ()=>b.localGet(Local.t1));
@@ -1800,7 +1857,8 @@ export function prepare(e, operand, options){
     if (operand.kind === 'mem')
     {
         e.folded = null;
-        if (wrappedFirst(e, operand, options?.store === true))
+        if (wrappedFirst(e, operand, options?.store === true)
+            || boundedRead(e, operand, options?.store === true))
         {
             return;
         }
@@ -1869,6 +1927,150 @@ function wrappedFirst(e, operand, store){
     return true;
 }
 
+/** By block, the registers' bounds before each of its instructions (`registerBounds`). @type {WeakMap<object, number[][]>} */
+const boundsByBlock = new WeakMap();
+
+/** Operations that write no general register, the flags and memory aside. */
+const WRITE_NO_REGISTER = new Set(['cmp', 'test', 'nop', 'bt', 'clc', 'stc', 'cmc', 'cld', 'std']);
+
+/**
+ * The largest value each general register can hold before each instruction of
+ * a block, from what the block itself wrote: a zero extension of a byte or a
+ * word, an `and` with a constant, a shift right by one, a constant moved in,
+ * a register cleared, a copy of one already bounded. -1 where nothing bounds
+ * it -- every register at the block's start, any write not followed here, and
+ * all of them after an operation that may write registers it does not name.
+ *
+ * @param {import('../region.js').Block} block
+ * @returns {number[][]}  by instruction, the eight registers' bounds before it
+ */
+function registerBounds(block){
+    let found = boundsByBlock.get(block);
+    if (found !== undefined)
+    {
+        return found;
+    }
+    found = [];
+    let bounds = new Array(8).fill(-1);
+    for (const instruction of block.instructions)
+    {
+        found.push(bounds);
+        bounds = bounds.slice();
+        const { op, operands, prefixes } = instruction;
+        const [dst, src] = operands;
+        const reg = dst?.kind === 'reg' ? /** @type {number} */ (dst.reg) : -1;
+        const whole = reg >= 0 && dst.size === 4;
+        const value = src?.kind === 'imm' ? /** @type {number} */ (src.value) >>> 0
+            : src?.kind === 'reg' && src.size === 4 ? bounds[/** @type {number} */ (src.reg)] : -1;
+        if (prefixes.lock || prefixes.rep || prefixes.repne)
+        {
+            bounds.fill(-1);
+            continue;
+        }
+        if (WRITE_NO_REGISTER.has(op) || op.startsWith('j') || dst?.kind === 'mem'
+            && (op === 'mov' || INT_RMW.has(op)))
+        {
+            continue;
+        }
+        if (!whole || !BOUND_WRITES.has(op) || operands.length > 2)
+        {
+            if (reg >= 0 && dst.size === 1 && !dst.high && op === 'mov' && bounds[reg] >= 0)
+            {
+                // A low byte written over a bounded register.
+                bounds[reg] = (bounds[reg] | 0xff) >>> 0;
+                continue;
+            }
+            if (reg >= 0 && (dst.size < 4 || BOUND_WRITES.has(op)) && SINGLE_WRITES.has(op))
+            {
+                bounds[reg] = -1;
+                continue;
+            }
+            bounds.fill(-1);
+            continue;
+        }
+        const known = (/** @type {number} */ bound)=>(bound < 0 ? 0xffffffff : bound);
+        switch (op)
+        {
+            case 'movzx':
+                bounds[reg] = src.size === 1 ? 0xff : 0xffff;
+                break;
+            case 'mov':
+                bounds[reg] = value;
+                break;
+            case 'and':
+                bounds[reg] = Math.min(known(bounds[reg]), known(value)) >>> 0;
+                bounds[reg] = bounds[reg] === 0xffffffff ? -1 : bounds[reg];
+                break;
+            case 'shr':
+                bounds[reg] = src?.kind === 'imm'
+                    ? Math.floor(known(bounds[reg]) / 2 ** (/** @type {number} */ (src.value) & 31))
+                    : -1;
+                break;
+            case 'xor': case 'sub':
+                bounds[reg] = src?.kind === 'reg' && src.reg === reg ? 0 : -1;
+                break;
+            default:
+                bounds[reg] = -1;
+        }
+    }
+    boundsByBlock.set(block, found);
+    return found;
+}
+
+/** Writes of a whole register `registerBounds` follows. */
+const BOUND_WRITES = new Set(['movzx', 'mov', 'and', 'shr', 'xor', 'sub']);
+/** Integer operations whose memory destination is read and written. */
+const INT_RMW = new Set(['add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'inc', 'dec', 'not',
+    'neg', 'shl', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr']);
+/** Operations that write their first operand, a register, and no other. */
+const SINGLE_WRITES = new Set([...INT_RMW, 'mov', 'movzx', 'movsx', 'lea', 'imul', 'bsf', 'bsr',
+    'bswap', 'shld', 'shrd']);
+
+/**
+ * A read left untested (`wrapsRead`) whose registers the block bounded
+ * (`registerBounds`) so that every byte it can reach lies in RAM: its address
+ * is then the one the wrap into RAM leaves as it is, so none is made, and the
+ * displacement becomes the load's own offset -- a table read through a zero
+ * extended byte (a CRC's, a decoder's), one index masked. Only a scaled index
+ * and a base the block bounded, a displacement not negative.
+ *
+ * @param {E} e @param {Operand} operand @param {boolean} store
+ * @returns {boolean}  whether the address is in `addr`, the read's test made
+ */
+function boundedRead(e, operand, store){
+    const index = operand.index ?? -1;
+    const base = operand.base ?? -1;
+    if (isLong(e) || index < 0 && base < 0 || operand.addressSize === 16 || operand.segment === 4
+        || operand.segment === 5 || e.memPlan?.access != null || !wrapsRead(e, store))
+    {
+        return false;
+    }
+    const block = e.region.blocks[e.blockIndex];
+    if (block.instructions[e.at] !== e.current)
+    {
+        // Emitted outside the block's own walk (a copy loop's element).
+        return false;
+    }
+    const bounds = registerBounds(block)[e.at];
+    const disp = operand.disp ?? 0;
+    if (disp < 0 || base >= 0 && bounds[base] < 0 || index >= 0 && bounds[index] < 0)
+    {
+        return false;
+    }
+    const reach = disp + (base >= 0 ? bounds[base] : 0)
+        + (index >= 0 ? bounds[index] * (operand.scale ?? 1) : 0) + Math.max(operand.size, 1);
+    if (reach > e.layout.ramSize)
+    {
+        return false;
+    }
+    const { b } = e;
+    const local = e.foldedSumLocal();
+    emitAddress(e, { ...operand, disp: 0 }, false);
+    b.localTee(local).i32const(disp).op(I32.add).localSet(Local.addr);
+    e.folded = { operand, local, offset: disp };
+    return true;
+}
+
 /**
  * The displacement a read's wrapped sum adds to its registers (`wrappedFirst`):
  * none for one under `WRAPPED_DISPLACEMENT` and not negative, the sum the
@@ -1926,8 +2128,51 @@ export function readAddress(e, operand){
         e.b.localGet(folded.local);
         return e.layout.ramBase + folded.offset;
     }
-    e.b.localGet(Local.addr);
-    return e.layout.ramBase;
+    return accessAddress(e, operand);
+}
+
+/**
+ * Pushes the address an access of `operand`, its address in `addr`, loads or
+ * stores at and answers the offset the access takes: off esp alone, where the
+ * plan's window test covered it (`stackOffset`), esp itself and the
+ * displacement as the access's own offset; `addr` otherwise.
+ *
+ * @param {E} e @param {Operand} operand
+ * @returns {number}
+ */
+function accessAddress(e, operand){
+    const disp = stackOffset(e, operand);
+    if (disp === null)
+    {
+        e.b.localGet(Local.addr);
+        return e.layout.ramBase;
+    }
+    e.b.localGet(registerLocal(e, 4));
+    return e.layout.ramBase + disp;
+}
+
+/**
+ * The displacement an access off esp alone takes as its own offset, or null:
+ * one the memory plan took (`planned`), whose address is the sum `prepare`
+ * left in `addr` and nothing more, its displacement under 64 KiB and not
+ * negative. Every such access then adds its displacement to one address the
+ * host's compiler makes of esp for all of them -- an arm64 load or store
+ * takes a register and a small offset, not two registers and an offset --
+ * where each added it to esp first, an instruction an access. The sum is not
+ * wrapped at 4 GiB: it differs from the processor's only with esp in the top
+ * 64 KiB, which no thread's stack is. Off another register it would differ
+ * for a pointer in the top 64 KiB too, where a read finds the null page
+ * through a wrapped sum and this one would trap.
+ *
+ * @param {E} e @param {Operand} operand
+ * @returns {number | null}
+ */
+function stackOffset(e, operand){
+    const disp = operand.disp ?? 0;
+    return operand.kind === 'mem' && operand.base === 4 && (operand.index ?? -1) < 0
+        && operand.addressSize !== 16 && operand.segment !== 4 && operand.segment !== 5
+        && !isLong(e) && e.memPlan?.access != null && disp >= 0 && disp < WRAPPED_DISPLACEMENT
+        ? disp : null;
 }
 
 /**
@@ -2136,11 +2381,13 @@ function fieldsRead(e){
     if (fields === undefined)
     {
         fields = new Map();
-        /** Registers some access other than a plain read goes through. */
-        const written = new Set();
         for (const instruction of block.instructions)
         {
-            const reads = readsOnly(instruction);
+            if (!readsOnly(instruction))
+            {
+                // Tested whole, whatever else goes through its registers.
+                continue;
+            }
             for (const operand of instruction.operands)
             {
                 if (operand.kind !== 'mem')
@@ -2148,19 +2395,10 @@ function fieldsRead(e){
                     continue;
                 }
                 const key = /** @type {string} */ (fieldKey(e, instruction, operand));
-                if (!reads)
-                {
-                    written.add(key);
-                    continue;
-                }
                 const disps = fields.get(key) ?? new Set();
                 disps.add(operand.disp ?? 0);
                 fields.set(key, disps);
             }
-        }
-        for (const key of written)
-        {
-            fields.delete(key);
         }
         fieldsByBlock.set(block, fields);
     }
@@ -2339,9 +2577,11 @@ export function writeOp(e, operand, pushValue, exact = false){
                 orderedStore(e, operand.size, pushValue);
                 return;
             }
-            b.localGet(Local.addr);
-            pushValue();
-            b.store(storeKind(operand.size), { offset: e.layout.ramBase });
+            {
+                const offset = accessAddress(e, operand);
+                pushValue();
+                b.store(storeKind(operand.size), { offset });
+            }
             return;
         default:
             throw new Error(`emit: cannot write a ${operand.kind} operand`);
@@ -2517,6 +2757,19 @@ export function push(e, size, pushValue){
     // which itself waits for the access check so a fault leaves esp as it was.
     pushValue();
     b.localSet(Local.t2);
+    const run = stackRun(e, 'push');
+    if (run !== null && looseStackStore(e, size))
+    {
+        // A run of pushes stores each below esp as the run found it, which
+        // moves once, at the last (`stackRun`).
+        b.localGet(run.base).localGet(Local.t2)
+            .store(storeKind(size), { offset: e.layout.ramBase + run.offset });
+        if (run.last)
+        {
+            b.localGet(run.base).localSet(registerLocal(e, 4));
+        }
+        return;
+    }
     b.localGet(registerLocal(e, 4)).i32const(size).op(I32.sub).localSet(Local.addr);
     if (!looseStackStore(e, size))
     {
@@ -2526,6 +2779,86 @@ export function push(e, size, pushValue){
     b.localGet(Local.addr).localGet(Local.t2)
         .store(storeKind(size), { offset: e.layout.ramBase });
     b.localGet(Local.addr).localSet(registerLocal(e, 4));
+}
+
+/** The shortest run of pushes or of pops `stackRun` moves esp once for. */
+const STACK_RUN = 3;
+
+/**
+ * Where the push or the pop being emitted stores or loads when it is one of a
+ * run of them that moves esp once: dword pushes of a register other than esp
+ * or of an immediate, ended by a direct call's push of its return address, or
+ * dword pops into a register other than esp, one instruction after another in
+ * the block, under loose stacks, none of them with a window test of the plan
+ * before it. Nothing in such a run can leave the region -- its accesses go
+ * untested, its values are registers and constants -- nor read esp, so esp
+ * between them is never seen: a push's store goes to its own offset off esp
+ * as it is after the run, taken once (`base`), and a pop's load to its own
+ * offset off esp as it was before it, which stays until the last moves it by
+ * the whole run (`moves`). Each access then adds its offset to one address
+ * the host's compiler makes for them all -- an arm64 store or load takes a
+ * register and a small offset -- where each moved esp first, an instruction
+ * an access. Null for any other push or pop.
+ *
+ * @param {E} e @param {'push' | 'pop'} kind
+ * @returns {{ base: number, offset: number, last: boolean, moves: number } | null}
+ */
+function stackRun(e, kind){
+    const { emitting } = e;
+    if (e.context.looseStacks !== true || isLong(e) || emitting === null)
+    {
+        return null;
+    }
+    let run = e.stackRun;
+    if (run === null || run.instructions !== emitting.instructions || run.kind !== kind
+        || e.at <= run.from || e.at >= run.from + run.length)
+    {
+        const length = stackRunLength(emitting.instructions, emitting.plan, e.at, kind);
+        if (length < STACK_RUN)
+        {
+            return null;
+        }
+        run = { instructions: emitting.instructions, kind, from: e.at, length,
+            base: kind === 'push' ? e.stackRunLocal() : registerLocal(e, 4) };
+        e.stackRun = run;
+        if (kind === 'push')
+        {
+            e.b.localGet(registerLocal(e, 4)).i32const(4 * length).op(I32.sub).localSet(run.base);
+        }
+    }
+    const j = e.at - run.from;
+    return { base: run.base, offset: 4 * (kind === 'push' ? run.length - 1 - j : j),
+        last: j === run.length - 1, moves: 4 * run.length };
+}
+
+/**
+ * How many instructions from `from` on make a run of `kind` (`stackRun`).
+ *
+ * @param {Instruction[]} instructions @param {Map<number, { checks: unknown[] }>} plan
+ * @param {number} from @param {'push' | 'pop'} kind
+ */
+function stackRunLength(instructions, plan, from, kind){
+    let j = from;
+    for (; j < instructions.length; j++)
+    {
+        const { op, operands: [operand] } = instructions[j];
+        if (j > from && (plan.get(j)?.checks.length ?? 0) > 0)
+        {
+            break;
+        }
+        if (kind === 'push' && op === 'call' && operand?.kind === 'rel')
+        {
+            j++;
+            break;
+        }
+        const plain = operand?.kind === 'reg' ? operand.reg !== 4
+            : kind === 'push' && operand?.kind === 'imm';
+        if (op !== kind || operand?.size !== 4 || !plain)
+        {
+            break;
+        }
+    }
+    return j - from;
 }
 
 // --- arithmetic ---
@@ -4706,6 +5039,61 @@ function stringInstruction(e, instruction){
         }
         e.pending = null;
     }
+    return true;
+}
+
+/**
+ * A switch's jump at 32 bits whose table read goes untested (`wrapsRead`) and
+ * lies in RAM: the index picks its table entry by a `br_table` before any
+ * read, and each entry that named a case when the region was formed is read
+ * at its own address, a constant, and compared with that case -- where the
+ * target read first took the index's sum, its wrap into RAM and a load, and
+ * then the `br_table`. The read is the processor's: an entry inside the
+ * table is the address the wrapped one reads. An index past the table, an
+ * entry written since, or one naming no case leaves the cases for the jump's
+ * own read and exit, which the caller emits after. False, and nothing
+ * emitted, for any other jump.
+ *
+ * @param {E} e
+ */
+function casesByEntry(e){
+    const { b } = e;
+    const table = e.region.blocks[e.blockIndex].exit.table;
+    if (table === undefined || isLong(e) || !wrapsRead(e, false)
+        || table.address + 4 * table.entries.length > e.layout.ramSize)
+    {
+        return false;
+    }
+    const taken = table.entries.map(target=>e.labels.has(target));
+    if (!taken.some(Boolean))
+    {
+        return false;
+    }
+    // Charged once, at the block's depth, for every way out below.
+    e.charge();
+    e.open('switchOut', EMPTY);
+    const arms = table.entries.map((_, i)=>i).filter(i=>taken[i]);
+    for (let k = arms.length - 1; k >= 0; k--)
+    {
+        e.open(`entry${k}`, EMPTY);
+    }
+    b.localGet(registerLocal(e, table.index));
+    b.brTable(table.entries.map((_, i)=>{
+        const k = arms.indexOf(i);
+        return k < 0 ? e.depthOf('switchOut') : e.depthOf(`entry${k}`);
+    }), e.depthOf('switchOut'));
+    for (let k = 0; k < arms.length; k++)
+    {
+        e.close();
+        const target = table.entries[arms[k]];
+        b.i32const(table.address + 4 * arms[k]).load('i32', { offset: e.layout.ramBase })
+            .i32const(target | 0).op(I32.eq);
+        e.openIf('case');
+        e.jumpTo(target);
+        e.close();
+        b.br(e.depthOf('switchOut'));
+    }
+    e.close();
     return true;
 }
 

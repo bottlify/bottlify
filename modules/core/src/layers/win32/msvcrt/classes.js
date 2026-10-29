@@ -20,7 +20,7 @@
  * and `dynamic_cast` read as they read a compiler's.
  */
 
-import { undecorateType } from './undname.js';
+import { undecorateName, undecorateType } from './undname.js';
 
 /** Where an exception keeps its message, and whether it owns it. */
 const NAME = 4;
@@ -408,25 +408,23 @@ export function createClassFunctions(host){
          *                 void *(*alloc)(size_t), void (*free)(void *), unsigned short flags)
          *
          * Into the caller's buffer when it gives one, else into memory from
-         * its allocator; null for a name this runtime cannot undecorate.
+         * its allocator. A name that cannot be read comes back as it is, as
+         * the runtime answers one; a type descriptor's `?A` name reads as
+         * the type, so a program asking about one sees type_info's answer.
          */
         __unDName: {
             convention: 'cdecl',
             argBytes: 24,
             /** @param {number[]} args */
-            handler: async([buffer, mangled, length, allocate])=>{
+            handler: async([buffer, mangled, length, allocate, , flags])=>{
                 const thread = host.currentThread?.();
                 if ((mangled >>> 0) === 0)
                 {
                     return 0;
                 }
                 const text = readString(mangled);
-                const undecorated = text.startsWith('?') && !text.startsWith('?A')
-                    ? null : undecorateType(text);
-                if (undecorated === null)
-                {
-                    return 0;
-                }
+                const undecorated = (text.startsWith('?A') ? undecorateType(text) : null)
+                    ?? undecorateName(text, flags & 0xffff);
                 const bytes = new Uint8Array(undecorated.length + 1);
                 bytes.set([...undecorated].map(character=>character.charCodeAt(0) & 0xff));
                 if ((buffer >>> 0) !== 0)

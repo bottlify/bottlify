@@ -380,7 +380,7 @@ export function createMspatchaFunctions(host){
     /** @param {number} address */
     const ansi = address=>host.readCString(address >>> 0, MAX_NAME);
     /** @param {number} address */
-    const wide = address=>host.readWideString(address >>> 0, MAX_NAME);
+    const wide = address=>host.readWideString(address >>> 0, MAX_NAME * 2);
 
     /**
      * ApplyPatchToFileByBuffers and its test: the patch and the old file in

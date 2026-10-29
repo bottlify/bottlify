@@ -189,18 +189,18 @@ test('a held pointer and a scheduled click and key are forwarded per frame', ()=
         '4:pointerButton:false', '5:key:true', '6:key:false']);
 });
 
-test('a process-replace is recorded', ()=>{
+test('a child process is recorded', ()=>{
     const app = fakeApp();
     /** @type {any} */
     const collected = { failures: [], missing: [], output: [], events: [] };
     listen(app, collected);
 
-    app.emit('process-replace', { image: 'C:\\App\\Child.exe', sequenceBase: 42 });
+    app.emit('process-child', { image: 'C:\\App\\Child.exe', commandLine: 'Child.exe' });
 
     assert.ok(collected.events.some(
-        (/** @type {string} */ line)=>line.startsWith('[process-replace]')
+        (/** @type {string} */ line)=>line.startsWith('[process-child]')
             && line.includes('Child.exe')),
-    `a handover is in the report: ${collected.events.join(' | ')}`);
+    `a child is in the report: ${collected.events.join(' | ')}`);
 });
 
 test('the draw-path counters are folded by module', t=>{

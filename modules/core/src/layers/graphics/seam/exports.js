@@ -23,7 +23,7 @@
  * `opengl/exports.js` keeps rather than written out here.
  */
 
-import { ARGUMENT_WORDS } from '../opengl/exports.js';
+import { ARGUMENT_WORDS, floatArguments } from '../opengl/exports.js';
 import { createGlu } from '../glu/exports.js';
 import { createComObject } from '../../win32/ole32/objects.js';
 import { createCountCells, createPublisher } from './com.js';
@@ -162,6 +162,13 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        Whether Direct3D 8 and 9 answer and record in the guest -- the state
  *        block, the command ring, the getters and the counts -- or trap every
  *        call; on unless false.
+ * @param {4 | 8} [deps.pointerSize]
+ *        8 for a 64-bit process: what Direct3D 9 and OpenGL lay out and write
+ *        back as a pointer or a handle is eight bytes there, and guest code,
+ *        which is i386, is off.
+ * @param {(value: number) => void} [deps.floatResult]
+ *        Where a method's float answer goes when the caller reads it from a
+ *        register the bridge does not set: XMM0, in a 64-bit process.
  * @param {string[]} [deps.guestTraps]
  *        With guest code on, the parts of it kept as traps all the same: methods
  *        by name, or the groups `getters`, `ring`, `locks`, `levels` and
@@ -187,13 +194,14 @@ export function createGraphicsLibraries(
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
         gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil, presented,
-        refresh = ()=>refreshOf(screen()), guestCode = true, phases, ringBytes,
-        guestTraps = [],
+        refresh = ()=>refreshOf(screen()), guestCode: guestCodeAsked = true, phases, ringBytes,
+        guestTraps = [], pointerSize = 4, floatResult,
         schedule = (ms, run)=>{
             setTimeout(run, ms);
         } },
 )
 {
+    const guestCode = guestCodeAsked && pointerSize === 4;
     const publisher = shared ?? createPublisher({
         publishInterface, unpublishInterface,
         cells: guestCode && !guestTraps.includes('counts') && allocate && memory?.readU32
@@ -337,7 +345,7 @@ export function createGraphicsLibraries(
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
         waitUntil, presented, refresh, phases, allocate: guestAllocate,
         allocateCode: guestAllocateCode,
-        traps: new Set(guestTraps), ringBytes,
+        traps: new Set(guestTraps), ringBytes, pointerSize, floatResult,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
@@ -437,8 +445,11 @@ export function createGraphicsLibraries(
             // the runtime's table is fixed once it is built.
             /** @type {((args: number[]) => number) | null} */
             let resolved = null;
+            const floats = floatArguments(name);
             openglTable[name] = {
                 argBytes: Number(words) * 4,
+                // Where a 64-bit caller's floats and doubles are (`floatArguments`).
+                ...floats ? { floats } : {},
                 // GL reports through glGetError and touches nothing of
                 // Win32's; only the wgl half of this library is a Windows
                 // API and may set the thread's last error.

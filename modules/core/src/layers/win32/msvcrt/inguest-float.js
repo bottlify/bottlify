@@ -15,10 +15,11 @@
  * into the runtime's portable bits (`float.h`'s `_MCW_EM`, `_MCW_RC`,
  * `_MCW_PC`, `_MCW_IC`), change the ones the mask names and load the word
  * back -- a precision a program sets is the precision its arithmetic then
- * rounds to -- and `_statusfp` and `_clearfp` read and clear the status
- * word's exception flags. The runtime of a machine with SSE2 changes MXCSR
- * alongside and folds its bits into the answer; this one, as the handler
- * before it, keeps to the x87.
+ * rounds to. `_statusfp` and `_clearfp` read and clear the exception flags
+ * of both units, as msvcrt does on x86: the x87 status word's and MXCSR's,
+ * whose six flags are laid out alike (Wine's kernel32 test_thread_fpu_cw
+ * raises the invalid flag in MXCSR alone and asks `_statusfp` for it). The
+ * control calls keep to the x87.
  *
  * The classifications read a double's bits, as integers: no x87 load, so a
  * signalling NaN raises nothing. `strtod` and `atof` read the text here and
@@ -187,27 +188,31 @@ export function _controlfp_s({ controlWord, setControlWord, setU32 }, current, n
 }
 
 /**
- * unsigned int _statusfp(void) -- the exception flags raised, as the
- * runtime numbers them (`_SW_INVALID` 0x10 ... `_SW_INEXACT` 0x1).
+ * unsigned int _statusfp(void) -- the exception flags raised in either
+ * unit, as the runtime numbers them (`_SW_INVALID` 0x10 ... `_SW_INEXACT`
+ * 0x1).
  *
  * @guestCode cdecl
  * @param {Guest} guest
  * @returns {u32}
  */
-export function _statusfp({ statusWord }){
-    return EXCEPTIONS[statusWord() & 0x3f] >>> 0;
+export function _statusfp({ statusWord, mxcsr }){
+    return EXCEPTIONS[(statusWord() | mxcsr()) & 0x3f] >>> 0;
 }
 
 /**
- * unsigned int _clearfp(void) -- the flags raised, and then cleared.
+ * unsigned int _clearfp(void) -- the flags raised in either unit, and then
+ * cleared in both.
  *
  * @guestCode cdecl
  * @param {Guest} guest
  * @returns {u32}
  */
-export function _clearfp({ statusWord, clearExceptions }){
-    const flags = EXCEPTIONS[statusWord() & 0x3f];
+export function _clearfp({ statusWord, clearExceptions, mxcsr, setMxcsr }){
+    const sse = mxcsr();
+    const flags = EXCEPTIONS[(statusWord() | sse) & 0x3f];
     clearExceptions();
+    setMxcsr(sse & ~0x3f);
     return flags >>> 0;
 }
 
@@ -382,6 +387,10 @@ export function _nextafter({ controlWord, setControlWord, host }, x, y){
  * @returns {f64}
  */
 export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, end){
+    if (text === 0)
+    {
+        return host();
+    }
     let at = text;
     let c = u8(at);
     while (c === 0x20 || c >= 0x09 && c <= 0x0d)
@@ -514,13 +523,17 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
 
 /**
  * double atof(const char *text) -- strtod's reading, and its value, with
- * no end to report.
+ * no end to report. No text is the handler's: zero and EINVAL.
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text
  * @returns {f64}
  */
 export function atof({ u8, controlWord, setControlWord, host }, text){
+    if (text === 0)
+    {
+        return host();
+    }
     let at = text;
     let c = u8(at);
     while (c === 0x20 || c >= 0x09 && c <= 0x0d)

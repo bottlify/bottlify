@@ -35,6 +35,7 @@ export const VT_UI8 = 21;
 export const VT_INT = 22;
 export const VT_UINT = 23;
 export const VT_RECORD = 36;
+export const VT_CLSID = 72;
 
 /** The bits of a VARTYPE that are not the type. */
 export const VT_VECTOR = 0x1000;

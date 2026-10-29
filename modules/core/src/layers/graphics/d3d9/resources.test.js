@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, offsetOfRect,
-    surfaceBytes, surfacePitch,
+    D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, blockAligned,
+    offsetOfRect, surfaceBytes, surfacePitch,
 } from './constants.js';
 import { createDirect3D9 } from './device.js';
 import {
@@ -552,6 +552,20 @@ test('a level smaller than one block still costs a whole block', ()=>{
     assert.equal(surfaceBytes(D3DFMT.DXT1, 2, 2), 8);
     assert.equal(surfaceBytes(D3DFMT.DXT1, 5, 5), 4 * 8);
     assert.equal(surfaceBytes(D3DFMT.DXT5, 3, 9), 1 * 16 * 3);
+});
+
+test('a DXTn top level must be whole blocks; ATI1 and ATI2 may be any size', ()=>{
+    // Wine's test_surface_blocks: the runtime size-checks the core block
+    // formats in every pool, not the drivers' ATI ones, which its lock tests
+    // then create at 257x257 and lock level by level.
+    assert.equal(blockAligned(D3DFMT.DXT1, 257, 257), false);
+    assert.equal(blockAligned(D3DFMT.DXT5, 8, 6), false);
+    assert.equal(blockAligned(D3DFMT.DXT1, 256, 8), true);
+    assert.equal(blockAligned(D3DFMT.ATI1, 257, 257), true);
+    assert.equal(blockAligned(D3DFMT.ATI2, 5, 7), true);
+    assert.equal(blockAligned(D3DFMT.A8R8G8B8, 3, 3), true);
+    assert.equal(surfaceBytes(D3DFMT.ATI1, 257, 257), 65 * 65 * 8);
+    assert.equal(surfacePitch(D3DFMT.ATI2, 257), 65 * 16);
 });
 
 test('an uncompressed format is measured exactly as it always was', ()=>{

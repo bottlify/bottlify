@@ -173,6 +173,23 @@ test('QueueUserAPC refuses a handle that is not a thread, and a null routine', (
     assert.deepEqual(m.errors, [6, 6]);
 });
 
+test('QueueUserAPC2 with no flags is QueueUserAPC; a special user APC is a 64-bit facility', ()=>{
+    // Wine's kernel32 sync test_QueueUserAPC, for a 32-bit process.
+    const m = machine();
+    m.worker.alertable = false;
+    assert.equal(m.apcs.table.QueueUserAPC2.argBytes, 16);
+
+    assert.equal(m.apcs.table.QueueUserAPC2.handler([0x00405000, 0x44, 7, 0]), 1);
+    assert.equal(m.apcs.pending(m.worker), 1);
+    assert.equal(m.apcs.table.QueueUserAPC2.handler([0x00405000, 0x44, 7, 1]), 0);
+    assert.equal(m.errors.at(-1), 50, 'ERROR_NOT_SUPPORTED');
+    assert.equal(m.apcs.table.QueueUserAPC2.handler([0x00405000, 0x44, 7, 2]), 0);
+    assert.equal(m.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(m.apcs.table.QueueUserAPC2.handler([0x00405000, 0x99, 7, 0]), 0);
+    assert.equal(m.errors.at(-1), 6);
+    assert.equal(m.apcs.pending(m.worker), 1, 'nothing more queued');
+});
+
 test('SignalObjectAndWait signals by the object\'s kind, then waits', ()=>{
     const m = machine();
 

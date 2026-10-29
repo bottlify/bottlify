@@ -18,7 +18,7 @@
  * undefined, the choice made here is written down at the function.
  */
 
-import { formatToString, guestAccess, varargsSlots } from './format.js';
+import { formatToString, guestAccess, sequentialArguments, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createSecureFunctions } from './secure.js';
 import { createErrorFunctions, messageOf } from './errors.js';
@@ -26,7 +26,7 @@ import { createConversionFunctions } from './convert.js';
 import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
 import { createTimeFunctions } from './time.js';
-import { createPathFunctions } from './paths.js';
+import { createPathFunctions, splitSearch } from './paths.js';
 import {
     createWideFunctions, createWideClassificationFunctions, createMultiByteFunctions,
 } from './mbstring.js';
@@ -43,14 +43,20 @@ import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
+import { createSortFunctions } from './sort.js';
+import { createRestartableFunctions } from './mbstate.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
-import { createDescriptors, createIoFunctions } from './io.js';
+import { createDescriptors, createIoFunctions, O_BINARY } from './io.js';
+import { withPipes } from './pipes.js';
 import { createEnvironment } from './environ.js';
 import { createMultiBytePage } from './mbcs.js';
 import { createLocaleFunctions } from './locale.js';
 import { createProcessFunctions } from './process.js';
-import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
+import { O_UNICODE, bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+
+/** A double the code reads as its two halves, which a 64-bit caller passes in XMM0. */
+const DOUBLE_HALVES = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
@@ -64,6 +70,23 @@ const MAX_STRING = 1 << 20;
 
 /** The largest number `rand` produces, which a caller scales its range by. */
 const RAND_MAX = 0x7fff;
+
+/** `_TRUNCATE`: a count that asks for as much as fits. */
+const TRUNCATE = 0xffffffff;
+
+/** `_set_output_format`'s one flag. */
+const TWO_DIGIT_EXPONENT = 1;
+
+/** The last category setlocale takes: LC_ALL is 0, LC_TIME 5. */
+const LC_MAX = 5;
+
+/** `_O_TEXT`, one of the two modes `_set_fmode` takes besides the Unicode ones. */
+const O_TEXT = 0x4000;
+
+/** The streams msvcrt allows open at once: 512 to start, 20 to 2048 when set. */
+const DEFAULT_STDIO = 512;
+const MIN_STDIO = 20;
+const MAX_STDIO = 2048;
 
 /** The variable `srand` and `rand` keep the generator in, and where it starts. */
 export const RAND_SEED = '_holdrand';
@@ -193,6 +216,11 @@ const seededCode = (made, argBytes, handler)=>({
  *           runtime's own copy of it follows. Absent, the default one.
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
+ * @property {() => string} [imagePath]
+ *           Where the program's image is, as GetModuleFileName(NULL) names it:
+ *           `_pgmptr`. Absent, `_pgmptr` and its kin stay unexported.
+ * @property {(type: number, source: number, count: number, out: number) => number}
+ *           [stringTypes]  kernel32's GetStringTypeW, for `__crtGetStringTypeW`.
  * @property {number} [processId]  What `_getpid` answers: GetCurrentProcessId's number.
  * @property {(code: number) => any} [exitProcess]
  * @property {(code: number) => void} [exit]
@@ -249,6 +277,12 @@ export function createMsvcrtFunctions(host){
         host.writeMemory(pointer, packInto(new Uint8Array(text.length + 1), text));
     };
 
+    /** What `_set_output_format` was given: `_TWO_DIGIT_EXPONENT` or nothing. */
+    let outputFormat = 0;
+
+    /** The least digits of %e's exponent. */
+    const exponentDigits = ()=>((outputFormat & TWO_DIGIT_EXPONENT) !== 0 ? 2 : 3);
+
     /**
      * What a narrow printer writes: %S and %ls read wide strings, and the
      * text is bytes under the C locale (see `formatToString`), held in the
@@ -257,7 +291,8 @@ export function createMsvcrtFunctions(host){
      * @param {number} format @param {number[]} values
      */
     const narrowText = (format, values)=>formatToString(readString(format), values, readString,
-        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi, ...memoryAccess });
+        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
+            exponentDigits: exponentDigits(), ...memoryAccess });
 
     /** @param {number[]} args @param {number} fixed */
     const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));
@@ -294,7 +329,42 @@ export function createMsvcrtFunctions(host){
      * @param {number} format @param {number[]} values
      */
     const wideText = (format, values)=>formatToString(readWide(format), values, readString,
-        { readWideString: readWide, wide: true, ...memoryAccess });
+        { readWideString: readWide, wide: true, exponentDigits: exponentDigits(),
+            ...memoryAccess });
+
+    /**
+     * The `_p` printers' text: a format that names its arguments' positions
+     * read as the ordinary one it amounts to (`sequentialArguments`).
+     *
+     * @param {number} format @param {number[]} values @param {boolean} wide
+     */
+    const positionalText = (format, values, wide)=>{
+        const text = wide ? readWide(format) : readString(format);
+        const reordered = sequentialArguments(text, values);
+        return formatToString(reordered?.format ?? text, reordered?.slots ?? values, readString,
+            wide ? { readWideString: readWide, wide: true, exponentDigits: exponentDigits(),
+                ...memoryAccess }
+                : { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
+                    exponentDigits: exponentDigits(), ...memoryAccess });
+    };
+
+    /**
+     * The `_vswprintf_c` family's answer: the text and its terminator when
+     * both fit in `size` characters, else as much as fits with one and -1.
+     *
+     * @param {number} buffer @param {number} size @param {string} text
+     */
+    const cutWide = (buffer, size, text)=>{
+        const room = size >>> 0;
+        if ((buffer >>> 0) === 0 || room === 0)
+        {
+            errno(EINVAL);
+            return -1;
+        }
+        const kept = text.slice(0, room - 1);
+        host.writeMemory(buffer, bytesOfUnits([...unitsOfText(kept), 0]));
+        return text.length < room ? text.length : -1;
+    };
 
     /**
      * The _snwprintf family's answer: at most `count` characters, terminated
@@ -405,7 +475,16 @@ export function createMsvcrtFunctions(host){
             errno(EINVAL);
             return -1;
         }
-        const text = narrowText(format, values);
+        return boundedText(buffer, room, narrowText(format, values));
+    };
+
+    /**
+     * What a secure printer writes of a text in `room` bytes: all of it and
+     * its terminator, or an empty string, -1 and ERANGE.
+     *
+     * @param {number} buffer @param {number} room @param {string} text
+     */
+    const boundedText = (buffer, room, text)=>{
         if (text.length + 1 > room)
         {
             host.writeMemory(buffer, new Uint8Array(1));
@@ -496,14 +575,17 @@ export function createMsvcrtFunctions(host){
          * locale with no data behind it here, which is reported as the
          * divergence it is and refused, the way an unset locale is on the
          * real runtime: the previous setting stands and null comes back.
-         * `locale` is read before `category` is used for anything, since a
-         * query (`locale` null) never touches the category at all.
+         * A category past LC_TIME is no category, and null.
          */
         setlocale: {
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, locale])=>{
+            handler: ([category, locale])=>{
+                if ((category >>> 0) > LC_MAX)
+                {
+                    return 0;
+                }
                 if (locale !== 0 && readString(locale) !== 'C' && readString(locale) !== '')
                 {
                     host.divergence?.('setlocale',
@@ -588,11 +670,15 @@ export function createMsvcrtFunctions(host){
          *
          * Questions about the bits of a double on the stack, answered in EAX
          * by code in the guest (`inguest-float.js`) that reads them as integers:
-         * no FPU, so they are here rather than with the maths.
+         * no FPU, so they are here rather than with the maths. The code takes
+         * the double as its two halves; a 64-bit caller passes it in XMM0.
          */
-        _isnan: guestEntry(inGuestFloat._isnan, FLOAT_CODE._isnan, {}),
-        _finite: guestEntry(inGuestFloat._finite, FLOAT_CODE._finite, {}),
-        _fpclass: guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
+        _isnan: { ...guestEntry(inGuestFloat._isnan, FLOAT_CODE._isnan, {}),
+            floats: DOUBLE_HALVES },
+        _finite: { ...guestEntry(inGuestFloat._finite, FLOAT_CODE._finite, {}),
+            floats: DOUBLE_HALVES },
+        _fpclass: { ...guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
+            floats: DOUBLE_HALVES },
 
         /**
          * unsigned int _control87(unsigned int newControl, unsigned int mask),
@@ -754,6 +840,137 @@ export function createMsvcrtFunctions(host){
             },
         },
 
+        /** int _vswprintf(wchar_t *buffer, const wchar_t *format, va_list args) -- vswprintf */
+        _vswprintf: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([buffer, format, list])=>{
+                const text = wideText(format, varargsAt(list));
+                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
+                return text.length;
+            },
+        },
+
+        /**
+         * int _vswprintf_l(wchar_t *buffer, const wchar_t *format, _locale_t locale,
+         *                  va_list args)
+         *
+         * The `_l` printers take a locale, and the C locale is the only one a
+         * program can hold here.
+         */
+        _vswprintf_l: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, format, , list])=>{
+                const text = wideText(format, varargsAt(list));
+                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
+                return text.length;
+            },
+        },
+
+        /**
+         * int _vswprintf_c(wchar_t *buffer, size_t size, const wchar_t *format, va_list args)
+         * int _vswprintf_c_l(..., _locale_t locale, va_list args)
+         * int _vswprintf_p_l(..., _locale_t locale, va_list args) -- positions named
+         *
+         * At most `size` characters with the terminator: the text, or what
+         * fits of it terminated and -1.
+         */
+        _vswprintf_c: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, list])=>
+                cutWide(buffer, size, wideText(format, varargsAt(list))),
+        },
+        _vswprintf_c_l: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, , list])=>
+                cutWide(buffer, size, wideText(format, varargsAt(list))),
+        },
+        _vswprintf_p_l: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, , list])=>
+                cutWide(buffer, size, positionalText(format, varargsAt(list), true)),
+        },
+
+        /** int _vscwprintf(const wchar_t *format, va_list args) -- the length of the text */
+        _vscwprintf: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([format, list])=>{
+                if ((format >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return -1;
+                }
+                return wideText(format, varargsAt(list)).length;
+            },
+        },
+
+        /**
+         * int _vsnwprintf_s(wchar_t *buffer, size_t size, size_t count,
+         *                   const wchar_t *format, va_list args)
+         *
+         * At most `count` characters and a terminator in a buffer of `size`;
+         * cut short, -1 with what fit kept under _TRUNCATE or a count the
+         * buffer holds. A count the buffer cannot hold for a text that does
+         * not fit empties the buffer with ERANGE; no buffer, size or format
+         * is EINVAL -- as _vsnprintf_s, in wide characters.
+         */
+        _vsnwprintf_s: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([buffer, size, count, format, list])=>{
+                const room = size >>> 0;
+                if ((buffer >>> 0) === 0 || room === 0 || (format >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return -1;
+                }
+                const text = wideText(format, varargsAt(list));
+                const truncate = (count >>> 0) === TRUNCATE;
+                const limit = truncate ? room - 1 : Math.min(count >>> 0, room - 1);
+                if (!truncate && (count >>> 0) > room - 1 && text.length > room - 1)
+                {
+                    host.writeMemory(buffer, new Uint8Array(2));
+                    errno(ERANGE);
+                    return -1;
+                }
+                const kept = text.slice(0, limit);
+                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(kept), 0]));
+                return text.length > limit ? -1 : text.length;
+            },
+        },
+
+        /**
+         * int _vsprintf_p(char *buffer, size_t size, const char *format, va_list args)
+         *
+         * vsprintf_s with the arguments named by position: `%2$s %1$d`.
+         */
+        _vsprintf_p: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, list])=>{
+                if ((buffer >>> 0) === 0 || (format >>> 0) === 0 || (size >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return -1;
+                }
+                return boundedText(buffer, size >>> 0,
+                    positionalText(format, varargsAt(list), false));
+            },
+        },
+
         /**
          * int sprintf_s(char *buffer, size_t size, const char *format, ...)
          *
@@ -841,9 +1058,12 @@ export function createMsvcrtFunctions(host){
 
     // The descriptor table the low-level calls hand out numbers from and the
     // streams stand on, so `_fileno(f)` is a number `_read` accepts.
-    const descriptors = host.files
+    // The volume with `_pipe`'s pipes in it, which the descriptors and
+    // streams on one read and write as they do a file.
+    const files = host.files ? withPipes(host.files) : null;
+    const descriptors = files
         ? createDescriptors({
-            files: host.files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
+            files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
             handles: host.handles,
             writeMemory: host.writeMemory,
             ioinfo: ()=>host.addressOf?.('__pioinfo') ?? 0,
@@ -865,10 +1085,12 @@ export function createMsvcrtFunctions(host){
             readCString: host.readCString,
             allocate: host.allocate,
             free: host.free,
-            files: host.files,
+            files,
             write: host.write,
             iob: host.iob,
             errno,
+            errnoValue: ()=>globals.get(errnoName()),
+            exponentDigits,
             descriptors: descriptors ?? undefined,
             varargs: varargsAt,
             setRegisters: host.setRegisters,
@@ -892,6 +1114,8 @@ export function createMsvcrtFunctions(host){
     // by as the `_mbs*` family does.
     const multiBytePage = createMultiBytePage();
 
+    let maxStdio = DEFAULT_STDIO;
+
     const narrow = {
         ...table,
         ...createStringFunctions({
@@ -903,6 +1127,18 @@ export function createMsvcrtFunctions(host){
             errno,
         }),
     };
+
+    const wideClasses = createWideClassificationFunctions();
+    const secure = createSecureFunctions({ readMemory: host.readMemory,
+        writeMemory: host.writeMemory, errno });
+    const wideStrings = createWideFunctions({
+        pointerSize: host.pointerSize,
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        readCString: host.readCString,
+        errno,
+        ...host.allocate ? { allocate: host.allocate } : {},
+    });
 
     return {
         ...narrow,
@@ -916,9 +1152,8 @@ export function createMsvcrtFunctions(host){
             divergence: host.divergence,
             page: multiBytePage,
         }),
-        ...createWideClassificationFunctions(),
-        ...createSecureFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
-            errno }),
+        ...wideClasses,
+        ...secure,
         ...createErrorFunctions({
             writeMemory: host.writeMemory,
             allocate,
@@ -927,6 +1162,106 @@ export function createMsvcrtFunctions(host){
             doserrno: ()=>globals.get('doserrno'),
             setDoserrno: code=>globals.set('doserrno', code),
         }),
+
+        /**
+         * int *__p___mb_cur_max(void): where `__mb_cur_max` holds the widest
+         * multibyte character of the locale (`___mb_cur_max_func`, locale.js).
+         */
+        __p___mb_cur_max: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>(host.addressOf?.('__mb_cur_max') ?? 0)
+                || globals.address('mb_cur_max', 1),
+        },
+
+        /**
+         * void _invalid_parameter(const wchar_t *expression, const wchar_t *function,
+         *     const wchar_t *file, unsigned int line, uintptr_t reserved)
+         *
+         * msvcrt.dll keeps no handler to call, and returns: the caller goes
+         * on to answer its own failure (Wine's msvcrt test__invalid_parameter).
+         * The runtimes that keep one end the process here instead (msvcr80.js).
+         */
+        _invalid_parameter: { convention: 'cdecl', argBytes: 20, handler: ()=>0 },
+
+        /**
+         * unsigned int _get_output_format(void) and
+         * unsigned int _set_output_format(unsigned int format)
+         *
+         * Whether %e and %g write the exponent in two digits at least
+         * (`_TWO_DIGIT_EXPONENT`) rather than three; the set answers the one
+         * before.
+         */
+        _get_output_format: { convention: 'cdecl', argBytes: 0, handler: ()=>outputFormat },
+        _set_output_format: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([format])=>{
+                const previous = outputFormat;
+                outputFormat = format & TWO_DIGIT_EXPONENT;
+                return previous;
+            },
+        },
+
+        /** errno_t _get_fmode(int *mode): `_fmode`; no pointer is EINVAL. */
+        _get_fmode: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return EINVAL;
+                }
+                const bytes = new Uint8Array(4);
+                new DataView(bytes.buffer).setInt32(0, globals.get('fmode'), true);
+                host.writeMemory(pointer, bytes);
+                return 0;
+            },
+        },
+
+        /**
+         * errno_t _set_fmode(int mode): `_O_TEXT` or `_O_BINARY` -- or a
+         * Unicode translation -- into `_fmode`; anything else is EINVAL.
+         */
+        _set_fmode: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([mode])=>{
+                if (![O_TEXT, O_BINARY, ...O_UNICODE].includes(mode | 0))
+                {
+                    errno(EINVAL);
+                    return EINVAL;
+                }
+                globals.set('fmode', mode | 0);
+                return 0;
+            },
+        },
+
+        /**
+         * int _setmaxstdio(int count) / int _getmaxstdio(void)
+         *
+         * How many streams may be open at once: msvcrt takes 20 to 2048 and
+         * answers the count, -1 for one outside; streams here are not
+         * counted against it, so the number is only kept.
+         */
+        _setmaxstdio: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([count])=>{
+                if ((count | 0) < MIN_STDIO || (count | 0) > MAX_STDIO)
+                {
+                    return -1;
+                }
+                maxStdio = count | 0;
+                return maxStdio;
+            },
+        },
+        _getmaxstdio: { convention: 'cdecl', argBytes: 0, handler: ()=>maxStdio },
 
         /** errno_t rand_s(unsigned int *value) -- from the machine's random source */
         rand_s: {
@@ -943,14 +1278,28 @@ export function createMsvcrtFunctions(host){
                 return 0;
             },
         },
-        ...createWideFunctions({
-            pointerSize: host.pointerSize,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            readCString: host.readCString,
-            errno,
-            ...host.allocate ? { allocate: host.allocate } : {},
-        }),
+        ...wideStrings,
+        ...createRestartableFunctions({ readMemory: host.readMemory,
+            writeMemory: host.writeMemory, readCString: host.readCString, errno }),
+
+        // The `_l` forms take a locale, and the C locale is the only one a
+        // program can hold here: each is its plain form, the locale an
+        // argument more the caller cleans up.
+        ...Object.fromEntries(/** @type {[string, Record<string, any>, string, number][]} */ ([
+            ['_strnicmp_l', narrow, '_strnicmp', 16], ['_memicmp_l', narrow, '_memicmp', 16],
+            ['_tolower_l', narrow, 'tolower', 8], ['_toupper_l', narrow, 'toupper', 8],
+            ['_stricmp_l', narrow, '_stricmp', 12],
+            ['_wcsicmp_l', wideStrings, '_wcsicmp', 12],
+            ['_wcsnicmp_l', wideStrings, '_wcsnicmp', 16],
+            ['_towlower_l', wideClasses, 'towlower', 8],
+            ['_towupper_l', wideClasses, 'towupper', 8],
+        ]).filter(([, from, plain])=>from[plain])
+            .map(([name, from, plain, argBytes])=>[name, { ...from[plain], argBytes }])),
+
+        /**
+         * size_t __strncnt(const char *string, size_t count): strnlen.
+         */
+        __strncnt: secure.strnlen,
         ...createConversionFunctions({
             pointerSize: host.pointerSize,
             ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
@@ -960,14 +1309,24 @@ export function createMsvcrtFunctions(host){
             allocate,
             fpu: host.fpu,
             errno,
+            ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
         }),
         ...createScanFunctions(host),
+        ...createSortFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            callGuest: host.callGuest,
+            errno,
+            ...host.currentThread ? { currentThread: host.currentThread } : {},
+        }),
         ...createCxxFunctions(host),
         ...createProcessFunctions({
             errno,
             readCString: readString,
             readU32: at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
                 .getUint32(0, true),
+            allocate,
+            writeMemory: host.writeMemory,
             ...host.launch ? { launch: host.launch } : {},
             ...host.closeHandle ? { closeHandle: host.closeHandle } : {},
             callGuest: host.callGuest,
@@ -1011,6 +1370,14 @@ export function createMsvcrtFunctions(host){
                 writeMemory: host.writeMemory,
                 allocate: host.allocate,
                 commandLine: host.commandLine,
+                ...host.imagePath ? { imagePath: host.imagePath } : {},
+                ...host.files ? {
+                    expand: (/** @type {string} */ pattern)=>{
+                        const { directory, pattern: last } = splitSearch(pattern);
+                        return host.files.list(directory, last)
+                            ?.map((/** @type {{ name: string }} */ entry)=>entry.name) ?? null;
+                    },
+                } : {},
                 callGuest: host.callGuest,
                 currentThread: host.currentThread,
                 exitProcess: host.exitProcess,
@@ -1080,8 +1447,9 @@ export function createMsvcrtFunctions(host){
                 readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 readCString: host.readCString,
-                files: host.files,
+                files,
                 errno,
+                doserrno: code=>globals.set('doserrno', code),
                 divergence: host.divergence,
                 setRegisters: host.setRegisters,
             }, descriptors)
@@ -1151,13 +1519,52 @@ export function createMsvcrtFunctions(host){
                 },
             }
             : {}),
-        ...(host.threads ? createThreadFunctions(host.threads) : {}),
+        ...(host.threads ? createThreadFunctions({
+            ...host.threads,
+            // `_beginthread`'s start routine, which ends in the runtime's own
+            // `_endthread`, and its block on the runtime's heap.
+            ...host.addressOf && host.allocate && host.free && host.allocateCode
+                && host.closeHandle && host.currentThread
+                ? {
+                    runtime: {
+                        endthread: ()=>/** @type {(name: string) => number} */ (
+                            host.addressOf)('_endthread'),
+                        allocate: host.allocate,
+                        free: host.free,
+                        allocateCode: host.allocateCode,
+                        readMemory: host.readMemory,
+                        writeMemory: host.writeMemory,
+                        closeHandle: host.closeHandle,
+                        currentThreadId: ()=>host.currentThread?.()?.id ?? 0,
+                    },
+                }
+                : {},
+        }) : {}),
+
+        /**
+         * BOOL __crtGetStringTypeW(DWORD unused, DWORD type, const wchar_t *source,
+         *                          int count, WORD *types)
+         *
+         * GetStringTypeW behind an argument of the runtime's own: the same
+         * answer, refusals included, as the system's call.
+         */
+        ...host.stringTypes ? {
+            __crtGetStringTypeW: {
+                convention: 'cdecl',
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([, type, source, count, types])=>
+                    /** @type {NonNullable<typeof host.stringTypes>} */ (host.stringTypes)(
+                        type >>> 0, source >>> 0, count | 0, types >>> 0),
+            },
+        } : {},
         ...(host.fpu
             ? createMathFunctions({
                 readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 fpu: host.fpu,
                 errno,
+                pointerSize: host.pointerSize ?? 4,
                 ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
             })
             : {}),

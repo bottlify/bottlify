@@ -55,7 +55,7 @@ import { emitInstruction } from './integer.js';
 import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
-    planLoop, planRegion, readsWrapped,
+    planLoop, planRegion, readsWrapped, registersChanged,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { LONG_SCRATCH, WIDTH_32, widthOf } from './width.js';
@@ -416,8 +416,14 @@ export function prepareModule(m, layout, features, memory = {},
     {
         throw new Error('emit: a 64-bit layout needs a flag record and SIMD');
     }
+    // At least the guest's RAM, which every memory a module is given holds:
+    // the host's compiler then knows a constant address inside it in bounds,
+    // and compares a word there in place, where with one page it loaded the
+    // word as well (a switch's table entry, x64).
+    const ramPages = Math.ceil(((layout.ramBase ?? 0) + layout.ramSize) / 65536);
     m.importMemory('env', 'memory', {
-        min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
+        min: Math.max(1, Math.min(ramPages, memory.maxPages ?? ramPages)),
+        ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
         shared: memory.shared ?? false,
     });
     const bases = importBases(m, layout);
@@ -1093,6 +1099,9 @@ export class RegionEmitter {
             (region.bytes ?? 0) * 16)))));
         /** @type {Map<number, number>} */
         this.labels = new Map(this.region.blocks.map((block, index)=>[block.start, index]));
+        /** By block start, its index in the region as formed, for a diagnostic build's marks. */
+        this.formedIndex = import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.markBlocks
+            ? new Map(region.blocks.map((block, index)=>[block.start, index])) : null;
         /** @type {string[]} the open control labels, innermost last */
         this.controls = [];
         /** @type {Map<string, number[]>} by label, where in `controls` it is open */
@@ -1162,6 +1171,12 @@ export class RegionEmitter {
          * @type {import('./memory.js').RegionPlan | null}
          */
         this.memoryPlan = null;
+        /**
+         * By block, the local that says its entry test passed for what the
+         * registers it tests from hold now (`planTestedOnce`).
+         * @type {Map<number, number>}
+         */
+        this.testedOnce = new Map();
         /** Whether the block's port write called the host from here and went on. */
         this.trapped = false;
         /** Blocks emitted as loops onto themselves. */
@@ -1260,9 +1275,12 @@ export class RegionEmitter {
         /** The block emitted before this one, whose record's kind a guess may take. */
         this.lastEmitted = -1;
         /** The ranges being emitted, innermost last (`emitRange`).
-         * @type {{ lo: number, hi: number, loop: boolean,
-         *     items: { start: number, end: number, loop: boolean, copy?: boolean }[] }[]} */
+         * @type {{ lo: number, hi: number, loop: boolean, items: { start: number, end: number,
+         *     loop: boolean, copy?: boolean, pair?: boolean }[] }[]} */
         this.ranges = [];
+        /** The loop being emitted two turns a wasm turn, and which turn (`emitPairedRange`).
+         * @type {{ lo: number, hi: number, turn: number } | null} */
+        this.pairing = null;
         /** Whether the current block's remaining instructions are unreachable. */
         this.dead = false;
         /**
@@ -1275,6 +1293,23 @@ export class RegionEmitter {
         this.folded = null;
         /** The i32 local `folded` sums are kept in, -1 until made. */
         this.sumLocal = -1;
+        /**
+         * The block whose instructions are being emitted and their access
+         * plan, which a run of pushes or pops looks along (`stackRun` in
+         * integer.js).
+         * @type {{ instructions: import('../decode/decoder.js').Instruction[],
+         *     plan: Map<number, any> } | null}
+         */
+        this.emitting = null;
+        /**
+         * The run of pushes or pops the block's instructions are in
+         * (`stackRun`), or null.
+         * @type {{ instructions: object[], kind: 'push' | 'pop', from: number,
+         *     length: number, base: number } | null}
+         */
+        this.stackRun = null;
+        /** The i32 local a run of pushes keeps esp in, -1 until made. */
+        this.runLocal = -1;
         /** Instructions retired in the current block so far, to charge at its end. */
         this.blockRetired = 0;
         /** Each block's marks made so far, in a build that marks them (`markBlock`).
@@ -1450,6 +1485,16 @@ export class RegionEmitter {
         }
     }
 
+    /** The i32 local a run of pushes keeps esp as it is after the run in (`stackRun`). */
+    stackRunLocal(){
+        if (this.runLocal < 0)
+        {
+            this.runLocal = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(ValType.i32);
+        }
+        return this.runLocal;
+    }
+
     /** The i32 local a read's wrapped sum is kept in (`folded`). */
     foldedSumLocal(){
         if (this.sumLocal < 0)
@@ -1581,6 +1626,10 @@ export class RegionEmitter {
         this.flowsInto = null;
         this.flagsOut = flagsOut;
         this.memoryPlan = memoryPlan;
+        if (memoryPlan !== null && !flat && !this.copyFunction)
+        {
+            this.planTestedOnce(memoryPlan);
+        }
         this.ranges = [];
         this.emitRange(0, blocks.length - 1, false);
         // Falling out of the last block cannot happen: every block ends with
@@ -2894,6 +2943,95 @@ export class RegionEmitter {
     }
 
     /**
+     * Whether the loop of blocks `lo` to `hi` runs two turns a wasm turn
+     * (`emitPairedRange`): a loop of plain blocks -- none a loop of its own,
+     * none with an entry test, each leaving by a jump, a branch or falling
+     * through, none jumping back but to the head -- of no more than
+     * `PAIRED_MAX` instructions, in the region's own function.
+     *
+     * @param {number} lo @param {number} hi
+     */
+    pairs(lo, hi){
+        if (this.copyFunction || this.copying || hi <= lo || this.entered.has(lo))
+        {
+            return false;
+        }
+        let instructions = 0;
+        for (let i = lo; i <= hi; i++)
+        {
+            const block = this.region.blocks[i];
+            instructions += block.instructions.length;
+            if (i > lo && this.loopEnds.has(i) || this.entryTested(i)
+                || !PAIRED_EXITS.has(block.exit.kind) || this.loopsOntoItself(i))
+            {
+                return false;
+            }
+            for (const target of block.exit.targets)
+            {
+                const at = this.labels.get(target);
+                if (at !== undefined && at >= lo && at <= hi && at <= i && at !== lo)
+                {
+                    return false;
+                }
+            }
+        }
+        return instructions <= PAIRED_MAX;
+    }
+
+    /**
+     * A loop of plain blocks (`pairs`) emitted twice in its wasm loop: the
+     * first turn's jump back to the head goes on into the second turn's head,
+     * forward, with no look at the budget and no wasm loop head (the host's
+     * stack check), and the second's jumps back as any loop's. Each block
+     * charges as it always does, so every way out counts exactly; the budget
+     * is looked at every other turn, and a slice may run a turn past its
+     * budget, as a hoisted self-loop's paired turns do.
+     *
+     * @param {number} lo @param {number} hi
+     */
+    emitPairedRange(lo, hi){
+        const blocks = this.region.blocks;
+        /** @type {{ start: number, end: number, loop: boolean, pair?: boolean }[]} */
+        const first = [];
+        /** @type {{ start: number, end: number, loop: boolean, pair?: boolean }[]} */
+        const second = [];
+        for (let i = lo; i <= hi; i++)
+        {
+            if (i > lo)
+            {
+                first.push({ start: i, end: i, loop: false });
+            }
+            second.push({ start: i, end: i, loop: false, pair: true });
+        }
+        const range = { lo, hi, loop: true, items: first };
+        this.ranges.push(range);
+        for (let k = second.length - 1; k >= 0; k--)
+        {
+            this.open(`d${second[k].start}`, EMPTY);
+        }
+        for (let k = first.length - 1; k >= 0; k--)
+        {
+            this.open(`b${first[k].start}`, EMPTY);
+        }
+        this.pairing = { lo, hi, turn: 1 };
+        this.emitBlock(blocks[lo], lo);
+        for (const item of first)
+        {
+            this.close();
+            this.emitBlock(blocks[item.start], item.start);
+        }
+        this.pairing.turn = 2;
+        range.items = second;
+        for (const item of second)
+        {
+            this.close();
+            this.emitBlock(blocks[item.start], item.start);
+        }
+        this.pairing = null;
+        this.ranges.pop();
+    }
+
+    /**
      * The blocks `lo` to `hi` as the region's structure has them: each a wasm
      * block the code after its end follows, a loop among them as one item
      * whose blocks are a range of their own inside a wasm loop. A branch
@@ -2980,7 +3118,14 @@ export class RegionEmitter {
                 {
                     this.openLoop(`L${item.start}`);
                 }
-                this.emitRange(item.start, item.end, true);
+                if (this.pairs(item.start, item.end))
+                {
+                    this.emitPairedRange(item.start, item.end);
+                }
+                else
+                {
+                    this.emitRange(item.start, item.end, true);
+                }
                 this.close();
                 continue;
             }
@@ -3097,6 +3242,81 @@ export class RegionEmitter {
     }
 
     /**
+     * The blocks whose entry test a jump back may pass by. A test that passed
+     * passes again for the same values of the registers its windows are
+     * placed from, and the pages' flags change only through the host: a
+     * local set at the block's start says the test passed, where every way
+     * from the block back to a jump into its test leaves those registers as
+     * they are and reaches the host nowhere (a call, a port write). A block
+     * one such way changes them in has none: what cleared it would run where
+     * the jumps do -- a sort whose swap calls cleared its outer loop's local
+     * every inner turn ran cork-bench 4.6 % slower. And only a jump back, to
+     * an address no higher than its own, passes by: the locals for jumps
+     * forward into a block, a way past a turn's first part, saved no test a
+     * turn and V8 spilled for them (cork-bench sort +2.2 %). As the hoisted
+     * loop's window (`emitStreamWindow`), what another executor does to the
+     * flags meanwhile goes unseen until the function is left.
+     *
+     * @param {import('./memory.js').RegionPlan} plan
+     */
+    planTestedOnce(plan){
+        const blocks = this.region.blocks;
+        const word = this.width.bits === 64 ? 8 : 4;
+        // By block, the registers it changes, all of them where it may reach
+        // the host and go on.
+        const changed = blocks.map(block=>(block.instructions.some(ins=>HOST_OPS.has(ins.op))
+            ? -1 : registersChanged(block.instructions, word)));
+        /** @type {Map<number, number>} */
+        const index = new Map(blocks.map((block, t)=>[block.start, t]));
+        /** @type {number[][]} by block, the blocks its ways out reach, calls and returns too */
+        const ways = blocks.map(block=>[...jumpsOf(block, this.returns, this.callReturn,
+            this.labels), ...block.exit.targets, block.exit.next]
+            .map(target=>index.get(target ?? -1) ?? -1).filter(t=>t >= 0));
+        /** @type {number[][]} */
+        const from = blocks.map(()=>[]);
+        ways.forEach((targets, s)=>targets.forEach(t=>from[t].push(s)));
+        plan.entry.forEach((windows, t)=>{
+            if (windows.length === 0 || this.testedOnce.size >= TESTED_ONCE_MAX)
+            {
+                return;
+            }
+            let regs = 0;
+            for (const { base, index: by } of windows)
+            {
+                regs |= (base >= 0 ? 1 << base : 0) | (by >= 0 ? 1 << by : 0);
+            }
+            const keeps = (/** @type {number} */ s)=>changed[s] !== -1 && (changed[s] & regs) === 0;
+            const past = [...new Set(from[t])].filter(s=>s !== plan.inherit[t] && s !== t);
+            if (!past.some(s=>keeps(s) && blocks[s].start >= blocks[t].start))
+            {
+                return;
+            }
+            // The blocks on a way from the block back to a jump into its test.
+            const after = reaching([t], ways, -1);
+            const before = reaching(past, from, t);
+            if ([...after].every(s=>keeps(s) || !before.has(s)))
+            {
+                this.testedOnce.set(t, this.localTypes.length + STATE_PARAMS);
+                this.localTypes.push(ValType.i32);
+            }
+        });
+    }
+
+    /**
+     * Before a way into a block's entry test from inside the function: past it,
+     * to the block, where it passed for what the registers hold.
+     *
+     * @param {number} index
+     */
+    passTested(index){
+        const own = this.testedOnce.get(index);
+        if (own !== undefined && !this.copying && this.pairing === null)
+        {
+            this.b.localGet(own).brIf(this.depthOf(`b${index}`));
+        }
+    }
+
+    /**
      * A block's entry test: the windows it takes from the block before it,
      * tested where it is entered otherwise -- by the dispatch, from another
      * region, from the host -- and left untranslated at its start when one is
@@ -3129,6 +3349,11 @@ export class RegionEmitter {
         if (this.copying)
         {
             return this.copies[this.copyAt + 1] ?? -1;
+        }
+        if (this.pairing?.turn === 1 && index === this.pairing.hi)
+        {
+            // The second turn's head follows, not the block after the loop.
+            return -1;
         }
         return index + 1 < this.region.blocks.length ? index + 1 : -1;
     }
@@ -3164,6 +3389,10 @@ export class RegionEmitter {
         {
             this.b.br(this.depthOf(`${this.copying ? 'c' : 'b'}${index}`));
         }
+        else if (this.entryTested(index))
+        {
+            this.passTested(index);
+        }
     }
 
     /**
@@ -3194,6 +3423,13 @@ export class RegionEmitter {
         // Until the next block starts, what is written is this block's: its
         // instructions and its ways out.
         this.b.written = this.blockWrites[index] ??= new Set();
+        const tested = this.testedOnce.get(index);
+        if (tested !== undefined && !this.copying)
+        {
+            // Here past its entry test, or with the windows its test covers
+            // tested before it (`planTestedOnce`).
+            this.b.i32const(1).localSet(tested);
+        }
         if (block.instructions.length === 0)
         {
             this.leaving.add(index);
@@ -3224,15 +3460,21 @@ export class RegionEmitter {
         {
             relaxedFlagReads(block, this.relaxedReads);
         }
-        // A loop that only reads is left unhoisted where reads go untested: its
-        // unchecked copy saved one wrapping `and` a read and cost a turn counter
-        // and the window's test, which a short loop (a strlen, a hash of a
-        // name) never paid back: cork-bench sort -3.1 %, str -1.8 %, crc's
-        // long table walk +0.3 %.
+        // A loop that only reads, where reads go untested, is hoisted only as
+        // one (`emitReadLoop`): the hoisted loop's unchecked copy saved one
+        // wrapping `and` a read and cost a turn counter and the window's test,
+        // which a short loop (a strlen, a hash of a name) never paid back:
+        // cork-bench sort -3.1 %, str -1.8 %, crc's long table walk +0.3 %.
         const planned = this.selfLoop && !x.active && this.layout.codePages < 0
             ? planLoop(block.instructions, this.width.bits === 64) : null;
-        const streams = planned !== null && (planned.streams.some(stream=>stream.store)
+        const reads = planned !== null && this.readsOnlyLoop(block, planned);
+        const streams = planned !== null && (reads || planned.streams.some(stream=>stream.store)
             || !readsWrapped(this.context)) ? planned : null;
+        if (streams !== null && reads)
+        {
+            this.emitReadLoop(block, index, live, streams);
+            return;
+        }
         if (streams !== null)
         {
             this.emitHoistedLoop(block, index, live, streams);
@@ -3486,6 +3728,175 @@ export class RegionEmitter {
     }
 
     /**
+     * Whether a hoisted self-loop goes the way of a loop that only reads
+     * (`emitReadLoop`): reads left untested, no stream that stores, no other
+     * executor to answer (no interrupt word), and every instruction one that
+     * lowers inline and leaves only at the block's end -- so its unchecked
+     * copy, emitted first, never ends early.
+     *
+     * @param {import('../region.js').Block} block
+     * @param {{ streams: import('./memory.js').Stream[], forward: boolean }} streams
+     */
+    readsOnlyLoop(block, streams){
+        return this.width.bits === 32 && this.layout.interrupt === undefined
+            && readsWrapped(this.context) && this.context.precise !== true
+            && streams.streams.every(stream=>!stream.store)
+            && block.instructions.every(ins=>READ_LOOP_OPS.has(ins.op) && !ins.prefixes.lock
+                && !ins.prefixes.rep && !ins.prefixes.repne && !ins.prefixes.address
+                && ins.operands.every(operand=>operand.kind === 'reg' || operand.kind === 'imm'
+                    || operand.kind === 'rel'
+                    || operand.kind === 'mem' && operand.segment !== 4 && operand.segment !== 5));
+    }
+
+    /**
+     * A self-loop that only reads, its streams moved by fixed strides
+     * (`readsOnlyLoop`): the streams' reach for many turns tested once against
+     * RAM itself (a read there is the one wrapped into RAM), then a copy whose
+     * reads go unwrapped for as many turns as that cleared, then -- when the
+     * test fails, or the turns are spent with the loop still going -- the
+     * checked copy to the loop's end. No outer loop goes back to the test, as
+     * the hoisted loop's does (`emitHoistedLoop`): entering one is its stream
+     * test and two wasm loop heads, each the host's stack check and the
+     * padding it aligns the head with, which a short scan (a partition's
+     * `while (v[i] < p) i++`) did not pay back; the reach a range test
+     * clears runs to 64 Ki turns, where a page's flags cleared a page.
+     *
+     * @param {import('../region.js').Block} block @param {number} index
+     * @param {boolean[]} live
+     * @param {{ plan: Map<number, any>, streams: import('./memory.js').Stream[],
+     *     turns: number, forward: boolean, ranges: import('./memory.js').Range[] }} streams
+     */
+    emitReadLoop(block, index, live, streams){
+        const { b } = this;
+        const last = block.instructions[block.instructions.length - 1];
+        const turns = this.localTypes.length + STATE_PARAMS;
+        this.localTypes.push(ValType.i32);
+        const widest = Math.max(...streams.streams.map(stream=>Math.abs(stream.stride)));
+        const reach = Math.max(...streams.streams.map(stream=>stream.hi - stream.lo));
+        // Only a stream whose every read wraps is tested against RAM alone; a
+        // string instruction's is tested by its pages' flags, for the turns a
+        // page's reach allows.
+        const ranged = streams.streams.every(stream=>stream.tested !== true);
+        const many = ranged ? Math.max(streams.turns, Math.min(1 << 16, Math.floor(
+            (this.layout.ramSize / 4 - reach) / Math.max(1, widest)))) : streams.turns;
+        this.loops++;
+        this.open(`selfDone${index}`, EMPTY);
+        this.open(`toChecked${index}`, EMPTY);
+        emitStreamWindow(this, streams.streams, many, streams.forward, streams.ranges);
+        b.op(I32.eqz);
+        b.brIf(this.depthOf(`toChecked${index}`));
+        const paired = many >= 2 && block.instructions.length <= PAIRED_MAX;
+        const cleared = paired ? many & ~1 : many;
+        b.localGet(Local.budget).i32const(cleared * block.instructions.length)
+            .op(I32.sub).localTee(turns).i32const(0)
+            .localGet(turns).i32const(0).op(I32.gtS).select().localSet(turns);
+        this.openLoop(`unchecked${index}`);
+        this.blockDepth = this.controls.length;
+        this.blockRetired = 0;
+        const counted = this.instructions;
+        if (!this.emitInstructions(block, index, live, streams.plan))
+        {
+            throw new Error(`emit: block ${index}'s read loop ended early`);
+        }
+        this.instructions = counted;
+        if (this.blockRetired !== block.instructions.length)
+        {
+            // A turn charged less than its bound was made for would run past
+            // the reach the test cleared.
+            throw new Error(`emit: block ${index}'s unchecked turn charges`
+                + ` ${this.blockRetired}, not ${block.instructions.length}`);
+        }
+        const turn = this.blockRetired;
+        if (paired)
+        {
+            // The first turn's back edge into the second, its count owed into
+            // it; its fall-through charges it below.
+            this.pushBranchCondition(last);
+            this.openIf('taken');
+            this.payResultFor(block.start);
+            this.resultOwed = null;
+            this.pending = null;
+            this.fcmp = null;
+            this.emitInstructions(block, index, live,
+                new Map([...streams.plan].map(([i, slot])=>[i, { ...slot }])));
+            this.instructions = counted;
+            if (this.blockRetired !== 2 * turn)
+            {
+                throw new Error(`emit: block ${index}'s unchecked turns charge`
+                    + ` ${this.blockRetired}, not ${2 * turn}`);
+            }
+            this.charge();
+            this.blockRetired = 0;
+        }
+        else
+        {
+            this.charge();
+        }
+        this.pushBranchCondition(last);
+        this.openIf('taken');
+        b.localGet(Local.budget).localGet(turns).op(I32.leS);
+        this.openGuard('turnsDone');
+        this.spentTest();
+        this.openGuard('spent');
+        this.exitAt(block.start, Exit.BUDGET);
+        this.close();
+        this.payResultFor(block.start);
+        b.br(this.depthOf(`toChecked${index}`));
+        this.close();
+        this.payResultFor(block.start);
+        b.br(this.depthOf(`unchecked${index}`));
+        this.close();
+        this.payResultFor(block.exit.targets[1]);
+        b.br(this.depthOf(`selfDone${index}`));
+        if (paired)
+        {
+            this.close(); // taken
+            this.dead = false;
+            this.blockRetired = turn;
+            this.charge();
+            this.payResultFor(block.exit.targets[1]);
+            b.br(this.depthOf(`selfDone${index}`));
+        }
+        this.resultOwed = null;
+        this.close(); // unchecked
+        this.close(); // toChecked
+        // The checked copy, to the loop's end.
+        this.openLoop(`checked${index}`);
+        this.blockDepth = this.controls.length;
+        this.blockRetired = 0;
+        this.pending = null;
+        this.fcmp = null;
+        this.dead = false;
+        this.emitInstructions(block, index, live, planBlock(block.instructions));
+        this.instructions = counted;
+        this.charge();
+        this.pushBranchCondition(last);
+        this.openIf('taken');
+        this.spentTest();
+        this.openGuard('spent');
+        this.exitAt(block.start, Exit.BUDGET);
+        this.close();
+        this.payResultFor(block.start);
+        b.br(this.depthOf(`checked${index}`));
+        this.close();
+        this.payResultFor(block.exit.targets[1]);
+        this.resultOwed = null;
+        b.br(this.depthOf(`selfDone${index}`));
+        this.close(); // checked
+        this.close(); // selfDone
+        this.selfLoop = false;
+        const [, notTaken] = block.exit.targets;
+        const after = this.following(index);
+        const next = after < 0 ? undefined : this.region.blocks[after];
+        if (next && next.start === notTaken)
+        {
+            this.fallInto(after);
+            return;
+        }
+        this.jumpTo(notTaken);
+    }
+
+    /**
      * One more execution of the block at `start` in its profile slot: the count,
      * and the address when the slot is another block's (then marked shared).
      *
@@ -3558,6 +3969,8 @@ export class RegionEmitter {
      * @param {boolean[]} live @param {Map<number, any>} plan
      */
     emitInstructions(block, index, live, plan){
+        this.emitting = { instructions: block.instructions, plan };
+        this.stackRun = null;
         if (this.pendingLows.size > 0)
         {
             throw new Error(`block ${index}: low lanes owed from the block before`);
@@ -3569,7 +3982,10 @@ export class RegionEmitter {
         this.lows.clear();
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
         {
-            this.markBlock(index);
+            // By the block's place in the region as formed, which its reader
+            // (`tools/cork-asm.mjs`) knows: a structured region emits them in
+            // another order.
+            this.markBlock(this.formedIndex?.get(block.start) ?? index);
         }
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile)
         {
@@ -3745,6 +4161,90 @@ export class RegionEmitter {
     }
 
     /**
+     * Whether a block's `cmp index, N; ja default` is a switch's bound test
+     * that the switch's own `br_table` can take (`emitFusedSwitch`): the block
+     * after it, its fall-through, is the switch's jump alone through a table
+     * of N + 1 entries off that index, read untested (`casesByEntry` in
+     * integer.js) and lying in RAM; no x87 in play, whose edges the switch's
+     * own block settles.
+     *
+     * @param {import('../region.js').Block} block
+     * @param {import('../region.js').Block} next
+     */
+    fusesSwitch(block, next){
+        const table = next.exit.table;
+        const { instructions } = block;
+        const [compare, branch] = instructions.slice(-2);
+        if (table === undefined || next.instructions.length !== 1 || this.width.bits !== 32
+            || this.x87.active || this.context.precise === true || !readsWrapped(this.context)
+            || this.layout.codePages >= 0 || branch?.op !== 'ja' || compare?.op !== 'cmp'
+            || table.address + 4 * table.entries.length > this.layout.ramSize)
+        {
+            return false;
+        }
+        const [into, by] = compare.operands;
+        return into.kind === 'reg' && into.size === 4 && into.reg === table.index
+            && by.kind === 'imm' && (/** @type {number} */ (by.value) >>> 0) + 1
+                === table.entries.length
+            && table.entries.some(target=>this.labels.has(target));
+    }
+
+    /**
+     * A switch's bound test and its jump as one `br_table` on the index
+     * (`fusesSwitch`): an index past the bound takes the test's branch, one
+     * within it picks its table entry, read at its own address and compared
+     * with the case it named when the region was formed -- the jump's
+     * instruction charged there -- and anything else (an entry written
+     * since, one naming no case) goes on into the switch's own block, which
+     * reads and jumps as it does for any other way in. Where the test was a
+     * compare and a branch, and then the `br_table`'s own bound test.
+     *
+     * @param {import('../region.js').Block} block @param {number} after
+     * @param {import('../region.js').Block} next  the switch's block, `after`
+     */
+    emitFusedSwitch(block, after, next){
+        const { b } = this;
+        const [taken, notTaken] = block.exit.targets;
+        const table = /** @type {NonNullable<typeof next.exit.table>} */ (next.exit.table);
+        const arms = table.entries.map((_, i)=>i).filter(i=>this.labels.has(table.entries[i]));
+        this.open('switchOn', EMPTY);
+        this.open('switchPast', EMPTY);
+        for (let k = arms.length - 1; k >= 0; k--)
+        {
+            this.open(`entry${k}`, EMPTY);
+        }
+        b.localGet(this.width.regLocal[table.index]);
+        b.brTable(table.entries.map((_, i)=>{
+            const k = arms.indexOf(i);
+            return k < 0 ? this.depthOf('switchOn') : this.depthOf(`entry${k}`);
+        }), this.depthOf('switchPast'));
+        for (let k = 0; k < arms.length; k++)
+        {
+            this.close();
+            const target = table.entries[arms[k]];
+            b.i32const(table.address + 4 * arms[k]).load('i32', { offset: this.layout.ramBase })
+                .i32const(target | 0).op(I32.eq);
+            this.openIf('case');
+            // The switch's jump, retired here.
+            b.localGet(Local.budget).i32const(1).op(I32.sub).localSet(Local.budget);
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile)
+            {
+                this.countBlock(next.start);
+            }
+            this.payResultFor(target);
+            this.jumpTo(target);
+            this.close();
+            b.br(this.depthOf('switchOn'));
+        }
+        this.close(); // switchPast
+        this.payResultFor(taken);
+        this.jumpTo(taken);
+        this.close(); // switchOn
+        this.payResultFor(notTaken);
+        this.fallThrough(after, notTaken);
+    }
+
+    /**
      * @param {import('../region.js').Block} block
      * @param {number} index
      */
@@ -3796,6 +4296,11 @@ export class RegionEmitter {
                         return;
                     }
                     this.jumpTo(notTaken);
+                    return;
+                }
+                if (next && next.start === notTaken && this.fusesSwitch(block, next))
+                {
+                    this.emitFusedSwitch(block, after, next);
                     return;
                 }
                 this.pushBranchCondition(last);
@@ -3951,6 +4456,13 @@ export class RegionEmitter {
         {
             return;
         }
+        if (this.pairing?.turn === 1 && label === this.pairing.lo)
+        {
+            // The first turn's jump back: on into the second turn's head.
+            this.countMechanism(Mechanism.JUMP_LOOP);
+            b.br(this.depthOf(`d${label}`));
+            return;
+        }
         if (!this.copying && label > this.blockIndex)
         {
             // A forward edge cannot close a loop: a branch out of the item that
@@ -3960,14 +4472,21 @@ export class RegionEmitter {
             for (let k = this.ranges.length - 1; k >= 0; k--)
             {
                 const range = this.ranges[k];
-                /** @type {{ start: number, end: number, loop: boolean } | undefined} */
+                /** @type {{ start: number, end: number, loop: boolean, pair?: boolean }
+                 *     | undefined} */
                 const item = range.items.find(one=>!one.copy && one.start <= label
                     && label <= one.end);
                 if (label >= range.lo && label <= range.hi && item
                     && (!item.loop || item.start === label))
                 {
-                    b.br(this.depthOf(item.loop || this.takesFrom(label)
-                        || !this.entryTested(label) ? `b${item.start}` : `p${label}`));
+                    if (item.pair !== true && !item.loop && !this.takesFrom(label)
+                        && this.entryTested(label))
+                    {
+                        this.passTested(label);
+                    }
+                    b.br(this.depthOf(item.pair === true ? `d${item.start}`
+                        : item.loop || this.takesFrom(label) || !this.entryTested(label)
+                            ? `b${item.start}` : `p${label}`));
                     return;
                 }
             }
@@ -4720,6 +5239,31 @@ function jumpsOf(block, returns, callReturn = false, index = new Map()){
 }
 
 /**
+ * The blocks reached from `starts`, themselves among them, along `edges`,
+ * never through `barrier`.
+ *
+ * @param {number[]} starts @param {number[][]} edges @param {number} barrier
+ * @returns {Set<number>}
+ */
+function reaching(starts, edges, barrier){
+    const seen = new Set();
+    const stack = [...starts];
+    while (stack.length > 0)
+    {
+        const t = /** @type {number} */ (stack.pop());
+        if (!seen.has(t))
+        {
+            seen.add(t);
+            if (t !== barrier)
+            {
+                stack.push(...edges[t]);
+            }
+        }
+    }
+    return seen;
+}
+
+/**
  * The block a way out of this one comes back to from outside the region on
  * every turn, if any: the return address of a call that always leaves it -- a
  * direct call whose callee is not formed in, an indirect one no prediction
@@ -4849,6 +5393,26 @@ function flowsInto(blocks, labels){
     });
     return into;
 }
+
+/** What a loop that only reads may be made of (`readsOnlyLoop`): forms that lower inline. */
+const READ_LOOP_OPS = new Set(['mov', 'movzx', 'movsx', 'add', 'sub', 'adc', 'sbb', 'and', 'or',
+    'xor', 'cmp', 'test', 'inc', 'dec', 'neg', 'not', 'lea', 'shl', 'shr', 'sar', 'rol', 'ror',
+    'imul', 'jo', 'jno', 'jb', 'jae', 'je', 'jne', 'jbe', 'ja', 'js', 'jns', 'jp', 'jnp', 'jl',
+    'jge', 'jle', 'jg', 'lods', 'scas', 'cmps']);
+
+/** How a block of a loop run two turns a wasm turn may leave (`pairs`). */
+const PAIRED_EXITS = new Set(['fallthrough', 'jump', 'jcc', 'loop']);
+
+/**
+ * The instructions that may reach the host and come back into the function:
+ * a call, a port write, an interrupt -- after which the pages' flags may not
+ * be what a test found (`planTestedOnce`).
+ */
+const HOST_OPS = new Set(['call', 'out', 'outs', 'in', 'ins', 'int', 'int1', 'int3', 'into',
+    'syscall', 'sysenter', 'hlt']);
+
+/** The entry tests a region's function keeps a local for, at most (`planTestedOnce`). */
+const TESTED_ONCE_MAX = 16;
 
 /** The longest block a hoisted loop's unchecked copy runs two turns a wasm turn. */
 const PAIRED_MAX = 32;

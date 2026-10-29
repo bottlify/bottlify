@@ -1941,3 +1941,144 @@ test('a quadword argument is one x64 slot, split into the two dwords the handler
     assert.throws(()=>dispatcher.register(3, { name: 'X!Short', ...STDCALL, argBytes: 8,
         quadwords: [1], handler: ()=>0 }), /quadwords/, 'a quadword needs two dwords');
 });
+
+test('a float or a double among the first four is read from the XMM register of its slot', ()=>{
+    // _jn(int n, double x): ECX, then XMM1 -- the second slot's register,
+    // whatever the first holds -- read into the two dwords the 32-bit handler
+    // takes it in. powf(float, float): XMM0 and XMM1, a dword each.
+    const { dispatcher } = longMachine({ rcx: 3n, r11: 0x55n });
+    /** @type {Map<number, number[]>} */
+    const xmm = new Map([[0, [0x40490fdb, 7, 7, 7]], [1, [0x54442d18, 0x400921fb, 9, 9]]]);
+    /** @type {any} */ (dispatcher).cpu.readXmm = (/** @type {number} */ index)=>
+        Uint32Array.from(xmm.get(index) ?? [0, 0, 0, 0]);
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!_jn', ...STDCALL, argBytes: 12, floats: { 1: 'f64' },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen[0], [3, 0x54442d18, 0x400921fb]);
+
+    dispatcher.register(2, { name: 'X!powf', ...STDCALL, argBytes: 8,
+        floats: { 0: 'f32', 1: 'f32' },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(2);
+    assert.deepEqual(seen[1], [0x40490fdb, 0x54442d18], 'one dword each, the low lane');
+
+    // Past the four registers a float is its stack slot, as any argument is,
+    // and a double the slot's two dwords; the slots after a double come one
+    // earlier than the dwords say.
+    const stack = longMachine({ rcx: 1n, r11: 2n, r8: 3n, r9: 4n });
+    /** @type {Map<number, number>} */
+    const words = new Map([[0x8000, 0x401234], [0x8028, 0x3f800000], [0x8030, 0x11],
+        [0x8034, 0x40000000], [0x8038, 7]]);
+    /** @type {any} */ (stack.dispatcher).memory = {
+        /** @param {number} address */
+        readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
+    /** @type {any} */ (stack.dispatcher).cpu.readXmm = ()=>Uint32Array.of(0, 0, 0, 0);
+    stack.dispatcher.register(3, { name: 'X!Late', ...STDCALL, argBytes: 32,
+        floats: { 4: 'f32', 5: 'f64' },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    stack.dispatcher.dispatch(3);
+    assert.deepEqual(seen[2], [1, 2, 3, 4, 0x3f800000, 0x11, 0x40000000, 7]);
+
+    assert.throws(()=>dispatcher.register(4, { name: 'X!Past', ...STDCALL, argBytes: 8,
+        floats: { 1: 'f64' }, handler: ()=>0 }), /f64/, 'a double needs two dwords');
+    assert.throws(()=>dispatcher.register(5, { name: 'X!Both', ...STDCALL, argBytes: 8,
+        quadwords: [0], floats: { 0: 'f64' }, handler: ()=>0 }), /f64/,
+    'and is not a quadword besides');
+});
+
+/** A refused guest access, as memory throws it. @param {'read' | 'write'} mode */
+const guestAccess = mode=>Object.assign(new Error(`Unmapped ${mode} at 0x0`),
+    { code: 'GUEST_ACCESS', address: 0, length: 4, mode });
+
+test('a refused guest access is raised in the guest; any other error stops the run', ()=>{
+    // Windows faults inside the DLL on a pointer that is not there and the
+    // program's handlers see STATUS_ACCESS_VIOLATION; an error of our own is
+    // a host bug, and is never turned into the program's exception.
+    const m = machine({ args: [0] });
+    /** @type {any[]} */
+    const suspended = [];
+    m.dispatcher.suspend = answer=>suspended.push(answer);
+    /** @type {any[]} */
+    const raised = [];
+    m.dispatcher.guestFault = fault=>{
+        raised.push(fault);
+        return Promise.resolve(0);
+    };
+    m.dispatcher.register(1, { ...STDCALL, name: 'KERNEL32.dll!lstrcpyA', argBytes: 4,
+        handler: ()=>{
+            throw guestAccess('write');
+        } });
+    m.dispatcher.register(2, { ...STDCALL, name: 'KERNEL32.dll!Broken', argBytes: 4,
+        handler: ()=>{
+            throw new TypeError('Cannot read properties of undefined');
+        } });
+    m.dispatcher.register(3, { ...STDCALL, name: 'KERNEL32.dll!Path', argBytes: 4,
+        handler: ()=>{
+            throw Object.assign(new Error('An empty path names nothing'), { code: 'INVALID_PATH' });
+        } });
+
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(raised.map(fault=>[fault.code, fault.mode]), [['GUEST_ACCESS', 'write']]);
+    assert.equal(suspended.length, 1, 'the call waits on the exception\'s dispatch');
+
+    assert.throws(()=>m.dispatcher.dispatch(2), TypeError);
+    assert.throws(()=>m.dispatcher.dispatch(3), /An empty path/);
+    assert.equal(raised.length, 1, 'neither was raised in the guest');
+
+    // Nobody to raise it: the refusal ends the run, as before.
+    m.dispatcher.guestFault = null;
+    assert.throws(()=>m.dispatcher.dispatch(1), /Unmapped write/);
+});
+
+test('a refused guest access after a handler waited is raised the same way', async()=>{
+    const m = machine({ args: [0] });
+    /** @type {any[]} */
+    const suspended = [];
+    m.dispatcher.suspend = answer=>suspended.push(answer);
+    /** @type {any[]} */
+    const raised = [];
+    m.dispatcher.guestFault = fault=>{
+        raised.push(fault);
+        return Promise.resolve(7);
+    };
+    m.dispatcher.register(1, { ...STDCALL, name: 'KERNEL32.dll!ReadFile', argBytes: 4,
+        handler: async()=>{
+            await null;
+            throw guestAccess('read');
+        } });
+    m.dispatcher.register(2, { ...STDCALL, name: 'KERNEL32.dll!Late', argBytes: 4,
+        handler: async()=>{
+            await null;
+            throw new RangeError('Invalid typed array length: -1');
+        } });
+    m.dispatcher.dispatch(1);
+    assert.equal(await suspended[0], 7, 'answered as the raise answers');
+    assert.equal(raised[0].mode, 'read');
+    m.dispatcher.dispatch(2);
+    await assert.rejects(suspended[1], RangeError);
+});
+
+test('an exception a handler raises on purpose goes to the guest the same way', ()=>{
+    // InitializeCriticalSectionEx's STATUS_INVALID_HANDLE and the like: the
+    // handler throws the exception Windows' function raises.
+    const m = machine({ args: [0] });
+    m.dispatcher.suspend = ()=>{};
+    /** @type {any[]} */
+    const raised = [];
+    m.dispatcher.guestFault = what=>{
+        raised.push(what);
+        return Promise.resolve(0);
+    };
+    m.dispatcher.register(1, { ...STDCALL, name: 'KERNEL32.dll!InitializeCriticalSectionEx',
+        argBytes: 4, handler: ()=>{
+            throw Object.assign(new Error('raised'),
+                { code: 'GUEST_EXCEPTION', status: 0xc0000008, flags: 0, parameters: [] });
+        } });
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(raised.map(what=>[what.code, what.status]), [['GUEST_EXCEPTION', 0xc0000008]]);
+});

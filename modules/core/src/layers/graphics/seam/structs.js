@@ -63,6 +63,31 @@ export const D3DPRESENT_PARAMETERS9 = Object.freeze({
     SIZE: 0x38,
 });
 
+/**
+ * D3DPRESENT_PARAMETERS in a 64-bit process: hDeviceWindow is a handle, eight
+ * bytes on an eight-byte boundary, which moves every field after it by eight.
+ * The handle's high half has a name of its own so that a write puts its zero
+ * there; the engine's handles fit the low half.
+ */
+export const D3DPRESENT_PARAMETERS9_64 = Object.freeze({
+    BackBufferWidth: 0x00,
+    BackBufferHeight: 0x04,
+    BackBufferFormat: 0x08,
+    BackBufferCount: 0x0c,
+    MultiSampleType: 0x10,
+    MultiSampleQuality: 0x14,
+    SwapEffect: 0x18,
+    hDeviceWindow: 0x20,
+    hDeviceWindowHigh: 0x24,
+    Windowed: 0x28,
+    EnableAutoDepthStencil: 0x2c,
+    AutoDepthStencilFormat: 0x30,
+    Flags: 0x34,
+    FullScreen_RefreshRateInHz: 0x38,
+    PresentationInterval: 0x3c,
+    SIZE: 0x40,
+});
+
 /** D3DDISPLAYMODE. The same in both versions. */
 export const D3DDISPLAYMODE = Object.freeze({
     Width: 0x00,
@@ -215,6 +240,10 @@ export const POINT = Object.freeze({ x: 0x00, y: 0x04, SIZE: 0x08 });
  * treats a pointer as a pitch and walks off the surface on its second row.
  */
 export const D3DLOCKED_RECT = Object.freeze({ Pitch: 0x00, pBits: 0x04, SIZE: 0x08 });
+/** D3DLOCKED_RECT in a 64-bit process: the address eight bytes, on an eight-byte boundary. */
+export const D3DLOCKED_RECT64 = Object.freeze({
+    Pitch: 0x00, pBits: 0x08, pBitsHigh: 0x0c, SIZE: 0x10,
+});
 
 /**
  * A rectangle lock -- a surface's, a texture level's, a cube face's -- with
@@ -227,17 +256,19 @@ export const D3DLOCKED_RECT = Object.freeze({ Pitch: 0x00, pBits: 0x04, SIZE: 0x
  * @param {{ writeStruct: (address: number, layout: any, values: any) => void }} fields
  * @param {number} out
  * @param {(locked: { Pitch?: number, pBits?: number }) => number | Promise<number>} lock
+ * @param {Record<string, number>} [layout]  D3DLOCKED_RECT64 for a 64-bit process.
  * @returns {number | Promise<number>}
  */
-export function lockRectInto(fields, out, lock){
+export function lockRectInto(fields, out, lock, layout = D3DLOCKED_RECT){
     /** @type {{ Pitch?: number, pBits?: number }} */
     const locked = {};
     /** @param {number} hr */
     const answer = hr=>{
         if (hr === 0 && (out >>> 0) !== 0)
         {
-            fields.writeStruct(out >>> 0, D3DLOCKED_RECT,
-                { Pitch: locked.Pitch ?? 0, pBits: locked.pBits ?? 0 });
+            fields.writeStruct(out >>> 0, layout, { Pitch: locked.Pitch ?? 0,
+                pBits: locked.pBits ?? 0,
+                ...layout.pBitsHigh === undefined ? {} : { pBitsHigh: 0 } });
         }
         return hr;
     };
@@ -274,6 +305,10 @@ export const D3DVOLUME_DESC8 = Object.freeze({
 /** D3DLOCKED_BOX, the same in both versions: two pitches, then the address. */
 export const D3DLOCKED_BOX = Object.freeze({
     RowPitch: 0x00, SlicePitch: 0x04, pBits: 0x08, SIZE: 0x0c,
+});
+/** D3DLOCKED_BOX in a 64-bit process: the address eight bytes, the end padded to eight. */
+export const D3DLOCKED_BOX64 = Object.freeze({
+    RowPitch: 0x00, SlicePitch: 0x04, pBits: 0x08, pBitsHigh: 0x0c, SIZE: 0x10,
 });
 
 /** D3DBOX, the same in both versions: the rectangle's four edges, then front and back. */

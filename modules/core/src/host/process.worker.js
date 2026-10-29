@@ -118,6 +118,12 @@ export async function serveProcess(start){
      * @type {number | null}
      */
     let terminated = null;
+    /** Settled once the process is made, or failed to be: what an ask waits on. */
+    /** @type {(value?: unknown) => void} */
+    let madeNow = ()=>{};
+    const made = new Promise(resolve=>{
+        madeNow = resolve;
+    });
     // What the page asks of the process it drives, as it would of a machine on
     // its own thread: pausing it, and looking inside it; and its parent's
     // TerminateProcess, which may come while it is still being made -- in
@@ -130,6 +136,8 @@ export async function serveProcess(start){
             terminated ??= code;
             app?.terminate(code);
         },
+        // A call its parent makes in it, answered once it is made.
+        ask: (/** @type {any} */ call)=>made.then(()=>app?.answerCall(call) ?? null),
     };
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.callWaiting(target, method, args);
@@ -220,10 +228,12 @@ export async function serveProcess(start){
         });
     }
     catch (e){
+        madeNow();
         link.close();
         await serving;
         throw e;
     }
+    madeNow();
     app.attachLog((/** @type {number} */ handle, /** @type {string} */ text)=>
         ask('process', 'output', [handle, text]));
     if (terminated !== null)

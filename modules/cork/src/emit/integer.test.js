@@ -285,6 +285,48 @@ test('conditional moves and sets, bit tests, scans, bswap, cmpxchg, cwde/cdq', (
     agree(r);
 });
 
+test('cmovcc of every condition, dword and word, from a register and memory, in the block'
+    + ' of its compare and at the start of the next', ()=>{
+    /** @param {number} value */
+    const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24];
+    const pairs = [[1, 2], [2, 1], [5, 5], [0x80000000, 1], [1, 0x80000000],
+        [0x7fffffff, 0xffffffff], [0, 0]];
+    for (const precise of [true, false])
+    {
+        for (let cc = 0; cc < 16; cc++)
+        {
+            for (const apart of [false, true])
+            {
+                const bytes = [];
+                pairs.forEach(([a, c], k)=>{
+                    bytes.push(0xb8, ...dword(a), 0xbb, ...dword(c));   // mov eax, a; mov ebx, c
+                    bytes.push(0xb9, ...dword(0x11111111), 0xba, ...dword(0x22222222));
+                    bytes.push(0xbe, ...dword(0x33333333), 0xbf, ...dword(0x44444444));
+                    bytes.push(0x39, 0xd8);                             // cmp eax, ebx
+                    if (apart)
+                    {
+                        bytes.push(0xeb, 0x00);                         // jmp to the next block
+                    }
+                    bytes.push(0x0f, 0x40 + cc, 0xca);                  // cmovcc ecx, edx
+                    bytes.push(0x66, 0x0f, 0x40 + cc, 0xf7);            // cmovcc si, di
+                    bytes.push(0x0f, 0x40 + cc, 0x3d, ...dword(0x2000)); // cmovcc edi, [0x2000]
+                    for (const [reg, at] of [[0x0d, 0], [0x35, 4], [0x3d, 8]])
+                    {
+                        bytes.push(0x89, reg, ...dword(0x3000 + 12 * k + at));
+                    }
+                });
+                bytes.push(0xf4);
+                const r = both(bytes, { precise, memory: [[0x2000, dword(0x55667788)]] });
+                assert.equal(r.exit.kind, 3);
+                agree(r);
+                assert.deepEqual([...r.m.read(0x3000, 12 * pairs.length)],
+                    [...r.ram.subarray(0x3000, 0x3000 + 12 * pairs.length)],
+                    `cc ${cc}${apart ? ' apart' : ''}${precise ? ' precise' : ''}`);
+            }
+        }
+    }
+});
+
 test('the string instructions with rep, repne and the direction flag', ()=>{
     const source = Array.from({ length: 16 }, (_, i)=>i + 1);
     const r = both([

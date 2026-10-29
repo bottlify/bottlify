@@ -621,6 +621,10 @@ export function createCpuModule(){
                 pop: ()=>activeFpu().pop(),
                 depth: ()=>activeFpu().depth(),
                 controlWord: ()=>activeFpu().controlWord(),
+                /** @param {number} word */
+                setControlWord: word=>activeFpu().setControlWord?.(word),
+                statusWord: ()=>activeFpu().statusWord?.() ?? 0,
+                clearExceptions: ()=>activeFpu().clearExceptions?.(),
             };
 
             current = state;
@@ -1042,6 +1046,20 @@ export function createCpuModule(){
                 /** @param {string} name @param {bigint} value */
                 writeReg64: (name, value)=>started().writeReg64(name, value),
                 /**
+                 * One XMM register's four lanes, low first, as their bit
+                 * patterns: where an x64 call passes a float argument.
+                 *
+                 * @param {number} index @returns {Uint32Array}
+                 */
+                readXmm: index=>started().readXmm(index),
+                /**
+                 * Sets an XMM register's lanes: where an x64 call answers a
+                 * float or a double, in XMM0.
+                 *
+                 * @param {number} index @param {Uint32Array} words
+                 */
+                writeXmm: (index, words)=>started().writeXmm(index, words),
+                /**
                  * A long-mode thread's state whole, as it stands on the
                  * processor: the sixteen general registers, the flags, the
                  * XMM registers and MXCSR -- what an x64 CONTEXT is made of.
@@ -1380,6 +1398,17 @@ export function createCpuModule(){
                 resumeContextAt(context, { eip, returnValue, esp = null, registers = null }){
                     context.eip = eip;
                     context.reg32[0] = returnValue | 0; // EAX
+                    // A 64-bit thread's RAX whole, sign-extended as a dword
+                    // the host answers is meant -- what a call answered at
+                    // once gets (the bridge): a restore writes the low dword
+                    // alone, and the high one left was whatever RAX held at
+                    // the call.
+                    if (context.layout?.bits === 64 && context.block instanceof Uint8Array)
+                    {
+                        new DataView(context.block.buffer, context.block.byteOffset,
+                            context.block.byteLength).setUint32(context.layout.regs + 4,
+                            (returnValue | 0) < 0 ? 0xffffffff : 0, true);
+                    }
                     if (registers !== null)
                     {
                         for (const [name, value] of Object.entries(registers))

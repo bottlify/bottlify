@@ -81,6 +81,8 @@ async function installed(){
             writeMemory: (address, bytes)=>memory.set(bytes, address),
             get: ()=>null,
             readFile: path=>readFile(host.files, path),
+            statPath: path=>(path === '' ? null : host.files.stat(path)),
+            readPath: async path=>(path === '' ? null : readFile(host.files, path)),
             openPackage: async()=>null,
             maintain: async(code, request)=>{
                 maintained.push(`${code} ${request}`);
@@ -147,6 +149,9 @@ test('the registered user, a component\'s state, and the product\'s own records'
     assert.equal(fns.MsiQueryComponentStateA.handler([product, 0, 4, put(0x500, CORE), 0x60]),
         0);
     assert.equal(view.getInt32(0x60, true), INSTALLSTATE.LOCAL);
+    view.setUint32(0x80, 20, true);
+    assert.equal(await fns.MsiGetFileHashA.handler([put(0x7f0, ''), 0, 0x80]), 3,
+        'ERROR_PATH_NOT_FOUND for an empty path (Wine\'s msi test)');
     host.files.remove('C:\\Program Files\\Game\\game.exe');
     fns.MsiQueryComponentStateA.handler([product, 0, 4, 0x500, 0x60]);
     assert.equal(view.getInt32(0x60, true), INSTALLSTATE.ABSENT, 'its key file gone');

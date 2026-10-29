@@ -749,8 +749,11 @@ export function createGraphicsModule(){
                     // thread's MakeCurrent or DeleteContext of it is ERROR_BUSY.
                     currentThread: ()=>bridge.callerThread?.()?.id ?? 0,
                     // Where the routines of a context's command ring find its
-                    // block: the calling thread's TEB.
-                    currentTeb: ()=>bridge.callerThread?.()?.tebAddress ?? 0,
+                    // block: the calling thread's TEB. A 64-bit process has no
+                    // such routines (they are i386 code), and every call traps.
+                    ...config?.pointerSize === 8 ? { pointerSize: 8 } : {
+                        currentTeb: ()=>bridge.callerThread?.()?.tebAddress ?? 0,
+                    },
                     // On the configuration rather than the device handle: it
                     // concerns the build that has no device.
                     raster: drawing ? config?.raster : false,
@@ -1103,6 +1106,9 @@ export function createGraphicsModule(){
                 allocate: config?.allocate,
                 allocateCode: config?.allocateCode,
                 guestCode: config?.guestCode !== false,
+                // A 64-bit process's layouts, and no i386 guest code in it.
+                pointerSize: config?.pointerSize === 8 ? 8 : 4,
+                floatResult: config?.floatResult,
                 guestTraps: config?.guestTraps,
                 free: config?.free,
                 // What a program is handed to free with HeapFree itself.

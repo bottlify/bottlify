@@ -4,6 +4,9 @@
  * See LICENSE for details
  */
 
+import { SHLWAPI_NAMED_ORDINALS } from './ordinals.js';
+import { DATABLOCK_ORDINALS } from './datablocks.js';
+
 /**
  * The exports of shlwapi that are nothing but another library's function under
  * a number: the "Wrap" functions a program of the Windows 9x era imports by
@@ -200,8 +203,11 @@ export const SHLWAPI_FORWARDS = Object.freeze([
 ]);
 
 /** The ordinals, as the name each stands for, in the shape the loader is told them in. */
-export const SHLWAPI_ORDINALS = Object.freeze(Object.fromEntries(
-    SHLWAPI_FORWARDS.map(([ordinal, name])=>[ordinal, name])));
+export const SHLWAPI_ORDINALS = Object.freeze(Object.fromEntries([
+    ...SHLWAPI_FORWARDS.map(([ordinal, name])=>[ordinal, name]),
+    ...SHLWAPI_NAMED_ORDINALS,
+    ...DATABLOCK_ORDINALS,
+]));
 
 /**
  * The functions of the table above, each answering as its target does.

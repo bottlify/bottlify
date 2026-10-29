@@ -410,7 +410,7 @@ export function registerWbemClasses(host){
         host.writeMemory(address, bytes);
     };
     const readString = (/** @type {number} */ address)=>
-        address === 0 ? '' : host.readWideString(address, MAX_WBEM_STRING);
+        address === 0 ? '' : host.readWideString(address, MAX_WBEM_STRING * 2);
 
     /**
      * An object of ours, published, its pointer written to `out`.

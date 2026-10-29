@@ -19,6 +19,12 @@ import { parseCertificate } from '../crypto/x509.js';
 import { TRUST, verifyAuthenticode } from './authenticode.js';
 import { defaultTrustedRoots } from './roots.js';
 
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
+
 /** @typedef {import('../crypto/x509.js').Certificate} Certificate */
 /** @typedef {import('../kernel32/files.js').FileSystem} FileSystem */
 
@@ -243,7 +249,7 @@ export function createWintrustFunctions(host){
             }
             return answer(code);
         };
-        const bytes = readWhole(host.fullPath(host.readWideString(pathPointer, 260)));
+        const bytes = readWhole(host.fullPath(host.readWideString(pathPointer, WHOLE_NAME * 2)));
         return bytes instanceof Promise ? bytes.then(judge) : judge(bytes);
     };
 
@@ -288,7 +294,7 @@ export function createWintrustFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([name, flags])=>{
-                const path = host.fullPath(host.readWideString(name >>> 0, 260));
+                const path = host.fullPath(host.readWideString(name >>> 0, WHOLE_NAME * 2));
                 const stat = host.files.stat(path);
                 if (!stat || stat.isDirectory)
                 {

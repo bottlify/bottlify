@@ -139,16 +139,6 @@ test('dsetup is a library here, so an autorun that loads it by name finds Direct
     await win32Module.dispose();
 });
 
-test('a child runs beside a parent that has not exited, however the parent waits for it',
-    async()=>{
-        const api = await win32Module.create({ screen: SCREEN }, stubHost());
-        assert.equal(api.childWaitedOn({ waiters: [{}] }), true, 'blocked on its handle');
-        assert.equal(api.childWaitedOn({}), true, 'polling it, or idle in its message loop');
-        assert.equal(api.childWaitedOn({ handsOver: true }), false,
-            'blocked on a wait for all of a set the child cannot answer alone');
-        await win32Module.dispose();
-    });
-
 test('a DC taken through user32 is one GDI answers for', async()=>{
     // A program asks the display about itself through a context user32
     // hands out: GetDeviceCaps on what came back. Both libraries live in

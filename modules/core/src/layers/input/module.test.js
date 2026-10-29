@@ -265,3 +265,62 @@ test('SetCooperativeLevel asks win32 what a window handle names', async()=>{
 
     await inputModule.dispose();
 });
+
+test('with no low-level hook installed, device input is posted at once, as before', async()=>{
+    // The hooks' seam is there and empty: nothing waits and nothing is held.
+    const { api, queue, drain } = await open();
+    let asked = 0;
+    queue.lowLevel = { hooked: ()=>false, show: ()=>{
+        asked++;
+        return 0;
+    } };
+    api.send({ kind: 'key', code: 'KeyA', down: true });
+    assert.equal(drain()[0]?.message, WM.KEYDOWN, 'in the queue before send returned');
+    assert.equal(asked, 0);
+});
+
+test('a low-level hook sees device input first, after the cursor moved, and takes away what '
+    + 'it answers non-zero for, in the order it came', async()=>{
+    /** @type {any[]} */
+    const reports = [];
+    const queue = createMessageQueue();
+    const { api } = await open({ win32: {
+        queue: ()=>queue,
+        rawInput: (/** @type {any} */ report)=>reports.push(report),
+    } });
+    const drain = ()=>{
+        /** @type {any[]} */
+        const taken = [];
+        for (let entry = queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }); entry;
+            entry = queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }))
+        {
+            taken.push(entry);
+        }
+        return taken;
+    };
+    /** @type {{ kind: string, message: number, x?: number }[]} */
+    const shown = [];
+    /** @type {((answer: number) => void)[]} */
+    const answers = [];
+    queue.lowLevel = {
+        hooked: kind=>kind === 'mouse',
+        show: (kind, message)=>{
+            shown.push({ kind, message: message.message, x: message.x });
+            return new Promise(resolve=>answers.push(resolve));
+        },
+    };
+
+    api.send({ kind: 'pointerMove', x: 30, y: 20 });
+    api.send({ kind: 'key', code: 'KeyA', down: true });
+    assert.deepEqual(drain(), [], 'held while the hook has not answered');
+    assert.equal(reports.length, 0, 'raw input too');
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(shown.map(each=>each.message), [WM.MOUSEMOVE]);
+    assert.equal(shown[0].x, api.cursor()?.x, 'the cursor had moved when the hook was called');
+    answers[0](1);
+    await new Promise(resolve=>setImmediate(resolve));
+    const taken = drain();
+    assert.deepEqual(taken.map(entry=>entry.message), [WM.KEYDOWN],
+        'the move taken away, the key after it let through in turn');
+    assert.deepEqual(reports.map(report=>report.device), ['key']);
+});

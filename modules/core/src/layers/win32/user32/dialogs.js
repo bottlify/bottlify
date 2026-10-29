@@ -46,7 +46,7 @@
  */
 
 import { ANY_WINDOW, WM_QUIT, threadIdOf } from './messages.js';
-import { readMessage, readRect, writeRect } from './structs.js';
+import { readMessage, readRect, userLayouts, writeRect } from './structs.js';
 import { WS_CAPTION, WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
 import { readText, translated, writeText } from './unicode.js';
@@ -275,6 +275,8 @@ const MAX_RESOURCE_NAME = 256;
 
 /**
  * @typedef {Object} DialogHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
+ *     have their pointers, handles and message parameters eight bytes wide.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -1725,7 +1727,8 @@ export function createDialogFunctions(options){
         IsDialogMessageA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0, readMessage(host, msg >>> 0)),
+            handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
+                readMessage(host, msg >>> 0, userLayouts(host.pointerSize))),
         },
 
         /** BOOL IsDialogMessageW(HWND hDlg, LPMSG lpMsg), a wide caller's message. */
@@ -1733,7 +1736,7 @@ export function createDialogFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
-                { ...readMessage(host, msg >>> 0), unicode: true }),
+                { ...readMessage(host, msg >>> 0, userLayouts(host.pointerSize)), unicode: true }),
         },
     };
 }

@@ -415,18 +415,35 @@ function rangeFlags(e, pointer, bytes){
 function copyRun(e, to, from, bytes, at, left, size){
     const { b } = e;
     const ram = e.layout.ramBase;
+    // Eight bytes at a time while eight are left: the first two moves ahead
+    // of the loop, which a run of under 24 bytes then never enters. Its head
+    // is the host's stack check, which V8 took out of a record swap's run by
+    // peeling the loop's first turn only while the function was small enough
+    // (cork-bench sort, 12 bytes a copy: 28 M more instructions run in a
+    // larger region).
     b.i32const(0).localSet(at);
     b.localGet(bytes).localSet(left);
+    const word = ()=>{
+        b.localGet(to).localGet(at).op(I32.add);
+        b.localGet(from).localGet(at).op(I32.add).load('i64', { offset: ram, align: 0 });
+        b.store('i64', { offset: ram, align: 0 });
+        b.localGet(at).i32const(8).op(I32.add).localSet(at);
+        b.localGet(left).i32const(8).op(I32.sub).localSet(left);
+    };
     e.open('words', EMPTY);
+    for (let k = 0; k < 3; k++)
+    {
+        b.localGet(left).i32const(8).op(I32.ltU);
+        b.brIf(e.depthOf('words'));
+        if (k < 2)
+        {
+            word();
+        }
+    }
     e.openLoop('word');
-    b.localGet(left).i32const(8).op(I32.ltU);
-    b.brIf(e.depthOf('words'));
-    b.localGet(to).localGet(at).op(I32.add);
-    b.localGet(from).localGet(at).op(I32.add).load('i64', { offset: ram, align: 0 });
-    b.store('i64', { offset: ram, align: 0 });
-    b.localGet(at).i32const(8).op(I32.add).localSet(at);
-    b.localGet(left).i32const(8).op(I32.sub).localSet(left);
-    b.br(e.depthOf('word'));
+    word();
+    b.localGet(left).i32const(8).op(I32.geU);
+    b.brIf(e.depthOf('word'));
     e.close();
     e.close();
     for (const [step, load, store] of /** @type {const} */ ([[4, 'i32', 'i32'],

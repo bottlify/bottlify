@@ -1636,6 +1636,17 @@ export function createCorkHost(config){
             return held;
         },
         controlWord: ()=>blockView.getUint16(inBlock.x87Control, true),
+        /** `fldcw`. @param {number} word */
+        setControlWord(word){
+            blockView.setUint16(inBlock.x87Control, word & 0xffff, true);
+        },
+        /** `fnstsw`, the stack's top left out. */
+        statusWord: ()=>blockView.getUint16(inBlock.x87Status, true) & ~0x3800,
+        /** `fnclex`: the exception flags, the summary and busy bits cleared. */
+        clearExceptions(){
+            const status = blockView.getUint16(inBlock.x87Status, true);
+            blockView.setUint16(inBlock.x87Status, status & 0x7f00, true);
+        },
     };
 
     /** @type {Record<string, any>} */

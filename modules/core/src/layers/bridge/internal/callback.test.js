@@ -436,3 +436,56 @@ test('a call that builds its callback before it suspends keeps it', ()=>{
     assert.equal(main.awaitingHost, false, 'the thread is sent to run the callback');
     assert.equal(made.returned(main), true, 'whose frame is still there to return to');
 });
+
+test('a routine called back returns, for an unwinder, into the code that called the host', ()=>{
+    // A 64-bit exception walk undoes the frames of a callback and lands on its
+    // return into the sentinel: the guest code that goes on from there is the
+    // caller of the host call that made the callback, not anything on the stack.
+    const worker = thread('main');
+    const { made, resumed } = callbacks([worker]);
+    made.reserve();
+    made.suspended(worker, { name: 'KERNEL32.dll!EnumSystemLocalesA', restingStack: 0x2ff000,
+        hostReturn: 0x401234 });
+    made.call({ thread: worker, entry: 0x402000, args: [7], stackAtRest: 0x2fefc0 });
+    const frameBase = resumed[0][1].esp;
+
+    assert.deepEqual(made.callerOf(worker, frameBase + 4), { rip: 0x401234, rsp: 0x2ff000 },
+        'the stack past the callback\'s return address is inside its frame');
+    assert.equal(made.callerOf(worker, 0x2ff100), null, 'a stack above every frame is none');
+    assert.equal(made.callerOf(thread('other'), frameBase + 4), null,
+        'and another thread has no such frame');
+});
+
+test('a 64-bit routine is handed a negative argument sign-extended, any other zero-extended',
+    ()=>{
+        // An LPARAM of -1 is -1 whole to the procedure, as a LONG widens; a
+        // WPARAM held unsigned, and every address, keeps a zero high half.
+        /** @type {Map<number, number>} */
+        const written = new Map();
+        /** @type {any[]} */
+        const resumed = [];
+        const made = createCallbacks({
+            cpu: { readReg32: ()=>0, bits: ()=>64 },
+            kernel: {
+                threads: ()=>[],
+                /** @param {any} who @param {any} where */
+                scheduleResume: (who, where)=>resumed.push(where),
+            },
+            memory: {
+                /** @param {number} address @param {number} value */
+                writeU32: (address, value)=>written.set(address >>> 0, value >>> 0),
+            },
+            reserveTrap: ()=>({ id: 1, address: SENTINEL }),
+        });
+        made.reserve();
+        made.placeLongCall(()=>0x9000);
+        made.call({ thread: thread('main'), entry: 0x402000,
+            args: [0x40, 0x0400, 0x80000001, -1], stackAtRest: 0x2ff000 });
+        const frameBase = resumed[0].esp;
+        /** @param {number} at */
+        const quad = at=>[written.get(frameBase + at), written.get(frameBase + at + 4)];
+        assert.deepEqual(quad(16), [0x80000001, 0], 'R8, a WPARAM');
+        assert.deepEqual(quad(24), [0xffffffff, 0xffffffff], 'R9, an LPARAM of -1');
+        assert.deepEqual(quad(0), [0x40, 0]);
+        assert.deepEqual(quad(32), [SENTINEL, 0], 'the return into the sentinel');
+    });

@@ -596,7 +596,10 @@ export function createDirectDrawSeam(
         });
     };
 
-    const clipperInterfaces = [describe(IID_IDirectDrawClipper, IDIRECTDRAWCLIPPER_SLOTS, {
+    // Windows' clipper checks the pointer it is called through, and Wine's
+    // tests call it through a released one and through 0xdeadbeef: its counts
+    // stay in the host, where an unknown pointer is refused, not followed.
+    const clipperMethods = describe(IID_IDirectDrawClipper, IDIRECTDRAWCLIPPER_SLOTS, {
         /**
          * A null region buffer asks how large one has to be; a size too small
          * for the list is answered the same way, with the size and no list.
@@ -654,7 +657,8 @@ export function createDirectDrawSeam(
         },
         /** @param {any} clipper @param {number[]} args */
         SetHWnd: (clipper, [, window])=>clipper.setHWnd(window >>> 0),
-    })];
+    });
+    const clipperInterfaces = [{ ...clipperMethods, countedInHost: true }];
 
     // --- surface ---
 

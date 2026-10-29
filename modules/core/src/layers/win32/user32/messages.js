@@ -870,6 +870,21 @@ export function createMessageQueue(options = {}){
         post: postMessage,
 
         /**
+         * The low-level hooks' look at device input before the input layer
+         * posts it, filled in by the window manager, which owns the hooks:
+         * `hooked(kind)` says whether a WH_MOUSE_LL or WH_KEYBOARD_LL hook is
+         * installed, and `show(kind, message)` answers what it said -- other
+         * than zero takes the input away -- or a promise of that while a
+         * hook of another thread answers. Null until then, and device input
+         * is posted unseen.
+         *
+         * @type {{ hooked: (kind: 'mouse' | 'keyboard') => boolean,
+         *     show: (kind: 'mouse' | 'keyboard', message: PostedMessage)
+         *         => number | Promise<number> } | null}
+         */
+        lowLevel: null,
+
+        /**
          * Whether a message taken from the queue came from the input layer
          * rather than from a program's post.
          *

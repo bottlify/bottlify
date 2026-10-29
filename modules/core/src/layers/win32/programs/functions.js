@@ -83,7 +83,7 @@ export function createProgramFunctions(host){
         try
         {
             const commandLine = host.readWideString(
-                await call('KERNEL32.dll', 'GetCommandLineW', []), MAX_COMMAND_LINE);
+                await call('KERNEL32.dll', 'GetCommandLineW', []), MAX_COMMAND_LINE * 2);
             return (await run({
                 commandLine,
                 call,

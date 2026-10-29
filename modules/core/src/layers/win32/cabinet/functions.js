@@ -6,7 +6,8 @@
 
 /**
  * cabinet.dll: the File Decompression Interface, how a setup unpacks a
- * cabinet it carries.
+ * cabinet it carries, and beside it the File Compression Interface (fci.js),
+ * how a program makes one.
  *
  * The program supplies every service the library needs -- memory, and the
  * opening, reading, writing, seeking in and closing of files, all as
@@ -22,7 +23,14 @@
 
 import { CabinetError, COMPRESSION } from './cabinet.js';
 import { extractCabinet, readCabinetHead } from './stream.js';
+import { createFciFunctions } from './fci.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
 
 /** FDICopy's notifications. */
 const fdintCABINET_INFO = 0;
@@ -118,7 +126,9 @@ export function createCabinetFunctions(host){
         const end = Number(await host.call(context.seek, [file, 0, 2], thread) | 0);
         const buffer = host.allocate(READ_CHUNK);
         return {
-            size: end,
+            // A seek that failed -- a handle that is no file -- leaves
+            // nothing to read, and so no cabinet; the error is the callback's.
+            size: Math.max(end, 0),
             read: async(offset, length)=>{
                 const out = new Uint8Array(length);
                 let done = 0;
@@ -154,6 +164,8 @@ export function createCabinetFunctions(host){
     };
 
     return {
+        ...createFciFunctions(host),
+
         /**
          * HFDI FDICreate(PFNALLOC pfnalloc, PFNFREE pfnfree, PFNOPEN pfnopen,
          *   PFNREAD pfnread, PFNWRITE pfnwrite, PFNCLOSE pfnclose, PFNSEEK pfnseek,
@@ -253,8 +265,8 @@ export function createCabinetFunctions(host){
                     return 0;
                 }
                 const thread = host.callerThread();
-                const name = host.readCString(cabinetName >>> 0, 260);
-                const directory = host.readCString(cabinetPath >>> 0, 260);
+                const name = host.readCString(cabinetName >>> 0, WHOLE_NAME);
+                const directory = host.readCString(cabinetPath >>> 0, WHOLE_NAME);
                 const path = guestString(directory + name);
                 /** @param {number} kind @param {(block: Uint8Array) => void} fill */
                 const tell = async(kind, fill)=>{

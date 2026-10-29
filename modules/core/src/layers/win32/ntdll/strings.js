@@ -315,6 +315,34 @@ export function createCountedStringFunctions(host){
             },
         },
 
+        /**
+         * BOOLEAN RtlCreateUnicodeStringFromAsciiz(PUNICODE_STRING Destination, PCSZ Source)
+         *
+         * A wide copy of an ANSI string in a buffer of its own, terminated, for
+         * RtlFreeUnicodeString to give back; FALSE when there is no room for it.
+         */
+        RtlCreateUnicodeStringFromAsciiz: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([destination, source])=>{
+                const text = host.readCString(source >>> 0, MAX_ANSI_BYTES);
+                const total = text.length * 2 + 2;
+                if (total > MAX_MAXIMUM)
+                {
+                    return 0;
+                }
+                const buffer = host.allocate(total);
+                if (buffer === 0)
+                {
+                    return 0;
+                }
+                writeWide(buffer, text);
+                writeDescriptor(destination >>> 0,
+                    { length: total - 2, maximumLength: total, buffer });
+                return 1;
+            },
+        },
+
         /** VOID RtlFreeAnsiString(PANSI_STRING AnsiString) */
         RtlFreeAnsiString: {
             argBytes: 4,
