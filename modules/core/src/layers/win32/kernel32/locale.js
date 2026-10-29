@@ -694,6 +694,14 @@ export const decodeOem = bytes=>decodeSingleByte(bytes, OEM_PAGE);
 export const encodeOem = text=>encodeSingleByte(text, OEM_PAGE).bytes;
 
 /**
+ * Text in the OEM page as CharToOem writes it: WideCharToMultiByte(CP_OEMCP)
+ * with its best fits and '_', not '?', where the page has nothing close.
+ *
+ * @param {string} text
+ */
+export const charToOem = text=>encodeSingleByte(text, OEM_PAGE, 0x5f, true).bytes;
+
+/**
  * Bytes of the ANSI page with their case changed, one byte to one byte.
  *
  * What CharUpper and CharLower do to a buffer: a byte whose mapping is not
