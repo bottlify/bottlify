@@ -157,7 +157,10 @@ const mountBundle = async id=>{
         executable,
         windows: manifest.windows,
         imagePath: placement.imagePath,
-        storage: seeded.length > 0 ? { files: seeded } : null,
+        // Laid over the volume as a person's own edits are (`files`),
+        // over whatever session there is rather than as one.
+        storage: null,
+        files: seeded,
         bundle: {
             /** @param {number} offset @param {number} length */
             fetch: async(offset, length)=>{
@@ -246,6 +249,7 @@ const app = await createApp({
     ...argv.includes('--args')
         ? { commandLine: `"${prefix.imagePath}" ${argv[argv.indexOf('--args') + 1]}` } : {},
     storage: prefix.storage,
+    ...prefix.files?.length > 0 ? { files: prefix.files } : {},
     ...'bundle' in prefix ? { bundle: prefix.bundle } : {},
     engine: 'cork',
     // `--windows NAME`: the Windows the machine is, over the one a bundle's
