@@ -140,20 +140,32 @@ const noted = new WeakMap();
  * beside an unmapped page or a code page is neither a fault nor a note
  * unless it reaches it.
  *
+ * In long mode (`window`, the whole address in `t64`, `windowAddress`) the
+ * address's high half is joined to that test: an access past the 4 GiB
+ * window finds a flag up, and the test under it faults. One that starts
+ * inside the window and ends past it starts on the window's last page, which
+ * no RAM reaches (`longLayout`), so its own flags fault it.
+ *
  * @param {E} e @param {number} size
- * @param {{ counted?: boolean, store?: boolean }} [options]  `counted` false
- *     inside a `rep` loop, where the instruction is not counted and a fault
+ * @param {{ counted?: boolean, store?: boolean, window?: boolean }} [options]  `counted`
+ *     false inside a `rep` loop, where the instruction is not counted and a fault
  *     leaves at it without uncounting; `store` when the access is only
- *     written and its `noteStore` follows with no exit between
+ *     written and its `noteStore` follows with no exit between; `window` for long
+ *     mode's address (`windowAddress`)
  */
-export function checkAccess(e, size, { counted = true, store = false } = {}){
+export function checkAccess(e, size, { counted = true, store = false, window = false } = {}){
     const { b } = e;
     if (planned(e, size, store))
     {
+        // The group's test covered the window too.
         return;
     }
     if (wrapsRead(e, store))
     {
+        if (window)
+        {
+            windowTest(e, size, counted);
+        }
         wrapIntoRam(b, e.layout.ramSize);
         return;
     }
@@ -163,7 +175,18 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     b.localGet(Local.addr).i32const(12).op(I32.shrU);
     loadFlags(e, table, size > 1 ? 'i32_16u' : 'i32_8u')
         .localTee(Local.pflags).i32const(size > 1 ? bits * 0x01010101 : bits).op(I32.and);
+    if (window)
+    {
+        b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).op(I32.or);
+    }
     e.openGuard('flagged', EMPTY);
+    if (window)
+    {
+        b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);
+        e.openGuard('beyond', EMPTY);
+        faultHere(e, counted);
+        e.close();
+    }
     if (size > 1)
     {
         b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
@@ -172,14 +195,7 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     }
     b.localGet(Local.pflags).i32const(PageFlag.INACCESSIBLE).op(I32.and);
     e.openGuard('inaccessible', EMPTY);
-    if (counted)
-    {
-        e.exitBefore(e.current.eip, Exit.FAULT, 13);
-    }
-    else
-    {
-        e.exitAt(e.current.eip, Exit.FAULT, 13);
-    }
+    faultHere(e, counted);
     e.close();
     if (noting)
     {
@@ -1553,6 +1569,63 @@ function copyReg(values, r, from, by){
 }
 
 /**
+ * Pushes long mode's sum of a group's registers and `start`: the quadword's
+ * (`wide`), or the dword of their low halves an access's own address sums
+ * (`emitAddress`), which the host computes once for both.
+ *
+ * @param {E} e @param {{ base: number, index: number, scale: number }} group
+ * @param {number} start @param {boolean} wide
+ */
+function groupSum(e, { base, index, scale }, start, wide){
+    const { b } = e;
+    const ops = wide ? I64 : I32;
+    /** @param {number} r */
+    const register = r=>{
+        b.localGet(registerLocal(e, r));
+        if (!wide)
+        {
+            b.op(I64.wrap);
+        }
+    };
+    if (base >= 0)
+    {
+        register(base);
+    }
+    if (index >= 0)
+    {
+        register(index);
+        if (scale > 1)
+        {
+            if (wide)
+            {
+                b.i64const(BigInt(Math.log2(scale)));
+            }
+            else
+            {
+                b.i32const(Math.log2(scale));
+            }
+            b.op(ops.shl);
+        }
+        if (base >= 0)
+        {
+            b.op(ops.add);
+        }
+    }
+    if (wide)
+    {
+        b.i64const(BigInt(start));
+    }
+    else
+    {
+        b.i32const(start | 0);
+    }
+    if (base >= 0 || index >= 0)
+    {
+        b.op(ops.add);
+    }
+}
+
+/**
  * The groups checked at the instruction about to be emitted: each window's
  * pages tested once, and the instruction left untranslated when one would
  * fault or a store would land in code. With `at`, the windows a block takes
@@ -1620,23 +1693,15 @@ export function emitGroupChecks(e, checks, at = -1){
             // not clean (the interpreter faults its access). Its high half is
             // tested with the page flags, at one branch: a window that starts
             // inside 4 GiB and ends past it starts on the last page, which no
-            // RAM reaches (`longLayout`), so it is flagged INACCESSIBLE.
-            if (group.base >= 0)
-            {
-                b.localGet(registerLocal(e, group.base));
-            }
-            else
-            {
-                b.i64const(0n);
-            }
-            if (group.index >= 0)
-            {
-                b.localGet(registerLocal(e, group.index)).i64const(BigInt(group.scale))
-                    .op(I64.mul).op(I64.add);
-            }
-            b.i64const(BigInt(start)).op(I64.add).localTee(Local.t64).op(I64.wrap)
-                .localSet(Local.addr);
-            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);
+            // RAM reaches (`longLayout`), so it is flagged INACCESSIBLE. The
+            // high half, of the quadword sum, is kept in `t64`; the low one is
+            // the sum of the registers' low halves, as the accesses' own
+            // addresses are (`emitAddress`), which the host computes once.
+            groupSum(e, group, start, true);
+            b.i64const(32n).op(I64.shrU).localSet(Local.t64);
+            groupSum(e, group, start, false);
+            b.localSet(Local.addr);
+            b.localGet(Local.t64).op(I64.wrap);
         }
         else
         {
@@ -1673,7 +1738,7 @@ export function emitGroupChecks(e, checks, at = -1){
         e.openGuard('window', EMPTY);
         if (e.width.bits === 64)
         {
-            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);
+            b.localGet(Local.t64).op(I64.wrap);
             leaveIf('beyond');
         }
         const [first = [1, 0], ...more] = storeSpans(group.list, group.lo);
@@ -2080,7 +2145,7 @@ export function stackAccess(e, size){
     }
     else if (e.width.bits === 64)
     {
-        windowAddress(e, ()=>e.b.localGet(registerLocal(e, 4)), size);
+        windowAddress(e, ()=>e.b.localGet(registerLocal(e, 4)));
     }
     else
     {
@@ -2091,25 +2156,45 @@ export function stackAccess(e, size){
         planned(e, size, false);
         return;
     }
-    checkAccess(e, size);
+    checkAccess(e, size, { window: e.width.bits === 64 });
 }
 
 /**
- * Long mode's address of a `size`-byte access, the i64 `pushAddress` pushes,
- * into `addr` as the window's 32 bits -- the access faulting (#GP) where any of
- * its bytes lies past the 4 GiB window, as the processor faults on an address
- * no page maps there.
+ * Long mode's address of an access, the i64 `pushAddress` pushes, into `addr`
+ * as the window's 32 bits, the whole of it kept in `t64` for the access's
+ * `checkAccess` (`window`) to fault (#GP) where any of its bytes lies past the
+ * 4 GiB window, as the processor faults on an address no page maps there.
  *
- * @param {E} e @param {() => void} pushAddress @param {number} size
- * @param {boolean} [counted]  false: the instruction is not counted at the fault, as a
- *     `rep` iteration's is not (`checkAccess`)
+ * @param {E} e @param {() => void} pushAddress
  */
-export function windowAddress(e, pushAddress, size, counted = true){
-    const { b } = e;
+export function windowAddress(e, pushAddress){
     pushAddress();
-    b.localTee(Local.t64).localGet(Local.t64).i64const(BigInt(size - 1)).op(I64.add).op(I64.or)
+    e.b.localTee(Local.t64).op(I64.wrap).localSet(Local.addr);
+}
+
+/**
+ * Leaves with #GP where the `size`-byte access whose whole address is in
+ * `t64` reaches past the 4 GiB window: a test of its own, for an access the
+ * page flags do not test.
+ *
+ * @param {E} e @param {number} size @param {boolean} counted
+ */
+function windowTest(e, size, counted){
+    const { b } = e;
+    b.localGet(Local.t64).localGet(Local.t64).i64const(BigInt(Math.max(size, 1) - 1))
+        .op(I64.add).op(I64.or)
         .i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
     e.openGuard('window', EMPTY);
+    faultHere(e, counted);
+    e.close();
+}
+
+/**
+ * Leaves with #GP at the current instruction, `counted` as `checkAccess` has it.
+ *
+ * @param {E} e @param {boolean} counted
+ */
+function faultHere(e, counted){
     if (counted)
     {
         e.exitBefore(e.current.eip, Exit.FAULT, 13);
@@ -2118,8 +2203,6 @@ export function windowAddress(e, pushAddress, size, counted = true){
     {
         e.exitAt(e.current.eip, Exit.FAULT, 13);
     }
-    e.close();
-    b.localGet(Local.t64).op(I64.wrap).localSet(Local.addr);
 }
 
 /**

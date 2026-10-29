@@ -32,12 +32,15 @@ import { interpret64 } from '../interp64.js';
 /**
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
- *     precise?: boolean, leafCalls?: boolean, looseStacks?: boolean }} settings
+ *     precise?: boolean, leafCalls?: boolean, looseStacks?: boolean,
+ *     callTargets?: Map<number, number[]> }} settings
  *     looseStacks: with precise false, the stack's accesses untested, as the runtime
- *     emits them until code is translated on a stack
+ *     emits them until code is translated on a stack; callTargets: the callees each
+ *     indirect call is predicted to, by the call's address, as the runtime's samples name
+ *     them (`formRegion`)
  */
 export function createSharedRunner64({ memory, layout, precise = true, leafCalls = true,
-    looseStacks = false })
+    looseStacks = false, callTargets = undefined })
 {
     const found = features();
     const flagsAt = pageFlagsAt(layout);
@@ -58,7 +61,8 @@ export function createSharedRunner64({ memory, layout, precise = true, leafCalls
     /** @param {number} entry */
     const form = entry=>{
         const region = formRegion(read, entry, { mode: MODE_64, helpers: false, leafCalls,
-            translatable: at=>open(at >>> 12), translates: translatesLong });
+            translatable: at=>open(at >>> 12), translates: translatesLong,
+            ...(callTargets === undefined ? {} : { callTargets }) });
         if (region.blocks.every(block=>block.instructions.length === 0))
         {
             regions.set(entry, null);

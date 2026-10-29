@@ -1999,3 +1999,25 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   end in these loops.
 - **Machine.** A cloud container (Intel Xeon @ 2.80 GHz, 4 vCPU), valgrind 3.22.
 - **Decision.** Not taken.
+
+### 2026-10-29: long mode's window test of a single access folded into its page-flag test
+
+- **Idea.** At 64 bits an access checked on its own (`checkAccess` after `windowAddress`) tested
+  the 4 GiB window with a branch of its own (the address and its last byte or'ed, shifted by 32)
+  before the page-flag test; folded into that test as the window checks of a group already were
+  (the high half or'ed into the flags, a test under the one branch), it saves the add, the or
+  and a branch an access. Gated: the far and crossing accesses of `runtime64-programs.itest.js`
+  fail with the high half left out of the test or with the test under it removed.
+- **Workload.** cork-bench tree, x86-64 image; valgrind callgrind, node 26.12.1 (V8 14.6) x64,
+  `--no-liftoff --no-wasm-dynamic-tiering --predictable`, `tools/cork-bench/ir.sh` with `WASM=1`
+  (machine instructions in V8's printed wasm code, 1100 iterations less 1000, over 100), one run
+  an arm (the column repeats to the instruction run to run on this workload).
+- **Values.** On cork2-x64 at cc16b41 with this change's stack, return, call and address
+  changes in place: without the fold 3 445 305 an iteration, with it 3 445 783 (+0.01 %). 32-bit
+  arm, unchanged: 3 085 465.
+- **Why.** tree's hot accesses are a group's (`emitGroupChecks`), whose window test was folded
+  already, or reads left untested; a single checked access is off its hot path.
+- **Machine.** A cloud container (Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Left in: it is fewer instructions on every path that has such an access, and
+  no workload measured here runs one hot; not measured apart on the others.

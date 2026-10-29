@@ -633,6 +633,19 @@ export const MASKED_SWITCHES = ''
     + '2000000000bdffffffc4ffffffcaffffffd1ffffffd1ffffffcaffffffc4ffffffbdffffff';
 
 /**
+ * An indirect call predicted for thirty rounds, then made to its callee's address past
+ * the 4 GiB window: the call faults as the interpreter's does, rsp as it was, where the
+ * translation tests the window only past the callees it matched on the whole quadword.
+ *
+ *         xor esi, esi; lea rdx, [rip + f]
+ *     1:  call rdx; inc esi; cmp esi, 30; jne 2f; bts rdx, 32
+ *     2:  cmp esi, 40; jb 1b; jmp 3f
+ *     f:  add qword [rbx], 1; ret
+ *     3:
+ */
+export const FAR_CALL = '31f6488d1515000000ffd2ffc683fe1e7505480fbaea2083fe2872edeb0548830301c3';
+
+/**
  * A masked switch whose second entry is rewritten, after thirty rounds, to its case's
  * address past the 4 GiB window: the next jump through it faults, as the interpreter's
  * does, rather than taking the case the low half names.

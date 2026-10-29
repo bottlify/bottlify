@@ -508,6 +508,7 @@ function predictCall(e){
     const { exit } = e.region.blocks[e.blockIndex];
     const callees = exit.kind === 'indirect' && exit.predicted
         ? exit.targets.filter(target=>e.labels.has(target)) : [];
+    const whole = farPastPrediction(e);
     if (callees.length === 0)
     {
         return;
@@ -521,7 +522,14 @@ function predictCall(e){
     }
     for (const callee of callees)
     {
-        b.localGet(Local.count).i32const(callee | 0).op(I32.eq);
+        if (whole)
+        {
+            b.localGet(LONG_WIDE).i64const(BigInt(callee)).op(I64.eq);
+        }
+        else
+        {
+            b.localGet(Local.count).i32const(callee | 0).op(I32.eq);
+        }
         e.openIf('predicted');
         e.countMechanism(Mechanism.CALL_PREDICTED);
         e.jumpTo(callee);
@@ -531,6 +539,19 @@ function predictCall(e){
     {
         e.close();
     }
+}
+
+/**
+ * Whether a long-mode indirect call's target is tested against the window
+ * past its predictions (`predictCall`), not before its push: a predicted
+ * callee matches the whole quadword, so a call that takes one pays no test.
+ * The target is in `LONG_WIDE` as well as `count`.
+ *
+ * @param {E} e
+ */
+function farPastPrediction(e){
+    const { exit } = e.region.blocks[e.blockIndex];
+    return isLong(e) && exit.kind === 'indirect' && exit.predicted === true;
 }
 
 /**
@@ -1117,7 +1138,20 @@ export function emitInstruction(e, instruction, flagsLive){
                 // and free between instructions; t2 is the push's scratch.
                 prepare(e, dst);
                 readOp(e, dst);
-                nearTarget(e, instruction);
+                if (farPastPrediction(e))
+                {
+                    b.localTee(LONG_WIDE).op(I64.wrap);
+                    if (e.blockRetired === 1)
+                    {
+                        // Its far exit leaves at the block's start, which then
+                        // must not be an entry (`exitBefore`).
+                        e.leaving.add(e.blockIndex);
+                    }
+                }
+                else
+                {
+                    nearTarget(e, instruction);
+                }
                 b.localSet(Local.count);
             }
             if (isLong(e))
@@ -1169,6 +1203,16 @@ export function emitInstruction(e, instruction, flagsLive){
                 // Sampled past the prediction: a call it takes costs nothing more,
                 // and the samples are the calls that still leave.
                 predictCall(e);
+                if (farPastPrediction(e))
+                {
+                    // Pushed already: a far target leaves with rsp put back,
+                    // the slot below it written as the interpreter writes it.
+                    b.localGet(LONG_WIDE).i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
+                    e.openGuard('far', EMPTY);
+                    addStack(e, 8);
+                    e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
+                    e.close();
+                }
                 profileCall(e, instruction.eip);
                 e.countMechanism(Mechanism.CALL_LEFT);
                 countApart(e);
@@ -1573,8 +1617,8 @@ function returnLong(e, instruction){
  */
 function leaveLong(e, size){
     const { b } = e;
-    windowAddress(e, ()=>b.localGet(registerLocal(e, 5)), size);
-    checkAccess(e, size);
+    windowAddress(e, ()=>b.localGet(registerLocal(e, 5)));
+    checkAccess(e, size, { window: true });
     b.localGet(registerLocal(e, 5)).i64const(BigInt(size)).op(I64.add)
         .localSet(registerLocal(e, 4));
     b.localGet(Local.addr);
@@ -1699,14 +1743,15 @@ export function prepare(e, operand, options){
         {
             return;
         }
-        if (isLong(e))
-        {
-            windowed(e, operand, options?.store === true);
-        }
-        else
+        if (!isLong(e))
         {
             emitAddress(e, operand, true);
             e.b.localSet(Local.addr);
+        }
+        else if (windowed(e, operand, options?.store === true))
+        {
+            checkAccess(e, operand.size, { ...options, window: true });
+            return;
         }
         checkAccess(e, operand.size, options);
     }
@@ -1834,6 +1879,7 @@ export function readAddress(e, operand){
  * wrapped into RAM as a 32-bit one is, with no test of the window.
  *
  * @param {E} e @param {Operand} operand @param {boolean} store
+ * @returns {boolean}  whether its `checkAccess` tests the window too (`window`)
  */
 function windowed(e, operand, store){
     const { b } = e;
@@ -1848,7 +1894,7 @@ function windowed(e, operand, store){
             e.exitBefore(e.current.eip, Exit.FAULT, 13);
         }
         b.i32const(disp | 0).localSet(Local.addr);
-        return;
+        return false;
     }
     if (wrapsRead(e, store) || e.memPlan?.access != null)
     {
@@ -1858,9 +1904,10 @@ function windowed(e, operand, store){
         // move to cut it.
         emitAddress(e, operand, true);
         b.localSet(Local.addr);
-        return;
+        return false;
     }
-    windowAddress(e, ()=>emitAddress64(e, operand), size);
+    windowAddress(e, ()=>emitAddress64(e, operand));
+    return true;
 }
 
 /**
@@ -2392,11 +2439,12 @@ export function push(e, size, pushValue){
         }
         else
         {
-            windowAddress(e, ()=>b.localGet(rsp).i64const(BigInt(size)).op(I64.sub), size);
+            windowAddress(e, ()=>b.localGet(rsp).i64const(BigInt(size)).op(I64.sub));
         }
         if (!looseStackStore(e, size))
         {
-            checkAccess(e, size, { store: true });
+            // Not loose: the window `windowAddress` left to the test.
+            checkAccess(e, size, { store: true, window: true });
             noteStore(e, size);
         }
         b.localGet(Local.addr).localGet(size === 8 ? Local.t64b : Local.t2)
@@ -3787,8 +3835,8 @@ function bitTestLong(e, instruction, flagsLive){
             emitAddress64(e, dst);
             b.localGet(LONG_WIDE).i64const(BigInt(Math.log2(bits))).op(I64.shrS)
                 .i64const(BigInt(Math.log2(size))).op(I64.shl).op(I64.add);
-        }, size);
-        checkAccess(e, size);
+        });
+        checkAccess(e, size, { window: true });
     }
     else
     {
@@ -4428,7 +4476,7 @@ function stringInstruction(e, instruction){
     const checkedLoad = pointer=>{
         if (long)
         {
-            windowAddress(e, ()=>b.localGet(pointer), size, counted);
+            windowAddress(e, ()=>b.localGet(pointer));
         }
         else
         {
@@ -4439,7 +4487,7 @@ function stringInstruction(e, instruction){
             }
             b.localSet(Local.addr);
         }
-        checkAccess(e, size, { counted });
+        checkAccess(e, size, { counted, window: long });
         b.localGet(Local.addr).load(size === 8 ? 'i64' : loadKind(size),
             { offset: e.layout.ramBase });
     };
@@ -4450,13 +4498,13 @@ function stringInstruction(e, instruction){
     const checkedStore = (pointer, pushValue)=>{
         if (long)
         {
-            windowAddress(e, ()=>b.localGet(pointer), size, counted);
+            windowAddress(e, ()=>b.localGet(pointer));
         }
         else
         {
             b.localGet(pointer).localSet(Local.addr);
         }
-        checkAccess(e, size, { counted, store: true });
+        checkAccess(e, size, { counted, store: true, window: long });
         noteStore(e, size);
         b.localGet(Local.addr);
         pushValue();

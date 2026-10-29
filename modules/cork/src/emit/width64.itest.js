@@ -15,8 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CORPUS, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, flagsLeftUndefined, load,
-    loopCases, machine, nested, pool, program, run, stacked,
+    CORPUS, FAR_CALL, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, flagsLeftUndefined,
+    load, loopCases, machine, nested, pool, program, run, stacked,
 } from '../testing/long-machine.js';
 import { createSharedRunner64 } from '../testing/shared-runner64.js';
 
@@ -147,6 +147,22 @@ test('leave and indirect jumps and calls run in the shared emitter\'s regions as
     const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
+
+test('a predicted call past the 4 GiB window faults as interpreted', ()=>{
+    // FAR_CALL's `call rdx` (at 9) predicted to its callee (at 0x1e), which the region
+    // forms in: the call matches it on the whole quadword, and only a miss tests the window.
+    const callTargets = new Map([[CORPUS.codeAt + 9, [CORPUS.codeAt + 0x1e]]]);
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `far call ${i}`, code: FAR_CALL }));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits, stats } = compare(cases, { budget,
+            makeRunner: (memory, layout)=>createSharedRunner64({ memory, layout, callTargets }) });
+        assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
+        assert.equal(exits, 0, 'every program faults past the window');
+        assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+    }
 });
 
 test('SIMD moves and conversions of quadword general operands run in the shared emitter\'s'
