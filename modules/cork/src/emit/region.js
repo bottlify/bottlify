@@ -52,6 +52,7 @@ import {
     recordOffsets, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
+import { copyLoopOf, emitCopyAtOnce } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
     planLoop, planRegion, readsWrapped,
@@ -3034,8 +3035,15 @@ export class RegionEmitter {
         {
             relaxedFlagReads(block, this.relaxedReads);
         }
-        const streams = this.selfLoop && !x.active && this.layout.codePages < 0
+        // A loop that only reads is left unhoisted where reads go untested: its
+        // unchecked copy saved one wrapping `and` a read and cost a turn counter
+        // and the window's test, which a short loop (a strlen, a hash of a
+        // name) never paid back: cork-bench sort -3.1 %, str -1.8 %, crc's
+        // long table walk +0.3 %.
+        const planned = this.selfLoop && !x.active && this.layout.codePages < 0
             ? planLoop(block.instructions, this.width.bits === 64) : null;
+        const streams = planned !== null && (planned.streams.some(stream=>stream.store)
+            || !readsWrapped(this.context)) ? planned : null;
         if (streams !== null)
         {
             this.emitHoistedLoop(block, index, live, streams);
@@ -3090,6 +3098,20 @@ export class RegionEmitter {
         const depth = this.controls.length;
         this.loops++;
         this.open(`selfDone${index}`, EMPTY);
+        const copy = this.width.bits === 32 && this.context.undo === undefined
+            ? copyLoopOf(block) : null;
+        if (copy !== null)
+        {
+            const pending = this.pending;
+            emitCopyAtOnce(this, block, copy, `selfDone${index}`, ()=>{
+                this.current = block.instructions[1];
+                this.flagsAfter = this.flagsAfterEach[1];
+                this.memPlan = null;
+                emitInstruction(this, block.instructions[1], live[1]);
+            }, import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile
+                ? times=>this.countBlock(block.start, times) : null);
+            this.pending = pending;
+        }
         this.openLoop(`self${index}`);
         emitStreamWindow(this, streams.streams, streams.turns, streams.forward, streams.ranges);
         b.op(I32.eqz);
@@ -3174,14 +3196,23 @@ export class RegionEmitter {
      * and the address when the slot is another block's (then marked shared).
      *
      * @param {number} start
+     * @param {number} [times]  a local holding how many executions, one unless given
      */
-    countBlock(start){
+    countBlock(start, times = -1){
         const { b } = this;
         const at = this.layout.tables + blockProfileAt(this.layout)
             + blockSlot(start) * Tables.BLOCK_SLOT;
         const { context } = this;
-        atTables(context, atTables(context, b)).load('i32', { offset: at + 4 }).i32const(1)
-            .op(I32.add).store('i32', { offset: at + 4 });
+        atTables(context, atTables(context, b)).load('i32', { offset: at + 4 });
+        if (times < 0)
+        {
+            b.i32const(1);
+        }
+        else
+        {
+            b.localGet(times);
+        }
+        b.op(I32.add).store('i32', { offset: at + 4 });
         atTables(context, b).load('i32', { offset: at }).i32const(start | 0).op(I32.ne);
         this.openIf('profileSlot');
         atTables(context, atTables(context, b)).load('i32', { offset: at + 8 });
@@ -3381,8 +3412,14 @@ export class RegionEmitter {
      * budget runs out, as a run with no word does.
      */
     spentTest(){
+        this.b.localGet(Local.budget);
+        this.spentLimit();
+        this.b.op(I32.leS);
+    }
+
+    /** What `spentTest` compares the budget with: 0, or the interrupt word. */
+    spentLimit(){
         const { b } = this;
-        b.localGet(Local.budget);
         if (this.layout.interrupt === undefined)
         {
             b.i32const(0);
@@ -3391,7 +3428,6 @@ export class RegionEmitter {
         {
             atState(this.context, b).load('i32', { offset: this.layout.interrupt });
         }
-        b.op(I32.leS);
     }
 
     /**

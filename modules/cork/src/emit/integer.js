@@ -3201,14 +3201,16 @@ function imul(e, instruction, flagsLive){
         }
         return true;
     }
-    if (!flagsLive && isLong(e))
+    if (!flagsLive)
     {
-        // The low half alone, which no sign extension changes: an i32 product,
-        // where the quadword one had the host load a memory operand twice --
-        // once as it is and once sign-extended into the multiply.
+        // With CF and OF dead only the low half is wanted, and the low half
+        // of a product is the same signed or not: one i32 multiply, where the
+        // widened one cost a hashing loop (str's FNV) a sign extension and a
+        // truncation a turn, and long mode's quadword one loaded a memory
+        // operand twice.
         readOp(e, a);
         readOp(e, c);
-        b.op(I32_EXTRA.mul).localSet(Local.t1);
+        b.op(I32.mul).localSet(Local.t1);
         writeOp(e, dst, ()=>{
             b.localGet(Local.t1);
             mask(e, size);
