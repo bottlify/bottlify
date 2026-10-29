@@ -2662,6 +2662,12 @@ export function createWin32Module(){
                 // The adapters behind the sockets: one, on the network they reach.
                 'IPHLPAPI.dll': createIphlpapiFunctions({
                     readMemory, writeMemory, localAddress: ()=>sockets.localAddress(),
+                    // MIB tables the caller frees with FreeMibTable.
+                    allocate: bytes=>libraries['KERNEL32.dll'].LocalAlloc
+                        .handler([0x40, bytes]) >>> 0,
+                    free: address=>void libraries['KERNEL32.dll'].LocalFree
+                        .handler([address]),
+                    handles,
                 }),
                 // TransmitFile is wsock32's and mswsock's, never ws2_32's.
                 'WS2_32.dll': Object.fromEntries(Object.entries(winsock.sockets)
