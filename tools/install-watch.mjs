@@ -542,8 +542,12 @@ setInterval(async()=>{
         console.log(seconds(), 'MEM', JSON.stringify({ rss: mb(usage.rss),
             heapUsed: mb(usage.heapUsed), external: mb(usage.external),
             arrayBuffers: mb(usage.arrayBuffers) }));
-        for (const { image, diagnostics } of await app.standing())
+        for (const standing of await app.standing())
         {
+            // A process standing in a worker of its own may not have said
+            // its image or its figures yet.
+            const image = String(standing.image ?? 'process');
+            const diagnostics = standing.diagnostics ?? [];
             /** @param {string} layer */
             const metrics = layer=>diagnostics.find((/** @type {any} */ entry)=>
                 entry.name === layer)?.metrics ?? {};
