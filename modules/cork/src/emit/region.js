@@ -3146,14 +3146,23 @@ export class RegionEmitter {
         // turn charges and looks once, where a count of its own and the
         // budget's test were two looks. Where the bound is met, the budget
         // spent leaves as before and a budget left goes back to the test.
+        // And two turns a wasm turn, for an even number of the turns
+        // cleared: the first turn's back edge goes on into the second
+        // with no charge and no look, its count owed into the second's ways
+        // out, and the second charges both and looks once -- the budget's
+        // subtraction, compare and branch and V8's stack check at the loop's
+        // head paid every other turn.
         const shared = this.layout.interrupt !== undefined;
+        const paired = !shared && streams.turns >= 2 && this.context.precise !== true
+            && block.instructions.length <= PAIRED_MAX;
+        const cleared = paired ? streams.turns & ~1 : streams.turns;
         if (shared)
         {
-            b.i32const(streams.turns).localSet(turns);
+            b.i32const(cleared).localSet(turns);
         }
         else
         {
-            b.localGet(Local.budget).i32const(streams.turns * block.instructions.length)
+            b.localGet(Local.budget).i32const(cleared * block.instructions.length)
                 .op(I32.sub).localTee(turns).i32const(0)
                 .localGet(turns).i32const(0).op(I32.gtS).select().localSet(turns);
         }
@@ -3182,7 +3191,32 @@ export class RegionEmitter {
                 throw new Error(`emit: block ${index}'s unchecked turn charges`
                     + ` ${this.blockRetired}, not ${block.instructions.length}`);
             }
-            this.charge();
+            const turn = this.blockRetired;
+            if (paired)
+            {
+                // The first turn's back edge into the second, its count owed
+                // into it; its fall-through charges it below.
+                this.pushBranchCondition(last);
+                this.openIf('taken');
+                this.payResultFor(block.start);
+                this.resultOwed = null;
+                this.pending = null;
+                this.fcmp = null;
+                this.emitInstructions(block, index, live,
+                    new Map([...streams.plan].map(([i, slot])=>[i, { ...slot }])));
+                this.instructions = counted;
+                if (this.blockRetired !== 2 * turn)
+                {
+                    throw new Error(`emit: block ${index}'s unchecked turns charge`
+                        + ` ${this.blockRetired}, not ${2 * turn}`);
+                }
+                this.charge();
+                this.blockRetired = 0;
+            }
+            else
+            {
+                this.charge();
+            }
             this.pushBranchCondition(last);
             this.openIf('taken');
             b.localGet(Local.budget).localGet(turns).op(I32.leS);
@@ -3198,8 +3232,17 @@ export class RegionEmitter {
             b.br(this.depthOf(`unchecked${index}`));
             this.close();
             this.payResultFor(block.exit.targets[1]);
-            this.resultOwed = null;
             b.br(this.depthOf(`selfDone${index}`));
+            if (paired)
+            {
+                this.close(); // taken
+                this.dead = false;
+                this.blockRetired = turn;
+                this.charge();
+                this.payResultFor(block.exit.targets[1]);
+                b.br(this.depthOf(`selfDone${index}`));
+            }
+            this.resultOwed = null;
         }
         this.close(); // unchecked
         this.close(); // self
@@ -4546,6 +4589,9 @@ function flowsInto(blocks, labels){
     });
     return into;
 }
+
+/** The longest block a hoisted loop's unchecked copy runs two turns a wasm turn. */
+const PAIRED_MAX = 32;
 
 /** The kinds the instructions that leave a record of their own record, by op. */
 const RECORDED = new Map([

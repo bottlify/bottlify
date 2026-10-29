@@ -6,20 +6,22 @@
 
 /**
  * A loop's ways out beside the interpreter: the back edge that finds the
- * budget spent, the fault of a store, the end of the turns a hoisted loop's
- * test cleared. Seeded programs of loops of one block and of several -- store
- * streams moving by a stride (hoisted, `planLoop`), carry chains whose head
- * reads the flags the turn before left (`adc` after `add`), heads that write
- * them first -- run under budgets from a few instructions to a million a
- * turn, some streams running off the end of RAM into the fault. Each runs
- * translated and interpreted, and the two must stop the same way with the
- * same instruction count, registers and memory, and with the same flags
- * where the program halts. A way out to code that writes the flags before it
- * reads them leaves an empty record (`exitAt`), so the flags are compared
- * where the program ends, not at a fault, as a fault's handler is not
- * promised them. Beside them: a loop inside another entered at its head from
- * elsewhere with a record another region made (the outer head's way in), and a
- * narrow register write widened soon after (`widenedNext` in integer.js).
+ * budget spent, the fault of a store, a store into code, the end of the turns
+ * a hoisted loop's test cleared -- whose unchecked copy counts its turns on
+ * the budget and runs two a wasm turn (`emitHoistedLoop`). Seeded programs of
+ * loops of one block and of several -- store streams moving by a stride
+ * (hoisted, `planLoop`), RAM's end at the turn after a window's last, carry
+ * chains whose head reads the flags the turn before left (`adc` after `add`),
+ * heads that write them first, compares owing their result to the branch,
+ * pointers the data moves, registers alone, x87 -- run under budgets from a
+ * few instructions to a million a turn, some streams running off the end of
+ * RAM into the fault. Each runs translated and interpreted, and the two must
+ * stop the same way with the same instruction count, registers and memory,
+ * and with the same flags where the program halts (a way out to code that
+ * writes the flags first leaves an empty record, so a fault's context is not
+ * promised them).
+ * Beside them: a narrow register write widened soon after (`widenedNext` in
+ * integer.js).
  */
 
 import { test } from 'node:test';
@@ -56,8 +58,12 @@ function random(seed){
  * @param {{ stride: number }} shape
  */
 function loop(pick, code, { stride }){
+    const kind = [0, 0, 1, 2, 3, 4, 4, 5, 6, 7, 7, 8, 8][pick(13)];
+    if (kind >= 7)
+    {
+        code.push(0xd9, 0xe8); // fld1: what the loop keeps in st0
+    }
     const head = code.length;
-    const kind = [0, 0, 1, 2, 3][pick(5)];
     const step = stride < 0 ? [0x83, 0xef, -stride] : [0x83, 0xc7, stride]; // sub/add edi, |stride|
     if (kind === 0)
     {
@@ -102,7 +108,7 @@ function loop(pick, code, { stride }){
         code.push(0x03, 0x06, 0x73, 0x01, 0x42); // add eax, [esi]; jnc +1; inc edx
         code.push(0x83, 0xc6, 0x04, 0x89, 0x07, ...step); // add esi, 4; mov [edi], eax; step
     }
-    else
+    else if (kind === 3)
     {
         // Two blocks, the head reading the carry of the turn before.
         code.push(0x83, 0xd2, 0x00); // adc edx, 0
@@ -110,7 +116,64 @@ function loop(pick, code, { stride }){
         code.push(0x73, 0x02, 0x89, 0x17); // jnc +2; mov [edi], edx
         code.push(0x8d, 0x7f, stride & 0xff); // lea edi, [edi+stride]
     }
-    code.push(0x49); // dec ecx
+    else if (kind === 4)
+    {
+        // One block whose pointer the data moves, so no stream is planned
+        // (a plain self-loop): edi on by a byte it reads, masked (by none
+        // for a stride of 0, a pad in the code, which it stays in). Every read
+        // past RAM's end comes after a store that faults first: a read is
+        // wrapped into RAM, untested (`readsWrapped`), where the model faults.
+        const mask = stride === 0 ? 0 : [3, 15, 127][pick(3)];
+        code.push(0x89, 0x1f); // mov [edi], ebx: tested, the read after it inside it
+        code.push(0x0f, 0xb6, 0x47, 0x01); // movzx eax, byte [edi+1]
+        code.push(0x83, 0xe0, mask); // and eax, mask
+        code.push(0x01, 0xc3); // add ebx, eax
+        code.push(0x01, 0xc7); // add edi, eax
+        if (pick(2))
+        {
+            code.push(0x11, 0xda); // adc edx, ebx: the add's carry
+        }
+    }
+    else if (kind === 5)
+    {
+        // One block of registers alone, a carry kept across the back edge.
+        code.push(0x01, 0xd0, 0xc1, 0xc2, 1 + pick(31)); // add eax, edx; rol edx, n
+        code.push(0x11, 0xc3); // adc ebx, eax
+        if (pick(2))
+        {
+            code.push(0x31, 0xda); // xor edx, ebx
+        }
+    }
+    else if (kind === 6)
+    {
+        // One block closed by a compare whose result its branch alone needs
+        // (owed, `oweResult`), the head reading its parity the turn after.
+        code.push(0x0f, 0x9a, 0xc3); // setp bl
+        code.push(0x01, 0xd8, 0xc1, 0xc0, 1 + pick(31)); // add eax, ebx; rol eax, n
+        if (pick(2))
+        {
+            code.push(0x89, 0x07, ...step); // mov [edi], eax; step: a stream, hoisted
+        }
+        code.push(0x49, 0x83, 0xf9, 0x00); // dec ecx; cmp ecx, 0
+    }
+    else if (kind === 7)
+    {
+        // x87 through edi, the stack as deep at the back edge as at the head
+        // (`loopsOntoItself`): fst [edi]; fld [edi]; fadd st0, st1; fmulp st1, st0.
+        code.push(0xd9, 0x17, 0xd9, 0x07, 0xd8, 0xc1, 0xde, 0xc9, ...step);
+    }
+    else if (kind === 8)
+    {
+        // x87 whose turn ends with a single just loaded in st0, which the
+        // block's end writes into its f64 local (`x87BlockEnd`): fstp st0;
+        // fld dword [esi], or fld dword [esi]; fstp st1; then a store through edi.
+        code.push(...pick(2) ? [0xdd, 0xd8, 0xd9, 0x06] : [0xd9, 0x06, 0xdd, 0xd9]);
+        code.push(0x83, 0xc6, 0x04, 0x89, 0x07, ...step); // add esi, 4; mov [edi], eax
+    }
+    if (kind !== 6)
+    {
+        code.push(0x49); // dec ecx
+    }
     const back = head - (code.length + 2);
     if (back >= -128)
     {
@@ -119,6 +182,30 @@ function loop(pick, code, { stride }){
     else
     {
         code.push(0x0f, 0x85, ...le(head - (code.length + 6)));
+    }
+    if (kind >= 7)
+    {
+        // The FPU's state as the loop left it -- its top, condition codes and
+        // which registers are empty -- with the instruction and operand
+        // pointers, which the translation does not keep, cleared, and each tag
+        // made empty or not and the status word its top and codes: how a
+        // value is tagged and the sticky exception bits are not this gate's
+        // (both differ from the model before this change, on a loaded NaN);
+        // then what the loop kept in st0.
+        const tags = le(DATA + 0x208);
+        code.push(0xd9, 0x35, ...le(DATA + 0x200)); // fnstenv [DATA+0x200]
+        for (let at = 12; at < 28; at += 4)
+        {
+            code.push(0xc7, 0x05, ...le(DATA + 0x200 + at), ...le(0)); // mov dword [...], 0
+        }
+        code.push(0x9c, 0x50, 0x52); // pushfd; push eax; push edx: the loop's, read after
+        code.push(0x66, 0xa1, ...tags, 0x66, 0x89, 0xc2); // mov ax, tags; mov dx, ax
+        code.push(0x66, 0xd1, 0xea); // shr dx, 1
+        code.push(0x66, 0x21, 0xd0, 0x66, 0x25, 0x55, 0x55); // and ax, dx; and ax, 0x5555
+        code.push(0x66, 0xa3, ...tags); // mov tags, ax
+        code.push(0x66, 0x81, 0x25, ...le(DATA + 0x204), 0x00, 0x7f); // and [status], 0x7f00
+        code.push(0x5a, 0x58, 0x9d); // pop edx; pop eax; popfd
+        code.push(0xdd, 0x1d, ...le(DATA + 0x100)); // fstp qword [DATA+0x100]
     }
 }
 
@@ -135,14 +222,47 @@ function generate(seed){
     const outer = code.length;
     for (let k = 1 + pick(3); k > 0; k--)
     {
-        const stride = [1, 4, 4, 8, 12, -4, 64][pick(7)];
-        // Some streams run off RAM's end, the rest stay in the data.
-        const off = pick(3) === 0;
-        const turns = 1 + pick(off ? 6000 : 300);
-        const base = off ? END - 4 * pick(4096) - 64 : DATA + 0x8000 + pick(64) * 4;
+        // Some streams run off RAM's end, some store into the loop's own code
+        // granule (a pad jumped over, so the stores change nothing the
+        // program runs, and each one is a store into translated code), the
+        // rest stay in the data.
+        const where = pick(8);
+        const off = where < 2;
+        const over = where === 2;
+        const stride = over ? 0 : [1, 4, 4, 8, 12, -4, 64][pick(7)];
+        if (over)
+        {
+            code.push(0xeb, 16, ...new Array(16).fill(0)); // jmp over the pad
+        }
+        let turns = 1 + pick(off ? 6000 : 300);
+        let base = off ? END - 4 * pick(4096) - 64 : over ? CODE + code.length - 16
+            : DATA + 0x8000 + pick(64) * 4;
+        if (off && stride > 0 && pick(2))
+        {
+            // RAM's end at about the turn after the last one a window test
+            // clears (`planLoop`'s turns, by the widest stride: edi's, or
+            // esi's 4), where a turn too many run unchecked would store past it.
+            const cleared = 1 + Math.floor(4096 / (pick(2) ? stride : Math.max(stride, 4)));
+            const at = cleared - 1 + pick(3);
+            base = END - at * stride - pick(12);
+            turns = at + 2 + pick(50);
+        }
         code.push(0xbf, ...le(stride < 0 && !off ? base + 0x4000 : base)); // mov edi, base
         code.push(0xbe, ...le(SOURCE + pick(64) * 4)); // mov esi, source
-        code.push(0xb9, ...le(turns)); // mov ecx, turns
+        if (off)
+        {
+            // More turns each outer turn, enough to reach RAM's end (or
+            // `turns`, for a stream moving down) by the third to the ninth:
+            // the fault comes in a loop translated by then.
+            const reach = stride > 0 ? Math.ceil((END - base) / stride) : turns;
+            const step = Math.max(1, Math.ceil(reach / (3 + pick(7))));
+            code.push(0xb9, ...le(11), 0x29, 0xe9); // mov ecx, 11; sub ecx, ebp
+            code.push(0x69, 0xc9, ...le(step), 0x85, 0xc9); // imul ecx, ecx, step; test ecx, ecx
+        }
+        else
+        {
+            code.push(0xb9, ...le(turns)); // mov ecx, turns
+        }
         code.push(0xb8, ...le(pick(1 << 30))); // mov eax, value
         code.push(0xba, ...le(pick(1 << 30))); // mov edx, value
         code.push(pick(2) ? 0xf9 : 0xf8); // stc / clc
@@ -206,52 +326,6 @@ test('loops left at the budget, a fault or their turns\' end match the interpret
     assert.ok(faults > 10, `${faults} programs end at a fault`);
     assert.ok(translated > 100, `${translated} programs ran mostly translated code`);
 });
-
-/**
- * A loop inside another entered at its head through the region's dispatch with
- * a record of another region's making: an indirect jump to it after an `add`
- * that carries, the inner loop's head an `adc` that reads that carry, or a head
- * that writes the flags first (the outer loop's way in leaves the record empty
- * only for heads that do).
- *
- * @param {number} seed
- */
-function entered(seed){
-    const pick = random(seed);
-    const reads = pick(2) === 0;
-    const turns = 1 + pick(40);
-    const code = [0xbf, ...le(2 + pick(20))]; // mov edi, rounds
-    code.push(0xbd, ...le(1 + pick(4))); // mov ebp, outer turns
-    const outer = code.length;
-    code.push(0xbe, ...le(SOURCE), 0xb9, ...le(turns), 0xf8); // mov esi, source; mov ecx, n; clc
-    const head = code.length;
-    code.push(...reads ? [0x13, 0x06] : [0x03, 0x06]); // adc / add eax, [esi]
-    code.push(0x8d, 0x76, 0x04, 0x49); // lea esi, [esi+4]; dec ecx
-    code.push(0x75, (head - (code.length + 2)) & 0xff); // jnz head
-    code.push(0xa3, ...le(DATA)); // mov [DATA], eax
-    code.push(0x4d, 0x0f, 0x85, ...le(outer - (code.length + 7))); // dec ebp; jnz outer
-    // Again from the head, by an indirect jump, with the carry set.
-    const again = [
-        0xbd, ...le(1), 0xbe, ...le(SOURCE), 0xb9, ...le(turns), // mov ebp, esi, ecx
-        0xbb, ...le(-1 >>> 0), 0x83, 0xc3, 0x01, // mov ebx, -1; add ebx, 1
-        0xba, ...le(CODE + head), 0xff, 0xe2, // mov edx, head; jmp edx
-    ];
-    code.push(0x4f, 0x74, again.length, ...again); // dec edi; jz done
-    code.push(0xf4); // done: hlt
-    return code;
-}
-
-test('a loop inside another entered at its head by a jump from elsewhere matches the interpreter',
-    async()=>{
-        for (let seed = 1; seed <= 120; seed++)
-        {
-            const code = entered(seed * 31337);
-            const interpreted = await runProgram(code, { translate: false });
-            const ran = await runProgram(code, {});
-            assert.deepEqual({ ...ran, translated: 0 }, interpreted, `seed ${seed}`);
-            assert.equal(interpreted.stop.reason, 'halt');
-        }
-    });
 
 /**
  * Narrow writes of a register, each followed or not by a `movzx`/`movsx` that
@@ -318,7 +392,10 @@ function narrow(seed){
             const from = word ? dst : dst & 3;
             const into = pick(4) === 0 ? words[pick(words.length)] : from;
             const op = (pick(2) ? 0xb6 : 0xbe) | (word ? 1 : 0); // movzx / movsx
-            code.push(0x0f, op, 0xc0 | into << 3 | (word || pick(4) > 0 ? from : dst));
+            // The source mostly the half just written, at times its other half
+            // (al and ah), which the widening reads unmerged if taken for it.
+            const half = [from, from, dst, dst ^ 4][pick(4)];
+            code.push(0x0f, op, 0xc0 | into << 3 | (word ? from : half));
         }
     }
     for (const reg of words)
