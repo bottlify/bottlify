@@ -2215,3 +2215,25 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   recorded.
 - **Decision.** Not taken as such: a narrower compare's operands are wrapped and compared as i32,
   a quadword's as i64 (tree 3,117,594, its base; sort 3,791,850).
+
+### 2026-10-29: a linked call's slot read in one quadword load on an x64 host
+
+- **Idea.** fe40382e read a linked call's slot (the index, the label and the top-and-empty
+  halfword) in one i64 load, taking each field out with shifts and masks, where it had been
+  three loads: on arm64 a constant address past a load's offset costs two instructions a load
+  (4da46ec1 kept the one load on both hosts when it took the one condition back to arm64).
+- **Workload.** cork-bench, both widths, `tools/cork-bench/ir.sh` with `WASM=1 CLOCK=0.001
+  ITERS=1000`, node 26.13.0 (V8 14.6) x64, machine instructions an iteration in V8's printed wasm
+  code, two runs an arm (identical to the instruction; load and lua one). Arms: cork2-x64-speed
+  at 35c25a0 (the one load on both hosts), and the same with three loads on an x64 host.
+- **Values.** One load, then three: calls512-order 5,242,588 -> 5,128,910 (x32), 5,998,645 ->
+  5,843,891 (x64); calls512-scatter 5,251,383 -> 5,139,761, 4,989,406 -> 4,825,586; load
+  2,501,119 -> 2,478,182, 2,974,678 -> 2,949,159; lua 33,891,535 -> 33,757,597, 36,667,831 ->
+  36,366,200; the other workloads within 0.1 %, none higher. Per commit of the base's history
+  (x64): fe40382e calls512-scatter +3.18 %, calls512-order +3.00 % (x32 +3.50 %); 4da46ec1 -1.80,
+  -1.99 (x32 -3.10 %).
+- **Why.** An x64 load takes the constant address as its offset for nothing; the fields out of one
+  quadword are shifts and masks the separate loads did not need.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded. arm64: not measured here (the one load stays there).
+- **Decision.** On an x64 host three loads again; arm64 keeps the one load.
