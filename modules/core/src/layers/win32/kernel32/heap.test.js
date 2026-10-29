@@ -1115,6 +1115,23 @@ test('VirtualQuery on a mapped image answers MEM_IMAGE from the image base', ()=
     assert.equal(view.getUint32(buffer + MBI.Type, true), 0x1000000);
 });
 
+test('VirtualQuery on a view of a section answers MEM_MAPPED, as long as the view', ()=>{
+    // A program opening a section another made learns its size this way.
+    const host = { ...fakeHost(),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x7f0000 && at < 0x7f3000
+            ? { base: 0x7f0000, length: 0x2100, writable: true } : null) };
+    const fns = createHeapFunctions(host);
+    const buffer = host.arena.base;
+    assert.equal(fns.VirtualQuery.handler([0x7f1234, buffer, MBI.SIZE]), MBI.SIZE);
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(view.getUint32(buffer + MBI.BaseAddress, true), 0x7f1000);
+    assert.equal(view.getUint32(buffer + MBI.AllocationBase, true), 0x7f0000);
+    assert.equal(view.getUint32(buffer + MBI.RegionSize, true), 0x2000,
+        'to the view\'s last page, rounded up');
+    assert.equal(view.getUint32(buffer + MBI.Protect, true), 0x04, 'PAGE_READWRITE');
+    assert.equal(view.getUint32(buffer + MBI.Type, true), 0x40000, 'MEM_MAPPED');
+});
+
 test('VirtualQuery above the last region answers up to the top of user address space', ()=>{
     const host = regionHost([{ base: 0x10000, size: 0x1000 }]);
     const fns = createHeapFunctions(host);

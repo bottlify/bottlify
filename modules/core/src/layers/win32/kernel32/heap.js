@@ -122,6 +122,10 @@ const MEM_PRIVATE = 0x20000;
  * only inside an image, whose headers it then reads from AllocationBase.
  */
 const MEM_IMAGE = 0x1000000;
+/** A view of a section (MapViewOfFile), as VirtualQuery types it. */
+const MEM_MAPPED = 0x40000;
+const PAGE_READONLY_VIEW = 0x02;
+const PAGE_READWRITE_VIEW = 0x04;
 
 /**
  * `lpMaximumApplicationAddress`: where 32-bit user address space ends. A free
@@ -820,6 +824,9 @@ export function createHeapAllocator({ base, size }){
  * @property {() => any} [currentThread]
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {(address: number) => { base: number, size: number, kind?: string } | null} [regionAt]
+ * @property {(address: number) => { base: number, length: number, writable: boolean } | null}
+ *     [viewAt]  The view of a section an address is in (mapping.js): VirtualQuery answers
+ *     its pages as Windows does, MEM_MAPPED and as long as the view.
  *           The memory layer's region map, when the assembling caller wired one.
  *           A region of kind `image` is answered as MEM_IMAGE.
  *           Without it VirtualQuery knows only the arena.
@@ -1207,6 +1214,17 @@ export function createHeapFunctions(host){
         const arenaEnd = host.arena.base + host.arena.size;
         const inArena = page >= host.arena.base && page < arenaEnd;
         const region = inArena ? null : host.regionAt ? host.regionAt(at) : null;
+        // A view is a region of its own, its pages rounded up from its
+        // length: a program that opens a section another made learns the
+        // section's size from its view's RegionSize.
+        const view = host.viewAt?.(at) ?? null;
+        if (view)
+        {
+            const end = (view.base + view.length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            const protection = view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW;
+            return [page, view.base, protection, (end >>> 0) - page, MEM_COMMIT, protection,
+                MEM_MAPPED];
+        }
         if (inArena)
         {
             return arenaAnswer(page, arenaEnd);

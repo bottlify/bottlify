@@ -418,6 +418,21 @@ export function createWin32Module(){
             const namedObjects = system?.objects
                 ? createRemoteNamedObjects({ objects: system.objects, kernel })
                 : createNamedObjects({ table: system?.namedObjects });
+            // This process's views of sections, by address: mapping.js keeps
+            // them, VirtualQuery answers them as the regions they are.
+            /** @type {Map<number, { length: number, writable: boolean }>} */
+            const viewRegions = new Map();
+            /** @param {number} at */
+            const viewAt = at=>{
+                for (const [base, view] of viewRegions)
+                {
+                    if (at >= base && at < base + ((view.length + 0xfff) & ~0xfff))
+                    {
+                        return { base, ...view };
+                    }
+                }
+                return null;
+            };
             // What GetCurrentProcessId answers: a child is the process its parent
             // was told of in PROCESS_INFORMATION, not a second copy of the first.
             const processId = (config?.processId ?? 0x1000) >>> 0;
@@ -2041,7 +2056,7 @@ export function createWin32Module(){
                         say: text=>trace(text),
                     }),
                     ...createHeapFunctions({
-                        arena, allocator, readMemory, writeMemory, fillMemory,
+                        arena, allocator, readMemory, writeMemory, fillMemory, viewAt,
                         guestHeap,
                         // A child's memory, reached where the child runs.
                         childOf: childProcessOf,
@@ -2248,6 +2263,7 @@ export function createWin32Module(){
                         readWideString,
                         setLastError: setError,
                         namedObjects,
+                        viewRegions,
                         // Views of one page-file section agree at the edges of
                         // a turn, across the processes on this thread.
                         sharedViews: system?.sharedViews

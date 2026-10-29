@@ -128,6 +128,8 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *     process: number }} [sharedViews]
  *           The run's agreement between views of one page-file section, and
  *           this process's name in it (`shared-views.js`).
+ * @property {Map<number, { length: number, writable: boolean }>} [viewRegions]
+ *           Every view of this process by its address, for VirtualQuery.
  * @property {{ views: number, waited: number, failed: number }} [metrics]
  *           Counted in place: views mapped, views that waited for their
  *           bytes, views whose bytes never came.
@@ -685,6 +687,7 @@ export function createMappingFunctions(host){
                         host.sharedViews.shared.attach(mapping, mapping.size, view.shared);
                     }
                     views.set(address, view);
+                    host.viewRegions?.set(address, { length: wanted, writable });
                     if (metrics)
                     {
                         metrics.views++;
@@ -785,6 +788,7 @@ export function createMappingFunctions(host){
                     host.sharedViews?.shared.detach(view.shared);
                 }
                 views.delete(address >>> 0);
+                host.viewRegions?.delete(address >>> 0);
                 host.release(address >>> 0);
                 return 1;
             },
