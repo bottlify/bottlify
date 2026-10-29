@@ -127,7 +127,7 @@ export function emitCopyAtOnce(e, block, loop, doneLabel, emitCompare, profile){
     const bytes = local();
     const left = local();
     const at = local();
-    const budget = local();
+    const charge = local();
     /** The flags of the page holding the address on the stack. */
     const flagsOf = ()=>{
         b.i32const(12).op(I32.shrU);
@@ -165,7 +165,7 @@ export function emitCopyAtOnce(e, block, loop, doneLabel, emitCompare, profile){
     // The budget after every turn, which must leave more than a back edge's
     // test leaves on (`spentTest`): the loop would have left before its end.
     b.localGet(Local.budget).localGet(bytes).i32const(shift).op(I32.shrU)
-        .i32const(length).op(I32.mul).op(I32.sub).localTee(budget);
+        .i32const(length).op(I32.mul).localTee(charge).op(I32.sub);
     e.spentLimit();
     b.op(I32.leS);
     out();
@@ -209,7 +209,7 @@ export function emitCopyAtOnce(e, block, loop, doneLabel, emitCompare, profile){
     }
     b.localGet(esi).localGet(bytes).op(I32.add).localSet(esi);
     b.localGet(edi).localGet(bytes).op(I32.add).localSet(edi);
-    b.localGet(budget).localSet(Local.budget);
+    b.localGet(Local.budget).localGet(charge).op(I32.sub).localSet(Local.budget);
     if (profile !== null)
     {
         b.localGet(bytes).i32const(shift).op(I32.shrU).localSet(left);
