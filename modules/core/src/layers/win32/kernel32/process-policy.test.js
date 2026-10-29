@@ -173,6 +173,19 @@ test('the information classes are taken at their sizes, others refused', ()=>{
     assert.equal(call('SetThreadInformation', threadHandle, 9, 0x2000, 4), 0);
 });
 
+test('GetProcessInformation answers what was set, or Windows\' default', ()=>{
+    const { call, view } = machine();
+    assert.equal(call('GetProcessInformation', CURRENT_PROCESS, 0, 0x2400, 4), 1);
+    assert.equal(view.getUint32(0x2400, true), 5, 'MEMORY_PRIORITY_NORMAL');
+    assert.equal(call('GetProcessInformation', CURRENT_PROCESS, 4, 0x2400, 12), 1);
+    assert.equal(view.getUint32(0x2400, true), 1, 'a power throttling state, version 1');
+    view.setUint32(0x2000, 2, true);
+    assert.equal(call('SetProcessInformation', CURRENT_PROCESS, 0, 0x2000, 4), 1);
+    assert.equal(call('GetProcessInformation', CURRENT_PROCESS, 0, 0x2400, 4), 1);
+    assert.equal(view.getUint32(0x2400, true), 2, 'what was set');
+    assert.equal(call('GetProcessInformation', CURRENT_PROCESS, 0, 0x2400, 8), 0);
+});
+
 test('cycle times are the processor time at the processor\'s rate', ()=>{
     const { view, call } = machine();
     assert.equal(call('QueryThreadCycleTime', CURRENT_THREAD, 0x2000), 1);

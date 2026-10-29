@@ -83,6 +83,8 @@ const PROCESS_DEP_DISABLE_ATL_THUNK_EMULATION = 0x2;
  *
  * @type {Map<number, number>}
  */
+/** MEMORY_PRIORITY_INFORMATION's default. */
+const MEMORY_PRIORITY_NORMAL = 5;
 const PROCESS_INFORMATION_SIZES = new Map([
     [0, 4], // ProcessMemoryPriority: MEMORY_PRIORITY_INFORMATION
     [1, 12], // ProcessMemoryExhaustionInfo: USHORT, USHORT, ULONG, ULONG_PTR
@@ -374,6 +376,9 @@ export function createProcessPolicyFunctions(host){
 
     /** A thread's cycles: its processor time at the processor's rate. @param {any} thread */
     const cyclesOf = thread=>BigInt(Math.round((thread?.cpuMs ?? 0) * PROCESSOR.mhz * 1000));
+
+    /** What SetProcessInformation was given, by class. @type {Map<number, Uint8Array>} */
+    const processInformation = new Map();
 
     return {
         /** VOID RtlCaptureContext(PCONTEXT ContextRecord) -- a 64-bit process has its own. */
@@ -735,8 +740,52 @@ export function createProcessPolicyFunctions(host){
                     return fail(ERROR_INVALID_HANDLE);
                 }
                 const size = PROCESS_INFORMATION_SIZES.get(type >>> 0);
-                return size === undefined || (length >>> 0) !== size || (from >>> 0) === 0
-                    ? fail(ERROR_INVALID_PARAMETER) : 1;
+                if (size === undefined || (length >>> 0) !== size || (from >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                processInformation.set(type >>> 0, host.readMemory(from >>> 0, size).slice());
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetProcessInformation(HANDLE hProcess, PROCESS_INFORMATION_CLASS,
+         *     LPVOID, DWORD)
+         *
+         * What SetProcessInformation was given for the class, or Windows'
+         * default: a normal memory priority (MEMORY_PRIORITY_NORMAL, 5), and
+         * version 1 of a power throttling state that controls nothing; zeroes
+         * for the rest. The size must be the class's.
+         */
+        GetProcessInformation: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([process, type, into, length])=>{
+                if (!processOf(process))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const size = PROCESS_INFORMATION_SIZES.get(type >>> 0);
+                if (size === undefined || (length >>> 0) !== size || (into >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                let bytes = processInformation.get(type >>> 0);
+                if (!bytes)
+                {
+                    bytes = new Uint8Array(size);
+                    if ((type >>> 0) === 0)
+                    {
+                        bytes[0] = MEMORY_PRIORITY_NORMAL;
+                    }
+                    else if ((type >>> 0) === 4)
+                    {
+                        bytes[0] = 1;
+                    }
+                }
+                host.writeMemory(into >>> 0, bytes);
+                return 1;
             },
         },
 
