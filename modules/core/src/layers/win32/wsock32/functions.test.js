@@ -665,17 +665,21 @@ test('the controls a socket is set up with: UDP resets, keep-alive, its base and
             SOCKET_ERROR, 'a tcp_keepalive is twelve bytes');
         assert.equal(fx.call('WSAIoctl', [stream, 0x98000010, IN, 4, 0, 0, RETURNED, 0, 0]), 0,
             'SIO_LOOPBACK_FAST_PATH');
-        assert.equal(fx.call('WSAIoctl', [stream, 0x48000022, 0, 0, ANSWER, 4, RETURNED, 0, 0]), 0);
+        assert.equal(fx.call('WSAIoctl', [stream, 0x48000022, 0, 0, ANSWER, 4, RETURNED, 0, 0]),
+            0);
         assert.equal(fx.dword(ANSWER), stream, 'SIO_BASE_HANDLE: its own base');
-        assert.equal(fx.call('WSAIoctl', [stream, 0x48000016, 0, 0, ANSWER, 64, RETURNED, 0, 0]), 0);
-        assert.deepEqual([fx.dword(ANSWER), fx.dword(ANSWER + 4), fx.dword(ANSWER + 8)], [1, ANSWER + 12, 16],
+        assert.equal(fx.call('WSAIoctl', [stream, 0x48000016, 0, 0, ANSWER, 64, RETURNED, 0, 0]),
+            0);
+        assert.deepEqual([fx.dword(ANSWER), fx.dword(ANSWER + 4), fx.dword(ANSWER + 8)],
+            [1, ANSWER + 12, 16],
             'SIO_ADDRESS_LIST_QUERY: one address, in the buffer after the list');
         assert.equal(fx.dword(RETURNED), 28);
         assert.equal(fx.call('WSAIoctl', [stream, 0x48000016, 0, 0, ANSWER, 8, RETURNED, 0, 0]),
             SOCKET_ERROR, 'too small a buffer');
         assert.equal(fx.dword(RETURNED), 28, 'and the size it needs');
-        assert.equal(fx.call('WSAIoctl', [datagram, 0xc8000014, IN, 16, ANSWER, 16, RETURNED, 0, 0]),
-            0, 'SIO_ROUTING_INTERFACE_QUERY');
+        assert.equal(fx.call('WSAIoctl',
+            [datagram, 0xc8000014, IN, 16, ANSWER, 16, RETURNED, 0, 0]), 0,
+        'SIO_ROUTING_INTERFACE_QUERY');
         assert.equal(fx.dword(ANSWER) & 0xffff, AF_INET);
     });
 
