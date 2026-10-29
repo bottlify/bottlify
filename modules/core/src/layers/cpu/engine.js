@@ -318,6 +318,8 @@ export function engineContractProblem(engineModule, url){
  * @property {boolean} [emptySites]  With `emptyCalls`, a call out of a region reads its target's
  *     slot first and returns from such a function in place, without calling the transfer.
  *     Default false.
+ * @property {boolean} [flagsAcrossCalls]  With `callReturn`, the flag record carried into a
+ *     guest call made as a wasm call and back with its `ret`. Default true.
  * @property {boolean} [linkedCalls]  A direct call out of a region reads its target's first slot
  *     and, where the entry there is the one the transfer would take at its first look, calls
  *     its function itself, without the transfer's hashing and probe. Default true.

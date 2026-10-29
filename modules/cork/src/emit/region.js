@@ -372,7 +372,7 @@ const recordFieldsOf = layout=>{
  *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, linkedCalls?: boolean,
  *     looseStacks?: boolean, atomic?: boolean, ordered?: boolean, checkReads?: boolean,
  *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean,
- *     callDepth?: number }}
+ *     callDepth?: number, flagsAcrossCalls?: boolean }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
  *     (`tools/cork-expansion.mjs`), in a diagnostic build only; markBlocks: each block
  *     marked for the machine code (`blockMark`), likewise; checkReads: an

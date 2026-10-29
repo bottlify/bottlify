@@ -210,8 +210,8 @@ async function runProgram(pieces, config){
     }
 }
 
-for (const [first, budget, clean] of [[1, 10_000_000, false], [501, 37, false],
-    [1001, 10_000_000, true], [1501, 37, true]])
+for (const [first, budget, clean] of /** @type {[number, number, boolean][]} */ ([
+    [1, 10_000_000, false], [501, 37, false], [1001, 10_000_000, true], [1501, 37, true]]))
 {
     test(`flags across calls, transfers and exits leave what the interpreter leaves (seeds ${
         first}.., budget ${budget}${clean ? ', flagsAcrossCalls off' : ''})`, async()=>{
