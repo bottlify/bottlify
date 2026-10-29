@@ -129,7 +129,30 @@ const HIGH_WATER = 1024 * 1024;
  *      default); a link silent for three of these is taken for dead.
  * @property {number} [helloTimeoutMs]
  *      How long a connection may stay without joining a room (10 s).
+ * @property {RelayDial} [dial]
+ *      How a real connection is opened: straight to the address by default;
+ *      `proxyDialer` (tunnel.js) through an HTTP proxy, where a relay's only
+ *      way out is one.
  */
+
+/**
+ * Opens a real connection for a peer: to `host`, the dotted address the guest
+ * dialled, or to `name`, the name that address was resolved from when the
+ * peer resolved it here. What comes back behaves as a `net.Socket` does,
+ * already connecting: 'connect', 'data', 'error' and 'close', with `write`,
+ * `end`, `destroy`, `pause`, `resume` and `address`.
+ *
+ * @callback RelayDial
+ * @param {{ host: string, name: string | null, port: number }} target
+ * @returns {any}
+ */
+
+/** @type {RelayDial} */
+const dialDirect = ({ host, port })=>{
+    const socket = new Socket();
+    socket.connect({ host, port });
+    return socket;
+};
 
 /**
  * The routing half, with no notion of how bytes reach a peer.
@@ -149,6 +172,7 @@ export function createRelay(options = {}){
     const resumeWindow = options.resumeWindowMs ?? 10000;
     const heartbeat = options.heartbeatMs ?? 5000;
     const helloTimeout = options.helloTimeoutMs ?? 10000;
+    const dial = options.dial ?? dialDirect;
 
     /** @type {Map<string, Map<number, any>>} room name -> address -> peer */
     const rooms = new Map();
@@ -330,8 +354,16 @@ export function createRelay(options = {}){
             return;
         }
 
-        const socket = new Socket();
-        socket.setNoDelay(true);
+        /** @type {any} */
+        let socket;
+        try {
+            socket = dial({ host, name, port: frame.toPort });
+        }
+        catch {
+            refuse(Wsa.CONNREFUSED);
+            return;
+        }
+        socket.setNoDelay?.(true);
         peer.dialling.add(socket);
         // Registered before it connects: bytes the peer sends now are queued by
         // the socket itself, and a HANGUP arriving mid-dial has to find this.
@@ -385,7 +417,6 @@ export function createRelay(options = {}){
             peer.streams.delete(frame.tag);
             send(peer, { op: Op.HANGUP, tag: frame.tag, payload: packError(0) });
         });
-        socket.connect({ host, port: frame.toPort });
     };
 
     /**

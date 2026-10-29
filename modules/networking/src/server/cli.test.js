@@ -35,6 +35,14 @@ test('arguments are read, and repeated ones accumulate', ()=>{
     assert.equal(parsed.resumeSeconds, 30);
 });
 
+test('a proxy is taken as http://host:port and nothing else', ()=>{
+    assert.equal(parseArguments([]).proxy, '');
+    assert.equal(parseArguments(['--proxy', 'http://127.0.0.1:3128']).proxy,
+        'http://127.0.0.1:3128');
+    assert.throws(()=>parseArguments(['--proxy', 'socks5://127.0.0.1:1080']), /wants http/);
+    assert.throws(()=>parseArguments(['--proxy', 'http://host:1/path']), /wants http/);
+});
+
 test('a resume window that is not a number is an error', ()=>{
     assert.throws(()=>parseArguments(['--resume-seconds', 'soon']), /wants a number/);
 });
