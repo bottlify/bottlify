@@ -55,7 +55,7 @@ import { emitInstruction } from './integer.js';
 import { copyLoopOf, emitCopyAtOnce } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
-    planLoop, planRegion, readsWrapped,
+    planLoop, planRegion, readsWrapped, registersChanged,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { LONG_SCRATCH, WIDTH_32, widthOf } from './width.js';
@@ -1171,6 +1171,12 @@ export class RegionEmitter {
          * @type {import('./memory.js').RegionPlan | null}
          */
         this.memoryPlan = null;
+        /**
+         * By block, the local that says its entry test passed for what the
+         * registers it tests from hold now (`planTestedOnce`).
+         * @type {Map<number, number>}
+         */
+        this.testedOnce = new Map();
         /** Whether the block's port write called the host from here and went on. */
         this.trapped = false;
         /** Blocks emitted as loops onto themselves. */
@@ -1560,6 +1566,10 @@ export class RegionEmitter {
         this.flowsInto = null;
         this.flagsOut = flagsOut;
         this.memoryPlan = memoryPlan;
+        if (memoryPlan !== null && !flat && !this.copyFunction)
+        {
+            this.planTestedOnce(memoryPlan);
+        }
         this.ranges = [];
         this.emitRange(0, blocks.length - 1, false);
         // Falling out of the last block cannot happen: every block ends with
@@ -3057,6 +3067,81 @@ export class RegionEmitter {
     }
 
     /**
+     * The blocks whose entry test a jump back may pass by. A test that passed
+     * passes again for the same values of the registers its windows are
+     * placed from, and the pages' flags change only through the host: a
+     * local set at the block's start says the test passed, where every way
+     * from the block back to a jump into its test leaves those registers as
+     * they are and reaches the host nowhere (a call, a port write). A block
+     * one such way changes them in has none: what cleared it would run where
+     * the jumps do -- a sort whose swap calls cleared its outer loop's local
+     * every inner turn ran cork-bench 4.6 % slower. And only a jump back, to
+     * an address no higher than its own, passes by: the locals for jumps
+     * forward into a block, a way past a turn's first part, saved no test a
+     * turn and V8 spilled for them (cork-bench sort +2.2 %). As the hoisted
+     * loop's window (`emitStreamWindow`), what another executor does to the
+     * flags meanwhile goes unseen until the function is left.
+     *
+     * @param {import('./memory.js').RegionPlan} plan
+     */
+    planTestedOnce(plan){
+        const blocks = this.region.blocks;
+        const word = this.width.bits === 64 ? 8 : 4;
+        // By block, the registers it changes, all of them where it may reach
+        // the host and go on.
+        const changed = blocks.map(block=>(block.instructions.some(ins=>HOST_OPS.has(ins.op))
+            ? -1 : registersChanged(block.instructions, word)));
+        /** @type {Map<number, number>} */
+        const index = new Map(blocks.map((block, t)=>[block.start, t]));
+        /** @type {number[][]} by block, the blocks its ways out reach, calls and returns too */
+        const ways = blocks.map(block=>[...jumpsOf(block, this.returns, this.callReturn,
+            this.labels), ...block.exit.targets, block.exit.next]
+            .map(target=>index.get(target ?? -1) ?? -1).filter(t=>t >= 0));
+        /** @type {number[][]} */
+        const from = blocks.map(()=>[]);
+        ways.forEach((targets, s)=>targets.forEach(t=>from[t].push(s)));
+        plan.entry.forEach((windows, t)=>{
+            if (windows.length === 0 || this.testedOnce.size >= TESTED_ONCE_MAX)
+            {
+                return;
+            }
+            let regs = 0;
+            for (const { base, index: by } of windows)
+            {
+                regs |= (base >= 0 ? 1 << base : 0) | (by >= 0 ? 1 << by : 0);
+            }
+            const keeps = (/** @type {number} */ s)=>changed[s] !== -1 && (changed[s] & regs) === 0;
+            const past = [...new Set(from[t])].filter(s=>s !== plan.inherit[t] && s !== t);
+            if (!past.some(s=>keeps(s) && blocks[s].start >= blocks[t].start))
+            {
+                return;
+            }
+            // The blocks on a way from the block back to a jump into its test.
+            const after = reaching([t], ways, -1);
+            const before = reaching(past, from, t);
+            if ([...after].every(s=>keeps(s) || !before.has(s)))
+            {
+                this.testedOnce.set(t, this.localTypes.length + STATE_PARAMS);
+                this.localTypes.push(ValType.i32);
+            }
+        });
+    }
+
+    /**
+     * Before a way into a block's entry test from inside the function: past it,
+     * to the block, where it passed for what the registers hold.
+     *
+     * @param {number} index
+     */
+    passTested(index){
+        const own = this.testedOnce.get(index);
+        if (own !== undefined && !this.copying && this.pairing === null)
+        {
+            this.b.localGet(own).brIf(this.depthOf(`b${index}`));
+        }
+    }
+
+    /**
      * A block's entry test: the windows it takes from the block before it,
      * tested where it is entered otherwise -- by the dispatch, from another
      * region, from the host -- and left untranslated at its start when one is
@@ -3129,6 +3214,10 @@ export class RegionEmitter {
         {
             this.b.br(this.depthOf(`${this.copying ? 'c' : 'b'}${index}`));
         }
+        else if (this.entryTested(index))
+        {
+            this.passTested(index);
+        }
     }
 
     /**
@@ -3158,6 +3247,13 @@ export class RegionEmitter {
         // Until the next block starts, what is written is this block's: its
         // instructions and its ways out.
         this.b.written = this.blockWrites[index] ??= new Set();
+        const tested = this.testedOnce.get(index);
+        if (tested !== undefined && !this.copying)
+        {
+            // Here past its entry test, or with the windows its test covers
+            // tested before it (`planTestedOnce`).
+            this.b.i32const(1).localSet(tested);
+        }
         if (block.instructions.length === 0)
         {
             this.leaving.add(index);
@@ -4190,6 +4286,11 @@ export class RegionEmitter {
                 if (label >= range.lo && label <= range.hi && item
                     && (!item.loop || item.start === label))
                 {
+                    if (item.pair !== true && !item.loop && !this.takesFrom(label)
+                        && this.entryTested(label))
+                    {
+                        this.passTested(label);
+                    }
                     b.br(this.depthOf(item.pair === true ? `d${item.start}`
                         : item.loop || this.takesFrom(label) || !this.entryTested(label)
                             ? `b${item.start}` : `p${label}`));
@@ -4925,6 +5026,31 @@ function jumpsOf(block, returns, callReturn = false, index = new Map()){
 }
 
 /**
+ * The blocks reached from `starts`, themselves among them, along `edges`,
+ * never through `barrier`.
+ *
+ * @param {number[]} starts @param {number[][]} edges @param {number} barrier
+ * @returns {Set<number>}
+ */
+function reaching(starts, edges, barrier){
+    const seen = new Set();
+    const stack = [...starts];
+    while (stack.length > 0)
+    {
+        const t = /** @type {number} */ (stack.pop());
+        if (!seen.has(t))
+        {
+            seen.add(t);
+            if (t !== barrier)
+            {
+                stack.push(...edges[t]);
+            }
+        }
+    }
+    return seen;
+}
+
+/**
  * The block a way out of this one comes back to from outside the region on
  * every turn, if any: the return address of a call that always leaves it -- a
  * direct call whose callee is not formed in, an indirect one no prediction
@@ -5063,6 +5189,17 @@ const READ_LOOP_OPS = new Set(['mov', 'movzx', 'movsx', 'add', 'sub', 'adc', 'sb
 
 /** How a block of a loop run two turns a wasm turn may leave (`pairs`). */
 const PAIRED_EXITS = new Set(['fallthrough', 'jump', 'jcc', 'loop']);
+
+/**
+ * The instructions that may reach the host and come back into the function:
+ * a call, a port write, an interrupt -- after which the pages' flags may not
+ * be what a test found (`planTestedOnce`).
+ */
+const HOST_OPS = new Set(['call', 'out', 'outs', 'in', 'ins', 'int', 'int1', 'int3', 'into',
+    'syscall', 'sysenter', 'hlt']);
+
+/** The entry tests a region's function keeps a local for, at most (`planTestedOnce`). */
+const TESTED_ONCE_MAX = 16;
 
 /** The longest block a hoisted loop's unchecked copy runs two turns a wasm turn. */
 const PAIRED_MAX = 32;

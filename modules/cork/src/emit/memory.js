@@ -1444,6 +1444,28 @@ function effect(ins, values, forward = false, word = 4){
 }
 
 /**
+ * The registers a block leaves holding other values than it found (`effect`),
+ * as a mask: one moved and moved back -- `add ebx, 4`, `sub ebx, 4` -- holds
+ * its own again, one popped or written from memory never does.
+ *
+ * @param {import('../decode/decoder.js').Instruction[]} instructions
+ * @param {4 | 8} [word]  (`effect`)
+ */
+export function registersChanged(instructions, word = 4){
+    const values = freshValues({ n: 0 }, word === 8 ? 16 : 8);
+    for (const ins of instructions)
+    {
+        effect(ins, values, false, word);
+    }
+    let mask = 0;
+    for (let r = 0; r < values.sym.length; r++)
+    {
+        mask |= values.sym[r] !== r || values.delta[r] !== 0 ? 1 << r : 0;
+    }
+    return mask;
+}
+
+/**
  * By instruction of a block, each memory operand's registers as the values
  * they hold there (`effect`), as a key, null for an operand not in memory:
  * two operands off one register across a write of it -- `[rdx + 4]`,

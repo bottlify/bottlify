@@ -2108,3 +2108,18 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
   recorded.
 - **Decision.** Not taken: a lone read keeps its address wrapped whole.
+
+### 2026-10-29: a loop of several blocks paired up to 64 instructions
+
+- **Idea.** A small loop of several blocks runs two turns a wasm turn (`emitPairedRange`)
+  when its blocks hold at most `PAIRED_MAX` (32) instructions; twice that takes in more loops.
+- **Workload.** cork-bench, x87 images, `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64; one run an arm, on 30c1205.
+- **Values.** The loops it adds: one in switch, one in vcall, none in the others. switch
+  447,918 -> 447,918, fmath 623,156 -> 623,156, tree 2,756,671 -> 2,756,671, vcall 1,701,852
+  -> 1,713,971 (+0.7 %).
+- **Why.** Not measured; the larger body did not take V8's turn test off enough turns to pay
+  for its size.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken: the limit stays 32.
