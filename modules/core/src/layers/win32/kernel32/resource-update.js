@@ -38,6 +38,7 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_DATA = 13;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_FILE_INVALID = 1006;
 
@@ -53,6 +54,29 @@ const HIGH_BIT = 0x80000000;
 const RESOURCE_CHARACTERISTICS = 0x40000040;
 
 /** A resource name or type, as read or as given: a number or an upper-case string. */
+/**
+ * FILEMUIINFO: its fixed part, and where the strings and lists it points at
+ * start (abBuffer).
+ */
+const FILEMUIINFO_SIZE = 80;
+const FILEMUIINFO_DATA = 72;
+const MUI_FILEINFO_VERSION = 1;
+const MUI_QUERY_CHECKSUM = 0x2;
+const MUI_QUERY_LANGUAGE_NAME = 0x4;
+const MUI_QUERY_RESOURCE_TYPES = 0x8;
+const MUI_FILETYPE_NOT_LANGUAGE_NEUTRAL = 0x1;
+const MUI_FILETYPE_LANGUAGE_NEUTRAL_MUI = 0x4;
+/**
+ * The MUI resource (type "MUI", name 1): a signature, its size, the file's
+ * type (shifted down a bit), two checksums, then offset and size pairs for
+ * the resource type lists and the language names, all from its start.
+ */
+const MUI_SIGNATURE = 0xfecdfecd;
+const MUI_HEADER = 132;
+const MUI = Object.freeze({ signature: 0, size: 4, fileType: 16, serviceChecksum: 28,
+    checksum: 44, mainNames: 84, mainIds: 92, muiNames: 100, muiIds: 108, language: 116,
+    fallbackLanguage: 124 });
+
 /** @typedef {number | string} ResourceKey */
 
 /**
@@ -86,6 +110,7 @@ const RESOURCE_CHARACTERISTICS = 0x40000040;
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
  *     `maxLength` in bytes.
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {{ open: (type: string, object: any) => number,
  *     resolve: (handle: number, type?: string) => any,
@@ -286,7 +311,12 @@ export function rewriteResources(file, resources){
     {
         return ERROR_BAD_EXE_FORMAT;
     }
-    const rawEnd = Math.max(0, ...image.sections.map(section=>section.rawOffset + section.rawSize));
+    // A section whose PointerToRawData is 0 has no bytes in the file,
+    // whatever its SizeOfRawData says: it is all zero when mapped.
+    /** @param {{ rawOffset: number, rawSize: number }} section */
+    const rawSizeOf = section=>(section.rawOffset === 0 ? 0 : section.rawSize);
+    const rawEnd = Math.max(image.sizeOfHeaders, ...image.sections.map(section=>
+        section.rawOffset + rawSizeOf(section)));
     const overlay = file.slice(Math.min(rawEnd, file.length));
     const directoryRva = image.directories[DIR_RESOURCE]?.address ?? 0;
     const holding = directoryRva === 0 ? -1 : image.sections.findIndex(section=>
@@ -306,7 +336,7 @@ export function rewriteResources(file, resources){
     const sections = image.sections.map((section, at)=>({
         header: sectionTable + at * SECTION_HEADER,
         va: section.virtualAddress, vsize: section.virtualSize,
-        raw: section.rawOffset, rawSize: section.rawSize,
+        raw: section.rawOffset === 0 ? 0 : section.rawOffset, rawSize: rawSizeOf(section),
     }));
     let headerEnd = sectionTable + sectionCount * SECTION_HEADER;
     let target = holding;
@@ -326,6 +356,11 @@ export function rewriteResources(file, resources){
         target = sections.length - 1;
     }
     const resource = sections[target];
+    if (resource.rawSize === 0)
+    {
+        // Bytes of its own, after everything that has some.
+        resource.raw = align(rawEnd, fileAlign);
+    }
     const body = buildResourceSection(resources, resource.va);
     const oldVirtual = align(Math.max(resource.vsize, resource.rawSize), sectionAlign);
     const rawSize = Math.max(resource.rawSize, align(body.length, fileAlign));
@@ -602,7 +637,169 @@ export function createResourceUpdates(host){
         },
     };
 
+    /**
+     * The FILEMUIINFO an image's MUI resource makes, from abBuffer on: the
+     * language name, then the main file's type IDs and names, then the MUI
+     * file's, as `flags` asks. A language-neutral main file names its
+     * fallback language; a MUI file's first type lists are its own.
+     *
+     * @param {Uint8Array | null} resource @param {number} flags
+     * @returns {{ type: number, checksums: Uint8Array | null, fields: number[],
+     *     data: Uint8Array } | 'bad format'}
+     */
+    const muiInfoOf = (resource, flags)=>{
+        const none = { type: MUI_FILETYPE_NOT_LANGUAGE_NEUTRAL, checksums: null,
+            fields: [0, 0, 0, 0, 0, 0, 0], data: new Uint8Array(0) };
+        if (resource === null)
+        {
+            return none;
+        }
+        const view = new DataView(resource.buffer, resource.byteOffset, resource.length);
+        if (resource.length < MUI_HEADER || view.getUint32(MUI.signature, true) !== MUI_SIGNATURE
+            || view.getUint32(MUI.size, true) > resource.length)
+        {
+            return 'bad format';
+        }
+        const type = view.getUint32(MUI.fileType, true) << 1;
+        /** @param {number} at */
+        const piece = at=>{
+            const offset = view.getUint32(at, true);
+            const size = view.getUint32(at + 4, true);
+            return size === 0 || offset + size > resource.length
+                ? new Uint8Array(0) : resource.subarray(offset, offset + size);
+        };
+        /** @type {Uint8Array[]} */
+        const parts = [];
+        let at = FILEMUIINFO_DATA;
+        /** @param {Uint8Array} bytes */
+        const place = bytes=>{
+            if (bytes.length === 0)
+            {
+                return 0;
+            }
+            parts.push(bytes);
+            const offset = at;
+            at += bytes.length;
+            return offset;
+        };
+        const fields = [0, 0, 0, 0, 0, 0, 0];
+        if ((flags & MUI_QUERY_LANGUAGE_NAME) !== 0)
+        {
+            const own = piece(MUI.language);
+            fields[0] = place(own.length > 0 ? own : piece(MUI.fallbackLanguage));
+        }
+        if ((flags & MUI_QUERY_RESOURCE_TYPES) !== 0)
+        {
+            const mui = type === MUI_FILETYPE_LANGUAGE_NEUTRAL_MUI;
+            const empty = new Uint8Array(0);
+            const own = [piece(MUI.mainIds), piece(MUI.mainNames)];
+            const lists = mui ? [[empty, empty], own]
+                : [own, [piece(MUI.muiIds), piece(MUI.muiNames)]];
+            lists.forEach(([ids, names], index)=>{
+                fields[1 + index * 3] = ids.length / 4;
+                fields[2 + index * 3] = place(ids);
+                fields[3 + index * 3] = place(names);
+            });
+        }
+        const data = new Uint8Array(at - FILEMUIINFO_DATA);
+        let offset = 0;
+        for (const part of parts)
+        {
+            data.set(part, offset);
+            offset += part.length;
+        }
+        // pChecksum, then pServiceChecksum, as FILEMUIINFO holds them.
+        const checksums = (flags & MUI_QUERY_CHECKSUM) === 0 ? null
+            : Uint8Array.from([...resource.subarray(MUI.checksum, MUI.checksum + 16),
+                ...resource.subarray(MUI.serviceChecksum, MUI.serviceChecksum + 16)]);
+        return { type, fields, data, checksums };
+    };
+
+    /**
+     * BOOL GetFileMUIInfo(DWORD dwFlags, PCWSTR pcwszFilePath,
+     *     PFILEMUIINFO pFileMUIInfo, DWORD *pcbFileMUIInfo)
+     *
+     * The file's type is given whatever the flags ask, as Windows gives it.
+     * Asked with no structure, it says the size the answer takes, and is
+     * refused with ERROR_INSUFFICIENT_BUFFER when that holds more than the
+     * fixed part. A structure must say MUI_FILEINFO_VERSION.
+     */
+    const getFileMuiInfo = {
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([flags, name, info, sizeAt])=>{
+            if ((name >>> 0) === 0 || (sizeAt >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const read32 = (/** @type {number} */ address)=>new DataView(
+                host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+            const write32 = (/** @type {number} */ address, /** @type {number} */ value)=>{
+                const bytes = new Uint8Array(4);
+                new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+                host.writeMemory(address, bytes);
+            };
+            const path = host.fullPath(host.readWideString(name >>> 0, 0x10000));
+            /** @param {Uint8Array | null} file */
+            const answer = file=>{
+                if (file === null)
+                {
+                    return 0;
+                }
+                /** @type {Uint8Array | null} */
+                let resource;
+                try
+                {
+                    const image = parsePe(file);
+                    resource = readResources(file, image).find(found=>found.type === 'MUI'
+                        && found.name === 1)?.data ?? null;
+                }
+                catch (e){
+                    void e;
+                    return fail(ERROR_BAD_EXE_FORMAT);
+                }
+                const known = muiInfoOf(resource, flags >>> 0);
+                if (known === 'bad format')
+                {
+                    return fail(ERROR_BAD_EXE_FORMAT);
+                }
+                const needed = Math.max(FILEMUIINFO_SIZE, FILEMUIINFO_DATA + known.data.length);
+                if ((info >>> 0) === 0)
+                {
+                    write32(sizeAt >>> 0, needed);
+                    return known.data.length === 0 ? 1 : fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                if (read32((info >>> 0) + 4) !== MUI_FILEINFO_VERSION)
+                {
+                    write32(sizeAt >>> 0, 0);
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (read32(sizeAt >>> 0) < needed)
+                {
+                    write32(sizeAt >>> 0, needed);
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                const out = new Uint8Array(needed - 8);
+                const view = new DataView(out.buffer);
+                view.setUint32(0, known.type, true);
+                if (known.checksums)
+                {
+                    out.set(known.checksums, 4);
+                }
+                known.fields.forEach((value, index)=>view.setUint32(36 + index * 4, value, true));
+                out.set(known.data, FILEMUIINFO_DATA - 8);
+                host.writeMemory((info >>> 0) + 8, out);
+                write32(sizeAt >>> 0, needed);
+                return 1;
+            };
+            const file = readWhole(path);
+            return file instanceof Promise ? file.then(answer) : answer(file);
+        },
+    };
+
     return {
+        GetFileMUIInfo: getFileMuiInfo,
+
         /**
          * HANDLE BeginUpdateResourceA/W(LPCSTR pFileName, BOOL bDeleteExistingResources)
          * BOOL UpdateResourceA/W(HANDLE hUpdate, LPCSTR lpType, LPCSTR lpName,

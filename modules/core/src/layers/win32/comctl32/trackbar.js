@@ -28,6 +28,7 @@ import {
     WM_CTLCOLORSTATIC, COLOR_3DFACE, COLOR_3DSHADOW, COLOR_3DHILIGHT, COLOR_HIGHLIGHT,
     COLOR_BTNTEXT, after,
 } from '../user32/controls.js';
+import { notifyWindow } from './notify.js';
 
 /** The class name a program creates the control by. */
 export const TRACKBAR_CLASS = 'msctls_trackbar32';
@@ -187,14 +188,14 @@ export function createTrackbarProcedure(host, tk){
      * @param {any} record @param {number} code @param {unknown} thread
      */
     const tell = (record, code, thread)=>{
-        if (!record.parent)
+        if (!notifyWindow(record))
         {
             return 0;
         }
         const wParam = code === TB_THUMBTRACK || code === TB_THUMBPOSITION
             ? ((state(record).pos & 0xffff) << 16 | code) >>> 0
             : code;
-        return host.send(record.parent, vertical(record) ? WM_VSCROLL : WM_HSCROLL,
+        return host.send(notifyWindow(record), vertical(record) ? WM_VSCROLL : WM_HSCROLL,
             wParam, record.hwnd, thread);
     };
 

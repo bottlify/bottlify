@@ -50,7 +50,7 @@ import { TOKEN_NATIVES } from '../advapi32/tokens.js';
 const CRT_EXPORTS = [
     'memchr', 'memcpy', 'memmove', 'memset', 'memcmp',
     'qsort', 'bsearch',
-    'sprintf', '_snprintf', 'vsprintf', 'sscanf',
+    'sprintf', '_snprintf', '_snwprintf', 'vsprintf', 'sscanf',
     'strcat', 'strchr', 'strcmp', 'strcpy', 'strcspn', 'strlen', 'strncat',
     'strncmp', 'strncpy', 'strpbrk', 'strrchr', 'strspn', 'strstr',
     '_stricmp', '_strnicmp', '_strlwr', '_strupr',
@@ -124,6 +124,9 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {Record<string, Entry>} kernel32  The assembled KERNEL32.dll table.
  * @property {Record<string, Entry>} crt       The assembled msvcrt.dll table.
  * @property {() => number} teb  The running thread's block.
+ * @property {() => any} [currentThread]
+ * @property {(thread: any) => number} [lastErrorOf]  A thread's last error, which a call
+ *           answered by another process leaves after its thread stopped running.
  * @property {{ base: number, size: number }} arena  The memory the process has.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Without it the 64-bit helpers stay unexported: their answer does not
@@ -134,6 +137,8 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {() => import('./query.js').SystemProcess[]} [processes]
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {import('./query.js').QueryHost['processOf']} [processOf]
+ * @property {import('./query.js').QueryHost['askChild']} [askChild]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {Record<string | symbol, any>} [advapi32]
  *           The assembled ADVAPI32.dll table, whose registry NtUnloadKey
@@ -324,6 +329,8 @@ export function createNtdllFunctions(host){
             arena: host.arena,
             version: host.windows,
             handleType: host.handleType,
+            processOf: host.processOf,
+            askChild: host.askChild,
             divergence: host.divergence,
             processes: host.processes,
             processors: host.processors,
@@ -347,7 +354,8 @@ export function createNtdllFunctions(host){
 
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
             ? createMemoryFunctions({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, kernel32, allocate })
+                writeMemory: host.writeMemory, kernel32, allocate,
+                currentThread: host.currentThread, lastErrorOf: host.lastErrorOf })
             : {}),
 
         ...(kernel32.HeapValidate ? createUserInfoFunctions(kernel32, host.writeMemory) : {}),

@@ -251,9 +251,10 @@ function fakeDrawing(){
 }
 
 /** @param {any} [graphics] */
-function setup(graphics){
+function setup(graphics, more = {}){
     const memory = fakeMemory();
     const fns = createGdiFunctions({
+        ...more,
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
             memory.writeMemory(a, d),
@@ -733,6 +734,32 @@ test('GetObject gives a bitmap the stride its rows have, and a DIB section its p
     assert.deepEqual(bitmapOf(section), { type: 0, width: 10, height: 4, widthBytes: 32,
         planes: 1, bitsPixel: 24, bits: pointer });
 });
+
+test('a 64-bit process\'s GetObject has bmBits, dshSection and a brush\'s hatch a quadword wide',
+    ()=>{
+        // wingdi.h under _WIN64: the pointer-sized field on an eight-byte
+        // boundary, the structure padded to eight.
+        const { memory, fns, hdc } = setup(undefined, { pointerSize: 8 });
+        const brush = fns.CreateSolidBrush.handler([0x00112233]);
+        assert.equal(fns.GetObjectA.handler([brush, 0, 0]), 16, 'LOGBRUSH');
+        assert.equal(fns.GetObjectA.handler([brush, 16, OUT]), 16);
+        assert.equal(memory.u32(OUT + 4), 0x00112233);
+
+        putInfo(memory, { width: 16, height: 8, bitCount: 32 });
+        const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x100, 0, 0]);
+        const pointer = memory.u32(OUT + 0x100);
+        assert.equal(fns.GetObjectA.handler([section, 0, 0]), 32, 'BITMAP');
+        memory.bytes.fill(0xaa, OUT, OUT + 104);
+        assert.equal(fns.GetObjectA.handler([section, 32, OUT]), 32);
+        assert.deepEqual([memory.u32(OUT + 24), memory.u32(OUT + 28)], [pointer, 0],
+            'bmBits at 24, both halves');
+        assert.equal(fns.GetObjectA.handler([section, 103, OUT]), 32, 'short of 104 a BITMAP');
+        assert.equal(fns.GetObjectA.handler([section, 104, OUT]), 104, 'DIBSECTION');
+        assert.deepEqual([0, 4, 8].map(at=>memory.u32(OUT + 32 + at)), [40, 16, 8],
+            'dsBmih at 32');
+        assert.deepEqual([88, 92, 96].map(at=>memory.u32(OUT + at)), [0, 0, 0],
+            'dshSection a quadword at 88, dsOffset at 96');
+    });
 
 test('GetObject fills a DIBSECTION for a DIB section when there is room for one', ()=>{
     const { memory, fns, hdc } = setup();

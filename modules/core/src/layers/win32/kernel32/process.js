@@ -33,6 +33,9 @@ const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_BAD_ARGUMENTS = 160;
 const ERROR_OLD_WIN_VERSION = 1150;
 
+/** The group number that names every processor group. */
+const ALL_PROCESSOR_GROUPS = 0xffff;
+
 /** What TlsAlloc returns when every slot is taken. */
 const TLS_OUT_OF_INDEXES = 0xffffffff;
 
@@ -137,7 +140,11 @@ const PAGE = 4096;
 const FILETIME_EPOCH_MS = 11_644_473_600_000n;
 
 /** Nothing sensible names a module beyond MAX_PATH. */
-const MAX_MODULE_NAME = 260;
+/**
+ * A module name is read to its terminator, as Windows reads it: a path may
+ * run to 32 767 characters, and one cut short names another module.
+ */
+const WHOLE_NAME = 32767;
 /** The one priority a process runs at here. */
 const NORMAL_PRIORITY_CLASS = 0x20;
 
@@ -155,6 +162,9 @@ const ERROR_NOACCESS = 998;
 
 /**
  * @typedef {Object} ProcessHost
+ * @property {ReturnType<typeof createThreadState>} [threadState]  The process's, where
+ *     another part of it keeps the last error too: one state, so a call made between
+ *     turns leaves its error where GetLastError then reads it.
  * @property {number} [performanceFrequency]  Ticks a second of the performance counter
  *     (`PERFORMANCE_FREQUENCY` by default); a whole number a 32-bit immediate holds.
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -232,11 +242,18 @@ const ERROR_NOACCESS = 998;
  */
 export function createThreadState(currentThread, memory = null, block = TEB){
     /**
+     * The state of a call made between turns, when no thread is running: a
+     * parent's call made in this process (`cross-process.js`) leaves its
+     * error here, not in whichever thread ran last.
+     */
+    const between = {};
+
+    /**
      * @param {any} [thread]  Whose state. Defaults to the thread that is running.
      *   Naming one is for an answer produced on somebody else's turn: a call
      *   that parked has no turn of its own left in which to record its result.
      */
-    const stateOf = (thread = currentThread())=>{
+    const stateOf = (thread = currentThread() ?? between)=>{
         if (!thread.kernel32)
         {
             thread.kernel32 = {
@@ -265,7 +282,7 @@ export function createThreadState(currentThread, memory = null, block = TEB){
     };
 
     /** @param {any} [thread] */
-    const lastErrorOf = (thread = currentThread())=>{
+    const lastErrorOf = (thread = currentThread() ?? between)=>{
         const teb = blockOf(thread);
         return teb !== 0 && memory
             ? memory.readU32(teb + block.LAST_ERROR)
@@ -277,7 +294,7 @@ export function createThreadState(currentThread, memory = null, block = TEB){
         lastErrorOf,
         setErrorOn,
         /** @param {number} code */
-        setError: code=>setErrorOn(currentThread(), code),
+        setError: code=>setErrorOn(currentThread() ?? between, code),
     };
 }
 
@@ -647,6 +664,11 @@ export function createProcessFunctions(host){
      * @type {(number | null)[]}
      */
     const slots = new Array(TLS_SLOTS).fill(null);
+    // Index 0 is taken before the program runs and never handed out, so it
+    // reads as zero in every thread until a program writes it, as Windows
+    // answers TlsGetValue(0); without it the loader's own first TlsAlloc, for
+    // an image's implicit TLS, would put that image's block there.
+    slots[0] = 0;
     let generation = 0;
 
     const memory = {
@@ -661,9 +683,23 @@ export function createProcessFunctions(host){
     // The thread block at the process's width: the last error's offset, and
     // the thread-local array's, whose slots are a pointer each.
     const blocks = blockLayouts(host.pointerSize);
-    const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory,
-        blocks.teb);
+    const { stateOf, setError, lastErrorOf } = host.threadState
+        ?? createThreadState(host.currentThread, memory, blocks.teb);
     const processors = host.processors ?? createProcessors();
+
+    /** @param {number} group  A WORD: ALL_PROCESSOR_GROUPS or 0, the only one. */
+    const processorsIn = group=>{
+        const wanted = group & 0xffff;
+        if (wanted !== ALL_PROCESSOR_GROUPS && wanted !== 0)
+        {
+            setError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        return processors.count();
+    };
+
+    /** SetProcessPriorityBoost's setting. */
+    let priorityBoostDisabled = false;
 
     /** The process's place in the shutdown order, which it may move. */
     const shutdown = { level: SHUTDOWN_DEFAULT_LEVEL, flags: 0 };
@@ -1190,7 +1226,7 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readCString(pointer >>> 0, MAX_MODULE_NAME)),
+                : host.readCString(pointer >>> 0, WHOLE_NAME)),
         },
 
         /** HMODULE GetModuleHandleW(LPCWSTR lpModuleName) */
@@ -1199,15 +1235,15 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readWideString?.(pointer >>> 0, MAX_MODULE_NAME) ?? ''),
+                : host.readWideString?.(pointer >>> 0, WHOLE_NAME * 2) ?? ''),
         },
 
         /** BOOL GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModuleName, HMODULE *phModule) */
-        GetModuleHandleExA: moduleHandleEx(pointer=>host.readCString(pointer, MAX_MODULE_NAME)),
+        GetModuleHandleExA: moduleHandleEx(pointer=>host.readCString(pointer, WHOLE_NAME)),
 
         /** BOOL GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE *phModule) */
         GetModuleHandleExW: moduleHandleEx(pointer=>
-            host.readWideString?.(pointer, MAX_MODULE_NAME) ?? ''),
+            host.readWideString?.(pointer, WHOLE_NAME * 2) ?? ''),
 
         /**
          * BOOL GetSystemPowerStatus(LPSYSTEM_POWER_STATUS lpSystemPowerStatus)
@@ -1457,6 +1493,41 @@ export function createProcessFunctions(host){
         },
 
         /**
+         * BOOL SetProcessPriorityBoost(HANDLE hProcess, BOOL bDisablePriorityBoost)
+         * BOOL GetProcessPriorityBoost(HANDLE hProcess, PBOOL pDisablePriorityBoost)
+         *
+         * The process's setting is also every thread's: setting it sets each
+         * thread's, and a thread may then set its own back without changing
+         * the process's. Like the thread's, it changes nothing a thread can
+         * measure here, and reads back as it was set.
+         */
+        SetProcessPriorityBoost: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, disable])=>{
+                priorityBoostDisabled = (disable >>> 0) !== 0;
+                for (const thread of host.allThreads?.() ?? [host.currentThread()])
+                {
+                    thread.priorityBoostDisabled = priorityBoostDisabled;
+                }
+                return 1;
+            },
+        },
+        GetProcessPriorityBoost: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    setError(ERROR_NOACCESS);
+                    return 0;
+                }
+                memory.writeU32(out >>> 0, priorityBoostDisabled ? 1 : 0);
+                return 1;
+            },
+        },
+
+        /**
          * BOOL GetProcessAffinityMask(HANDLE hProcess, PDWORD_PTR lpProcessAffinityMask,
          *                             PDWORD_PTR lpSystemAffinityMask)
          *
@@ -1480,6 +1551,29 @@ export function createProcessFunctions(host){
                 return 1;
             },
         },
+
+        /**
+         * DWORD GetActiveProcessorCount(WORD GroupNumber)
+         * DWORD GetMaximumProcessorCount(WORD GroupNumber)
+         * WORD GetActiveProcessorGroupCount(VOID)
+         * WORD GetMaximumProcessorGroupCount(VOID)
+         *
+         * One group of every processor the machine has. ALL_PROCESSOR_GROUPS
+         * counts them all; a group that is not there is 0 and
+         * ERROR_INVALID_PARAMETER.
+         */
+        GetActiveProcessorCount: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([group])=>processorsIn(group),
+        },
+        GetMaximumProcessorCount: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([group])=>processorsIn(group),
+        },
+        GetActiveProcessorGroupCount: { argBytes: 0, handler: ()=>1 },
+        GetMaximumProcessorGroupCount: { argBytes: 0, handler: ()=>1 },
 
         /**
          * BOOL SetProcessAffinityMask(HANDLE hProcess, DWORD_PTR dwProcessAffinityMask)

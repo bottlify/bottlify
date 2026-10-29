@@ -452,6 +452,10 @@ export function createBridgeModule(){
                  *     Where an argument counted as two dwords begins, which an
                  *     x86-64 caller passes in one slot (the dispatcher's
                  *     `readLongCall`).
+                 * @param {Record<number, 'f32' | 'f64'>} [fn.floats]
+                 *     The float and double arguments by their first dword,
+                 *     which an x86-64 caller passes among its first four in
+                 *     XMM registers.
                  * @returns {number} the guest address that calls it, or 0 once
                  *     this instance is disposed -- there is no guest left to place
                  *     one in.
@@ -460,7 +464,7 @@ export function createBridgeModule(){
                     name,
                     {
                         convention = Convention.STDCALL, argBytes, handler,
-                        preserveResult = false, lastError = true, quadwords,
+                        preserveResult = false, lastError = true, quadwords, floats,
                     })
                 {
                     if (convention === Convention.FASTCALL)
@@ -480,7 +484,7 @@ export function createBridgeModule(){
                     const { id, address } = cpu.registerTrap(
                         name, calleeCleanup(convention, argBytes), { preserveResult });
                     state.dispatcher.register(id, { name, convention, argBytes, handler, lastError,
-                        ...quadwords ? { quadwords } : {} });
+                        ...quadwords ? { quadwords } : {}, ...floats ? { floats } : {} });
                     state.dispatcher.placed(address, name);
                     return address;
                 },
@@ -828,6 +832,23 @@ export function createBridgeModule(){
                 }),
 
                 /**
+                 * Where a host call's refused guest access, or an exception a
+                 * handler raised, goes: raised in the guest -- the access
+                 * violation as Windows raises it inside the DLL -- by whoever
+                 * dispatches exceptions; this layer does not. Without one,
+                 * either ends the run.
+                 *
+                 * @param {((raised: import('./internal/dispatch.js').GuestRaise)
+                 *     => Promise<number>) | null} raise
+                 */
+                onGuestFault(raise){
+                    if (live() && state.dispatcher)
+                    {
+                        state.dispatcher.guestFault = raise;
+                    }
+                },
+
+                /**
                  * Holds the running thread while a processor exception it took is
                  * offered to its handlers, the way a host call holds it while it
                  * waits: the thread is sent to the park loop from the vector's
@@ -889,6 +910,7 @@ export function createBridgeModule(){
                     state.vtables = createVtables({
                         memory,
                         heap,
+                        long: ()=>cpu.bits?.() === 64,
                         register: (/** @type {string} */ name, /** @type {any} */ fn)=>
                             this.register(name, fn),
                     });
@@ -990,6 +1012,19 @@ export function createBridgeModule(){
 
                 /** Where the guest was last sent by us, newest last. */
                 recentlyStarted: ()=>live() ? state.callbacks.recentlyStarted() : [],
+
+                /**
+                 * Where a routine the host called back returns to on the guest
+                 * side, by the stack its frame left once undone: the call into
+                 * the host that made the callback. What a 64-bit exception
+                 * walk crosses a host call by; null when `stack` is no
+                 * callback's return.
+                 *
+                 * @param {any} thread @param {number} stack
+                 * @returns {{ rip: number, rsp: number } | null}
+                 */
+                callbackCaller: (thread, stack)=>(live() && thread
+                    ? state.callbacks.callerOf(thread, stack >>> 0) : null),
 
                 /**
                  * The recorded session: every event at this seam, in order.

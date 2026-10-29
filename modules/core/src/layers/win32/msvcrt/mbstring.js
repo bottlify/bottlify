@@ -21,13 +21,17 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import {
-    LOWER, UPPER, W_ALPHA, W_BLANK, W_CNTRL, W_DIGIT, W_LOWER, W_PUNCT, W_SPACE, W_UPPER,
-    W_XDIGIT, WEOF, WIDE_CLASSES,
+    LOWER, UPPER, WEOF, WIDE_CTYPE, CT_UPPER, CT_LOWER, CT_DIGIT, CT_SPACE, CT_PUNCT, CT_CONTROL,
+    CT_BLANK, CT_HEX, CT_LETTER, CT_ALPHA,
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
-import { wideStringAt } from './widetext.js';
+import { compareUnitsAt, wideStringAt } from './widetext.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
 import { pointerWidth } from '../common/pointers.js';
+import {
+    SHIFT_JIS, jisToShiftJis, shiftJisToJis, toHiragana, toKatakana, isKatakana, toFullWidth,
+    toHalfWidth, jisLevel,
+} from './kana.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -43,25 +47,43 @@ const MAX_STRING = 1 << 20;
  *           pointer `mbsrtowcs` and `wcsrtombs` advance is a quadword; absent, 4.
  */
 
+/** WEOF, and what no class is answered for. */
+const NO_CLASS = 0;
+
 /**
- * The bits `iswctype`'s mask is built from, at the values msvcrt's own
- * `<wctype.h>` gives them -- the same numbering `_isctype` uses, since a
- * guest builds both from the same header.
+ * msvcrt's class bits of a wide code unit: the table's below 0x100, and past
+ * it the unit's Unicode category, as the system's GetStringTypeW answers --
+ * a letter's case, a decimal digit of any script, a space separator as blank
+ * too, punctuation and symbols as punctuation, the full-width hex digits.
+ *
+ * @param {number} unit
  */
-const CT_UPPER = 0x0001;
-const CT_LOWER = 0x0002;
-const CT_DIGIT = 0x0004;
-const CT_SPACE = 0x0008;
-const CT_PUNCT = 0x0010;
-const CT_CONTROL = 0x0020;
-const CT_BLANK = 0x0040;
-const CT_HEX = 0x0080;
-/**
- * Set on an alpha character alongside `_UPPER`/`_LOWER`, never alone: a
- * caller asking `iswctype(c, _ALPHA)` passes `0x0100|_UPPER|_LOWER` and
- * matches on the overlap, the same as every other mask here.
- */
-const CT_ALPHA_MARK = 0x0100;
+export function wideClassOf(unit){
+    if (unit < WIDE_CTYPE.length)
+    {
+        return WIDE_CTYPE[unit];
+    }
+    if (unit === WEOF)
+    {
+        return NO_CLASS;
+    }
+    const character = String.fromCharCode(unit);
+    /** @param {RegExp} pattern @param {number} bits */
+    const when = (pattern, bits)=>(pattern.test(character) ? bits : 0);
+    return when(/[\p{Lu}\p{Lt}]/u, CT_UPPER) | when(/\p{Ll}/u, CT_LOWER)
+        | when(/\p{L}/u, CT_LETTER) | when(/\p{Nd}/u, CT_DIGIT)
+        | when(/\p{Zs}/u, CT_SPACE | CT_BLANK) | when(/[\p{Zl}\p{Zp}]/u, CT_SPACE)
+        | when(/[\p{P}\p{S}]/u, CT_PUNCT) | when(/\p{Cc}/u, CT_CONTROL)
+        | when(/[\uff10-\uff19\uff21-\uff26\uff41-\uff46]/, CT_HEX);
+}
+
+/** The classes each wide classifier asks for, in msvcrt's bits. */
+const WIDE_MASKS = Object.freeze({
+    iswalpha: CT_ALPHA, iswdigit: CT_DIGIT, iswalnum: CT_ALPHA | CT_DIGIT, iswspace: CT_SPACE,
+    iswupper: CT_UPPER, iswlower: CT_LOWER, iswpunct: CT_PUNCT, iswxdigit: CT_HEX,
+    iswcntrl: CT_CONTROL, iswprint: CT_BLANK | CT_PUNCT | CT_ALPHA | CT_DIGIT,
+    iswgraph: CT_PUNCT | CT_ALPHA | CT_DIGIT,
+});
 
 /**
  * @param {WideHost} host
@@ -86,6 +108,14 @@ export function createWideFunctions(host){
      * @param {number} pointer
      */
     const readWide = pointer=>wideStringAt(host.readMemory, pointer);
+
+    /**
+     * A wide string's first `count` units at most, read no further: an
+     * n-bounded call stops at its count whether or not a terminator came.
+     *
+     * @param {number} pointer @param {number} count
+     */
+    const readWideUpTo = (pointer, count)=>wideStringAt(host.readMemory, pointer, count);
 
     /** @param {number} pointer @param {string} text @param {boolean} terminate */
     const writeWide = (pointer, text, terminate = true)=>{
@@ -167,7 +197,7 @@ export function createWideFunctions(host){
         return { at, found: at < text.length };
     };
 
-    return {
+    const wide = {
         /** size_t wcslen(const wchar_t *) -- in the guest */
         wcslen: guestEntry(inGuest.wcslen, COMPILED.wcslen, host),
 
@@ -181,7 +211,7 @@ export function createWideFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const length = count >>> 0;
-                const text = readWide(source).slice(0, length);
+                const text = readWideUpTo(source, length);
                 // Padded to the full count and unterminated when it truncates,
                 // exactly as the narrow strncpy does.
                 writeWide(destination, text.padEnd(length, '\0'), false);
@@ -242,7 +272,7 @@ export function createWideFunctions(host){
             handler: ([destination, source, count])=>{
                 const existing = readWide(destination);
                 writeWide(destination + existing.length * 2,
-                    readWide(source).slice(0, count >>> 0));
+                    readWideUpTo(source, count >>> 0));
                 return destination;
             },
         },
@@ -255,9 +285,8 @@ export function createWideFunctions(host){
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([left, right, count])=>compare(
-                readWide(left).slice(0, count >>> 0),
-                readWide(right).slice(0, count >>> 0)),
+            handler: ([left, right, count])=>Math.sign(
+                compareUnitsAt(host.readMemory, left, right, 2, count >>> 0)),
         },
 
         /** int _wcsicmp(const wchar_t *, const wchar_t *) */
@@ -315,18 +344,8 @@ export function createWideFunctions(host){
                 {
                     return 0;
                 }
-                const a = readWide(left).slice(0, limit);
-                const b = readWide(right).slice(0, limit);
-                for (let at = 0; at < limit; at++)
-                {
-                    const x = folded(LOWER, a.charCodeAt(at) || 0);
-                    const y = folded(LOWER, b.charCodeAt(at) || 0);
-                    if (x !== y || x === 0)
-                    {
-                        return x - y;
-                    }
-                }
-                return 0;
+                return compareUnitsAt(host.readMemory, left, right, 2, limit,
+                    unit=>folded(LOWER, unit));
             },
         },
 
@@ -444,13 +463,19 @@ export function createWideFunctions(host){
          * size_t mbstowcs(wchar_t *dest, const char *src, size_t count)
          *
          * A null destination means "how many units would this need", which is
-         * how a caller sizes the buffer before the call that fills it.
+         * how a caller sizes the buffer before the call that fills it; no
+         * source is -1 and EINVAL.
          */
         mbstowcs: {
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
+                if ((source >>> 0) === 0)
+                {
+                    host.errno?.(EINVAL);
+                    return -1;
+                }
                 const text = readNarrowUnits(source);
                 if ((destination >>> 0) === 0)
                 {
@@ -684,6 +709,16 @@ export function createWideFunctions(host){
             },
         },
     };
+
+    return {
+        ...wide,
+        // The collating forms: under the C locale the order is the units'
+        // own, and each is its comparison.
+        wcscoll: wide.wcscmp,
+        _wcsicoll: wide._wcsicmp,
+        _wcsncoll: wide.wcsncmp,
+        _wcsnicoll: wide._wcsnicmp,
+    };
 }
 
 /**
@@ -695,63 +730,37 @@ export function createWideFunctions(host){
  * the classifiers and the case functions run in the guest.
  */
 export function createWideClassificationFunctions(){
-    const table = WIDE_CLASSES;
-    /** @param {string} name */
-    const inGuestEntry = name=>guestEntry(
+    /** @param {string} name @param {import('./guest-code.js').HostFallback} [fallback] */
+    const inGuestEntry = (name, fallback)=>guestEntry(
         /** @type {Function} */ (inGuest[/** @type {'iswalpha'} */ (name)]),
-        COMPILED[/** @type {'iswalpha'} */ (name)], {});
+        COMPILED[/** @type {'iswalpha'} */ (name)], {}, fallback);
 
     return {
-        /** int iswalpha/isdigit/... (wint_t) — the classifiers, under the C locale */
-        ...Object.fromEntries(['iswalpha', 'iswdigit', 'iswalnum', 'iswspace', 'iswupper',
-            'iswlower', 'iswpunct', 'iswxdigit', 'iswcntrl', 'iswprint', 'iswgraph',
-            'iswascii', 'towupper', 'towlower'].map(name=>[name, inGuestEntry(name)])),
+        /**
+         * int iswalpha/iswdigit/... (wint_t) -- the classifiers, under the C
+         * locale: msvcrt's bits of the class asked for, in the guest below
+         * 0x100 and on the host past it.
+         */
+        ...Object.fromEntries(Object.entries(WIDE_MASKS).map(([name, mask])=>[name,
+            inGuestEntry(name, { argBytes: 4,
+                handler: ([code])=>wideClassOf(code & 0xffff) & mask })])),
+        ...Object.fromEntries(['iswascii', 'towupper', 'towlower']
+            .map(name=>[name, inGuestEntry(name)])),
 
         /**
          * int iswctype(wint_t c, wctype_t type)
          *
-         * `_isctype` for a wide code unit: nonzero when `c` has any of the
-         * classes `type` names. Built from the same table the classifiers
-         * above are, translated to the bits a guest actually passes, since
-         * this table's own numbering exists only for the classifiers to share
-         * and was never meant to leave this function.
+         * The bits of `type` that `c` has: what each classifier above asks
+         * with its own mask.
          */
         iswctype: {
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([code, type])=>{
-                const unit = code & 0xffff;
-                if (unit === WEOF || unit >= table.length)
-                {
-                    return 0;
-                }
-                const classes = table[unit];
-                let real = 0;
-                if (classes & W_UPPER)
-                    real |= CT_UPPER;
-                if (classes & W_LOWER)
-                    real |= CT_LOWER;
-                if (classes & W_DIGIT)
-                    real |= CT_DIGIT;
-                if (classes & W_SPACE)
-                    real |= CT_SPACE;
-                if (classes & W_PUNCT)
-                    real |= CT_PUNCT;
-                if (classes & W_CNTRL)
-                    real |= CT_CONTROL;
-                if (classes & W_XDIGIT)
-                    real |= CT_HEX;
-                if (classes & W_BLANK)
-                    real |= CT_BLANK;
-                if (classes & W_ALPHA)
-                    real |= CT_ALPHA_MARK;
-                return (real & type) !== 0 ? 1 : 0;
-            },
+            handler: ([code, type])=>wideClassOf(code & 0xffff) & type & 0xffff,
         },
     };
 }
-
 
 /**
  * @typedef {Object} MultiByteFunctionsHost
@@ -790,6 +799,10 @@ export function createMultiByteFunctions(narrow, host){
         _mbscpy: 'strcpy',
         _mbscat: 'strcat',
         _mbsdup: '_strdup',
+        // Under the C locale a collation is the bytes' order.
+        _stricoll: '_stricmp',
+        _strncoll: 'strncmp',
+        _strnicoll: '_strnicmp',
         // A classifier, not a string function: one character code in, one
         // flag out, and a space or a digit is a byte in every page.
         _ismbcspace: 'isspace',
@@ -843,6 +856,20 @@ export function createMultiByteFunctions(narrow, host){
         handler: /** @type {Record<string, (args: number[]) => number>} */ (handlers)[name],
     });
 
+    /**
+     * A function of one character code that holds under page 932 alone:
+     * elsewhere it answers `otherwise`, or the code itself.
+     *
+     * @param {(code: number) => number} convert @param {number} [otherwise]
+     */
+    const underShiftJis = (convert, otherwise)=>({
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([code])=>(page.page() === SHIFT_JIS ? convert(code >>> 0)
+            : otherwise ?? code >>> 0),
+    });
+
     /** Rewrites the table a program reads, where the runtime's export of it was placed. */
     const publishTable = ()=>{
         const at = host.addressOf?.('_mbctype') ?? 0;
@@ -881,6 +908,32 @@ export function createMultiByteFunctions(narrow, host){
         _mbbtype: onHost('_mbbtype', 8),
         _mbsbtype: onHost('_mbsbtype', 8),
         _ismbclegal: onHost('_ismbclegal', 4),
+        _mbsnlen: onHost('_mbsnlen', 8),
+        _mbccpy_s: onHost('_mbccpy_s', 16),
+        _mbscpy_s: onHost('_mbscpy_s', 12),
+        _mbscat_s: onHost('_mbscat_s', 12),
+        _mbsnbcpy_s: onHost('_mbsnbcpy_s', 16),
+        _mbsnbcat_s: onHost('_mbsnbcat_s', 16),
+        _mbsupr_s: onHost('_mbsupr_s', 8),
+        _mbslwr_s: onHost('_mbslwr_s', 8),
+        // The `_l` forms take a locale, and the C locale is the only one a
+        // program can hold here: each is its plain form.
+        _mbsnextc_l: onHost('_mbsnextc', 8),
+        _mbscmp_l: { ...guestCoded('_mbscmp'), argBytes: 12 },
+
+        // The Japanese conversions and tests (kana.js): under any page but
+        // 932 a conversion is its argument and a test is false.
+        _mbcjistojms: underShiftJis(jisToShiftJis),
+        _mbcjmstojis: underShiftJis(shiftJisToJis),
+        _mbctohira: underShiftJis(toHiragana),
+        _mbctokata: underShiftJis(toKatakana),
+        _mbbtombc: underShiftJis(toFullWidth),
+        _mbctombb: underShiftJis(toHalfWidth),
+        _ismbckata: underShiftJis(c=>(isKatakana(c) ? 1 : 0), 0),
+        _ismbchira: underShiftJis(c=>(c >= 0x829f && c <= 0x82f1 ? 1 : 0), 0),
+        _ismbcl0: underShiftJis(c=>(jisLevel(c) === 0 ? 1 : 0), 0),
+        _ismbcl1: underShiftJis(c=>(jisLevel(c) === 1 ? 1 : 0), 0),
+        _ismbcl2: underShiftJis(c=>(jisLevel(c) === 2 ? 1 : 0), 0),
 
         /**
          * int mblen(const char *text, size_t count) / size_t _mbstrlen(const char *text)

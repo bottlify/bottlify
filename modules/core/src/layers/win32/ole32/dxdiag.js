@@ -283,7 +283,7 @@ export function registerDxDiagClasses(host){
     };
 
     /** @param {number} address @returns {string} */
-    const readName = address=>host.readWideString(address, MAX_NAME);
+    const readName = address=>host.readWideString(address, MAX_NAME * 2);
 
     /** @param {number} out @param {number} value */
     const count = (out, value)=>{

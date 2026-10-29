@@ -226,7 +226,7 @@ export function createInternetShortcut(host){
         IsDirty: state=>(state.dirty ? S_OK : S_FALSE),
         /** HRESULT Load(LPCOLESTR pszFileName, DWORD dwMode) */
         Load: (state, [name])=>{
-            const path = host.readWideString(name >>> 0, MAX_STRING);
+            const path = host.readWideString(name >>> 0, MAX_STRING * 2);
             const files = host.files;
             const entry = files?.stat(path);
             if (!files || !entry || entry.exists === false || entry.isDirectory)
@@ -267,7 +267,8 @@ export function createInternetShortcut(host){
          * Writes the file at the path, or at the current file for a null one.
          */
         Save: (state, [name, remember])=>{
-            const given = (name >>> 0) === 0 ? null : host.readWideString(name >>> 0, MAX_STRING);
+            const given = (name >>> 0) === 0 ? null
+                : host.readWideString(name >>> 0, MAX_STRING * 2);
             const path = given ?? state.curFile;
             if (path === null)
             {
@@ -306,7 +307,8 @@ export function createInternetShortcut(host){
             return S_OK;
         },
         SaveCompleted: (state, [name])=>{
-            state.curFile = (name >>> 0) === 0 ? null : host.readWideString(name >>> 0, MAX_STRING);
+            state.curFile = (name >>> 0) === 0 ? null
+                : host.readWideString(name >>> 0, MAX_STRING * 2);
             state.dirty = false;
             return S_OK;
         },

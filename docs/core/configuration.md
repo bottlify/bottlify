@@ -100,6 +100,7 @@ store does not know (`cpu` diagnostics, `store.opened.swept`).
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `windows` | `'winxp'` | The Windows version reported everywhere. |
+| `machine` | `'x86'`, `'amd64'` for a 64-bit process | Whether the machine is a 64-bit Windows, under which a 32-bit process runs as WOW64 (`createApp`'s `machine`). |
 | `compatibility` | from the image | The program's manifest compatibility: what Windows 10 tells it its version is. |
 | `screen` | 640 × 480, 32 | The display. |
 | `commandLine` | the quoted image path | `GetCommandLine`. |

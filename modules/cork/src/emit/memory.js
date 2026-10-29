@@ -2114,9 +2114,12 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
             // A watched page is marked written here, every page the turns may
             // reach, and the turns run untested as on pages written already:
             // left to the checked copy, a loop filling a watched buffer ran
-            // every store tested to its end, three times as slow.
+            // every store tested to its end, three times as slow. Out of the
+            // way: few pages are watched, and its calls inline had the host's
+            // compiler spill the loop's registers on the way every window
+            // test takes (a Crysis loop's head stored eleven to its frame).
             b.localTee(Local.pflags).i32const(PageFlag.WATCH).op(I32.and);
-            b.if(EMPTY);
+            b.unlikely().if(EMPTY);
             for (const at of reach)
             {
                 b.localGet(Local.addr);

@@ -93,3 +93,19 @@ test('a table detached says nothing for any handle until it is attached again', 
     sync.setEvent(event);
     assert.equal(wordOf(open), MIRROR.SET, 'and every change after');
 });
+
+test('a handle granted fewer than all rights has no word: its calls are the host\'s to check',
+    ()=>{
+        // An OpenEvent without SYNCHRONIZE cannot be waited on, which only the
+        // host can refuse; a word would let the guest take the event anyway.
+        const { mirror, sync, handles, wordOf } = machine();
+        mirror.attach(TABLE, 1024, []);
+        const event = sync.createEvent({ signalled: true });
+        const all = handles.open('event', event);
+        const narrow = handles.open('event', event, 0x20002);
+        assert.equal(wordOf(all), MIRROR.SET);
+        assert.equal(wordOf(narrow), MIRROR.NONE);
+        assert.equal(handles.access(narrow), 0x20002);
+        assert.equal(handles.access(all), null);
+        assert.deepEqual(handles.list().map(entry=>entry.access), [null, 0x20002]);
+    });

@@ -41,6 +41,10 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @property {string} clsid
  * @property {string} iid
  * @property {number} size
+ * @property {boolean} [skipNothingEnds]
+ *           Skip(0) answers S_FALSE and leaves nothing to enumerate, as
+ *           Windows' property set enumerator does (stg_prop.c
+ *           test_propertyset_storage_enum).
  */
 
 /**
@@ -71,7 +75,7 @@ export function publishEnumerator(env, kind, snapshot, out){
 /**
  * @template T
  * @param {EnumeratorEnv} env @param {EnumeratorKind} kind
- * @param {{ snapshot: Snapshot<T>, users: number }} shared
+ * @param {{ snapshot: Snapshot<T>, users: number, released?: boolean }} shared
  * @param {number} start @param {number} out
  * @returns {number}
  */
@@ -124,7 +128,8 @@ function publishOver(env, kind, shared, start, out){
                 {
                     name: 'Skip', argBytes: 8,
                     invoke: (_self, [celt])=>{
-                        if ((celt >>> 0) > items.length - position)
+                        if ((celt >>> 0) > items.length - position
+                            || ((celt >>> 0) === 0 && kind.skipNothingEnds))
                         {
                             position = items.length;
                             return S_FALSE;
@@ -153,10 +158,20 @@ function publishOver(env, kind, shared, start, out){
                 },
             ],
         }],
+        // What the snapshot holds of the program's goes inside the last
+        // enumerator's Release, which the program waits on.
+        lastRelease: async()=>{
+            if (shared.users === 1 && !shared.released)
+            {
+                shared.released = true;
+                await shared.snapshot.release?.();
+            }
+        },
         destroy: ()=>{
             shared.users--;
-            if (shared.users === 0)
+            if (shared.users === 0 && !shared.released)
             {
+                shared.released = true;
                 shared.snapshot.release?.();
             }
         },

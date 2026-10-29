@@ -31,7 +31,7 @@
  * that draws nowhere.
  */
 
-import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js';
+import { PAINTSTRUCT, RECT, readRect, userLayouts, writeFields, writeRect } from './structs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
 import { boundsOf, intersectArea, subtractFromArea } from '../gdi32/rects.js';
@@ -148,6 +148,7 @@ const MAX_TAB_STOPS = 1024;
 /** What a character cell measures when nothing better is known. */
 const ESTIMATED_CHAR_WIDTH = 8;
 const ESTIMATED_LINE_HEIGHT = 16;
+const ERROR_INVALID_HANDLE = 6;
 /** Class styles: each window a context of its own, or the class one for all its windows. */
 const CS_OWNDC = 0x0020;
 const CS_CLASSDC = 0x0040;
@@ -171,9 +172,12 @@ const DCX_INTERSECTRGN = 0x0080;
 
 /**
  * @typedef {Object} PaintHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
+ *     have their pointers, handles and message parameters eight bytes wide.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(code: number) => void} [setLastError]
  * @property {(region: number) => (Rect & { rects?: Rect[] }) | null} [regionBox]
  *           The rectangle a region object holds, and its rectangles when it is
  *           more than one; null for a handle that is not one: gdi32's, reached
@@ -491,6 +495,8 @@ export function tabbedWidth(text, widthOf, stops, interval){
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
+    /** The structures at the process's width (`structs.js`). */
+    const layouts = userLayouts(host.pointerSize);
     const shown = options.shown ?? (()=>true);
     let iconDivergenceSaid = false;
     /** @type {Set<string>} what a drawing call has said it leaves out */
@@ -1274,6 +1280,11 @@ export function createPaintFunctions(options){
         }
         if (kind === DST_TEXT || kind === DST_PREFIXTEXT)
         {
+            // No text is a failure, not a read of address zero.
+            if ((data >>> 0) === 0)
+            {
+                return 0;
+            }
             // A length of 0 is a terminated string.
             const string = (length | 0) > 0
                 ? readCounted(data, length | 0, wide)
@@ -1345,6 +1356,17 @@ export function createPaintFunctions(options){
      * @param {number[]} args @param {boolean} [wide]  UTF-16 text, as the W calls take.
      */
     const drawText = ([hdc, text, count, rect, format], wide = false)=>{
+        // No context, and the text and the rectangle are not looked at:
+        // Windows answers zero before reading either, the UTF-16 form
+        // without a word in the last error.
+        if (host.draw?.isContext && !host.draw.isContext(hdc >>> 0))
+        {
+            if (!wide)
+            {
+                host.setLastError?.(ERROR_INVALID_HANDLE);
+            }
+            return 0;
+        }
         // A count of -1 means a terminated string; any other count is the
         // string's length, and the text need not be terminated at all -- a
         // caller drawing part of a buffer passes exactly that part.
@@ -1481,10 +1503,11 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
+                const layout = layouts.PAINTSTRUCT;
                 return after(beginPaint(record), ({ hdc, rect, erase })=>{
-                    writeU32s(host, paintStruct + PAINTSTRUCT.hdc, [hdc, erase ? 1 : 0]);
-                    writeRect(host, paintStruct + PAINTSTRUCT.rcPaint, rect);
-                    writeU32s(host, paintStruct + PAINTSTRUCT.fRestore, [0, 0]);
+                    writeFields(host, paintStruct, layouts, layout,
+                        { hdc, fErase: erase ? 1 : 0, fRestore: 0, fIncUpdate: 0 });
+                    writeRect(host, paintStruct + layout.rcPaint, rect);
                     return handedOut(record.hwnd, hdc);
                 });
             },
@@ -1496,7 +1519,7 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, paintStruct])=>{
                 const record = live(hwnd);
-                const hdc = host.readMemory(paintStruct + PAINTSTRUCT.hdc, 4);
+                const hdc = host.readMemory(paintStruct + layouts.PAINTSTRUCT.hdc, 4);
                 const handle = (hdc[0] | hdc[1] << 8 | hdc[2] << 16 | hdc[3] << 24) >>> 0;
                 // A kept context is still its window's after the paint.
                 if ((held.get(handle)?.kind ?? 'cache') === 'cache')

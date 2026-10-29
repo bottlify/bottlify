@@ -119,13 +119,37 @@ export const WIDE_CLASSES = Uint16Array.from({ length: 256 }, (_, code)=>{
         : /\p{Ll}/u.test(char) ? W_ALPHA | W_LOWER : W_PUNCT;
 });
 
+/**
+ * msvcrt's own class bits, the ones `iswctype` takes and the wide classifiers
+ * answer with: GetStringTypeW's C1 bits, and `_ALPHA` the letter bit 0x100
+ * with the two cases.
+ */
+export const CT_UPPER = 0x0001;
+export const CT_LOWER = 0x0002;
+export const CT_DIGIT = 0x0004;
+export const CT_SPACE = 0x0008;
+export const CT_PUNCT = 0x0010;
+export const CT_CONTROL = 0x0020;
+export const CT_BLANK = 0x0040;
+export const CT_HEX = 0x0080;
+export const CT_LETTER = 0x0100;
+export const CT_ALPHA = CT_LETTER | CT_UPPER | CT_LOWER;
+
+/**
+ * `WIDE_CLASSES` in msvcrt's bits: what `_pwctype` holds for each unit below
+ * 0x100, a letter's bit with its case's.
+ */
+export const WIDE_CTYPE = Uint16Array.from(WIDE_CLASSES, classes=>
+    (classes & W_UPPER ? CT_UPPER : 0) | (classes & W_LOWER ? CT_LOWER : 0)
+    | (classes & W_DIGIT ? CT_DIGIT : 0) | (classes & W_SPACE ? CT_SPACE : 0)
+    | (classes & W_PUNCT ? CT_PUNCT : 0) | (classes & W_CNTRL ? CT_CONTROL : 0)
+    | (classes & W_BLANK ? CT_BLANK : 0) | (classes & W_XDIGIT ? CT_HEX : 0)
+    | (classes & W_ALPHA ? CT_LETTER : 0));
+
 /** 1 for a byte of one of the classes, 0 for anything else, EOF and values past a byte included. */
 const inClass = (/** @type {u32} */ c, /** @type {number} */ classes)=>
     (c < 256 && (CLASSES[c] & classes) !== 0 ? 1 : 0);
 
-/** The same for a wide character: its low sixteen bits, a unit past 0xff in none. */
-const inWideClass = (/** @type {u32} */ c, /** @type {number} */ classes)=>
-    ((c & 0xffff) < 256 && (WIDE_CLASSES[c & 0xffff] & classes) !== 0 ? 1 : 0);
 
 /**
  * double floor(double x)
@@ -419,100 +443,141 @@ export function iscntrl(c){
 /**
  * int iswalpha(wint_t c)
  *
+ * The wide classifiers answer msvcrt's bits of the class they ask for, as
+ * `iswctype` does -- `iswdigit('0')` is `_DIGIT`, 4, and `iswalpha('a')`
+ * `_LOWER | 0x100` -- from the table for a unit below 0x100; the host
+ * classifies one past it (`wideClassOf`).
+ *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswalpha(c){
-    return inWideClass(c, W_ALPHA);
+export function iswalpha({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_ALPHA);
 }
 
 /**
  * int iswdigit(wint_t c)
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswdigit(c){
-    return inWideClass(c, W_DIGIT);
+export function iswdigit({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_DIGIT);
 }
 
 /**
  * int iswalnum(wint_t c)
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswalnum(c){
-    return inWideClass(c, W_ALPHA | W_DIGIT);
+export function iswalnum({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_ALPHA | CT_DIGIT);
 }
 
 /**
  * int iswspace(wint_t c)
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswspace(c){
-    return inWideClass(c, W_SPACE);
+export function iswspace({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_SPACE);
 }
 
 /**
  * int iswupper(wint_t c)
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswupper(c){
-    return inWideClass(c, W_UPPER);
+export function iswupper({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_UPPER);
 }
 
 /**
  * int iswlower(wint_t c)
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswlower(c){
-    return inWideClass(c, W_LOWER);
+export function iswlower({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_LOWER);
 }
 
 /**
  * int iswpunct(wint_t c)
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswpunct(c){
-    return inWideClass(c, W_PUNCT);
+export function iswpunct({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_PUNCT);
 }
 
 /**
  * int iswxdigit(wint_t c)
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswxdigit(c){
-    return inWideClass(c, W_XDIGIT);
+export function iswxdigit({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_HEX);
 }
 
 /**
  * int iswcntrl(wint_t c)
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswcntrl(c){
-    return inWideClass(c, W_CNTRL);
+export function iswcntrl({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_CONTROL);
 }
 
 /**
@@ -522,11 +587,15 @@ export function iswcntrl(c){
  * `iswctype`: a tab is printable here, where `isprint`'s is not.
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswprint(c){
-    return inWideClass(c, W_BLANK | W_PUNCT | W_ALPHA | W_DIGIT);
+export function iswprint({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_BLANK | CT_PUNCT | CT_ALPHA | CT_DIGIT);
 }
 
 /**
@@ -535,11 +604,15 @@ export function iswprint(c){
  * iswprint without the blanks.
  *
  * @guestCode cdecl
- * @param {u32} c
+ * @param {Guest} guest @param {u32} c
  * @returns {i32}
  */
-export function iswgraph(c){
-    return inWideClass(c, W_PUNCT | W_ALPHA | W_DIGIT);
+export function iswgraph({ host }, c){
+    if ((c & 0xffff) >= 256)
+    {
+        return host();
+    }
+    return WIDE_CTYPE[c & 0xffff] & (CT_PUNCT | CT_ALPHA | CT_DIGIT);
 }
 
 /**
@@ -1466,11 +1539,17 @@ export function _mbsstr({ u8, host }, haystack, needle){
 /**
  * int _mbscmp(const unsigned char *left, const unsigned char *right)
  *
+ * No string, either side, is the host's: _NLSCMPERROR and EINVAL.
+ *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} left @param {u32} right
  * @returns {i32}
  */
 export function _mbscmp({ u8, host }, left, right){
+    if (left === 0 || right === 0)
+    {
+        return host();
+    }
     for (/** @type {u32} */ let i = 0; ; i++)
     {
         const a = u8(left + i);
@@ -1498,6 +1577,10 @@ export function _mbscmp({ u8, host }, left, right){
  * @returns {i32}
  */
 export function _mbsicmp({ u8, host }, left, right){
+    if (left === 0 || right === 0)
+    {
+        return host();
+    }
     for (/** @type {u32} */ let i = 0; ; i++)
     {
         const a = u8(left + i);

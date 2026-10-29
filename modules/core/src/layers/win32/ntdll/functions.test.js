@@ -420,3 +420,14 @@ test('the debugging calls are in the table, and the process calls only over kern
         assert.equal(typeof full[name]?.handler, 'function', name);
     }
 });
+
+test('ntdll\'s printers are the runtime\'s own, the wide one with them', ()=>{
+    // Wine's shlwapi test_printf_format checks wnsprintf against ntdll's two.
+    const host = fakeHost();
+    const printer = { convention: 'cdecl', argBytes: 12 + 4 * 32, handler: ()=>0 };
+    Object.assign(host.crt, { _snprintf: printer, _snwprintf: { ...printer } });
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns._snprintf, /** @type {any} */ (host.crt)._snprintf);
+    assert.equal(fns._snwprintf, /** @type {any} */ (host.crt)._snwprintf,
+        'msvcrt\'s formatting, entry and convention');
+});

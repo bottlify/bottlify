@@ -91,15 +91,18 @@ const hostOf = (cork, where = {}, features = undefined)=>/** @type {CorkHost} */
  *
  * @param {{ pool?: import('./sequences.js').Form[], cork?: Record<string, unknown>,
  *     executor?: { executors: number, executor: number },
- *     features?: import('../../../core/src/layers/cpu/engine.js').EngineEnv['features'] }}
+ *     features?: import('../../../core/src/layers/cpu/engine.js').EngineEnv['features'],
+ *     spans?: { address: number, length: number }[] }}
  *     [given]  pool: the forms the sequences index (`POOL` by default); cork: the
  *     translator's settings besides the judge's own (the atomic variant's judge sets
  *     `atomic`); executor: which executor of a shared memory the translator's host is (the
  *     executors' judge); features: the host the translator makes code for, another than
- *     this one (an arm64 one's default NaN is positive)
+ *     this one (an arm64 one's default NaN is positive); spans: the memory restored before
+ *     each sequence and compared after it (the data, `SPANS`, by default; a pool that
+ *     stores onto the stack names the stack's too)
  */
 export function createJudge({ pool = undefined, cork = {}, executor = undefined,
-    features = undefined } = {})
+    features = undefined, spans = SPANS } = {})
 {
     // The model is the JavaScript interpreter alone: the wasm tier is an
     // implementation of the instructions of its own, not their description.
@@ -135,7 +138,7 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
         model.writeReg32(name, value);
     }
     model.writeReg32('eflags', 2);
-    const pristine = snapshot(model, SPANS);
+    const pristine = snapshot(model, spans);
 
     const oracle = { ...model, step: model.runSlice };
     const subject = { ...translator, step: translator.runSlice };
@@ -181,7 +184,7 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
             const code = programBytes(body, pool);
             model.writePhysical(CODE, code);
             model.writeReg32('eip', CODE);
-            const state = snapshot(model, SPANS);
+            const state = snapshot(model, spans);
             model.wake();
             const instructions = retireExactly(model.runSlice, model.halted, LIMIT);
             if (instructions === 0 || instructions >= LIMIT)
@@ -199,7 +202,7 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
             published += made > 0 ? 1 : 0;
             const before = runtime.diagnostics().retired;
             const tierBefore = translator.wasmRetired?.() ?? 0;
-            const result = replaySlice({ oracle, subject, state, instructions, spans: SPANS });
+            const result = replaySlice({ oracle, subject, state, instructions, spans });
             byTranslator += runtime.diagnostics().retired - before;
             byTier += (translator.wasmRetired?.() ?? 0) - tierBefore;
             bySubject += result.retiredSubject;

@@ -116,6 +116,29 @@ export const DIBSECTION = Object.freeze({
 });
 
 /**
+ * The same structures in a 64-bit process, where bmBits, a LOGBRUSH's and an
+ * EXTLOGPEN's hatch (ULONG_PTR) and dshSection are eight bytes on an
+ * eight-byte boundary, and every structure holding one is padded to eight
+ * (wingdi.h under _WIN64).
+ */
+export const BITMAP64 = Object.freeze({
+    bmType: 0, bmWidth: 4, bmHeight: 8, bmWidthBytes: 12, bmPlanes: 16, bmBitsPixel: 18,
+    bmBits: 24, SIZE: 32,
+});
+export const DIBSECTION64 = Object.freeze({
+    dsBm: 0, dsBmih: 32, dsBitfields: 72, dshSection: 88, dsOffset: 96, SIZE: 104,
+});
+export const LOGBRUSH64 = Object.freeze({ lbStyle: 0, lbColor: 4, lbHatch: 8, SIZE: 16 });
+/**
+ * EXTLOGPEN at 64 bits: the hatch a quadword, the dash table after the
+ * count; GetObject writes it up to the last dash.
+ */
+export const EXTLOGPEN64 = Object.freeze({
+    elpPenStyle: 0, elpWidth: 4, elpBrushStyle: 8, elpColor: 12, elpHatch: 16,
+    elpNumEntries: 24, elpStyleEntry: 28, SIZE: 32,
+});
+
+/**
  * Bytes per row of a device-dependent bitmap, which pads to a WORD -- the
  * layout CreateBitmap's lpBits and GetBitmapBits' buffer are in.
  *

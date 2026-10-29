@@ -630,3 +630,29 @@ test('_findfirst lists "." and ".." first in a folder, as the FindFirstFile it w
     assert.equal(table._findnext.handler([handle, data]), 0);
     assert.notEqual(found().name, '..', 'then what the folder holds');
 });
+
+test('_mktemp fills six closing X\'s with a free letter and digits, or answers null', ()=>{
+    // Wine's msvcrt test_mktemp: five X's, a letter after them, no X's at all fail.
+    const memory = fakeMemory();
+    const taken = new Set();
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: { stat: (/** @type {string} */ path)=>({ exists: taken.has(path) }),
+            currentDirectory: ()=>'C:\\here' },
+    }));
+    for (const template of ['a', 'testXXXXX', 'testXXXXXXa'])
+    {
+        const at = memory.put(template);
+        assert.equal(table._mktemp.handler([at]), 0, template);
+        assert.equal(memory.text(at), template, 'left as it was');
+    }
+    const first = memory.put('testXXXXXX');
+    assert.equal(table._mktemp.handler([first]), first);
+    assert.match(memory.text(first), /^testa\d{5}$/);
+    taken.add(memory.text(first));
+    const second = memory.put('testXXXXXX');
+    table._mktemp.handler([second]);
+    assert.match(memory.text(second), /^testb\d{5}$/, 'the next letter while a name is taken');
+    const stars = memory.put('**XXXXXX');
+    assert.equal(table._mktemp.handler([stars]), stars);
+});

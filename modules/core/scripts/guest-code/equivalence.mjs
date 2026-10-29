@@ -69,6 +69,7 @@ const SAVED = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x444444
  * @property {[number, ArrayLike<number>][]} [memory]  Bytes at addresses in the data area.
  * @property {number} [control]       The x87 control word the call is made under.
  * @property {number} [status]        The x87 status word the call finds, its top aside.
+ * @property {number} [mxcsr]         MXCSR as the call finds it; 0x1f80, its reset, by default.
  */
 
 /**
@@ -418,6 +419,7 @@ export function equivalence(compiled, sources, model, long){
         m.setEflags(2);
         view.setUint16(m.layout.x87Control, input.control ?? 0x37f, true);
         view.setUint16(m.layout.x87Status, (input.status ?? 0) & 0xc7ff, true);
+        view.setUint32(m.layout.mxcsr, input.mxcsr ?? 0x1f80, true);
         let top = 0;
         let empty = 0xff;
         for (const value of input.x87 ?? [])
@@ -464,6 +466,7 @@ export function equivalence(compiled, sources, model, long){
             df: (m.eflags() & 0x400) !== 0,
             control: view.getUint16(m.layout.x87Control, true),
             status: view.getUint16(m.layout.x87Status, true),
+            mxcsr: view.getUint32(m.layout.mxcsr, true),
             data: m.read(DATA, span),
             handedOver: false,
         };
@@ -519,6 +522,7 @@ export function equivalence(compiled, sources, model, long){
             eax: typeof answer === 'number' ? answer >>> 0 : 0, edx: 0, esp: frame + 4 + popped,
             st: typeof answer === 'number' ? [] : [answer.st0], saved: SAVED, df: false,
             control: input.control ?? 0x37f, status: (input.status ?? 0) & 0xc7ff,
+            mxcsr: input.mxcsr ?? 0x1f80,
             data: memory.slice(DATA, DATA + data.length), handedOver: true,
         };
     };
@@ -534,6 +538,7 @@ export function equivalence(compiled, sources, model, long){
         // loads is the one the model's arithmetic rounds to from there on.
         let control = input.control ?? 0x37f;
         let status = (input.status ?? 0) & 0xc7ff;
+        let mxcsr = input.mxcsr ?? 0x1f80;
         const span = spanOf(compiledOf(name));
         const memory = new Uint8Array(span > 0 ? 1 << 20 : DATA);
         for (const [address, bytes] of input.memory ?? [])
@@ -594,6 +599,10 @@ export function equivalence(compiled, sources, model, long){
                 clearExceptions: ()=>{
                     status &= 0x7f00;
                 },
+                mxcsr: ()=>mxcsr,
+                setMxcsr: word=>{
+                    mxcsr = word >>> 0;
+                },
             },
             setRegisters: values=>{
                 edx = values.edx >>> 0;
@@ -619,7 +628,7 @@ export function equivalence(compiled, sources, model, long){
         }
         const eax = entry.handler([...input.stack ?? []]) >>> 0;
         return { eax, edx, st, data: memory.slice(DATA, DATA + span), handedOver, control,
-            status };
+            status, mxcsr };
     };
 
     return {
@@ -654,6 +663,10 @@ export function equivalence(compiled, sources, model, long){
             assert.equal(x86.esp, STACK + 4 + popped, `${what}: ESP past the return address`);
             assert.equal(x86.df, false, `${what}: the direction flag clear`);
             assert.equal(x86.control, js.control, `${what}: the control word`);
+            if (fn.uses.includes('setMxcsr'))
+            {
+                assert.equal(x86.mxcsr, js.mxcsr, `${what}: MXCSR`);
+            }
             if (fn.uses.includes('clearExceptions'))
             {
                 assert.equal(x86.status & 0xbf, js.status & 0xbf,

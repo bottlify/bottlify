@@ -713,13 +713,13 @@ export function listen(app, collected){
             collected.output.push(`[${stream}] ${text}`);
         }
     });
-    // A run that hands its process to a child -- an installer's redistributable
-    // finishing as the title, a launcher's bootstrapper stepping aside -- keeps
-    // going under a different image. Without this a report from such a run
-    // looks like one process throughout, which is the one thing it was not.
+    // A run whose processes start others -- an installer's redistributable, a
+    // launcher's game -- has more than one image. Without these a report from
+    // such a run looks like one process throughout, which is the one thing it
+    // was not.
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
         'library-loaded', 'library-missing', 'unimplemented', 'warning', 'debug',
-        'bundle', 'bundle-unavailable', 'divergence', 'process-started', 'process-replace',
+        'bundle', 'bundle-unavailable', 'divergence', 'process-started', 'process-child',
         'hooks-bound', 'hook-error', 'process-create', 'process-resumed', 'process-server',
         'process-server-exit', 'exit', 'error'])
     {
@@ -970,8 +970,9 @@ export function seriesRow(app, count, at){
  * One presented frame: counts it, records the gap since the last one, and
  * forwards whatever the request asked to happen at this frame number -- a
  * held pointer, a click a frame long, a key held the same way. The counter is
- * on the harness rather than the run, so it keeps counting across a
- * `process-replace`: the frame after a handover is one more, not the first.
+ * on the harness rather than the run, so it keeps counting across the
+ * processes of a run: a launcher's last frame and its game's first are one
+ * count.
  *
  * An action's `after` is a frame number, or -- given as `afterSeconds` --
  * a time since the first presented frame, resolved to the first frame

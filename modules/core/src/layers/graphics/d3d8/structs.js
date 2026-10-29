@@ -31,6 +31,15 @@ export const D3DDEVICE_CREATION_PARAMETERS = Object.freeze({
     BehaviorFlags: 0x0c,
     SIZE: 0x10,
 });
+/** The same in a 64-bit process: the window handle eight bytes, the end padded to eight. */
+export const D3DDEVICE_CREATION_PARAMETERS64 = Object.freeze({
+    AdapterOrdinal: 0x00,
+    DeviceType: 0x04,
+    hFocusWindow: 0x08,
+    hFocusWindowHigh: 0x0c,
+    BehaviorFlags: 0x10,
+    SIZE: 0x18,
+});
 
 /** D3DRASTER_STATUS: whether the scan-out is in the blanking interval, and where it is. */
 export const D3DRASTER_STATUS = Object.freeze({

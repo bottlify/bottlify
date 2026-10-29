@@ -21,10 +21,13 @@
  */
 
 /** Codes this surface reports. */
+const ERROR_INVALID_PARAMETER = 87;
 const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
 const ERROR_RESOURCE_NAME_NOT_FOUND = 1814;
 const ERROR_RESOURCE_LANG_NOT_FOUND = 1815;
+/** What memory calls an access to an address that is not there. */
+const GUEST_ACCESS = 'GUEST_ACCESS';
 
 /**
  * A pointer below this cannot be a string, so it is an integer identifier.
@@ -165,8 +168,23 @@ export function createResourceFunctions(host){
      * @param {number | null} language @param {boolean} [wide]
      */
     const find = (instance, type, name, language, wide = false)=>{
-        const wantedType = identifier(type, wide);
-        const wantedName = identifier(name, wide);
+        let wantedType;
+        let wantedName;
+        // A name that is not there is a page fault the lookup catches and
+        // answers: a program that passes what an enumeration it thought had
+        // run left in its variable gets ERROR_INVALID_PARAMETER back.
+        try
+        {
+            wantedType = identifier(type, wide);
+            wantedName = identifier(name, wide);
+        }
+        catch (e){
+            if (/** @type {{ code?: string }} */ (e)?.code !== GUEST_ACCESS)
+            {
+                throw e;
+            }
+            return fail(ERROR_INVALID_PARAMETER);
+        }
         const entry = wantedType === null || wantedName === null ? null
             : host.findResource(instance >>> 0, wantedType, wantedName, language);
         if (!entry)

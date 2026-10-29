@@ -71,6 +71,7 @@ const USER_CLASSES = 'Software\\Classes';
  * @property {string} name
  * @property {Map<string, RegistryNode>} keys      Keyed by folded name.
  * @property {Map<string, RegistryValue>} values  Keyed by folded name.
+ * @property {string} keyClass  The class string RegCreateKeyEx was given, "" for none.
  */
 
 /**
@@ -110,7 +111,7 @@ const fold = name=>name.toLowerCase();
 
 /** @param {string} name @returns {RegistryNode} */
 function makeKey(name){
-    return { name, keys: new Map(), values: new Map() };
+    return { name, keys: new Map(), values: new Map(), keyClass: '' };
 }
 
 /**
@@ -168,6 +169,7 @@ function terminate(type, data){
 function keyToJSON(key){
     return {
         name: key.name,
+        ...key.keyClass ? { keyClass: key.keyClass } : {},
         values: [...key.values.values()].map(value=>({
             name: value.name,
             type: value.type,
@@ -180,6 +182,7 @@ function keyToJSON(key){
 /** @param {any} stored @returns {RegistryNode} */
 function keyFromJSON(stored){
     const key = makeKey(stored?.name ?? '');
+    key.keyClass = stored?.keyClass ?? '';
     for (const value of stored?.values ?? [])
     {
         const name = value?.name ?? '';
@@ -393,6 +396,79 @@ const pick = (table, names)=>Object.fromEntries(names.map(name=>[name, table[nam
 /** Where the kernel describes the processors, a key for each. */
 const PROCESSORS_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor';
 
+/**
+ * Services Windows XP's setup installs, among them the ones a program is
+ * found asking for -- the print spooler, the event log, the task scheduler,
+ * WMI -- with the values the service control manager keeps: sharing a
+ * process (0x20) or with one of their own (0x10), started automatically
+ * (2), errors logged (1), running as the system, in the host XP runs them in.
+ */
+const BUILT_IN_SERVICES = Object.freeze([
+    { name: 'AudioSrv', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Windows Audio', ObjectName: 'LocalSystem', Group: 'AudioGroup' } },
+    { name: 'Dhcp', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'DHCP Client', ObjectName: 'LocalSystem', Group: 'TDI' } },
+    { name: 'Dnscache', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k NetworkService',
+        DisplayName: 'DNS Client', ObjectName: 'LocalSystem', Group: 'TDI' } },
+    { name: 'Eventlog', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\services.exe',
+        DisplayName: 'Event Log', ObjectName: 'LocalSystem', Group: 'Event log' } },
+    { name: 'LanmanWorkstation', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Workstation', ObjectName: 'LocalSystem', Group: 'NetworkProvider' } },
+    { name: 'PlugPlay', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\services.exe',
+        DisplayName: 'Plug and Play', ObjectName: 'LocalSystem', Group: 'PlugPlay' } },
+    { name: 'RpcSs', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k rpcss',
+        DisplayName: 'Remote Procedure Call (RPC)', ObjectName: 'LocalSystem',
+        Group: 'COM Infrastructure' } },
+    { name: 'Schedule', values: { Type: 0x120, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Task Scheduler', ObjectName: 'LocalSystem', Group: 'SchedulerGroup' } },
+    { name: 'Spooler', values: { Type: 0x110, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\spoolsv.exe',
+        DisplayName: 'Print Spooler', ObjectName: 'LocalSystem', Group: 'SpoolerGroup' } },
+    { name: 'Themes', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Themes', ObjectName: 'LocalSystem', Group: 'UIGroup' } },
+    { name: 'W32Time', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Windows Time', ObjectName: 'LocalSystem' } },
+    { name: 'winmgmt', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Windows Management Instrumentation', ObjectName: 'LocalSystem' } },
+]);
+
+/**
+ * The cryptographic providers Windows XP SP3 has, by name and type, and each
+ * type's name and default provider, as its setup registers them: what
+ * CryptAcquireContext, CryptEnumProviders and CryptGetDefaultProvider read.
+ */
+const CRYPTO_PROVIDERS = Object.freeze([
+    ['Microsoft Base Cryptographic Provider v1.0', 1, 'rsaenh.dll'],
+    ['Microsoft Base DSS and Diffie-Hellman Cryptographic Provider', 13, 'dssenh.dll'],
+    ['Microsoft Base DSS Cryptographic Provider', 3, 'dssenh.dll'],
+    ['Microsoft DH SChannel Cryptographic Provider', 18, 'dssenh.dll'],
+    ['Microsoft Enhanced Cryptographic Provider v1.0', 1, 'rsaenh.dll'],
+    ['Microsoft Enhanced DSS and Diffie-Hellman Cryptographic Provider', 13, 'dssenh.dll'],
+    ['Microsoft Enhanced RSA and AES Cryptographic Provider', 24, 'rsaenh.dll'],
+    ['Microsoft RSA SChannel Cryptographic Provider', 12, 'rsaenh.dll'],
+    ['Microsoft Strong Cryptographic Provider', 1, 'rsaenh.dll'],
+]);
+const CRYPTO_PROVIDER_TYPES = Object.freeze([
+    [1, 'RSA Full (Signature and Key Exchange)', 'Microsoft Strong Cryptographic Provider'],
+    [3, 'DSS Signature', 'Microsoft Base DSS Cryptographic Provider'],
+    [12, 'RSA SChannel', 'Microsoft RSA SChannel Cryptographic Provider'],
+    [13, 'DSS Signature with Diffie-Hellman Key Exchange',
+        'Microsoft Enhanced DSS and Diffie-Hellman Cryptographic Provider'],
+    [18, 'Diffie-Hellman SChannel', 'Microsoft DH SChannel Cryptographic Provider'],
+    [24, 'RSA Full and AES', 'Microsoft Enhanced RSA and AES Cryptographic Provider'],
+]);
+
 /** The in-process COM classes the system libraries serve, by CLSID. */
 const IN_PROCESS_CLASSES = Object.freeze([
     { clsid: '{47D4D946-62E8-11CF-93BC-444553540000}', library: 'dsound.dll' }, // DirectSound
@@ -495,6 +571,23 @@ const machineKeys = (windows, directx, processors)=>{
             },
             owned: VERSION_VALUES },
         { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
+        // The services every Windows XP machine has installed, as its setup
+        // registers them: the service control manager lists them, a program
+        // asks for one by name -- the spooler, to learn whether it may print --
+        // and the event log's logs are its subkeys, each source a key under
+        // its log.
+        ...BUILT_IN_SERVICES.map(({ name, values })=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SYSTEM\\CurrentControlSet\\Services\\${name}`, values })),
+        ...CRYPTO_PROVIDERS.map(([name, type, image])=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider\\${name}`,
+            values: { Type: type, 'Image Path': image } })),
+        ...CRYPTO_PROVIDER_TYPES.map(([type, typeName, name])=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider Types\\Type ${
+                String(type).padStart(3, '0')}`,
+            values: { Name: name, TypeName: typeName } })),
+        ...['Application', 'System', 'Security'].map(log=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SYSTEM\\CurrentControlSet\\Services\\Eventlog\\${log}`,
+            values: { File: `%SystemRoot%\\system32\\config\\${log.slice(0, 6)}.Evt` } })),
         // What the kernel wrote about each processor it found, alike: the
         // identifier is the emulated CPUID's family, model and stepping, the
         // speed the emulated counter's rate (`createHive`'s `processorMhz`),
@@ -789,7 +882,7 @@ export function createHive(
      * @param {RegistryNode} key @param {string | null} [path]
      * @returns {{ key: RegistryNode, created: boolean }}
      */
-    const createNode = (key, path)=>{
+    const createNode = (key, path, keyClass = '')=>{
         let node = key;
         let created = false;
         for (const part of segments(path))
@@ -802,6 +895,12 @@ export function createHive(
                 created = true;
             }
             node = next;
+        }
+        // The class is the key's, set when it is first made; Windows keeps the
+        // one an existing key already has and ignores a later create's.
+        if (created && keyClass)
+        {
+            node.keyClass = keyClass;
         }
         if (created)
         {
@@ -920,10 +1019,10 @@ export function createHive(
          * @param {RegistryKey} key @param {string | null} [path]
          * @returns {{ key: RegistryKey, created: boolean }}
          */
-        create(key, path){
+        create(key, path, keyClass = ''){
             if (!isClasses(key))
             {
-                return createNode(key, path);
+                return createNode(key, path, keyClass);
             }
             const parts = segments(path);
             if (parts.length === 0)
@@ -958,11 +1057,14 @@ export function createHive(
                 return removeNode(key, path);
             }
             const parts = segments(path);
-            if (parts.length === 0)
+            // An empty subkey names the key itself, as RegDeleteKey(hKey, "")
+            // asks: the delete reaches the real key the handle names, on the
+            // user side or the machine's, not this merged view.
+            const doomed = parts.length === 0 ? key : classesKey([...key.path, ...parts]);
+            if (doomed.path.length === 0)
             {
                 return 'missing';
             }
-            const doomed = classesKey([...key.path, ...parts]);
             const { user, machine } = sidesOf(doomed);
             const base = user
                 ? walk(roots.get(HKEY_CURRENT_USER), segments(USER_CLASSES))
@@ -977,6 +1079,27 @@ export function createHive(
         subkeys(key){
             return (isClasses(key) ? merged(key, node=>node.keys) : [...key.keys.values()])
                 .map(child=>child.name);
+        },
+
+        /**
+         * A key's class string, the one RegCreateKeyEx was given. A key seen
+         * through the classes root carries none of its own.
+         *
+         * @param {RegistryKey} key @returns {string}
+         */
+        classOf(key){
+            return isClasses(key) ? '' : key.keyClass;
+        },
+
+        /**
+         * The longest class string among a key's immediate subkeys, what
+         * RegQueryInfoKey reports as the most room a class read could need.
+         *
+         * @param {RegistryKey} key @returns {number}
+         */
+        maxSubkeyClassLength(key){
+            const children = isClasses(key) ? merged(key, node=>node.keys) : [...key.keys.values()];
+            return children.reduce((most, child)=>Math.max(most, child.keyClass.length), 0);
         },
 
         /**

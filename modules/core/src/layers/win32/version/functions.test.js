@@ -195,6 +195,15 @@ test('GetFileVersionInfoSizeA tells a missing file from one with no version reso
     assert.equal(version.GetFileVersionInfoSizeA.handler([0x10, 0]), 0);
     assert.deepEqual(errors, [1812],
         'ERROR_RESOURCE_DATA_NOT_FOUND: present, but carries no version resource');
+
+    // Wine's info test: NULL and "" name no file, and the handle is still zeroed.
+    errors.length = 0;
+    memory.set([0x55, 0x55, 0x55, 0x55], 0x40);
+    put(0x10, '');
+    assert.equal(version.GetFileVersionInfoSizeA.handler([0, 0x40]), 0);
+    assert.equal(version.GetFileVersionInfoSizeA.handler([0x10, 0]), 0);
+    assert.deepEqual(errors, [3, 3], 'ERROR_PATH_NOT_FOUND');
+    assert.deepEqual([...memory.subarray(0x40, 0x44)], [0, 0, 0, 0]);
 });
 
 test('a version asked of a file whose bytes are still coming is answered once they are, and '
@@ -532,6 +541,12 @@ test('VerFindFileA recommends the program directory, and reports a copy that liv
         4, 'VFF_BUFFTOOSMALL');
     assert.equal(readAt(DEST), 'C:\\');
     assert.equal(memory[DESTLEN], 'C:\\Games\\Doom'.length + 1);
+
+    // Wine's install test: no program directory recommends none.
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), DESTLEN);
+    assert.equal(version.VerFindFileA.handler([0, 0x10, 0, 0, CUR, CURLEN, DEST, DESTLEN]), 0);
+    assert.equal(memory[DESTLEN], 1);
     assert.equal(version.VerFindFileA.argBytes, 32);
 });
 
@@ -610,6 +625,10 @@ test('VerInstallFileA expands a compressed source into the destination directory
     put(0x10, 'missing.dl_');
     assert.equal(
         version.VerInstallFileA.handler([0, 0x10, 0x30, 0x50, 0x80, 0, TMP, TMPLEN]), 0x10000);
+    // Wine's install test: no names or no directories are the same answer.
+    assert.equal(version.VerInstallFileA.handler([0, 0, 0, 0, 0, 0, TMP, TMPLEN]), 0x10000);
+    assert.equal(version.VerInstallFileA.handler([0, 0x10, 0, 0, 0, 0, TMP, TMPLEN]), 0x10000);
+    assert.equal(memory[TMP], 0, 'and no temp file was named');
 });
 
 test('VerInstallFileA keeps a newer file already in place and says so, unless forced', ()=>{
@@ -775,4 +794,38 @@ test('VerLanguageName names the language a translation is in, as kernel32\'s cal
         'Language Neutral\0');
     assert.equal(version.VerLanguageNameA.handler([0x7777, 0x100, 64]), 16,
         'a language not in the table is named as the neutral one');
+});
+
+test('a wide path is read whole, not cut at half of MAX_PATH', ()=>{
+    // The reader's limit is in bytes; read in characters, a path of 200
+    // characters reached the volume cut to 130 and named another file.
+    const memory = new Uint8Array(0x2000);
+    const path = `C:\\${'d'.repeat(190)}\\x.dll`;
+    [...`${path}\0`].forEach((c, i)=>{
+        memory[0x100 + i * 2] = c.charCodeAt(0);
+    });
+    /** @type {string[]} */
+    const asked = [];
+    const host = {
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readCString: ()=>'',
+        // As the layer reads: the limit in bytes, a longer string cut there.
+        readWideString: (/** @type {number} */ a, /** @type {number} */ limit)=>{
+            let text = '';
+            for (let at = a; at + 2 <= a + limit && (memory[at] | memory[at + 1]) !== 0; at += 2)
+            {
+                text += String.fromCharCode(memory[at] | memory[at + 1] << 8);
+            }
+            return text;
+        },
+        setLastError: ()=>{},
+        files: /** @type {any} */ ({ stat: (/** @type {string} */ p)=>{
+            asked.push(p);
+            return null;
+        } }),
+    };
+    const version = /** @type {any} */ (createVersionFunctions(host));
+    assert.equal(version.GetFileVersionInfoSizeW.handler([0x100, 0]), 0);
+    assert.deepEqual(asked, [path]);
 });

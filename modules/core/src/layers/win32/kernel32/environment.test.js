@@ -6,8 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment }
-    from './environment.js';
+import {
+    ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
+} from './environment.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
@@ -228,6 +229,20 @@ test('setting a variable is visible to the next reader', ()=>{
     assert.equal(host.readAnsi(0x200), 'value');
 });
 
+test('the variables as they are now, for a child made now, changes included', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    host.plant(0x100, 'NEW');
+    host.plant(0x140, 'value');
+    fns.SetEnvironmentVariableA.handler([0x100, 0x140]);
+    host.plant(0x180, 'TEMP');
+    fns.SetEnvironmentVariableA.handler([0x180, 0]);
+
+    const now = fns[ENVIRONMENT_NOW]();
+    assert.equal(now.NEW, 'value');
+    assert.equal('TEMP' in now, false, 'one removed is gone');
+});
+
 test('a null value removes the variable', ()=>{
     const host = fakeHost();
     const fns = createEnvironmentFunctions(host);
@@ -269,7 +284,7 @@ test('GetEnvironmentVariableW reads a variable by a wide name into a wide buffer
     assert.notEqual(fns.GetEnvironmentStringsA.handler(), 0, 'the block under its A name too');
 });
 
-test('the startup record names its own size and nothing else', ()=>{
+test('a process no parent started has a startup record of its size and nothing else', ()=>{
     // dwFlags of zero is how a program is told not to read the rest, so every
     // other field being zero is the answer rather than a placeholder.
     const host = fakeHost();
@@ -282,8 +297,6 @@ test('the startup record names its own size and nothing else', ()=>{
     assert.equal(view.getUint32(0x300 + 44, true), 0, 'dwFlags');
     assert.deepEqual([...host.bytes.slice(0x304, 0x300 + STARTUPINFOA_SIZE)],
         new Array(STARTUPINFOA_SIZE - 4).fill(0));
-    assert.equal(fns.GetStartupInfoW, fns.GetStartupInfoA,
-        'the wide record is the same size, with no strings to give either');
 });
 
 test('the system directory is inside the windows one, as a program assumes', ()=>{
@@ -453,4 +466,45 @@ test('CreateEnvironmentBlock hands out the process\'s block, and Destroy frees i
     assert.deepEqual(freed, [0x5000]);
     assert.equal(fns.CreateEnvironmentBlock.handler([0, 0, 1]), 0);
     assert.deepEqual(errors, [87], 'no pointer is ERROR_INVALID_PARAMETER');
+});
+
+test('a name finds its variable whatever its case, and the block keeps the first spelling', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    host.plant(0x100, 'SomeWildName');
+    host.plant(0x140, 'sOMEwILDnAME');
+    host.plant(0x180, 'SomeWildValue');
+    host.plant(0x1c0, '');
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x100, 0x180]), 1);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x140, 0x200, 64]), 13);
+    assert.equal(host.readAnsi(0x200), 'SomeWildValue');
+
+    // Set to empty through the other spelling: the same variable, now "".
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x140, 0x1c0]), 1);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0x200, 64]), 0);
+    assert.equal(host.readAnsi(0x200), '');
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0, 0]), 1, 'the terminator');
+    const block = fns.GetEnvironmentStringsA.handler();
+    let text = '';
+    for (let at = block; host.bytes[at] !== 0 || host.bytes[at + 1] !== 0; at++)
+    {
+        text += String.fromCharCode(host.bytes[at] || 10);
+    }
+    assert.match(text, /^SomeWildName=$/m);
+
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x140, 0]), 1, 'deleted by either spelling');
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0x200, 64]), 0);
+    assert.equal(host.errors.at(-1), ERROR_ENVVAR_NOT_FOUND);
+});
+
+test('a NULL name names nothing, and a NULL source expands to the empty string', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0, 0x200, 64]), 0);
+    assert.equal(fns.GetEnvironmentVariableW.handler([0, 0, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_ENVVAR_NOT_FOUND, ERROR_ENVVAR_NOT_FOUND]);
+    assert.equal(fns.SetEnvironmentVariableA.handler([0, 0]), 0);
+    assert.equal(host.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0, 0x200, 64]), 1);
+    assert.equal(fns.ExpandEnvironmentStringsW.handler([0, 0x200, 64]), 1);
 });

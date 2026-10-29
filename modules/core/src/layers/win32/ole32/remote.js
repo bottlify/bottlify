@@ -23,13 +23,15 @@
  * the NDR buffer the generated code marshaled, through an IRpcChannelBuffer
  * of this file's.
  *
- * The model is COM's single-threaded apartment, which is what every program
- * of this era that serves a class out of process uses. An object belongs to
- * the thread that exported it, and a call for it runs there and nowhere
- * else: posted to the apartment's hidden window, the way ole32 posts an
- * incoming call, so it runs when that thread's message loop dispatches it --
- * or, when the thread is itself waiting on a call it made, inside that wait,
- * as COM's modal loop runs one.
+ * An object exported from a single-threaded apartment belongs to the thread
+ * that exported it, and a call for it runs there and nowhere else: posted to
+ * the apartment's hidden window, the way ole32 posts an incoming call, so it
+ * runs when that thread's message loop dispatches it -- or, when the thread
+ * is itself waiting on a call it made, inside that wait, as COM's modal loop
+ * runs one. An object of the multithreaded apartment belongs to no thread:
+ * its calls run on a thread of the process's own that waits for them, as
+ * COM's RPC threads run them, so a server whose threads all sit in a wait
+ * still answers.
  *
  * The table of registered class objects is the service control manager's:
  * one for the whole run, shared by every process in it. A process that asks
@@ -444,6 +446,10 @@ export function createClassTable(hooks = {}){
  *     The apartment a thread is in: two threads of one apartment call an
  *     object directly, any other through a proxy. Absent, every thread is in
  *     the same one.
+ * @property {(body: (thread: unknown) => Promise<void>) => boolean} [worker]
+ *     Starts a thread of this process whose whole work is `body`, given that
+ *     thread: where the multithreaded apartment's calls run. False when none
+ *     could be started.
  * @property {import('../oleaut32/marshal.js').CatalogHost} catalog
  * @property {{ factory: (iid: string, thread: unknown) => Promise<number> }} [proxyStub]
  *     The IPSFactoryBuffer of the proxy/stub DLL the registry names for an
@@ -520,6 +526,9 @@ export function createRemoting(host){
      * @property {Map<string, number>} stubs  The MIDL stubs its calls go through.
      * @property {number} refs
      * @property {unknown} thread
+     * @property {boolean} [borrowed]
+     *     A registered class object: the registration's count is the one
+     *     CoRegisterClassObject took, and nothing is released for it here.
      */
 
     /** @type {Map<number, Exported>} */
@@ -540,6 +549,18 @@ export function createRemoting(host){
 
     /** @type {Map<unknown, Apartment>} */
     const apartments = new Map();
+    /** The multithreaded apartment's calls, which its worker runs. */
+    const MTA_CALLS = Symbol('multithreaded apartment');
+    /** @type {boolean | null} Null until the first call for the apartment. */
+    let workerStarted = null;
+    /**
+     * Whether a call for an object `thread` exported runs on the worker:
+     * only where threads have apartments and something can start one.
+     *
+     * @param {unknown} thread
+     */
+    const servedByWorker = thread=>host.worker !== undefined && host.apartmentOf !== undefined
+        && host.apartmentOf(thread) !== thread;
     /** @param {unknown} thread @returns {Apartment} */
     const apartment = thread=>{
         let found = apartments.get(thread);
@@ -575,12 +596,12 @@ export function createRemoting(host){
     };
 
     /**
-     * Runs every call waiting for this thread, on it.
+     * Runs every call waiting for an apartment, on `thread`: its own, or the
+     * worker's for the multithreaded one.
      *
-     * @param {unknown} thread
+     * @param {unknown} thread @param {Apartment} [home]
      */
-    const drain = async thread=>{
-        const home = apartment(thread);
+    const drain = async(thread, home = apartment(thread))=>{
         while (home.queue.length > 0)
         {
             const item = /** @type {{ message: any, resolve: (reply: any) => void }} */ (
@@ -601,15 +622,54 @@ export function createRemoting(host){
     };
 
     /**
+     * The multithreaded apartment's worker, started with its first call: it
+     * runs what is queued, then waits for the next. False when no thread
+     * could be started, and the exporting thread's window is used instead.
+     *
+     * @returns {boolean}
+     */
+    const startWorker = ()=>{
+        if (workerStarted !== null)
+        {
+            return workerStarted;
+        }
+        const home = apartment(MTA_CALLS);
+        workerStarted = host.worker?.(async thread=>{
+            for (;;)
+            {
+                await drain(thread, home);
+                // Looked at and armed in one step: a call queued while the
+                // drain was finishing is not left for a wake nobody sends.
+                if (home.queue.length > 0)
+                {
+                    continue;
+                }
+                await new Promise(resolve=>{
+                    home.waiting = ()=>{
+                        home.waiting = null;
+                        resolve(null);
+                    };
+                });
+            }
+        }) === true;
+        return workerStarted;
+    };
+
+    /**
      * Hands a call to the apartment it belongs to.
      *
      * @param {unknown} thread @param {any} message
      * @returns {Promise<any>}
      */
     const enqueue = (thread, message)=>new Promise(resolve=>{
-        const home = apartment(thread);
+        const shared = servedByWorker(thread) && startWorker();
+        const home = apartment(shared ? MTA_CALLS : thread);
         home.queue.push({ message, resolve });
-        if (home.waiting)
+        if (shared)
+        {
+            home.waiting?.();
+        }
+        else if (home.waiting)
         {
             home.waiting();
         }
@@ -915,6 +975,10 @@ export function createRemoting(host){
             return;
         }
         exported.delete(entry.id);
+        if (entry.borrowed)
+        {
+            return;
+        }
         byIdentity.delete(entry.unknown);
         // A stub holds the object too, and is the DLL's to release.
         for (const stub of entry.stubs.values())
@@ -1711,9 +1775,17 @@ export function createRemoting(host){
          */
         async registerClass(clsid, object, flags, cookie){
             const thread = host.callerThread();
-            const reference = await exportInterface(object, IID_IUNKNOWN, false, thread);
-            registered.set(cookie, reference.object);
-            host.table.register({ clsid, endpoint: endpointId, object: reference.object, flags,
+            await ensureWindow(thread);
+            // Not exported as a client's reference is: what an activation
+            // hands out is exported then, and goes when that client lets go,
+            // so an idle server holds its class object by the registration's
+            // one count, as ole_server.c counts it.
+            /** @type {Exported} */
+            const entry = { id: nextObject++, unknown: object >>> 0, interfaces: new Map(),
+                stubs: new Map(), refs: 1, thread, borrowed: true };
+            exported.set(entry.id, entry);
+            registered.set(cookie, entry.id);
+            host.table.register({ clsid, endpoint: endpointId, object: entry.id, flags,
                 cookie, suspended: (flags & REGCLS_SUSPENDED) !== 0, used: false });
         },
 

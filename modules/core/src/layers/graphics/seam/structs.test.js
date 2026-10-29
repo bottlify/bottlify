@@ -13,9 +13,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DLIGHT7, D3DVIEWPORT8, createFields, createLightReader, dwordsOf, floatsOf, intsOf,
-    lockRectInto, putLight,
+    D3DLIGHT7, D3DLOCKED_BOX64, D3DLOCKED_RECT64, D3DPRESENT_PARAMETERS9,
+    D3DPRESENT_PARAMETERS9_64, D3DVIEWPORT8, createFields, createLightReader, dwordsOf, floatsOf,
+    intsOf, lockRectInto, putLight,
 } from './structs.js';
+import { D3DDEVICE_CREATION_PARAMETERS64 } from '../d3d8/structs.js';
 
 /**
  * What the readers answered before the staging buffer: a fresh array, its
@@ -249,4 +251,30 @@ test('a rectangle lock writes its D3DLOCKED_RECT now or once it settles', async(
     assert.equal(lockRectInto(fields, 0, locked=>(take(locked), 0)), 0);
     assert.deepEqual(written, [[0x40, { Pitch: 256, pBits: 0x1000 }],
         [0x80, { Pitch: 256, pBits: 0x1000 }]]);
+});
+
+test('a 64-bit process\'s Direct3D structures lay a handle or a pointer out in eight bytes', ()=>{
+    // d3d9.h under _WIN64: the handle or pointer on an eight-byte boundary,
+    // everything after it moved, the end padded to eight.
+    assert.deepEqual([D3DPRESENT_PARAMETERS9_64.hDeviceWindow, D3DPRESENT_PARAMETERS9_64.Windowed,
+        D3DPRESENT_PARAMETERS9_64.PresentationInterval, D3DPRESENT_PARAMETERS9_64.SIZE],
+    [0x20, 0x28, 0x3c, 0x40]);
+    assert.equal(D3DPRESENT_PARAMETERS9_64.SwapEffect, D3DPRESENT_PARAMETERS9.SwapEffect,
+        'the fields before the handle stay where they were');
+    assert.deepEqual([D3DDEVICE_CREATION_PARAMETERS64.hFocusWindow,
+        D3DDEVICE_CREATION_PARAMETERS64.BehaviorFlags, D3DDEVICE_CREATION_PARAMETERS64.SIZE],
+    [0x08, 0x10, 0x18]);
+    assert.deepEqual([D3DLOCKED_RECT64.pBits, D3DLOCKED_RECT64.SIZE], [0x08, 0x10]);
+    assert.deepEqual([D3DLOCKED_BOX64.pBits, D3DLOCKED_BOX64.SIZE], [0x08, 0x10]);
+});
+
+test('a rectangle lock in a 64-bit process writes the address whole', ()=>{
+    /** @type {any[]} */
+    const written = [];
+    const fields = { writeStruct: (/** @type {number} */ address, /** @type {any} */ layout,
+        /** @type {any} */ values)=>written.push([address, layout, values]) };
+    lockRectInto(fields, 0x40, locked=>(Object.assign(locked, { Pitch: 64, pBits: 0x2000 }), 0),
+        D3DLOCKED_RECT64);
+    assert.deepEqual(written, [[0x40, D3DLOCKED_RECT64, { Pitch: 64, pBits: 0x2000,
+        pBitsHigh: 0 }]]);
 });

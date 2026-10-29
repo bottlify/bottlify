@@ -22,11 +22,16 @@
  */
 
 import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from './guid.js';
-import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
+import { HKEY_CLASSES_ROOT, REG_SZ } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 import { publishEnumerator } from './enumerator.js';
-import { CF, DVASPECT_CONTENT, FORMATETC_SIZE, SLOT, createOleUtil } from './oleutil.js';
+import {
+    CF, DVASPECT_CONTENT, FORMATETC_SIZE, SLOT, STGMEDIUM_SIZE, createOleUtil,
+} from './oleutil.js';
+import {
+    CLSID_PICTURE_DIB, CLSID_PICTURE_ENHMETAFILE, CLSID_PICTURE_METAFILE,
+} from './datacache.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -35,6 +40,12 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const REGDB_E_KEYMISSING = 0x80040152 | 0;
 const REGDB_E_CLASSNOTREG = 0x80040154 | 0;
+const REGDB_E_WRITEREGDB = 0x80040151 | 0;
+const GMEM_MOVEABLE = 0x0002;
+const MM_ANISOTROPIC = 8;
+const SM_CXICON = 11;
+const SM_CYICON = 12;
+const HIMETRIC_PER_INCH = 2540;
 const CO_E_CLASSSTRING = 0x800401f3 | 0;
 const CO_E_NOTINITIALIZED = 0x800401f0 | 0;
 const OLE_S_STATIC = 0x00040001;
@@ -46,9 +57,35 @@ const DV_E_CLIPFORMAT = 0x8004006a | 0;
 const DV_E_NOIVIEWOBJECT = 0x80040073 | 0;
 const STG_E_FILENOTFOUND = 0x80030002 | 0;
 const STG_E_READFAULT = 0x8003001e | 0;
-const DRAGDROP_S_CANCEL = 0x00040101;
 const CONVERT10_E_OLESTREAM_FMT = 0x800401c2 | 0;
 const CONVERT10_E_STG_NO_STD_STREAM = 0x800401c5 | 0;
+
+/** DoDragDrop's loop: IDropSource's and IDropTarget's slots, and what it asks user32. */
+const DRAGDROP_S_DROP = 0x00040100;
+const DROPEFFECT_NONE = 0;
+const DROPSOURCE_QUERY_CONTINUE_DRAG = 3;
+const DROPSOURCE_GIVE_FEEDBACK = 4;
+const DROPTARGET_DRAG_ENTER = 3;
+const DROPTARGET_DRAG_OVER = 4;
+const DROPTARGET_DRAG_LEAVE = 5;
+const DROPTARGET_DROP = 6;
+const DRAG_POINT = 8;
+const MSG_SIZE = 28;
+const WS_POPUP = 0x80000000 | 0;
+const GA_PARENT = 1;
+const QS_ALLINPUT = 0x04ff;
+const PM_REMOVE = 1;
+const WM_QUIT = 0x0012;
+const WM_KEYFIRST = 0x0100;
+const WM_KEYLAST = 0x0109;
+const WM_MOUSEFIRST = 0x0200;
+const WM_MOUSELAST = 0x020e;
+const VK_ESCAPE = 0x1b;
+/** How long the loop waits for input before asking the source again. */
+const DRAG_POLL_MS = 50;
+/** grfKeyState: MK_LBUTTON, MK_RBUTTON, MK_SHIFT, MK_CONTROL, MK_MBUTTON, MK_ALT. */
+const DRAG_KEYS = [[0x01, 0x01], [0x02, 0x02], [0x10, 0x04], [0x11, 0x08], [0x04, 0x10],
+    [0x12, 0x20]];
 
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 const IID_IVIEWOBJECT = '{0000010D-0000-0000-C000-000000000046}';
@@ -67,6 +104,7 @@ const OLEOBJECT_SET_CLIENT_SITE = 3;
 const OLEOBJECT_GET_MISC_STATUS = 22;
 const PERSIST = Object.freeze({ GET_CLASS_ID: 3, INIT_NEW: 5, LOAD: 6, SAVE: 7 });
 const OLECACHE_CACHE = 3;
+const OLECACHE_SET_DATA = 7;
 const VIEWOBJECT_DRAW = 3;
 /** IOleInPlaceFrame::TranslateAccelerator, after IOleWindow's and IOleInPlaceUIWindow's. */
 const FRAME_TRANSLATE_ACCELERATOR = 14;
@@ -295,9 +333,19 @@ export function decodeCompObj(bytes){
 }
 
 /**
+ * OleEnv with the objects made after ole2's table: declared here, not in
+ * oleutil.js, which the cache and the handler import.
+ *
+ * @typedef {import('./oleutil.js').OleEnv & {
+ *     dataCaches?: ReturnType<typeof import('./datacache.js').createDataCaches>,
+ *     defaultHandlers?: ReturnType<typeof import('./defhandler.js').createDefaultHandlers>,
+ * }} Ole2Env
+ */
+
+/**
  * Builds the table: name -> { argBytes, handler }.
  *
- * @param {import('./oleutil.js').OleEnv} env
+ * @param {Ole2Env} env
  */
 export function createOle2Functions(env){
     const util = createOleUtil(env);
@@ -551,9 +599,9 @@ export function createOle2Functions(env){
      * @param {string} clsid @param {string} api
      * @returns {Promise<{ hr: number, unknown: number }>}
      */
-    const makeObject = async(clsid, api)=>(await withScratch(4, async block=>{
+    const makeObject = async(clsid, api, quiet = false)=>(await withScratch(4, async block=>{
         const hr = (await env.createInstance(clsid, 0, CLSCTX_INPROC, IID_IUNKNOWN, block)) | 0;
-        if (hr === REGDB_E_CLASSNOTREG)
+        if (hr === REGDB_E_CLASSNOTREG && !quiet)
         {
             util.sayOnce(api, `class ${clsid} has no server in this process`);
         }
@@ -602,7 +650,151 @@ export function createOle2Functions(env){
 
     /** The formats a static object can be made of. */
     /** @type {Set<number>} */
+    /** The static picture class of each format a static object is made of. */
+    /** @type {Set<number>} */
     const STATIC_FORMATS = new Set([CF.METAFILEPICT, CF.BITMAP, CF.DIB, CF.ENHMETAFILE]);
+    /** @type {Map<number, string>} */
+    const STATIC_CLASSES = new Map([[CF.DIB, CLSID_PICTURE_DIB], [CF.BITMAP, CLSID_PICTURE_DIB],
+        [CF.METAFILEPICT, CLSID_PICTURE_METAFILE], [CF.ENHMETAFILE, CLSID_PICTURE_ENHMETAFILE]]);
+
+    /**
+     * A static picture's CONTENTS: a DIB behind a file header, a metafile
+     * behind its placeable header, an enhanced metafile behind the size of
+     * its header and a copy of it (ole2.c get_stgdef).
+     *
+     * @param {number} cf @param {Uint8Array} bytes @param {{ x: number, y: number }} extent
+     */
+    const contentsOf = (cf, bytes, extent)=>{
+        if (cf === CF.DIB || cf === CF.BITMAP)
+        {
+            const view = new DataView(bytes.buffer, bytes.byteOffset);
+            const headerSize = bytes.length >= 40 ? view.getUint32(0, true) : 40;
+            const bits = bytes.length >= 40 ? view.getUint16(14, true) : 0;
+            const used = bytes.length >= 40 ? view.getUint32(32, true) : 0;
+            const colours = used || (bits <= 8 && bits > 0 ? 1 << bits : 0);
+            const header = new Uint8Array(14);
+            const head = new DataView(header.buffer);
+            head.setUint16(0, 0x4d42, true);
+            head.setUint32(2, 14 + bytes.length, true);
+            head.setUint32(10, 14 + headerSize + colours * 4, true);
+            return concatBytes(header, bytes);
+        }
+        if (cf === CF.ENHMETAFILE)
+        {
+            const headerSize = bytes.length >= 8 ? new DataView(bytes.buffer, bytes.byteOffset)
+                .getUint32(4, true) : 0;
+            const size = new Uint8Array(4);
+            new DataView(size.buffer).setUint32(0, headerSize, true);
+            return concatBytes(size, bytes.slice(0, headerSize), bytes);
+        }
+        // The placeable header: its key, no handle, the picture's box in
+        // 576ths of an inch from its HIMETRIC extent, the units, and the
+        // checksum of the words before it.
+        const placeable = new Uint8Array(22);
+        const view = new DataView(placeable.buffer);
+        view.setUint32(0, 0x9ac6cdd7, true);
+        view.setInt16(10, Math.round(extent.x * 576 / 2540), true);
+        view.setInt16(12, Math.round(extent.y * 576 / 2540), true);
+        view.setUint16(14, 576, true);
+        let sum = 0;
+        for (let at = 0; at < 20; at += 2)
+        {
+            sum ^= view.getUint16(at, true);
+        }
+        view.setUint16(20, sum, true);
+        return concatBytes(placeable, bytes);
+    };
+
+    /** @param {...Uint8Array} parts */
+    const concatBytes = (...parts)=>{
+        const whole = new Uint8Array(parts.reduce((sum, part)=>sum + part.length, 0));
+        let at = 0;
+        for (const part of parts)
+        {
+            whole.set(part, at);
+            at += part.length;
+        }
+        return whole;
+    };
+
+    /**
+     * OleCreateStaticFromData's work: the picture asked of the data object
+     * kept by a default handler of its static class, the storage made that
+     * class's with \1Ole, \1CompObj and CONTENTS.
+     *
+     * @param {number} data @param {number} cf @param {string} clsid @param {number} formatEtc
+     * @param {number} storage @param {number} riid @param {number} out
+     */
+    const makeStatic = async(data, cf, clsid, formatEtc, storage, riid, out)=>{
+        const thread = env.callerThread();
+        const handlers = /** @type {NonNullable<typeof env.defaultHandlers>} */ (env.defaultHandlers);
+        return await withScratch(STGMEDIUM_SIZE + 8 + 16, async block=>{
+            const medium = block;
+            env.writeMemory(medium, new Uint8Array(STGMEDIUM_SIZE));
+            const got = (await env.callMethod(data, SLOT.DATA_GET, [formatEtc, medium],
+                thread)) | 0;
+            if (got !== S_OK)
+            {
+                return got < 0 ? got : DV_E_FORMATETC;
+            }
+            const classAt = block + STGMEDIUM_SIZE + 8;
+            writeGuid(classAt, clsid);
+            await env.callMethod(storage, SLOT.STORAGE_SET_CLASS, [classAt], thread);
+            const slot = block + STGMEDIUM_SIZE;
+            let hr = await handlers.create(clsid, 0, 0, 0, IID_IUNKNOWN, slot, thread);
+            const unknown = hr < 0 ? 0 : readU32(slot);
+            if (unknown !== 0)
+            {
+                const persist = await env.queryPointer(unknown, IID_IPERSISTSTORAGE, thread);
+                hr = persist === 0 ? E_NOINTERFACE
+                    : (await env.callMethod(persist, PERSIST.INIT_NEW, [storage], thread)) | 0;
+                if (persist !== 0)
+                {
+                    await release(persist, thread);
+                }
+            }
+            if (hr >= 0)
+            {
+                hr = (await table.WriteFmtUserTypeStg.handler([storage, cf, 0])) | 0;
+            }
+            if (hr >= 0)
+            {
+                const cache = await env.queryPointer(unknown, IID_IOLECACHE, thread);
+                if (cache !== 0)
+                {
+                    await env.callMethod(cache, OLECACHE_SET_DATA, [formatEtc, medium, 0], thread);
+                    await release(cache, thread);
+                }
+                hr = await writeContents(cf, medium, storage, thread);
+            }
+            await env.releaseMedium(medium);
+            return unknown === 0 ? hr : handOut(unknown, riid, out, hr, thread);
+        }) ?? E_OUTOFMEMORY;
+    };
+
+    /**
+     * The CONTENTS stream of a static object, from the picture it was made of.
+     *
+     * @param {number} cf @param {number} medium @param {number} storage @param {unknown} thread
+     */
+    const writeContents = async(cf, medium, storage, thread)=>{
+        const caches = env.dataCaches;
+        const picture = caches ? await caches.pictureIn(cf, medium, thread) : null;
+        if (!picture)
+        {
+            return E_OUTOFMEMORY;
+        }
+        const opened = await util.openStream(storage, 'CONTENTS',
+            STGM_CREATE | STGM_SHARE_EXCLUSIVE | STGM_READWRITE, true, thread);
+        if (opened.hr < 0)
+        {
+            return opened.hr;
+        }
+        const hr = await util.writeStream(opened.stream, contentsOf(cf, picture.data,
+            picture.extent), thread);
+        await release(opened.stream, thread);
+        return hr < 0 ? hr : S_OK;
+    };
 
     /**
      * OleQueryCreateFromData's answer: S_OK for data an embedding comes
@@ -715,6 +907,184 @@ export function createOle2Functions(env){
                 return refusal.handler();
             },
         };
+    };
+
+    /**
+     * DoDragDrop's loop, after its argument checks.
+     *
+     * @param {number} data @param {number} source @param {number} allowed
+     * @param {unknown} thread
+     * @returns {Promise<{ hr: number, effect: number }>}
+     */
+    const dragAndDrop = async(data, source, allowed, thread)=>{
+        /** @param {string} name @param {number[]} args */
+        const user32 = async(name, args)=>
+            (await util.system('USER32.dll', name, args, thread)) ?? 0;
+        // A point, an effect and a MSG; the strings lent for the window's
+        // class and the target's property.
+        const block = env.heap.allocate(DRAG_POINT + 4 + MSG_SIZE) >>> 0;
+        const className = util.lendWide('STATIC');
+        const property = util.lendWide('OleDropTargetInterface');
+        if (block === 0 || className === 0 || property === 0)
+        {
+            for (const lent of [block, className, property].filter(at=>at !== 0))
+            {
+                env.heap.free(lent);
+            }
+            return { hr: E_OUTOFMEMORY, effect: DROPEFFECT_NONE };
+        }
+        const point = block;
+        const effectAt = block + DRAG_POINT;
+        const message = effectAt + 4;
+        const tracker = (await user32('CreateWindowExW',
+            [0, className, 0, WS_POPUP, 0, 0, 0, 0, 0, 0, 0, 0])) >>> 0;
+        if (tracker !== 0)
+        {
+            await user32('SetCapture', [tracker]);
+        }
+        /** @param {number} vk */
+        const down = async vk=>((await user32('GetAsyncKeyState', [vk])) & 0x8000) !== 0;
+        const keyState = async()=>{
+            let keys = 0;
+            for (const [vk, bit] of DRAG_KEYS)
+            {
+                keys |= (await down(vk)) ? bit : 0;
+            }
+            return keys;
+        };
+        /**
+         * The target under the point: its window's, or the nearest parent's.
+         *
+         * @param {number} x @param {number} y
+         */
+        const targetAt = async(x, y)=>{
+            let window = (await user32('WindowFromPoint', [x, y])) >>> 0;
+            for (let depth = 0; window !== 0 && depth < 64; depth++)
+            {
+                const target = (await user32('GetPropW', [window, property])) >>> 0;
+                if (target !== 0)
+                {
+                    return target;
+                }
+                window = (await user32('GetAncestor', [window, GA_PARENT])) >>> 0;
+            }
+            return 0;
+        };
+        /** @param {number} object @param {number} slot @param {number[]} args */
+        const call = async(object, slot, args)=>
+            (await env.callMethod(object, slot, args, thread)) | 0;
+        /**
+         * A target's call that answers an effect: it is handed the allowed
+         * ones and gives back its own, which the source sees narrowed.
+         *
+         * @param {number} at @param {number} slot @param {number[]} args
+         */
+        const ask = async(at, slot, args)=>{
+            writeU32(effectAt, allowed);
+            const hr = await call(at, slot, [...args, effectAt]);
+            return { hr, effect: readU32(effectAt) >>> 0 };
+        };
+        let target = 0;
+        let entered = false;
+        let effect = DROPEFFECT_NONE;
+        /** A WM_QUIT taken on the way, put back after. @type {number | null} */
+        let quit = null;
+        try
+        {
+            for (;;)
+            {
+                const keys = await keyState();
+                const escape = quit !== null || await down(VK_ESCAPE);
+                const going = await call(source, DROPSOURCE_QUERY_CONTINUE_DRAG,
+                    [escape ? 1 : 0, keys]);
+                if (going !== S_OK && going !== DRAGDROP_S_DROP)
+                {
+                    if (entered)
+                    {
+                        await call(target, DROPTARGET_DRAG_LEAVE, []);
+                    }
+                    return { hr: going, effect: DROPEFFECT_NONE };
+                }
+                env.writeMemory(point, new Uint8Array(8));
+                await user32('GetCursorPos', [point]);
+                const x = readU32(point) | 0;
+                const y = readU32(point + 4) | 0;
+                const under = await targetAt(x, y);
+                if (under !== target)
+                {
+                    if (entered)
+                    {
+                        await call(target, DROPTARGET_DRAG_LEAVE, []);
+                    }
+                    target = under;
+                    entered = false;
+                    effect = DROPEFFECT_NONE;
+                    if (target !== 0)
+                    {
+                        const answer = await ask(target, DROPTARGET_DRAG_ENTER, [data, keys, x, y]);
+                        entered = answer.hr >= 0;
+                        effect = entered ? answer.effect & allowed : DROPEFFECT_NONE;
+                    }
+                    await call(source, DROPSOURCE_GIVE_FEEDBACK, [effect]);
+                }
+                if (going === DRAGDROP_S_DROP)
+                {
+                    if (!entered)
+                    {
+                        return { hr: DRAGDROP_S_DROP, effect: DROPEFFECT_NONE };
+                    }
+                    if (effect === DROPEFFECT_NONE)
+                    {
+                        await call(target, DROPTARGET_DRAG_LEAVE, []);
+                        return { hr: DRAGDROP_S_DROP, effect: DROPEFFECT_NONE };
+                    }
+                    const dropped = await ask(target, DROPTARGET_DROP, [data, keys, x, y]);
+                    return dropped.hr === S_OK
+                        ? { hr: DRAGDROP_S_DROP, effect: dropped.effect }
+                        : { hr: dropped.hr, effect: dropped.effect };
+                }
+                if (entered)
+                {
+                    const answer = await ask(target, DROPTARGET_DRAG_OVER, [keys, x, y]);
+                    effect = answer.hr >= 0 ? answer.effect & allowed : DROPEFFECT_NONE;
+                    await call(source, DROPSOURCE_GIVE_FEEDBACK, [effect]);
+                }
+                // What arrived meanwhile: input is the drag's, the rest is
+                // the thread's windows' as ever; a WM_QUIT ends the drag as
+                // escape would and is put back.
+                await user32('MsgWaitForMultipleObjects', [0, 0, 0, DRAG_POLL_MS, QS_ALLINPUT]);
+                for (let taken = 0; taken < 100
+                    && (await user32('PeekMessageW', [message, 0, 0, 0, PM_REMOVE])) !== 0; taken++)
+                {
+                    const kind = readU32(message + 4) >>> 0;
+                    if (kind === WM_QUIT)
+                    {
+                        quit = readU32(message + 8) | 0;
+                    }
+                    else if (!(kind >= WM_KEYFIRST && kind <= WM_KEYLAST)
+                        && !(kind >= WM_MOUSEFIRST && kind <= WM_MOUSELAST))
+                    {
+                        await user32('TranslateMessage', [message]);
+                        await user32('DispatchMessageW', [message]);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            if (tracker !== 0)
+            {
+                await user32('ReleaseCapture', []);
+                await user32('DestroyWindow', [tracker]);
+            }
+            if (quit !== null)
+            {
+                await user32('PostQuitMessage', [quit]);
+            }
+            env.heap.free(block);
+            env.heap.free(className);
+            env.heap.free(property);
+        }
     };
 
     const table = {
@@ -834,7 +1204,8 @@ export function createOle2Functions(env){
          *   LPFORMATETC pFormatEtc, LPOLECLIENTSITE pClientSite, LPSTORAGE pStg,
          *   LPVOID *ppvObj)
          *
-         * The object made in process, its storage initialised new, the site
+         * The object made in process, its storage made the class's and
+         * initialised new, the site
          * given, and -- to draw or for a format -- run and its cache asked
          * for the presentation, in the order ole2.c test_OleCreate records.
          * A class whose server is not in process has no default handler to
@@ -861,6 +1232,9 @@ export function createOle2Functions(env){
                 {
                     return made.hr;
                 }
+                // The storage is the class's from here on, as OleLoad reads
+                // it back (ole2.c: the storage's class after OleCreate).
+                await env.callMethod(storage >>> 0, SLOT.STORAGE_SET_CLASS, [rclsid >>> 0], thread);
                 let hr = await prepare(made.unknown, site >>> 0, async persist=>
                     (await env.callMethod(persist, PERSIST.INIT_NEW, [storage], thread)) | 0,
                 thread);
@@ -912,7 +1286,19 @@ export function createOle2Functions(env){
                 {
                     return stat.hr;
                 }
-                const made = await makeObject(formatGuid(stat.clsid), 'OleLoad');
+                const clsid = formatGuid(stat.clsid);
+                let made = await makeObject(clsid, 'OleLoad', true);
+                if (made.hr === REGDB_E_CLASSNOTREG && env.defaultHandlers)
+                {
+                    // No server in process: the default handler stands for
+                    // the object, drawn from the storage's presentations.
+                    made = await withScratch(4, async block=>{
+                        const hr = await /** @type {NonNullable<typeof env.defaultHandlers>} */ (
+                            env.defaultHandlers).create(clsid, 0, 0, 0, IID_IUNKNOWN, block,
+                            thread);
+                        return { hr, unknown: hr < 0 ? 0 : readU32(block) };
+                    }) ?? { hr: E_OUTOFMEMORY, unknown: 0 };
+                }
                 if (made.hr < 0)
                 {
                     return made.hr;
@@ -1050,6 +1436,92 @@ export function createOle2Functions(env){
                 const found = autoConvertOf(guidAt(old));
                 writeGuid(out, found.guid);
                 return found.hr;
+            },
+        },
+
+        /**
+         * HRESULT OleSetAutoConvert(REFCLSID clsidOld, REFCLSID clsidNew)
+         *
+         * The old class's AutoConvertTo value names the new one, which
+         * OleGetAutoConvert and OleDoAutoConvert read; a class with no key
+         * of its own is not registered.
+         */
+        OleSetAutoConvert: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([old, replacement])=>{
+                if ((old >>> 0) === 0 || (replacement >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const key = classesKey(`CLSID\\${guidAt(old)}`);
+                if (!key)
+                {
+                    return REGDB_E_CLASSNOTREG;
+                }
+                if (!env.hive?.create || !env.hive.setValue)
+                {
+                    return REGDB_E_WRITEREGDB;
+                }
+                const made = env.hive.create(key, 'AutoConvertTo').key;
+                env.hive.setValue(made, '', REG_SZ, encodeAnsi(`${guidAt(replacement)}\0`));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HGLOBAL OleMetafilePictFromIconAndLabel(HICON hIcon, LPOLESTR lpszLabel,
+         *     LPOLESTR lpszSourceFile, UINT iIconIndex)
+         *
+         * A METAFILEPICT in movable global memory, anisotropic, over a
+         * metafile of the icon. NULL for no icon. The metafile is gdi32's,
+         * and the extent is the icon's own size in HIMETRIC at 96 DPI: the
+         * label is neither drawn nor measured here, which is said once.
+         */
+        OleMetafilePictFromIconAndLabel: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: async([icon])=>{
+                if ((icon >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const thread = env.callerThread();
+                /** @param {string} library @param {string} name @param {number[]} args */
+                const system = async(library, name, args)=>
+                    (await util.system(library, name, args, thread)) ?? 0;
+                const dc = await system('GDI32.dll', 'CreateMetaFileW', [0]);
+                if (!dc)
+                {
+                    return 0;
+                }
+                await system('USER32.dll', 'DrawIcon', [dc, 0, 0, icon >>> 0]);
+                const metafile = await system('GDI32.dll', 'CloseMetaFile', [dc]);
+                const block = metafile
+                    ? await system('KERNEL32.dll', 'GlobalAlloc', [GMEM_MOVEABLE, 16]) : 0;
+                const at = block ? await system('KERNEL32.dll', 'GlobalLock', [block]) : 0;
+                if (!at)
+                {
+                    if (metafile)
+                    {
+                        await system('GDI32.dll', 'DeleteMetaFile', [metafile]);
+                    }
+                    if (block)
+                    {
+                        await system('KERNEL32.dll', 'GlobalFree', [block]);
+                    }
+                    return 0;
+                }
+                const cx = (await system('USER32.dll', 'GetSystemMetrics', [SM_CXICON])) || 32;
+                const cy = (await system('USER32.dll', 'GetSystemMetrics', [SM_CYICON])) || 32;
+                writeU32(at, MM_ANISOTROPIC);
+                writeU32(at + 4, Math.round(cx * HIMETRIC_PER_INCH / 96));
+                writeU32(at + 8, Math.round(cy * HIMETRIC_PER_INCH / 96));
+                writeU32(at + 12, metafile >>> 0);
+                await system('KERNEL32.dll', 'GlobalUnlock', [block]);
+                util.sayOnce('OleMetafilePictFromIconAndLabel',
+                    'the label is not drawn, and the extent is the icon\'s alone');
+                return block >>> 0;
             },
         },
 
@@ -1325,16 +1797,25 @@ export function createOle2Functions(env){
          * HRESULT DoDragDrop(LPDATAOBJECT pDataObj, LPDROPSOURCE pDropSource,
          *   DWORD dwOKEffects, LPDWORD pdwEffect)
          *
-         * A drag runs while a person holds a mouse button down and moves it,
-         * and no person drives one here: the drag ends as one cancelled
-         * before it began, with no effect, the answer a source already
-         * handles. The source is not called. Outside OleInitialize, and with
-         * any argument missing, the answers are dragdrop.c test_DoDragDrop's.
+         * A modal loop on the calling thread, over a hidden window holding
+         * the capture: the source says each time round whether the drag
+         * goes on, is dropped or is cancelled; the target is the
+         * "OleDropTargetInterface" of the window under the cursor or of its
+         * nearest parent with one, entered, moved over, left and dropped
+         * on, and the source is told the effect it answered narrowed to the
+         * ones allowed. A drop on a target answering no allowed effect is
+         * a DragLeave instead, with DRAGDROP_S_DROP and no effect; a drop
+         * the target took answers DRAGDROP_S_DROP and the target's effect,
+         * a failed Drop its error. Input taken while dragging belongs to
+         * the drag and is not dispatched. dragdrop.c's call_lists are the
+         * sequences, but for the data object's formats Windows reads twice
+         * and queries before the loop, to publish them to other processes'
+         * targets: no other process takes a drop here, so they are not read.
          */
         DoDragDrop: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([data, source, , effect])=>{
+            handler: async([data, source, allowed, effect])=>{
                 if (!env.oleInitialized(env.currentThread()))
                 {
                     return CO_E_NOTINITIALIZED;
@@ -1343,9 +1824,10 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(effect, 0);
-                util.sayOnce('DoDragDrop', 'no drag is carried out; answered as cancelled');
-                return DRAGDROP_S_CANCEL;
+                const thread = env.callerThread();
+                const answer = await dragAndDrop(data >>> 0, source >>> 0, allowed >>> 0, thread);
+                writeU32(effect, answer.effect);
+                return answer.hr;
             },
         },
 
@@ -1449,28 +1931,30 @@ export function createOle2Functions(env){
         OleCreateStaticFromData: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([data, , renderopt, formatEtc, , storage, out])=>{
+            handler: async([data, riid, renderopt, formatEtc, , storage, out])=>{
                 if ((out >>> 0) !== 0)
                 {
                     writeU32(out, 0);
                 }
-                if ((out >>> 0) === 0 || (storage >>> 0) === 0 || (data >>> 0) === 0)
+                if ((out >>> 0) === 0 || (storage >>> 0) === 0 || (data >>> 0) === 0
+                    || (riid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if ((renderopt >>> 0) === OLERENDER.FORMAT)
+                if ((renderopt >>> 0) !== OLERENDER.FORMAT || (formatEtc >>> 0) === 0)
                 {
-                    if ((formatEtc >>> 0) === 0)
-                    {
-                        return E_INVALIDARG;
-                    }
-                    if (!STATIC_FORMATS.has(util.readU16(formatEtc >>> 0)))
-                    {
-                        return DV_E_CLIPFORMAT;
-                    }
+                    util.sayOnce('OleCreateStaticFromData',
+                        'only a picture of the format named is made');
+                    return (formatEtc >>> 0) === 0 ? E_INVALIDARG : DV_E_FORMATETC;
                 }
-                util.sayOnce('OleCreateStaticFromData', 'no static picture object is made here');
-                return REGDB_E_CLASSNOTREG;
+                const cf = util.readU16(formatEtc >>> 0);
+                const clsid = STATIC_CLASSES.get(cf);
+                if (!clsid || !env.defaultHandlers)
+                {
+                    return DV_E_CLIPFORMAT;
+                }
+                return makeStatic(data >>> 0, cf, clsid, formatEtc >>> 0, storage >>> 0,
+                    riid >>> 0, out >>> 0);
             },
         },
 
@@ -1499,10 +1983,89 @@ export function createOle2Functions(env){
         //   LPSTORAGE, LPVOID *)
         OleCreateLink: refuseWithOut('OleCreateLink', 28, 6, REGDB_E_CLASSNOTREG,
             'a linked object needs its source\'s server'),
-        // HRESULT CreateDataCache(LPUNKNOWN, REFCLSID, REFIID, LPVOID *): OLE's
-        // presentation cache, which this layer does not have.
-        CreateDataCache: refuseWithOut('CreateDataCache', 16, 3, E_OUTOFMEMORY,
-            'OLE\'s data cache is not here'),
+        /**
+         * HRESULT CreateDataCache(LPUNKNOWN pUnkOuter, REFCLSID rclsid, REFIID iid, LPVOID *ppv)
+         *
+         * An aggregated cache is handed out as its inner IUnknown and nothing
+         * else (ole2.c test_data_cache).
+         */
+        CreateDataCache: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([outer, rclsid, riid, out])=>{
+                if ((out >>> 0) === 0 || (riid >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                const iid = guidAt(riid);
+                if ((outer >>> 0) !== 0 && iid !== IID_IUNKNOWN)
+                {
+                    return E_INVALIDARG;
+                }
+                const caches = env.dataCaches;
+                const object = caches?.create(outer >>> 0,
+                    (rclsid >>> 0) === 0 ? GUID_NULL : guidAt(rclsid));
+                if (!caches || !object)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                if (!object.interfaceFor(iid))
+                {
+                    object.release();
+                    return E_NOINTERFACE;
+                }
+                writeU32(out, env.publish(object, caches.primary(object, iid)) >>> 0);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT OleCreateDefaultHandler(REFCLSID clsid, LPUNKNOWN pUnkOuter, REFIID riid,
+         *                                 LPVOID *lplpObj)
+         */
+        OleCreateDefaultHandler: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: async([rclsid, outer, riid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || !env.defaultHandlers)
+                {
+                    return E_INVALIDARG;
+                }
+                return env.defaultHandlers.create(guidAt(rclsid), outer >>> 0, 0, 0, guidAt(riid),
+                    out >>> 0, env.callerThread());
+            },
+        },
+
+        /**
+         * HRESULT OleCreateEmbeddingHelper(REFCLSID clsid, LPUNKNOWN pUnkOuter, DWORD flags,
+         *                                  LPCLASSFACTORY pCF, REFIID riid, LPVOID *ppvObj)
+         *
+         * The default handler over a server's own class factory: an
+         * in-process server made at once unless the flags put it off.
+         */
+        OleCreateEmbeddingHelper: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: async([rclsid, outer, flags, factory, riid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || !env.defaultHandlers)
+                {
+                    return E_INVALIDARG;
+                }
+                return env.defaultHandlers.create(guidAt(rclsid), outer >>> 0, flags >>> 0,
+                    factory >>> 0, guidAt(riid), out >>> 0, env.callerThread());
+            },
+        },
         // HGLOBAL OleGetIconOfClass(REFCLSID, LPOLESTR, BOOL): NULL on failure.
         OleGetIconOfClass: refuse('OleGetIconOfClass', { argBytes: 12,
             why: 'no metafile of a class\'s icon is drawn here' }),

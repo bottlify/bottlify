@@ -422,74 +422,88 @@ function linkedCall(e, target){
     // any top, as a function that does something -- its top and empty code
     // read as one halfword, which is `ANY_TOP` only then. An empty slot's
     // halfword is 0 and a removed one's has the top 0xff (`entries.js`), so
-    // neither passes for a call to address 0 or all ones. Two branches, not
-    // one condition: V8 makes a flag of each comparison it ors.
+    // neither passes for a call to address 0 or all ones. The index, the
+    // label and that halfword come in one load: a direct call's slot is a
+    // constant address past what an arm64 load's offset holds, which V8 moves
+    // into a register, two instructions, for each load from it. On an arm64
+    // host the two tests are one condition, which V8 makes a compare and a
+    // conditional compare before one branch; an x64 host has no conditional
+    // compare, and V8 makes a flag of each comparison it ors, so there they
+    // are two branches, another key straight to the transfer.
+    const key = ()=>(target === null ? b.localGet(Local.eip) : b.i32const(target | 0));
+    const oneTest = context.features?.armHost === true;
     e.open('linked', ValType.i32);
+    e.open('through', EMPTY);
     e.open('anyTop', EMPTY);
+    b.localGet(Local.t2).load('i64', { offset: 4, align: 2 }).localTee(Local.t64);
     b.localGet(Local.t2).load('i32');
-    if (target === null)
+    key();
+    b.op(I32.ne);
+    if (!oneTest)
     {
-        b.localGet(Local.eip);
+        b.unlikely().brIf(e.depthOf('through'));
     }
-    else
+    b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap).i32const(ANY_TOP).op(I32.ne);
+    if (oneTest)
     {
-        b.i32const(target | 0);
+        b.op(I32.or);
     }
-    b.op(I32.ne).unlikely().brIf(e.depthOf('anyTop'));
-    b.localGet(Local.t2).load('i32_16u', { offset: 10 }).i32const(ANY_TOP).op(I32.ne)
-        .unlikely().brIf(e.depthOf('anyTop'));
-    countLinked(e);
-    b.localGet(Local.t2).load('i32_16u', { offset: 8 });
-    for (let local = Local.budget; local < STATE_PARAMS; local++)
-    {
-        b.localGet(local);
-    }
-    b.localGet(Local.t2).load('i32', { offset: 4 });
-    b.callIndirect(context.regionType, 0);
+    b.unlikely().brIf(e.depthOf('anyTop'));
+    linkedCallOf(e);
     b.br(e.depthOf('linked'));
     e.close();
-    // Anything else, out of the way: a slot holding the target compiled for
-    // the top the machine has is called the same way, the rest goes through
-    // the transfer. The index, the label, the top and the empty code in one
-    // word, the call taking two of them: with an empty code of 0 the top two
-    // bytes are the top.
-    b.localGet(Local.t2)
-        .load('i64', { offset: 4, align: 2 }).localTee(Local.t64)
-        .i64const(48n).op(I64.shrU).op(I64.wrap).localTee(Local.t0);
-    b.i32const(ANY_TOP).op(I32.eq).localGet(Local.t0);
+    // Out of the way: a slot holding the target compiled for the top the
+    // machine has is called the same way, the rest goes through the
+    // transfer. Under one test the key is read again, as the low half of a
+    // quadword: read as above, V8 would take the one read and the comparison
+    // a value kept for both ways, made with a `cset` on the way nearly every
+    // call goes.
+    if (oneTest)
+    {
+        b.localGet(Local.t2).load('i64').op(I64.wrap);
+        key();
+        b.op(I32.ne).brIf(e.depthOf('through'));
+    }
+    // With an empty code of 0 the halfword is the top.
+    b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap);
     atState(context, b).load('i32_8u', { offset: layout.x87Top });
-    b.op(I32.eq).op(I32.or);
-    b.localGet(Local.t2).load('i32');
+    b.op(I32.eq);
     if (target === null)
     {
         // An empty slot's key is 0 and a removed one's all ones: a call to
         // either address goes through the transfer, which faults it.
-        b.localGet(Local.eip).op(I32.eq).op(I32.and)
-            .localGet(Local.eip).i32const(1).op(I32.add).i32const(1).op(I32.gtU).op(I32.and);
+        b.localGet(Local.eip).i32const(1).op(I32.add).i32const(1).op(I32.gtU).op(I32.and);
     }
-    else
-    {
-        b.i32const(target | 0).op(I32.eq).op(I32.and);
-    }
-    b.op(I32.eqz);
-    e.openIf('unlinked', ValType.i32);
+    b.op(I32.eqz).brIf(e.depthOf('through'));
+    linkedCallOf(e);
+    b.br(e.depthOf('linked'));
+    e.close();
     b.localGet(Local.eip);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
         b.localGet(local);
     }
     b.call(/** @type {number} */ (context.transfer));
-    b.else();
+    e.close();
+}
+
+/**
+ * The slot's function called through the table, its index and label taken
+ * from the word `linkedCall` read into `t64`.
+ *
+ * @param {E} e
+ */
+function linkedCallOf(e){
+    const { b, context } = e;
     countLinked(e);
-    b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).i32const(0xffff).op(I32.and);
+    // Masked as a quadword: V8 takes the shift and the mask as one `ubfx`.
+    b.localGet(Local.t64).i64const(32n).op(I64.shrU).i64const(0xffffn).op(I64.and).op(I64.wrap);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
         b.localGet(local);
     }
     b.localGet(Local.t64).op(I64.wrap);
     b.callIndirect(context.regionType, 0);
-    e.close();
-    e.close();
 }
 
 /**
@@ -1032,15 +1046,31 @@ export function emitInstruction(e, instruction, flagsLive){
             stackAccess(e, dst.size);
             {
                 const popped = dst.size === 8 ? Local.t64b : Local.t1;
+                const run = stackRun(e, 'pop');
+                if (run !== null)
+                {
+                    // A run of pops reads each off esp as the run found it,
+                    // which moves once, at the last (`stackRun`).
+                    b.localGet(registerLocal(e, 4))
+                        .load('i32', { offset: e.layout.ramBase + run.offset }).localSet(popped);
+                    if (run.last)
+                    {
+                        addStack(e, run.moves);
+                    }
+                    writeOp(e, dst, ()=>b.localGet(popped));
+                    return true;
+                }
                 b.localGet(Local.addr).load(dst.size === 8 ? 'i64'
                     : dst.size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
                     .localSet(popped);
                 if (dst.kind === 'mem')
                 {
-                    prepare(e, dst.base === 4
-                        ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 } : dst,
-                    { store: true });
-                    writeOp(e, dst, ()=>b.localGet(popped));
+                    // The same operand to both: its address, the incremented
+                    // esp's, is the one the store goes to however it is taken.
+                    const moved = dst.base === 4
+                        ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 } : dst;
+                    prepare(e, moved, { store: true });
+                    writeOp(e, moved, ()=>b.localGet(popped));
                     addStack(e, dst.size);
                     return true;
                 }
@@ -2098,8 +2128,51 @@ export function readAddress(e, operand){
         e.b.localGet(folded.local);
         return e.layout.ramBase + folded.offset;
     }
-    e.b.localGet(Local.addr);
-    return e.layout.ramBase;
+    return accessAddress(e, operand);
+}
+
+/**
+ * Pushes the address an access of `operand`, its address in `addr`, loads or
+ * stores at and answers the offset the access takes: off esp alone, where the
+ * plan's window test covered it (`stackOffset`), esp itself and the
+ * displacement as the access's own offset; `addr` otherwise.
+ *
+ * @param {E} e @param {Operand} operand
+ * @returns {number}
+ */
+function accessAddress(e, operand){
+    const disp = stackOffset(e, operand);
+    if (disp === null)
+    {
+        e.b.localGet(Local.addr);
+        return e.layout.ramBase;
+    }
+    e.b.localGet(registerLocal(e, 4));
+    return e.layout.ramBase + disp;
+}
+
+/**
+ * The displacement an access off esp alone takes as its own offset, or null:
+ * one the memory plan took (`planned`), whose address is the sum `prepare`
+ * left in `addr` and nothing more, its displacement under 64 KiB and not
+ * negative. Every such access then adds its displacement to one address the
+ * host's compiler makes of esp for all of them -- an arm64 load or store
+ * takes a register and a small offset, not two registers and an offset --
+ * where each added it to esp first, an instruction an access. The sum is not
+ * wrapped at 4 GiB: it differs from the processor's only with esp in the top
+ * 64 KiB, which no thread's stack is. Off another register it would differ
+ * for a pointer in the top 64 KiB too, where a read finds the null page
+ * through a wrapped sum and this one would trap.
+ *
+ * @param {E} e @param {Operand} operand
+ * @returns {number | null}
+ */
+function stackOffset(e, operand){
+    const disp = operand.disp ?? 0;
+    return operand.kind === 'mem' && operand.base === 4 && (operand.index ?? -1) < 0
+        && operand.addressSize !== 16 && operand.segment !== 4 && operand.segment !== 5
+        && !isLong(e) && e.memPlan?.access != null && disp >= 0 && disp < WRAPPED_DISPLACEMENT
+        ? disp : null;
 }
 
 /**
@@ -2504,9 +2577,11 @@ export function writeOp(e, operand, pushValue, exact = false){
                 orderedStore(e, operand.size, pushValue);
                 return;
             }
-            b.localGet(Local.addr);
-            pushValue();
-            b.store(storeKind(operand.size), { offset: e.layout.ramBase });
+            {
+                const offset = accessAddress(e, operand);
+                pushValue();
+                b.store(storeKind(operand.size), { offset });
+            }
             return;
         default:
             throw new Error(`emit: cannot write a ${operand.kind} operand`);
@@ -2682,6 +2757,19 @@ export function push(e, size, pushValue){
     // which itself waits for the access check so a fault leaves esp as it was.
     pushValue();
     b.localSet(Local.t2);
+    const run = stackRun(e, 'push');
+    if (run !== null && looseStackStore(e, size))
+    {
+        // A run of pushes stores each below esp as the run found it, which
+        // moves once, at the last (`stackRun`).
+        b.localGet(run.base).localGet(Local.t2)
+            .store(storeKind(size), { offset: e.layout.ramBase + run.offset });
+        if (run.last)
+        {
+            b.localGet(run.base).localSet(registerLocal(e, 4));
+        }
+        return;
+    }
     b.localGet(registerLocal(e, 4)).i32const(size).op(I32.sub).localSet(Local.addr);
     if (!looseStackStore(e, size))
     {
@@ -2691,6 +2779,86 @@ export function push(e, size, pushValue){
     b.localGet(Local.addr).localGet(Local.t2)
         .store(storeKind(size), { offset: e.layout.ramBase });
     b.localGet(Local.addr).localSet(registerLocal(e, 4));
+}
+
+/** The shortest run of pushes or of pops `stackRun` moves esp once for. */
+const STACK_RUN = 3;
+
+/**
+ * Where the push or the pop being emitted stores or loads when it is one of a
+ * run of them that moves esp once: dword pushes of a register other than esp
+ * or of an immediate, ended by a direct call's push of its return address, or
+ * dword pops into a register other than esp, one instruction after another in
+ * the block, under loose stacks, none of them with a window test of the plan
+ * before it. Nothing in such a run can leave the region -- its accesses go
+ * untested, its values are registers and constants -- nor read esp, so esp
+ * between them is never seen: a push's store goes to its own offset off esp
+ * as it is after the run, taken once (`base`), and a pop's load to its own
+ * offset off esp as it was before it, which stays until the last moves it by
+ * the whole run (`moves`). Each access then adds its offset to one address
+ * the host's compiler makes for them all -- an arm64 store or load takes a
+ * register and a small offset -- where each moved esp first, an instruction
+ * an access. Null for any other push or pop.
+ *
+ * @param {E} e @param {'push' | 'pop'} kind
+ * @returns {{ base: number, offset: number, last: boolean, moves: number } | null}
+ */
+function stackRun(e, kind){
+    const { emitting } = e;
+    if (e.context.looseStacks !== true || isLong(e) || emitting === null)
+    {
+        return null;
+    }
+    let run = e.stackRun;
+    if (run === null || run.instructions !== emitting.instructions || run.kind !== kind
+        || e.at <= run.from || e.at >= run.from + run.length)
+    {
+        const length = stackRunLength(emitting.instructions, emitting.plan, e.at, kind);
+        if (length < STACK_RUN)
+        {
+            return null;
+        }
+        run = { instructions: emitting.instructions, kind, from: e.at, length,
+            base: kind === 'push' ? e.stackRunLocal() : registerLocal(e, 4) };
+        e.stackRun = run;
+        if (kind === 'push')
+        {
+            e.b.localGet(registerLocal(e, 4)).i32const(4 * length).op(I32.sub).localSet(run.base);
+        }
+    }
+    const j = e.at - run.from;
+    return { base: run.base, offset: 4 * (kind === 'push' ? run.length - 1 - j : j),
+        last: j === run.length - 1, moves: 4 * run.length };
+}
+
+/**
+ * How many instructions from `from` on make a run of `kind` (`stackRun`).
+ *
+ * @param {Instruction[]} instructions @param {Map<number, { checks: unknown[] }>} plan
+ * @param {number} from @param {'push' | 'pop'} kind
+ */
+function stackRunLength(instructions, plan, from, kind){
+    let j = from;
+    for (; j < instructions.length; j++)
+    {
+        const { op, operands: [operand] } = instructions[j];
+        if (j > from && (plan.get(j)?.checks.length ?? 0) > 0)
+        {
+            break;
+        }
+        if (kind === 'push' && op === 'call' && operand?.kind === 'rel')
+        {
+            j++;
+            break;
+        }
+        const plain = operand?.kind === 'reg' ? operand.reg !== 4
+            : kind === 'push' && operand?.kind === 'imm';
+        if (op !== kind || operand?.size !== 4 || !plain)
+        {
+            break;
+        }
+    }
+    return j - from;
 }
 
 // --- arithmetic ---

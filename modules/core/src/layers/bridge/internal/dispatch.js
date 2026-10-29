@@ -36,6 +36,11 @@ import { isDriven } from './drive.js';
  *     two dwords -- an `__int64`, a LARGE_INTEGER by value -- begins, by its
  *     first dword's index: one argument, one register or stack slot whole, to
  *     an x86-64 caller, which `readLongCall` splits back into the two.
+ * @property {Record<number, 'f32' | 'f64'>} [floats]  The arguments that are a
+ *     float or a double, by their first dword's index: an x86-64 caller passes
+ *     one among its first four in the XMM register of its position, and
+ *     `readLongCall` reads it from there into the dwords the 32-bit signature
+ *     has it in -- a double's two, low first.
  * @property {boolean} [hook]
  *     A slot hook: `handler` answers `true` (it computed the call itself) or
  *     `false` (run the guest's own code, at `target`). Which of the two
@@ -108,6 +113,9 @@ import { isDriven } from './drive.js';
  * @property {number} sampledMs    Host ms the timed ones of them took, each standing for
  *     `TRAP_SAMPLE` calls on average (`dispatch`).
  * @property {number[] | null} quadwords  Of `fn`, checked; null for none.
+ * @property {LongSlot[] | null} longSlots  Where each x64 slot's argument goes
+ *     in `args`, for a function with quadwords or floating-point arguments;
+ *     null when every slot is one dword.
  * @property {number} [windowCalls]  `calls` when the rate window began (`measureRates`).
  * @property {number} [windowMs]     `sampledMs` when it began.
  */
@@ -144,6 +152,25 @@ const CALL_RING = 4096;
 const KEPT_ARGS = 12;
 
 /** How a call ended, as the ring keeps it, by the number it keeps. */
+/**
+ * What a handler's call becomes in the guest rather than the end of the run,
+ * told by its code: this layer imports neither memory's nor win32's. Memory's
+ * refused guest access (`memory/internal/faults.js`), and an exception a
+ * handler raises on purpose (`win32/common/raise.js`).
+ *
+ * @typedef {Error & { code: 'GUEST_ACCESS', address: number, length: number,
+ *     mode: 'read' | 'write' | 'execute' }} GuestAccess
+ * @typedef {Error & { code: 'GUEST_EXCEPTION', status: number, flags: number,
+ *     parameters: number[] }} GuestException
+ * @typedef {GuestAccess | GuestException} GuestRaise
+ */
+
+/** @param {unknown} e @returns {e is GuestRaise} */
+const isGuestRaise = e=>{
+    const code = /** @type {{ code?: unknown }} */ (e)?.code;
+    return code === 'GUEST_ACCESS' || code === 'GUEST_EXCEPTION';
+};
+
 const KINDS = ['threw', 'answered', 'fellThrough', 'parked', 'waiting', 'forwarded'];
 const THREW = 0;
 const ANSWERED = 1;
@@ -230,6 +257,35 @@ const CALLERS_KEPT = 64;
  * RCX, RDX -- which the stub keeps in R11 before it spends DX -- R8 and R9.
  */
 const LONG_ARGUMENT_REGISTERS = Object.freeze(['rcx', 'r11', 'r8', 'r9']);
+
+/**
+ * One x64 argument slot of a function: the first of its dwords in the 32-bit
+ * signature, how many it is there, and whether an XMM register carries it
+ * when it is among the first four.
+ *
+ * @typedef {{ word: number, words: 1 | 2, xmm: boolean }} LongSlot
+ */
+
+/**
+ * The x64 slots of a signature of `count` dwords: one per argument, an
+ * argument of two dwords -- a quadword or a double -- one slot.
+ *
+ * @param {number} count @param {number[] | null} quadwords
+ * @param {Record<number, 'f32' | 'f64'> | null} floats
+ * @returns {LongSlot[]}
+ */
+const longSlotsOf = (count, quadwords, floats)=>{
+    /** @type {LongSlot[]} */
+    const slots = [];
+    for (let word = 0; word < count;)
+    {
+        const kind = floats?.[word];
+        const words = quadwords?.includes(word) || kind === 'f64' ? 2 : 1;
+        slots.push({ word, words, xmm: kind !== undefined });
+        word += words;
+    }
+    return slots;
+};
 
 /**
  * A function's sampled frame chains as text and counts: "0xA<0xB", the first
@@ -493,6 +549,14 @@ class Dispatcher {
         // archives made up its mind thousands of calls earlier. A sink keeps
         // all of it, for whoever is willing to pay for the file.
         this.onCall = deps.onCall ?? null;
+        /**
+         * Raises a handler's refused guest access, or the exception it
+         * raised, in the guest, answering as the call would after it -- set
+         * by whoever has the exception dispatch, which is not this layer.
+         *
+         * @type {((raised: GuestRaise) => Promise<number>) | null}
+         */
+        this.guestFault = null;
         /** @type {((name: string) => boolean) | null} */
         this.wantsCall = null;
         /** @type {Int32Array | null} */
@@ -951,8 +1015,9 @@ class Dispatcher {
      * the trap spent DX -- and the rest on the stack past the return address
      * and the 32 bytes of home space the caller leaves for the four. Each
      * argument is its slot's low dword: a handler takes dwords, and every
-     * address lies in the window below 4 GiB. A quadword argument the 32-bit
-     * signature counts as two is not split yet.
+     * address lies in the window below 4 GiB. A quadword or a float the
+     * function declares (`quadwords`, `floats`) is read whole into the dwords
+     * the 32-bit signature has it in.
      *
      * @param {Entry} entry @param {number} rsp
      * @returns {number} the return address at RSP
@@ -961,8 +1026,8 @@ class Dispatcher {
         const args = entry.args;
         const count = entry.registerArgs + entry.stackWords;
         const registers = LONG_ARGUMENT_REGISTERS;
-        const quadwords = entry.quadwords;
-        if (quadwords === null)
+        const slots = entry.longSlots;
+        if (slots === null)
         {
             for (let i = 0; i < count; i++)
             {
@@ -973,19 +1038,38 @@ class Dispatcher {
             return this.memory.readU32(rsp);
         }
         // An argument the signature counts as two dwords is one slot here,
-        // both its halves: the slots after it come one earlier.
-        let slot = 0;
-        for (let i = 0; i < count; slot++)
+        // both its halves: the slots after it come one earlier. A float or a
+        // double among the first four is in the XMM register of its slot, and
+        // on the stack past them as any other slot is.
+        for (let slot = 0; slot < slots.length; slot++)
         {
-            const at = rsp + 8 + 0x20 + (slot - 4) * 8;
-            const low = slot < 4 ? Number(BigInt.asIntN(32, this.cpu.readReg64(registers[slot])))
-                : this.memory.readU32(at) | 0;
-            args[i++] = low;
-            if (quadwords.includes(i - 1) && i < count)
+            const { word, words, xmm } = slots[slot];
+            if (slot >= 4)
             {
-                args[i++] = slot < 4
-                    ? Number(BigInt.asIntN(32, this.cpu.readReg64(registers[slot]) >> 32n))
-                    : this.memory.readU32(at + 4) | 0;
+                const at = rsp + 8 + 0x20 + (slot - 4) * 8;
+                args[word] = this.memory.readU32(at) | 0;
+                if (words === 2 && word + 1 < count)
+                {
+                    args[word + 1] = this.memory.readU32(at + 4) | 0;
+                }
+            }
+            else if (xmm)
+            {
+                const lanes = this.cpu.readXmm(slot);
+                args[word] = lanes[0] | 0;
+                if (words === 2 && word + 1 < count)
+                {
+                    args[word + 1] = lanes[1] | 0;
+                }
+            }
+            else
+            {
+                const whole = this.cpu.readReg64(registers[slot]);
+                args[word] = Number(BigInt.asIntN(32, whole));
+                if (words === 2 && word + 1 < count)
+                {
+                    args[word + 1] = Number(BigInt.asIntN(32, whole >> 32n));
+                }
             }
         }
         return this.memory.readU32(rsp);
@@ -1427,12 +1511,35 @@ class Dispatcher {
             {
                 kinds[at] = WAITING;
                 late = true;
+                const raise = this.guestFault;
+                if (raise !== null && !entry.hook)
+                {
+                    // The same fault, met after the handler waited.
+                    result = /** @type {Promise<number>} */ (result).catch(
+                        (/** @type {unknown} */ e)=>(isGuestRaise(e) ? raise(e) : Promise.reject(e)));
+                }
             }
             else
             {
                 kinds[at] = ANSWERED;
                 this.answers[at] = Number(result);
             }
+        }
+        catch (e){
+            // A guest pointer the handler was handed and memory refused: on
+            // Windows the DLL's own instruction faults there and the
+            // program's handlers see STATUS_ACCESS_VIOLATION, so the call
+            // becomes that exception rather than the end of the run -- as
+            // does an exception the handler raises as Windows' function
+            // does. Nothing else is turned: any other error here is ours,
+            // and stops the run.
+            if (this.guestFault === null || entry.hook || !isGuestRaise(e))
+            {
+                throw e;
+            }
+            result = this.guestFault(e);
+            kinds[at] = WAITING;
+            late = true;
         }
         finally
         {
@@ -1571,11 +1678,23 @@ class Dispatcher {
         const hook = fn.hook === true || site;
         const quadwords = fn.quadwords !== undefined && fn.quadwords.length > 0
             ? [...fn.quadwords] : null;
-        if (quadwords?.some(at=>!Number.isInteger(at) || at < 0
-            || at + 1 >= stackWords + registerArgs))
+        const words = stackWords + registerArgs;
+        if (quadwords?.some(at=>!Number.isInteger(at) || at < 0 || at + 1 >= words))
         {
             throw new Error(`bridge: ${fn.name}'s quadwords ${quadwords.join(', ')} are not two`
                 + ' of its argument dwords');
+        }
+        const floats = fn.floats !== undefined && Object.keys(fn.floats).length > 0
+            ? { ...fn.floats } : null;
+        for (const [at, kind] of Object.entries(floats ?? {}))
+        {
+            const word = Number(at);
+            if (!Number.isInteger(word) || word < 0 || word + (kind === 'f64' ? 1 : 0) >= words
+                || (kind !== 'f32' && kind !== 'f64') || quadwords?.includes(word))
+            {
+                throw new Error(`bridge: ${fn.name}'s ${kind} at dword ${at} is not among its`
+                    + ' arguments');
+            }
         }
         this.functions[id] = {
             fn,
@@ -1599,6 +1718,7 @@ class Dispatcher {
                 ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
             readsError: this.errorReader && fn.lastError !== false,
             quadwords,
+            longSlots: quadwords || floats ? longSlotsOf(words, quadwords, floats) : null,
             args: argumentArray(site ? 8 : stackWords + registerArgs),
             kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
             chainCount: 0,

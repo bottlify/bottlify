@@ -418,32 +418,36 @@ function fixedText(argument, precision, alt){
 
 /**
  * %e's: one digit, `precision` places and an exponent of three digits at
- * least, as msvcrt writes it.
+ * least, as msvcrt writes it -- two under `_set_output_format`'s
+ * `_TWO_DIGIT_EXPONENT`.
  *
  * @param {DoubleArgument} argument @param {number} precision @param {boolean} alt
  * @param {string} e  The exponent's letter, in the conversion's case.
+ * @param {number} least  The exponent's least digits.
  */
-function exponentText(argument, precision, alt, e){
+function exponentText(argument, precision, alt, e, least){
     const { digits: text, point } = cvtDigits(argument, precision + 1, false);
     const exponent = argument.value === 0 ? 0 : point - 1;
     const mantissa = precision > 0 || alt ? `${text[0]}.${text.slice(1)}` : text[0];
     return `${mantissa}${e}${exponent < 0 ? '-' : '+'}${String(Math.abs(exponent))
-        .padStart(3, '0')}`;
+        .padStart(least, '0')}`;
 }
 
 /**
  * @param {DoubleArgument} argument
  * @param {Spec} spec
+ * @param {number} least  The exponent's least digits.
  * @returns {Rendered}
  */
-function convertFloat(argument, spec){
+function convertFloat(argument, spec, least){
     const negative = argument.high >>> 31 === 1;
     const upper = spec.conversion !== spec.conversion.toLowerCase();
     const e = upper ? 'E' : 'e';
     let body;
     switch (spec.conversion.toLowerCase()){
         case 'e':
-            body = exponentText(argument, spec.precision < 0 ? 6 : spec.precision, spec.alt, e);
+            body = exponentText(argument, spec.precision < 0 ? 6 : spec.precision, spec.alt, e,
+                least);
             break;
         case 'g': {
             // The precision counts significant digits, zero of them one; the
@@ -453,7 +457,7 @@ function convertFloat(argument, spec){
             const { point } = cvtDigits(argument, count, false);
             const exponent = argument.value === 0 ? 0 : point - 1;
             body = exponent < -4 || exponent >= count
-                ? exponentText(argument, count - 1, spec.alt, e)
+                ? exponentText(argument, count - 1, spec.alt, e, least)
                 : fixedText(argument, count - 1 - exponent, spec.alt);
             if (!spec.alt)
             {
@@ -477,6 +481,7 @@ function convertFloat(argument, spec){
  * @param {(pointer: number, wide: boolean) => string | null} source.readCounted
  *        An ANSI_STRING's or UNICODE_STRING's text; null for none.
  * @param {(code: number, wide: boolean) => string} source.character  A %c's text.
+ * @param {number} source.exponentDigits  The least digits of %e's exponent.
  * @param {number} produced                Characters written so far, for %n.
  * @param {(pointer: number, value: number) => void} writeCount
  * @returns {Rendered | null}   Null when the conversion is not one we know.
@@ -563,7 +568,7 @@ function convert(spec, source, produced, writeCount){
         case 'f':
         case 'g':
         case 'G':
-            return convertFloat(takeDouble(), spec);
+            return convertFloat(takeDouble(), spec, source.exponentDigits);
         case 'n': {
             // The only conversion that writes rather than reads. It produces no
             // output, which is why it returns an empty body rather than null.
@@ -668,6 +673,9 @@ export function guestAccess(readMemory, writeMemory){
  * @param {(pointer: number, value: number) => void} [options.writeCount]
  *        Where %n stores the count. Absent means %n produces nothing and
  *        writes nothing, which is what a runtime with %n disabled does.
+ * @param {number} [options.exponentDigits]
+ *        The least digits of %e's exponent: msvcrt's three, or two after
+ *        `_set_output_format(_TWO_DIGIT_EXPONENT)`.
  * @param {boolean} [options.wide]
  *        True for the wprintf family, where %s means a wide string by default.
  * @param {boolean} [options.cLocale]
@@ -763,7 +771,8 @@ export function formatToString(format, varargs, readString, options = {}){
         return code > 0xff ? '' : decode(Uint8Array.of(code));
     };
 
-    const source = { take, takeWide, takeDouble, readText, readCounted, character };
+    const source = { take, takeWide, takeDouble, readText, readCounted, character,
+        exponentDigits: options.exponentDigits ?? 3 };
     const writeCount = options.writeCount ?? (()=>{});
 
     for (let i = 0; i < format.length; i++)
@@ -793,3 +802,75 @@ export function formatToString(format, varargs, readString, options = {}){
 
 /** Everything this file needs to know about a string's length. */
 export { MAX_STRING };
+
+/** One positional conversion: `%`, its index and `$`, what is left of the spec. */
+const POSITIONAL = /%(?:(\d+)\$)?([-+ #0]*)(\*(?:(\d+)\$)?|\d*)(?:\.(\*(?:(\d+)\$)?|\d*))?(ll|I64|I32|[hlLwIjzt]*)?(.)/g;
+
+/**
+ * A format of the `_p` printers -- `%2$s %1$d`, `%2$*3$s` -- as the ordinary
+ * format it amounts to and the arguments in the order that one takes them:
+ * each conversion's width, precision and value moved to where it reads them.
+ * An argument's slots are known from the conversion that names it, two for a
+ * double or a 64-bit integer; one not named by any is taken to be a slot.
+ * Null when the format names no position, which the ordinary reading takes.
+ *
+ * @param {string} format
+ * @param {number[]} slots  The arguments as stack slots, in order.
+ * @returns {{ format: string, slots: number[] } | null}
+ */
+export function sequentialArguments(format, slots){
+    /** @type {Map<number, number>} the slots each position takes */
+    const widths = new Map();
+    /** @type {{ value: number, width: number, precision: number }[]} */
+    const uses = [];
+    let positional = false;
+    const rewrite = (/** @type {string} */ whole, /** @type {string=} */ position,
+        /** @type {string} */ flags, /** @type {string} */ width, /** @type {string=} */ widthAt,
+        /** @type {string=} */ precision, /** @type {string=} */ precisionAt,
+        /** @type {string=} */ size, /** @type {string} */ conversion)=>
+    {
+        if (conversion === '%' && !position)
+        {
+            return whole;
+        }
+        positional ||= position !== undefined;
+        const value = Number(position ?? 0);
+        const isDouble = 'aAeEfgG'.includes(conversion);
+        const wideInteger = !isDouble && (size === 'll' || size === 'I64');
+        widths.set(value, isDouble || wideInteger ? 2 : 1);
+        const at = (/** @type {string | undefined} */ text)=>(text ? Number(text) : 0);
+        if (widthAt)
+        {
+            widths.set(at(widthAt), 1);
+        }
+        if (precisionAt)
+        {
+            widths.set(at(precisionAt), 1);
+        }
+        uses.push({ value, width: at(widthAt), precision: at(precisionAt) });
+        return `%${flags}${width.startsWith('*') ? '*' : width}${
+            precision === undefined ? '' : `.${precision.startsWith('*') ? '*' : precision}`}${
+            size ?? ''}${conversion}`;
+    };
+    const rewritten = format.replace(POSITIONAL, rewrite);
+    if (!positional)
+    {
+        return null;
+    }
+    const last = Math.max(...widths.keys());
+    /** @type {number[]} */
+    const offsets = [];
+    for (let position = 1, offset = 0; position <= last; position++)
+    {
+        offsets[position] = offset;
+        offset += widths.get(position) ?? 1;
+    }
+    /** @param {number} position */
+    const argument = position=>slots.slice(offsets[position],
+        offsets[position] + (widths.get(position) ?? 1));
+    return {
+        format: rewritten,
+        slots: uses.flatMap(use=>[...use.width ? argument(use.width) : [],
+            ...use.precision ? argument(use.precision) : [], ...argument(use.value)]),
+    };
+}

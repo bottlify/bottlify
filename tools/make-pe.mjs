@@ -155,6 +155,8 @@ export function assemble(parts){
  *        library needs a base of its own: it has no relocations, so one that
  *        asks for the program's base cannot be loaded beside it.
  * @param {boolean} [options.dll]  A library: its entry point is DllMain.
+ * @param {{ id: number, text: string }} [options.manifest]
+ *        An RT_MANIFEST resource: 1 is a program's own, 2 a library's.
  * @param {{ template: string, index: string, callbacks?: number[] }} [options.tls]
  *        A thread-local directory: the data blob each thread's block is a copy
  *        of, the one the loader writes the block's slot number into, and the
@@ -267,6 +269,18 @@ export function buildExe(options){
         cursor += 'self.exe'.length + 1;
     }
     const exportSize = cursor - exportOffset;
+
+    // A resource tree of one RT_MANIFEST: the type, name and language
+    // directories, each of one entry, the data entry, then the text.
+    const manifest = options.manifest ?? null;
+    const manifestBytes = manifest === null ? [] : [...new TextEncoder().encode(manifest.text)];
+    cursor = (cursor + 3) & ~3;
+    const resourceOffset = cursor;
+    if (manifest !== null)
+    {
+        cursor += 88 + manifestBytes.length;
+    }
+    const resourceSize = cursor - resourceOffset;
     const sectionSize = cursor;
 
     /** @param {string} name */
@@ -381,6 +395,18 @@ export function buildExe(options){
         }
         text.ascii('self.exe').u8(0);
     }
+    if (manifest !== null)
+    {
+        /** @param {number} id @param {number} target */
+        const directory = (id, target)=>text.u32(0).u32(0).u16(0).u16(0).u16(0).u16(1)
+            .u32(id).u32(target);
+        text.pad(resourceOffset);
+        directory(24, 0x80000000 | 24); // RT_MANIFEST
+        directory(manifest.id, 0x80000000 | 48);
+        directory(0x409, 72); // the language, then its data entry
+        text.u32(rva(resourceOffset + 88)).u32(manifestBytes.length).u32(0).u32(0);
+        text.push(...manifestBytes);
+    }
     text.pad(sectionSize);
 
     const rawSize = Math.ceil(sectionSize / FILE_ALIGNMENT) * FILE_ALIGNMENT;
@@ -423,6 +449,7 @@ export function buildExe(options){
     const directories = new Array(16).fill(null).map(()=>[0, 0]);
     directories[0] = exports.length > 0 ? [rva(exportOffset), exportSize] : [0, 0];
     directories[1] = [rva(descriptorOffset), (modules.length + 1) * 20]; // import table
+    directories[2] = manifest === null ? [0, 0] : [rva(resourceOffset), resourceSize];
     directories[9] = tls === null ? [0, 0] : [rva(tlsOffset), TLS_DIRECTORY_SIZE];
     // The IAT directory spans every module's address table; they were laid out
     // consecutively, so the first one's start and the last one's end bound it.

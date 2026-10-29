@@ -140,8 +140,18 @@ function createEngineMixer(
     /** Pumps that found nothing to write while at least one track was open. */
     let idlePumps = 0;
     let pumps = 0;
+    /**
+     * What each process mixing onto this output through `borrow` asks for
+     * before a mix, its buffers' sound read out as this mixer's own `fill`
+     * reads its process's.
+     *
+     * @type {Set<() => void>}
+     */
+    const borrowerFills = new Set();
+    /** This process's own `fill`, gone once its process has (`retire`). */
+    let ownFill = fill;
 
-    return {
+    const mixer = {
         sampleRate,
         channels: OUTPUT_CHANNELS,
         ring,
@@ -360,6 +370,77 @@ function createEngineMixer(
         /** No arena here to lend. @returns {number} */
         lend: ()=>-1,
         takeBack(){},
+
+        /**
+         * The output for a process started beside this one, where there is no
+         * arena to lend it (`lend` answers -1): a mixer whose tracks are mixed
+         * into this one's ring with this one's, the shared backend's process
+         * on a lent span in this backend's terms. Closing it closes the tracks
+         * opened through it and no other; either process may pump, and the
+         * output goes on while either stands.
+         *
+         * @param {{ fill?: () => void }} [options]  What the borrowing process
+         *        reads its buffers out with, before each mix.
+         */
+        borrow({ fill: lent } = {}){
+            /** @type {Set<any>} */
+            const own = new Set();
+            if (lent)
+            {
+                borrowerFills.add(lent);
+            }
+            return {
+                sampleRate,
+                channels: OUTPUT_CHANNELS,
+                ring,
+                memory: ring.memory,
+                capacityFrames,
+                /** @param {PcmFormat} format */
+                open(format){
+                    const track = /** @type {any} */ (mixer.open(format));
+                    track.borrowed = true;
+                    const close = track.close;
+                    track.close = ()=>{
+                        close();
+                        own.delete(track);
+                    };
+                    own.add(track);
+                    return track;
+                },
+                lend: ()=>-1,
+                takeBack(){},
+                close(){
+                    for (const track of [...own])
+                    {
+                        track.close();
+                    }
+                    if (lent)
+                    {
+                        borrowerFills.delete(lent);
+                    }
+                },
+                consumed: ()=>ring.consumed(),
+                /** @param {number} [frames] */
+                pump: frames=>mixer.pump(frames),
+                diagnostics: ()=>({ ...mixer.diagnostics(), borrowed: true, ownTracks: own.size }),
+            };
+        },
+
+        /**
+         * This process has gone and others mix on: its tracks close and its
+         * buffers are read out no more, theirs go on.
+         */
+        retire(){
+            ownFill = undefined;
+            for (const track of [...tracks].filter(one=>!one.borrowed))
+            {
+                track.close();
+            }
+        },
+
+        /** Whether a process beside this one mixes onto its output. */
+        lent: ()=>borrowerFills.size > 0,
+
         /** Closes every track this mixer opened. */
         close(){
             for (const track of [...tracks])
@@ -383,7 +464,11 @@ function createEngineMixer(
          * @returns {number} frames written
          */
         pump(frames = ring.room()){
-            fill?.();
+            ownFill?.();
+            for (const lent of borrowerFills)
+            {
+                lent();
+            }
             pumps++;
             const room = Math.min(frames, ring.room());
             if (room <= 0 || tracks.size === 0)
@@ -436,6 +521,7 @@ function createEngineMixer(
             pumps,
         }),
     };
+    return mixer;
 }
 
 /**

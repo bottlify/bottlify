@@ -32,10 +32,14 @@ const MAGIC = 0x53544201; // "BTS", version 1
 
 /**
  * @typedef {{ path: string, bytes: Uint8Array }} SessionFile
- * @typedef {{ files: SessionFile[], registry: any | null }} Session
+ * @typedef {{ owner: string, names: string[] }} SessionLink
+ *     A file with more than one name: the path its bytes travel under among
+ *     the files, and its other names.
+ * @typedef {{ files: SessionFile[], registry: any | null, links?: SessionLink[] | null }} Session
  *     Everything a program leaves behind: the files it wrote and the registry
  *     it wrote, because a program's settings live in either and a session that
- *     carries only one of them forgets half of what was chosen.
+ *     carries only one of them forgets half of what was chosen -- and the
+ *     hard links among the files, which a list of files cannot say.
  */
 
 /**
@@ -44,6 +48,26 @@ const MAGIC = 0x53544201; // "BTS", version 1
  * caller applying a session to a volume never writes it as a file.
  */
 const REGISTRY_ENTRY = '<registry>';
+
+/**
+ * Where the hard links travel, as the registry does: one more entry, under a
+ * name no path can have, and only when a file has more than one name -- a
+ * session with none is written exactly as one was before links existed.
+ */
+const LINKS_ENTRY = '<links>';
+
+/**
+ * A session with its links, the field there only when there are some: a
+ * session without them is the shape it always was.
+ *
+ * @param {Session} session @param {SessionLink[] | null} links
+ * @returns {Session}
+ */
+const withLinks = (session, links)=>(links && links.length > 0 ? { ...session, links } : session);
+
+/** The links entry's bytes, or null when there are no links to carry. @param {Session} session */
+const linksBytes = session=>(session.links && session.links.length > 0
+    ? new TextEncoder().encode(JSON.stringify(session.links)) : null);
 
 /**
  * The one shape a session has inside the engine, from whatever a provider or
@@ -62,7 +86,8 @@ export function normaliseSession(session){
     {
         return { files: session, registry: null };
     }
-    return { files: session.files ?? [], registry: session.registry ?? null };
+    return withLinks({ files: session.files ?? [], registry: session.registry ?? null },
+        session.links ?? null);
 }
 
 /**
@@ -133,13 +158,19 @@ export const inflateRaw = bytes=>recode(bytes, 'deflate-raw', false);
  * @returns {Promise<Uint8Array>}
  */
 export async function packSession(session){
-    const { files, registry } = normaliseSession(session);
+    const normal = normaliseSession(session);
+    const { files, registry } = normal;
     const encoder = new TextEncoder();
     const parts = files.map(file=>({ name: encoder.encode(file.path), bytes: file.bytes }));
     if (registry)
     {
         parts.push({ name: encoder.encode(REGISTRY_ENTRY),
             bytes: encoder.encode(JSON.stringify(registry)) });
+    }
+    const links = linksBytes(normal);
+    if (links)
+    {
+        parts.push({ name: encoder.encode(LINKS_ENTRY), bytes: links });
     }
     const size = parts.reduce((total, part)=>total + 8 + part.name.length + part.bytes.length, 4);
 
@@ -179,6 +210,7 @@ export async function unpackSession(packed){
     /** @type {SessionFile[]} */
     const files = [];
     let registry = null;
+    let links = null;
     let at = 4;
     while (at < raw.length)
     {
@@ -190,13 +222,17 @@ export async function unpackSession(packed){
         {
             registry = JSON.parse(decoder.decode(raw.subarray(start, start + byteLength)));
         }
+        else if (name === LINKS_ENTRY)
+        {
+            links = JSON.parse(decoder.decode(raw.subarray(start, start + byteLength)));
+        }
         else
         {
             files.push({ path: name, bytes: raw.slice(start, start + byteLength) });
         }
         at = start + byteLength;
     }
-    return { files, registry };
+    return withLinks({ files, registry }, links);
 }
 
 /** @param {Uint8Array} bytes */
@@ -358,6 +394,9 @@ export function opfsSession(key, directory){
     let writing = Promise.resolve();
     /** Whether the folder holds this run's whole session, so a change is all a save needs. */
     let whole = false;
+    /** The links entry as the folder holds it since this run's first save; null for none. */
+    /** @type {string | null} */
+    let linksSaved = null;
 
     /** @param {any} folder @param {string} path @param {Uint8Array} bytes */
     const put = async(folder, path, bytes)=>{
@@ -403,6 +442,11 @@ export function opfsSession(key, directory){
             if (old.registry)
             {
                 await put(folder, REGISTRY_ENTRY, registryBytes(old));
+            }
+            const links = linksBytes(old);
+            if (links)
+            {
+                await put(folder, LINKS_ENTRY, links);
             }
             await drop(dir, legacy);
         }
@@ -455,7 +499,7 @@ export function opfsSession(key, directory){
             for await (const file of entryFiles(folder))
             {
                 const head = await headOf(file);
-                if (head && head.path !== REGISTRY_ENTRY)
+                if (head && head.path !== REGISTRY_ENTRY && head.path !== LINKS_ENTRY)
                 {
                     files.push({ path: head.path, size: file.size - head.start });
                 }
@@ -524,6 +568,7 @@ export function opfsSession(key, directory){
             /** @type {SessionFile[]} */
             const files = [];
             let registry = null;
+            let links = null;
             for await (const file of entryFiles(folder))
             {
                 const raw = new Uint8Array(await file.arrayBuffer());
@@ -538,19 +583,26 @@ export function opfsSession(key, directory){
                 {
                     registry = JSON.parse(decoder.decode(raw.subarray(start)));
                 }
+                else if (path === LINKS_ENTRY)
+                {
+                    links = JSON.parse(decoder.decode(raw.subarray(start)));
+                }
                 else
                 {
                     files.push({ path, bytes: raw.slice(start) });
                 }
             }
-            return { files, registry };
+            return withLinks({ files, registry }, links);
         },
         /**
          * @param {Session} session
          * @param {SessionChange[]} [changes]  what changed since the last save; none for all
          */
         save(session, changes){
-            const { files, registry } = normaliseSession(session);
+            const normal = normaliseSession(session);
+            const { files, registry } = normal;
+            const links = linksBytes(normal);
+            const linksText = links ? new TextDecoder().decode(links) : null;
             writing = writing.then(async()=>{
                 const dir = await open();
                 const folder = await dir.getDirectoryHandle(folderName, { create: true });
@@ -570,6 +622,12 @@ export function opfsSession(key, directory){
                         keep.add(await entryName(REGISTRY_ENTRY));
                         await put(folder, REGISTRY_ENTRY, registryBytes({ registry }));
                     }
+                    if (links)
+                    {
+                        keep.add(await entryName(LINKS_ENTRY));
+                        await put(folder, LINKS_ENTRY, links);
+                    }
+                    linksSaved = linksText;
                     /** @type {string[]} */
                     const stale = [];
                     for await (const [name] of folder.entries())
@@ -608,6 +666,20 @@ export function opfsSession(key, directory){
                     {
                         await drop(folder, await entryName(path));
                     }
+                }
+                // A link made, renamed or taken away names a path that is
+                // no file of the session: the record is compared instead.
+                if (linksText !== linksSaved)
+                {
+                    if (links)
+                    {
+                        await put(folder, LINKS_ENTRY, links);
+                    }
+                    else
+                    {
+                        await drop(folder, await entryName(LINKS_ENTRY));
+                    }
+                    linksSaved = linksText;
                 }
             });
             return writing;

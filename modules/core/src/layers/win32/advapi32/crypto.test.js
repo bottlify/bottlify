@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCryptoFunctions } from './crypto.js';
+import { createHive } from './registry.js';
+import { createRegistryService } from './registry-service.js';
 
 /* The contract's numbers, restated here so a wrong constant in the module
  * cannot be hidden by the test importing it. */
@@ -29,7 +31,6 @@ const PUBLICKEYBLOB = 6;
 const PLAINTEXTKEYBLOB = 8;
 const RSA1_MAGIC = 0x31415352;
 
-const NTE_BAD_HASH = 0x80090002;
 const NTE_BAD_KEY = 0x80090003;
 const NTE_BAD_DATA = 0x80090005;
 const NTE_BAD_SIGNATURE = 0x80090006;
@@ -37,8 +38,12 @@ const NTE_BAD_ALGID = 0x80090008;
 const NTE_BAD_TYPE = 0x8009000a;
 const NTE_BAD_HASH_STATE = 0x8009000c;
 const NTE_BAD_KEYSET = 0x80090016;
-const NTE_BAD_PROV_TYPE = 0x80090017;
+const NTE_BAD_PROV_TYPE = 0x80090014;
+const NTE_PROV_TYPE_NOT_DEF = 0x80090017;
+const NTE_KEYSET_NOT_DEF = 0x80090019;
+const NTE_PROV_TYPE_NO_MATCH = 0x8009001b;
 const ERROR_MORE_DATA = 234;
+const ERROR_INVALID_PARAMETER = 87;
 
 /** A fixed 512-bit RSA key; the round trip m -> m^e -> ^d was checked. */
 const RSA_N = BigInt('0x' + [
@@ -106,7 +111,7 @@ const BLOB = 0x800;
  * copy, exactly as the real memory layer may, so the module has to copy what
  * it keeps.
  */
-function setup(){
+function setup(/** @type {Record<string, any>} */ extra = {}){
     const bytes = new Uint8Array(0x4000);
     /** @type {{ lastError: number, divergences: { api: string, detail: string }[] }} */
     const state = { lastError: 0, divergences: [] };
@@ -132,6 +137,7 @@ function setup(){
         divergence: (api, detail)=>{
             state.divergences.push({ api, detail });
         },
+        ...extra,
     });
 
     /** @param {number} at @param {number} value */
@@ -305,10 +311,10 @@ test('an unknown container fails until it is created with CRYPT_NEWKEYSET', ()=>
     assert.equal(fns.CryptReleaseContext.handler([created, 0]), 1);
 });
 
-test('an unknown provider type is refused', ()=>{
+test('a provider type past the last there can be is refused', ()=>{
     const { fns, state } = setup();
     assert.equal(fns.CryptAcquireContextA.handler(
-        [OUT, 0, 0, 999, CRYPT_VERIFYCONTEXT]), 0);
+        [OUT, 0, 0, 1000, CRYPT_VERIFYCONTEXT]), 0);
     assert.equal(state.lastError, NTE_BAD_PROV_TYPE);
 });
 
@@ -319,7 +325,7 @@ test('releasing a provider frees the hashes it handed out', ()=>{
     assert.equal(fns.CryptReleaseContext.handler([prov, 0]), 1);
     putBytes(DATA, ascii('x'));
     assert.equal(fns.CryptHashData.handler([hash, DATA, 1, 0]), 0);
-    assert.equal(state.lastError, NTE_BAD_HASH);
+    assert.equal(state.lastError, ERROR_INVALID_PARAMETER);
 });
 
 test('a derived RC4 key encrypts and decrypts back to the plaintext', ()=>{
@@ -490,7 +496,7 @@ test('signing without a private key fails, and a bad blob is refused', ()=>{
     assert.equal(fns.CryptSignHashW.handler([hash, 2, 0, 0, BUFFER, SIZE]), 0);
     assert.equal(state.lastError, NTE_BAD_KEY, 'the wide form fails alike');
     assert.equal(fns.CryptSignHashW.handler([0x9999, 2, 0, 0, BUFFER, SIZE]), 0);
-    assert.equal(state.lastError, NTE_BAD_HASH);
+    assert.equal(state.lastError, ERROR_INVALID_PARAMETER);
     assert.equal(fns.CryptSignHashW.argBytes, 24);
 
     // An unknown blob type is refused outright.
@@ -513,5 +519,80 @@ test('CryptGetUserKey finds no key pair in a container that never made one', ()=
     assert.equal(fns.CryptGetUserKey.handler([prov, 7, 0x40]), 0);
     assert.equal(state.lastError, 0x80090003, 'NTE_BAD_KEY for a kind there is not');
     assert.equal(fns.CryptGetUserKey.handler([0x1234, 1, 0x40]), 0);
-    assert.equal(state.lastError, 0x80090001, 'NTE_BAD_UID for no provider');
+    assert.equal(state.lastError, ERROR_INVALID_PARAMETER, 'advapi32 refuses the handle');
+});
+
+test('a provider is acquired by its registered name and type, or the type\'s default', ()=>{
+    const { fns, state, putAnsi, getDword, getBytes, putDword } = setup({
+        hive: createRegistryService(createHive()) });
+    const NAME = 0x800;
+    putAnsi(NAME, 'Microsoft Enhanced Cryptographic Provider v1.0');
+    assert.equal(fns.CryptAcquireContextA.handler([OUT, 0, NAME, 24, CRYPT_VERIFYCONTEXT]), 0);
+    assert.equal(state.lastError, NTE_PROV_TYPE_NO_MATCH);
+    putAnsi(NAME, 'No Such Provider');
+    assert.equal(fns.CryptAcquireContextA.handler([OUT, 0, NAME, 1, CRYPT_VERIFYCONTEXT]), 0);
+    assert.equal(state.lastError, NTE_KEYSET_NOT_DEF);
+    assert.equal(fns.CryptAcquireContextA.handler([OUT, 0, 0, 999, CRYPT_VERIFYCONTEXT]), 0);
+    assert.equal(state.lastError, NTE_PROV_TYPE_NOT_DEF);
+    assert.equal(fns.CryptAcquireContextA.handler([OUT, 0, 0, 1, CRYPT_VERIFYCONTEXT]), 1);
+    const prov = getDword(OUT);
+    putDword(SIZE, 0x100);
+    assert.equal(fns.CryptGetProvParam.handler([prov, 4, 0x900, SIZE, 0]), 1);
+    assert.equal(String.fromCharCode(...getBytes(0x900, getDword(SIZE) - 1)),
+        'Microsoft Strong Cryptographic Provider', 'the default of type 1');
+
+    putDword(SIZE, 0x100);
+    let count = 0;
+    while (fns.CryptEnumProvidersA?.handler([count, 0, 0, 0x880, 0, SIZE]) === 1)
+    {
+        count++;
+    }
+    assert.equal(count, 9, 'XP\'s providers');
+    assert.equal(state.lastError, 259, 'ERROR_NO_MORE_ITEMS');
+});
+
+test('a context lives until its last reference goes, and flags are refused after one goes', ()=>{
+    const { fns, state, acquire } = setup();
+    const prov = acquire();
+    assert.equal(fns.CryptContextAddRef.handler([prov, 0, 0]), 1);
+    assert.equal(fns.CryptReleaseContext.handler([prov, 0]), 1);
+    assert.equal(fns.CryptReleaseContext.handler([prov, 1]), 0);
+    assert.equal(state.lastError, 0x80090009, 'NTE_BAD_FLAGS, and released anyway');
+    assert.equal(fns.CryptReleaseContext.handler([prov, 0]), 0);
+    assert.equal(state.lastError, 87, 'gone');
+    assert.equal(fns.CryptContextAddRef.handler([0, 0, 0]), 0);
+    assert.equal(state.lastError, 87);
+});
+
+test('a session key answers its algorithm, length and permissions, and duplicates', ()=>{
+    const { fns, acquire, getDword, putDword } = setup();
+    const prov = acquire();
+    assert.equal(fns.CryptGenKey.handler([prov, CALG_RC4, CRYPT_EXPORTABLE, OUT]), 1);
+    const key = getDword(OUT);
+    putDword(SIZE, 4);
+    assert.equal(fns.CryptGetKeyParam.handler([key, 7, BUFFER, SIZE, 0]), 1);
+    assert.equal(getDword(BUFFER), CALG_RC4);
+    assert.equal(fns.CryptGetKeyParam.handler([key, 9, BUFFER, SIZE, 0]), 1);
+    assert.equal(getDword(BUFFER), 128);
+    assert.equal(fns.CryptGetKeyParam.handler([key, 6, BUFFER, SIZE, 0]), 1);
+    assert.equal(getDword(BUFFER) & 4, 4, 'CRYPT_EXPORT: it was made exportable');
+    assert.equal(fns.CryptDuplicateKey.handler([key, 0, 0, OUT]), 1);
+    assert.notEqual(getDword(OUT), key);
+    assert.equal(fns.CryptGetKeyParam.handler([getDword(OUT), 7, BUFFER, SIZE, 0]), 1);
+    assert.equal(getDword(BUFFER), CALG_RC4);
+});
+
+test('RtlGenRandom checks the whole buffer before it draws a byte', ()=>{
+    /** @type {number[]} */
+    const asked = [];
+    const { fns, state } = setup({
+        canWrite: (/** @type {number} */ at, /** @type {number} */ length)=>{
+            asked.push(length);
+            return at + length <= 0x4000;
+        },
+    });
+    assert.equal(fns.SystemFunction036.handler([BUFFER, 0x7fffffff]), 0);
+    assert.equal(state.lastError, 998, 'ERROR_NOACCESS');
+    assert.deepEqual(asked, [0x7fffffff], 'one check, nothing drawn');
+    assert.equal(fns.SystemFunction036.handler([BUFFER, 16]), 1);
 });

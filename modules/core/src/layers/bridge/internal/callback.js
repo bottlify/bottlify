@@ -203,9 +203,11 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
      * `LONG_CALL_CODE` to pop, then the return address -- RSP eight past a
      * multiple of 16 when the routine is entered -- the four home slots, which
      * hold the first four arguments too, the rest of the arguments, and a
-     * spare quadword for the sentinel's park, as in the 32-bit frame. Every
-     * quadword's high half is zero: an argument is a dword, and every address
-     * lies below 4 GiB.
+     * spare quadword for the sentinel's park, as in the 32-bit frame. An
+     * argument is a dword widened by its sign as JavaScript holds it: a
+     * negative one -- an LPARAM of -1, a handle such as HWND_TOPMOST -- is
+     * sign-extended as a LONG is, any other zero-extended, which keeps every
+     * address below 4 GiB as it is.
      *
      * @param {number} resting @param {number[]} args
      * @returns {{ frameBase: number, extent: number }}
@@ -216,7 +218,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         /** @param {number} at @param {number} value */
         const quad = (at, value)=>{
             memory.writeU32(at, value);
-            memory.writeU32(at + 4, 0);
+            memory.writeU32(at + 4, value < 0 ? 0xffffffff : 0);
         };
         for (let index = 0; index < slots; index++)
         {
@@ -456,6 +458,43 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @returns {string[]}
          */
         waiting: thread=>thread ? hostCalls(thread).map(call=>call.name) : [],
+
+        /**
+         * The host call a callback returns into, by the stack its routine's
+         * frame left once undone -- somewhere inside the frame built for it:
+         * the deepest suspended call above that frame, which is the one that
+         * made it. Its return address and the stack past it are where the
+         * guest code that called the host goes on.
+         *
+         * @param {any} thread @param {number} stack
+         * @returns {{ rip: number, rsp: number } | null}
+         */
+        callerOf(thread, stack){
+            const frames = callbackFrames(thread);
+            let at = frames.length - 1;
+            while (at >= 0
+                && !(stack > frames[at].frameBase >>> 0 && stack <= frames[at].extent >>> 0))
+            {
+                at--;
+            }
+            if (at < 0)
+            {
+                return null;
+            }
+            const extent = frames[at].extent >>> 0;
+            const suspended = hostCalls(thread);
+            let made = suspended.length - 1;
+            while (made >= 0 && (suspended[made].restingStack >>> 0) < extent)
+            {
+                made--;
+            }
+            if (made < 0)
+            {
+                return null;
+            }
+            return { rip: suspended[made].hostReturn >>> 0,
+                rsp: suspended[made].restingStack >>> 0 };
+        },
 
         /**
          * Where the guest was last sent, newest last, and by which host call.

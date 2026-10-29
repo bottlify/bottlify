@@ -50,6 +50,8 @@ export const fileLayout = (size = 4)=>({
     bufsiz: 3 * size + 12,
 });
 const DEFAULT_BUFFER = 4096;
+/** An unbuffered stream's `_bufsiz`: the two bytes of its own `_charbuf`. */
+const UNBUFFERED = 2;
 
 /**
  * `_iob`: the runtime's own streams, stdin, stdout and stderr first, twenty
@@ -103,6 +105,8 @@ export const standardRecords = (iob, pointerSize = 4)=>(iob === 0 ? []
  *           The console, for the standard streams.
  * @property {() => number} [iob]  Where `_iob` was placed, once it has been.
  * @property {(code: number) => void} [errno]  Where a failure says why.
+ * @property {() => number} [errnoValue]  What errno holds, for fopen_s to answer.
+ * @property {() => number} [exponentDigits]  The least digits of %e's exponent.
  * @property {import('./io.js').Descriptors} [descriptors]
  *           The runtime's descriptor table, shared with `_open` and the rest;
  *           absent, the streams keep one of their own.
@@ -139,7 +143,7 @@ const CCS = new Map([['unicode', O_WTEXT], ['utf-8', O_U8TEXT], ['utf-16le', O_U
  * @param {string} mode
  * @returns {{ read: boolean, write: boolean, create: boolean, truncate: boolean,
  *            append: boolean, flags: number, text: boolean | null,
- *            temporary: boolean, unicode: number } | null}
+ *            temporary: boolean, sequential: boolean, unicode: number } | null}
  */
 function parseMode(mode){
     const comma = mode.indexOf(',');
@@ -153,17 +157,19 @@ function parseMode(mode){
     const plus = rest.includes('+');
     const text = /[bt]/.test(rest) ? rest.lastIndexOf('t') > rest.lastIndexOf('b') : null;
     const temporary = rest.includes('D');
+    // 'S' asks for sequential access and 'R' for random; the first said wins.
+    const sequential = /[SR]/.exec(rest)?.[0] === 'S';
     const unicode = text === false ? 0 : ccs;
     switch (mode[0]){
         case 'r':
             return { read: true, write: plus, create: false, truncate: false, append: false,
-                flags: plus ? IORW : IOREAD, text, temporary, unicode };
+                flags: plus ? IORW : IOREAD, text, temporary, sequential, unicode };
         case 'w':
             return { read: plus, write: true, create: true, truncate: true, append: false,
-                flags: plus ? IORW : IOWRT, text, temporary, unicode };
+                flags: plus ? IORW : IOWRT, text, temporary, sequential, unicode };
         case 'a':
             return { read: plus, write: true, create: true, truncate: false, append: true,
-                flags: plus ? IORW : IOWRT, text, temporary, unicode };
+                flags: plus ? IORW : IOWRT, text, temporary, sequential, unicode };
         default:
             return null;
     }
@@ -578,6 +584,7 @@ export function createStdioFunctions(host){
         }
         const text = formatToString(readString(format), values, readString,
             { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
+                exponentDigits: host.exponentDigits?.() ?? 3,
                 ...guestAccess(host.readMemory, host.writeMemory) });
         return emit(stream, encodeAnsi(text)) === text.length ? text.length : EOF;
     };
@@ -608,6 +615,25 @@ export function createStdioFunctions(host){
                 descriptors.close(fd);
             }
             return record;
+        });
+    };
+
+    /**
+     * fopen_s's body: the stream written through `out`, and 0 or the code
+     * errno was given.
+     *
+     * @param {number} out @param {number} path @param {number} mode
+     * @param {(address: number) => string} read
+     */
+    const openInto = (out, path, mode, read)=>{
+        if ((out >>> 0) === 0 || (path >>> 0) === 0 || (mode >>> 0) === 0)
+        {
+            fail(EINVAL);
+            return EINVAL;
+        }
+        return settle(openStream(read(path), read(mode)), record=>{
+            writeU32(out, record);
+            return record === 0 ? host.errnoValue?.() ?? EINVAL : 0;
         });
     };
 
@@ -693,7 +719,7 @@ export function createStdioFunctions(host){
             return -1;
         }
         const text = formatToString(readWide(format), values, readString,
-            { readWideString: readWide, wide: true,
+            { readWideString: readWide, wide: true, exponentDigits: host.exponentDigits?.() ?? 3,
                 ...guestAccess(host.readMemory, host.writeMemory) });
         return putUnits(stream, unitsOfText(text)) < 0 ? -1 : text.length;
     };
@@ -807,6 +833,18 @@ export function createStdioFunctions(host){
         fopen: cdecl(8, ([path, mode])=>openStream(
             (path >>> 0) === 0 ? '' : readString(path),
             (mode >>> 0) === 0 ? null : readString(mode))),
+
+        /**
+         * errno_t fopen_s(FILE **file, const char *filename, const char *mode)
+         *
+         * fopen answering why: 0 and the stream in `*file`, or errno's code
+         * and null there. No `file`, name or mode is EINVAL.
+         */
+        fopen_s: cdecl(12, ([out, path, mode])=>openInto(out, path, mode, readString)),
+
+        /** errno_t _wfopen_s(FILE **file, const wchar_t *filename, const wchar_t *mode) */
+        _wfopen_s: cdecl(12, ([out, path, mode])=>openInto(out, path, mode,
+            at=>wideStringAt(host.readMemory, at))),
 
         /** FILE *_wfopen(const wchar_t *filename, const wchar_t *mode) -- fopen, wide. */
         _wfopen: cdecl(8, ([path, mode])=>openStream(
@@ -1155,6 +1193,52 @@ export function createStdioFunctions(host){
         getc: fgetc,
 
         /**
+         * int _getw(FILE *stream)
+         *
+         * The next four bytes as a little-endian int, read as fread reads
+         * them -- a CR LF a text stream crosses is one LF. EOF, with the
+         * stream at its end, when fewer are left; a word that is -1 reads as
+         * EOF too, which the caller tells apart with feof.
+         */
+        _getw: cdecl(4, ([pointer])=>{
+            const stream = argument(pointer);
+            if (!stream || narrowRefused(stream))
+            {
+                return EOF;
+            }
+            if (!readable(stream))
+            {
+                raise(stream, IOERR);
+                return EOF;
+            }
+            return settle(take(stream, 4, false), bytes=>{
+                if (bytes.length < 4)
+                {
+                    raise(stream, IOEOF);
+                    return EOF;
+                }
+                return new DataView(bytes.buffer, bytes.byteOffset).getInt32(0, true);
+            });
+        }),
+
+        /** int _putw(int word, FILE *stream) -- its four bytes: the word, or EOF. */
+        _putw: cdecl(8, ([word, pointer])=>{
+            const stream = argument(pointer);
+            if (!stream || narrowRefused(stream))
+            {
+                return EOF;
+            }
+            if (!writable(stream))
+            {
+                refuseWrite(stream);
+                return EOF;
+            }
+            const bytes = new Uint8Array(4);
+            new DataView(bytes.buffer).setInt32(0, word | 0, true);
+            return emit(stream, bytes) === 4 ? word | 0 : EOF;
+        }),
+
+        /**
          * int _filbuf(FILE *stream)
          *
          * What the `getc` macro calls once it has counted `_cnt` below zero:
@@ -1499,6 +1583,21 @@ export function createStdioFunctions(host){
             : {}),
 
         /**
+         * void setbuf(FILE *stream, char *buffer)
+         *
+         * setvbuf with the buffer's own size, BUFSIZ, or none for no buffer.
+         */
+        setbuf: cdecl(8, ([pointer, buffer])=>{
+            const stream = streamOf(pointer);
+            if (stream)
+            {
+                writeU32(stream.record + layout.bufsiz,
+                    (buffer >>> 0) === 0 ? UNBUFFERED : DEFAULT_BUFFER);
+            }
+            return 0;
+        }),
+
+        /**
          * int setvbuf(FILE *stream, char *buffer, int mode, size_t size)
          *
          * Every stream here writes straight through to the volume, so a
@@ -1511,10 +1610,7 @@ export function createStdioFunctions(host){
             {
                 return -1;
             }
-            if (mode !== IONBF)
-            {
-                writeU32(stream.record + layout.bufsiz, size >>> 0);
-            }
+            writeU32(stream.record + layout.bufsiz, mode === IONBF ? UNBUFFERED : size >>> 0);
             return 0;
         }),
     };

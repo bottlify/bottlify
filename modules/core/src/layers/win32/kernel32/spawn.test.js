@@ -189,6 +189,184 @@ test('a child is recorded with a full path, however the caller spelled it', ()=>
         'and the line composed for it names the same full path');
 });
 
+test('CreateProcess refuses a malformed name before it looks for a file', ()=>{
+    // Wine's kernel32 test_CommandLine: what Windows answers to each spelling.
+    const ERROR_PATH_NOT_FOUND = 3;
+    const ERROR_INVALID_PARAMETER = 87;
+    const host = fakeHost({ files: ['C:\\App\\child.exe'] });
+    const fns = createSpawnFunctions(host);
+    /** @param {number} application @param {string} line */
+    const refusal = (application, line)=>{
+        assert.equal(fns.CreateProcessA.handler(
+            [application, putAnsi(host, 0x200, line), 0, 0, 0, 0, 0, 0, 0, 0]), 0, line);
+        return host.errors.at(-1);
+    };
+
+    assert.equal(refusal(putAnsi(host, 0x100, ''), 'child.exe'), ERROR_PATH_NOT_FOUND,
+        'an empty application name, as against none');
+    assert.equal(refusal(putAnsi(host, 0x100, ''), ''), ERROR_PATH_NOT_FOUND);
+    for (const line of ['', ' ', ' child.exe', '\tchild.exe', '""', '" "'])
+    {
+        assert.equal(refusal(0, line), ERROR_INVALID_PARAMETER, JSON.stringify(line));
+    }
+    // Blanks inside the quotes but before the name are part of it.
+    for (const line of ['"\t"', '" child.exe"', '"\tchild.exe"', '"child\t"'])
+    {
+        assert.equal(refusal(0, line), ERROR_FILE_NOT_FOUND, JSON.stringify(line));
+    }
+    assert.equal(host.kernel.processes.all().length, 0, 'and none of them started anything');
+
+    // A refusal, and a file not there, leave nothing in PROCESS_INFORMATION.
+    for (const line of [' child.exe', 'missing.exe'])
+    {
+        host.bytes.fill(0x0a, 0x300, 0x310);
+        assert.equal(fns.CreateProcessA.handler(
+            [0, putAnsi(host, 0x200, line), 0, 0, 0, 0, 0, 0, 0, 0x300]), 0);
+        assert.deepEqual([...host.bytes.subarray(0x300, 0x310)], new Array(16).fill(0), line);
+    }
+
+    // Trailing spaces inside the quotes are not, and .exe is still added.
+    assert.equal(fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x200, '"child " /s'), 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+    assert.equal(pending(host).imagePath, 'C:\\App\\child.exe');
+});
+
+test('QueryFullProcessImageName answers this process\'s image and a child\'s', ()=>{
+    // Wine's kernel32 test_QueryFullProcessImageNameA/W.
+    const ERROR_INVALID_PARAMETER = 87;
+    const ERROR_INSUFFICIENT_BUFFER = 122;
+    const host = fakeHost({ files: ['C:\\App\\child.exe'] });
+    const fns = /** @type {Record<string, any>} */ (createSpawnFunctions(host));
+    const view = new DataView(host.bytes.buffer);
+    const own = 'C:\\App\\launcher.exe';
+    /** @param {string} name @param {number[]} args @param {number} room */
+    const ask = (name, args, room)=>{
+        view.setUint32(0x300, room, true);
+        return fns[name].handler([...args.slice(0, 2), args[2], 0x300]);
+    };
+    const ansi = ()=>new TextDecoder().decode(host.bytes.subarray(0x400,
+        host.bytes.indexOf(0, 0x400)));
+
+    assert.equal(ask('QueryFullProcessImageNameA', [CURRENT_PROCESS, 0, 0x400], 260), 1);
+    assert.equal(ansi(), own);
+    assert.equal(view.getUint32(0x300, true), own.length, 'the length without the terminator');
+
+    assert.equal(ask('QueryFullProcessImageNameW', [CURRENT_PROCESS, 0, 0x600], 260), 1);
+    let wide = '';
+    for (let at = 0x600; view.getUint16(at, true) !== 0; at += 2)
+    {
+        wide += String.fromCharCode(view.getUint16(at, true));
+    }
+    assert.equal(wide, own);
+
+    host.bytes.fill(0x41, 0x400, 0x410);
+    host.bytes[0x410] = 0;
+    assert.equal(ask('QueryFullProcessImageNameA', [CURRENT_PROCESS, 0, 0x400], own.length), 0,
+        'no room for the terminator');
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(view.getUint32(0x300, true), own.length, 'the size left as it was');
+    assert.equal(ansi(), 'A'.repeat(16), 'and the buffer');
+    assert.equal(ask('QueryFullProcessImageNameW', [CURRENT_PROCESS, 0, 0], 0), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(ask('QueryFullProcessImageNameA', [CURRENT_PROCESS, 0, 0], 1024), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER, 'room, and nowhere to put it');
+    assert.equal(ask('QueryFullProcessImageNameW', [CURRENT_PROCESS, 2, 0x600], 260), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER, 'a flag that is not one');
+    assert.equal(ask('QueryFullProcessImageNameA', [0x999, 0, 0x400], 260), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+
+    fns.CreateProcessA.handler([putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0x200]);
+    const child = view.getUint32(0x200, true);
+    assert.equal(ask('QueryFullProcessImageNameA', [child, 0, 0x400], 260), 1);
+    assert.equal(ansi(), 'C:\\App\\child.exe');
+    assert.equal(fns.QueryFullProcessImageNameW.argBytes, 16);
+});
+
+test('PROCESS_NAME_NATIVE names the image by its volume\'s device, as the drives say', ()=>{
+    // Wine's kernel32 test_QueryFullProcessImageNameA/W, with the native flag.
+    const host = /** @type {any} */ (fakeHost());
+    /** @type {string[]} */
+    const asked = [];
+    host.nativePath = (/** @type {string} */ path)=>{
+        asked.push(path);
+        return `\\Device\\HarddiskVolume1${path.slice(2)}`;
+    };
+    const fns = /** @type {Record<string, any>} */ (createSpawnFunctions(host));
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x300, 260, true);
+    assert.equal(fns.QueryFullProcessImageNameA.handler([CURRENT_PROCESS, 1, 0x400, 0x300]), 1);
+    const native = '\\Device\\HarddiskVolume1\\App\\launcher.exe';
+    assert.equal(new TextDecoder().decode(host.bytes.subarray(0x400, 0x400 + native.length)),
+        native);
+    assert.equal(view.getUint32(0x300, true), native.length);
+    assert.deepEqual(asked, ['C:\\App\\launcher.exe']);
+
+    // A path no drive holds has no native name.
+    host.nativePath = ()=>null;
+    view.setUint32(0x300, 260, true);
+    assert.equal(fns.QueryFullProcessImageNameA.handler([CURRENT_PROCESS, 1, 0x400, 0x300]), 0);
+    assert.equal(host.errors.at(-1), 50);
+});
+
+test('the child is handed the STARTUPINFO its parent gave, a NULL desktop the parent\'s', ()=>{
+    // Wine's kernel32 test_Startup reads it back in the child.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    host.startup = ()=>({ desktop: 'winsta0\\default' });
+    const fns = createSpawnFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x400, 68, true);
+    view.setUint32(0x400 + 12, putAnsi(host, 0x500, 'I\'m the title string'), true);
+    view.setUint32(0x400 + 16, 0x34343434, true);
+    view.setUint32(0x400 + 44, 1, true);
+    view.setUint16(0x400 + 48, 1, true);
+
+    assert.equal(fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0x400, 0]), 1);
+    const { startup } = host.kernel.processes.all()[0];
+    assert.equal(startup.title, 'I\'m the title string');
+    assert.equal(startup.desktop, 'winsta0\\default', 'none named: the parent\'s own');
+    assert.equal(startup.x, 0x34343434);
+    assert.equal(startup.flags, 1);
+    assert.equal(startup.showWindow, 1);
+    assert.equal(host.kernel.processes.all()[0].parentId, host.processId ?? 0,
+        'and the process that started it');
+
+    view.setUint32(0x400 + 12, putWide(host, 0x600, 'wide'), true);
+    assert.equal(fns.CreateProcessW.handler(
+        [putWide(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0x400, 0]), 1);
+    assert.equal(host.kernel.processes.all()[1].startup.title, 'wide', 'read in the call\'s width');
+    assert.equal(fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+    assert.equal(host.kernel.processes.all()[2].startup, null, 'no STARTUPINFO, nothing handed');
+});
+
+test('the child\'s environment is the block its parent handed, or the parent\'s own', ()=>{
+    // Wine's kernel32 test_Environment.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    host.environment = ()=>({ PATH: 'C:\\WINDOWS', FOO: 'set by the parent' });
+    const fns = createSpawnFunctions(host);
+    const block = '=C:=C:\\FOO\\BAR\0PATH=C:\\MY\\OWN\\DIR\0FOO=BAR\0EMPTY=\0\0';
+    putAnsi(host, 0x700, block.slice(0, -1));
+    const childOf = (/** @type {number} */ at)=>host.kernel.processes.all()[at].environment;
+
+    fns.CreateProcessA.handler([putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0x700, 0, 0, 0]);
+    assert.deepEqual(childOf(0), { '=C:': 'C:\\FOO\\BAR', PATH: 'C:\\MY\\OWN\\DIR', FOO: 'BAR',
+        EMPTY: '' }, 'the per-drive directory\'s name begins with its \'=\'');
+
+    // CreateProcessW reads an ANSI block unless told the block is wide.
+    fns.CreateProcessW.handler([putWide(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0x700, 0, 0, 0]);
+    assert.equal(childOf(1).FOO, 'BAR');
+    putWide(host, 0x900, 'FOO=wide');
+    host.bytes[0x900 + 18] = 0;
+    host.bytes[0x900 + 19] = 0;
+    fns.CreateProcessW.handler([putWide(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0x400, 0x900, 0, 0,
+        0]);
+    assert.deepEqual(childOf(2), { FOO: 'wide' }, 'CREATE_UNICODE_ENVIRONMENT');
+
+    fns.CreateProcessA.handler([putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.equal(childOf(3).FOO, 'set by the parent', 'no block: the parent\'s variables now');
+});
+
 test('a name with no extension gets .exe, as CreateProcess gives it', ()=>{
     const host = fakeHost({ files: ['C:\\App\\setup.exe'] });
     const fns = createSpawnFunctions(host);
@@ -262,7 +440,22 @@ test('PROCESS_INFORMATION comes back filled in with usable handles', ()=>{
     assert.equal(host.view.getUint32(information + 12, true), child.threadId);
 
     assert.equal(host.kernel.handles.resolve(child.handle, 'process'), child);
-    assert.equal(host.kernel.handles.resolve(child.threadHandle, 'process-thread'), child);
+    assert.equal(host.kernel.handles.resolve(child.threadHandle, 'process-thread').process, child,
+        'the child\'s first thread');
+});
+
+test('a 64-bit process\'s PROCESS_INFORMATION has its handles eight bytes wide', ()=>{
+    // processthreadsapi.h under _WIN64: hProcess 0, hThread 8, the ids at 16
+    // and 20, 24 bytes in all, the handles' high halves zero.
+    const host = { ...fakeHost({ files: ['C:\\App\\child.exe'] }), pointerSize: 8 };
+    const fns = createSpawnFunctions(host);
+    const information = 0x300;
+    host.bytes.fill(0xee, information, information + 24);
+    assert.equal(fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, information]), 1);
+    const child = pending(host);
+    assert.deepEqual([0, 4, 8, 12, 16, 20].map(at=>host.view.getUint32(information + at, true)),
+        [child.handle, 0, child.threadHandle, 0, child.id, child.threadId]);
 });
 
 test('OpenProcess finds the program itself and the children it made, and nothing else', ()=>{
@@ -298,13 +491,13 @@ test('an image that is not there is refused rather than recorded', ()=>{
         ERROR_FILE_NOT_FOUND, 'WinExec answers below 32 with the error itself');
 });
 
-test('CREATE_SUSPENDED records the child without arming the replacement', ()=>{
+test('CREATE_SUSPENDED records the child for the run to start, its first thread held', ()=>{
     const host = fakeHost({ files: ['C:\\App\\child.exe'] });
     const fns = createSpawnFunctions(host);
 
     assert.equal(fns.CreateProcessA.handler(
         [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]), 1);
-    assert.equal(host.kernel.processes.pending(), null);
+    assert.equal(host.kernel.processes.pending(), host.kernel.processes.all()[0]);
     assert.equal(host.kernel.processes.all()[0].suspended, true);
 });
 
@@ -317,29 +510,65 @@ test('the wide spelling starts the same child as the narrow one', ()=>{
     assert.equal(pending(host).imagePath, 'C:\\App\\child.exe');
 });
 
-test('a write into a suspended child is deferred, not applied', ()=>{
-    // The child's image is not mapped, so there is nowhere to put these bytes
-    // yet. They are kept against the address they name and replayed once the PE
-    // is there -- which is process hollowing implemented as a queue.
+/**
+ * A host whose calls into a child are answered by `answer`, each one kept.
+ *
+ * @param {(call: any) => any} answer
+ */
+function askingHost(answer){
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    /** @type {any[]} */
+    const asked = [];
+    const caller = { name: 'caller' };
+    /** @type {[any, number][]} */
+    const errorsFor = [];
+    Object.assign(host, {
+        askChild: (/** @type {any} */ record, /** @type {any} */ call)=>{
+            asked.push({ record, call });
+            return Promise.resolve(answer(call));
+        },
+        currentThread: ()=>caller,
+        setLastErrorFor: (/** @type {any} */ thread, /** @type {number} */ code)=>
+            errorsFor.push([thread, code]),
+    });
+    return { host, asked, caller, errorsFor };
+}
+
+test('a write into a child is made in the child, and its answer comes back to the caller',
+    async()=>{
+        // A launcher hollowing its child: the bytes cross, the call is the
+        // child's own WriteProcessMemory on itself, through its protection.
+        const { host, asked, caller, errorsFor } = askingHost(()=>({ result: 1, error: 0,
+            outs: [null, null, null, null, new Uint8Array([3, 0, 0, 0])] }));
+        const fns = createSpawnFunctions(host);
+        fns.CreateProcessA.handler(
+            [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]);
+        const child = host.kernel.processes.all()[0];
+
+        host.bytes.set([0x90, 0xcc, 0x90], 0x400);
+        const written = fns.WriteProcessMemory.handler([child.handle, 0x401000, 0x400, 3, 0x500]);
+        // Copied when asked, not viewed: the caller may write its buffer again.
+        host.bytes[0x400] = 0xff;
+        assert.equal(await written, 1);
+        assert.equal(asked[0].record, child);
+        assert.deepEqual(asked[0].call.call, 'WriteProcessMemory');
+        const [process, base, data, size, out] = asked[0].call.args;
+        assert.deepEqual([process, base, [...data.in], size, out],
+            [CURRENT_PROCESS, 0x401000, [0x90, 0xcc, 0x90], 3, { out: 4 }]);
+        assert.equal(host.view.getUint32(0x500, true), 3, 'the count the child wrote');
+        assert.deepEqual(errorsFor, [[caller, 0]], 'the error set on the thread that asked');
+    });
+
+test('a child the run cannot reach is refused, and a handle that is none is invalid', ()=>{
     const host = fakeHost({ files: ['C:\\App\\child.exe'] });
     const fns = createSpawnFunctions(host);
     fns.CreateProcessA.handler(
         [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]);
-    const child = pending(host, { suspended: true });
-
-    host.bytes.set([0x90, 0xcc, 0x90], 0x400);
-    assert.equal(fns.WriteProcessMemory.handler(
-        [child.handle, 0x401000, 0x400, 3, 0x500]), 1);
-
-    assert.equal(child.patches.length, 1);
-    assert.equal(child.patches[0].address, 0x401000);
-    assert.deepEqual([...child.patches[0].bytes], [0x90, 0xcc, 0x90]);
-    assert.equal(host.view.getUint32(0x500, true), 3, 'and it reported all three written');
-
-    // Copied, not viewed: the machine these bytes came from is gone by the time
-    // they are replayed.
-    host.bytes[0x400] = 0xff;
-    assert.deepEqual([...child.patches[0].bytes], [0x90, 0xcc, 0x90]);
+    const child = host.kernel.processes.all()[0];
+    assert.equal(fns.WriteProcessMemory.handler([child.handle, 0x401000, 0x400, 3, 0]), 0);
+    assert.equal(host.errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(fns.ReadProcessMemory.handler([0x1234, 0x400, 0x800, 2, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
 });
 
 test('a write against this process writes memory, as it always did', ()=>{
@@ -442,7 +671,7 @@ test('the launcher every spelling shares finds one image and opens the handles',
     assert.equal(made.commandLine, '"C:\\App\\child.exe" /s');
     assert.notEqual(made.handle, 0);
     assert.equal(host.kernel.handles.resolve(made.handle, 'process'), made);
-    assert.equal(host.kernel.handles.resolve(made.threadHandle, 'process-thread'), made);
+    assert.equal(host.kernel.handles.resolve(made.threadHandle, 'process-thread').process, made);
     assert.deepEqual(host.requests.map((/** @type {any} */ r)=>r.imagePath),
         ['C:\\App\\child.exe'], 'and the request left the process as it was recorded');
 });
@@ -514,8 +743,10 @@ test('an ordinary child is still held pending for the replacement', ()=>{
     assert.equal(host.kernel.processes.pending()?.imagePath, 'C:\\App\\game.exe');
 });
 
-test('ReadProcessMemory reads this process, and of a child only what was written into it', ()=>{
-    const host = fakeHost({ files: ['C:\\App\\child.exe'] });
+test('ReadProcessMemory reads this process, and a child\'s memory in the child', async()=>{
+    const { host, asked } = askingHost(call=>({ result: 1, error: 0, outs: [null, null,
+        new Uint8Array([0x22, 0x33]).subarray(0, call.args[2].out), null,
+        new Uint8Array([2, 0, 0, 0])] }));
     const fns = createSpawnFunctions(host);
     host.bytes.set([5, 6, 7, 8], 0x400);
     assert.equal(fns.ReadProcessMemory.handler([CURRENT_PROCESS, 0x400, 0x600, 4, 0x700]), 1);
@@ -524,19 +755,12 @@ test('ReadProcessMemory reads this process, and of a child only what was written
 
     fns.CreateProcessA.handler(
         [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]);
-    const child = pending(host, { suspended: true });
-    host.bytes.set([0x11, 0x22, 0x33, 0x44], 0x400);
-    fns.WriteProcessMemory.handler([child.handle, 0x401000, 0x400, 4, 0]);
-    assert.equal(fns.ReadProcessMemory.handler([child.handle, 0x401001, 0x800, 2, 0x700]), 1);
-    assert.deepEqual([...host.bytes.slice(0x800, 0x802)], [0x22, 0x33],
-        'the bytes it was handed, which is all of it there is yet');
-
-    host.errors.length = 0;
-    assert.equal(fns.ReadProcessMemory.handler([child.handle, 0x402000, 0x800, 2, 0x700]), 0);
-    assert.equal(host.view.getUint32(0x700, true), 0);
-    assert.deepEqual(host.errors, [299], 'ERROR_PARTIAL_COPY: nothing is mapped there yet');
-    assert.equal(fns.ReadProcessMemory.handler([0x1234, 0x400, 0x800, 2, 0]), 0);
-    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+    const child = host.kernel.processes.all()[0];
+    assert.equal(await fns.ReadProcessMemory.handler([child.handle, 0x401001, 0x800, 2, 0x700]),
+        1);
+    assert.deepEqual(asked[0].call.args, [CURRENT_PROCESS, 0x401001, { out: 2 }, 2, { out: 4 }]);
+    assert.deepEqual([...host.bytes.slice(0x800, 0x802)], [0x22, 0x33]);
+    assert.equal(host.view.getUint32(0x700, true), 2);
     assert.equal(fns.ReadProcessMemory.argBytes, 20);
 });
 

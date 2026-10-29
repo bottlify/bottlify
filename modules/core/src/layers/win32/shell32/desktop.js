@@ -50,6 +50,30 @@ const SETTINGS = Object.freeze([
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(code: number) => void} [setLastError]
+ * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
+ *     | undefined} [library]
+ */
+
+/** APPBARDATA: cbSize, hWnd, uCallbackMessage, uEdge, rc, lParam. */
+const APPBARDATA = Object.freeze({ hWnd: 4, uCallbackMessage: 8, uEdge: 12, rc: 16 });
+const ABM_NEW = 0;
+const ABM_REMOVE = 1;
+const ABM_QUERYPOS = 2;
+const ABM_SETPOS = 3;
+const ABM_ACTIVATE = 6;
+const ABM_WINDOWPOSCHANGED = 9;
+const ABE_LEFT = 0;
+const ABE_TOP = 1;
+const ABE_RIGHT = 2;
+const ABE_BOTTOM = 3;
+const ABN_POSCHANGED = 1;
+
+/**
+ * @typedef {Object} AppBar
+ * @property {number} window
+ * @property {number} message  What it is told its position changed with.
+ * @property {number} edge
+ * @property {[number, number, number, number] | null} space  left, top, right, bottom
  */
 
 /** @param {number} value */
@@ -68,19 +92,134 @@ export function createDesktopFunctions(host){
     const noExplorer = refuse('SHGetInstanceExplorer', { argBytes: 4, answer: E_FAIL,
         why: 'no Explorer process to hold a reference on' });
 
+    /** @type {AppBar[]} The bars, in the order they were registered. */
+    const bars = [];
+
+    /** @param {number} at */
+    const readInt = at=>{
+        const bytes = host.readMemory?.(at >>> 0, 4) ?? new Uint8Array(4);
+        return bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24;
+    };
+
+    /**
+     * A bar's rectangle where the bars registered before it leave room: each
+     * keeps the strip along its own edge, whatever this one's edge is.
+     *
+     * @param {AppBar} bar @param {[number, number, number, number]} rect
+     * @returns {[number, number, number, number]}
+     */
+    const clipped = (bar, rect)=>{
+        let [left, top, right, bottom] = rect;
+        for (const other of bars.slice(0, bars.indexOf(bar)))
+        {
+            const space = other.space;
+            if (space === null)
+            {
+                continue;
+            }
+            switch (other.edge)
+            {
+                case ABE_LEFT: left = Math.max(left, space[2]); break;
+                case ABE_TOP: top = Math.max(top, space[3]); break;
+                case ABE_RIGHT: right = Math.min(right, space[0]); break;
+                case ABE_BOTTOM: bottom = Math.min(bottom, space[1]); break;
+                default: break;
+            }
+        }
+        return [left, top, right, bottom];
+    };
+
+    /**
+     * The bars after one whose space changed are told to ask for theirs
+     * again, through the message each registered with.
+     *
+     * @param {number} from  The first bar to tell.
+     */
+    const tellFrom = from=>{
+        const post = host.library?.('USER32.dll')?.PostMessageA;
+        for (const bar of bars.slice(from))
+        {
+            post?.handler([bar.window, bar.message, ABN_POSCHANGED, 0]);
+        }
+    };
+
+    /**
+     * SHAppBarMessage: the bars the shell keeps on the screen's edges, each
+     * given the strip it asks for less the strips of the bars registered
+     * before it (Wine's test_setpos, against Windows). There is no taskbar:
+     * ABM_GETTASKBARPOS, ABM_GETSTATE and ABM_GETAUTOHIDEBAR answer none, and
+     * no bar can hide itself.
+     *
+     * @param {number} message @param {number} data
+     * @returns {number}
+     */
+    const appBarMessage = (message, data)=>{
+        if (data === 0 || !host.readMemory)
+        {
+            return 0;
+        }
+        const window = readInt(data + APPBARDATA.hWnd) >>> 0;
+        const index = bars.findIndex(bar=>bar.window === window);
+        const bar = bars[index];
+        /** @returns {[number, number, number, number]} */
+        const rect = ()=>/** @type {[number, number, number, number]} */ (
+            [0, 4, 8, 12].map(at=>readInt(data + APPBARDATA.rc + at)));
+        /** @param {[number, number, number, number]} values */
+        const writeRect = values=>values.forEach((value, at)=>
+            host.writeMemory(data + APPBARDATA.rc + at * 4, dword(value)));
+        switch (message)
+        {
+            case ABM_NEW:
+                if (bar || window === 0)
+                {
+                    return 0;
+                }
+                bars.push({ window, message: readInt(data + APPBARDATA.uCallbackMessage) >>> 0,
+                    edge: ABE_BOTTOM, space: null });
+                return 1;
+            case ABM_REMOVE:
+                if (!bar)
+                {
+                    return 0;
+                }
+                bars.splice(index, 1);
+                tellFrom(index);
+                return 1;
+            case ABM_QUERYPOS:
+            case ABM_SETPOS:
+            {
+                if (!bar)
+                {
+                    return 0;
+                }
+                const edge = readInt(data + APPBARDATA.uEdge) >>> 0;
+                const space = clipped(bar, rect());
+                writeRect(space);
+                if (message === ABM_SETPOS)
+                {
+                    bar.edge = edge;
+                    bar.space = space;
+                    tellFrom(index + 1);
+                }
+                return 1;
+            }
+            case ABM_ACTIVATE:
+            case ABM_WINDOWPOSCHANGED:
+                return bar ? 1 : 0;
+            default:
+                return 0;
+        }
+    };
+
     return {
         /**
          * UINT_PTR SHAppBarMessage(DWORD dwMessage, PAPPBARDATA pData)
-         *
-         * Every message goes to the taskbar's window, and there is none: the
-         * work area is the whole screen, as SystemParametersInfo reports it.
-         * Without the tray to send to, the call answers FALSE whatever was
-         * asked -- ABM_NEW registers no bar, ABM_GETTASKBARPOS has no taskbar
-         * to place, ABM_GETSTATE reports neither auto-hide nor always-on-top,
-         * ABM_GETAUTOHIDEBAR names no bar -- and the record is not written.
          */
-        SHAppBarMessage: refuse('SHAppBarMessage', { argBytes: 8, answer: 0,
-            why: 'no taskbar: every application-bar message answers FALSE' }),
+        SHAppBarMessage: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([message, data])=>appBarMessage(message >>> 0, data >>> 0),
+        },
 
         /**
          * void SHGetSettings(LPSHELLFLAGSTATE lpsfs, DWORD dwMask)

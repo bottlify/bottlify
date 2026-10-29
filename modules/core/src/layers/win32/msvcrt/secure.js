@@ -20,6 +20,7 @@
 
 import { EINVAL, ERANGE } from './globals.js';
 import { LOWER, UPPER } from './inguest.js';
+import { unitsAt } from './widetext.js';
 
 /**
  * @typedef {Object} SecureHost
@@ -37,9 +38,6 @@ export const STRUNCATE = 80;
 /** A string is read no further than this, since nothing in C bounds one. */
 const MAX_STRING = 1 << 20;
 
-/** Units read from memory at a time while looking for a terminator. */
-const CHUNK = 256;
-
 /**
  * @param {SecureHost} host
  */
@@ -52,34 +50,17 @@ export function createSecureFunctions(host){
 
     /**
      * A string's units up to its terminator or `limit` units, whichever comes
-     * first, read a chunk at a time so a large limit costs only the string.
+     * first, read no further than either: a count may end inside a string
+     * that is not terminated before its region does.
      *
      * @param {number} pointer @param {number} unit  Bytes a character.
      * @param {number} limit
      * @returns {{ units: number[], terminated: boolean }}
      */
     const readUnits = (pointer, unit, limit)=>{
-        /** @type {number[]} */
-        const units = [];
-        let at = pointer >>> 0;
         const most = Math.min(limit, MAX_STRING);
-        while (units.length < most)
-        {
-            const count = Math.min(CHUNK, most - units.length);
-            const bytes = host.readMemory(at, count * unit);
-            for (let index = 0; index < count; index++)
-            {
-                const value = unit === 1 ? bytes[index]
-                    : bytes[index * 2] | bytes[index * 2 + 1] << 8;
-                if (value === 0)
-                {
-                    return { units, terminated: true };
-                }
-                units.push(value);
-            }
-            at += count * unit;
-        }
-        return { units, terminated: false };
+        const units = [...unitsAt(host.readMemory, pointer, /** @type {1 | 2} */ (unit), most)];
+        return { units, terminated: units.length < most };
     };
 
     /** @param {number} pointer @param {number} unit @param {number[]} units */

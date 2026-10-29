@@ -6,11 +6,31 @@
 
 import { INF_STYLE_OLDNT, INF_STYLE_WIN4, infText, parseInf } from './inf.js';
 import { decodeFolder, folderOf, readCabinet } from '../cabinet/cabinet.js';
-import { commitQueue, queueInstallSection } from './queue.js';
+import { expand as expandLz, readHeader as lzHeader } from '../lz32/expand.js';
+import {
+    commitQueue, lookup, pushCopy, queueFileList, queueInfCopy, queueInstallSection,
+    targetDirectory as listTarget,
+} from './queue.js';
 import { standardDirids } from './dirids.js';
-import { installRegistry } from './registry.js';
+import { createStringTableFunctions } from './stringtable.js';
+import { createDiskSpaceFunctions } from './diskspace.js';
+import {
+    CLASS_KEY, DEVICE_CLASSES_KEY, ENUM_KEY, GUID_NULL, ROOT_DEVNODE, ROOT_ID, SPINT,
+    createDeviceStore, interfacePath,
+} from './devices.js';
+import { infNumber, installRegistry } from './registry.js';
+import {
+    ERROR_INVALID_REG_PROPERTY, propertyEntry, readProperty, writeProperty,
+} from './properties.js';
+import {
+    DEVPROPKEY_SIZE, DEVPROP_TYPE, deleteProperty, storeProperty, storedKeys, storedProperty,
+    validType,
+} from './devprops.js';
+import { writeShellLink } from '../common/shell-link.js';
+import { msToFileTime } from '../kernel32/filetime.js';
+import { bestDriver, driversOf } from './drivers.js';
 import { CATALOG_STORE } from '../sfc/functions.js';
-import { encodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_CLASSES_ROOT, HKEY_USERS } from '../advapi32/registry.js';
 
 /**
@@ -41,11 +61,118 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_INVALID_USER_BUFFER = 1784;
 const ERROR_FILE_EXISTS = 80;
+const ERROR_DIRECTORY = 267;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NO_SUCH_DEVINST = 0xe000020b;
 export const ERROR_SECTION_NOT_FOUND = 0xe0000101;
 export const ERROR_LINE_NOT_FOUND = 0xe0000102;
 const ERROR_CLASS_MISMATCH = 0xe0000201;
+const ERROR_INVALID_DEVINST_NAME = 0xe0000205;
+const ERROR_DEVINST_ALREADY_EXISTS = 0xe0000207;
+const ERROR_NO_ASSOCIATED_CLASS = 0xe0000200;
+const ERROR_INVALID_MACHINENAME = 0xe0000220;
+const ERROR_INVALID_CLASS = 0xe0000206;
+const ERROR_BAD_SERVICE_INSTALLSECT = 0xe0000217;
+const ERROR_SERVICE_EXISTS = 1073;
+const ERROR_INVALID_FLAGS = 1004;
+/** The device property formats: the device's registry properties, its instance, its relations, its bus, its container. */
+const DEVPKEY_DEVICE = '{a45c254e-df1c-4efd-8020-67d146a850e0}';
+const DEVPKEY_INSTANCE = '{78c34fc8-104a-4aca-9ea4-524d52996e57}';
+const DEVPKEY_RELATIONS = '{4340a6c5-93fa-4706-972c-7b648008a5a7}';
+const DEVPKEY_BUS_DESCRIPTION = '{540b947e-8b40-45bc-a8a2-6a0b894cbda2}';
+const DEVPKEY_CONTAINER = '{8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c}';
+/** The device's driver format: its driver key's values. */
+const DEVPKEY_DRIVER = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}';
+/** DEVPROP_TYPE_FILETIME. */
+const DEVPROP_TYPE_FILETIME = 0x10;
+/**
+ * The driver properties by id: the driver key's value and the type it is
+ * answered as.
+ *
+ * @type {ReadonlyMap<number, { name: string, type: number }>}
+ */
+const DRIVER_PROPERTIES = new Map([
+    [2, { name: 'DriverDateData', type: DEVPROP_TYPE_FILETIME }],
+    [3, { name: 'DriverVersion', type: 0x12 }], [4, { name: 'DriverDesc', type: 0x12 }],
+    [5, { name: 'InfPath', type: 0x12 }], [6, { name: 'InfSection', type: 0x12 }],
+    [7, { name: 'InfSectionExt', type: 0x12 }], [8, { name: 'MatchingDeviceId', type: 0x12 }],
+    [9, { name: 'ProviderName', type: 0x12 }], [11, { name: 'CoInstallers32', type: 0x2012 }],
+]);
+
+/** The device interface format: its name, whether it is enabled, its class. */
+const DEVPKEY_INTERFACE = '{026e516e-b814-414b-83cd-856d6fef4822}';
+
+/** DEVPROP_TYPE_BOOLEAN: one byte, 0 or 0xff. */
+const DEVPROP_TYPE_BOOLEAN = 0x11;
+
+
+const SPDRP_CLASSGUID = 0x8;
+const SPDRP_PHYSICAL_DEVICE_OBJECT_NAME = 0xe;
+/** The last index, which no call may set. */
+const SPDRP_BASE_CONTAINERID = 0x24;
+
+/** DEVPROP_TYPE_BINARY: an array of bytes. */
+const DEVPROP_TYPE_BINARY = 0x1003;
+
+/** The DEVPROPTYPE a registry property's type is answered as. */
+const DEVPROP_OF_REG = new Map([[1, DEVPROP_TYPE.STRING], [2, DEVPROP_TYPE.STRING],
+    [7, DEVPROP_TYPE.STRING_LIST], [4, DEVPROP_TYPE.UINT32], [3, DEVPROP_TYPE_BINARY]]);
+
+const ERROR_NOT_FOUND = 1168;
+const ERROR_WRONG_INF_STYLE = 0xe0000100;
+const ERROR_DEVICE_INTERFACE_REMOVED = 0xe000021c;
+const ERROR_NO_SUCH_DEVICE_INTERFACE = 0xe0000225;
+
+/** SP_DEVINSTALL_PARAMS: cbSize and the eight DWORDs after it, before the path. */
+const INSTALL_PARAMS_WORDS = 8;
+const INSTALL_PARAMS_FIELDS = 4 + INSTALL_PARAMS_WORDS * 4;
+
+/** Driver list types, and the install flag that names one INF rather than a directory. */
+const SPDIT_CLASSDRIVER = 1;
+const SPDIT_COMPATDRIVER = 2;
+const DI_ENUMSINGLEINF = 0x10000;
+/** A driver's strings: description, manufacturer, provider, section. */
+const LINE_LEN = 256;
+/** SP_DRVINFO_DETAIL_DATA: cbSize, InfDate, CompatIDsOffset and -Length, Reserved, then the strings. */
+const DETAIL = Object.freeze({ INF_DATE: 4, COMPAT_OFFSET: 12, COMPAT_LENGTH: 16, SECTION: 24 });
+const ERROR_NO_DRIVER_SELECTED = 0xe0000203;
+const ERROR_NO_COMPAT_DRIVERS = 0xe0000228;
+
+/** The class installer requests that have a default handler, and how it answers. */
+const DIF_REMOVE = 0x05;
+const DIF_DESTROYPRIVATEDATA = 0x0c;
+const DIF_SELECTBESTCOMPATDRV = 0x17;
+const DIF_REGISTERDEVICE = 0x19;
+const ERROR_DI_DO_DEFAULT = 0xe000020e;
+const ERROR_DI_POSTPROCESSING_REQUIRED = 0xe0000222;
+/** COINSTALLER_CONTEXT_DATA: PostProcessing, InstallResult, PrivateData. */
+const COINSTALLER_CONTEXT_SIZE = 12;
+const CO_INSTALLERS_KEY = 'SYSTEM\\CurrentControlSet\\Control\\CoDeviceInstallers';
+/** CONFIGRET codes, cfgmgr32.h. */
+const CR_SUCCESS = 0x00;
+const CR_INVALID_POINTER = 0x03;
+const CR_INVALID_FLAG = 0x04;
+const CR_INVALID_DEVNODE = 0x05;
+const CR_NO_SUCH_DEVNODE = 0x0d;
+const CR_BUFFER_SMALL = 0x1a;
+
+/** CM_Get_Device_ID_List's filters, and CM_Get_Device_Interface_List's one flag. */
+const CM_GETIDLIST_FILTER_NONE = 0x0;
+const CM_GETIDLIST_FILTER_ENUMERATOR = 0x1;
+const CM_GETIDLIST_FILTER_CLASS = 0x200;
+const CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES = 0x1;
+
+
+const ERROR_PARTIAL_COPY = 299;
+const ERROR_DEVINFO_NOT_REGISTERED = 0xe0000208;
+const ERROR_KEY_DOES_NOT_EXIST = 0xe0000204;
+
+/** A device key's scope, and its type: the device's own, its driver's, both. */
+const DICS_FLAG_GLOBAL = 1;
+const DICS_FLAG_CONFIGSPECIFIC = 2;
+const DIREG_DEV = 1;
+const DIREG_DRV = 2;
+const DIREG_BOTH = 4;
 
 /** The notifications a callback is sent. */
 export const SPFILENOTIFY = Object.freeze({
@@ -76,8 +203,34 @@ const DEFAULT_ANSWERS = new Map([
 const SP_COPY_REPLACEONLY = 0x2;
 const SP_COPY_NOOVERWRITE = 0x8;
 
-/** SetupDiGetClassDevs: every class, rather than the one named. */
+/** SetupDiGetClassDevs: every class rather than the one named, and interfaces rather than devices. */
 const DIGCF_ALLCLASSES = 0x4;
+const DIGCF_DEVICEINTERFACE = 0x10;
+
+/** SetupDiCreateDeviceInfo: make the instance id, under ROOT. */
+const DICD_GENERATE_ID = 0x1;
+
+/** SetupDiOpenClassRegKeyEx: the installer's classes, or the interfaces'. */
+const DIOCR_INSTALLER = 0x1;
+const DIOCR_INTERFACE = 0x2;
+
+/** SP_DEVINSTALL_PARAMS' flags: no file queue of the installer's own. */
+const DI_NOVCP = 0x8;
+
+/** SetupPromptForDisk: look for the file before asking, and what it answers. */
+const IDF_CHECKFIRST = 0x100;
+const DPROMPT = Object.freeze({ SUCCESS: 0, CANCEL: 1, SKIPFILE: 2, BUFFERTOOSMALL: 3 });
+
+/**
+ * SP_DEVINFO_LIST_DETAIL_DATA's sizes: cbSize, a GUID, a handle and 263
+ * characters, packed to a byte as setupapi.h packs its structures on x86.
+ */
+const LIST_DETAIL_A_SIZE = 287;
+const LIST_DETAIL_W_SIZE = 550;
+
+/** SP_DEVICE_INTERFACE_DETAIL_DATA's cbSize: a DWORD and the first character of the path. */
+const DETAIL_A_SIZE = 5;
+const DETAIL_W_SIZE = 6;
 
 /** sizeof(SP_DEVINFO_DATA): cbSize, the class GUID, DevInst, Reserved. */
 const SP_DEVINFO_DATA_SIZE = 28;
@@ -87,12 +240,40 @@ const SP_DEVICE_INTERFACE_DATA_SIZE = 28;
 /** The first DIRID a program may assign with SetupSetDirectoryId. */
 const DIRID_USER = 0x8000;
 
-/** A default queue callback's context: the owner, progress window and message. */
-const DEFAULT_CONTEXT_SIZE = 16;
+/**
+ * A default queue callback's context as Windows lays it out, which a caller
+ * may read: the magic "SPQC", the owner, and past fields of its own the
+ * progress window and its message.
+ */
+const DEFAULT_CONTEXT = Object.freeze({ SIZE: 80, MAGIC: 0x43515053, OWNER: 4, PROGRESS: 52,
+    MESSAGE: 56 });
+
+/** What SetupGetFileCompressionInfo says a file is. */
+const FILE_COMPRESSION = Object.freeze({ NONE: 0, WINLZA: 1, MSZIP: 2, NTCAB: 3 });
+
+/** A setup log's severities: LogSevMaximum and above are none. */
+const LOG_SEVERITY_MAXIMUM = 4;
+const ERROR_FILE_INVALID = 1006;
 
 /** SetupInstallFromInfSection's flags. */
 const SPINST_REGISTRY = 0x04;
 const SPINST_FILES = 0x10;
+const SPINST_UNREGSVR = 0x80;
+const SPINST_REGSVR = 0x40;
+const SPINST_PROFILEITEMS = 0x100;
+
+/** The directives an install section's carrying out answers for. */
+const CARRIED_OUT = new Set(['copyfiles', 'delfiles', 'renfiles', 'addreg', 'delreg', 'include',
+    'needs', 'registerdlls', 'unregisterdlls', 'profileitems']);
+
+/** A RegisterDlls line's flags: call DllRegisterServer, call DllInstall. */
+const FLG_REGSVR_DLLREGISTER = 0x1;
+const FLG_REGSVR_DLLINSTALL = 0x2;
+
+/** A profile item's flags: the user's menu, delete it, a group (a folder). */
+const FLG_PROFITEM_CURRENTUSER = 0x1;
+const FLG_PROFITEM_DELETE = 0x2;
+const FLG_PROFITEM_GROUP = 0x4;
 const SPINST_ALL = 0x3ff;
 
 /** SetupGetInfInformation's search controls. */
@@ -101,9 +282,10 @@ const INFINFO_INF_NAME_IS_ABSOLUTE = 2;
 const INFINFO_REVERSE_DEFAULT_SEARCH = 4;
 const INFINFO_INF_PATH_LIST_SEARCH = 5;
 
-/** FILE_IN_CABINET_INFO_A: the target name buffer, and the whole. */
+/** FILE_IN_CABINET_INFO_A and _W: the target name buffer, and the whole. */
 const CABINET_TARGET_OFFSET = 18;
 const FILE_IN_CABINET_INFO_SIZE = 280;
+const FILE_IN_CABINET_INFO_W_SIZE = 540;
 
 /** Where each notification's structures are laid out: FILEPATHS_A, SOURCE_MEDIA_A. */
 const FILEPATHS_SIZE = 16;
@@ -132,7 +314,28 @@ const SOURCE_MEDIA_SIZE = 24;
  * @property {Readonly<Record<string, string>>} folders  The shell's folders, for DIRIDs.
  * @property {any} [registry]  The hive: where registered OS components are kept, and
  *           what an install section's AddReg and DelReg write.
+ * @property {(service: { name: string, displayName: string, binary: string, type: number,
+ *     start: number, errorControl: number, startName: string | null }) => number} [createService]
+ *           A service made through the service control manager: the error, 0 for none.
+ * @property {{ loadAnsi: (name: number) => number | Promise<number>,
+ *     procAddress: (module: number, name: number) => number | Promise<number>,
+ *     free: (module: number) => unknown }} [libraries]
+ *           kernel32's LoadLibraryA, GetProcAddress and FreeLibrary, for the
+ *           DLLs an INF registers; names are guest ANSI strings.
+ * @property {(handle: number) => any} [keyOf]
+ *           The hive's key a registry handle the program holds is open on;
+ *           null for one that is none.
+ * @property {(path: string) => number} [keyHandle]
+ *           An HKEY for a key under HKEY_LOCAL_MACHINE, from the registry's
+ *           own handle table; 0 for a key that is not there.
  * @property {(api: string, detail: string) => void} [divergence]
+ */
+
+/**
+ * A queue's callback: the program's, at an address, or one answered here.
+ *
+ * @typedef {number | ((message: number, first: any) => { answer: number, path: string })}
+ *     QueueCallback
  */
 
 /** @param {string} path */
@@ -162,6 +365,34 @@ export function createSetupapiFunctions(host){
     const ansi = text=>encodeAnsi(`${text}\0`);
     /** @param {number} address */
     const text = address=>((address >>> 0) === 0 ? null : host.readCString(address >>> 0, 4096));
+    /**
+     * A string argument in the call's width: UTF-16 for a W call.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const textOf = (address, wide)=>{
+        if (!wide)
+        {
+            return text(address);
+        }
+        return (address >>> 0) === 0 ? null
+            : /** @type {NonNullable<typeof host.readWideString>} */ (host.readWideString)(
+                address >>> 0, 8192);
+    };
+    /** Terminated, in the call's width. @param {string} value @param {boolean} wide */
+    const encodeIn = (value, wide)=>{
+        if (!wide)
+        {
+            return ansi(value);
+        }
+        const bytes = new Uint8Array((value.length + 1) * 2);
+        const view = new DataView(bytes.buffer);
+        for (let at = 0; at < value.length; at++)
+        {
+            view.setUint16(at * 2, value.charCodeAt(at), true);
+        }
+        return bytes;
+    };
     /** @param {number} code @param {number} [result] */
     const fail = (code, result = 0)=>{
         host.setLastError(code);
@@ -169,14 +400,64 @@ export function createSetupapiFunctions(host){
     };
 
     /**
+     * A name a program passed as a path, made absolute; null for one that
+     * names no file at all -- empty, or nothing but blanks -- which the
+     * volume refuses outright.
+     *
+     * @param {string} name
+     */
+    const pathOf = name=>{
+        try
+        {
+            return host.fullPath(name);
+        }
+        catch {
+            return null;
+        }
+    };
+
+    /**
+     * Whether a path names something on the volume; a path it refuses names
+     * nothing.
+     *
+     * @param {string | null} path
+     */
+    const exists = path=>{
+        if (path === null)
+        {
+            return false;
+        }
+        try
+        {
+            return Boolean(host.files.stat(path));
+        }
+        catch {
+            return false;
+        }
+    };
+
+    /**
      * A whole file off the volume: bytes, a promise of them for a file not
      * resident yet, or null for none.
      *
-     * @param {string} path
+     * @param {string | null} path
      * @returns {Uint8Array | Promise<Uint8Array> | null}
      */
     const readWhole = path=>{
-        const stat = host.files.stat(path);
+        if (path === null)
+        {
+            return null;
+        }
+        // A path the volume refuses outright -- a component of blanks --
+        // names no file, which is the answer the caller is after.
+        let stat;
+        try
+        {
+            stat = host.files.stat(path);
+        }
+        catch {
+            return null;
+        }
         if (!stat || stat.isDirectory)
         {
             return null;
@@ -218,9 +499,13 @@ export function createSetupapiFunctions(host){
     /**
      * Writes a whole file, answering a Win32 error code.
      *
-     * @param {string} path @param {Uint8Array} bytes
+     * @param {string | null} path @param {Uint8Array} bytes
      */
     const writeWhole = (path, bytes)=>{
+        if (path === null)
+        {
+            return ERROR_PATH_NOT_FOUND;
+        }
         const parent = directoryOf(path);
         if (parent !== '' && !host.files.stat(parent.replace(/[\\/]+$/, '') || parent))
         {
@@ -245,7 +530,10 @@ export function createSetupapiFunctions(host){
      * An open INF: what a HINF names, and the user DIRIDs set on it.
      *
      * @typedef {{ inf: import('./inf.js').Inf, path: string,
-     *     list: import('./inf.js').InfSection[], ids: Map<number, string> }} OpenInf
+     *     list: import('./inf.js').InfSection[], ids: Map<number, string>,
+     *     fields?: Map<string, number> }} OpenInf
+     * `fields`: the wide copies `pSetupGetField` handed out, by section, line
+     * and field, given back when the INF is closed.
      */
 
     /**
@@ -293,7 +581,8 @@ export function createSetupapiFunctions(host){
     const infCandidates = (name, reverse = false)=>{
         if (/[\\/]/.test(name))
         {
-            return [host.fullPath(name)];
+            const path = pathOf(name);
+            return path === null ? [] : [path];
         }
         const places = [`${windows}\\inf\\${name}`, `${system}\\${name}`];
         return reverse ? places.reverse() : places;
@@ -302,12 +591,12 @@ export function createSetupapiFunctions(host){
     /**
      * Loads an INF, answering the record or the error it failed with.
      *
-     * @param {string} path
+     * @param {string | undefined} path  Undefined for a name that names no file.
      * @returns {{ open: OpenInf } | { error: number, line: number }
      *     | Promise<{ open: OpenInf } | { error: number, line: number }>}
      */
     const loadInf = path=>{
-        const bytes = readWhole(path);
+        const bytes = path === undefined ? null : readWhole(path);
         if (bytes === null)
         {
             return { error: ERROR_FILE_NOT_FOUND, line: 0 };
@@ -319,7 +608,8 @@ export function createSetupapiFunctions(host){
             {
                 return result;
             }
-            return { open: { inf: result.inf, path, list: [...result.inf.sections.values()],
+            return { open: { inf: result.inf, path: /** @type {string} */ (path),
+                list: [...result.inf.sections.values()],
                 ids: new Map() } };
         };
         return bytes instanceof Uint8Array ? parse(bytes) : bytes.then(parse);
@@ -357,19 +647,24 @@ export function createSetupapiFunctions(host){
      * string calls do: the size needed, terminator included, whether or not
      * a buffer came; too small a buffer is ERROR_INSUFFICIENT_BUFFER.
      *
+     * Sizes count the call's characters: bytes for an A call, WCHARs for a
+     * W one.
+     *
      * @param {string} value @param {number} buffer @param {number} size @param {number} required
+     * @param {boolean} [wide]
      */
-    const answerText = (value, buffer, size, required)=>{
-        const bytes = ansi(value);
+    const answerText = (value, buffer, size, required, wide = false)=>{
+        const bytes = encodeIn(value, wide);
+        const characters = wide ? bytes.length / 2 : bytes.length;
         if ((required >>> 0) !== 0)
         {
-            writeU32(required, bytes.length);
+            writeU32(required, characters);
         }
         if ((buffer >>> 0) === 0)
         {
             return 1;
         }
-        if ((size >>> 0) < bytes.length)
+        if ((size >>> 0) < characters)
         {
             return fail(ERROR_INSUFFICIENT_BUFFER);
         }
@@ -396,14 +691,14 @@ export function createSetupapiFunctions(host){
                 blocks.push(at);
                 return at;
             },
-            /** @param {string | null} value */
-            string(value){
+            /** @param {string | null} value @param {boolean} [wide] */
+            string(value, wide = false){
                 if (value === null)
                 {
                     return 0;
                 }
-                const bytes = ansi(value);
-                const at = this.block(Math.max(bytes.length, MAX_PATH));
+                const bytes = encodeIn(value, wide);
+                const at = this.block(Math.max(bytes.length, MAX_PATH * (wide ? 2 : 1)));
                 host.writeMemory(at, bytes);
                 return at;
             },
@@ -417,10 +712,14 @@ export function createSetupapiFunctions(host){
      * SetupIterateCabinet's walk over one cabinet: CABINETINFO, then for
      * each file FILEINCABINET, and FILEEXTRACTED for each one extracted.
      *
+     * The notifications' structures are the W ones for the W call: strings
+     * in UTF-16, and the target name a buffer of WCHARs.
+     *
      * @param {Uint8Array} bytes @param {string} full @param {number} pathArgument
      * @param {number} callback @param {number} context @param {any} thread
+     * @param {boolean} wide
      */
-    const iterateCabinet = async(bytes, full, pathArgument, callback, context, thread)=>{
+    const iterateCabinet = async(bytes, full, pathArgument, callback, context, thread, wide)=>{
         let cabinet;
         try
         {
@@ -441,9 +740,9 @@ export function createSetupapiFunctions(host){
         {
             const info = memory.block(16);
             const infoView = new DataView(new ArrayBuffer(16));
-            infoView.setUint32(0, memory.string(directoryOf(full)), true);
-            infoView.setUint32(4, memory.string(cabinet.next ?? ''), true);
-            infoView.setUint32(8, memory.string(''), true);
+            infoView.setUint32(0, memory.string(directoryOf(full), wide), true);
+            infoView.setUint32(4, memory.string(cabinet.next ?? '', wide), true);
+            infoView.setUint32(8, memory.string('', wide), true);
             infoView.setUint16(12, cabinet.setId, true);
             infoView.setUint16(14, cabinet.index, true);
             host.writeMemory(info, new Uint8Array(infoView.buffer));
@@ -455,11 +754,12 @@ export function createSetupapiFunctions(host){
 
             /** @type {Map<number, Uint8Array>} */
             const streams = new Map();
-            const record = memory.block(FILE_IN_CABINET_INFO_SIZE);
+            const recordSize = wide ? FILE_IN_CABINET_INFO_W_SIZE : FILE_IN_CABINET_INFO_SIZE;
+            const record = memory.block(recordSize);
             const paths = memory.block(FILEPATHS_SIZE);
             for (const file of cabinet.files)
             {
-                const name = memory.string(file.name);
+                const name = memory.string(file.name, wide);
                 const fields = new DataView(new ArrayBuffer(CABINET_TARGET_OFFSET));
                 fields.setUint32(0, name, true);
                 fields.setUint32(4, file.size, true);
@@ -468,7 +768,8 @@ export function createSetupapiFunctions(host){
                 fields.setUint16(14, file.time, true);
                 fields.setUint16(16, file.attributes, true);
                 host.writeMemory(record, new Uint8Array(fields.buffer));
-                host.writeMemory(record + CABINET_TARGET_OFFSET, new Uint8Array(MAX_PATH));
+                host.writeMemory(record + CABINET_TARGET_OFFSET,
+                    new Uint8Array(recordSize - CABINET_TARGET_OFFSET));
                 const operation = await notify(SPFILENOTIFY.FILEINCABINET, record, pathArgument);
                 if (operation === FILEOP.ABORT)
                 {
@@ -478,7 +779,7 @@ export function createSetupapiFunctions(host){
                 {
                     continue;
                 }
-                const target = host.readCString(record + CABINET_TARGET_OFFSET, MAX_PATH);
+                const target = textOf(record + CABINET_TARGET_OFFSET, wide) ?? '';
                 let error = ERROR_SUCCESS;
                 const folder = folderOf(cabinet, file);
                 if (!folder)
@@ -495,7 +796,7 @@ export function createSetupapiFunctions(host){
                             stream = decodeFolder(cabinet, file.folder);
                             streams.set(file.folder, stream);
                         }
-                        error = writeWhole(host.fullPath(target),
+                        error = writeWhole(pathOf(target),
                             stream.subarray(file.offset, file.offset + file.size));
                     }
                     catch {
@@ -503,7 +804,7 @@ export function createSetupapiFunctions(host){
                     }
                 }
                 const pathsView = new DataView(new ArrayBuffer(FILEPATHS_SIZE));
-                pathsView.setUint32(0, memory.string(target), true);
+                pathsView.setUint32(0, memory.string(target, wide), true);
                 pathsView.setUint32(4, pathArgument >>> 0, true);
                 pathsView.setUint32(8, error, true);
                 host.writeMemory(paths, new Uint8Array(pathsView.buffer));
@@ -573,16 +874,17 @@ export function createSetupapiFunctions(host){
      * @param {number} owner @param {number} progress @param {number} message
      */
     const defaultContext = (owner, progress, message)=>{
-        const at = host.allocate(DEFAULT_CONTEXT_SIZE);
+        const at = host.allocate(DEFAULT_CONTEXT.SIZE);
         if (!at)
         {
             return fail(ERROR_NOT_ENOUGH_MEMORY);
         }
-        const bytes = new Uint8Array(DEFAULT_CONTEXT_SIZE);
+        const bytes = new Uint8Array(DEFAULT_CONTEXT.SIZE);
         const view = new DataView(bytes.buffer);
-        view.setUint32(0, owner >>> 0, true);
-        view.setUint32(4, progress >>> 0, true);
-        view.setUint32(8, message >>> 0, true);
+        view.setUint32(0, DEFAULT_CONTEXT.MAGIC, true);
+        view.setUint32(DEFAULT_CONTEXT.OWNER, owner >>> 0, true);
+        view.setUint32(DEFAULT_CONTEXT.PROGRESS, progress >>> 0, true);
+        view.setUint32(DEFAULT_CONTEXT.MESSAGE, message >>> 0, true);
         host.writeMemory(at, bytes);
         callbackContexts.add(at);
         return at;
@@ -593,20 +895,44 @@ export function createSetupapiFunctions(host){
      * sequence of SetupCommitFileQueue, each notification's structures laid
      * out in guest memory.
      *
-     * @param {any} queue @param {number} callback @param {number} context @param {any} thread
+     * The callback is the program's, at an address, or the default one
+     * answered here, a function, when no program callback is in the way. The
+     * structures are the W ones for a W call.
+     *
+     * @param {any} queue @param {QueueCallback} callback
+     * @param {number} context @param {any} thread @param {boolean} [wide]
      */
-    const commit = async(queue, callback, context, thread)=>{
+    const commit = async(queue, callback, context, thread, wide = false)=>{
         const memory = scratch();
         try
         {
             const paths = memory.block(FILEPATHS_SIZE);
             const media = memory.block(SOURCE_MEDIA_SIZE);
-            const newPath = memory.block(MAX_PATH);
+            const newPath = memory.block(MAX_PATH * 2);
             return await commitQueue(queue, {
-                files: host.files,
-                readWhole,
-                writeWhole,
-                makeDirectories,
+                exists: path=>exists(pathOf(path)),
+                remove: path=>{
+                    const full = pathOf(path);
+                    if (full !== null && exists(full))
+                    {
+                        host.files.remove(full);
+                    }
+                },
+                rename: (from, to)=>{
+                    const source = pathOf(from);
+                    const target = pathOf(to);
+                    return source !== null && target !== null && exists(source)
+                        && Boolean(host.files.rename(source, target));
+                },
+                readWhole: path=>readWhole(pathOf(path)),
+                writeWhole: (path, bytes)=>writeWhole(pathOf(path), bytes),
+                makeDirectories: directory=>{
+                    const full = pathOf(directory);
+                    if (full !== null)
+                    {
+                        makeDirectories(full);
+                    }
+                },
                 /**
                  * @param {number} message
                  * @param {{ kind: 'paths', target: string | null, source: string | null,
@@ -616,43 +942,58 @@ export function createSetupapiFunctions(host){
                  * @param {number} second
                  */
                 notify: async(message, first, second)=>{
-                    let param1;
-                    let param2 = second;
-                    if (first.kind === 'paths')
+                    if (typeof callback === 'function')
                     {
-                        const view = new DataView(new ArrayBuffer(FILEPATHS_SIZE));
-                        view.setUint32(0, memory.string(first.target), true);
-                        view.setUint32(4, memory.string(first.source), true);
-                        view.setUint32(8, first.error ?? 0, true);
-                        host.writeMemory(paths, new Uint8Array(view.buffer));
-                        param1 = paths;
-                        if (message === SPFILENOTIFY.COPYERROR)
+                        return callback(message, first);
+                    }
+                    // A notification's strings live while the callback has them:
+                    // a callback that keeps answering NEEDMEDIA with a path is
+                    // asked again for as long as it does.
+                    const strings = scratch();
+                    try
+                    {
+                        let param1;
+                        let param2 = second;
+                        if (first.kind === 'paths')
                         {
-                            host.writeMemory(newPath, new Uint8Array(MAX_PATH));
+                            const view = new DataView(new ArrayBuffer(FILEPATHS_SIZE));
+                            view.setUint32(0, strings.string(first.target, wide), true);
+                            view.setUint32(4, strings.string(first.source, wide), true);
+                            view.setUint32(8, first.error ?? 0, true);
+                            host.writeMemory(paths, new Uint8Array(view.buffer));
+                            param1 = paths;
+                            if (message === SPFILENOTIFY.COPYERROR)
+                            {
+                                host.writeMemory(newPath, new Uint8Array(MAX_PATH * 2));
+                                param2 = newPath;
+                            }
+                        }
+                        else if (first.kind === 'media')
+                        {
+                            const view = new DataView(new ArrayBuffer(SOURCE_MEDIA_SIZE));
+                            view.setUint32(4, strings.string(first.tagfile, wide), true);
+                            view.setUint32(8, strings.string(first.description, wide), true);
+                            view.setUint32(12, strings.string(first.path, wide), true);
+                            view.setUint32(16, strings.string(first.file, wide), true);
+                            view.setUint32(20, first.flags, true);
+                            host.writeMemory(media, new Uint8Array(view.buffer));
+                            host.writeMemory(newPath, new Uint8Array(MAX_PATH * 2));
+                            param1 = media;
                             param2 = newPath;
                         }
+                        else
+                        {
+                            param1 = first.value;
+                        }
+                        const answer = (await host.call(callback >>> 0,
+                            [context >>> 0, message, param1 >>> 0, param2 >>> 0], thread)) >>> 0;
+                        const path = param2 === newPath ? textOf(newPath, wide) ?? '' : '';
+                        return { answer, path };
                     }
-                    else if (first.kind === 'media')
+                    finally
                     {
-                        const view = new DataView(new ArrayBuffer(SOURCE_MEDIA_SIZE));
-                        view.setUint32(4, memory.string(first.tagfile), true);
-                        view.setUint32(8, memory.string(first.description), true);
-                        view.setUint32(12, memory.string(first.path), true);
-                        view.setUint32(16, memory.string(first.file), true);
-                        view.setUint32(20, first.flags, true);
-                        host.writeMemory(media, new Uint8Array(view.buffer));
-                        host.writeMemory(newPath, new Uint8Array(MAX_PATH));
-                        param1 = media;
-                        param2 = newPath;
+                        strings.release();
                     }
-                    else
-                    {
-                        param1 = first.value;
-                    }
-                    const answer = (await host.call(callback >>> 0,
-                        [context >>> 0, message, param1 >>> 0, param2 >>> 0], thread)) >>> 0;
-                    const path = param2 === newPath ? host.readCString(newPath, MAX_PATH) : '';
-                    return { answer, path };
                 },
             });
         }
@@ -663,19 +1004,1287 @@ export function createSetupapiFunctions(host){
     };
 
     /**
-     * The devices of a set a HDEVINFO names, or null for a handle that is
-     * not one.
+     * SetupDiGetActualSectionToInstall's body.
      *
-     * @param {number} handle @returns {any[] | null}
+     * @param {number} handle @param {string | null} section @param {number} buffer
+     * @param {number} size @param {number} required @param {number} extension
+     * @param {boolean} wide
+     */
+    const actualSection = (handle, section, buffer, size, required, extension, wide)=>{
+        const open = openInf(handle);
+        if (!open)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (section === null)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const decoration = ['.NTx86', '.NT'].find(suffix=>open.inf.section(section + suffix))
+            ?? '';
+        if (!answerText(section + decoration, buffer, size, required, wide))
+        {
+            return 0;
+        }
+        if ((extension >>> 0) !== 0 && (buffer >>> 0) !== 0)
+        {
+            writeU32(extension, decoration === '' ? 0
+                : (buffer >>> 0) + section.length * (wide ? 2 : 1));
+        }
+        return fail(ERROR_SUCCESS, 1);
+    };
+
+    /**
+     * The key of a class, or of all of them: the installer's under
+     * Control\\Class, the interfaces' under Control\\DeviceClasses -- the
+     * root made when it is not there yet.
+     *
+     * @param {string | null} classGuid @param {number} flags
+     */
+    const classKey = (classGuid, flags)=>{
+        const root = flags === DIOCR_INTERFACE ? DEVICE_CLASSES_KEY : CLASS_KEY;
+        const hive = host.registry;
+        if (!hive || !host.keyHandle)
+        {
+            return fail(ERROR_INVALID_CLASS, INVALID_HANDLE_VALUE);
+        }
+        if (classGuid === null)
+        {
+            hive.create(hive.root(HKEY_LOCAL_MACHINE), root);
+            return fail(ERROR_SUCCESS, host.keyHandle(root) || INVALID_HANDLE_VALUE);
+        }
+        const handle = host.keyHandle(`${root}\\${classGuid}`);
+        return handle ? fail(ERROR_SUCCESS, handle)
+            : fail(ERROR_INVALID_CLASS, INVALID_HANDLE_VALUE);
+    };
+
+    /**
+     * SetupDiInstallClass's body.
+     *
+     * @param {string | null} name @param {number} flags @param {number} queue
+     */
+    const installClass = (name, flags, queue)=>{
+        if (name === null || ((flags & DI_NOVCP) !== 0 && queue === 0))
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const hive = host.registry;
+        const candidates = infCandidates(name);
+        const path = candidates.find(place=>host.files.stat(place)) ?? candidates[0];
+        const thread = host.callerThread();
+        /** @param {{ open: OpenInf } | { error: number, line: number }} result */
+        const finish = result=>{
+            if ('error' in result)
+            {
+                host.setLastErrorFor(thread, result.error);
+                return 0;
+            }
+            const { inf } = result.open;
+            const guid = (inf.value('Version', 'ClassGUID') ?? '').toLowerCase();
+            if (!hive || !/^\{[0-9a-f-]{36}\}$/.test(guid))
+            {
+                host.setLastErrorFor(thread, ERROR_INVALID_CLASS);
+                return 0;
+            }
+            const { key } = hive.create(hive.root(HKEY_LOCAL_MACHINE), `${CLASS_KEY}\\${guid}`);
+            hive.setValue(key, 'Class', 1, ansi(inf.value('Version', 'Class') ?? ''));
+            const section = ['ClassInstall32.NTx86', 'ClassInstall32.NT', 'ClassInstall32']
+                .map(candidate=>inf.section(candidate)).find(Boolean);
+            if (section)
+            {
+                installRegistry(hive, inf, section, {
+                    relativeRoot: key,
+                    expand: value=>expand(result.open, value),
+                    divergence: detail=>host.divergence?.('SetupDiInstallClass', detail),
+                });
+            }
+            host.setLastErrorFor(thread, ERROR_SUCCESS);
+            return 1;
+        };
+        const loaded = loadInf(path);
+        return 'then' in loaded ? loaded.then(finish) : finish(loaded);
+    };
+
+    /** Where devices and their interfaces are kept: the registry. */
+    const devices = host.registry ? createDeviceStore(host.registry) : null;
+    devices?.seedMachine();
+
+    /**
+     * The set a HDEVINFO names, or null for a handle that is not one.
+     *
+     * @param {number} handle @returns {import('./devices.js').DeviceSet | null}
      */
     const deviceSet = handle=>{
         try
         {
-            return host.handles.resolve(handle >>> 0, 'device-info-set')?.devices ?? null;
+            return host.handles.resolve(handle >>> 0, 'device-info-set') ?? null;
         }
         catch {
             return null;
         }
+    };
+
+    /** A new, empty set. @param {string | null} classGuid */
+    const newSet = classGuid=>host.handles.open('device-info-set',
+        { classGuid, devices: [], made: new Set(), faces: new Map() });
+
+    /** A GUID from guest memory, as lower-case text; null for none. @param {number} pointer */
+    const guidAt = pointer=>((pointer >>> 0) === 0 ? null
+        : guidText(host.readMemory(pointer >>> 0, 16).slice()).toLowerCase());
+
+    /** @param {number} address @param {string} guid  Braced. */
+    const writeGuid = (address, guid)=>host.writeMemory(address >>> 0, guidBytes(guid));
+
+    /** A GUID's sixteen bytes. @param {string} guid  Braced. */
+    const guidBytes = guid=>{
+        const hex = guid.replace(/[{}-]/g, '');
+        const bytes = new Uint8Array(16);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, Number.parseInt(hex.slice(0, 8), 16), true);
+        view.setUint16(4, Number.parseInt(hex.slice(8, 12), 16), true);
+        view.setUint16(6, Number.parseInt(hex.slice(12, 16), 16), true);
+        for (let at = 0; at < 8; at++)
+        {
+            bytes[8 + at] = Number.parseInt(hex.slice(16 + at * 2, 18 + at * 2), 16);
+        }
+        return bytes;
+    };
+
+    /**
+     * SP_DEVINFO_DATA after its cbSize: the class, the device node, and
+     * which device of its set it is.
+     *
+     * @param {number} address @param {import('./devices.js').Device} device
+     */
+    const writeDevice = (address, device)=>{
+        writeGuid(address + 4, device.classGuid);
+        writeU32(address + 20, device.devnode);
+        writeU32(address + 24, device.key);
+    };
+
+    /**
+     * Device data a set handed out: its cbSize right and its device the
+     * set's. Null otherwise.
+     *
+     * @param {import('./devices.js').DeviceSet} set @param {number} address
+     */
+    const deviceIn = (set, address)=>{
+        if ((address >>> 0) === 0 || readU32(address) !== SP_DEVINFO_DATA_SIZE)
+        {
+            return null;
+        }
+        const key = readU32(address + 24);
+        return set.devices.find(device=>device.key === key) ?? null;
+    };
+
+    /** A DEVPROPKEY at an address: its format, braced and lower case, and its id. @param {number} address */
+    const propKeyAt = address=>({
+        fmtid: guidText(host.readMemory(address >>> 0, 16).slice()).toLowerCase(),
+        pid: readU32((address >>> 0) + 16),
+    });
+
+    /** UTF-16, terminated. @param {string} value */
+    const utf16z = value=>encodeIn(value, true);
+
+    /**
+     * The properties of a device the system keeps, by format and id: how
+     * each is answered, null when the device has none. None can be set to
+     * anything but what it is.
+     *
+     * @typedef {(device: import('./devices.js').Device) =>
+     *     { type: number, data: Uint8Array } | null} Innate
+     * @type {Map<string, Innate>}
+     */
+    const INNATE = new Map(/** @type {[string, Innate][]} */ ([
+        [`${DEVPKEY_INSTANCE}|256`, device=>({ type: DEVPROP_TYPE.STRING,
+            data: utf16z(device.id) })],
+        [`${DEVPKEY_RELATIONS}|8`, ()=>({ type: DEVPROP_TYPE.STRING, data: utf16z(ROOT_ID) })],
+        [`${DEVPKEY_RELATIONS}|10`, device=>({ type: DEVPROP_TYPE.STRING_LIST,
+            data: utf16z([...(devices?.allInstances() ?? [])]
+                .filter(id=>id.toUpperCase() !== device.id.toUpperCase())
+                .map(id=>`${id}\0`).join('')) })],
+        [`${DEVPKEY_RELATIONS}|9`, ()=>null],
+        [`${DEVPKEY_BUS_DESCRIPTION}|4`, ()=>null],
+        [`${DEVPKEY_CONTAINER}|2`, ()=>null],
+    ]));
+
+    /**
+     * A device's property by its key, as SetupDiGetDevicePropertyW answers
+     * it; null for one it has not. A key in the device format whose id is
+     * an SPDRP index plus two is that registry property.
+     *
+     * @param {import('./devices.js').Device} device @param {string} fmtid @param {number} pid
+     * @returns {{ type: number, data: Uint8Array } | null}
+     */
+    const devicePropertyOf = (device, fmtid, pid)=>{
+        const innate = INNATE.get(`${fmtid}|${pid}`);
+        if (innate)
+        {
+            return innate(device);
+        }
+        const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+        if (fmtid === DEVPKEY_DRIVER)
+        {
+            return driverPropertyOf(device, pid);
+        }
+        const key = devices?.instanceKey(device.id) ?? null;
+        if (fmtid === DEVPKEY_DEVICE && pid >= 2)
+        {
+            const spdrp = pid - 2;
+            const entry = propertyEntry(spdrp);
+            if (entry)
+            {
+                const value = readProperty(hive, key, device.id, spdrp, true);
+                if ('error' in value)
+                {
+                    return null;
+                }
+                if (spdrp === SPDRP_CLASSGUID)
+                {
+                    return { type: DEVPROP_TYPE.GUID, data: guidBytes(devices?.classOf(device.id)
+                        ?? GUID_NULL) };
+                }
+                return { type: DEVPROP_OF_REG.get(value.type) ?? DEVPROP_TYPE_BINARY,
+                    data: value.data };
+            }
+        }
+        return key ? storedProperty(hive, key, fmtid, pid) : null;
+    };
+
+    /**
+     * A device's driver property: a value of its driver key, by the name
+     * Windows keeps it under -- the date as the FILETIME DriverDateData
+     * holds, the strings widened, the co-installers a list.
+     *
+     * @param {import('./devices.js').Device} device @param {number} pid
+     * @returns {{ type: number, data: Uint8Array } | null}
+     */
+    const driverPropertyOf = (device, pid)=>{
+        const entry = DRIVER_PROPERTIES.get(pid);
+        const hive = host.registry;
+        const path = devices?.driverPath(device.id) ?? null;
+        const key = entry && hive && path ? hive.open(hive.root(HKEY_LOCAL_MACHINE), path) : null;
+        const value = key ? hive?.getValue(key, entry?.name ?? '') : null;
+        if (!entry || !value)
+        {
+            return null;
+        }
+        if (entry.type === DEVPROP_TYPE_FILETIME)
+        {
+            return value.data.length === 8 ? { type: entry.type, data: value.data.slice() } : null;
+        }
+        const stored = decodeAnsi(value.data);
+        return { type: entry.type, data: utf16z(entry.type === DEVPROP_TYPE.STRING_LIST
+            ? stored.replace(/\0+$/, '\0') : stored.replace(/\0[\s\S]*$/, '')) };
+    };
+
+    /**
+     * Sets a device's property, or deletes it for DEVPROP_TYPE_EMPTY or
+     * NULL; the error, 0 for none.
+     *
+     * @param {import('./devices.js').Device} device @param {string} fmtid @param {number} pid
+     * @param {number} type @param {Uint8Array} data
+     */
+    const setDeviceProperty = (device, fmtid, pid, type, data)=>{
+        const removing = type === DEVPROP_TYPE.EMPTY || type === DEVPROP_TYPE.NULL;
+        const innate = INNATE.get(`${fmtid}|${pid}`);
+        if (innate)
+        {
+            const now = innate(device);
+            const same = now !== null && !removing && now.type === type
+                && now.data.length === data.length && now.data.every((byte, at)=>byte === data[at]);
+            return same ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
+        }
+        const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+        const key = devices?.instanceKey(device.id) ?? null;
+        if (!key)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if (fmtid === DEVPKEY_DEVICE && pid >= 2 && pid - 2 <= SPDRP_BASE_CONTAINERID)
+        {
+            const spdrp = pid - 2;
+            const entry = propertyEntry(spdrp);
+            if (spdrp === SPDRP_BASE_CONTAINERID)
+            {
+                return ERROR_INVALID_REG_PROPERTY;
+            }
+            if ((entry && !entry.settable) || spdrp === SPDRP_PHYSICAL_DEVICE_OBJECT_NAME)
+            {
+                return ERROR_ACCESS_DENIED;
+            }
+            if (entry)
+            {
+                if (removing)
+                {
+                    return hive.deleteValue(key, entry.name) ? ERROR_SUCCESS : ERROR_NOT_FOUND;
+                }
+                if (spdrp === SPDRP_CLASSGUID)
+                {
+                    if (type !== DEVPROP_TYPE.GUID || data.length !== 16)
+                    {
+                        return ERROR_INVALID_DATA;
+                    }
+                    hive.setValue(key, entry.name, 1, encodeAnsi(`${guidText(data)
+                        .toLowerCase()}\0`));
+                    return ERROR_SUCCESS;
+                }
+                if (DEVPROP_OF_REG.get(entry.type) !== type)
+                {
+                    return ERROR_INVALID_DATA;
+                }
+                return writeProperty(hive, key, spdrp, data, true);
+            }
+        }
+        if (removing)
+        {
+            return deleteProperty(hive, key, fmtid, pid) ? ERROR_SUCCESS : ERROR_NOT_FOUND;
+        }
+        storeProperty(hive, key, fmtid, pid, type, data);
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * The keys of the properties a device has: the system's it has, the
+     * registry properties with a value, and its own.
+     *
+     * @param {import('./devices.js').Device} device
+     */
+    const devicePropertyKeys = device=>{
+        /** @type {{ fmtid: string, pid: number }[]} */
+        const keys = [];
+        for (const [name, answer] of INNATE)
+        {
+            if (answer(device))
+            {
+                const [fmtid, pid] = name.split('|');
+                keys.push({ fmtid, pid: Number(pid) });
+            }
+        }
+        for (let spdrp = 0; spdrp < SPDRP_BASE_CONTAINERID; spdrp++)
+        {
+            if (propertyEntry(spdrp) && devicePropertyOf(device, DEVPKEY_DEVICE, spdrp + 2))
+            {
+                keys.push({ fmtid: DEVPKEY_DEVICE, pid: spdrp + 2 });
+            }
+        }
+        const key = devices?.instanceKey(device.id) ?? null;
+        return key ? [...keys, ...storedKeys(host.registry, key)] : keys;
+    };
+
+    /**
+     * The installer classes the machine has: each class key's GUID and its
+     * Class name.
+     *
+     * @returns {{ guid: string, name: string }[]}
+     */
+    const installedClasses = ()=>{
+        const hive = host.registry;
+        const root = hive?.open(hive.root(HKEY_LOCAL_MACHINE), CLASS_KEY) ?? null;
+        if (!hive || !root)
+        {
+            return [];
+        }
+        return hive.subkeys(root).map((/** @type {string} */ guid)=>{
+            const key = hive.open(root, guid);
+            const value = key ? hive.getValue(key, 'Class') : null;
+            return { guid: guid.toLowerCase(),
+                name: value ? decodeAnsi(value.data).replace(/\0[\s\S]*$/, '') : '' };
+        });
+    };
+
+    /**
+     * A list of strings as the CM_ calls answer it: each terminated, an
+     * empty one after the last, sized in characters; too small a buffer is
+     * CR_BUFFER_SMALL, nothing written.
+     *
+     * @param {string} strings  Each terminated already.
+     * @param {number} buffer @param {number} length @param {boolean} wide
+     */
+    const answerList = (strings, buffer, length, wide)=>{
+        if ((length >>> 0) < strings.length + 1)
+        {
+            return CR_BUFFER_SMALL;
+        }
+        host.writeMemory(buffer >>> 0, encodeIn(strings, wide));
+        return CR_SUCCESS;
+    };
+
+    /**
+     * CM_Get_Device_ID_List's instances for a filter, or the CONFIGRET
+     * that refuses it.
+     *
+     * @param {string | null} filter @param {number} flags
+     * @returns {{ text: string } | { error: number }}
+     */
+    const deviceIdList = (filter, flags)=>{
+        const ids = devices?.allInstances(flags === CM_GETIDLIST_FILTER_CLASS ? 'tree'
+            : 'registry') ?? [];
+        /** @param {(id: string) => boolean} keep */
+        const listed = keep=>({ text: ids.filter(keep).map(id=>`${id}\0`).join('') });
+        if (flags === CM_GETIDLIST_FILTER_NONE)
+        {
+            return listed(()=>true);
+        }
+        if (filter === null)
+        {
+            return { error: CR_INVALID_POINTER };
+        }
+        if (flags === CM_GETIDLIST_FILTER_ENUMERATOR)
+        {
+            const prefix = `${filter.replace(/\\$/, '')}\\`.toUpperCase();
+            return listed(id=>id.toUpperCase().startsWith(prefix));
+        }
+        if (flags === CM_GETIDLIST_FILTER_CLASS)
+        {
+            const guid = filter.toLowerCase();
+            return listed(id=>devices?.classOf(id) === guid);
+        }
+        return { error: CR_INVALID_FLAG };
+    };
+
+    /**
+     * CM_Get_Device_Interface_List's links, or the CONFIGRET that refuses
+     * the arguments.
+     *
+     * @param {number} classGuid @param {string | null} deviceId @param {number} flags
+     * @returns {{ text: string } | { error: number }}
+     */
+    const interfaceList = (classGuid, deviceId, flags)=>{
+        if ((flags & ~CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES) !== 0)
+        {
+            return { error: CR_INVALID_FLAG };
+        }
+        const guid = guidAt(classGuid);
+        const all = (flags & CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES) !== 0;
+        const wanted = deviceId === null || deviceId === '' ? null : deviceId.toUpperCase();
+        const links = (devices?.allInstances('tree') ?? [])
+            .filter(id=>(wanted === null || id.toUpperCase() === wanted)
+                && (all || devices?.registered(id)))
+            .flatMap(id=>(devices?.storedInterfaces(id) ?? [])
+                .filter(face=>face.classGuid === guid)
+                .map(face=>interfacePath(id, face.classGuid, face.reference)));
+        return { text: links.map(link=>`${link}\0`).join('') };
+    };
+
+    /**
+     * The Device Parameters key of the interface interface data names, or
+     * the error: a removed interface has none.
+     *
+     * @param {number} handle @param {number} data
+     * @returns {{ path: string } | { error: number }}
+     */
+    const interfaceKey = (handle, data)=>{
+        const set = deviceSet(handle);
+        if (!set || !devices || !host.registry)
+        {
+            return { error: ERROR_INVALID_HANDLE };
+        }
+        const held = interfaceIn(set, data);
+        if (!held)
+        {
+            return { error: ERROR_INVALID_PARAMETER };
+        }
+        if ((held.face.flags & SPINT.REMOVED) !== 0)
+        {
+            return { error: ERROR_DEVICE_INTERFACE_REMOVED };
+        }
+        return { path: `${devices.interfaceKeyPath(held.device.id, held.face.classGuid,
+            held.face.reference)}\\Device Parameters` };
+    };
+
+    /**
+     * @template T
+     * @typedef {Object} PropertyTarget  What a set of property calls works on.
+     * @property {(handle: number, data: number) => { target: T } | { error: number }} resolve
+     * @property {(target: T, fmtid: string, pid: number) =>
+     *     { type: number, data: Uint8Array } | null} read
+     * @property {(target: T, fmtid: string, pid: number, type: number, bytes: Uint8Array)
+     *     => number} write  The error, 0 for none.
+     * @property {(target: T) => { fmtid: string, pid: number }[]} keys
+     * @property {number} noKeyOnGet  What the Get call answers no property key with.
+     */
+
+    /**
+     * The unified property model's three calls -- set, get, list the keys
+     * -- for devices or interfaces alike, the arguments checked in
+     * Windows' order.
+     *
+     * @template T @template {string} S @template {string} G @template {string} K
+     * @param {S} setName @param {G} getName @param {K} keysName
+     * @param {PropertyTarget<T>} on
+     * @returns {Record<S | G | K, { argBytes: number, handler: (args: number[]) => number }>}
+     */
+    const propertyCalls = (setName, getName, keysName, on)=>/** @type {any} */ ({
+        [setName]: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, keyPointer, type, buffer, size,
+                flags])=>{
+                const found = on.resolve(handle, data);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                if ((keyPointer >>> 0) === 0 || !validType(type >>> 0))
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                if ((buffer >>> 0) === 0 && (size >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                const removing = (type >>> 0) === DEVPROP_TYPE.EMPTY
+                    || (type >>> 0) === DEVPROP_TYPE.NULL;
+                if (!removing && (size >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_FLAGS);
+                }
+                const { fmtid, pid } = propKeyAt(keyPointer);
+                const bytes = removing ? new Uint8Array(0)
+                    : host.readMemory(buffer >>> 0, size >>> 0).slice();
+                const error = on.write(found.target, fmtid, pid, type >>> 0, bytes);
+                return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
+            },
+        },
+        [getName]: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, keyPointer, typeOut, buffer, size,
+                required, flags])=>{
+                const found = on.resolve(handle, data);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                if ((keyPointer >>> 0) === 0)
+                {
+                    return fail(on.noKeyOnGet);
+                }
+                if ((typeOut >>> 0) === 0 || ((buffer >>> 0) === 0 && (size >>> 0) !== 0))
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_FLAGS);
+                }
+                const { fmtid, pid } = propKeyAt(keyPointer);
+                const value = on.read(found.target, fmtid, pid);
+                if (!value)
+                {
+                    return fail(ERROR_NOT_FOUND);
+                }
+                writeU32(typeOut, value.type);
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, value.data.length);
+                }
+                if ((size >>> 0) < value.data.length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory(buffer >>> 0, value.data);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+        [keysName]: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, array, count, required, flags])=>{
+                const found = on.resolve(handle, data);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                if ((array >>> 0) === 0 && (count >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_FLAGS);
+                }
+                const keys = on.keys(found.target);
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, keys.length);
+                }
+                if ((count >>> 0) < keys.length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                keys.forEach((key, index)=>{
+                    const at = (array >>> 0) + index * DEVPROPKEY_SIZE;
+                    writeGuid(at, key.fmtid);
+                    writeU32(at + 16, key.pid);
+                });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+    });
+
+    /**
+     * An interface's properties the system keeps: whether it is enabled,
+     * its class, its device's instance id.
+     *
+     * @typedef {{ device: import('./devices.js').Device,
+     *     face: import('./devices.js').DeviceInterface }} HeldInterface
+     * @typedef {(held: HeldInterface) => { type: number, data: Uint8Array }} InterfaceInnate
+     * @type {Map<string, InterfaceInnate>}
+     */
+    const INTERFACE_INNATE = new Map(/** @type {[string, InterfaceInnate][]} */ ([
+        [`${DEVPKEY_INTERFACE}|3`, held=>({ type: DEVPROP_TYPE_BOOLEAN,
+            data: Uint8Array.of((held.face.flags & SPINT.ACTIVE) !== 0 ? 0xff : 0) })],
+        [`${DEVPKEY_INTERFACE}|4`, held=>({ type: DEVPROP_TYPE.GUID,
+            data: guidBytes(held.face.classGuid) })],
+        [`${DEVPKEY_INSTANCE}|256`, held=>({ type: DEVPROP_TYPE.STRING,
+            data: utf16z(held.device.id) })],
+    ]));
+
+    /** An interface's own key in the hive, made when `create`. @param {HeldInterface} held @param {boolean} create */
+    const interfaceHiveKey = (held, create)=>{
+        const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+        const path = /** @type {NonNullable<typeof devices>} */ (devices)
+            .interfaceKeyPath(held.device.id, held.face.classGuid, held.face.reference);
+        const root = hive.root(HKEY_LOCAL_MACHINE);
+        return create ? hive.create(root, path).key : hive.open(root, path);
+    };
+
+    /** @param {HeldInterface} held @param {string} fmtid @param {number} pid */
+    const interfacePropertyOf = (held, fmtid, pid)=>{
+        const innate = INTERFACE_INNATE.get(`${fmtid}|${pid}`);
+        if (innate)
+        {
+            return innate(held);
+        }
+        const key = interfaceHiveKey(held, false);
+        return key ? storedProperty(host.registry, key, fmtid, pid) : null;
+    };
+
+    /**
+     * Sets an interface's property; whether it is enabled only to what it
+     * is, a boolean being 0 or 0xff.
+     *
+     * @param {HeldInterface} held @param {string} fmtid @param {number} pid
+     * @param {number} type @param {Uint8Array} bytes
+     */
+    const setInterfaceProperty = (held, fmtid, pid, type, bytes)=>{
+        const removing = type === DEVPROP_TYPE.EMPTY || type === DEVPROP_TYPE.NULL;
+        const innate = INTERFACE_INNATE.get(`${fmtid}|${pid}`);
+        if (innate)
+        {
+            const now = innate(held);
+            if (removing || type !== now.type
+                || (type === DEVPROP_TYPE_BOOLEAN && (bytes.length !== 1
+                    || (bytes[0] !== 0 && bytes[0] !== 0xff))))
+            {
+                return removing ? ERROR_ACCESS_DENIED : ERROR_INVALID_DATA;
+            }
+            return now.data.length === bytes.length
+                && now.data.every((byte, at)=>byte === bytes[at]) ? ERROR_SUCCESS
+                : ERROR_ACCESS_DENIED;
+        }
+        if (removing)
+        {
+            const key = interfaceHiveKey(held, false);
+            return key && deleteProperty(host.registry, key, fmtid, pid) ? ERROR_SUCCESS
+                : ERROR_NOT_FOUND;
+        }
+        storeProperty(host.registry, interfaceHiveKey(held, true), fmtid, pid, type, bytes);
+        return ERROR_SUCCESS;
+    };
+
+    /** @param {HeldInterface} held */
+    const interfacePropertyKeys = held=>{
+        const innate = [...INTERFACE_INNATE.keys()].map(name=>{
+            const [fmtid, pid] = name.split('|');
+            return { fmtid, pid: Number(pid) };
+        });
+        const key = interfaceHiveKey(held, false);
+        return key ? [...innate, ...storedKeys(host.registry, key)] : innate;
+    };
+
+    /**
+     * SP_DEVINSTALL_PARAMS's size in a call's width: nine DWORDs, then
+     * MAX_PATH characters of driver path.
+     *
+     * @param {boolean} wide
+     */
+    const installParamsSize = wide=>INSTALL_PARAMS_FIELDS + MAX_PATH * (wide ? 2 : 1);
+
+    /**
+     * The install parameters of each device, and of each set for the calls
+     * that name no device: the eight DWORDs after cbSize, and the path.
+     *
+     * @type {WeakMap<object, { words: number[], driverPath: string }>}
+     */
+    const installParams = new WeakMap();
+
+    /**
+     * The install parameters a call names, or its error.
+     *
+     * @param {number} handle @param {number} data @param {number} params @param {boolean} wide
+     * @returns {{ held: { words: number[], driverPath: string } } | { error: number }}
+     */
+    const installParamsOf = (handle, data, params, wide)=>{
+        const set = deviceSet(handle);
+        if (!set)
+        {
+            return { error: ERROR_INVALID_HANDLE };
+        }
+        const owner = (data >>> 0) === 0 ? set : deviceIn(set, data);
+        if (!owner)
+        {
+            return { error: ERROR_INVALID_PARAMETER };
+        }
+        if ((params >>> 0) === 0 || readU32(params) !== installParamsSize(wide))
+        {
+            return { error: ERROR_INVALID_USER_BUFFER };
+        }
+        let held = installParams.get(owner);
+        if (!held)
+        {
+            held = { words: new Array(INSTALL_PARAMS_WORDS).fill(0), driverPath: '' };
+            installParams.set(owner, held);
+        }
+        return { held };
+    };
+
+    /**
+     * Each device's driver lists, and each set's class list: the lists by
+     * type, and the driver selected.
+     *
+     * @type {WeakMap<object, { lists: Map<number, import('./drivers.js').Driver[]>,
+     *     selected: { type: number, index: number } | null }>}
+     */
+    const driverLists = new WeakMap();
+
+    /**
+     * Whose driver list a call names, or its error: a device's, or with no
+     * device the set's -- which has a class list only.
+     *
+     * @param {number} handle @param {number} data @param {number | null} type  null for any.
+     * @returns {{ owner: object, set: import('./devices.js').DeviceSet,
+     *     device: import('./devices.js').Device | null } | { error: number }}
+     */
+    const driverOwner = (handle, data, type)=>{
+        const set = deviceSet(handle);
+        if (!set)
+        {
+            return { error: ERROR_INVALID_HANDLE };
+        }
+        if (type !== null && (type >>> 0) !== SPDIT_CLASSDRIVER
+            && (type >>> 0) !== SPDIT_COMPATDRIVER)
+        {
+            return { error: ERROR_INVALID_PARAMETER };
+        }
+        if ((data >>> 0) === 0)
+        {
+            return type !== null && (type >>> 0) === SPDIT_COMPATDRIVER
+                ? { error: ERROR_INVALID_PARAMETER } : { owner: set, set, device: null };
+        }
+        const device = deviceIn(set, data);
+        return device ? { owner: device, set, device } : { error: ERROR_INVALID_PARAMETER };
+    };
+
+    /** A MULTI_SZ registry value's strings, none for none. @param {any} key @param {string} name */
+    const multiSzOf = (key, name)=>{
+        const value = key && host.registry ? host.registry.getValue(key, name) : null;
+        return value ? decodeAnsi(value.data).split('\0').filter(Boolean) : [];
+    };
+
+    /** A file's last write time as a FILETIME, 0n for none. @param {string} path */
+    const fileDate = path=>{
+        try
+        {
+            const stat = host.files.stat(path);
+            return stat ? msToFileTime(stat.modified ?? 0) : 0n;
+        }
+        catch {
+            return 0n;
+        }
+    };
+
+    /**
+     * Builds a device's or a set's driver list of a type from the INFs its
+     * install parameters point at.
+     *
+     * @param {object} owner @param {import('./devices.js').DeviceSet} set
+     * @param {import('./devices.js').Device | null} device @param {number} type
+     */
+    const buildDrivers = async(owner, set, device, type)=>{
+        const params = installParams.get(owner);
+        const flags = params?.words[0] ?? 0;
+        const given = params?.driverPath ?? '';
+        const target = pathOf(given === '' ? `${windows}\\inf` : given);
+        /** @type {string[]} */
+        let paths = [];
+        if (target !== null && (flags & DI_ENUMSINGLEINF) !== 0)
+        {
+            paths = [target];
+        }
+        else if (target !== null)
+        {
+            paths = host.files.list(target, '*.inf').filter(entry=>!entry.isDirectory)
+                .map(entry=>joinPath(target, entry.name));
+        }
+        const key = device ? devices?.instanceKey(device.id) ?? null : null;
+        const ids = type !== SPDIT_COMPATDRIVER ? null
+            : { hardware: multiSzOf(key, 'HardwareID'),
+                compatible: multiSzOf(key, 'CompatibleIDs') };
+        const classGuid = device ? devices?.classOf(device.id) ?? GUID_NULL : set.classGuid;
+        /** @type {import('./drivers.js').Driver[]} */
+        const list = [];
+        for (const path of paths)
+        {
+            const loaded = await loadInf(path);
+            if ('error' in loaded || loaded.open.inf.style !== INF_STYLE_WIN4)
+            {
+                continue;
+            }
+            const { open } = loaded;
+            if (type === SPDIT_CLASSDRIVER && (open.inf.value('Version', 'ClassGUID') ?? '')
+                .toLowerCase() !== classGuid)
+            {
+                continue;
+            }
+            list.push(...driversOf(open.inf, path, ids, value=>expand(open, value),
+                msToFileTime));
+        }
+        let held = driverLists.get(owner);
+        if (!held)
+        {
+            held = { lists: new Map(), selected: null };
+            driverLists.set(owner, held);
+        }
+        held.lists.set(type, list);
+    };
+
+    /**
+     * The driver SP_DRVINFO_DATA names: its type, and its Reserved, the
+     * driver's place in that list plus one.
+     *
+     * @param {object} owner @param {number} info
+     */
+    const driverOf = (owner, info)=>{
+        if ((info >>> 0) === 0)
+        {
+            return null;
+        }
+        const type = readU32((info >>> 0) + 4);
+        return driverLists.get(owner)?.lists.get(type)?.[readU32((info >>> 0) + 8) - 1] ?? null;
+    };
+
+    /**
+     * SP_DRVINFO_DATA for a driver: the V2 structure, or the V1 one (with
+     * no date and version) when that is the size given.
+     *
+     * @param {number} out @param {number} type @param {number} index
+     * @param {import('./drivers.js').Driver} driver @param {boolean} wide
+     */
+    const answerDriver = (out, type, index, driver, wide)=>{
+        const unit = wide ? 2 : 1;
+        const v1 = 12 + LINE_LEN * 3 * unit;
+        const size = (out >>> 0) === 0 ? 0 : readU32(out);
+        if (size !== v1 && size !== v1 + 16)
+        {
+            return fail(ERROR_INVALID_USER_BUFFER);
+        }
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, size, true);
+        view.setUint32(4, type, true);
+        view.setUint32(8, index + 1, true);
+        [driver.description, driver.manufacturer, driver.provider].forEach((value, at)=>
+            bytes.set(encodeIn(value.slice(0, LINE_LEN - 1), wide), 12 + at * LINE_LEN * unit));
+        if (size > v1)
+        {
+            view.setBigUint64(v1, driver.date, true);
+            view.setBigUint64(v1 + 8, driver.version, true);
+        }
+        host.writeMemory(out >>> 0, bytes);
+        return fail(ERROR_SUCCESS, 1);
+    };
+
+    /**
+     * SP_DRVINFO_DETAIL_DATA's fixed part, up to its HardwareID list.
+     *
+     * @param {boolean} wide
+     */
+    const detailFixed = wide=>DETAIL.SECTION + (LINE_LEN * 2 + MAX_PATH) * (wide ? 2 : 1);
+
+    /**
+     * A device of a set registered: no longer a phantom, nor the set's to
+     * take away with it.
+     *
+     * @param {import('./devices.js').DeviceSet} set @param {import('./devices.js').Device} device
+     */
+    const registerDevice = (set, device)=>{
+        devices?.register(device.id);
+        set.made.delete(device.id.toUpperCase());
+    };
+
+    /**
+     * A device out of the registry: the set keeps it, which no longer has
+     * an instance id, and its interfaces, marked removed.
+     *
+     * @param {import('./devices.js').DeviceSet} set @param {import('./devices.js').Device} device
+     */
+    const removeDevice = (set, device)=>{
+        devices?.removeInstance(device.id);
+        set.made.delete(device.id.toUpperCase());
+        device.removed = true;
+        device.interfaces.forEach(face=>{
+            face.flags |= SPINT.REMOVED;
+        });
+    };
+
+    /**
+     * A class's installers as the registry names them: its co-installers
+     * and its class installer, each a DLL and an entry.
+     *
+     * @param {string | null} classGuid
+     * @returns {{ co: { dll: string, entry: string }[],
+     *     installer: { dll: string, entry: string } | null }}
+     */
+    const installersOf = classGuid=>{
+        const hive = host.registry;
+        const machine = hive?.root(HKEY_LOCAL_MACHINE);
+        if (!hive || !machine || classGuid === null)
+        {
+            return { co: [], installer: null };
+        }
+        /** @param {string} value @param {string} entry */
+        const split = (value, entry)=>{
+            const [dll = '', given = ''] = value.split(',').map(part=>part.trim());
+            return { dll, entry: given || entry };
+        };
+        const coKey = hive.open(machine, CO_INSTALLERS_KEY);
+        const co = multiSzOf(coKey, classGuid).map(value=>split(value, 'CoDeviceInstall'))
+            .filter(entry=>entry.dll !== '');
+        const installed = hive.open(machine, `${CLASS_KEY}\\${classGuid}`);
+        const value = installed ? hive.getValue(installed, 'Installer32') : null;
+        const named = value ? decodeAnsi(value.data).replace(/\0[\s\S]*$/, '') : '';
+        return { co, installer: named === '' ? null : split(named, 'ClassInstall') };
+    };
+
+    /** Whether a class has any installer of its own. @param {string | null} classGuid */
+    const hasInstallers = classGuid=>{
+        const { co, installer } = installersOf(classGuid);
+        return co.length > 0 || installer !== null;
+    };
+
+    /**
+     * An installer's entry, loaded: its address, 0 when it is not there.
+     *
+     * @param {{ dll: string, entry: string }} installer
+     */
+    const installerEntry = async installer=>{
+        const libraries = host.libraries;
+        if (!libraries)
+        {
+            return 0;
+        }
+        const memory = scratch();
+        try
+        {
+            const module = (await libraries.loadAnsi(memory.string(installer.dll))) >>> 0;
+            return module === 0 ? 0
+                : (await libraries.procAddress(module, memory.string(installer.entry))) >>> 0;
+        }
+        finally
+        {
+            memory.release();
+        }
+    };
+
+    /**
+     * SetupDiCallClassInstaller's sequence for a request; the error, 0 for
+     * none.
+     *
+     * @param {number} request @param {number} handle @param {import('./devices.js').DeviceSet} set
+     * @param {import('./devices.js').Device | null} device @param {number} data
+     * @param {any} thread
+     */
+    const callInstallers = async(request, handle, set, device, data, thread)=>{
+        const { co, installer } = installersOf(device ? devices?.classOf(device.id) ?? null
+            : set.classGuid);
+        const memory = scratch();
+        try
+        {
+            /** @type {{ entry: number, context: number }[]} */
+            const after = [];
+            for (const one of co)
+            {
+                const entry = await installerEntry(one);
+                if (entry === 0)
+                {
+                    continue;
+                }
+                const context = memory.block(COINSTALLER_CONTEXT_SIZE);
+                const code = (await host.call(entry, [request, handle, data, context], thread))
+                    >>> 0;
+                if (code === ERROR_DI_POSTPROCESSING_REQUIRED)
+                {
+                    after.push({ entry, context });
+                }
+                else if (code !== ERROR_SUCCESS)
+                {
+                    return code;
+                }
+            }
+            let result = ERROR_DI_DO_DEFAULT;
+            const entry = installer ? await installerEntry(installer) : 0;
+            if (entry !== 0)
+            {
+                result = (await host.call(entry, [request, handle, data], thread)) >>> 0;
+            }
+            if (result === ERROR_DI_DO_DEFAULT)
+            {
+                result = defaultInstall(request, set, device);
+            }
+            for (const { entry: post, context } of after)
+            {
+                writeU32(context, 1);
+                writeU32(context + 4, result);
+                result = (await host.call(post, [request, handle, data, context], thread)) >>> 0;
+            }
+            return result;
+        }
+        finally
+        {
+            memory.release();
+        }
+    };
+
+    /**
+     * What a request does when no class installer did it; ERROR_DI_DO_DEFAULT
+     * for one that has nothing to do by default.
+     *
+     * @param {number} request @param {import('./devices.js').DeviceSet} set
+     * @param {import('./devices.js').Device | null} device
+     */
+    const defaultInstall = (request, set, device)=>{
+        if (request === DIF_DESTROYPRIVATEDATA)
+        {
+            return ERROR_SUCCESS;
+        }
+        if (!device)
+        {
+            return ERROR_DI_DO_DEFAULT;
+        }
+        if (request === DIF_REGISTERDEVICE)
+        {
+            registerDevice(set, device);
+            return ERROR_SUCCESS;
+        }
+        if (request === DIF_REMOVE)
+        {
+            removeDevice(set, device);
+            return ERROR_SUCCESS;
+        }
+        if (request === DIF_SELECTBESTCOMPATDRV)
+        {
+            const held = driverLists.get(device);
+            const best = bestDriver(held?.lists.get(SPDIT_COMPATDRIVER) ?? []);
+            if (!held || best < 0)
+            {
+                return ERROR_NO_COMPAT_DRIVERS;
+            }
+            held.selected = { type: SPDIT_COMPATDRIVER, index: best };
+            return ERROR_SUCCESS;
+        }
+        return ERROR_DI_DO_DEFAULT;
+    };
+
+    /** An instance's Device Parameters key. @param {string} id */
+    const parametersPath = id=>`${ENUM_KEY}\\${id}\\Device Parameters`;
+
+    /**
+     * A device key's path in a scope: as it is for DICS_FLAG_GLOBAL, under
+     * the current hardware profile's copy of the control set for
+     * DICS_FLAG_CONFIGSPECIFIC.
+     *
+     * @param {number} scope @param {string} path
+     */
+    const scopePath = (scope, path)=>((scope >>> 0) === DICS_FLAG_CONFIGSPECIFIC
+        ? `SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current\\${path}` : path);
+
+    /**
+     * Where a device's key of a type is, null for a driver key it has not.
+     *
+     * @param {import('./devices.js').Device} device @param {number} scope @param {number} keyType
+     */
+    const devKeyPath = (device, scope, keyType)=>{
+        if ((keyType >>> 0) === DIREG_DEV)
+        {
+            return scopePath(scope, parametersPath(device.id));
+        }
+        const driver = devices?.driverPath(device.id) ?? null;
+        return driver === null ? null : scopePath(scope, driver);
+    };
+
+    /**
+     * The checks the device key calls make, in Windows' order: the set, the
+     * device, the scope, the key type (DIREG_BOTH only where `both`), and
+     * for opening, that the device is registered.
+     *
+     * @param {number} handle @param {number} data @param {number} scope @param {number} keyType
+     * @param {boolean} registeredOnly @param {boolean} [both]
+     * @returns {{ device: import('./devices.js').Device } | { error: number }}
+     */
+    const devRegKey = (handle, data, scope, keyType, registeredOnly, both = false)=>{
+        const set = deviceSet(handle);
+        if (!set || !devices || !host.registry)
+        {
+            return { error: ERROR_INVALID_HANDLE };
+        }
+        const device = deviceIn(set, data);
+        if (!device)
+        {
+            return { error: ERROR_INVALID_PARAMETER };
+        }
+        const type = keyType >>> 0;
+        if (((scope >>> 0) !== DICS_FLAG_GLOBAL && (scope >>> 0) !== DICS_FLAG_CONFIGSPECIFIC)
+            || (type !== DIREG_DEV && type !== DIREG_DRV && !(both && type === DIREG_BOTH)))
+        {
+            return { error: ERROR_INVALID_FLAGS };
+        }
+        if (registeredOnly && !devices.registered(device.id))
+        {
+            return { error: ERROR_DEVINFO_NOT_REGISTERED };
+        }
+        return { device };
+    };
+
+    /**
+     * A new or opened device's answer: its data written when the caller's
+     * structure is the right size, ERROR_INVALID_USER_BUFFER when it is not
+     * -- the device in the set either way.
+     *
+     * @param {number} data @param {import('./devices.js').Device} device
+     */
+    const answerDevice = (data, device)=>{
+        if ((data >>> 0) === 0)
+        {
+            return fail(ERROR_SUCCESS, 1);
+        }
+        if (readU32(data) !== SP_DEVINFO_DATA_SIZE)
+        {
+            return fail(ERROR_INVALID_USER_BUFFER);
+        }
+        writeDevice(data, device);
+        return fail(ERROR_SUCCESS, 1);
+    };
+
+    /** Interface handles: what SP_DEVICE_INTERFACE_DATA's Reserved names. */
+    let nextFace = 1;
+
+    /**
+     * SP_DEVICE_INTERFACE_DATA after its cbSize: the class, the flags, and
+     * which interface of its set it is.
+     *
+     * @param {number} address @param {import('./devices.js').DeviceSet} set
+     * @param {import('./devices.js').Device} device
+     * @param {import('./devices.js').DeviceInterface} face
+     */
+    const writeInterface = (address, set, device, face)=>{
+        const { faces } = set;
+        let key = [...faces].find(([, held])=>held.face === face)?.[0];
+        if (key === undefined)
+        {
+            key = nextFace++;
+            faces.set(key, { device, face });
+        }
+        writeGuid(address + 4, face.classGuid);
+        writeU32(address + 20, face.flags);
+        writeU32(address + 24, key);
+    };
+
+    /**
+     * Interface data a set handed out, as its device and interface; null
+     * for data that is not that.
+     *
+     * @param {import('./devices.js').DeviceSet} set @param {number} address
+     */
+    const interfaceIn = (set, address)=>{
+        if ((address >>> 0) === 0 || readU32(address) !== SP_DEVICE_INTERFACE_DATA_SIZE)
+        {
+            return null;
+        }
+        const held = set.faces.get(readU32(address + 24));
+        return held && held.device.interfaces.includes(held.face) ? held : null;
+    };
+
+    /**
+     * SetupDiGetClassDevs's body: a set of the devices asked for, added to
+     * the set given or a new one.
+     *
+     * @param {string | null} classGuid @param {string | null} enumerator
+     * @param {number} flags @param {number} into
+     */
+    const classDevices = (classGuid, enumerator, flags, into)=>{
+        const allClasses = (flags & DIGCF_ALLCLASSES) !== 0;
+        const byInterface = (flags & DIGCF_DEVICEINTERFACE) !== 0;
+        if (classGuid === null && !allClasses)
+        {
+            return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+        }
+        // An enumerator names an enumerator or a device of one; for
+        // interfaces, a whole instance.
+        const parts = enumerator?.split('\\') ?? [];
+        if (enumerator !== null && (enumerator === '' || parts.includes('')
+            || (byInterface ? parts.length !== 3 : parts.length >= 3)))
+        {
+            return fail(ERROR_INVALID_DATA, INVALID_HANDLE_VALUE);
+        }
+        const existing = into === 0 ? null : deviceSet(into);
+        if (into !== 0 && !existing)
+        {
+            return fail(ERROR_INVALID_HANDLE, INVALID_HANDLE_VALUE);
+        }
+        const handle = existing ? into
+            : newSet(allClasses || byInterface ? null : classGuid);
+        const set = /** @type {import('./devices.js').DeviceSet} */ (deviceSet(handle));
+        const prefix = parts.map(part=>part.toUpperCase());
+        // A class's devices come in the order they were made; an
+        // enumerator's alone in its keys' order.
+        const order = classGuid !== null && !allClasses ? 'tree' : 'registry';
+        for (const id of devices?.allInstances(order) ?? [])
+        {
+            const idParts = id.toUpperCase().split('\\');
+            if (!devices?.registered(id) || prefix.some((part, at)=>idParts[at] !== part)
+                || set.devices.some(device=>device.id.toUpperCase() === id.toUpperCase()))
+            {
+                continue;
+            }
+            const deviceClass = devices.classOf(id);
+            const entry = devices.entry(id, deviceClass);
+            if (byInterface)
+            {
+                entry.interfaces = entry.interfaces.filter(face=>allClasses
+                    || face.classGuid === classGuid);
+                if (entry.interfaces.length === 0)
+                {
+                    continue;
+                }
+            }
+            else
+            {
+                if (!allClasses && deviceClass !== classGuid)
+                {
+                    continue;
+                }
+                entry.interfaces = [];
+            }
+            set.devices.push(entry);
+        }
+        return fail(ERROR_SUCCESS, handle);
     };
 
     /**
@@ -696,7 +2305,635 @@ export function createSetupapiFunctions(host){
             + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
     };
 
+    /**
+     * What a file is, compressed or not: an LZ-compressed (SZDD) file the
+     * size its header promises; a cabinet the size of its first file, which
+     * is what decompressing it gives, called MSZIP whatever its folders
+     * use, as Windows calls it; anything else itself. Null for a file that
+     * is not there.
+     *
+     * @param {Uint8Array} bytes
+     */
+    const compressionOf = bytes=>{
+        const lz = lzHeader(bytes);
+        if (lz)
+        {
+            return { type: FILE_COMPRESSION.WINLZA, target: lz.length };
+        }
+        if (bytes[0] === 0x4d && bytes[1] === 0x53 && bytes[2] === 0x43 && bytes[3] === 0x46)
+        {
+            try
+            {
+                const first = readCabinet(bytes).files[0];
+                if (first)
+                {
+                    return { type: FILE_COMPRESSION.MSZIP, target: first.size };
+                }
+            }
+            catch {
+                // Not a cabinet after all: what it is, is itself.
+            }
+        }
+        return { type: FILE_COMPRESSION.NONE, target: bytes.length };
+    };
+
+    /**
+     * A file's bytes as a type says to read them: an LZ file expanded, a
+     * cabinet's first file, anything else as it is. Null for bytes that are
+     * not what the type says.
+     *
+     * @param {Uint8Array} bytes @param {number} type
+     */
+    const decompressed = (bytes, type)=>{
+        if (type === FILE_COMPRESSION.WINLZA)
+        {
+            return expandLz(bytes);
+        }
+        if (type === FILE_COMPRESSION.MSZIP || type === FILE_COMPRESSION.NTCAB)
+        {
+            try
+            {
+                const cabinet = readCabinet(bytes);
+                const first = cabinet.files[0];
+                return first ? decodeFolder(cabinet, first.folder)
+                    .slice(first.offset, first.offset + first.size) : null;
+            }
+            catch {
+                return null;
+            }
+        }
+        return bytes;
+    };
+
+    /** The setup log's two files once SetupOpenLog has opened them. */
+    let log = /** @type {{ actions: string, errors: string } | null} */ (null);
+
+    /** @param {string} path @param {string} line */
+    const appendLog = (path, line)=>{
+        const node = host.files.open(path, { write: true, create: true });
+        if (node)
+        {
+            host.files.write(node, host.files.stat(path)?.size ?? 0, encodeAnsi(line));
+            host.files.close(node);
+        }
+    };
+
+    /**
+     * The default queue callback as answered here, for the calls that commit
+     * a queue with no program callback: go on with everything, the media
+     * where the queue says it is, an error the end.
+     *
+     * @param {number} message @param {any} first
+     */
+    const defaultAnswer = (message, first)=>(message === SPFILENOTIFY.NEEDMEDIA
+        ? { answer: FILEOP.DOIT, path: first.path ?? '' }
+        : { answer: DEFAULT_ANSWERS.get(message) ?? ERROR_SUCCESS, path: '' });
+
+    /**
+     * An install section carried out: SPINST_FILES queues its CopyFiles,
+     * DelFiles and RenFiles and commits them through the callback, sources
+     * found from the root by SourceDisksNames and SourceDisksFiles;
+     * SPINST_REGISTRY then carries out its DelReg and AddReg, HKR the key
+     * given; SPINST_PROFILEITEMS its ProfileItems; SPINST_UNREGSVR and
+     * SPINST_REGSVR last its UnregisterDlls and RegisterDlls. The other
+     * directives are reported as not carried out. The error, 0 for none.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section
+     * @param {{ wanted: number, relative: any, root: string, copyFlags: number,
+     *     callback: QueueCallback, context: number, thread: any, wide: boolean, api: string }} how
+     *     `relative` is the key HKR stands for.
+     * @returns {number | Promise<number | null>}
+     */
+    const installSection = (open, section, how)=>{
+        const { wanted, relative, root, copyFlags, callback, context, thread, wide, api } = how;
+        for (const line of section.lines)
+        {
+            const directive = line.key?.toLowerCase() ?? '';
+            if (!CARRIED_OUT.has(directive)
+                && directive !== '' && wanted & ~(SPINST_FILES | SPINST_REGISTRY))
+            {
+                host.divergence?.(api, `the ${line.key} directive is not carried out`);
+            }
+        }
+        const registry = ()=>{
+            if ((wanted & SPINST_REGISTRY) !== 0 && host.registry)
+            {
+                return installRegistry(host.registry, open.inf, section, {
+                    relativeRoot: relative,
+                    expand: value=>expand(open, value),
+                    divergence: detail=>host.divergence?.(api, detail),
+                });
+            }
+            return ERROR_SUCCESS;
+        };
+        /** @param {number} code  The registry's. @returns {number | Promise<number>} */
+        const after = code=>{
+            if (code !== ERROR_SUCCESS)
+            {
+                return code;
+            }
+            if ((wanted & SPINST_PROFILEITEMS) !== 0)
+            {
+                profileItems(open, section, api);
+            }
+            return (wanted & (SPINST_UNREGSVR | SPINST_REGSVR)) === 0 ? ERROR_SUCCESS
+                : registerDlls(open, section, wanted, thread, api);
+        };
+        if ((wanted & SPINST_FILES) === 0)
+        {
+            return after(registry());
+        }
+        const queue = newQueue();
+        queueInstallSection(queue, open.inf, section, {
+            root, copyFlags, dirid: diridOf(open),
+        });
+        return commit(queue, callback, context, thread, wide)
+            .then(code=>(code === ERROR_SUCCESS ? after(registry()) : code));
+    };
+
+    /**
+     * A line's fields with its key among them, for the lines whose first
+     * comma comes before any `=`: a key there is the line's first field.
+     *
+     * @param {import('./inf.js').InfLine} line
+     */
+    const allFields = line=>(line.key === null
+        || (line.fields.length === 1 && line.fields[0] === line.key)
+        ? line.fields : [line.key, ...line.fields]);
+
+    /**
+     * The sections an install section's directive names, across its lines.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section @param {string} key
+     */
+    const namedBy = (open, section, key)=>section.lines
+        .filter(line=>line.key?.toLowerCase() === key)
+        .flatMap(line=>line.fields).filter(name=>name !== '')
+        .map(name=>open.inf.section(name)).filter(found=>found !== null);
+
+    /**
+     * A file a line names as a DIRID, a subdirectory and a name.
+     *
+     * @param {OpenInf} open @param {string[]} fields
+     */
+    const diridPath = (open, fields)=>joinPath(
+        diridOf(open)(Number.parseInt(fields[0] ?? '', 10)) ?? '', fields[1] ?? '',
+        fields[2] ?? '');
+
+    /**
+     * An install section's UnregisterDlls and then its RegisterDlls, as
+     * asked: each line a DLL by DIRID, subdirectory and name, then flags --
+     * FLG_REGSVR_DLLREGISTER for DllRegisterServer (DllUnregisterServer to
+     * unregister), FLG_REGSVR_DLLINSTALL for DllInstall with the line's
+     * arguments -- each loaded, called on the installing thread and freed.
+     * A DLL that does not load or lacks the entry is passed over.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section
+     * @param {number} wanted @param {any} thread @param {string} api
+     */
+    const registerDlls = async(open, section, wanted, thread, api)=>{
+        const libraries = host.libraries;
+        // A registration runs in a COM apartment the installer enters, as
+        // Windows' does -- an ATL DLL reaches its registrar through COM --
+        // and leaves when it entered it; a thread already in the other
+        // model keeps its own.
+        const leave = libraries ? await enterCom(libraries, thread) : null;
+        try
+        {
+            await registerEach(open, section, wanted, thread, api);
+        }
+        finally
+        {
+            await leave?.();
+        }
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * Enters a single-threaded apartment on the thread through ole32's
+     * CoInitialize, called as the thread calls it; what leaves it again,
+     * null when it was not entered.
+     *
+     * @param {NonNullable<SetupapiHost['libraries']>} libraries @param {any} thread
+     * @returns {Promise<(() => unknown) | null>}
+     */
+    const enterCom = async(libraries, thread)=>{
+        const memory = scratch();
+        try
+        {
+            const ole32 = (await libraries.loadAnsi(memory.string('ole32.dll'))) >>> 0;
+            const initialize = ole32 === 0 ? 0
+                : (await libraries.procAddress(ole32, memory.string('CoInitialize'))) >>> 0;
+            const uninitialize = ole32 === 0 ? 0
+                : (await libraries.procAddress(ole32, memory.string('CoUninitialize'))) >>> 0;
+            if (initialize === 0 || uninitialize === 0
+                || ((await host.call(initialize, [0], thread)) | 0) < 0)
+            {
+                return null;
+            }
+            return ()=>host.call(uninitialize, [], thread);
+        }
+        finally
+        {
+            memory.release();
+        }
+    };
+
+    /**
+     * registerDlls' walk over the sections, in an apartment or not.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section
+     * @param {number} wanted @param {any} thread @param {string} api
+     */
+    const registerEach = async(open, section, wanted, thread, api)=>{
+        const libraries = host.libraries;
+        for (const [flag, key, unregister] of /** @type {const} */ ([
+            [SPINST_UNREGSVR, 'unregisterdlls', true], [SPINST_REGSVR, 'registerdlls', false]]))
+        {
+            if ((wanted & flag) === 0)
+            {
+                continue;
+            }
+            for (const named of namedBy(open, section, key))
+            {
+                for (const line of /** @type {import('./inf.js').InfSection} */ (named).lines)
+                {
+                    const fields = allFields(line).map(field=>expand(open, field));
+                    const flags = infNumber(fields[3] ?? '');
+                    if (!libraries)
+                    {
+                        host.divergence?.(api, `${fields[2] ?? ''} is not registered: no`
+                            + ' library loader');
+                        continue;
+                    }
+                    const memory = scratch();
+                    try
+                    {
+                        const module = (await libraries.loadAnsi(
+                            memory.string(diridPath(open, fields)))) >>> 0;
+                        if (module === 0)
+                        {
+                            continue;
+                        }
+                        /** @param {string} name @param {number[]} args */
+                        const call = async(name, args)=>{
+                            const entry = (await libraries.procAddress(module,
+                                memory.string(name))) >>> 0;
+                            if (entry !== 0)
+                            {
+                                await host.call(entry, args, thread);
+                            }
+                        };
+                        if ((flags & FLG_REGSVR_DLLREGISTER) !== 0)
+                        {
+                            await call(unregister ? 'DllUnregisterServer' : 'DllRegisterServer',
+                                []);
+                        }
+                        if ((flags & FLG_REGSVR_DLLINSTALL) !== 0)
+                        {
+                            await call('DllInstall', [unregister ? 0 : 1,
+                                memory.string(fields[5] ?? '', true)]);
+                        }
+                        await libraries.free(module);
+                    }
+                    finally
+                    {
+                        memory.release();
+                    }
+                }
+            }
+        }
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * An install section's ProfileItems: each section a Start menu entry
+     * under the common Programs folder (the user's with
+     * FLG_PROFITEM_CURRENTUSER) and its SubDir -- a folder named Name for
+     * FLG_PROFITEM_GROUP, else a link Name.lnk to its CmdLine with its
+     * WorkingDir, IconPath, IconIndex, HotKey and InfoTip; with
+     * FLG_PROFITEM_DELETE, the entry taken away instead.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section @param {string} api
+     */
+    const profileItems = (open, section, api)=>{
+        for (const item of namedBy(open, section, 'profileitems'))
+        {
+            /** @param {string} key */
+            const value = key=>{
+                const line = /** @type {import('./inf.js').InfSection} */ (item).lines
+                    .find(candidate=>candidate.key?.toLowerCase() === key.toLowerCase());
+                return line ? line.fields.map(field=>expand(open, field)) : null;
+            };
+            const [name = '', flagText = ''] = value('Name') ?? [];
+            if (name === '')
+            {
+                continue;
+            }
+            const flags = infNumber(flagText);
+            const base = (flags & FLG_PROFITEM_CURRENTUSER) !== 0 ? host.folders.Programs
+                : host.folders['Common Programs'];
+            const directory = pathOf(joinPath(base, value('SubDir')?.[0] ?? ''));
+            if (directory === null)
+            {
+                continue;
+            }
+            const path = joinPath(directory,
+                (flags & FLG_PROFITEM_GROUP) !== 0 ? name : `${name}.lnk`);
+            if ((flags & FLG_PROFITEM_DELETE) !== 0)
+            {
+                if (exists(path))
+                {
+                    host.files.remove(path);
+                }
+                continue;
+            }
+            if ((flags & FLG_PROFITEM_GROUP) !== 0)
+            {
+                makeDirectories(path);
+                continue;
+            }
+            makeDirectories(directory);
+            const command = value('CmdLine');
+            const working = value('WorkingDir');
+            const icon = value('IconPath');
+            if (!writeShellLink(host.files, path, {
+                target: command ? diridPath(open, command) : '',
+                workingDirectory: working ? diridPath(open, [...working.slice(0, 2), '']) : '',
+                iconLocation: icon ? diridPath(open, icon) : '',
+                iconIndex: infNumber(value('IconIndex')?.[0] ?? ''),
+                hotkey: infNumber(value('HotKey')?.[0] ?? '') & 0xffff,
+                description: value('InfoTip')?.[0] ?? '',
+            }))
+            {
+                host.divergence?.(api, `the profile item ${name} could not be written`);
+            }
+        }
+    };
+
+    /**
+     * The key HKR stands for: a predefined root, or a key the program has
+     * open, when the registry's handle table can say which; null when there
+     * is none, the HKR lines then skipped and reported.
+     *
+     * @param {number} handle @param {string} api
+     */
+    const relativeKeyOf = (handle, api)=>{
+        if (handle === 0 || !host.registry)
+        {
+            return null;
+        }
+        const root = handle >= HKEY_CLASSES_ROOT && handle <= HKEY_USERS
+            ? host.registry.root(handle) : null;
+        const key = root ?? host.keyOf?.(handle) ?? null;
+        if (!key)
+        {
+            host.divergence?.(api, 'an HKR line under a key not known here is not carried out');
+        }
+        return key;
+    };
+
+    /**
+     * An install section's services: each AddService line's service made
+     * from the section it names -- ServiceType, StartType, ErrorControl and
+     * ServiceBinary all wanted, DisplayName and StartName taken when there.
+     * A line with no service name associates none and is no work. The
+     * error, 0 for none.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section @param {string} api
+     */
+    const installServices = (open, section, api)=>{
+        for (const line of section.lines)
+        {
+            if (line.key?.toLowerCase() !== 'addservice')
+            {
+                continue;
+            }
+            const [name = '', , install = ''] = line.fields.map(field=>expand(open, field));
+            if (name === '')
+            {
+                continue;
+            }
+            const values = open.inf.section(install)?.lines ?? [];
+            /** @param {string} key */
+            const value = key=>{
+                const found = values.find(entry=>entry.key?.toLowerCase() === key.toLowerCase());
+                return found ? expand(open, found.fields[0] ?? '') : null;
+            };
+            const numbers = ['ServiceType', 'StartType', 'ErrorControl']
+                .map(key=>value(key)).map(found=>(found === null ? Number.NaN : Number(found)));
+            const binary = value('ServiceBinary');
+            if (numbers.some(number=>Number.isNaN(number)) || binary === null)
+            {
+                return ERROR_BAD_SERVICE_INSTALLSECT;
+            }
+            if (!host.createService)
+            {
+                host.divergence?.(api, 'there is no service control manager to add a service to');
+                continue;
+            }
+            const error = host.createService({ name, displayName: value('DisplayName') ?? name,
+                binary, type: numbers[0], start: numbers[1], errorControl: numbers[2],
+                startName: value('StartName') });
+            // A service already there is the one the INF names, as a
+            // reinstall finds it.
+            if (error !== ERROR_SUCCESS && error !== ERROR_SERVICE_EXISTS)
+            {
+                return error;
+            }
+        }
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * SetupQueueCopy's body, for it and SetupQueueCopyIndirect.
+     *
+     * @param {number} handle
+     * @param {{ root: string | null, subdirectory: string | null, file: string | null,
+     *     description: string | null, tagfile: string | null, directory: string | null,
+     *     target: string | null, flags: number }} copy
+     */
+    const queueCopy = (handle, copy)=>{
+        const queue = fileQueue(handle);
+        if (!queue)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (!copy.file || !copy.directory)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const sourceRoot = copy.root ?? '';
+        const subdirectory = copy.subdirectory ?? '';
+        pushCopy(queue, {
+            sourceRoot,
+            subdirectory,
+            sourcePath: joinPath(sourceRoot, subdirectory),
+            sourceFile: copy.file,
+            description: copy.description || null,
+            tagfile: copy.tagfile || null,
+            targetDirectory: pathOf(copy.directory) ?? copy.directory,
+            targetFile: copy.target || copy.file,
+            flags: copy.flags,
+        });
+        return fail(ERROR_SUCCESS, 1);
+    };
+
+    /**
+     * Queues a file list section of an INF's: SetupQueueCopySection,
+     * SetupQueueDeleteSection and SetupQueueRenameSection.
+     *
+     * @param {number} queueHandle @param {number} handle  The INF with the source disks.
+     * @param {number} listHandle  The INF with the list, when not that one.
+     * @param {string | null} name @param {'copyfiles' | 'delfiles' | 'renfiles'} directive
+     * @param {string} root @param {number} copyFlags
+     */
+    const queueList = (queueHandle, handle, listHandle, name, directive, root, copyFlags)=>{
+        const queue = fileQueue(queueHandle);
+        const open = openInf(handle);
+        const list = (listHandle >>> 0) === 0 ? open : openInf(listHandle);
+        if (!queue || !open || !list)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (name === null || !list.inf.section(name))
+        {
+            return fail(ERROR_SECTION_NOT_FOUND);
+        }
+        queueFileList(queue, list.inf, name, directive, { root, copyFlags, dirid: diridOf(list),
+            layout: open.inf });
+        return fail(ERROR_SUCCESS, 1);
+    };
+
+    /**
+     * SetupInstallFile's body: one file copied now, not queued.
+     *
+     * With an INF, the context is the file's line in a CopyFiles list: its
+     * target is the list's DestinationDirs directory, under DestinationName
+     * when given, else the line's name, and its source is that line's under
+     * the root, in the subdirectory its [SourceDisksFiles] line gives -- the
+     * disk's own path is not looked in. Without one, SourceFile is under the
+     * root and DestinationName is the whole target path.
+     *
+     * A copy SP_COPY_REPLACEONLY or SP_COPY_NOOVERWRITE leaves undone is
+     * FALSE with ERROR_SUCCESS, as for a copy found unnecessary.
+     *
+     * @param {number} handle @param {number} context @param {string | null} named  SourceFile.
+     * @param {string | null} root @param {string | null} destination @param {number} style
+     * @param {number} callback @param {number} inUse @param {string} api
+     */
+    const installFile = (handle, context, named, root, destination, style, callback, inUse, api)=>{
+        let source;
+        let target;
+        if ((handle >>> 0) !== 0)
+        {
+            const open = openInf(handle);
+            if (!open)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if ((context >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const at = readContext(context);
+            const holder = openInf(at.handle);
+            const section = holder?.list[at.section];
+            const line = section?.lines[at.line];
+            if (!holder || !section || !line)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const name = line.fields[0] || line.key || '';
+            const file = line.fields[1] || name;
+            const disk = lookup(open.inf, 'SourceDisksFiles', file);
+            source = joinPath(root ?? '', disk?.fields[1] ?? '', file);
+            target = joinPath(listTarget(holder.inf, section.name, diridOf(holder)),
+                destination || name);
+        }
+        else
+        {
+            if (!named || !destination)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            source = joinPath(root ?? '', named);
+            target = destination;
+        }
+        if ((callback >>> 0) !== 0)
+        {
+            host.divergence?.(api, 'the copy is not reported to CopyMsgHandler');
+        }
+        if ((inUse >>> 0) !== 0)
+        {
+            writeU32(inUse, 0);
+        }
+        const targetPath = pathOf(target);
+        const there = exists(targetPath);
+        if ((there && (style & SP_COPY_NOOVERWRITE)) || (!there && (style & SP_COPY_REPLACEONLY)))
+        {
+            return fail(ERROR_SUCCESS);
+        }
+        const bytes = readWhole(pathOf(source));
+        if (bytes === null)
+        {
+            return fail(ERROR_FILE_NOT_FOUND);
+        }
+        const thread = host.callerThread();
+        /** @param {Uint8Array} data */
+        const place = data=>{
+            const code = writeWhole(targetPath, data);
+            host.setLastErrorFor(thread, code);
+            return code === ERROR_SUCCESS ? 1 : 0;
+        };
+        return bytes instanceof Uint8Array ? place(bytes) : bytes.then(place);
+    };
+
+    /**
+     * A call's ANSI and wide entries: the one factory, told whether the
+     * call's strings are UTF-16, under each name.
+     *
+     * @template {string} N @template T
+     * @param {N} name @param {(wide: boolean) => T} make
+     * @returns {Record<`${N}A` | `${N}W`, T>}
+     */
+    const bothWidths = (name, make)=>/** @type {Record<`${N}A` | `${N}W`, T>} */ (
+        /** @type {unknown} */ ({ [`${name}A`]: make(false), [`${name}W`]: make(true) }));
+
     return {
+        ...createDiskSpaceFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            text: textOf,
+            encode: encodeIn,
+            // A drive's path is the list's to read, whether or not the drive
+            // is there: only its drive letter and its name matter to it.
+            fullPath: name=>(/^[A-Za-z]:/.test(name)
+                ? `${name.slice(0, 2)}\\${name.slice(2).replace(/^[\\/]+/, '')}`
+                : pathOf(name)),
+            sizeOf: path=>{
+                try
+                {
+                    const stat = host.files.stat(path);
+                    return stat && !stat.isDirectory ? stat.size : null;
+                }
+                catch {
+                    return null;
+                }
+            },
+            setLastError: host.setLastError,
+            open: (type, object)=>host.handles.open(type, object),
+            resolve: (handle, type)=>host.handles.resolve(handle, type),
+            close: handle=>host.handles.close(handle),
+        }),
+        ...host.readWideString ? createStringTableFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readWideString: host.readWideString,
+            allocate: host.allocate,
+            free: host.free,
+        }) : {},
+
         /**
          * HINF SetupOpenInfFileA(PCSTR FileName, PCSTR InfClass, DWORD InfStyle,
          *                        PUINT ErrorLine)
@@ -706,16 +2943,16 @@ export function createSetupapiFunctions(host){
          * does not parse (with the line in ErrorLine), is not of a style
          * asked for, or not of the class asked for.
          */
-        SetupOpenInfFileA: {
+        ...bothWidths('SetupOpenInfFile', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([namePointer, classPointer, style, errorLine])=>{
-                const name = text(namePointer);
+                const name = textOf(namePointer, wide);
                 if (name === null || name === '')
                 {
                     return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
                 }
-                const wanted = text(classPointer);
+                const wanted = textOf(classPointer, wide);
                 const thread = host.callerThread();
                 const candidates = infCandidates(name);
                 const path = candidates.find(place=>host.files.stat(place)) ?? candidates[0];
@@ -751,15 +2988,17 @@ export function createSetupapiFunctions(host){
                 const loaded = loadInf(path);
                 return 'then' in loaded ? loaded.then(finish) : finish(loaded);
             },
-        },
+        })),
 
         /** VOID SetupCloseInfFile(HINF InfHandle) -- a handle that names no INF is ignored. */
         SetupCloseInfFile: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                if (openInf(handle))
+                const open = openInf(handle);
+                if (open)
                 {
+                    open.fields?.forEach(address=>host.free(address));
                     host.handles.close(handle >>> 0);
                 }
                 return 0;
@@ -774,7 +3013,7 @@ export function createSetupapiFunctions(host){
          * whose key matches it, case aside. ERROR_LINE_NOT_FOUND for either
          * missing, the section included.
          */
-        SetupFindFirstLineA: {
+        ...bothWidths('SetupFindFirstLine', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, sectionPointer, keyPointer, context])=>{
@@ -783,9 +3022,9 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const name = (text(sectionPointer) ?? '').toLowerCase();
+                const name = (textOf(sectionPointer, wide) ?? '').toLowerCase();
                 const index = open.list.findIndex(section=>section.name.toLowerCase() === name);
-                const key = text(keyPointer)?.toLowerCase() ?? null;
+                const key = textOf(keyPointer, wide)?.toLowerCase() ?? null;
                 const lines = index < 0 ? [] : open.list[index].lines;
                 const line = key === null
                     ? (lines.length > 0 ? 0 : -1)
@@ -797,7 +3036,7 @@ export function createSetupapiFunctions(host){
                 writeContext(context, handle, index, line);
                 return fail(ERROR_SUCCESS, 1);
             },
-        },
+        })),
 
         /**
          * BOOL SetupFindNextLine(PINFCONTEXT ContextIn, PINFCONTEXT ContextOut)
@@ -830,7 +3069,7 @@ export function createSetupapiFunctions(host){
          * A line's fields after the key, joined by commas, found by context
          * or else by section and key.
          */
-        SetupGetLineTextA: {
+        ...bothWidths('SetupGetLineText', wide=>({
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([context, handle, sectionPointer, keyPointer, buffer, size, required])=>{
@@ -855,8 +3094,8 @@ export function createSetupapiFunctions(host){
                     {
                         return fail(ERROR_INVALID_HANDLE);
                     }
-                    const key = (text(keyPointer) ?? '').toLowerCase();
-                    line = open.inf.section(text(sectionPointer) ?? '')?.lines
+                    const key = (textOf(keyPointer, wide) ?? '').toLowerCase();
+                    line = open.inf.section(textOf(sectionPointer, wide) ?? '')?.lines
                         .find(entry=>entry.key?.toLowerCase() === key);
                     if (!line)
                     {
@@ -865,10 +3104,10 @@ export function createSetupapiFunctions(host){
                 }
                 const value = line.fields.map(field=>expand(/** @type {OpenInf} */ (open), field))
                     .join(',');
-                const answered = answerText(value, buffer, size, required);
+                const answered = answerText(value, buffer, size, required, wide);
                 return answered ? fail(ERROR_SUCCESS, 1) : 0;
             },
-        },
+        })),
 
         /**
          * BOOL SetupGetStringFieldA(PINFCONTEXT Context, DWORD FieldIndex,
@@ -878,7 +3117,7 @@ export function createSetupapiFunctions(host){
          * `=` does not have -- and field N the Nth value after it. A field
          * that is not there is ERROR_INVALID_PARAMETER.
          */
-        SetupGetStringFieldA: {
+        ...bothWidths('SetupGetStringField', wide=>({
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([context, index, buffer, size, required])=>{
@@ -898,10 +3137,10 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const answered = answerText(expand(open, field), buffer, size, required);
+                const answered = answerText(expand(open, field), buffer, size, required, wide);
                 return answered ? fail(ERROR_SUCCESS, 1) : 0;
             },
-        },
+        })),
 
         /**
          * BOOL SetupGetBinaryField(PINFCONTEXT Context, DWORD FieldIndex,
@@ -957,7 +3196,7 @@ export function createSetupapiFunctions(host){
          * (Wine's setupapi test_GLE) -- how a caller tells a missing section
          * from an empty one, as it does probing for a platform-decorated one.
          */
-        SetupGetLineCountA: {
+        ...bothWidths('SetupGetLineCount', wide=>({
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, sectionPointer])=>{
@@ -966,11 +3205,11 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE, -1);
                 }
-                const section = open.inf.section(text(sectionPointer) ?? '');
+                const section = open.inf.section(textOf(sectionPointer, wide) ?? '');
                 return section ? fail(ERROR_SUCCESS, section.lines.length)
                     : fail(ERROR_SECTION_NOT_FOUND, -1);
             },
-        },
+        })),
 
         /**
          * BOOL SetupGetLineByIndexA(HINF InfHandle, PCSTR Section, DWORD Index,
@@ -979,7 +3218,7 @@ export function createSetupapiFunctions(host){
          * ERROR_LINE_NOT_FOUND for a section that is not there as well as
          * for an index past its end.
          */
-        SetupGetLineByIndexA: {
+        ...bothWidths('SetupGetLineByIndex', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, sectionPointer, index, context])=>{
@@ -988,7 +3227,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const name = (text(sectionPointer) ?? '').toLowerCase();
+                const name = (textOf(sectionPointer, wide) ?? '').toLowerCase();
                 const section = open.list.findIndex(entry=>entry.name.toLowerCase() === name);
                 if (section < 0 || (index >>> 0) >= open.list[section].lines.length)
                 {
@@ -997,6 +3236,738 @@ export function createSetupapiFunctions(host){
                 writeContext(context, handle, section, index >>> 0);
                 return fail(ERROR_SUCCESS, 1);
             },
+        })),
+
+        /**
+         * BOOL SetupFindNextMatchLineA(PINFCONTEXT ContextIn, PCSTR Key,
+         *                              PINFCONTEXT ContextOut), and the W form
+         *
+         * The next line of the section whose key is Key, case aside, or with
+         * no key the next line; ERROR_LINE_NOT_FOUND past the last.
+         */
+        ...bothWidths('SetupFindNextMatchLine', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [contextIn, keyPointer, contextOut])=>{
+                const at = readContext(contextIn);
+                const open = openInf(at.handle);
+                const lines = open?.list[at.section]?.lines;
+                if (!lines)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const key = textOf(keyPointer, wide)?.toLowerCase() ?? null;
+                const found = lines.findIndex((entry, index)=>index > at.line
+                    && (key === null || entry.key?.toLowerCase() === key));
+                if (found < 0)
+                {
+                    return fail(ERROR_LINE_NOT_FOUND);
+                }
+                writeContext(contextOut, at.handle, at.section, found);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupEnumInfSectionsA(HINF InfHandle, UINT Index, PSTR Buffer,
+         *                            DWORD Size, UINT *SizeNeeded), and the W form
+         *
+         * The name of the INF's section of that index, in file order; past
+         * the last, ERROR_NO_MORE_ITEMS. The size needed is reported first;
+         * no buffer with a size is ERROR_INVALID_USER_BUFFER.
+         */
+        ...bothWidths('SetupEnumInfSections', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, index, buffer, size, needed])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const section = open.list[index >>> 0];
+                if (!section)
+                {
+                    return fail(ERROR_NO_MORE_ITEMS);
+                }
+                if ((buffer >>> 0) === 0 && (size >>> 0) !== 0)
+                {
+                    if ((needed >>> 0) !== 0)
+                    {
+                        writeU32(needed, section.name.length + 1);
+                    }
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                return answerText(section.name, buffer, size, needed, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * DWORD SetupGetFieldCount(PINFCONTEXT Context)
+         *
+         * The fields after the key: a line of several fields and no `=` has
+         * them all.
+         */
+        SetupGetFieldCount: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([context])=>{
+                const at = readContext(context);
+                const line = openInf(at.handle)?.list[at.section]?.lines[at.line];
+                return line ? fail(ERROR_SUCCESS, line.fields.length)
+                    : fail(ERROR_INVALID_PARAMETER);
+            },
+        },
+
+        /**
+         * BOOL SetupGetIntField(PINFCONTEXT Context, DWORD FieldIndex, PINT IntegerValue)
+         *
+         * The field as strtol reads it with its base from its prefix (0x
+         * hexadecimal, 0 octal), the whole field a number; an empty field is
+         * 0. Anything else is ERROR_INVALID_DATA, the value untouched.
+         */
+        SetupGetIntField: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([context, index, value])=>{
+                const at = readContext(context);
+                const open = openInf(at.handle);
+                const line = open?.list[at.section]?.lines[at.line];
+                if (!open || !line)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const raw = (index >>> 0) === 0 ? line.key : line.fields[(index >>> 0) - 1];
+                if (raw === null || raw === undefined)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const field = expand(open, raw).trim();
+                const number = /^([+-]?)(?:0x([0-9a-f]+)|(0[0-7]*)|([1-9][0-9]*))$/i.exec(field);
+                if (field !== '' && !number)
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                let magnitude = 0;
+                if (number)
+                {
+                    magnitude = number[2] !== undefined ? Number.parseInt(number[2], 16)
+                        : number[3] !== undefined ? Number.parseInt(number[3], 8)
+                            : Number(number[4]);
+                    magnitude = Math.min(magnitude, number[1] === '-' ? 0x80000000 : 0x7fffffff);
+                }
+                writeU32(value, number?.[1] === '-' ? -magnitude : magnitude);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupGetMultiSzFieldA(PINFCONTEXT Context, DWORD FieldIndex,
+         *     PSTR ReturnBuffer, DWORD ReturnBufferSize, LPDWORD RequiredSize),
+         *     and the W form
+         *
+         * The fields from FieldIndex (1-based) to the end of the line, each
+         * terminated, and an empty string after the last.
+         */
+        ...bothWidths('SetupGetMultiSzField', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [context, index, buffer, size, required])=>{
+                const at = readContext(context);
+                const open = openInf(at.handle);
+                const line = open?.list[at.section]?.lines[at.line];
+                const first = index >>> 0;
+                if (!open || !line || first === 0 || first > line.fields.length)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const joined = `${line.fields.slice(first - 1)
+                    .map(field=>expand(open, field)).join('\0')}\0`;
+                return answerText(joined, buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * PCWSTR pSetupGetField(PINFCONTEXT Context, DWORD FieldIndex)
+         *
+         * The field itself, wide, kept with the INF until it is closed;
+         * field 0 the key. NULL with ERROR_INVALID_PARAMETER for a field the
+         * line has not.
+         */
+        pSetupGetField: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([context, index])=>{
+                const at = readContext(context);
+                const open = openInf(at.handle);
+                const line = open?.list[at.section]?.lines[at.line];
+                const raw = !line ? undefined
+                    : (index >>> 0) === 0 ? line.key : line.fields[(index >>> 0) - 1];
+                if (!open || raw === null || raw === undefined)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                open.fields ??= new Map();
+                const name = `${at.section}:${at.line}:${index >>> 0}`;
+                let address = open.fields.get(name);
+                if (address === undefined)
+                {
+                    const bytes = encodeIn(expand(open, raw), true);
+                    address = host.allocate(bytes.length);
+                    if (!address)
+                    {
+                        return fail(ERROR_NOT_ENOUGH_MEMORY);
+                    }
+                    host.writeMemory(address, bytes);
+                    open.fields.set(name, address);
+                }
+                return fail(ERROR_SUCCESS, address);
+            },
+        },
+
+        /**
+         * BOOL SetupQueryInfFileInformationA(PSP_INF_INFORMATION InfInformation,
+         *     UINT InfIndex, PSTR ReturnBuffer, DWORD ReturnBufferSize,
+         *     PDWORD RequiredSize), and the W form
+         *
+         * The path of the INF of that index in what SetupGetInfInformation
+         * wrote, which leads its version data; an index past the count is
+         * ERROR_INVALID_PARAMETER.
+         */
+        ...bothWidths('SetupQueryInfFileInformation', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [information, index, buffer, size, required])=>{
+                if ((information >>> 0) === 0 || (index >>> 0) >= readU32(information + 4))
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const path = textOf(information + 8, wide) ?? '';
+                return answerText(path, buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * BOOL SetupGetSourceFileLocationA(HINF InfHandle, PINFCONTEXT InfContext,
+         *     PCSTR FileName, PUINT SourceId, PSTR ReturnBuffer,
+         *     DWORD ReturnBufferSize, PDWORD RequiredSize), and the W form
+         *
+         * The disk a file comes from and its path on it, from its
+         * [SourceDisksFiles] line. With a context, the file is the one the
+         * context's copy line names where it goes -- whatever name is passed,
+         * as Windows looks it up. ERROR_LINE_NOT_FOUND for a file no line names.
+         */
+        ...bothWidths('SetupGetSourceFileLocation', wide=>({
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, context, namePointer, sourceId, buffer,
+                size, required])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                let name = textOf(namePointer, wide) ?? '';
+                if ((context >>> 0) !== 0)
+                {
+                    const at = readContext(context);
+                    const line = openInf(at.handle)?.list[at.section]?.lines[at.line];
+                    name = line?.fields[0] ?? line?.key ?? '';
+                }
+                const disk = name === '' ? null : lookup(open.inf, 'SourceDisksFiles', name);
+                if (!disk)
+                {
+                    return fail(ERROR_LINE_NOT_FOUND);
+                }
+                if ((sourceId >>> 0) !== 0)
+                {
+                    writeU32(sourceId, Number.parseInt(disk.fields[0] ?? '', 10) || 0);
+                }
+                return answerText(expand(open, disk.fields[1] ?? ''), buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * BOOL SetupGetSourceInfoA(HINF InfHandle, UINT SourceId, UINT InfoDesired,
+         *     PSTR ReturnBuffer, DWORD ReturnBufferSize, LPDWORD RequiredSize),
+         *     and the W form
+         *
+         * A [SourceDisksNames] line's fields by what is asked: SRCINFO_PATH
+         * (1) its fourth, SRCINFO_TAGFILE (2) its second, SRCINFO_DESCRIPTION
+         * (3) its first, SRCINFO_TAGFILE2 (5) its sixth -- empty when the line
+         * has not got it. ERROR_LINE_NOT_FOUND for a disk no line names.
+         */
+        ...bothWidths('SetupGetSourceInfo', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, sourceId, desired, buffer, size,
+                required])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const field = ({ 1: 3, 2: 1, 3: 0, 5: 5 })[desired >>> 0];
+                if (field === undefined)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const disk = lookup(open.inf, 'SourceDisksNames', String(sourceId >>> 0));
+                if (!disk)
+                {
+                    return fail(ERROR_LINE_NOT_FOUND);
+                }
+                return answerText(expand(open, disk.fields[field] ?? ''), buffer, size, required,
+                    wide) ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * BOOL SetupGetTargetPathA(HINF InfHandle, PINFCONTEXT InfContext,
+         *     PCSTR Section, PSTR ReturnBuffer, DWORD ReturnBufferSize,
+         *     PDWORD RequiredSize), and the W form
+         *
+         * Where a file list's files go, by the context's section or the
+         * section named: its DestinationDirs entry, the INF's DefaultDestDir,
+         * or the system directory. A context whose section is none of the
+         * INF's has the default.
+         */
+        ...bothWidths('SetupGetTargetPath', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, context, sectionPointer, buffer, size,
+                required])=>{
+                let open = openInf(handle);
+                let list = textOf(sectionPointer, wide) ?? '';
+                if ((context >>> 0) !== 0)
+                {
+                    const at = readContext(context);
+                    open = openInf(at.handle) ?? open;
+                    list = open?.list[at.section]?.name ?? '';
+                }
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const path = listTarget(open.inf, list, diridOf(open));
+                return answerText(path, buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /** PVOID MyMalloc(DWORD Size) -- setupapi's own heap, which MyFree gives back to */
+        MyMalloc: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([size])=>host.allocate(Math.max(1, size >>> 0)),
+        },
+
+        /** VOID MyFree(PVOID Block) */
+        MyFree: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([block])=>{
+                if ((block >>> 0) !== 0)
+                {
+                    host.free(block >>> 0);
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * DWORD SetupGetFileCompressionInfoA(PCSTR SourceFileName,
+         *     PSTR *ActualSourceFileName, PDWORD SourceFileSize,
+         *     PDWORD TargetFileSize, PUINT CompressionType), and the W form
+         *
+         * Every pointer is wanted: ERROR_INVALID_PARAMETER without one. The
+         * name it hands back is the source's, from setupapi's heap, which
+         * MyFree gives back. The error, or 0.
+         */
+        ...bothWidths('SetupGetFileCompressionInfo', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [sourcePointer, nameOut, sourceSize, targetSize,
+                type])=>{
+                const source = textOf(sourcePointer, wide);
+                if (source === null || [nameOut, sourceSize, targetSize, type]
+                    .some(pointer=>(pointer >>> 0) === 0))
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const bytes = readWhole(pathOf(source));
+                /** @param {Uint8Array | null} data */
+                const answer = data=>{
+                    if (data === null)
+                    {
+                        return ERROR_FILE_NOT_FOUND;
+                    }
+                    const encoded = encodeIn(source, wide);
+                    const name = host.allocate(encoded.length);
+                    if (!name)
+                    {
+                        return ERROR_NOT_ENOUGH_MEMORY;
+                    }
+                    host.writeMemory(name, encoded);
+                    const what = compressionOf(data);
+                    writeU32(nameOut, name);
+                    writeU32(sourceSize, data.length);
+                    writeU32(targetSize, what.target);
+                    writeU32(type, what.type);
+                    return ERROR_SUCCESS;
+                };
+                return bytes instanceof Promise ? bytes.then(answer) : answer(bytes);
+            },
+        })),
+
+        /**
+         * BOOL SetupGetFileCompressionInfoExA(PCSTR SourceFileName,
+         *     PSTR ActualSourceFileNameBuffer, DWORD ActualSourceFileNameBufferLen,
+         *     PDWORD RequiredBufferLen, PDWORD SourceFileSize, PDWORD TargetFileSize,
+         *     PUINT CompressionType), and the W form
+         *
+         * The size the name needs is reported first, whatever follows; no
+         * buffer, or a file that is not there, is then a failure.
+         */
+        ...bothWidths('SetupGetFileCompressionInfoEx', wide=>({
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [sourcePointer, buffer, length, required,
+                sourceSize, targetSize, type])=>{
+                const source = textOf(sourcePointer, wide);
+                if (source === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, source.length + 1);
+                }
+                if ((buffer >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const bytes = readWhole(pathOf(source));
+                /** @param {Uint8Array | null} data */
+                const answer = data=>{
+                    if (data === null)
+                    {
+                        return fail(ERROR_FILE_NOT_FOUND);
+                    }
+                    if ((length >>> 0) < source.length + 1)
+                    {
+                        return fail(ERROR_INSUFFICIENT_BUFFER);
+                    }
+                    host.writeMemory(buffer >>> 0, encodeIn(source, wide));
+                    const what = compressionOf(data);
+                    for (const [pointer, value] of [[sourceSize, data.length],
+                        [targetSize, what.target], [type, what.type]])
+                    {
+                        if ((pointer >>> 0) !== 0)
+                        {
+                            writeU32(pointer, value);
+                        }
+                    }
+                    return 1;
+                };
+                return bytes instanceof Promise ? bytes.then(answer) : answer(bytes);
+            },
+        })),
+
+        /**
+         * DWORD SetupDecompressOrCopyFileA(PCSTR SourceFileName, PCSTR TargetFileName,
+         *     PUINT CompressionType), and the W form
+         *
+         * The source written to the target as the type says to read it --
+         * no type, the type it is -- a cabinet giving its first file. No
+         * source or target, or a type that is none, is ERROR_INVALID_PARAMETER.
+         * The error, or 0.
+         */
+        ...bothWidths('SetupDecompressOrCopyFile', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [sourcePointer, targetPointer, typePointer])=>{
+                const source = textOf(sourcePointer, wide);
+                const target = textOf(targetPointer, wide);
+                const asked = (typePointer >>> 0) === 0 ? null : readU32(typePointer);
+                if (source === null || target === null
+                    || (asked !== null && asked > FILE_COMPRESSION.NTCAB))
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const bytes = readWhole(pathOf(source));
+                /** @param {Uint8Array | null} data */
+                const copy = data=>{
+                    if (data === null)
+                    {
+                        return ERROR_FILE_NOT_FOUND;
+                    }
+                    const out = decompressed(data, asked ?? compressionOf(data).type);
+                    return out === null ? ERROR_INVALID_DATA
+                        : writeWhole(pathOf(target), out);
+                };
+                return bytes instanceof Promise ? bytes.then(copy) : copy(bytes);
+            },
+        })),
+
+        /**
+         * BOOL SetupUninstallOEMInfA(PCSTR InfFileName, DWORD Flags, PVOID Reserved),
+         *     and the W form
+         *
+         * An INF the INF directory holds removed, with the precompiled one
+         * beside it; ERROR_FILE_NOT_FOUND for one it has not.
+         */
+        ...bothWidths('SetupUninstallOEMInf', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [namePointer])=>{
+                const name = textOf(namePointer, wide);
+                if (name === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const path = `${windows}\\inf\\${name}`;
+                if (name === '' || /[\\/]/.test(name) || !host.files.stat(path)?.exists)
+                {
+                    return fail(ERROR_FILE_NOT_FOUND);
+                }
+                host.files.remove(path);
+                host.files.remove(path.replace(/\.inf$/i, '.pnf'));
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupOpenLog(BOOL Erase)
+         *
+         * The setup log opened: setupact.log and setuperr.log in the Windows
+         * directory, emptied first when asked. Opening an open log is not
+         * an error.
+         */
+        SetupOpenLog: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([erase])=>{
+                log = { actions: `${windows}\\setupact.log`, errors: `${windows}\\setuperr.log` };
+                if ((erase >>> 0) !== 0)
+                {
+                    writeWhole(log.actions, new Uint8Array(0));
+                    writeWhole(log.errors, new Uint8Array(0));
+                }
+                return 1;
+            },
+        },
+
+        /** VOID SetupCloseLog(void) */
+        SetupCloseLog: {
+            argBytes: 0,
+            handler: ()=>{
+                log = null;
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL SetupLogErrorA(PCSTR MessageString, LogSeverity Severity), and the W form
+         *
+         * The message added to the action log, and to the error log too for
+         * an error or a fatal error. No log open is ERROR_FILE_INVALID; a
+         * severity that is none fails with the last error untouched.
+         */
+        ...bothWidths('SetupLogError', wide=>({
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [messagePointer, severity])=>{
+                if (!log)
+                {
+                    return fail(ERROR_FILE_INVALID);
+                }
+                if ((severity >>> 0) >= LOG_SEVERITY_MAXIMUM)
+                {
+                    return 0;
+                }
+                const message = textOf(messagePointer, wide) ?? '';
+                appendLog(log.actions, message);
+                if ((severity >>> 0) >= 2)
+                {
+                    appendLog(log.errors, message);
+                }
+                return 1;
+            },
+        })),
+
+        /**
+         * CONFIGRET CM_Get_Device_IDA(DEVINST dnDevInst, PSTR Buffer, ULONG BufferLen,
+         *     ULONG ulFlags), the W form, and CM_Get_Device_ID_Size
+         *
+         * A device node's instance id, phantoms' too. A buffer with no room
+         * for the terminator takes the id without one; one too small for
+         * the id is CR_BUFFER_SMALL, as much of it as fits copied.
+         */
+        ...bothWidths('CM_Get_Device_ID', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [devnode, buffer, length, flags])=>{
+                if ((buffer >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return CR_INVALID_FLAG;
+                }
+                const id = devices?.idOf(devnode >>> 0) ?? null;
+                if (id === null)
+                {
+                    return CR_INVALID_DEVNODE;
+                }
+                const unit = wide ? 2 : 1;
+                const bytes = encodeIn(id, wide);
+                const room = (length >>> 0) * unit;
+                host.writeMemory(buffer >>> 0, bytes.subarray(0, Math.min(room, bytes.length)));
+                return room < bytes.length - unit ? CR_BUFFER_SMALL : CR_SUCCESS;
+            },
+        })),
+        /** CONFIGRET CM_Get_Device_ID_Size(PULONG pulLen, DEVINST dnDevInst, ULONG ulFlags) */
+        CM_Get_Device_ID_Size: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([lengthOut, devnode, flags])=>{
+                if ((lengthOut >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return CR_INVALID_FLAG;
+                }
+                const id = devices?.idOf(devnode >>> 0) ?? null;
+                if (id === null)
+                {
+                    return CR_INVALID_DEVNODE;
+                }
+                writeU32(lengthOut, id.length);
+                return CR_SUCCESS;
+            },
+        },
+
+        /**
+         * CONFIGRET CM_Get_Parent(PDEVINST pdnDevInst, DEVINST dnDevInst, ULONG ulFlags)
+         *
+         * Every device's parent is the tree's root, which enumerates them
+         * all here; the root has none.
+         */
+        CM_Get_Parent: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([parentOut, devnode, flags])=>{
+                if ((parentOut >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return CR_INVALID_FLAG;
+                }
+                if ((devnode >>> 0) === ROOT_DEVNODE)
+                {
+                    return CR_NO_SUCH_DEVNODE;
+                }
+                if (devices?.idOf(devnode >>> 0) == null)
+                {
+                    return CR_INVALID_DEVNODE;
+                }
+                writeU32(parentOut, ROOT_DEVNODE);
+                return CR_SUCCESS;
+            },
+        },
+
+        /**
+         * CONFIGRET CM_Get_Device_ID_ListA(PCSTR pszFilter, PCHAR Buffer, ULONG BufferLen,
+         *     ULONG ulFlags), the W form, and the _Size forms
+         *
+         * Every instance, phantoms too, in the tree's order, each terminated
+         * and an empty one after the last; CM_GETIDLIST_FILTER_ENUMERATOR
+         * those under an enumerator (or an enumerator's device),
+         * CM_GETIDLIST_FILTER_CLASS those of a class. Sizes are in characters.
+         */
+        ...bothWidths('CM_Get_Device_ID_List', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [filterPointer, buffer, length, flags])=>{
+                if ((buffer >>> 0) === 0 || (length >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                const list = deviceIdList(textOf(filterPointer, wide), flags >>> 0);
+                return 'error' in list ? list.error : answerList(list.text, buffer, length, wide);
+            },
+        })),
+        ...bothWidths('CM_Get_Device_ID_List_Size', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [lengthOut, filterPointer, flags])=>{
+                if ((lengthOut >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                const list = deviceIdList(textOf(filterPointer, wide), flags >>> 0);
+                if ('error' in list)
+                {
+                    return list.error;
+                }
+                writeU32(lengthOut, list.text.length + 1);
+                return CR_SUCCESS;
+            },
+        })),
+
+        /**
+         * CONFIGRET CM_Get_Device_Interface_ListA(LPGUID InterfaceClassGuid,
+         *     DEVINSTID_A pDeviceID, PCHAR Buffer, ULONG BufferLen, ULONG ulFlags),
+         *     the W form, and the _Size forms
+         *
+         * The symbolic links of a class's interfaces, of one device or of
+         * all; those of present devices only, unless
+         * CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES.
+         */
+        ...bothWidths('CM_Get_Device_Interface_List', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [classGuid, devicePointer, buffer, length, flags])=>{
+                if ((classGuid >>> 0) === 0 || (buffer >>> 0) === 0 || (length >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                const list = interfaceList(classGuid, textOf(devicePointer, wide), flags >>> 0);
+                return 'error' in list ? list.error : answerList(list.text, buffer, length, wide);
+            },
+        })),
+        ...bothWidths('CM_Get_Device_Interface_List_Size', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [lengthOut, classGuid, devicePointer, flags])=>{
+                if ((lengthOut >>> 0) === 0 || (classGuid >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                const list = interfaceList(classGuid, textOf(devicePointer, wide), flags >>> 0);
+                if ('error' in list)
+                {
+                    return list.error;
+                }
+                writeU32(lengthOut, list.text.length + 1);
+                return CR_SUCCESS;
+            },
+        })),
+
+        /** WORD CM_Get_Version(void) -- version 4.0 of the configuration manager */
+        CM_Get_Version: {
+            argBytes: 0,
+            handler: ()=>0x0400,
         },
 
         /**
@@ -1007,7 +3978,7 @@ export function createSetupapiFunctions(host){
          * directory unassigns the id, and id 0 unassigns every one; an id
          * below DIRID_USER is ERROR_INVALID_PARAMETER.
          */
-        SetupSetDirectoryIdA: {
+        ...bothWidths('SetupSetDirectoryId', wide=>({
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, id, directoryPointer])=>{
@@ -1026,7 +3997,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const directory = text(directoryPointer);
+                const directory = textOf(directoryPointer, wide);
                 if (directory === null)
                 {
                     open.ids.delete(number);
@@ -1037,7 +4008,7 @@ export function createSetupapiFunctions(host){
                 }
                 return fail(ERROR_SUCCESS, 1);
             },
-        },
+        })),
 
         /**
          * BOOL SetupOpenAppendInfFileA(PCSTR FileName, HINF InfHandle, PUINT ErrorLine)
@@ -1049,7 +4020,7 @@ export function createSetupapiFunctions(host){
          * SetupOpenInfFile looks for it; a file that does not parse leaves
          * its line in ErrorLine.
          */
-        SetupOpenAppendInfFileA: {
+        ...bothWidths('SetupOpenAppendInfFile', wide=>({
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([namePointer, handle, errorLine])=>{
@@ -1058,7 +4029,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const name = text(namePointer);
+                const name = textOf(namePointer, wide);
                 let names = name === null ? null : [name];
                 if (names === null)
                 {
@@ -1098,7 +4069,7 @@ export function createSetupapiFunctions(host){
                     : finish(/** @type {({ open: OpenInf } | { error: number, line: number })[]} */
                         (loads));
             },
-        },
+        })),
 
         /**
          * BOOL SetupGetInfInformationA(LPCVOID InfSpec, DWORD SearchControl,
@@ -1111,7 +4082,7 @@ export function createSetupapiFunctions(host){
          * The size needed is reported whatever the buffer; a NULL buffer
          * with a size no smaller than that is ERROR_INVALID_PARAMETER.
          */
-        SetupGetInfInformationA: {
+        ...bothWidths('SetupGetInfInformation', wide=>({
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([spec, search, buffer, size, required])=>{
@@ -1126,7 +4097,7 @@ export function createSetupapiFunctions(host){
                     const version = open.inf.section('Version')?.lines ?? [];
                     const data = [open.path, ...version.map(line=>
                         `${line.key ?? ''}=${line.fields.join(',')}`), ''];
-                    const strings = data.map(ansi);
+                    const strings = data.map(value=>encodeIn(value, wide));
                     const total = 8 + strings.reduce((sum, bytes)=>sum + bytes.length, 0) - 1;
                     if ((required >>> 0) !== 0)
                     {
@@ -1163,7 +4134,7 @@ export function createSetupapiFunctions(host){
                     const open = openInf(spec);
                     return open ? answer(open) : fail(ERROR_INVALID_HANDLE);
                 }
-                const name = text(spec);
+                const name = textOf(spec, wide);
                 if (name === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -1188,11 +4159,12 @@ export function createSetupapiFunctions(host){
                 };
                 return 'then' in loaded ? loaded.then(finish) : finish(loaded);
             },
-        },
+        })),
 
         /**
          * BOOL SetupIterateCabinetA(PCSTR CabinetFile, DWORD Reserved,
-         *                           PSP_FILE_CALLBACK_A MsgHandler, PVOID Context)
+         *                           PSP_FILE_CALLBACK_A MsgHandler, PVOID Context),
+         *     and the W form, whose callback is handed the W structures
          *
          * Wine's setupapi cabinet tests: NULL is ERROR_INVALID_PARAMETER, an
          * empty name ERROR_NOT_ENOUGH_MEMORY, a missing file
@@ -1201,11 +4173,11 @@ export function createSetupapiFunctions(host){
          * callback that aborts, or answers an extraction with an error,
          * ends the walk with that error.
          */
-        SetupIterateCabinetA: {
+        ...bothWidths('SetupIterateCabinet', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([cabinetPointer, , callback, context])=>{
-                const name = text(cabinetPointer);
+            handler: (/** @type {number[]} */ [cabinetPointer, , callback, context])=>{
+                const name = textOf(cabinetPointer, wide);
                 if (name === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -1214,22 +4186,22 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_NOT_ENOUGH_MEMORY);
                 }
-                const full = host.fullPath(name);
+                const full = pathOf(name);
                 const bytes = readWhole(full);
-                if (bytes === null)
+                if (full === null || bytes === null)
                 {
                     return fail(ERROR_FILE_NOT_FOUND);
                 }
                 const thread = host.callerThread();
                 return Promise.resolve(bytes)
-                    .then(data=>
-                        iterateCabinet(data, full, cabinetPointer, callback, context, thread))
+                    .then(data=>iterateCabinet(data, full, cabinetPointer, callback, context,
+                        thread, wide))
                     .then(code=>{
                         host.setLastErrorFor(thread, code);
                         return code === ERROR_SUCCESS ? 1 : 0;
                     });
             },
-        },
+        })),
 
         /** HSPFILEQ SetupOpenFileQueue(VOID) */
         SetupOpenFileQueue: {
@@ -1320,56 +4292,332 @@ export function createSetupapiFunctions(host){
          * BOOL SetupQueueCopyA(HSPFILEQ QueueHandle, PCSTR SourceRootPath,
          *     PCSTR SourcePath, PCSTR SourceFilename, PCSTR SourceDescription,
          *     PCSTR SourceTagfile, PCSTR TargetDirectory, PCSTR TargetFilename,
-         *     DWORD CopyStyle)
+         *     DWORD CopyStyle), and the W form
          *
-         * The file is looked for under the root joined with SourcePath, and
-         * the tag file at the root. No target name means the source's; no
-         * source name or no target directory is ERROR_INVALID_PARAMETER.
+         * The root and the description and tag file are the media the file
+         * comes from, SourcePath its directory under the root; the media's
+         * path is told to the callback as the program gave it. No target
+         * name means the source's; no source name or no target directory is
+         * ERROR_INVALID_PARAMETER.
          */
-        SetupQueueCopyA: {
+        ...bothWidths('SetupQueueCopy', wide=>({
             argBytes: 36,
             /** @param {number[]} args */
-            handler: ([handle, rootPointer, pathPointer, filePointer, descriptionPointer,
-                tagPointer, directoryPointer, targetPointer, style])=>{
-                const queue = fileQueue(handle);
+            handler: (/** @type {number[]} */ [handle, rootPointer, pathPointer, filePointer,
+                descriptionPointer, tagPointer, directoryPointer, targetPointer, style])=>
+                queueCopy(handle, {
+                    root: textOf(rootPointer, wide), subdirectory: textOf(pathPointer, wide),
+                    file: textOf(filePointer, wide), description: textOf(descriptionPointer, wide),
+                    tagfile: textOf(tagPointer, wide), directory: textOf(directoryPointer, wide),
+                    target: textOf(targetPointer, wide), flags: style >>> 0,
+                }),
+        })),
+
+        /**
+         * BOOL SetupQueueCopyIndirectA(PSP_FILE_COPY_PARAMS_A CopyParams), and the W form
+         *
+         * SetupQueueCopy's arguments in a structure: cbSize, QueueHandle,
+         * SourceRootPath, SourcePath, SourceFilename, SourceDescription,
+         * SourceTagfile, TargetDirectory, TargetFilename, CopyStyle,
+         * LayoutInf, and since Windows XP SecurityDescriptor -- cbSize 44 or
+         * 48. A LayoutInf is refused with ERROR_INVALID_PARAMETER, as Windows
+         * 8 and later refuse it.
+         */
+        ...bothWidths('SetupQueueCopyIndirect', wide=>({
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [params])=>{
+                if ((params >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const view = new DataView(host.readMemory(params >>> 0, 44).slice().buffer);
+                /** @param {number} index */
+                const field = index=>view.getUint32(index * 4, true);
+                if ((field(0) !== 44 && field(0) !== 48) || field(10) !== 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                return queueCopy(field(1), {
+                    root: textOf(field(2), wide), subdirectory: textOf(field(3), wide),
+                    file: textOf(field(4), wide), description: textOf(field(5), wide),
+                    tagfile: textOf(field(6), wide), directory: textOf(field(7), wide),
+                    target: textOf(field(8), wide), flags: field(9),
+                });
+            },
+        })),
+
+        /**
+         * BOOL SetupQueueDefaultCopyA(HSPFILEQ QueueHandle, HINF InfHandle,
+         *     PCSTR SourceRootPath, PCSTR SourceFilename, PCSTR TargetFilename,
+         *     DWORD CopyStyle), and the W form
+         *
+         * One file to the INF's DefaultDestDir, its media from the INF's
+         * source disks. No source name is ERROR_INVALID_PARAMETER.
+         */
+        ...bothWidths('SetupQueueDefaultCopy', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, handle, rootPointer, filePointer,
+                targetPointer, style])=>{
+                const queue = fileQueue(queueHandle);
+                const open = openInf(handle);
+                if (!queue || !open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const source = textOf(filePointer, wide);
+                if (!source)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                queueInfCopy(queue, open.inf, { root: textOf(rootPointer, wide) ?? '', source,
+                    targetDirectory: listTarget(open.inf, 'DefaultDestDir', diridOf(open)),
+                    targetFile: textOf(targetPointer, wide) || source, flags: style >>> 0 });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupQueueCopySectionA(HSPFILEQ QueueHandle, PCSTR SourceRootPath,
+         *     HINF InfHandle, HINF ListInfHandle, PCSTR Section, DWORD CopyStyle),
+         *     and the W form
+         *
+         * A CopyFiles list's files: the list in ListInfHandle's INF when one
+         * is given, the source disks in InfHandle's.
+         */
+        ...bothWidths('SetupQueueCopySection', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, rootPointer, handle, listHandle,
+                sectionPointer, style])=>queueList(queueHandle, handle, listHandle,
+                textOf(sectionPointer, wide), 'copyfiles', textOf(rootPointer, wide) ?? '',
+                style >>> 0),
+        })),
+
+        /**
+         * BOOL SetupQueueDeleteSectionA(HSPFILEQ QueueHandle, HINF InfHandle,
+         *     HINF ListInfHandle, PCSTR Section), and the W form
+         */
+        ...bothWidths('SetupQueueDeleteSection', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, handle, listHandle, sectionPointer])=>
+                queueList(queueHandle, handle, listHandle, textOf(sectionPointer, wide),
+                    'delfiles', '', 0),
+        })),
+
+        /**
+         * BOOL SetupQueueRenameSectionA(HSPFILEQ QueueHandle, HINF InfHandle,
+         *     HINF ListInfHandle, PCSTR Section), and the W form
+         */
+        ...bothWidths('SetupQueueRenameSection', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, handle, listHandle, sectionPointer])=>
+                queueList(queueHandle, handle, listHandle, textOf(sectionPointer, wide),
+                    'renfiles', '', 0),
+        })),
+
+        /**
+         * BOOL SetupQueueDeleteA(HSPFILEQ QueueHandle, PCSTR PathPart1, PCSTR PathPart2),
+         * and the W form -- the file the two parts make joined.
+         */
+        ...bothWidths('SetupQueueDelete', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, firstPointer, secondPointer])=>{
+                const queue = fileQueue(queueHandle);
                 if (!queue)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const sourceFile = text(filePointer);
-                const targetDirectory = text(directoryPointer);
-                if (!sourceFile || !targetDirectory)
+                const first = textOf(firstPointer, wide);
+                if (first === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const root = text(rootPointer) ?? '';
-                const where = joinPath(root, text(pathPointer) ?? '');
-                const sourcePath = where === '' ? '' : host.fullPath(where);
-                queue.copies.push({
-                    sourceRoot: root === '' ? sourcePath : host.fullPath(root),
-                    sourcePath,
-                    sourceFile,
-                    description: text(descriptionPointer) || null,
-                    tagfile: text(tagPointer) || null,
-                    targetDirectory: host.fullPath(targetDirectory),
-                    targetFile: text(targetPointer) || sourceFile,
-                    flags: style >>> 0,
+                queue.deletes.push({ targetDirectory: first,
+                    targetFile: textOf(secondPointer, wide) ?? '' });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupQueueRenameA(HSPFILEQ QueueHandle, PCSTR SourcePath,
+         *     PCSTR SourceFilename, PCSTR TargetPath, PCSTR TargetFilename),
+         *     and the W form
+         *
+         * No target path is the source's: a rename in place. A rename into
+         * another directory moves the file.
+         */
+        ...bothWidths('SetupQueueRename', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [queueHandle, sourcePathPointer, sourcePointer,
+                targetPathPointer, targetPointer])=>{
+                const queue = fileQueue(queueHandle);
+                if (!queue)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const sourceDirectory = textOf(sourcePathPointer, wide);
+                const sourceFile = textOf(sourcePointer, wide);
+                const targetFile = textOf(targetPointer, wide);
+                if (sourceDirectory === null || !sourceFile || !targetFile)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                queue.renames.push({ sourceDirectory, sourceFile,
+                    targetDirectory: textOf(targetPathPointer, wide) ?? sourceDirectory,
+                    targetFile });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupInstallFilesFromInfSectionA(HINF InfHandle, HINF LayoutInfHandle,
+         *     HSPFILEQ FileQueue, PCSTR SectionName, PCSTR SourceRootPath, UINT CopyFlags),
+         *     and the W form
+         *
+         * Queues an install section's CopyFiles, DelFiles and RenFiles; the
+         * source disks are the layout INF's when one is given. No root is the
+         * INF's own directory.
+         */
+        ...bothWidths('SetupInstallFilesFromInfSection', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, layoutHandle, queueHandle, sectionPointer,
+                rootPointer, copyFlags])=>{
+                const queue = fileQueue(queueHandle);
+                const open = openInf(handle);
+                const layout = (layoutHandle >>> 0) === 0 ? open : openInf(layoutHandle);
+                if (!queue || !open || !layout)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const section = open.inf.section(textOf(sectionPointer, wide) ?? '');
+                if (!section)
+                {
+                    return fail(ERROR_SECTION_NOT_FOUND);
+                }
+                queueInstallSection(queue, open.inf, section, {
+                    root: textOf(rootPointer, wide) || directoryOf(open.path).replace(/\\$/, ''),
+                    copyFlags: copyFlags >>> 0, dirid: diridOf(open), layout: layout.inf,
                 });
                 return fail(ERROR_SUCCESS, 1);
             },
-        },
+        })),
+
+        /**
+         * BOOL SetupInstallFileA(HINF InfHandle, PINFCONTEXT InfContext, PCSTR SourceFile,
+         *     PCSTR SourcePathRoot, PCSTR DestinationName, DWORD CopyStyle,
+         *     PSP_FILE_CALLBACK_A CopyMsgHandler, PVOID Context), and the W form
+         */
+        ...bothWidths('SetupInstallFile', wide=>({
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, context, sourcePointer, rootPointer,
+                destinationPointer, style, callback])=>installFile(handle, context,
+                textOf(sourcePointer, wide), textOf(rootPointer, wide),
+                textOf(destinationPointer, wide), style >>> 0, callback >>> 0, 0,
+                `SetupInstallFile${wide ? 'W' : 'A'}`),
+        })),
+
+        /**
+         * BOOL SetupInstallFileExA(HINF InfHandle, PINFCONTEXT InfContext, PCSTR SourceFile,
+         *     PCSTR SourcePathRoot, PCSTR DestinationName, DWORD CopyStyle,
+         *     PSP_FILE_CALLBACK_A CopyMsgHandler, PVOID Context, PBOOL FileWasInUse),
+         *     and the W form -- a file is never in use here.
+         */
+        ...bothWidths('SetupInstallFileEx', wide=>({
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, context, sourcePointer, rootPointer,
+                destinationPointer, style, callback, , inUse])=>installFile(handle, context,
+                textOf(sourcePointer, wide), textOf(rootPointer, wide),
+                textOf(destinationPointer, wide), style >>> 0, callback >>> 0, inUse >>> 0,
+                `SetupInstallFileEx${wide ? 'W' : 'A'}`),
+        })),
+
+        /**
+         * BOOL SetupGetInfFileListA(PCSTR DirectoryPath, DWORD InfStyle, PSTR ReturnBuffer,
+         *     DWORD ReturnBufferSize, PDWORD RequiredSize), and the W form
+         *
+         * The .inf files of a directory -- the INF directory for none -- whose
+         * style is one asked for, each name terminated and an empty one after
+         * the last; a [Version] Signature of $Chicago$, $Windows NT$ or
+         * $Windows 95$ is INF_STYLE_WIN4, any other file INF_STYLE_OLDNT. A
+         * directory that is not there has no files, TRUE with
+         * ERROR_PATH_NOT_FOUND; a file in its place is ERROR_DIRECTORY.
+         */
+        ...bothWidths('SetupGetInfFileList', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [directoryPointer, style, buffer, size,
+                required])=>{
+                const given = textOf(directoryPointer, wide);
+                const directory = given === null ? `${windows}\\inf`
+                    : pathOf(given.replace(/[\\/]+$/, '') || given);
+                if (directory === null)
+                {
+                    return fail(ERROR_PATH_NOT_FOUND);
+                }
+                let stat;
+                try
+                {
+                    stat = host.files.stat(directory);
+                }
+                catch {
+                    stat = null;
+                }
+                if (stat && !stat.isDirectory)
+                {
+                    return fail(ERROR_DIRECTORY);
+                }
+                const thread = host.callerThread();
+                return (async()=>{
+                    /** @type {string[]} */
+                    const names = [];
+                    for (const entry of stat ? host.files.list(directory, '*.inf') : [])
+                    {
+                        const bytes = entry.isDirectory ? null
+                            : await readWhole(joinPath(directory, entry.name));
+                        if (bytes === null)
+                        {
+                            continue;
+                        }
+                        const parsed = parseInf(infText(bytes), { dirid });
+                        const found = 'inf' in parsed ? parsed.inf.style : INF_STYLE_OLDNT;
+                        if ((found & style) !== 0)
+                        {
+                            names.push(entry.name);
+                        }
+                    }
+                    const list = names.map(name=>`${name}\0`).join('');
+                    if (!answerText(list, buffer, size, required, wide))
+                    {
+                        return 0;
+                    }
+                    host.setLastErrorFor(thread, stat ? ERROR_SUCCESS : ERROR_PATH_NOT_FOUND);
+                    return 1;
+                })();
+            },
+        })),
 
         /**
          * BOOL SetupCommitFileQueueA(HWND Owner, HSPFILEQ QueueHandle,
-         *                            PSP_FILE_CALLBACK_A MsgHandler, PVOID Context)
+         *     PSP_FILE_CALLBACK_A MsgHandler, PVOID Context), and the W form
          *
          * The queue's operations, through MsgHandler, in SetupCommitFileQueue's
-         * order; FALSE with the error that ended it when it did not finish.
+         * order; FALSE with the error that ended it when it did not finish,
+         * and with the last error the handler left when it was the handler
+         * that ended it.
          */
-        SetupCommitFileQueueA: {
+        ...bothWidths('SetupCommitFileQueue', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, handle, callback, context])=>{
+            handler: (/** @type {number[]} */ [, handle, callback, context])=>{
                 const queue = fileQueue(handle);
                 if (!queue)
                 {
@@ -1380,12 +4628,15 @@ export function createSetupapiFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const thread = host.callerThread();
-                return commit(queue, callback, context, thread).then(code=>{
-                    host.setLastErrorFor(thread, code);
+                return commit(queue, callback, context, thread, wide).then(code=>{
+                    if (code !== null)
+                    {
+                        host.setLastErrorFor(thread, code);
+                    }
                     return code === ERROR_SUCCESS ? 1 : 0;
                 });
             },
-        },
+        })),
 
         /**
          * BOOL SetupInstallFromInfSectionA(HWND Owner, HINF InfHandle, PCSTR SectionName,
@@ -1402,79 +4653,150 @@ export function createSetupapiFunctions(host){
          * directives are not carried out here, and each one met is reported
          * as a divergence.
          */
-        SetupInstallFromInfSectionA: {
+        ...bothWidths('SetupInstallFromInfSection', wide=>({
             argBytes: 44,
             /** @param {number[]} args */
-            handler: ([, handle, sectionPointer, flags, relativeKey, rootPointer, copyFlags,
-                callback, context])=>{
+            handler: (/** @type {number[]} */ [, handle, sectionPointer, flags, relativeKey,
+                rootPointer, copyFlags, callback, context])=>{
+                const api = `SetupInstallFromInfSection${wide ? 'W' : 'A'}`;
                 const open = openInf(handle);
                 if (!open)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const name = text(sectionPointer) ?? '';
-                const section = open.inf.section(name);
+                const section = open.inf.section(textOf(sectionPointer, wide) ?? '');
                 if (!section)
                 {
                     return fail(ERROR_SECTION_NOT_FOUND);
                 }
                 const wanted = (flags >>> 0) & SPINST_ALL;
-                for (const line of section.lines)
-                {
-                    const directive = line.key?.toLowerCase() ?? '';
-                    if (!['copyfiles', 'delfiles', 'renfiles', 'addreg', 'delreg']
-                        .includes(directive) && directive !== ''
-                        && wanted & ~(SPINST_FILES | SPINST_REGISTRY))
-                    {
-                        host.divergence?.('SetupInstallFromInfSectionA',
-                            `the ${line.key} directive is not carried out`);
-                    }
-                }
-                const registry = ()=>{
-                    if ((wanted & SPINST_REGISTRY) === 0 || !host.registry)
-                    {
-                        return;
-                    }
-                    const relative = (relativeKey >>> 0) >= HKEY_CLASSES_ROOT
-                        && (relativeKey >>> 0) <= HKEY_USERS
-                        ? host.registry.root(relativeKey >>> 0) : null;
-                    if ((relativeKey >>> 0) !== 0 && !relative)
-                    {
-                        host.divergence?.('SetupInstallFromInfSectionA',
-                            'an HKR line under an opened key is not carried out');
-                    }
-                    installRegistry(host.registry, open.inf, section, {
-                        relativeRoot: relative,
-                        expand: value=>expand(open, value),
-                        divergence: detail=>host.divergence?.('SetupInstallFromInfSectionA',
-                            detail),
-                    });
-                };
-                if ((wanted & SPINST_FILES) === 0)
-                {
-                    registry();
-                    return fail(ERROR_SUCCESS, 1);
-                }
-                if ((callback >>> 0) === 0)
+                if ((wanted & SPINST_FILES) !== 0 && (callback >>> 0) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const root = text(rootPointer) || directoryOf(open.path).replace(/\\$/, '');
-                const queue = newQueue();
-                queueInstallSection(queue, open.inf, section, {
-                    root, copyFlags: copyFlags >>> 0, dirid: diridOf(open),
-                });
+                const relative = relativeKeyOf(relativeKey >>> 0, api);
+                const root = textOf(rootPointer, wide)
+                    || directoryOf(open.path).replace(/\\$/, '');
                 const thread = host.callerThread();
-                return commit(queue, callback, context, thread).then(code=>{
-                    if (code === ERROR_SUCCESS)
+                const done = installSection(open, section, { wanted, relative, root,
+                    copyFlags: copyFlags >>> 0, callback: callback >>> 0, context: context >>> 0,
+                    thread, wide, api });
+                /** @param {number | null} code  null: the callback's own last error stands. */
+                const answer = code=>{
+                    if (code !== null)
                     {
-                        registry();
+                        host.setLastErrorFor(thread, code);
                     }
-                    host.setLastErrorFor(thread, code);
                     return code === ERROR_SUCCESS ? 1 : 0;
-                });
+                };
+                return typeof done === 'number' ? answer(done) : done.then(answer);
             },
-        },
+        })),
+
+        /**
+         * BOOL SetupInstallServicesFromInfSectionA(HINF InfHandle, PCSTR SectionName,
+         *     DWORD Flags), and the W form
+         *
+         * Each AddService line's service made. A section that is not there,
+         * or has no lines, is ERROR_SECTION_NOT_FOUND; a service section
+         * short of what a service needs, ERROR_BAD_SERVICE_INSTALLSECT.
+         */
+        ...bothWidths('SetupInstallServicesFromInfSection', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, sectionPointer])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const section = open.inf.section(textOf(sectionPointer, wide) ?? '');
+                if (!section || section.lines.length === 0)
+                {
+                    return fail(ERROR_SECTION_NOT_FOUND);
+                }
+                const error = installServices(open, section,
+                    `SetupInstallServicesFromInfSection${wide ? 'W' : 'A'}`);
+                return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
+            },
+        })),
+
+        /**
+         * VOID InstallHinfSectionA(HWND Window, HINSTANCE ModuleHandle, PCSTR CommandLine,
+         *     INT ShowCommand), and the W form
+         *
+         * The command line is a section, a reboot mode, and the INF's path --
+         * the rest of the line, spaces and all, taken as it is (quoted, it
+         * names no file). The section is installed whole, files through the
+         * default callback, and its .Services section after it. Its Include
+         * INFs are appended first and the sections its Needs names installed
+         * before it -- directives only this call carries out, not
+         * SetupInstallFromInfSection.
+         */
+        ...bothWidths('InstallHinfSection', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [, , commandPointer])=>{
+                const api = `InstallHinfSection${wide ? 'W' : 'A'}`;
+                const command = textOf(commandPointer, wide) ?? '';
+                const match = /^\s*(\S+)\s+(\d+)\s+(.*)$/.exec(command);
+                if (!match)
+                {
+                    return 0;
+                }
+                const [, name, , path] = match;
+                const thread = host.callerThread();
+                return (async()=>{
+                    const loaded = await loadInf(pathOf(path) ?? undefined);
+                    if ('error' in loaded)
+                    {
+                        return 0;
+                    }
+                    const { open } = loaded;
+                    /** @param {string} wanted */
+                    const decorated = wanted=>['.NTx86', '.NT', ''].map(suffix=>wanted + suffix)
+                        .find(candidate=>open.inf.section(candidate)) ?? wanted;
+                    const actual = decorated(name);
+                    const section = open.inf.section(actual);
+                    if (!section)
+                    {
+                        return 0;
+                    }
+                    /** @param {string} key */
+                    const listed = key=>section.lines
+                        .filter(line=>line.key?.toLowerCase() === key)
+                        .flatMap(line=>line.fields).filter(field=>field !== '');
+                    for (const included of listed('include'))
+                    {
+                        const more = await loadInf(pathOf(included) ?? undefined);
+                        if (!('error' in more))
+                        {
+                            appendInf(open, more.open.inf);
+                        }
+                    }
+                    const root = directoryOf(open.path).replace(/\\$/, '');
+                    // The sections Needs names first, then the section itself.
+                    for (const wanted of [...listed('needs').map(decorated), actual])
+                    {
+                        const part = open.inf.section(wanted);
+                        const code = part ? await installSection(open, part, {
+                            wanted: SPINST_ALL, relative: null, root, copyFlags: 0,
+                            callback: defaultAnswer, context: 0, thread, wide, api,
+                        }) : ERROR_SUCCESS;
+                        if (code !== ERROR_SUCCESS)
+                        {
+                            return 0;
+                        }
+                    }
+                    const extra = open.inf.section(`${actual}.Services`);
+                    if (extra)
+                    {
+                        installServices(open, extra, api);
+                    }
+                    return 0;
+                })();
+            },
+        })),
 
         /**
          * BOOL SetupCopyOEMInfA(PCSTR SourceInfFileName, PCSTR OEMSourceMediaLocation,
@@ -1499,7 +4821,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const source = name === '' ? null : host.fullPath(name);
+                const source = name === '' ? null : pathOf(name);
                 const bytes = source === null ? null : readWhole(source);
                 if (bytes === null)
                 {
@@ -1579,29 +4901,507 @@ export function createSetupapiFunctions(host){
         },
 
         /**
-         * HDEVINFO SetupDiGetClassDevsA(const GUID *ClassGuid, PCSTR Enumerator,
-         *                               HWND hwndParent, DWORD Flags)
+         * BOOL SetupDiGetActualSectionToInstallA(HINF InfHandle, PCSTR InfSectionName,
+         *     PSTR InfSectionWithExt, DWORD InfSectionWithExtSize, PDWORD RequiredSize,
+         *     PSTR *Extension), the W form, and the Ex forms with an alternate
+         *     platform after the name and a reserved pointer last
          *
-         * This machine registers no Plug and Play devices, so a set is
-         * always empty -- but the arguments are checked as Wine's setupapi
-         * test_get_class_devs shows: no class without DIGCF_ALLCLASSES is
-         * ERROR_INVALID_PARAMETER, and an empty enumerator or one ending in
-         * a separator ERROR_INVALID_DATA.
+         * The section this machine installs: the name decorated .NTx86 if the
+         * INF has that, else .NT, else the name itself; Extension at the
+         * decoration in the caller's buffer, or null for none.
          */
-        SetupDiGetClassDevsA: {
+        ...bothWidths('SetupDiGetActualSectionToInstall', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, sectionPointer, buffer, size, required,
+                extension])=>actualSection(handle, textOf(sectionPointer, wide), buffer, size,
+                required, extension, wide),
+        })),
+        ...bothWidths('SetupDiGetActualSectionToInstallEx', wide=>({
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, sectionPointer, platform, buffer, size,
+                required, extension, reserved])=>((platform >>> 0) !== 0 || (reserved >>> 0) !== 0
+                ? fail(ERROR_INVALID_PARAMETER)
+                : actualSection(handle, textOf(sectionPointer, wide), buffer, size, required,
+                    extension, wide)),
+        })),
+
+        /**
+         * BOOL SetupDiInstallClassA(HWND hwndParent, PCSTR InfFileName, DWORD Flags,
+         *     HSPFILEQ FileQueue), the W form, and the Ex forms with an interface
+         *     class, a reserved pointer and another after them
+         *
+         * The INF's [Version] class made under Control\\Class -- its name the
+         * key's Class value -- and its ClassInstall32 section, decorated for
+         * this machine, carried out there: its AddReg and DelReg with HKR the
+         * class's key. DI_NOVCP with no queue to add to, or no INF, is
+         * ERROR_INVALID_PARAMETER.
+         */
+        ...bothWidths('SetupDiInstallClass', wide=>({
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([classGuid, enumerator, , flags])=>{
-                if ((classGuid >>> 0) === 0 && ((flags >>> 0) & DIGCF_ALLCLASSES) === 0)
+            handler: (/** @type {number[]} */ [, namePointer, flags, queue])=>
+                installClass(textOf(namePointer, wide), flags >>> 0, queue >>> 0),
+        })),
+
+        /**
+         * BOOL SetupDiGetINFClassA(PCSTR InfName, LPGUID ClassGuid, PSTR ClassName,
+         *     DWORD ClassNameSize, PDWORD RequiredSize), and the W form
+         *
+         * The class an INF installs, from its [Version] Class and ClassGUID,
+         * strings substituted; the one it does not give is the installed
+         * class's of that name or GUID, GUID_NULL or an empty name when there
+         * is none. An INF that is not there is ERROR_FILE_NOT_FOUND before
+         * any argument is looked at; one that is not INF_STYLE_WIN4, or names
+         * neither, fails; a ClassGUID that is not one is
+         * ERROR_INVALID_PARAMETER, as Windows 7 and later answer it.
+         */
+        ...bothWidths('SetupDiGetINFClass', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [namePointer, guidOut, buffer, size, required])=>{
+                const name = textOf(namePointer, wide);
+                if (name === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const path = pathOf(name);
+                if (!exists(path))
+                {
+                    return fail(ERROR_FILE_NOT_FOUND);
+                }
+                if ((guidOut >>> 0) === 0 || (buffer >>> 0) === 0 || (size >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const thread = host.callerThread();
+                /** @param {{ open: OpenInf } | { error: number, line: number }} result */
+                const answer = result=>{
+                    if ('error' in result || result.open.inf.style !== INF_STYLE_WIN4)
+                    {
+                        host.setLastErrorFor(thread, 'error' in result ? result.error
+                            : ERROR_WRONG_INF_STYLE);
+                        return 0;
+                    }
+                    const { inf } = result.open;
+                    const className = inf.value('Version', 'Class');
+                    const guidValue = inf.value('Version', 'ClassGUID');
+                    if (className === null && guidValue === null)
+                    {
+                        host.setLastErrorFor(thread, ERROR_NO_ASSOCIATED_CLASS);
+                        return 0;
+                    }
+                    let guid = GUID_NULL;
+                    if (guidValue !== null)
+                    {
+                        if (!/^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$/i
+                            .test(guidValue))
+                        {
+                            host.setLastErrorFor(thread, ERROR_INVALID_PARAMETER);
+                            return 0;
+                        }
+                        guid = guidValue.toLowerCase();
+                    }
+                    const installed = installedClasses();
+                    const found = guidValue === null
+                        ? installed.find(entry=>entry.name.toLowerCase()
+                            === /** @type {string} */ (className).toLowerCase())
+                        : installed.find(entry=>entry.guid === guid);
+                    if (guidValue === null && found)
+                    {
+                        guid = found.guid;
+                    }
+                    writeGuid(guidOut, guid);
+                    if (!answerText(className ?? found?.name ?? '', buffer, size, required, wide))
+                    {
+                        host.setLastErrorFor(thread, ERROR_INSUFFICIENT_BUFFER);
+                        return 0;
+                    }
+                    host.setLastErrorFor(thread, ERROR_SUCCESS);
+                    return 1;
+                };
+                const loaded = loadInf(path ?? undefined);
+                return 'then' in loaded ? loaded.then(answer) : answer(loaded);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiGetClassDescriptionA(const GUID *ClassGuid, PSTR ClassDescription,
+         *     DWORD ClassDescriptionSize, PDWORD RequiredSize), the W form, and the
+         *     Ex forms with a machine and a reserved pointer after them
+         *
+         * The class key's default value; a class not installed is
+         * ERROR_INVALID_CLASS, the size untouched.
+         */
+        ...bothWidths('SetupDiGetClassDescription', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [classGuid, buffer, size, required])=>{
+                const guid = guidAt(classGuid);
+                const hive = host.registry;
+                const key = guid === null || !hive ? null
+                    : hive.open(hive.root(HKEY_LOCAL_MACHINE), `${CLASS_KEY}\\${guid}`);
+                const value = key ? hive.getValue(key, '') : null;
+                if (!value)
+                {
+                    return fail(ERROR_INVALID_CLASS);
+                }
+                const description = decodeAnsi(value.data).replace(/\0[\s\S]*$/, '');
+                return answerText(description, buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * HKEY SetupDiOpenClassRegKey(const GUID *ClassGuid, REGSAM samDesired)
+         *
+         * The installer's class key, or with no class the key every class's is under.
+         */
+        SetupDiOpenClassRegKey: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([classGuid])=>classKey(guidAt(classGuid), DIOCR_INSTALLER),
+        },
+
+        /**
+         * HKEY SetupDiOpenClassRegKeyExA(const GUID *ClassGuid, REGSAM samDesired,
+         *     DWORD Flags, PCSTR MachineName, PVOID Reserved), and the W form
+         *
+         * DIOCR_INSTALLER the installer's class keys, DIOCR_INTERFACE the
+         * interface classes'. A class that has none is INVALID_HANDLE_VALUE
+         * with ERROR_INVALID_CLASS.
+         */
+        ...bothWidths('SetupDiOpenClassRegKeyEx', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [classGuid, , flags, machinePointer, reserved])=>{
+                if ((reserved >>> 0) !== 0 || ((flags >>> 0) !== DIOCR_INSTALLER
+                    && (flags >>> 0) !== DIOCR_INTERFACE))
                 {
                     return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
                 }
-                const name = text(enumerator);
-                if (name !== null && (name === '' || /\\$/.test(name)))
+                if ((textOf(machinePointer, wide) ?? '') !== '')
                 {
-                    return fail(ERROR_INVALID_DATA, INVALID_HANDLE_VALUE);
+                    return fail(ERROR_INVALID_MACHINENAME, INVALID_HANDLE_VALUE);
                 }
-                return host.handles.open('device-info-set', { devices: [] });
+                return classKey(guidAt(classGuid), flags >>> 0);
+            },
+        })),
+
+        /**
+         * UINT SetupPromptForDiskA(HWND hwndParent, PCSTR DialogTitle, PCSTR DiskName,
+         *     PCSTR PathToSource, PCSTR FileSought, PCSTR TagFile, DWORD DiskPromptStyle,
+         *     PSTR PathBuffer, DWORD PathBufferSize, PDWORD PathRequiredSize), and the
+         *     W form
+         *
+         * With IDF_CHECKFIRST and the file already where it is sought, the
+         * path, no dialog shown: DPROMPT_SUCCESS, or DPROMPT_BUFFERTOOSMALL
+         * for a buffer it does not fit, its size reported either way.
+         * Anything else would ask the user for the disk, and no one is there
+         * to answer: DPROMPT_CANCEL, as a user who declines.
+         */
+        ...bothWidths('SetupPromptForDisk', wide=>({
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [, , , sourcePointer, filePointer, tagPointer,
+                style, buffer, size, required])=>{
+                const source = textOf(sourcePointer, wide) ?? '';
+                const sought = textOf(tagPointer, wide) || textOf(filePointer, wide) || '';
+                const found = exists(pathOf(joinPath(source, sought)));
+                if (((style >>> 0) & IDF_CHECKFIRST) === 0 || !found)
+                {
+                    host.divergence?.(`SetupPromptForDisk${wide ? 'W' : 'A'}`,
+                        'no one to ask for the disk: answered as cancelled');
+                    return DPROMPT.CANCEL;
+                }
+                const characters = source.length + 1;
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, characters);
+                }
+                if ((buffer >>> 0) === 0)
+                {
+                    return DPROMPT.SUCCESS;
+                }
+                if ((size >>> 0) < characters)
+                {
+                    return DPROMPT.BUFFERTOOSMALL;
+                }
+                host.writeMemory(buffer >>> 0, encodeIn(source, wide));
+                return DPROMPT.SUCCESS;
+            },
+        })),
+
+        /**
+         * HDEVINFO SetupDiCreateDeviceInfoList(const GUID *ClassGuid, HWND hwndParent)
+         *
+         * An empty set, of the class given or of any.
+         */
+        SetupDiCreateDeviceInfoList: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([classGuid])=>newSet(guidAt(classGuid)),
+        },
+
+        /**
+         * HDEVINFO SetupDiCreateDeviceInfoListExA(const GUID *ClassGuid, HWND hwndParent,
+         *     PCSTR MachineName, PVOID Reserved), and the W form
+         *
+         * A machine named is a remote one, which this machine cannot reach;
+         * an empty name is this one. Anything reserved is ERROR_INVALID_PARAMETER.
+         */
+        ...bothWidths('SetupDiCreateDeviceInfoListEx', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [classGuid, , machinePointer, reserved])=>{
+                if ((reserved >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+                }
+                if ((textOf(machinePointer, wide) ?? '') !== '')
+                {
+                    return fail(ERROR_INVALID_MACHINENAME, INVALID_HANDLE_VALUE);
+                }
+                return newSet(guidAt(classGuid));
+            },
+        })),
+
+        /**
+         * BOOL SetupDiGetDeviceInfoListClass(HDEVINFO DeviceInfoSet, LPGUID ClassGuid)
+         *
+         * A set of no one class has none to give: ERROR_NO_ASSOCIATED_CLASS.
+         */
+        SetupDiGetDeviceInfoListClass: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const set = deviceSet(handle);
+                if (!set)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (set.classGuid === null)
+                {
+                    return fail(ERROR_NO_ASSOCIATED_CLASS);
+                }
+                writeGuid(out, set.classGuid);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetupDiGetDeviceInfoListDetailA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_LIST_DETAIL_DATA_A DeviceInfoSetDetailData), and the W form
+         *
+         * The set's class (GUID_NULL for none) and no remote machine.
+         */
+        ...bothWidths('SetupDiGetDeviceInfoListDetail', wide=>({
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, detail])=>{
+                const set = deviceSet(handle);
+                if (!set)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const size = wide ? LIST_DETAIL_W_SIZE : LIST_DETAIL_A_SIZE;
+                if ((detail >>> 0) === 0 || readU32(detail) !== size)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                host.writeMemory((detail >>> 0) + 4, new Uint8Array(size - 4));
+                writeGuid(detail + 4, set.classGuid ?? GUID_NULL);
+                return 1;
+            },
+        })),
+
+        /**
+         * BOOL SetupDiCreateDeviceInfoA(HDEVINFO DeviceInfoSet, PCSTR DeviceName,
+         *     const GUID *ClassGuid, PCSTR DeviceDescription, HWND hwndParent,
+         *     DWORD CreationFlags, PSP_DEVINFO_DATA DeviceInfoData), and the W form
+         *
+         * A phantom instance in the registry and in the set, until it is
+         * registered. The name is a whole instance id, or with
+         * DICD_GENERATE_ID a device's name under ROOT, given the first
+         * instance free. The checks come in Windows' order: the name, the
+         * set, the class, the class against the set's, the id itself, an
+         * instance already there. Device data of the wrong size is
+         * ERROR_INVALID_USER_BUFFER, the device made all the same.
+         */
+        ...bothWidths('SetupDiCreateDeviceInfo', wide=>({
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, namePointer, classGuid, description, ,
+                flags, data])=>{
+                const name = textOf(namePointer, wide);
+                if (name === null)
+                {
+                    return fail(ERROR_INVALID_DEVINST_NAME);
+                }
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const guid = guidAt(classGuid);
+                if (guid === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (set.classGuid !== null && set.classGuid !== guid)
+                {
+                    return fail(ERROR_CLASS_MISMATCH);
+                }
+                const taken = new Set(set.devices.map(device=>device.id.toUpperCase()));
+                const id = devices.instanceId(name, ((flags >>> 0) & DICD_GENERATE_ID) !== 0,
+                    taken);
+                if (id === null)
+                {
+                    return fail(ERROR_INVALID_DEVINST_NAME);
+                }
+                if (taken.has(id.toUpperCase()) || devices.exists(id))
+                {
+                    return fail(ERROR_DEVINST_ALREADY_EXISTS);
+                }
+                devices.createPhantom(id, guid, textOf(description, wide) || null);
+                const device = devices.entry(id, guid);
+                set.devices.push(device);
+                set.made.add(id.toUpperCase());
+                return answerDevice(data, device);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiOpenDeviceInfoA(HDEVINFO DeviceInfoSet, PCSTR DeviceInstanceId,
+         *     HWND hwndParent, DWORD OpenFlags, PSP_DEVINFO_DATA DeviceInfoData),
+         *     and the W form
+         *
+         * A registered instance added to the set, or the set's own entry
+         * for it; a phantom, or none, is ERROR_NO_SUCH_DEVINST, and one of
+         * another class than the set's ERROR_CLASS_MISMATCH.
+         */
+        ...bothWidths('SetupDiOpenDeviceInfo', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, idPointer, , , data])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const name = textOf(idPointer, wide);
+                if (name === null)
+                {
+                    // The W form reads none as the root device, of no
+                    // class; the A form refuses it outright.
+                    return fail(wide && set.classGuid !== null ? ERROR_CLASS_MISMATCH
+                        : ERROR_INVALID_PARAMETER);
+                }
+                const id = devices.instanceId(name, false, new Set());
+                if (id === null)
+                {
+                    return fail(ERROR_INVALID_DEVINST_NAME);
+                }
+                const held = set.devices.find(device=>!device.removed
+                    && device.id.toUpperCase() === id.toUpperCase());
+                if (held && !set.made.has(id.toUpperCase()))
+                {
+                    return answerDevice(data, held);
+                }
+                if (!devices.registered(id))
+                {
+                    return fail(ERROR_NO_SUCH_DEVINST);
+                }
+                const classGuid = devices.classOf(id);
+                if (set.classGuid !== null && set.classGuid !== classGuid)
+                {
+                    return fail(ERROR_CLASS_MISMATCH);
+                }
+                const device = devices.entry(id, classGuid);
+                set.devices.push(device);
+                return answerDevice(data, device);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiRegisterDeviceInfo(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DWORD Flags, PSP_DETSIG_CMPPROC CompareProc,
+         *     PVOID CompareContext, PSP_DEVINFO_DATA DupDeviceInfoData)
+         *
+         * A phantom made real: it stays when its set goes.
+         */
+        SetupDiRegisterDeviceInfo: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, data])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                registerDevice(set, device);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiDeleteDeviceInfo(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData)
+         *
+         * The device out of the set; a phantom the set made goes from the
+         * registry with it, a registered one stays there.
+         */
+        SetupDiDeleteDeviceInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, data])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                set.devices.splice(set.devices.indexOf(device), 1);
+                if (set.made.delete(device.id.toUpperCase()))
+                {
+                    devices.removeInstance(device.id);
+                }
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiRemoveDevice(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData)
+         *
+         * The instance and its interfaces out of the registry; the set keeps
+         * the device, which no longer has an instance id, and its
+         * interfaces, marked removed.
+         */
+        SetupDiRemoveDevice: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, data])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                removeDevice(set, device);
+                return fail(ERROR_SUCCESS, 1);
             },
         },
 
@@ -1612,9 +5412,9 @@ export function createSetupapiFunctions(host){
         SetupDiEnumDeviceInfo: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([set, index, data])=>{
-                const devices = deviceSet(set);
-                if (!devices)
+            handler: ([handle, index, data])=>{
+                const set = deviceSet(handle);
+                if (!set)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
@@ -1626,93 +5426,1051 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_USER_BUFFER);
                 }
-                return (index >>> 0) < devices.length ? 1 : fail(ERROR_NO_MORE_ITEMS);
+                const device = set.devices[index >>> 0];
+                if (!device)
+                {
+                    return fail(ERROR_NO_MORE_ITEMS);
+                }
+                writeDevice(data, device);
+                return fail(ERROR_SUCCESS, 1);
             },
         },
+
+        /**
+         * BOOL SetupDiGetDeviceInstanceIdA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, PSTR DeviceInstanceId,
+         *     DWORD DeviceInstanceIdSize, PDWORD RequiredSize), and the W form
+         *
+         * A removed device has none: ERROR_NO_SUCH_DEVINST.
+         */
+        ...bothWidths('SetupDiGetDeviceInstanceId', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, buffer, size, required])=>{
+                const set = deviceSet(handle);
+                if (!set)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (device.removed)
+                {
+                    return fail(ERROR_NO_SUCH_DEVINST);
+                }
+                // No buffer is too small a one here, unlike the INF calls.
+                if ((buffer >>> 0) === 0)
+                {
+                    if ((required >>> 0) !== 0)
+                    {
+                        writeU32(required, device.id.length + 1);
+                    }
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                return answerText(device.id, buffer, size, required, wide)
+                    ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        })),
+
+        /**
+         * HDEVINFO SetupDiGetClassDevsA(const GUID *ClassGuid, PCSTR Enumerator,
+         *     HWND hwndParent, DWORD Flags), the W form, and the Ex forms with a
+         *     set to add to, a machine and a reserved pointer after them
+         *
+         * The registered devices of a class, or of any with DIGCF_ALLCLASSES,
+         * under an enumerator or a device's prefix of an instance id; with
+         * DIGCF_DEVICEINTERFACE, the devices with interfaces of the class
+         * (any, with DIGCF_ALLCLASSES) and those interfaces, the enumerator
+         * then allowed to be a whole instance id. No class and no
+         * DIGCF_ALLCLASSES is ERROR_INVALID_PARAMETER; an empty enumerator,
+         * one ending in a separator, or an instance id where it may not be,
+         * ERROR_INVALID_DATA.
+         */
+        ...bothWidths('SetupDiGetClassDevs', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [classGuid, enumerator, , flags])=>
+                classDevices(guidAt(classGuid), textOf(enumerator, wide), flags >>> 0, 0),
+        })),
+        ...bothWidths('SetupDiGetClassDevsEx', wide=>({
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [classGuid, enumerator, , flags, into,
+                machinePointer, reserved])=>{
+                if ((reserved >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+                }
+                if ((textOf(machinePointer, wide) ?? '') !== '')
+                {
+                    return fail(ERROR_INVALID_MACHINENAME, INVALID_HANDLE_VALUE);
+                }
+                return classDevices(guidAt(classGuid), textOf(enumerator, wide), flags >>> 0,
+                    into >>> 0);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiCreateDeviceInterfaceA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, const GUID *InterfaceClassGuid,
+         *     PCSTR ReferenceString, DWORD CreationFlags,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData), and the W form
+         *
+         * An interface of the device, kept in the registry from now on; one
+         * the device already has, the reference's case aside, is that one.
+         * No class is ERROR_INVALID_USER_BUFFER.
+         */
+        ...bothWidths('SetupDiCreateDeviceInterface', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, classGuid, referencePointer, ,
+                out])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const guid = guidAt(classGuid);
+                if (guid === null)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                const reference = textOf(referencePointer, wide) ?? '';
+                let face = device.interfaces.find(entry=>entry.classGuid === guid
+                    && entry.reference.toLowerCase() === reference.toLowerCase());
+                if (!face)
+                {
+                    face = { classGuid: guid, reference, flags: 0 };
+                    device.interfaces.push(face);
+                    devices.addInterface(device.id, guid, reference);
+                }
+                if ((out >>> 0) !== 0)
+                {
+                    if (readU32(out) !== SP_DEVICE_INTERFACE_DATA_SIZE)
+                    {
+                        return fail(ERROR_INVALID_USER_BUFFER);
+                    }
+                    writeInterface(out, set, device, face);
+                }
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
 
         /**
          * BOOL SetupDiEnumDeviceInterfaces(HDEVINFO DeviceInfoSet,
          *     PSP_DEVINFO_DATA DeviceInfoData, const GUID *InterfaceClassGuid,
          *     DWORD MemberIndex, PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData)
          *
-         * A set holds no device, so it has no interface of any class: the
-         * arguments checked as Windows checks them, then the end of the
-         * enumeration.
+         * The Nth interface of the class -- of the device given, or of the
+         * set's devices in turn -- removed ones included, flagged.
          */
+        SetupDiEnumDeviceInterfaces: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, data, interfaceClass, index, out])=>{
+                const set = deviceSet(handle);
+                if (!set)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((out >>> 0) === 0 || (interfaceClass >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (readU32(out) !== SP_DEVICE_INTERFACE_DATA_SIZE)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                const only = (data >>> 0) === 0 ? null : deviceIn(set, data);
+                if ((data >>> 0) !== 0 && !only)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const guid = guidAt(interfaceClass);
+                const found = (only ? [only] : set.devices).flatMap(device=>device.interfaces
+                    .filter(face=>face.classGuid === guid).map(face=>({ device, face })));
+                const chosen = found[index >>> 0];
+                if (!chosen)
+                {
+                    return fail(ERROR_NO_MORE_ITEMS);
+                }
+                writeInterface(out, set, chosen.device, chosen.face);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
         /**
          * BOOL SetupDiGetDeviceInterfaceDetailA(HDEVINFO DeviceInfoSet,
          *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData,
          *     PSP_DEVICE_INTERFACE_DETAIL_DATA_A DeviceInterfaceDetailData,
          *     DWORD DeviceInterfaceDetailDataSize, PDWORD RequiredSize,
-         *     PSP_DEVINFO_DATA DeviceInfoData)
+         *     PSP_DEVINFO_DATA DeviceInfoData), and the W form
          *
-         * No set holds an interface, so none named here was handed out by an
-         * enumeration: the set checked, then the interface refused.
+         * The interface's path, after a cbSize that must be the structure's
+         * own; the size needed is reported, and the device filled in, before
+         * a buffer too small is refused.
          */
-        SetupDiGetDeviceInterfaceDetailA: {
+        ...bothWidths('SetupDiGetDeviceInterfaceDetail', wide=>({
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([set])=>(deviceSet(set) ? fail(ERROR_INVALID_PARAMETER)
-                : fail(ERROR_INVALID_HANDLE)),
-        },
-
-        SetupDiEnumDeviceInterfaces: {
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([set, , interfaceClass, index, data])=>{
-                const devices = deviceSet(set);
-                if (!devices)
+            handler: (/** @type {number[]} */ [handle, faceData, detail, size, required,
+                data])=>{
+                const set = deviceSet(handle);
+                if (!set)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((data >>> 0) === 0 || (interfaceClass >>> 0) === 0)
+                const held = interfaceIn(set, faceData);
+                if (!held)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if (readU32(data) !== SP_DEVICE_INTERFACE_DATA_SIZE)
+                if ((detail >>> 0) === 0 && (size >>> 0) !== 0)
                 {
                     return fail(ERROR_INVALID_USER_BUFFER);
                 }
-                return (index >>> 0) < devices.length ? 1 : fail(ERROR_NO_MORE_ITEMS);
+                if ((detail >>> 0) !== 0
+                    && readU32(detail) !== (wide ? DETAIL_W_SIZE : DETAIL_A_SIZE))
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                const path = encodeIn(interfacePath(held.device.id, held.face.classGuid,
+                    held.face.reference), wide);
+                const needed = 4 + path.length;
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, needed);
+                }
+                if ((data >>> 0) !== 0 && readU32(data) === SP_DEVINFO_DATA_SIZE)
+                {
+                    writeDevice(data, held.device);
+                }
+                if ((detail >>> 0) === 0 || (size >>> 0) < needed)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory((detail >>> 0) + 4, path);
+                return fail(ERROR_SUCCESS, 1);
             },
-        },
+        })),
 
-        /** BOOL SetupDiDestroyDeviceInfoList(HDEVINFO DeviceInfoSet) */
-        SetupDiDestroyDeviceInfoList: {
-            argBytes: 4,
+        /**
+         * BOOL SetupDiRemoveDeviceInterface(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData)
+         *
+         * The interface out of the registry, left in the set marked removed.
+         */
+        SetupDiRemoveDeviceInterface: {
+            argBytes: 8,
             /** @param {number[]} args */
-            handler: ([set])=>{
-                if (!deviceSet(set))
+            handler: ([handle, faceData])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                host.handles.close(set >>> 0);
-                return 1;
+                const held = interfaceIn(set, faceData);
+                if (!held)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                devices.removeInterface(held.device.id, held.face.classGuid, held.face.reference);
+                held.face.flags |= SPINT.REMOVED;
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiDeleteDeviceInterfaceData(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData)
+         *
+         * The interface out of the set, the registry untouched.
+         */
+        SetupDiDeleteDeviceInterfaceData: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, faceData])=>{
+                const set = deviceSet(handle);
+                if (!set)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const held = interfaceIn(set, faceData);
+                if (!held)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                held.device.interfaces.splice(held.device.interfaces.indexOf(held.face), 1);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiDestroyDeviceInfoList(HDEVINFO DeviceInfoSet)
+         *
+         * The set gone, and with it the phantoms it made and never registered.
+         */
+        SetupDiDestroyDeviceInfoList: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const set = deviceSet(handle);
+                if (!set)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const destroy = ()=>{
+                    for (const device of set.devices)
+                    {
+                        if (set.made.has(device.id.toUpperCase()))
+                        {
+                            devices?.removeInstance(device.id);
+                        }
+                    }
+                    host.handles.close(handle >>> 0);
+                    return 1;
+                };
+                // The class's installers are told first, to let go of what
+                // they kept for the set.
+                if (!hasInstallers(set.classGuid))
+                {
+                    return fail(ERROR_SUCCESS, destroy());
+                }
+                const thread = host.callerThread();
+                return callInstallers(DIF_DESTROYPRIVATEDATA, handle >>> 0, set, null, 0, thread)
+                    .then(()=>{
+                        host.setLastErrorFor(thread, ERROR_SUCCESS);
+                        return destroy();
+                    });
             },
         },
 
         /**
          * BOOL SetupDiGetDeviceRegistryPropertyA(HDEVINFO DeviceInfoSet,
          *     PSP_DEVINFO_DATA DeviceInfoData, DWORD Property, PDWORD PropertyRegDataType,
-         *     PBYTE PropertyBuffer, DWORD PropertyBufferSize, PDWORD RequiredSize)
+         *     PBYTE PropertyBuffer, DWORD PropertyBufferSize, PDWORD RequiredSize),
+         *     and the W form
          *
-         * No device data can name a device of an empty set.
+         * A property of the device's instance key, sized in bytes: too small
+         * a buffer is ERROR_INSUFFICIENT_BUFFER with the size written; no
+         * buffer with a size, a bad pointer -- ERROR_INVALID_PARAMETER for the
+         * A form, ERROR_PARTIAL_COPY for the W one, as Windows answers.
          */
-        SetupDiGetDeviceRegistryPropertyA: {
+        ...bothWidths('SetupDiGetDeviceRegistryProperty', wide=>({
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([set])=>fail(deviceSet(set) ? ERROR_NO_SUCH_DEVINST : ERROR_INVALID_HANDLE),
-        },
+            handler: (/** @type {number[]} */ [handle, data, property, typeOut, buffer, size,
+                required])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                if (!device)
+                {
+                    return fail((data >>> 0) === 0 ? ERROR_INVALID_PARAMETER
+                        : ERROR_NO_SUCH_DEVINST);
+                }
+                const value = readProperty(host.registry, devices.instanceKey(device.id),
+                    device.id, property >>> 0, wide);
+                if ('error' in value)
+                {
+                    return fail(value.error);
+                }
+                if ((typeOut >>> 0) !== 0)
+                {
+                    writeU32(typeOut, value.type);
+                }
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, value.data.length);
+                }
+                if ((buffer >>> 0) === 0 && (size >>> 0) !== 0)
+                {
+                    return fail(wide ? ERROR_PARTIAL_COPY : ERROR_INVALID_PARAMETER);
+                }
+                if ((size >>> 0) < value.data.length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory(buffer >>> 0, value.data);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
 
         /**
          * BOOL SetupDiSetDeviceRegistryPropertyA(HDEVINFO DeviceInfoSet,
          *     PSP_DEVINFO_DATA DeviceInfoData, DWORD Property, const BYTE *PropertyBuffer,
-         *     DWORD PropertyBufferSize)
+         *     DWORD PropertyBufferSize), and the W form -- no data deletes it.
          */
-        SetupDiSetDeviceRegistryPropertyA: {
+        ...bothWidths('SetupDiSetDeviceRegistryProperty', wide=>({
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([set])=>fail(deviceSet(set) ? ERROR_NO_SUCH_DEVINST : ERROR_INVALID_HANDLE),
+            handler: (/** @type {number[]} */ [handle, data, property, buffer, size])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = deviceIn(set, data);
+                const key = device ? devices.instanceKey(device.id) : null;
+                if (!device || !key)
+                {
+                    return fail((data >>> 0) === 0 ? ERROR_INVALID_PARAMETER
+                        : ERROR_NO_SUCH_DEVINST);
+                }
+                const bytes = (buffer >>> 0) === 0 ? null
+                    : host.readMemory(buffer >>> 0, size >>> 0).slice();
+                const error = writeProperty(host.registry, key, property >>> 0, bytes, wide);
+                return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiSetDevicePropertyW(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     const DEVPROPKEY *PropertyKey, DEVPROPTYPE PropertyType, const BYTE *PropertyBuffer,
+         *     ULONG PropertyBufferSize, DWORD Flags)
+         * BOOL SetupDiGetDevicePropertyW(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     const DEVPROPKEY *PropertyKey, DEVPROPTYPE *PropertyType, PBYTE PropertyBuffer,
+         *     DWORD PropertyBufferSize, PDWORD RequiredSize, DWORD Flags)
+         * BOOL SetupDiGetDevicePropertyKeys(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DEVPROPKEY *PropertyKeyArray,
+         *     DWORD PropertyKeyCount, PDWORD RequiredPropertyKeyCount, DWORD Flags)
+         *
+         * DEVPROP_TYPE_EMPTY or NULL deletes a property, ERROR_NOT_FOUND
+         * when there is none. A property the system keeps is
+         * ERROR_ACCESS_DENIED unless it is set to what it is.
+         */
+        ...propertyCalls('SetupDiSetDevicePropertyW', 'SetupDiGetDevicePropertyW',
+            'SetupDiGetDevicePropertyKeys', /** @type {PropertyTarget<import('./devices.js').Device>} */ ({
+                resolve: (handle, data)=>{
+                    const set = deviceSet(handle);
+                    if (!set || !devices || !host.registry)
+                    {
+                        return { error: ERROR_INVALID_HANDLE };
+                    }
+                    const device = deviceIn(set, data);
+                    return device ? { target: device } : { error: ERROR_INVALID_PARAMETER };
+                },
+                read: (device, fmtid, pid)=>devicePropertyOf(device, fmtid, pid),
+                write: (device, fmtid, pid, type, bytes)=>
+                    setDeviceProperty(device, fmtid, pid, type, bytes),
+                keys: device=>devicePropertyKeys(device),
+                noKeyOnGet: ERROR_INVALID_DATA,
+            })),
+
+        /**
+         * BOOL SetupDiSetDeviceInterfacePropertyW(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData, const DEVPROPKEY *PropertyKey,
+         *     DEVPROPTYPE PropertyType, const BYTE *PropertyBuffer, DWORD PropertyBufferSize,
+         *     DWORD Flags), its Get form and SetupDiGetDeviceInterfacePropertyKeys
+         *
+         * As the device's: the interface's own properties kept under its
+         * reference's key; whether it is enabled, its class and its device's
+         * instance id the system's.
+         */
+        ...propertyCalls('SetupDiSetDeviceInterfacePropertyW',
+            'SetupDiGetDeviceInterfacePropertyW', 'SetupDiGetDeviceInterfacePropertyKeys',
+            /** @type {PropertyTarget<HeldInterface>} */ ({
+                resolve: (handle, data)=>{
+                    const set = deviceSet(handle);
+                    if (!set || !devices || !host.registry)
+                    {
+                        return { error: ERROR_INVALID_HANDLE };
+                    }
+                    const held = interfaceIn(set, data);
+                    return held ? { target: held } : { error: ERROR_INVALID_PARAMETER };
+                },
+                read: (held, fmtid, pid)=>interfacePropertyOf(held, fmtid, pid),
+                write: (held, fmtid, pid, type, bytes)=>
+                    setInterfaceProperty(held, fmtid, pid, type, bytes),
+                keys: held=>interfacePropertyKeys(held),
+                noKeyOnGet: ERROR_INVALID_USER_BUFFER,
+            })),
+
+        /**
+         * HKEY SetupDiCreateDeviceInterfaceRegKeyA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData, DWORD Reserved,
+         *     REGSAM samDesired, HINF InfHandle, PCSTR InfSectionName), and the W form
+         *
+         * The interface's Device Parameters key, under its reference's; an
+         * INF section's registry lines go into it as HKR.
+         */
+        ...bothWidths('SetupDiCreateDeviceInterfaceRegKey', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, , , infHandle, sectionPointer])=>{
+                const found = interfaceKey(handle, data);
+                if ('error' in found)
+                {
+                    return fail(found.error, INVALID_HANDLE_VALUE);
+                }
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                const { key } = hive.create(hive.root(HKEY_LOCAL_MACHINE), found.path);
+                const open = (infHandle >>> 0) === 0 ? null : openInf(infHandle);
+                const section = open?.inf.section(textOf(sectionPointer, wide) ?? '');
+                if (open && section)
+                {
+                    installRegistry(hive, open.inf, section, { relativeRoot: key,
+                        expand: value=>expand(open, value),
+                        divergence: detail=>host.divergence?.(
+                            `SetupDiCreateDeviceInterfaceRegKey${wide ? 'W' : 'A'}`, detail) });
+                }
+                return fail(ERROR_SUCCESS, host.keyHandle?.(found.path) || INVALID_HANDLE_VALUE);
+            },
+        })),
+
+        /**
+         * HKEY SetupDiOpenDeviceInterfaceRegKey(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData, DWORD Reserved, REGSAM samDesired)
+         *
+         * The key SetupDiCreateDeviceInterfaceRegKey makes, if it is there.
+         */
+        SetupDiOpenDeviceInterfaceRegKey: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, data])=>{
+                const found = interfaceKey(handle, data);
+                if ('error' in found)
+                {
+                    return fail(found.error, INVALID_HANDLE_VALUE);
+                }
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                if (!hive.open(hive.root(HKEY_LOCAL_MACHINE), found.path))
+                {
+                    return fail(ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE);
+                }
+                return fail(ERROR_SUCCESS, host.keyHandle?.(found.path) || INVALID_HANDLE_VALUE);
+            },
+        },
+
+        /**
+         * BOOL SetupDiDeleteDeviceInterfaceRegKey(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData, DWORD Reserved)
+         */
+        SetupDiDeleteDeviceInterfaceRegKey: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, data])=>{
+                const found = interfaceKey(handle, data);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                const at = found.path.lastIndexOf('\\');
+                const parent = hive.open(hive.root(HKEY_LOCAL_MACHINE), found.path.slice(0, at));
+                if (!parent || !hive.open(parent, found.path.slice(at + 1)))
+                {
+                    return fail(ERROR_FILE_NOT_FOUND);
+                }
+                hive.remove(parent, found.path.slice(at + 1));
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiGetDeviceInstallParamsA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, PSP_DEVINSTALL_PARAMS_A DeviceInstallParams),
+         *     the W form, and SetupDiSetDeviceInstallParams in both
+         *
+         * A device's install parameters, or with no device the set's: the
+         * flags, the window, the callback and its context, the queue, the
+         * class installer's word and the driver path -- all zero to begin
+         * with. The structure's size must be its own, 296 bytes for the A
+         * form and 556 for the W, else ERROR_INVALID_USER_BUFFER.
+         */
+        ...bothWidths('SetupDiGetDeviceInstallParams', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, params])=>{
+                const found = installParamsOf(handle, data, params, wide);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const { held } = found;
+                const fields = new DataView(new ArrayBuffer(INSTALL_PARAMS_FIELDS));
+                held.words.forEach((word, index)=>fields.setUint32(4 + index * 4, word, true));
+                fields.setUint32(0, installParamsSize(wide), true);
+                host.writeMemory(params >>> 0, new Uint8Array(fields.buffer));
+                const path = encodeIn(held.driverPath, wide);
+                host.writeMemory((params >>> 0) + INSTALL_PARAMS_FIELDS, path);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+        ...bothWidths('SetupDiSetDeviceInstallParams', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, params])=>{
+                const found = installParamsOf(handle, data, params, wide);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const fields = new DataView(host.readMemory(params >>> 0, INSTALL_PARAMS_FIELDS)
+                    .slice().buffer);
+                found.held.words = Array.from({ length: INSTALL_PARAMS_WORDS },
+                    (_, index)=>fields.getUint32(4 + index * 4, true));
+                found.held.driverPath = textOf((params >>> 0) + INSTALL_PARAMS_FIELDS, wide) ?? '';
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiBuildDriverInfoList(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DWORD DriverType)
+         *
+         * The drivers the INFs offer: the one the install parameters' driver
+         * path names with DI_ENUMSINGLEINF, else every INF in that directory,
+         * the INF directory when it names none. SPDIT_COMPATDRIVER keeps
+         * those matching the device's hardware and compatible IDs, ranked;
+         * SPDIT_CLASSDRIVER every driver of the device's -- or the set's --
+         * class.
+         */
+        SetupDiBuildDriverInfoList: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, data, type])=>{
+                const found = driverOwner(handle, data, type);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const thread = host.callerThread();
+                return buildDrivers(found.owner, found.set, found.device, type >>> 0).then(()=>{
+                    host.setLastErrorFor(thread, ERROR_SUCCESS);
+                    return 1;
+                });
+            },
+        },
+
+        /**
+         * BOOL SetupDiEnumDriverInfoA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     DWORD DriverType, DWORD MemberIndex, PSP_DRVINFO_DATA_A DriverInfoData),
+         *     and the W form -- a list not built has none
+         */
+        ...bothWidths('SetupDiEnumDriverInfo', wide=>({
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, type, index, out])=>{
+                const found = driverOwner(handle, data, type);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const list = driverLists.get(found.owner)?.lists.get(type >>> 0) ?? [];
+                if ((index >>> 0) >= list.length)
+                {
+                    return fail(ERROR_NO_MORE_ITEMS);
+                }
+                return answerDriver(out, type >>> 0, index >>> 0, list[index >>> 0], wide);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiGetDriverInfoDetailA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, PSP_DRVINFO_DATA_A DriverInfoData,
+         *     PSP_DRVINFO_DETAIL_DATA_A DriverInfoDetailData, DWORD DriverInfoDetailDataSize,
+         *     PDWORD RequiredSize), and the W form
+         *
+         * The driver's INF, its date, its install section and description,
+         * then its hardware ID and its compatible IDs as one list, the
+         * compatible ones' offset and length in characters (0 for none).
+         * A structure smaller than its own fixed part is
+         * ERROR_INVALID_USER_BUFFER, nothing written; one too small for the
+         * list ERROR_INSUFFICIENT_BUFFER, the fixed part and an empty list
+         * written.
+         */
+        ...bothWidths('SetupDiGetDriverInfoDetail', wide=>({
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, info, detail, size, required])=>{
+                const found = driverOwner(handle, data, null);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const driver = driverOf(found.owner, info);
+                if (!driver)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const unit = wide ? 2 : 1;
+                const fixed = detailFixed(wide);
+                const ids = [driver.hardwareId, ...driver.compatibleIds];
+                const list = `${ids.map(id=>`${id}\0`).join('')}\0`;
+                const needed = fixed + list.length * unit;
+                // setupapi.h packs its structures to a byte on x86: the size
+                // is the fixed part and one character, unrounded.
+                const whole = fixed + unit;
+                if ((detail >>> 0) === 0)
+                {
+                    if ((size >>> 0) !== 0)
+                    {
+                        return fail(ERROR_INVALID_USER_BUFFER);
+                    }
+                    if ((required >>> 0) !== 0)
+                    {
+                        writeU32(required, needed);
+                    }
+                    return fail(ERROR_SUCCESS, 1);
+                }
+                if ((size >>> 0) < whole || readU32(detail) !== whole)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, needed);
+                }
+                const bytes = new Uint8Array(fixed + unit);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, whole, true);
+                const date = fileDate(driver.infPath);
+                view.setBigUint64(DETAIL.INF_DATE, date, true);
+                const compat = driver.compatibleIds.length === 0 ? 0
+                    : driver.hardwareId.length + 1;
+                const compatLength = driver.compatibleIds.length === 0 ? 0
+                    : driver.compatibleIds.reduce((sum, id)=>sum + id.length + 1, 1);
+                view.setUint32(DETAIL.COMPAT_OFFSET, compat, true);
+                view.setUint32(DETAIL.COMPAT_LENGTH, compatLength, true);
+                const field = (/** @type {string} */ value, /** @type {number} */ at,
+                    /** @type {number} */ chars)=>bytes.set(encodeIn(value.slice(0, chars - 1),
+                    wide), at);
+                field(driver.section, DETAIL.SECTION, LINE_LEN);
+                field(driver.infPath, DETAIL.SECTION + LINE_LEN * unit, MAX_PATH);
+                field(driver.description, DETAIL.SECTION + (LINE_LEN + MAX_PATH) * unit, LINE_LEN);
+                host.writeMemory(detail >>> 0, bytes);
+                if ((size >>> 0) < needed)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory((detail >>> 0) + fixed, encodeIn(list.slice(0, -1), wide));
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiSelectBestCompatDrv(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData)
+         *
+         * The compatible list's best driver selected: its lowest rank, then
+         * its newest, then its highest version.
+         */
+        SetupDiSelectBestCompatDrv: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, data])=>{
+                const found = driverOwner(handle, data, SPDIT_COMPATDRIVER);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const held = driverLists.get(found.owner);
+                const list = held?.lists.get(SPDIT_COMPATDRIVER) ?? [];
+                const best = bestDriver(list);
+                if (!held || best < 0)
+                {
+                    return fail(ERROR_NO_COMPAT_DRIVERS);
+                }
+                held.selected = { type: SPDIT_COMPATDRIVER, index: best };
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiGetSelectedDriverA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     PSP_DRVINFO_DATA_A DriverInfoData), and the W form
+         */
+        ...bothWidths('SetupDiGetSelectedDriver', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, out])=>{
+                const found = driverOwner(handle, data, null);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const held = driverLists.get(found.owner);
+                const selected = held?.selected ?? null;
+                const driver = selected ? held?.lists.get(selected.type)?.[selected.index] : null;
+                if (!selected || !driver)
+                {
+                    return fail(ERROR_NO_DRIVER_SELECTED);
+                }
+                return answerDriver(out, selected.type, selected.index, driver, wide);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiSetSelectedDriverA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     PSP_DRVINFO_DATA_A DriverInfoData), and the W form -- no driver
+         *     data selects none
+         */
+        ...bothWidths('SetupDiSetSelectedDriver', ()=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, info])=>{
+                const found = driverOwner(handle, data, null);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const held = driverLists.get(found.owner);
+                if ((info >>> 0) === 0)
+                {
+                    if (held)
+                    {
+                        held.selected = null;
+                    }
+                    return fail(ERROR_SUCCESS, 1);
+                }
+                const type = readU32((info >>> 0) + 4);
+                const index = readU32((info >>> 0) + 8) - 1;
+                if (!held || !held.lists.get(type)?.[index])
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                held.selected = { type, index };
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * BOOL SetupDiDestroyDriverInfoList(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DWORD DriverType)
+         */
+        SetupDiDestroyDriverInfoList: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, data, type])=>{
+                const found = driverOwner(handle, data, type);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const held = driverLists.get(found.owner);
+                held?.lists.delete(type >>> 0);
+                if (held?.selected?.type === (type >>> 0))
+                {
+                    held.selected = null;
+                }
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupDiCallClassInstaller(DI_FUNCTION InstallFunction,
+         *     HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData)
+         *
+         * The class's co-installers -- CoDeviceInstallers' value for the
+         * class, each `dll[,entry]`, CoDeviceInstall by default -- then its
+         * class installer, Installer32 in its class key, ClassInstall by
+         * default; then, unless the class installer did the work, the
+         * request's default handler: DIF_REGISTERDEVICE registers the device,
+         * DIF_REMOVE removes it, DIF_SELECTBESTCOMPATDRV selects its best
+         * driver, DIF_DESTROYPRIVATEDATA does nothing. A request with no
+         * default handler is ERROR_DI_DO_DEFAULT. Co-installers that asked
+         * are called again after, with the result. An error ends it and is
+         * the call's.
+         */
+        SetupDiCallClassInstaller: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([request, handle, data])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const device = (data >>> 0) === 0 ? null : deviceIn(set, data);
+                if ((data >>> 0) !== 0 && !device)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const thread = host.callerThread();
+                return callInstallers(request >>> 0, handle >>> 0, set, device, data >>> 0, thread)
+                    .then(code=>{
+                        host.setLastErrorFor(thread, code);
+                        return code === ERROR_SUCCESS ? 1 : 0;
+                    });
+            },
+        },
+
+        /**
+         * BOOL SetupDiOpenDeviceInterfaceA(HDEVINFO DeviceInfoSet, PCSTR DevicePath,
+         *     DWORD OpenFlags, PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData), and the W form
+         *
+         * The interface a symbolic link names, case aside, added to the set
+         * with its device -- phantom or not -- and its data answered when
+         * asked for. A link no interface has is ERROR_NO_SUCH_DEVICE_INTERFACE;
+         * a device of another class than the set's ERROR_CLASS_MISMATCH.
+         */
+        ...bothWidths('SetupDiOpenDeviceInterface', wide=>({
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, pathPointer, , data])=>{
+                const set = deviceSet(handle);
+                if (!set || !devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const path = textOf(pathPointer, wide);
+                if (path === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((data >>> 0) !== 0 && readU32(data) !== SP_DEVICE_INTERFACE_DATA_SIZE)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                const wanted = path.toLowerCase();
+                const id = devices.allInstances('tree').find(candidate=>devices
+                    .storedInterfaces(candidate).some(face=>interfacePath(candidate,
+                        face.classGuid, face.reference) === wanted));
+                const stored = id === undefined ? undefined : devices.storedInterfaces(id)
+                    .find(face=>interfacePath(id, face.classGuid, face.reference) === wanted);
+                if (id === undefined || !stored)
+                {
+                    return fail(ERROR_NO_SUCH_DEVICE_INTERFACE);
+                }
+                const deviceClass = devices.classOf(id);
+                if (set.classGuid !== null && set.classGuid !== deviceClass)
+                {
+                    return fail(ERROR_CLASS_MISMATCH);
+                }
+                let device = set.devices.find(held=>held.id.toUpperCase() === id.toUpperCase());
+                if (!device)
+                {
+                    device = devices.entry(id, deviceClass);
+                    device.interfaces = [];
+                    set.devices.push(device);
+                }
+                let face = device.interfaces.find(held=>held.classGuid === stored.classGuid
+                    && held.reference.toLowerCase() === stored.reference.toLowerCase());
+                if (!face)
+                {
+                    face = { ...stored, flags: 0 };
+                    device.interfaces.push(face);
+                }
+                if ((data >>> 0) !== 0)
+                {
+                    writeInterface(data, set, device, face);
+                }
+                return fail(ERROR_SUCCESS, 1);
+            },
+        })),
+
+        /**
+         * HKEY SetupDiCreateDevRegKeyA(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     DWORD Scope, DWORD HwProfile, DWORD KeyType, HINF InfHandle,
+         *     PCSTR InfSectionName), and the W form
+         *
+         * DIREG_DEV is the instance's Device Parameters key; DIREG_DRV its
+         * driver key under its class, made the first time with its Driver
+         * value naming it. With an INF section, the section's registry
+         * lines go into the key as HKR.
+         */
+        ...bothWidths('SetupDiCreateDevRegKey', wide=>({
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [handle, data, scope, , keyType, infHandle,
+                sectionPointer])=>{
+                const found = devRegKey(handle, data, scope, keyType, false);
+                if ('error' in found)
+                {
+                    return fail(found.error, INVALID_HANDLE_VALUE);
+                }
+                const { device } = found;
+                const path = scopePath(scope, (keyType >>> 0) === DIREG_DEV
+                    ? parametersPath(device.id) : devices?.makeDriver(device.id) ?? '');
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                const { key } = hive.create(hive.root(HKEY_LOCAL_MACHINE), path);
+                const open = (infHandle >>> 0) === 0 ? null : openInf(infHandle);
+                const section = open?.inf.section(textOf(sectionPointer, wide) ?? '');
+                if (open && section)
+                {
+                    installRegistry(hive, open.inf, section, { relativeRoot: key,
+                        expand: value=>expand(open, value),
+                        divergence: detail=>host.divergence?.(
+                            `SetupDiCreateDevRegKey${wide ? 'W' : 'A'}`, detail) });
+                }
+                return fail(ERROR_SUCCESS, host.keyHandle?.(path) || INVALID_HANDLE_VALUE);
+            },
+        })),
+
+        /**
+         * HKEY SetupDiOpenDevRegKey(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     DWORD Scope, DWORD HwProfile, DWORD KeyType, REGSAM samDesired)
+         *
+         * The key SetupDiCreateDevRegKey makes, if it is there: a phantom
+         * device's is ERROR_DEVINFO_NOT_REGISTERED, a key not made
+         * ERROR_KEY_DOES_NOT_EXIST, and no access asked for ERROR_INVALID_DATA.
+         */
+        SetupDiOpenDevRegKey: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, data, scope, , keyType, access])=>{
+                const found = devRegKey(handle, data, scope, keyType, true);
+                if ('error' in found)
+                {
+                    return fail(found.error, INVALID_HANDLE_VALUE);
+                }
+                const path = devKeyPath(found.device, scope, keyType);
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                if (path === null || !hive.open(hive.root(HKEY_LOCAL_MACHINE), path))
+                {
+                    return fail(ERROR_KEY_DOES_NOT_EXIST, INVALID_HANDLE_VALUE);
+                }
+                if ((access >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_DATA, INVALID_HANDLE_VALUE);
+                }
+                return fail(ERROR_SUCCESS, host.keyHandle?.(path) || INVALID_HANDLE_VALUE);
+            },
+        },
+
+        /**
+         * BOOL SetupDiDeleteDevRegKey(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
+         *     DWORD Scope, DWORD HwProfile, DWORD KeyType) -- DIREG_BOTH for both
+         */
+        SetupDiDeleteDevRegKey: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, data, scope, , keyType])=>{
+                const found = devRegKey(handle, data, scope, keyType, true, true);
+                if ('error' in found)
+                {
+                    return fail(found.error);
+                }
+                const { device } = found;
+                const hive = /** @type {NonNullable<typeof host.registry>} */ (host.registry);
+                const both = (keyType >>> 0) === DIREG_BOTH;
+                if (both || (keyType >>> 0) === DIREG_DEV)
+                {
+                    const path = scopePath(scope, parametersPath(device.id));
+                    const at = path.lastIndexOf('\\');
+                    const parent = hive.open(hive.root(HKEY_LOCAL_MACHINE), path.slice(0, at));
+                    if (parent)
+                    {
+                        hive.remove(parent, path.slice(at + 1));
+                    }
+                }
+                if (both || (keyType >>> 0) === DIREG_DRV)
+                {
+                    devices?.removeDriver(device.id);
+                }
+                return fail(ERROR_SUCCESS, 1);
+            },
         },
 
         /**

@@ -1437,6 +1437,18 @@ test('LR_LOADFROMFILE makes a bitmap of a .bmp file, its pixels where bfOffBits 
         ['C:\\SETUP\\AUTORUN\\AUTORUN.BMP', bmp(14 + 40 + 2, 2)],
         ['C:\\SETUP\\PACKED.BMP', bmp(0, 0)],
         ['C:\\SETUP\\NOTES.TXT', new TextEncoder().encode('not a bitmap at all, only words')],
+        ...[0, 11, 13, 39, 41, 107, 109, 123, 125, 26, 116, 0xdeadbeef, 0xffffffff]
+            .map(size=>{
+                const bytes = bmp(0, 0);
+                new DataView(bytes.buffer).setUint32(14, size, true);
+                return /** @type {[string, Uint8Array]} */ ([`C:\\SETUP\\SIZE${size}.BMP`, bytes]);
+            }),
+        ...[[65536, 2], [2, 65536]].map(([width, height])=>{
+            const bytes = bmp(0, 0);
+            new DataView(bytes.buffer).setInt32(18, width, true);
+            new DataView(bytes.buffer).setInt32(22, height, true);
+            return /** @type {[string, Uint8Array]} */ ([`C:\\SETUP\\W${width}H${height}.BMP`, bytes]);
+        }),
     ]);
     /** @param {string} path */
     const find = path=>disk.get(path.toUpperCase());
@@ -1482,6 +1494,18 @@ test('LR_LOADFROMFILE makes a bitmap of a .bmp file, its pixels where bfOffBits 
     assert.equal(fns.LoadImageA.handler([0, TEXT_BUFFER, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE]),
         0, 'no file');
     assert.equal(made.length, 2);
+
+    // Wine's cursoricon test: a header of no size a header has, or a side
+    // past 65535, is a broken file, refused before its colours are looked for.
+    for (const name of [0, 11, 13, 39, 41, 107, 109, 123, 125, 26, 116, 0xdeadbeef, 0xffffffff]
+        .map(size=>`C:\\Setup\\Size${size}.bmp`).concat(
+            ['C:\\Setup\\W65536H2.bmp', 'C:\\Setup\\W2H65536.bmp']))
+    {
+        memory.putString(TEXT_BUFFER, name);
+        assert.equal(await fns.LoadImageA.handler([0, TEXT_BUFFER, IMAGE_BITMAP, 0, 0,
+            LR_LOADFROMFILE]), 0, name);
+    }
+    assert.equal(made.length, 2);
 });
 
 test('a bitmap the module does not carry, and a program-manager conversation, are refused', ()=>{
@@ -1524,8 +1548,6 @@ test('CharNext walks a string a byte at a time and stops at its end', ()=>{
     assert.equal(fns.CharNextA.handler([TEXT_BUFFER + 2]), TEXT_BUFFER + 2,
         'the terminator is where it stays');
     assert.equal(fns.CharNextA.handler([0]), 0);
-    assert.equal(fns.NotifyWinEvent.handler([0, 0, 0, 0]), 0, 'an event nobody hears');
-    assert.equal(fns.NotifyWinEvent.argBytes, 16);
     memory.bytes.set([0x61, 0, 0, 0], TEXT_BUFFER + 0x40);
     assert.equal(fns.CharNextW.handler([TEXT_BUFFER + 0x40]), TEXT_BUFFER + 0x42, 'two bytes on');
     assert.equal(fns.CharNextW.handler([TEXT_BUFFER + 0x42]), TEXT_BUFFER + 0x42);
@@ -1546,6 +1568,12 @@ test('OemToCharBuff translates a counted buffer between the OEM and ANSI pages',
     assert.equal(fns.CharToOemBuffA.handler([TEXT_BUFFER + 8, TEXT_BUFFER + 8, 3]), 1,
         'and back in place');
     assert.deepEqual([...memory.readMemory(TEXT_BUFFER + 8, 3)], [0x81, 0x61, 0x00]);
+    // Wine's text test: a NULL source or target is FALSE, nothing written.
+    for (const [source, target] of [[0, 0], [TEXT_BUFFER, 0], [0, TEXT_BUFFER + 8]])
+    {
+        assert.equal(fns.OemToCharBuffA.handler([source, target, 3]), 0);
+        assert.equal(fns.CharToOemBuffA.handler([source, target, 3]), 0);
+    }
     assert.equal(fns.OemToCharBuffA.argBytes, 12);
     assert.equal(fns.CharToOemBuffA.argBytes, 12);
 });
@@ -2338,6 +2366,9 @@ test('the foreground window is the one the program showed, never nothing while o
 
     const shown = makeWindow(memory, fns, WS_VISIBLE);
     assert.equal(fns.GetForegroundWindow.handler([]), shown, 'a window made visible is active');
+    // Activated first; this procedure leaves WM_ACTIVATE unanswered by
+    // DefWindowProc, so the focus is still where it was when SetFocus moves
+    // it, and that is what it answers (win32u NtUserSetFocus).
     assert.equal(fns.SetFocus.handler([hidden]), shown, 'SetFocus answers the window that had it');
     assert.equal(fns.GetForegroundWindow.handler([]), hidden);
 
@@ -2841,6 +2872,10 @@ test('GetClipboardFormatName reads back a fixed and a registered name', ()=>{
     assert.equal(memory.bytes[OUT + 8], 0, 'and it is terminated');
 
     assert.equal(fns.GetClipboardFormatNameW.handler([0xffff, OUT, 20]), 0, 'no such format');
+    // Wine's clipboard test: a size of zero with no buffer answers zero and
+    // writes nothing -- there is no room even for the terminator.
+    assert.equal(fns.GetClipboardFormatNameA.handler([id, 0, 0]), 0);
+    assert.equal(fns.GetClipboardFormatNameW.handler([id, 0, 0]), 0);
     assert.deepEqual([fns.GetClipboardFormatNameA.argBytes, fns.GetClipboardFormatNameW.argBytes],
         [12, 12]);
 });
@@ -3760,4 +3795,39 @@ test('with no DDE instance its handles are refused, and string handles still com
     assert.equal(fns.DdeCmpStringHandles.handler([0, 0]), 0);
     assert.equal(fns.SendIMEMessageExA.handler([0, 0]), 0, 'no IME to take the request');
     assert.equal(fns.SendIMEMessageExW.argBytes, 8);
+});
+
+test('SetActiveWindow refuses what win.c test_SetActiveWindow finds refused', ()=>{
+    // A handle that names no window: NULL and ERROR_INVALID_WINDOW_HANDLE. A
+    // child: nothing changes and the active window is answered. The desktop:
+    // nothing changes, NULL. NULL itself, as Windows 10 answers it, changes
+    // nothing and answers NULL (test_SetActiveWindow_0_proc).
+    const WS_CHILD = 0x40000000;
+    const { memory, fns, errors } = setup();
+    const first = makeWindow(memory, fns, WS_VISIBLE);
+    const second = makeWindow(memory, fns, WS_VISIBLE);
+    memory.putString(TITLE, 'child');
+    const child = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, first, 0, HINSTANCE, 0]);
+    assert.equal(fns.GetActiveWindow.handler([]), second);
+
+    assert.equal(fns.SetActiveWindow.handler([0xdead0]), 0);
+    assert.equal(errors.at(-1), 1400);
+    assert.equal(fns.SetActiveWindow.handler([child]), second, 'a child answers the active one');
+    assert.equal(fns.GetActiveWindow.handler([]), second, 'and changes nothing');
+    assert.equal(fns.SetActiveWindow.handler([fns.GetDesktopWindow.handler([])]), 0);
+    assert.equal(fns.GetActiveWindow.handler([]), second);
+
+    assert.equal(fns.SetActiveWindow.handler([first]), second);
+    assert.equal(fns.GetActiveWindow.handler([]), first);
+    const said = errors.length;
+    assert.equal(fns.SetActiveWindow.handler([0]), 0, 'NULL');
+    assert.equal(fns.GetActiveWindow.handler([]), first, 'changes nothing');
+    assert.equal(errors.length, said, 'and leaves the last error');
+});
+
+test('SetFocus of a handle that names no window is ERROR_INVALID_WINDOW_HANDLE', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.SetFocus.handler([0xdead0]), 0);
+    assert.equal(errors.at(-1), 1400);
 });

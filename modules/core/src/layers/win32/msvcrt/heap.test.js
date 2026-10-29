@@ -305,3 +305,64 @@ test('_heapchk finds the heap whole: _HEAPOK', ()=>{
     table.malloc.handler([16]);
     assert.equal(table._heapchk.handler([]) | 0, -2);
 });
+
+test('_aligned_offset_malloc aligns the byte at the offset, inside the block', ()=>{
+    // Wine's msvcrt test_aligned: an offset not inside the block is EINVAL.
+    const { memory, allocator, errno, table } = build();
+    for (const [alignment, offset] of [[0, 0], [1, 0], [16, 0], [64, 1], [128, 5], [8, 255]])
+    {
+        const block = table._aligned_offset_malloc.handler([256, alignment, offset]);
+        assert.notEqual(block, 0, `${alignment}, ${offset}`);
+        assert.equal((block + offset) % Math.max(alignment, 1), 0, `${alignment}, ${offset}`);
+        const base = memory.u32(block - 4 & ~3);
+        assert.ok((allocator.block(base)?.size ?? 0) >= block - base + 256);
+        assert.ok((block - 4 & ~3) >= base, 'the saved slot is inside what malloc gave');
+        table._aligned_free.handler([block]);
+        assert.equal(allocator.block(base), null);
+    }
+    assert.equal(table._aligned_offset_malloc.handler([256, 16, 256]), 0, 'past the block');
+    assert.equal(table._aligned_offset_malloc.handler([256, 3, 0]), 0);
+    assert.deepEqual(errno, [22, 22]);
+    assert.equal(table._aligned_offset_malloc.argBytes, 12);
+});
+
+test('_aligned_realloc and _aligned_offset_realloc move the bytes both blocks hold', ()=>{
+    // Wine's msvcrt test_aligned_realloc and test_aligned_offset_realloc.
+    const { memory, errno, table } = build();
+    const block = table._aligned_offset_malloc.handler([100, 32, 3]);
+    memory.writeMemory(block, Uint8Array.from({ length: 100 }, (_, i)=>i + 1));
+    const bigger = table._aligned_offset_realloc.handler([block, 200, 32, 3]);
+    assert.equal((bigger + 3) % 32, 0);
+    assert.deepEqual([...memory.bytes.subarray(bigger, bigger + 100)],
+        Array.from({ length: 100 }, (_, i)=>i + 1));
+    const other = table._aligned_offset_realloc.handler([bigger, 50, 16, 4]);
+    assert.equal((other + 4) % 16, 0, 'a new offset and alignment');
+    assert.deepEqual([...memory.bytes.subarray(other, other + 50)],
+        Array.from({ length: 50 }, (_, i)=>i + 1));
+    assert.equal(table._aligned_offset_realloc.handler([other, 50, 16, 50]), 0,
+        'the offset past the block is refused');
+    assert.deepEqual(errno, [22]);
+    const plain = table._aligned_realloc.handler([other, 80, 64]);
+    assert.equal(plain % 64, 0);
+    assert.deepEqual([...memory.bytes.subarray(plain, plain + 50)],
+        Array.from({ length: 50 }, (_, i)=>i + 1), 'the old block was still whole');
+    assert.equal(table._aligned_realloc.handler([plain, 0, 64]), 0, 'a size of zero frees');
+    assert.notEqual(table._aligned_realloc.handler([0, 16, 8]), 0, 'no block allocates');
+    assert.deepEqual([table._aligned_realloc.argBytes, table._aligned_offset_realloc.argBytes],
+        [12, 16]);
+});
+
+test('_set_sbh_threshold keeps a threshold rounded to sixteen, up to 1016', ()=>{
+    // Wine's msvcrt test_sbheap.
+    const { table } = build();
+    assert.equal(table._set_sbh_threshold.handler([1]), 1);
+    assert.equal(table._get_sbh_threshold.handler([]), 16);
+    assert.equal(table._set_sbh_threshold.handler([8]), 1);
+    assert.equal(table._get_sbh_threshold.handler([]), 16);
+    assert.equal(table._set_sbh_threshold.handler([1000]), 1);
+    assert.equal(table._get_sbh_threshold.handler([]), 1008);
+    assert.equal(table._set_sbh_threshold.handler([1017]), 0);
+    assert.equal(table._get_sbh_threshold.handler([]), 1008);
+    assert.equal(table._set_sbh_threshold.handler([0]), 1);
+    assert.equal(table._get_sbh_threshold.handler([]), 0);
+});

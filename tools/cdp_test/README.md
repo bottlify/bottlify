@@ -22,6 +22,7 @@ the guest, its files directly in that directory.
 |---|---|---|
 | [`game.mjs`](game.mjs) | starts the engine on a bundle in a GPU browser, waits, writes a report | `npm run cdp:game -- <bundle-id> [flags]` |
 | [`frames.mjs`](frames.mjs) | lets a title settle, watches a window, reports what a frame costs and why | `npm run cdp:frames -- <bundle-id> [flags]` |
+| [`smoke.mjs`](smoke.mjs) | whether a title still runs, in one line and a JSON report: `game.mjs` run N times with the same flags (`--worker`, `--run-seconds`, the route's `args`), and per run how far it got (the route's `smoke.milestones`, lines matched in a file the program writes, `smoke.log`), frames presented, the frame time once the load is over (median, p10, p90), instructions, turns, the report's errors and messages, the sound fed to the mixer, wall time, with the commit and the bundle's sha256. `--against` an earlier report fails a run that stops short, has an error that one did not, or whose frame time is past that one's slowest run by more than its runs differed (5 % at least); `--checkout DIR` runs another checkout's engine with this bundle. Exit 0 good, 1 broke, 125 not measured (no bundle, no harness), so `git -C DIR bisect run node $PWD/tools/cdp_test/smoke.mjs <id> --checkout DIR --against good.json` bisects another checkout with it | `node tools/cdp_test/smoke.mjs <bundle-id> [--runs 3] [--run-seconds 240] [--against FILE] [--checkout DIR] [--json FILE] [-- game.mjs flags]` |
 | [`launcher.mjs`](launcher.mjs) | starts a title in the launcher the way a person does and profiles the page thread | `node tools/cdp_test/launcher.mjs <bundle-id> [flags]` (launcher running: `npm run ui`) |
 | [`ui-layout.mjs`](ui-layout.mjs) | the launcher's layout as screenshots at a phone, a phone on its side, a tablet, a laptop and a desktop, the page as it opens and a card's details; for judging a layout change on every size at once | `node tools/cdp_test/ui-layout.mjs [card regex] [--url URL]` (launcher running: `npm run ui`; pictures in dbg/ui-layout) |
 | [`triangle.mjs`](triangle.mjs) | the graphics acceptance scenario: a fixture draws a triangle, four pixels are compared byte for byte; `--graphics-worker pixels` draws it in the graphics worker (`bitmap`, its default way of sending frames back, makes headless SwiftShader lose the read-back's `mapAsync`) | `node tools/cdp_test/triangle.mjs [--graphics-worker pixels] [--isolated]`; `--isolated` serves the page cross-origin isolated, so guest memory is shared |
@@ -244,6 +245,15 @@ LoadLibrary and GetProcAddress, checked against the real libraries' export
 lists (Wine's spec files, fetched once into DIR by `--fetch-specs DIR` and not
 kept in the repository): a function a program looks up by name that this
 build does not export is a NULL it may call.
+
+[`tools/vcredist-matrix.mjs`](../vcredist-matrix.mjs) runs Microsoft's own Visual C++ runtimes
+in Node -- vcomp.dll (2005) and msvcr90.dll (2008), whose DllMain checks that it was loaded
+through an activation context -- in seven deployment layouts each, and says where each runs
+and where it stops with R6034, against what Windows does. `--fetch` downloads the two
+redistributables into `to_install/vcredist/` (never committed) and unpacks them with the
+engine's own cabinet and installer-database readers; without them every row is "not measured".
+The report is `to_install/vcredist/matrix/report.md`, or `--out DIR`. Run it after any change to
+activation contexts, the loader's search or a runtime the engine answers itself.
 
 `tools/arg-bytes-audit.mjs <spec directory>` checks the bytes every stdcall
 entry of the win32 layer pops against Wine's export spec files kept locally:

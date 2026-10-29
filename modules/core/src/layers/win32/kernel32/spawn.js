@@ -34,11 +34,16 @@
  */
 
 import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
+import { decodeAnsi, encodeAnsi } from './locale.js';
+import { STARTUPINFO, readStartupInfo } from './startup-info.js';
+import { askChild, childThread } from './cross-process.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
 /** ReadProcessMemory of a range nothing is at. */
 const ERROR_PARTIAL_COPY = 299;
@@ -48,6 +53,12 @@ const ERROR_NOT_SUPPORTED = 50;
 const ERROR_GEN_FAILURE = 31;
 const ERROR_OBJECT_NAME_EXISTS = 5010;
 const ERROR_NOACCESS = 998;
+/** QueryFullProcessImageName's one flag: the path in the object manager's terms. */
+const PROCESS_NAME_NATIVE = 1;
+/** CreateProcess's flag saying the environment block is UTF-16. */
+const CREATE_UNICODE_ENVIRONMENT = 0x400;
+/** The most of an environment block read: a block runs to two NULs well before. */
+const ENVIRONMENT_LIMIT = 0x10000;
 
 /**
  * Writes into this process's memory as WriteProcessMemory writes into its
@@ -120,10 +131,12 @@ const DEBUG_ONLY_THIS_PROCESS = 0x00000002;
 
 /** STARTUPINFO's dwFlags bit that says its three handles are the child's own. */
 const STARTF_USESTDHANDLES = 0x00000100;
-/** Where dwFlags, hStdOutput and hStdError sit in STARTUPINFOA and W alike. */
-const SI_FLAGS = 44;
-const SI_STD_OUTPUT = 60;
-const SI_STD_ERROR = 64;
+/**
+ * Where dwFlags, hStdOutput and hStdError sit in STARTUPINFOA and W alike;
+ * in a 64-bit process, whose three strings and four handles are eight bytes.
+ */
+const STARTUP = Object.freeze({ flags: 44, output: 60, error: 64 });
+const STARTUP64 = Object.freeze({ flags: 60, output: 88, error: 96 });
 
 /** The pseudo-handle for the running process; -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
@@ -135,16 +148,19 @@ const CURRENT_PROCESS = 0xffffffff;
 const WINEXEC_SUCCESS = 33;
 
 /** A path argument is at most this long; longer is a pointer that is not one. */
-const MAX_PATH = 260;
+/**
+ * A path is read to its terminator, as Windows reads it: one cut at MAX_PATH
+ * names another program or directory.
+ */
+const WHOLE_NAME = 32767;
 /** And a command line, which Windows caps at the same place. */
 const MAX_COMMAND_LINE = 32768;
 
-/** sizeof(PROCESS_INFORMATION) and the offsets inside it. */
-const PROCESS_INFORMATION_SIZE = 16;
-const PI_PROCESS_HANDLE = 0;
-const PI_THREAD_HANDLE = 4;
-const PI_PROCESS_ID = 8;
-const PI_THREAD_ID = 12;
+/** PROCESS_INFORMATION, and in a 64-bit process, whose two handles are eight bytes. */
+const PROCESS_INFORMATION = Object.freeze({ process: 0, thread: 4, processId: 8, threadId: 12,
+    SIZE: 16 });
+const PROCESS_INFORMATION64 = Object.freeze({ process: 0, thread: 8, processId: 16,
+    threadId: 20, SIZE: 24 });
 
 /** @param {string} path */
 const isQualified = path=>/^[A-Za-z]:[\\/]/.test(path) || /^[\\/]/.test(path);
@@ -213,7 +229,8 @@ const directoryOf = path=>path.slice(0, Math.max(
 
 /**
  * @typedef {Object} Spawner
- * @property {(named: string, line: string, flags: number, directory?: string) => any} launch
+ * @property {(named: string, line: string, flags: number, directory?: string,
+ *     handed?: Record<string, any>) => any} launch
  *           Records a child and opens the handles on it, or answers null when
  *           the image is not there. `named` is the image when the caller
  *           already knows it and '' when only the command line is there to find
@@ -223,6 +240,35 @@ const directoryOf = path=>path.slice(0, Math.max(
  *           The image a name -- or a command line whose first token is one --
  *           points at, or null.
  */
+
+/**
+ * The error CreateProcess answers before it looks for any file, or 0 when the
+ * names are well formed. An application name given as an empty string names
+ * no path; with none given, the image is the command line's first token, and
+ * a line that is empty or starts with a blank, or whose quoted name is empty
+ * once its trailing spaces go, names none (Wine's kernel32 test_CommandLine
+ * records what Windows answers to each).
+ *
+ * @param {string | null} named  lpApplicationName, null for NULL.
+ * @param {string} line
+ */
+export function createRefusal(named, line){
+    if (named !== null)
+    {
+        return named === '' ? ERROR_PATH_NOT_FOUND : 0;
+    }
+    if (line === '' || line[0] === ' ' || line[0] === '\t')
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (line[0] === '"')
+    {
+        const end = line.indexOf('"', 1);
+        const name = line.slice(1, end < 0 ? line.length : end);
+        return name.replace(/ +$/, '') === '' ? ERROR_INVALID_PARAMETER : 0;
+    }
+    return 0;
+}
 
 /**
  * Finding an image and recording a child for it, apart from the calls that
@@ -308,7 +354,9 @@ export function createSpawner(host){
      * @returns {string | null}
      */
     const resolveImage = name=>{
-        const wanted = name.trim();
+        // Trailing spaces only: a name that begins with blanks names no file,
+        // and CreateProcess looks for it as spelled (`createRefusal`).
+        const wanted = name.replace(/ +$/, '');
         if (wanted === '')
         {
             return null;
@@ -379,7 +427,7 @@ export function createSpawner(host){
     };
 
     return {
-        launch(named, line, flags, directory = ''){
+        launch(named, line, flags, directory = '', handed = {}){
             const found = named === ''
                 ? imageFromCommandLine(line)
                 : { path: resolveImage(named), line };
@@ -401,12 +449,12 @@ export function createSpawner(host){
                 // it is never what this process hands over to.
                 completed: isRedistributableInstaller(path),
             });
-            // Both handles name the same record, and every spelling of "start a
-            // program" hands one out: a parent waits on the first and resumes
-            // the second, and neither is a different object here because the
-            // child has exactly one thread until it is really running.
+            // Every spelling of "start a program" hands both out: a parent
+            // waits on the process and resumes, suspends or reads the thread,
+            // which is the child's first, reached where the child runs.
             made.handle = kernel.handles.open('process', made);
-            made.threadHandle = kernel.handles.open('process-thread', made);
+            made.threadHandle = kernel.handles.open('process-thread',
+                childThread(made, made.threadId));
             // A child its parent debugs reports its creation and its exit to
             // WaitForDebugEvent.
             made.debugEvents = (flags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS)) !== 0
@@ -421,6 +469,10 @@ export function createSpawner(host){
                 made.startDirectory = directory.trim() !== '' ? qualify(directory.trim())
                     : host.currentDirectory?.();
             }
+            // What the caller hands the child -- its STARTUPINFO, environment
+            // and parent -- is on the record before anyone is told of it: the
+            // child is built from it the moment it is.
+            Object.assign(made, handed);
             host.spawned?.(made);
             return made;
         },
@@ -454,9 +506,24 @@ export function createSpawner(host){
  *           The one every library in this process launches through, when the
  *           caller assembled it. Built here otherwise, from the same fields.
  * @property {number} [processId]  The running program's own identifier.
+ * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(path: string) => string | null} [nativePath]  A path as the object
+ *           manager names it, `\\Device\\HarddiskVolume1\\...`; null where it has no
+ *           drive.
+ * @property {() => import('./startup-info.js').StartupRecord | null} [startup]
+ *           This process's own, whose desktop a child named none of inherits.
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child where it runs; absent, no child is reached.
+ * @property {() => any} [currentThread]
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
+ * @property {() => Record<string, string>} [environment]
+ *           This process's variables as they are now, which a child given no
+ *           block inherits.
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]
  *           Writes into this process through the pages' protection
  *           (`writeThroughProtection`); false when not all of it is mapped.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose STARTUPINFO and
+ *           PROCESS_INFORMATION hold eight-byte handles; absent, 4.
  */
 
 /**
@@ -465,6 +532,8 @@ export function createSpawner(host){
 export function createSpawnFunctions(host){
     const { kernel } = host;
     const record = (host.spawner ?? createSpawner(host)).launch;
+    const STARTUP_ = host.pointerSize === 8 ? STARTUP64 : STARTUP;
+    const INFORMATION = host.pointerSize === 8 ? PROCESS_INFORMATION64 : PROCESS_INFORMATION;
 
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
@@ -485,11 +554,148 @@ export function createSpawnFunctions(host){
         }
     };
 
+    /**
+     * A call made in the child a handle names, where it runs
+     * (`cross-process.js`): ERROR_INVALID_HANDLE for a handle that names no
+     * child, ERROR_ACCESS_DENIED for one the run cannot reach.
+     *
+     * @param {number} handle @param {import('./cross-process.js').CrossCall} call
+     * @param {(number | null)[]} into
+     */
+    const inChild = (handle, call, into)=>{
+        const target = processOf(handle);
+        if (!target)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        const asked = host.currentThread && host.setLastErrorFor ? askChild({
+            askChild: host.askChild, writeMemory: host.writeMemory,
+            currentThread: host.currentThread, setLastErrorFor: host.setLastErrorFor,
+        }, target, call, into) : null;
+        if (asked === null)
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
+            return 0;
+        }
+        return asked;
+    };
+
     /** @param {number} address */
     const readDword = address=>{
         const b = host.readMemory(address, 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
+
+    /**
+     * An environment block as variables: NAME=VALUE entries, each ended by a
+     * NUL and the block by another, ANSI unless CREATE_UNICODE_ENVIRONMENT
+     * says UTF-16 -- whichever CreateProcess was called. A name may begin
+     * with '=', as the per-drive directories' do; the value starts at the
+     * first '=' after it.
+     *
+     * @param {number} address @param {boolean} wide
+     * @returns {Record<string, string>}
+     */
+    const environmentBlock = (address, wide)=>{
+        const unit = wide ? 2 : 1;
+        /** @type {Record<string, string>} */
+        const variables = {};
+        let entry = '';
+        for (let at = address; at < address + ENVIRONMENT_LIMIT; at += unit)
+        {
+            const bytes = host.readMemory(at, unit);
+            const code = wide ? bytes[0] | bytes[1] << 8 : bytes[0];
+            if (code !== 0)
+            {
+                entry += wide ? String.fromCharCode(code) : decodeAnsi(bytes.subarray(0, 1));
+                continue;
+            }
+            if (entry === '')
+            {
+                break;
+            }
+            const cut = entry.indexOf('=', 1);
+            if (cut > 0)
+            {
+                variables[entry.slice(0, cut)] = entry.slice(cut + 1);
+            }
+            entry = '';
+        }
+        return variables;
+    };
+
+    /**
+     * The image a process handle names: this process's, or a child's.
+     *
+     * @param {number} handle @returns {string | null}
+     */
+    const imagePathOf = handle=>((handle >>> 0) === CURRENT_PROCESS ? host.imagePath()
+        : processOf(handle)?.imagePath ?? null);
+
+    /**
+     * QueryFullProcessImageName in either width. The size is the room in
+     * characters going in and the length without its terminator coming out;
+     * a buffer too small for the path and its terminator leaves both the
+     * buffer and the size as they were (Wine's test_QueryFullProcessImageName).
+     * The native form names the volume as the object manager does, as the
+     * drives say; without them it is refused, and said so.
+     *
+     * @param {boolean} wide
+     */
+    const queryImageName = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([handle, flags, buffer, size])=>{
+            const named = imagePathOf(handle);
+            if (named === null)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            if ((flags >>> 0) & ~PROCESS_NAME_NATIVE)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const native = (flags >>> 0) === PROCESS_NAME_NATIVE;
+            const path = native ? host.nativePath?.(named) ?? null : named;
+            if (path === null)
+            {
+                host.divergence?.('QueryFullProcessImageName', 'the native path is not answered');
+                host.setLastError(ERROR_NOT_SUPPORTED);
+                return 0;
+            }
+            const room = readDword(size >>> 0);
+            if (room < path.length + 1)
+            {
+                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                return 0;
+            }
+            if ((buffer >>> 0) === 0)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const text = `${path}\0`;
+            if (wide)
+            {
+                const bytes = new Uint8Array(text.length * 2);
+                for (let i = 0; i < text.length; i++)
+                {
+                    bytes[i * 2] = text.charCodeAt(i) & 0xff;
+                    bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
+                }
+                host.writeMemory(buffer >>> 0, bytes);
+            }
+            else
+            {
+                host.writeMemory(buffer >>> 0, encodeAnsi(text));
+            }
+            writeDword(size >>> 0, path.length);
+            return 1;
+        },
+    });
 
     /**
      * The files a STARTUPINFO hands the child as its output and error, when
@@ -502,7 +708,7 @@ export function createSpawnFunctions(host){
      * @returns {{ output?: any, error?: any } | undefined}
      */
     const standardFiles = startup=>{
-        if (startup === 0 || (readDword(startup + SI_FLAGS) & STARTF_USESTDHANDLES) === 0)
+        if (startup === 0 || (readDword(startup + STARTUP_.flags) & STARTF_USESTDHANDLES) === 0)
         {
             return undefined;
         }
@@ -519,32 +725,59 @@ export function createSpawnFunctions(host){
             }
         };
         return {
-            output: fileOf(readDword(startup + SI_STD_OUTPUT)),
-            error: fileOf(readDword(startup + SI_STD_ERROR)),
+            output: fileOf(readDword(startup + STARTUP_.output)),
+            error: fileOf(readDword(startup + STARTUP_.error)),
         };
     };
 
     /**
-     * @param {string} named @param {string} line
+     * @param {string | null} named  null where no application name was given.
+     * @param {string} line
      * @param {number} flags @param {number} information @param {number} [startup]
      * @param {string} [directory]
+     * @param {boolean} [wide]  CreateProcessW's, whose STARTUPINFO's strings are wide.
+     * @param {number} [environment]  lpEnvironment.
      */
-    const create = (named, line, flags, information, startup = 0, directory = '')=>{
-        const made = record(named, line, flags, directory);
+    const create = (named, line, flags, information, startup = 0, directory = '', wide = false,
+        environment = 0)=>
+    {
+        // Cleared first: a call that fails leaves no handle or id in it.
+        if ((information >>> 0) !== 0)
+        {
+            host.writeMemory(information >>> 0, new Uint8Array(INFORMATION.SIZE));
+        }
+        const refused = createRefusal(named, line);
+        if (refused !== 0)
+        {
+            host.setLastError(refused);
+            return 0;
+        }
+        const made = record(named ?? '', line, flags, directory, {
+            standardFiles: standardFiles(startup >>> 0),
+            // What the child's GetStartupInfo answers: values, since the child
+            // may be built on another thread from what crosses to it.
+            startup: (startup >>> 0) === 0 ? null : readStartupInfo(
+                host.readMemory(startup >>> 0, STARTUPINFO.SIZE),
+                address=>(wide ? host.readWideString(address, WHOLE_NAME * 2)
+                    : host.readCString(address, WHOLE_NAME)),
+                host.startup?.()?.desktop ?? null),
+            // The process that started it, which its own snapshot names.
+            parentId: (host.processId ?? 0) >>> 0,
+            // The block asked for, or this process's variables as they are now.
+            environment: (environment >>> 0) === 0 ? host.environment?.() ?? null
+                : environmentBlock(environment >>> 0, (flags & CREATE_UNICODE_ENVIRONMENT) !== 0),
+        });
         if (!made)
         {
             host.setLastError(ERROR_FILE_NOT_FOUND);
             return 0;
         }
-        made.standardFiles = standardFiles(startup >>> 0);
         if ((information >>> 0) !== 0)
         {
-            const bytes = new Uint8Array(PROCESS_INFORMATION_SIZE);
-            host.writeMemory(information >>> 0, bytes);
-            writeDword((information >>> 0) + PI_PROCESS_HANDLE, made.handle);
-            writeDword((information >>> 0) + PI_THREAD_HANDLE, made.threadHandle);
-            writeDword((information >>> 0) + PI_PROCESS_ID, made.id);
-            writeDword((information >>> 0) + PI_THREAD_ID, made.threadId);
+            writeDword((information >>> 0) + INFORMATION.process, made.handle);
+            writeDword((information >>> 0) + INFORMATION.thread, made.threadHandle);
+            writeDword((information >>> 0) + INFORMATION.processId, made.id);
+            writeDword((information >>> 0) + INFORMATION.threadId, made.threadId);
         }
         host.setLastError(ERROR_SUCCESS);
         return 1;
@@ -568,29 +801,31 @@ export function createSpawnFunctions(host){
         CreateProcessA: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, , directory, startup,
+            handler: ([application, commandLine, , , , flags, environment, directory, startup,
                 information])=>create(
-                (application >>> 0) === 0 ? '' : host.readCString(application >>> 0, MAX_PATH),
+                (application >>> 0) === 0 ? null : host.readCString(application >>> 0, WHOLE_NAME),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readCString(commandLine >>> 0, MAX_COMMAND_LINE),
                 flags >>> 0, information, startup,
-                (directory >>> 0) === 0 ? '' : host.readCString(directory >>> 0, MAX_PATH)),
+                (directory >>> 0) === 0 ? '' : host.readCString(directory >>> 0, WHOLE_NAME),
+                false, environment),
         },
 
         /** BOOL CreateProcessW(...) — the same call, read as wide strings. */
         CreateProcessW: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, , directory, startup,
+            handler: ([application, commandLine, , , , flags, environment, directory, startup,
                 information])=>create(
-                (application >>> 0) === 0 ? ''
-                    : host.readWideString(application >>> 0, MAX_PATH * 2),
+                (application >>> 0) === 0 ? null
+                    : host.readWideString(application >>> 0, WHOLE_NAME * 2),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE * 2),
                 flags >>> 0, information, startup,
-                (directory >>> 0) === 0 ? '' : host.readWideString(directory >>> 0, MAX_PATH * 2)),
+                (directory >>> 0) === 0 ? '' : host.readWideString(directory >>> 0, WHOLE_NAME * 2),
+                true, environment),
         },
 
         /**
@@ -800,13 +1035,11 @@ export function createSpawnFunctions(host){
                 }
                 else
                 {
-                    const target = processOf(handle);
-                    if (!target)
-                    {
-                        host.setLastError(ERROR_INVALID_HANDLE);
-                        return 0;
-                    }
-                    target.patches.push({ address: base >>> 0, bytes });
+                    // Written where the child runs, through its own protection.
+                    return inChild(handle, { call: 'WriteProcessMemory',
+                        args: [CURRENT_PROCESS, base >>> 0, { in: bytes }, count,
+                            (written >>> 0) === 0 ? 0 : { out: 4 }] },
+                    [null, null, null, null, written >>> 0]);
                 }
 
                 if ((written >>> 0) !== 0)
@@ -822,11 +1055,10 @@ export function createSpawnFunctions(host){
          * BOOL ReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress,
          *   LPVOID lpBuffer, SIZE_T nSize, SIZE_T *lpNumberOfBytesRead)
          *
-         * Against the running process this reads memory. A child's image is
-         * not mapped yet, so what it holds is the bytes written into it and
-         * nothing else: a read inside those answers them, the last write to a
-         * byte winning as it would in memory, and any other is ERROR_PARTIAL_COPY,
-         * what Windows says of memory it cannot read.
+         * Against the running process this reads memory; against a child the
+         * same read is made in the child, where it runs. A range that leaves
+         * mapped memory is ERROR_PARTIAL_COPY, what Windows says of memory it
+         * cannot read.
          */
         ReadProcessMemory: {
             argBytes: 20,
@@ -853,25 +1085,10 @@ export function createSpawnFunctions(host){
                 }
                 else
                 {
-                    const target = processOf(handle);
-                    if (!target)
-                    {
-                        host.setLastError(ERROR_INVALID_HANDLE);
-                        return 0;
-                    }
-                    const gathered = new Uint8Array(count);
-                    const covered = new Uint8Array(count);
-                    for (const { address, bytes: patch } of target.patches ?? [])
-                    {
-                        const start = Math.max(address, from);
-                        const end = Math.min(address + patch.length, from + count);
-                        for (let at = start; at < end; at++)
-                        {
-                            gathered[at - from] = patch[at - address];
-                            covered[at - from] = 1;
-                        }
-                    }
-                    bytes = covered.every(byte=>byte === 1) ? gathered : null;
+                    return inChild(handle, { call: 'ReadProcessMemory',
+                        args: [CURRENT_PROCESS, from, (buffer >>> 0) === 0 ? 0 : { out: count },
+                            count, (read >>> 0) === 0 ? 0 : { out: 4 }] },
+                    [null, null, buffer >>> 0, null, read >>> 0]);
                 }
                 if (bytes === null)
                 {
@@ -893,5 +1110,12 @@ export function createSpawnFunctions(host){
                 return 1;
             },
         },
+
+        /**
+         * BOOL QueryFullProcessImageNameA/W(HANDLE hProcess, DWORD dwFlags,
+         *                                   LPSTR/LPWSTR lpExeName, PDWORD lpdwSize)
+         */
+        QueryFullProcessImageNameA: queryImageName(false),
+        QueryFullProcessImageNameW: queryImageName(true),
     };
 }

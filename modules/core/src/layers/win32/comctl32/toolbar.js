@@ -33,6 +33,7 @@ import {
     pointOf,
 } from '../user32/controls.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { notifyWindow } from './notify.js';
 
 /** The class name a program creates the control by. */
 export const TOOLBAR_CLASS = 'ToolbarWindow32';
@@ -329,7 +330,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
     };
 
     /** @param {any} record @returns {number} the window WM_COMMAND and notifications go to */
-    const ownerOf = record=>state(record).owner ?? record.parent ?? 0;
+    const ownerOf = record=>state(record).owner ?? notifyWindow(record);
 
     /**
      * Fills a list of the toolbar's own with `count` images from a bitmap,

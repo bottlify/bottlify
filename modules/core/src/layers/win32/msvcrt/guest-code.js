@@ -29,6 +29,7 @@
 
 import { COMPILED as RUNTIME } from './inguest.x86.js';
 import { COMPILED as RUNTIME_LONG } from './inguest.x64.js';
+import { setSingle } from './float.js';
 
 /**
  * Each function's x86-64 code by its i386, the two compiled from one source:
@@ -84,7 +85,8 @@ export const longCodeOf = compiled=>LONG_CODE.get(compiled);
  *
  * @typedef {Object} CodeBuilder
  * @property {(trap: { convention: string, argBytes: number, handler: Function,
- *     lastError?: boolean }) => number} register  Answers the trap's address.
+ *     lastError?: boolean, floats?: Record<number, 'f32' | 'f64'> }) => number} register
+ *     Answers the trap's address.
  * @property {(at: number, target: number) => void} jump
  *     The four bytes at `at` in the code are a jump's displacement to `target`.
  */
@@ -135,10 +137,13 @@ export const longCodeOf = compiled=>LONG_CODE.get(compiled);
  * @property {() => number} statusWord  The x87 status word, the stack's top
  *     left out (`fnstsw`).
  * @property {() => void} clearExceptions  `fnclex`.
+ * @property {() => number} mxcsr  SSE's control and status register (`stmxcsr`).
+ * @property {(word: number) => void} setMxcsr  `ldmxcsr`.
  */
 
 /** The helpers that are the x87's control and status words, not the guest's memory. */
-const X87_WORDS = ['controlWord', 'setControlWord', 'statusWord', 'clearExceptions'];
+const X87_WORDS = ['controlWord', 'setControlWord', 'statusWord', 'clearExceptions', 'mxcsr',
+    'setMxcsr'];
 
 /**
  * The x87's words as a handler reaches them: through the FPU seam, which
@@ -160,6 +165,9 @@ function x87Words(fpu){
         statusWord: ()=>(fpu?.statusWord ? fpu.statusWord() & 0xc7ff : missing('statusWord')),
         clearExceptions: ()=>(fpu?.clearExceptions ? fpu.clearExceptions()
             : missing('clearExceptions')),
+        mxcsr: ()=>(fpu?.mxcsr ? fpu.mxcsr() >>> 0 : missing('mxcsr')),
+        /** @param {number} word */
+        setMxcsr: word=>(fpu?.setMxcsr ? fpu.setMxcsr(word >>> 0) : missing('setMxcsr')),
     };
 }
 
@@ -179,8 +187,8 @@ function x87Words(fpu){
  * The helpers that are the guest's memory, its calls and `host`: all of
  * Guest but the x87's words.
  *
- * @typedef {Omit<Guest, 'controlWord' | 'setControlWord' | 'statusWord' | 'clearExceptions'>}
- *     GuestMemory
+ * @typedef {Omit<Guest, 'controlWord' | 'setControlWord' | 'statusWord' | 'clearExceptions'
+ *     | 'mxcsr' | 'setMxcsr'>} GuestMemory
  */
 
 /**
@@ -305,6 +313,7 @@ export function guestMemory(host){
  * @param {CompiledGuestCode} compiled
  * @param {HostFallback} [fallback]
  * @returns {{ convention: string, argBytes: number,
+ *     floats?: Record<number, 'f32' | 'f64'>,
  *     code: (builder?: CodeBuilder) => Uint8Array,
  *     long?: (builder?: CodeBuilder) => Uint8Array }}
  */
@@ -316,6 +325,21 @@ export function guestExport(compiled, fallback){
     {
         throw new Error('guest code: a function that hands calls to the host wants its handler');
     }
+    // Where a 64-bit caller passes the floating-point arguments, for a trap
+    // that answers the call: where no x86-64 code was built, and the one the
+    // code hands a call over to.
+    /** @type {Record<number, 'f32' | 'f64'>} */
+    const floats = {};
+    let word = 0;
+    for (const type of compiled.params)
+    {
+        if (type === 'f64' || type === 'f32')
+        {
+            floats[word] = type;
+        }
+        word += type === 'f64' ? 2 : type === 'x87' ? 0 : 1;
+    }
+    const declared = Object.keys(floats).length > 0 ? { floats } : {};
     /**
      * The code with its jump to the trap filled in, where it has one.
      *
@@ -337,7 +361,7 @@ export function guestExport(compiled, fallback){
         // convention is one, and `this` is in RCX either way.)
         const trap = builder.register({
             convention: convention === 'thiscall' ? 'stdcall' : convention,
-            argBytes, handler: fallback.handler });
+            argBytes, ...declared, handler: fallback.handler });
         if (record.code[host - 1] !== MOV_EAX)
         {
             builder.jump(host, trap);
@@ -350,7 +374,7 @@ export function guestExport(compiled, fallback){
     };
     const long = LONG_CODE.get(compiled);
     return {
-        convention, argBytes,
+        convention, argBytes, ...declared,
         code: (/** @type {CodeBuilder | undefined} */ builder)=>bound(compiled, builder),
         ...long ? { long: (/** @type {CodeBuilder | undefined} */ builder)=>bound(long, builder) }
             : {},
@@ -368,6 +392,7 @@ export function guestExport(compiled, fallback){
  * @param {HostFallback} [fallback]  What `return host()` answers with, in the
  *     handler and through the trap the code jumps to.
  * @returns {{ convention: string, argBytes: number,
+ *     floats?: Record<number, 'f32' | 'f64'>,
  *     code: (builder?: CodeBuilder) => Uint8Array,
  *     long?: (builder?: CodeBuilder) => Uint8Array, handler: (args: number[]) => number }}
  */
@@ -448,8 +473,10 @@ export function guestEntry(source, compiled, host, fallback){
         switch (returns)
         {
             case 'f64':
-            case 'f32':
                 /** @type {import('./float.js').FloatHost} */ (host.fpu).setResult(result);
+                return 0;
+            case 'f32':
+                setSingle(/** @type {import('./float.js').FloatHost} */ (host.fpu), result);
                 return 0;
             case 'i64':
             {

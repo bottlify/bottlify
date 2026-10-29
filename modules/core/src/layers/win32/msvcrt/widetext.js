@@ -237,38 +237,76 @@ const MAX_WIDE = 1 << 16;
 const WIDE_STRETCH = 64;
 
 /**
- * A wide string in guest memory up to its terminator, as the string its units
- * spell. Each stretch read ends at a 64-byte boundary, so a string that ends
- * just short of where its region does is not read past it.
+ * The units of a string in guest memory, one or two bytes each, up to its
+ * terminator or `limit` of them, whichever comes first -- never a byte past
+ * either. Each stretch read ends at a 64-byte boundary, so a string that
+ * ends just short of where its region does is not read past it, and a
+ * count that ends inside an unterminated one is not read past either, as
+ * the n-bounded C functions stop there.
  *
  * @param {(address: number, length: number) => Uint8Array} readMemory
- * @param {number} pointer
+ * @param {number} pointer @param {1 | 2} unit @param {number} limit
+ * @returns {Generator<number>}
  */
-export function wideStringAt(readMemory, pointer){
-    /** @type {number[]} */
-    const units = [];
+export function* unitsAt(readMemory, pointer, unit, limit){
+    const last = (pointer >>> 0) + Math.max(0, limit) * unit;
     let low = -1;
-    for (let at = pointer >>> 0; units.length < MAX_WIDE;)
+    for (let at = pointer >>> 0; at < last;)
     {
-        const end = at - at % WIDE_STRETCH + WIDE_STRETCH;
+        const end = Math.min(at - at % WIDE_STRETCH + WIDE_STRETCH, last);
         for (const byte of readMemory(at, end - at))
         {
-            if (low < 0)
+            if (unit === 2 && low < 0)
             {
                 low = byte;
                 continue;
             }
-            const unit = low | byte << 8;
+            const value = unit === 2 ? low | byte << 8 : byte;
             low = -1;
-            if (unit === 0)
+            if (value === 0)
             {
-                return textOfUnits(units);
+                return;
             }
-            units.push(unit);
+            yield value;
         }
         at = end;
     }
-    return textOfUnits(units);
+}
+
+/**
+ * A wide string in guest memory up to its terminator, or its first `limit`
+ * units, as the string its units spell.
+ *
+ * @param {(address: number, length: number) => Uint8Array} readMemory
+ * @param {number} pointer @param {number} [limit]
+ */
+export function wideStringAt(readMemory, pointer, limit = MAX_WIDE){
+    return textOfUnits([...unitsAt(readMemory, pointer, 2, Math.min(limit, MAX_WIDE))]);
+}
+
+/**
+ * Two strings compared unit by unit, as far as the first two that differ,
+ * a terminator, or `limit` units -- read no further, as the n-bounded
+ * comparisons stop there: the difference of the first two that differ
+ * after `map`, or 0.
+ *
+ * @param {(address: number, length: number) => Uint8Array} readMemory
+ * @param {number} left @param {number} right @param {1 | 2} unit
+ * @param {number} limit @param {(value: number) => number} [map]
+ */
+export function compareUnitsAt(readMemory, left, right, unit, limit, map = value=>value){
+    const a = unitsAt(readMemory, left, unit, limit);
+    const b = unitsAt(readMemory, right, unit, limit);
+    for (let at = 0; at < limit; at++)
+    {
+        const x = map(a.next().value ?? 0);
+        const y = map(b.next().value ?? 0);
+        if (x !== y || x === 0)
+        {
+            return x - y;
+        }
+    }
+    return 0;
 }
 
 /**
