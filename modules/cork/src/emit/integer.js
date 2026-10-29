@@ -2257,7 +2257,7 @@ export function writeReg(e, reg, size, high, exact = false){
         writeLongReg(e, local, size, high, exact);
         return;
     }
-    if (size === 4)
+    if (size === 4 || !high && widenedNext(e, reg, size))
     {
         b.localSet(local);
         return;
@@ -2276,6 +2276,56 @@ export function writeReg(e, reg, size, high, exact = false){
     }
     b.op(I32.or).localSet(local);
 }
+
+/**
+ * Whether an instruction soon after the current one in its block widens the
+ * register's low `size` bytes into the whole register (`movzx`/`movsx` of it
+ * into itself, as `setl al; movzx eax, al` or `xor dl, al; shr eax, 8;
+ * movzx edx, dl`), with only plain register and immediate operations between
+ * that neither name the register nor can leave: then nothing reads the bits a
+ * narrow write keeps above it before they are overwritten, and the write
+ * leaves them as they come -- no mask and merge, three or four machine
+ * instructions a time. Not under `precise`. What is given up: a context taken
+ * in between (a store into code's exit after the write) shows those bits as
+ * the value left them; the widening, run anywhere, overwrites them.
+ *
+ * @param {E} e @param {number} reg @param {number} size
+ */
+function widenedNext(e, reg, size){
+    const instructions = e.region.blocks[e.blockIndex]?.instructions;
+    if (e.context.precise === true || e.at < 0 || instructions?.[e.at] !== e.current)
+    {
+        return false;
+    }
+    for (let k = e.at + 1; k < instructions.length && k <= e.at + WIDEN_REACH; k++)
+    {
+        const next = instructions[k];
+        const [to, from] = next.operands;
+        if ((next.op === 'movzx' || next.op === 'movsx') && next.operands.length === 2
+            && to.kind === 'reg' && to.size === 4 && to.reg === reg
+            && from.kind === 'reg' && from.size === size && from.reg === reg && from.high !== true)
+        {
+            return true;
+        }
+        // Between them only what neither names the register nor can leave
+        // (no memory, no fault, nothing it reads or writes unnamed).
+        if (!PASSED_OVER.has(next.op) || next.faults !== 'none' || next.prefixes.rep
+            || next.op === 'imul' && next.operands.length < 2
+            || next.operands.some(operand=>operand.kind === 'reg' ? operand.reg === reg
+                : operand.kind === 'mem' ? next.op !== 'lea' || operand.base === reg
+                    || operand.index === reg : operand.kind !== 'imm'))
+        {
+            return false;
+        }
+    }
+    return false;
+}
+
+/** How far `widenedNext` looks for the widening. */
+const WIDEN_REACH = 4;
+/** Instructions `widenedNext` looks past: their operands are all they touch. */
+const PASSED_OVER = new Set(['mov', 'add', 'sub', 'and', 'or', 'xor', 'cmp', 'test', 'inc',
+    'dec', 'not', 'neg', 'shl', 'shr', 'sar', 'lea', 'movzx', 'movsx', 'imul']);
 
 /**
  * `writeReg` over long mode's i64 register: a quadword as it is, a dword

@@ -1973,3 +1973,29 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   (`operandValues`, the access planner's model), taken: vm 2 800 365 (-0.7 % against without),
   sort 5 573 581 (-0.3 %); fmath and game emit the same wasm as by name. All on 73ed219's
   `wrappedFirst`, before its spreads of 64 KiB (cbe09368).
+
+### 2026-10-29: a plain self-loop run two turns a wasm turn
+
+- **Idea.** A self-looping block that `planLoop` does not hoist (no stream: a pointer the data
+  moves, registers alone, x87) emitted twice in its wasm loop: the first turn's back edge goes on
+  into the second with no charge and no look at the budget, its count owed into the second's ways
+  out, and the second charges both and looks once -- the budget's subtraction, compare and branch
+  and V8's stack check at the loop's head paid every other turn. With x87, the tracker reset
+  between the turns to the state the back edge leaves (`x87BlockStart`'s, after `x87BlockEnd`).
+- **Workload.** cork-bench crc, vm, switch, sort, fmath, tree, str, game, vcall (x87 images);
+  `tools/cork-bench/ir.sh` with WASM=1, node 26.12.1 (V8 14.6) x64, CLOCK=0.001, 1000 warm-up
+  and 1000 counted iterations; machine instructions an iteration in wasm code. One run an arm:
+  two runs of the arm without it gave the same in-wasm count on every workload.
+- **Values.** Against the tree without it (the loop-edge changes of the same day, before the
+  paired unchecked copy): crc 1,707,993 against 1,706,399 (-0.09 %), sort 3,966,623 against
+  3,964,870 (-0.04 %); vm 2,190,307, switch 501,974, fmath 748,116, tree 2,896,777, str 3,301,943,
+  game 1,163,971 and vcall 1,740,686 unchanged. With x87 as well: fmath 748,116, unchanged (its
+  frustum loop leaves mid-body and is no self-loop). Native: not measured for this arm.
+- **Why.** The hot self-loops of these workloads have streams and are hoisted; their unchecked
+  copy running two turns a wasm turn did pay (crc -3.0 %, str -10.2 %), and went in.
+- **Checked.** emit/loop-edges.test.js with loops of a data-moved pointer, registers alone and
+  x87: every count mutation failed it; the x87 ones (no reset of the tracker between the turns,
+  no `x87BlockEnd` after either) did not, as what they change is rewritten the same at the turn's
+  end in these loops.
+- **Machine.** A cloud container (Intel Xeon @ 2.80 GHz, 4 vCPU), valgrind 3.22.
+- **Decision.** Not taken.

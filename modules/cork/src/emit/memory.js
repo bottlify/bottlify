@@ -99,15 +99,17 @@ export function wrapsRead(e, store){
 
 /**
  * The flags of the page whose index is on the stack, as `type` loads them:
- * the table's address joined to the index by `or` where its low 20 bits are
- * clear, which an arm64 `orr` takes as an immediate, and as the load's offset
- * otherwise.
+ * on an arm64 host the table's address joined to the index by `or` where its
+ * low 20 bits are clear, which an arm64 `orr` takes as an immediate where an
+ * offset that large is a constant moved into a register and an add; as the
+ * load's offset otherwise, which an x86-64 load takes into its address for
+ * nothing (V8 14.6: a store's test 6 instructions with the `or`, 5 without).
  *
- * @param {import('./region.js').RegionEmitter['b']} b @param {number} table
- * @param {'i32_8u' | 'i32_16u'} type
+ * @param {E} e @param {number} table @param {'i32_8u' | 'i32_16u'} type
  */
-function loadFlags(b, table, type){
-    if ((table & 0xfffff) === 0)
+function loadFlags(e, table, type){
+    const { b } = e;
+    if ((table & 0xfffff) === 0 && e.context.features?.armHost === true)
     {
         return b.i32const(table | 0).op(I32.or).load(type, { offset: 0 });
     }
@@ -159,7 +161,7 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     const noting = store && e.layout.codePages < 0 && size <= 16;
     const bits = PageFlag.INACCESSIBLE | (noting ? STORE_FLAGS : 0);
     b.localGet(Local.addr).i32const(12).op(I32.shrU);
-    loadFlags(b, table, size > 1 ? 'i32_16u' : 'i32_8u')
+    loadFlags(e, table, size > 1 ? 'i32_16u' : 'i32_8u')
         .localTee(Local.pflags).i32const(size > 1 ? bits * 0x01010101 : bits).op(I32.and);
     e.openGuard('flagged', EMPTY);
     if (size > 1)
@@ -1661,7 +1663,7 @@ export function emitGroupChecks(e, checks, at = -1){
         const stores = group.list.some(access=>access.store);
         const bits = PageFlag.INACCESSIBLE | (stores ? STORE_FLAGS : 0);
         b.localGet(Local.addr).i32const(12).op(I32.shrU);
-        loadFlags(b, table, 'i32_16u').i32const(bits * 0x01010101).op(I32.and);
+        loadFlags(e, table, 'i32_16u').i32const(bits * 0x01010101).op(I32.and);
         if (e.width.bits === 64)
         {
             b.op(I32.or);
@@ -1993,7 +1995,8 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
             {
                 b.i32const(at).op(I32.add);
             }
-            loadFlags(b.i32const(12).op(I32.shrU), table, 'i32_8u');
+            b.i32const(12).op(I32.shrU);
+            loadFlags(e, table, 'i32_8u');
             if (k > 0)
             {
                 b.op(I32.or);
