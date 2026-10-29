@@ -85,6 +85,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--profile-calls` | off | every host call timed as a phase of its own, so the phase table says which API a frame's host time went to rather than only that it went to the crossing |
 | `--cpu-profile-from S` | 0 | with `--cpu-profile`: the window starts S seconds into the run instead of at the start, so a scene is profiled without the load in front of it |
 | `--heap-profile [old]` | off | with `--cpu-profile`: the same workers' allocations sampled over the same window, garbage included (`old`: only what lived long enough to be promoted, the garbage a full collection is run for), as `game-<stamp>-heap-<n>.heapprofile` (the browser's Memory panel opens it) and the top allocating sites in the report; and every worker's heap read once a second for the whole run, `game-<stamp>-heap-usage.json` (`usedSize`, `totalSize`, and `backingStorageSize`, the array buffers outside the heap). A long collection pause is paid for by what was thrown away, which is what this shows |
+| `--roots FILE` | none | A PEM bundle (`/etc/ssl/certs/ca-certificates.crt`) added to the machine's trusted roots: the ROOT store a program doing its own TLS has crypt32 judge a server's chain against |
 | `--win32-config JSON` | none | createApp's `win32` for the run, e.g. `{"handleWords":false}`: events, mutexes and their waits answered by the host instead of the guest's handle words, a run that differs from an ordinary one by that path alone |
 | `--cpu-config JSON` | none | createApp's `cpu` for the run, e.g. `{"playPinned":false}`: threads placed one fixed way instead of by the scheduler's trials, so two arms of an A/B are placed alike |
 | `--cork-config JSON` | `{"timings":true}` | the translator's own settings for the run, e.g. `{"countTransfers":true}` or `{"relinkAfter":0}`; the harness turns the translator's `timings` on (its milliseconds and `stalls`), which a shipped build leaves off, and `{"timings":false}` runs as it does; `{"traceStore":true}` writes every store key put and missed to `game-<stamp>-store.json` beside the report, for comparing a cold run's keys with a warm run's; `{"blockProfile":true}` counts every translated block's executions (with `"blockProfileFrom":S` only from S seconds on, so a profile holds the game and not its load) (no store is kept that run), prints the twenty hottest as `hottest blocks` and how calls, returns, transfers and `rdtsc`s went as `mechanisms` (cork's `Mechanism`) and what the hot code is made of as `forms` (each instruction form's executions and wasm bytes), and writes all of them to `game-<stamp>-blocks.json`, which `node tools/cork-mix.mjs <that file> [--top N]` turns into the dynamic instruction mix (a DLL's blocks too, placed with `--image name.dll@base`) by operation and operand form with the wasm operations cork emits for each form, ranked by weighted cost, and `node tools/cork-asm.mjs --image name.dll@base --entry A,B --blocks <that file>` into the machine instructions an executed guest instruction costs: the regions emitted again, compiled by a node's V8 (`--runner` another node, e.g. an arm64 one under qemu), each block's code found by a mark and weighed by its executions |
@@ -232,7 +233,12 @@ cross-process COM calls S seconds in. `--bundle ID` runs an installed
 program's launcher or entry the same way, with `--click`, `--key`, `--shots`
 and, with `--attended`, its message boxes left on the desktop to answer.
 `--copy DIR TO` writes a directory of the volume out once the run is over:
-what a setup unpacked, for the audit below.
+what a setup unpacked, for the audit below. `--network ws://127.0.0.1:8787/` puts the run
+on a relay's network and `--roots FILE` adds a PEM bundle to the trusted roots, as for
+game.mjs (`tools/relay-option.mjs`); launch-probe takes both too. The relay for a machine
+whose only way out is an HTTP proxy (a cloud container) is
+`node modules/networking/src/server/cli.js --host 127.0.0.1 --allow '*' --proxy "$HTTPS_PROXY" --log`:
+`--log` prints every host and port a program reached.
 
 `tools/import-audit.mjs <file|directory|bundle.btl|disc.iso>...` reads the
 import table of every PE image under the paths and lists what this build does

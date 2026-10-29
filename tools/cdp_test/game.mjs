@@ -64,6 +64,7 @@ import { GPU_PROFILES } from '../../modules/core/src/layers/graphics/seam/adapte
 import { disassemble } from '../../modules/core/src/layers/win32/d3dx9/d3d9-machine.fixture.js';
 import { disassembleShader } from '../../modules/core/src/layers/win32/d3dx9/shader-asm.js';
 import { modeOf } from '../play/modes.js';
+import { rootsFromArgv } from '../relay-option.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -386,8 +387,16 @@ function parse(argv){
             : mode.cork,
         // createApp's `win32` as JSON ('{"handleWords":false}'): a run beside
         // an ordinary one that differs by a Win32 path and nothing else.
-        win32Config: argv.includes('--win32-config')
-            ? JSON.parse(argv[argv.indexOf('--win32-config') + 1]) : undefined,
+        win32Config: argv.includes('--win32-config') || argv.includes('--roots')
+            ? {
+                ...argv.includes('--win32-config')
+                    ? JSON.parse(argv[argv.indexOf('--win32-config') + 1]) : {},
+                // `--roots FILE`: a PEM bundle the machine trusts beside
+                // Windows' defaults (relay-option.mjs), as base64 for the page.
+                ...argv.includes('--roots') ? { trustedRoots: /** @type {Uint8Array[]} */ (
+                    rootsFromArgv(argv)).map(root=>Buffer.from(root).toString('base64')) } : {},
+            }
+            : undefined,
         // createApp's `cpu` as JSON ('{"playPinned":false}'): a run whose threads
         // are placed one fixed way, beside another placed the same way.
         cpuConfig: argv.includes('--cpu-config')
