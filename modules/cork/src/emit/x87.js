@@ -1957,7 +1957,63 @@ export function x87StoreRegisters(e, written){
         // blocks, whose loops would carry it, and V8 the locals it ties up, around
         // every turn.
         b.i32const(0).localSet(Local.x87Dirty);
+        let stored = 0;
+        for (let k = 0; k < 8; k++)
+        {
+            stored |= written(k) ? 1 << k : 0;
+        }
+        const at = exactPlace(layout);
+        if (x.dyn < 0 && at >= 0 && stored !== 0)
+        {
+            // What is compared for is the exact marks of the registers stored, and
+            // these are seldom up: with none, each register goes back as it is, the
+            // ones the run did not write as the block holds them already (every one
+            // is loaded at the entry, `x87LoadRegisters`).
+            atState(e.context, b).load(exactLoad(layout), { offset: at }).i32const(stored)
+                .op(I32.and);
+            e.openGuard('marked', EMPTY);
+            x87CompareRegisters(e, written);
+            x87DropExact(e, ()=>b.localGet(Local.x87Dirty));
+            b.else();
+            for (let k = 0; k < 8; k++)
+            {
+                if (written(k))
+                {
+                    atState(e.context, b).localGet(x.base + k)
+                        .store('f64', { offset: layout.x87 + k * 16 });
+                }
+            }
+            e.close();
+            return;
+        }
     }
+    x87CompareRegisters(e, written);
+    if (x.dyn >= 0 && exactPlace(layout) >= 0)
+    {
+        // What the region knows at run time, its own quadwords and the ones
+        // it came in with alike.
+        atState(e.context, b).localGet(x.dyn)
+            .store(exactStore(layout), { offset: exactPlace(layout) });
+        for (let k = 0; k < 8; k++)
+        {
+            atState(e.context, b).localGet(x.shadow[k])
+                .store('i64', { offset: layout.x87 + k * 16 + 8 });
+        }
+        return;
+    }
+    x87DropExact(e, ()=>b.localGet(Local.x87Dirty));
+}
+
+/**
+ * The registers `written` names back into the state block: compared bit for
+ * bit with what it holds and each changed one marked in `x87Dirty`
+ * (`compared`), or each marked dirty stored.
+ *
+ * @param {E} e @param {(k: number) => boolean} written
+ */
+function x87CompareRegisters(e, written){
+    const { b, layout } = e;
+    const x = e.x87;
     for (let k = 0; k < 8; k++)
     {
         if (!written(k))
@@ -1989,20 +2045,6 @@ export function x87StoreRegisters(e, written){
         }
         e.close();
     }
-    if (x.dyn >= 0 && exactPlace(layout) >= 0)
-    {
-        // What the region knows at run time, its own quadwords and the ones
-        // it came in with alike.
-        atState(e.context, b).localGet(x.dyn)
-            .store(exactStore(layout), { offset: exactPlace(layout) });
-        for (let k = 0; k < 8; k++)
-        {
-            atState(e.context, b).localGet(x.shadow[k])
-                .store('i64', { offset: layout.x87 + k * 16 + 8 });
-        }
-        return;
-    }
-    x87DropExact(e, ()=>b.localGet(Local.x87Dirty));
 }
 
 /**
