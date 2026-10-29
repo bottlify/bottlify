@@ -369,3 +369,64 @@ test('QueryDosDeviceW answers in UTF-16', ()=>{
     assert.equal(bytes[0x300], 0x5c);
     assert.equal(bytes[0x301], 0);
 });
+
+test('a path\'s volume is its drive\'s root, in the namespace the path was written in', ()=>{
+    // Wine's kernel32 volume test_GetVolumePathNameA: a file's volume path is
+    // the root of its drive; the client's browser host asks for its cache's.
+    const { fns, bytes, errors } = setup(['C', 'D']);
+    const bs = String.fromCharCode(92);
+    const read = (/** @type {number} */ at)=>String.fromCharCode(...bytes.subarray(at,
+        bytes.indexOf(0, at)));
+    plant(bytes, 0x100, `C:${bs}Program Files${bs}Steam${bs}htmlcache`);
+    assert.equal(fns.GetVolumePathNameA.handler([0x100, 0x200, 64]), 1);
+    assert.equal(read(0x200), `C:${bs}`);
+    plant(bytes, 0x100, `${bs}${bs}?${bs}d:${bs}data`);
+    assert.equal(fns.GetVolumePathNameA.handler([0x100, 0x200, 64]), 1);
+    assert.equal(read(0x200), `${bs}${bs}?${bs}D:${bs}`, 'the namespace kept');
+    plant(bytes, 0x100, 'relative.txt');
+    assert.equal(fns.GetVolumePathNameA.handler([0x100, 0x200, 64]), 1);
+    assert.equal(read(0x200), `C:${bs}`, 'no drive: the current one');
+    assert.equal(fns.GetVolumePathNameA.handler([0x100, 0x200, 3]), 0, 'no room for C:\\');
+    assert.equal(errors.at(-1), 206, 'ERROR_FILENAME_EXCED_RANGE');
+    assert.equal(fns.GetVolumePathNameW.argBytes, 12);
+});
+
+test('a drive\'s root names its volume, the volume names the root, and the search walks them', ()=>{
+    const { fns, bytes, errors } = setup(['C', 'D']);
+    const bs = String.fromCharCode(92);
+    const read = (/** @type {number} */ at)=>String.fromCharCode(...bytes.subarray(at,
+        bytes.indexOf(0, at)));
+    plant(bytes, 0x100, `C:${bs}`);
+    assert.equal(fns.GetVolumeNameForVolumeMountPointA.handler([0x100, 0x200, 50]), 1);
+    const volume = read(0x200);
+    assert.match(volume, /^\\\\\?\\Volume\{[0-9a-f-]{36}\}\\$/, volume);
+    assert.equal(volume.length + 1, 50, 'the 50 characters a volume GUID path takes');
+
+    plant(bytes, 0x100, 'C:');
+    assert.equal(fns.GetVolumeNameForVolumeMountPointA.handler([0x100, 0x200, 50]), 0);
+    assert.equal(errors.at(-1), 123, 'ERROR_INVALID_NAME without the separator');
+    plant(bytes, 0x100, `Q:${bs}`);
+    assert.equal(fns.GetVolumeNameForVolumeMountPointA.handler([0x100, 0x200, 50]), 0);
+    assert.equal(errors.at(-1), 2, 'ERROR_FILE_NOT_FOUND for a drive not there');
+
+    plant(bytes, 0x300, volume);
+    assert.equal(fns.GetVolumePathNamesForVolumeNameA.handler([0x300, 0x400, 2, 0x380]), 0);
+    assert.equal(errors.at(-1), 234, 'ERROR_MORE_DATA');
+    assert.equal(dword(bytes, 0x380), 5, 'C:\\, its terminator and the list\'s');
+    assert.equal(fns.GetVolumePathNamesForVolumeNameA.handler([0x300, 0x400, 5, 0x380]), 1);
+    assert.deepEqual([...bytes.subarray(0x400, 0x405)], [0x43, 0x3a, 0x5c, 0, 0]);
+
+    // FindFirstVolume and FindNextVolume give each drive's volume once.
+    const search = fns.FindFirstVolumeA.handler([0x500, 50]);
+    assert.notEqual(search, 0xffffffff);
+    const names = [read(0x500)];
+    while (fns.FindNextVolumeA.handler([search, 0x500, 50]) === 1)
+    {
+        names.push(read(0x500));
+    }
+    assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
+    assert.equal(names[0], volume);
+    assert.equal(new Set(names).size, 2, 'two drives, two volumes');
+    assert.equal(fns.FindVolumeClose.handler([search]), 1);
+    assert.equal(fns.FindVolumeClose.handler([search]), 0);
+});

@@ -49,6 +49,18 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 /** A path argument is at most this long. */
 const MAX_PATH = 260;
 
+const ERROR_NO_MORE_FILES = 18;
+const ERROR_FILENAME_TOO_LONG = 206;
+
+/**
+ * Every volume GUID here begins the same and ends in its drive letter's
+ * code: the name is the drive's for good, as a volume's is (roadmap/decisions.md).
+ */
+const VOLUME_GUID_PREFIX = 'b0771f42-0000-4000-8000-0000000000';
+
+/** Volume searches' handles, apart from the kernel's and every other library's. */
+const VOLUME_SEARCH_BASE = 0x5f800004;
+
 /**
  * The geometry claimed, and the reason for these particular numbers.
  *
@@ -440,7 +452,241 @@ export function createDriveFunctions(host){
         },
     });
 
+    /**
+     * The volume GUID path of a drive's volume, `\\?\Volume{GUID}\`. The
+     * GUID is the drive's own and stays the same from run to run, as a
+     * volume's does on a machine: a program keys what it knows about a disk by
+     * this name.
+     *
+     * @param {string} letter
+     */
+    const volumeNameOf = letter=>`\\\\?\\Volume{${VOLUME_GUID_PREFIX}${
+        letter.charCodeAt(0).toString(16).padStart(2, '0')}}\\`;
+
+    /** The drive a volume GUID path names, or null. @param {string} name */
+    const letterOfVolume = name=>letters().find(letter=>
+        volumeNameOf(letter).toLowerCase() === name.toLowerCase()) ?? null;
+
+    /**
+     * Text into a buffer of `room` characters, terminator included: TRUE, or
+     * FALSE with `code` when it does not fit.
+     *
+     * @param {(text: string) => Uint8Array} encode @param {number} buffer
+     * @param {number} room @param {string} text @param {number} code
+     */
+    const fitText = (encode, buffer, room, text, code)=>{
+        if ((buffer >>> 0) === 0 || text.length + 1 > (room >>> 0))
+        {
+            host.setLastError(code);
+            return 0;
+        }
+        host.writeMemory(buffer >>> 0, encode(`${text}\0`));
+        return 1;
+    };
+
+    /**
+     * GetVolumePathName in either width: the root of the volume a path is
+     * on, which here is its drive's root -- each drive is one volume and none
+     * is mounted in a folder of another -- kept in the namespace the path was
+     * written in. A path with no drive is on the current one.
+     *
+     * @param {(address: number) => string} readPath
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const volumePathName = (readPath, encode)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([path, buffer, room])=>{
+            const asked = (path >>> 0) === 0 ? '' : readPath(path >>> 0);
+            if (asked === '')
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const prefix = /^\\\\[?.]\\/.exec(asked)?.[0] ?? '';
+            const letter = letterOf(asked.slice(prefix.length)) ?? letterOf('') ?? 'C';
+            return fitText(encode, buffer, room, `${prefix}${letter}:\\`,
+                ERROR_FILENAME_TOO_LONG);
+        },
+    });
+
+    /**
+     * GetVolumeNameForVolumeMountPoint in either width: a drive's root,
+     * with its separator, names its volume's GUID path.
+     *
+     * @param {(address: number) => string} readPath
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const volumeNameForMountPoint = (readPath, encode)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([path, buffer, room])=>{
+            const ERROR_INVALID_NAME = 123;
+            const asked = (path >>> 0) === 0 ? '' : readPath(path >>> 0);
+            const root = /^(?:\\\\[?.]\\)?([A-Za-z]):\\$/.exec(asked);
+            if (!root)
+            {
+                host.setLastError(asked.endsWith('\\') ? ERROR_FILE_NOT_FOUND : ERROR_INVALID_NAME);
+                return 0;
+            }
+            const letter = root[1].toUpperCase();
+            if (!letters().includes(letter))
+            {
+                host.setLastError(ERROR_FILE_NOT_FOUND);
+                return 0;
+            }
+            return fitText(encode, buffer, room, volumeNameOf(letter), ERROR_FILENAME_TOO_LONG);
+        },
+    });
+
+    /**
+     * GetVolumePathNamesForVolumeName in either width: the one place a
+     * volume is mounted, its drive's root, as a list ended by an empty name.
+     * The characters the list takes are said whether it fits or not.
+     *
+     * @param {(address: number) => string} readPath
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const volumePathNames = (readPath, encode)=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([name, buffer, room, length])=>{
+            const ERROR_INVALID_NAME = 123;
+            const ERROR_MORE_DATA = 234;
+            const asked = (name >>> 0) === 0 ? '' : readPath(name >>> 0);
+            if (!/^\\\\\?\\Volume\{[0-9a-f-]{36}\}\\$/i.test(asked))
+            {
+                host.setLastError(ERROR_INVALID_NAME);
+                return 0;
+            }
+            const letter = letterOfVolume(asked);
+            if (letter === null)
+            {
+                host.setLastError(ERROR_FILE_NOT_FOUND);
+                return 0;
+            }
+            const list = `${letter}:\\\0\0`;
+            writeDwordIf(length >>> 0, list.length);
+            if ((buffer >>> 0) === 0 || list.length > (room >>> 0))
+            {
+                host.setLastError(ERROR_MORE_DATA);
+                return 0;
+            }
+            host.writeMemory(buffer >>> 0, encode(list));
+            return 1;
+        },
+    });
+
+    /**
+     * The volume searches FindFirstVolume opened, by handle: the drives
+     * still to give.
+     *
+     * @type {Map<number, string[]>}
+     */
+    const volumeSearches = new Map();
+    let nextVolumeSearch = VOLUME_SEARCH_BASE;
+
+    /** @param {(text: string) => Uint8Array} encode */
+    const findFirstVolume = encode=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([buffer, room])=>{
+            const INVALID_HANDLE_VALUE = 0xffffffff;
+            const [first, ...rest] = letters();
+            if (first === undefined)
+            {
+                host.setLastError(ERROR_NO_MORE_FILES);
+                return INVALID_HANDLE_VALUE;
+            }
+            if (!fitText(encode, buffer, room, volumeNameOf(first), ERROR_FILENAME_TOO_LONG))
+            {
+                return INVALID_HANDLE_VALUE;
+            }
+            const handle = nextVolumeSearch;
+            nextVolumeSearch += 4;
+            volumeSearches.set(handle, rest);
+            return handle;
+        },
+    });
+
+    /** @param {(text: string) => Uint8Array} encode */
+    const findNextVolume = encode=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([handle, buffer, room])=>{
+            const ERROR_INVALID_HANDLE = 6;
+            const rest = volumeSearches.get(handle >>> 0);
+            if (!rest)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const [next] = rest;
+            if (next === undefined)
+            {
+                host.setLastError(ERROR_NO_MORE_FILES);
+                return 0;
+            }
+            if (!fitText(encode, buffer, room, volumeNameOf(next), ERROR_FILENAME_TOO_LONG))
+            {
+                return 0;
+            }
+            rest.shift();
+            return 1;
+        },
+    });
+
     return {
+        /**
+         * BOOL GetVolumePathNameA/W(LPCSTR lpszFileName, LPSTR lpszVolumePathName,
+         *   DWORD cchBufferLength)
+         */
+        GetVolumePathNameA: volumePathName(address=>host.readCString(address, MAX_PATH),
+            encodeAnsi),
+        GetVolumePathNameW: volumePathName(address=>host.readWideString(address, 0x10000),
+            encodeWide),
+
+        /**
+         * BOOL GetVolumeNameForVolumeMountPointA/W(LPCSTR lpszVolumeMountPoint,
+         *   LPSTR lpszVolumeName, DWORD cchBufferLength)
+         */
+        GetVolumeNameForVolumeMountPointA: volumeNameForMountPoint(
+            address=>host.readCString(address, MAX_PATH), encodeAnsi),
+        GetVolumeNameForVolumeMountPointW: volumeNameForMountPoint(
+            address=>host.readWideString(address, MAX_PATH * 2), encodeWide),
+
+        /**
+         * BOOL GetVolumePathNamesForVolumeNameA/W(LPCSTR lpszVolumeName,
+         *   LPCH lpszVolumePathNames, DWORD cchBufferLength, PDWORD lpcchReturnLength)
+         */
+        GetVolumePathNamesForVolumeNameA: volumePathNames(
+            address=>host.readCString(address, MAX_PATH), encodeAnsi),
+        GetVolumePathNamesForVolumeNameW: volumePathNames(
+            address=>host.readWideString(address, MAX_PATH * 2), encodeWide),
+
+        /**
+         * HANDLE FindFirstVolumeA/W(LPSTR lpszVolumeName, DWORD cchBufferLength),
+         * BOOL FindNextVolumeA/W(HANDLE hFindVolume, LPSTR lpszVolumeName, DWORD),
+         * BOOL FindVolumeClose(HANDLE hFindVolume): each drive's volume, in
+         * the order of the letters.
+         */
+        FindFirstVolumeA: findFirstVolume(encodeAnsi),
+        FindFirstVolumeW: findFirstVolume(encodeWide),
+        FindNextVolumeA: findNextVolume(encodeAnsi),
+        FindNextVolumeW: findNextVolume(encodeWide),
+        FindVolumeClose: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if (!volumeSearches.delete(handle >>> 0))
+                {
+                    host.setLastError(6);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
         /** DWORD QueryDosDeviceA(LPCSTR lpDeviceName, LPSTR lpTargetPath, DWORD ucchMax) */
         QueryDosDeviceA: queryDosDevice(address=>host.readCString(address, MAX_PATH), encodeAnsi),
 
