@@ -584,6 +584,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
 {
     /** The structures at the process's width (`structs.js`). */
     const layouts = userLayouts(host.pointerSize);
+    /** The accessibility event hooks set and not yet unhooked, by handle. */
+    const winEventHooks = new Set();
+    /** The next HWINEVENTHOOK, in a range no window or object handle takes. */
+    let nextWinEventHook = 0x5f000004;
+    /** Whether the hooks' silence has been said once. */
+    let winEventSaid = false;
     /**
      * A window as the program is told of it: the desktop, the one window
      * here that is not the program's, as none.
@@ -3714,6 +3720,53 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         WinHelpA: { argBytes: 16, handler: ()=>0 },
         /** void NotifyWinEvent(DWORD event, HWND hwnd, LONG idObject, LONG idChild): nobody listens */
         NotifyWinEvent: { argBytes: 16, handler: ()=>0 },
+
+        /**
+         * HWINEVENTHOOK SetWinEventHook(DWORD eventMin, DWORD eventMax,
+         *   HMODULE hmodWinEventProc, WINEVENTPROC pfnWinEventProc,
+         *   DWORD idProcess, DWORD idThread, DWORD dwFlags)
+         *
+         * The accessibility events are not raised here -- no window manager
+         * event and no NotifyWinEvent reaches a listener -- so the hook is
+         * registered and never called, which a program sees as a desktop
+         * where nothing it listens for happens. A range that ends before it
+         * starts, or no procedure, is refused as Windows refuses it.
+         */
+        SetWinEventHook: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([eventMin, eventMax, , procedure])=>{
+                const ERROR_INVALID_HOOK_FILTER = 1426;
+                const ERROR_INVALID_FILTER_PROC = 1427;
+                if ((eventMin >>> 0) > (eventMax >>> 0))
+                {
+                    host.setLastError?.(ERROR_INVALID_HOOK_FILTER);
+                    return 0;
+                }
+                if ((procedure >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_FILTER_PROC);
+                    return 0;
+                }
+                const hook = nextWinEventHook;
+                nextWinEventHook += 4;
+                winEventHooks.add(hook);
+                if (!winEventSaid)
+                {
+                    winEventSaid = true;
+                    host.divergence?.('SetWinEventHook',
+                        'accessibility events are not raised here: the hook is never called');
+                }
+                return hook;
+            },
+        },
+
+        /** BOOL UnhookWinEvent(HWINEVENTHOOK hWinEventHook) */
+        UnhookWinEvent: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hook])=>(winEventHooks.delete(hook >>> 0) ? 1 : 0),
+        },
         GrayStringW: { argBytes: 36, handler: ()=>0 },
         TabbedTextOutW: { argBytes: 32, handler: ()=>0 },
         WinHelpW: { argBytes: 16, handler: ()=>0 },

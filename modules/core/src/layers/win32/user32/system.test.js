@@ -1514,6 +1514,24 @@ test('a DDE client finds no server, and each refusal pops what it was pushed', (
         [16, 4, 32, 28, 16, 20, 4]);
 });
 
+test('SetWinEventHook registers a hook UnhookWinEvent takes back, and refuses a bad range', ()=>{
+    // The Steam client listens for EVENT_SYSTEM_FOREGROUND out of context.
+    const { fns } = setup();
+    const EVENT_SYSTEM_FOREGROUND = 3;
+    const WINEVENT_OUTOFCONTEXT = 0;
+    assert.equal(fns.SetWinEventHook.argBytes, 28);
+    const hook = fns.SetWinEventHook.handler([EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+        0, 0x401000, 0, 0, WINEVENT_OUTOFCONTEXT]);
+    assert.notEqual(hook, 0);
+    const second = fns.SetWinEventHook.handler([1, 0x7fffffff, 0, 0x401000, 0, 0, 0]);
+    assert.notEqual(second, hook, 'each hook its own handle');
+    assert.equal(fns.SetWinEventHook.handler([4, 3, 0, 0x401000, 0, 0, 0]), 0, 'min past max');
+    assert.equal(fns.SetWinEventHook.handler([3, 3, 0, 0, 0, 0, 0]), 0, 'no procedure');
+    assert.equal(fns.UnhookWinEvent.handler([hook]), 1);
+    assert.equal(fns.UnhookWinEvent.handler([hook]), 0, 'once');
+    assert.equal(fns.UnhookWinEvent.argBytes, 4);
+});
+
 test('CharNext walks a string a byte at a time and stops at its end', ()=>{
     // A program walks a path with this and stops when the pointer stops
     // moving; a stub that answered zero sent it on to copy from address zero.
