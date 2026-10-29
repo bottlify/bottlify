@@ -169,6 +169,44 @@ test('a wildcard filters an enumeration and never opens anything', async()=>{
     assert.equal(vol.open('C:\\*.sav', { read: true }), null, 'a pattern is not a file name');
 });
 
+test('a move that copies blocks not resident waits for them, its partial copy gone', async()=>{
+    // A move from the bundle to the overlay copies the file chunk by chunk;
+    // the copy meets an absent block, which the layer throws as a miss after
+    // the destination was made. The move is undone, the blocks fetched, and
+    // it is done again: twice here, a block missing on each of two tries.
+    const fs = await filesystemModule.create({});
+    const node = fs.open('C:\\pkg.zip', { write: true, disposition: fs.Disposition.CREATE_NEW });
+    fs.write(node, new Uint8Array([1, 2, 3]));
+    fs.close(node);
+    let misses = 2;
+    /** @type {any[]} */
+    const fetched = [];
+    const bundled = Object.create(fs);
+    bundled.rename = (/** @type {string} */ from, /** @type {string} */ to)=>{
+        if (misses > 0)
+        {
+            // As the layer leaves it: the destination made, nothing in it.
+            fs.close(fs.open(to, { write: true, disposition: fs.Disposition.CREATE_NEW }));
+            throw Object.assign(new Error('not resident'),
+                { code: 'BLOCK_MISS', blocks: [{ index: misses }] });
+        }
+        return fs.rename(from, to);
+    };
+    const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
+        fetched.push(...blocks);
+        misses--;
+    }));
+    const pending = vol.renameOrFetch('C:\\pkg.zip', 'C:\\moved.zip');
+    assert.equal(typeof pending?.then, 'function', 'the move waits');
+    assert.equal(await pending, true);
+    assert.deepEqual(fetched.map(block=>block.index), [2, 1]);
+    assert.equal(vol.stat('C:\\pkg.zip'), null);
+    const moved = vol.open('C:\\moved.zip', { read: true });
+    assert.deepEqual([...vol.read(moved, 0, 3)], [1, 2, 3]);
+    vol.close(moved);
+    assert.equal(vol.renameOrFetch('C:\\a.dat', 'C:\\b.dat'), false, 'nothing to move');
+});
+
 test('renaming moves the bytes and leaves nothing behind', async()=>{
     const { volume: vol } = await volume();
     const node = vol.open('C:\\old.dat', { write: true, create: true });

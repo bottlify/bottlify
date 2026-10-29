@@ -785,6 +785,19 @@ test('a move never replaces what is already at the destination', ()=>{
     assert.equal(files.nodes.has('C:\\GAME\\A.DAT'), false);
 });
 
+test('a move that has to wait for the blocks it copies is parked, then answered', async()=>{
+    const { files, fns, at } = setup();
+    files.put('C:\\GAME\\A.DAT', 'a');
+    const anyFiles = /** @type {any} */ (files);
+    anyFiles.renameOrFetch = (/** @type {string} */ from, /** @type {string} */ to)=>
+        Promise.resolve().then(()=>files.rename(from, to));
+    const answer = /** @type {any} */ (fns.MoveFileA.handler(
+        [at(NAME, 'C:\\GAME\\A.DAT'), at(NAME2, 'C:\\GAME\\C.DAT')]));
+    assert.equal(typeof answer?.then, 'function', 'the call is parked, not answered');
+    assert.equal(await answer, 1);
+    assert.equal(files.text('C:\\GAME\\C.DAT'), 'a');
+});
+
 test('a copy overwrites unless the caller says not to', ()=>{
     const { error, files, fns, at } = setup();
     files.put('C:\\GAME\\A.DAT', 'source');

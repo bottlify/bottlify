@@ -403,6 +403,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  * @property {(path: string, modified: number) => boolean} [setModified]
  * @property {(path: string) => boolean} mkdir
  * @property {(from: string, to: string) => boolean} rename
+ * @property {(from: string, to: string) => boolean | Promise<boolean>} [renameOrFetch]
+ *           rename, waiting for the blocks a move off a bundle copies.
  * @property {(path: string, pattern: string) => DirectoryEntry[]} list
  * @property {() => string} currentDirectory
  * @property {(path: string) => void} setCurrentDirectory
@@ -1259,8 +1261,13 @@ export function createFileFunctions(host){
         }
         // A move off a disc has to delete what it moved, so the disc refuses
         // it as surely as a move onto one.
-        return files.rename(source, destination)
-            ? 1 : fail(denied(onReadOnlyMedia(source) ? source : destination));
+        // A move off the bundle may have to wait for the blocks it copies.
+        const moved = files.renameOrFetch ? files.renameOrFetch(source, destination)
+            : files.rename(source, destination);
+        /** @param {boolean} done */
+        const answer = done=>(done
+            ? 1 : fail(denied(onReadOnlyMedia(source) ? source : destination)));
+        return typeof moved === 'boolean' ? answer(moved) : moved.then(answer);
     };
 
     /**

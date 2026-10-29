@@ -621,6 +621,37 @@ export function createVolume(fs, fetchBlocks = null){
             return made;
         },
 
+        /**
+         * rename for a caller that can park: a move from the bundle to the
+         * overlay copies the file, and the copy needs every block under it.
+         * When one is absent the copy stops at it, so what was copied is
+         * removed, the blocks are fetched and the move is done again -- as
+         * many times as it meets blocks not here yet, each time with more of
+         * them here.
+         *
+         * @param {string} from @param {string} to
+         * @returns {boolean | Promise<boolean>}
+         */
+        renameOrFetch(from, to){
+            const existed = attempt(()=>fs.stat(to), null) !== null;
+            try
+            {
+                return this.rename(from, to);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code !== 'BLOCK_MISS' || !fetchBlocks)
+                {
+                    throw miss;
+                }
+                if (!existed)
+                {
+                    attempt(()=>fs.deleteFile(to), null);
+                }
+                return fetchBlocks(miss.blocks).then(()=>this.renameOrFetch(from, to));
+            }
+        },
+
         /** @param {string} from @param {string} to @returns {boolean} */
         rename: (from, to)=>attempt(()=>{
             fs.rename(from, to);
