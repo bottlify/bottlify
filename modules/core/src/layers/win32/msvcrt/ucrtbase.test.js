@@ -89,8 +89,8 @@ test('the API sets of the universal runtime are ucrtbase, as the schema has them
     assert.equal(moduleKeyOf('API-MS-WIN-CRT-RUNTIME-L1-1-0.DLL'), 'ucrtbase');
     assert.equal(moduleKeyOf('C:\\Windows\\System32\\api-ms-win-crt-math-l1-1-0.dll'), 'ucrtbase');
     assert.equal(moduleKeyOf('ucrtbase.dll'), 'ucrtbase');
-    assert.equal(moduleKeyOf('api-ms-win-core-synch-l1-2-0.dll'), 'api-ms-win-core-synch-l1-2-0',
-        'only the C runtime\'s sets are mapped');
+    assert.equal(moduleKeyOf('api-ms-win-core-synch-l1-2-0.dll'), 'kernel32',
+        'a core set is kernel32\'s (apisets.itest.js)');
 });
 
 test('__acrt_iob_func indexes the runtime\'s FILE records', ()=>{

@@ -1394,10 +1394,17 @@ export function answeredByEngine(knownDlls, runtimes){
  * library each is: a program imports `api-ms-win-crt-stdio-l1-1-0.dll` and is
  * bound to ucrtbase.dll, which GetModuleHandle names it too -- one module, not
  * a copy for each set, and a copy of one a program carries is never loaded.
+ * The core sets are kernelbase's on Windows, whose functions kernel32 holds
+ * here, but for the registry, event tracing and security ones, which are
+ * advapi32's; the first match wins.
  *
  * @type {[RegExp, string][]}
  */
-const API_SETS = [[/^api-ms-win-crt-[a-z0-9-]+$/, 'ucrtbase']];
+const API_SETS = [
+    [/^api-ms-win-crt-[a-z0-9-]+$/, 'ucrtbase'],
+    [/^api-ms-win-(core-(localregistry|registry)|eventing|security)-[a-z0-9-]+$/, 'advapi32'],
+    [/^api-ms-win-core-(?!winrt|com-)[a-z0-9-]+$/, 'kernel32'],
+];
 
 /**
  * The key a module is known by: its file name, without directory, case or
