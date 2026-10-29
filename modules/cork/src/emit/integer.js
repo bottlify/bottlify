@@ -341,11 +341,19 @@ function callAndReturn(e, next, target, mechanism){
     // What the block wrote so far: the stores wait for the whole body, and a
     // local no way to this call wrote since the state block last held it is
     // left out (`fillDeferred`).
+    /** @type {import('./region.js').CallSite | undefined} */
     const call = e.b.written === null ? undefined
         : { block: e.blockIndex, written: new Set(e.b.written), empty: site };
     if (call !== undefined)
     {
         e.callSites.set(e.blockIndex, call);
+        if (e.pathStores)
+        {
+            call.must = new Set(e.segment?.must ?? []);
+            call.segment = e.segment;
+            call.after = new Set();
+            e.sites.push(call);
+        }
     }
     e.storeMemoryState(call);
     e.storeUncarriedState(call);
@@ -374,7 +382,13 @@ function callAndReturn(e, next, target, mechanism){
     e.close();
     atState(context, b).load('i32', { offset: layout.regs + CallStack.BUDGET })
         .localSet(Local.budget);
-    e.loadState(false, true);
+    e.loadState(false, true, call);
+    if (call?.after !== undefined)
+    {
+        // What follows the return, the way the call does nothing too, reads
+        // what the return reloads (`planPaths`).
+        e.openSegment(e.blockIndex, call);
+    }
     if (e.x87.active)
     {
         x87AfterCall(e, next, top);
