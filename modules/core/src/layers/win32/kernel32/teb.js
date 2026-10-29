@@ -250,8 +250,15 @@ export function blockLayouts(size = 4){
 /** No handler is registered yet, and this is how a thread says so. */
 export const END_OF_EXCEPTION_LIST = 0xffffffff;
 
-/** How many thread-local slots the array behind FS:[0x2c] (GS:[0x58]) holds. */
-export const TLS_SLOTS = 64;
+/**
+ * How many thread-local slots the array behind FS:[0x2c] (GS:[0x58]) holds:
+ * every index TlsAlloc can give (`kernel32/process.js`), since a library
+ * loaded at run time takes its thread-local index from that pool and a
+ * program that holds the first 64 for itself, as a client with many threads
+ * of its own does, leaves the library one past them. Only the first 64 are
+ * also TlsGetValue's; the rest of the array is the loader's alone.
+ */
+export const TLS_SLOTS = 1088;
 
 /**
  * @typedef {Object} LoadedModule
