@@ -1781,7 +1781,9 @@ export function emitGroupChecks(e, checks, at = -1){
 
 /**
  * @typedef {{ base: number, index: number, scale: number, lo: number, hi: number,
- *     stride: number, store: boolean }} Stream
+ *     stride: number, store: boolean, tested?: boolean }} Stream
+ *     tested: some access of it is a read tested where reads go untested (a string
+ *     instruction's), which a page's flags fault
  * @typedef {{ base: number, index: number, scale: number, lo: number, hi: number,
  *     stride: number }} Range
  *     the values a long-mode loop's dword writes cut (`longWrite`), off a base and an
@@ -1890,6 +1892,8 @@ export function planLoop(instructions, long = false){
         stream.lo = Math.min(stream.lo, access.off);
         stream.hi = Math.max(stream.hi, access.off + access.size);
         stream.store ||= access.store;
+        stream.tested ||= !readsOnly(instructions[access.i])
+            || STRING_ACCESSES.has(instructions[access.i].op);
         const entry = plan.get(access.i);
         plan.set(access.i, { checks: [], access: entry?.access ?? { block: 0, i: access.i,
             off: access.off, size: access.size, store: access.store }, size: access.size,
@@ -2051,6 +2055,22 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
                     .op(I32.add);
             }
             b.i32const(from | 0).op(I32.add).localSet(Local.addr);
+            if (!stream.store && stream.tested !== true && readsWrapped(e.context)
+                && width <= e.layout.ramSize)
+            {
+                // A stream that only reads, where reads go untested: its reach
+                // inside RAM is all the unchecked copy needs, a read there being
+                // the one its address wrapped into RAM makes -- one compare, where
+                // the pages' flags were three loads.
+                b.localGet(Local.addr).i32const(e.layout.ramSize - width + 1 | 0).op(I32.geU)
+                    .op(I32.or);
+                continue;
+            }
+        }
+        if (width - 1 > 8192)
+        {
+            // Three pages' flags cover no more.
+            throw new Error(`emit: a stream window of ${width} bytes`);
         }
         const bits = PageFlag.INACCESSIBLE | (stream.store ? PageFlag.HAS_CODE : 0);
         const reach = [0, Math.min(4096, width - 1), width - 1];
