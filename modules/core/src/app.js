@@ -1401,13 +1401,15 @@ export function answeredByEngine(knownDlls, runtimes){
  * a copy for each set, and a copy of one a program carries is never loaded.
  * The core sets are kernelbase's on Windows, whose functions kernel32 holds
  * here, but for the registry, event tracing and security ones, which are
- * advapi32's; the first match wins.
+ * advapi32's, and the Windows Runtime's, which are combase's; the first match
+ * wins.
  *
  * @type {[RegExp, string][]}
  */
 const API_SETS = [
     [/^api-ms-win-crt-[a-z0-9-]+$/, 'ucrtbase'],
     [/^api-ms-win-(core-(localregistry|registry)|eventing|security)-[a-z0-9-]+$/, 'advapi32'],
+    [/^api-ms-win-core-winrt-[a-z0-9-]+$/, 'combase'],
     [/^api-ms-win-core-(?!winrt|com-)[a-z0-9-]+$/, 'kernel32'],
 ];
 

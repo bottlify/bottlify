@@ -112,6 +112,7 @@ import { createSyssetupFunctions } from './syssetup/functions.js';
 import { createDbghelpFunctions } from './dbghelp/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createDhcpFunctions, createWinhttpFunctions } from './winhttp/functions.js';
+import { createCombaseFunctions } from './combase/functions.js';
 import { createImageCertificateFunctions } from './dbghelp/image-certificates.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
@@ -3107,6 +3108,11 @@ export function createWin32Module(){
                 'bcrypt.dll': createBcryptFunctions({ writeMemory, readMemory }),
                 // The per-process generator under it, which a browser imports
                 // and then finds by GetModuleHandle: it must be a module.
+                // The Windows Runtime's start and strings, and no class of it:
+                // what a desktop program falls back from (the winrt API sets).
+                'combase.dll': createCombaseFunctions({ readMemory, writeMemory,
+                    allocate: bytes=>heap.allocate(bytes), free: address=>heap.free(address),
+                    divergence: config?.divergence }),
                 'bcryptprimitives.dll': createBcryptPrimitivesFunctions({ writeMemory,
                     readMemory }),
                 // No security package and no key storage provider: what a library

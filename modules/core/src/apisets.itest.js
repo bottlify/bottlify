@@ -24,14 +24,15 @@ const u32 = value=>[
 /** @param {string} text */
 const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
 
-test('the core sets are kernel32, the registry and tracing sets advapi32, winrt neither', ()=>{
+test('the core sets are kernel32, the registry and tracing sets advapi32, winrt combase', ()=>{
     assert.equal(moduleKeyOf('api-ms-win-core-file-l1-1-0.dll'), 'kernel32');
     assert.equal(moduleKeyOf('API-MS-WIN-CORE-LIBRARYLOADER-L1-2-0.DLL'), 'kernel32');
     assert.equal(moduleKeyOf('api-ms-win-core-localregistry-l1-1-0.dll'), 'advapi32');
     assert.equal(moduleKeyOf('api-ms-win-core-registry-l1-1-0.dll'), 'advapi32');
     assert.equal(moduleKeyOf('api-ms-win-eventing-provider-l1-1-0.dll'), 'advapi32');
     assert.equal(moduleKeyOf('api-ms-win-security-base-l1-1-0.dll'), 'advapi32');
-    assert.equal(moduleKeyOf('api-ms-win-core-winrt-l1-1-0.dll'), 'api-ms-win-core-winrt-l1-1-0');
+    assert.equal(moduleKeyOf('api-ms-win-core-winrt-l1-1-0.dll'), 'combase');
+    assert.equal(moduleKeyOf('api-ms-win-core-winrt-string-l1-1-0.dll'), 'combase');
     assert.equal(moduleKeyOf('api-ms-win-crt-heap-l1-1-0.dll'), 'ucrtbase');
 });
 
