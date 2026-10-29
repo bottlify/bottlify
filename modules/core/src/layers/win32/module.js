@@ -110,6 +110,7 @@ import { createOleaccFunctions } from './oleacc/functions.js';
 import { createSyssetupFunctions } from './syssetup/functions.js';
 import { createDbghelpFunctions } from './dbghelp/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
+import { createDhcpFunctions, createWinhttpFunctions } from './winhttp/functions.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
 import { DPLAYX_ORDINALS, createDplayFunctions, registerDplayClasses } from './dplayx/functions.js';
@@ -3405,6 +3406,12 @@ export function createWin32Module(){
                 // The library is published either way, because a program that
                 // imports it and never uses it -- which is the common case -- must
                 // still be able to load.
+                // The proxy settings a browser reads, and a client that sends
+                // nothing: WinINet's transport is the embedder's, WinHTTP has none.
+                'WINHTTP.dll': createWinhttpFunctions({ readMemory, writeMemory,
+                    setLastError: setError, divergence: config?.divergence }),
+                'dhcpcsvc.dll': createDhcpFunctions({ writeMemory }),
+
                 'WININET.dll': createWininetFunctions({
                     readMemory, writeMemory, readCString, setLastError: setError,
                     request: config?.http ?? null,
