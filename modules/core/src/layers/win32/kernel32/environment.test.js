@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
+    machineArchitecture,
 } from './environment.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
@@ -507,4 +508,15 @@ test('a NULL name names nothing, and a NULL source expands to the empty string',
     assert.equal(host.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
     assert.equal(fns.ExpandEnvironmentStringsA.handler([0, 0x200, 64]), 1);
     assert.equal(fns.ExpandEnvironmentStringsW.handler([0, 0x200, 64]), 1);
+});
+
+test('a process on a 64-bit machine sees its own architecture whatever its parent handed it', ()=>{
+    const parent64 = { Path: 'C:\\WINDOWS', Processor_Architecture: 'AMD64' };
+    assert.deepEqual(machineArchitecture(parent64, { long: false, wow64: true }),
+        { Path: 'C:\\WINDOWS', Processor_Architecture: 'x86', PROCESSOR_ARCHITEW6432: 'AMD64' });
+    const parent32 = { PROCESSOR_ARCHITECTURE: 'x86', processor_architew6432: 'AMD64', TEMP: 'T' };
+    assert.deepEqual(machineArchitecture(parent32, { long: true, wow64: false }),
+        { PROCESSOR_ARCHITECTURE: 'AMD64', TEMP: 'T' });
+    assert.deepEqual(machineArchitecture({}, { long: false, wow64: true }),
+        { PROCESSOR_ARCHITECTURE: 'x86', PROCESSOR_ARCHITEW6432: 'AMD64' });
 });

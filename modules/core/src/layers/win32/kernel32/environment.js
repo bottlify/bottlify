@@ -108,6 +108,40 @@ export function defaultEnvironment(windows, folders, processors = 1, process = {
 }
 
 /**
+ * A process's variables on a 64-bit machine as the process sees them,
+ * whatever its parent's said: WOW64 sets a 32-bit process's architecture to
+ * x86 with the machine's in PROCESSOR_ARCHITEW6432, and a 64-bit process
+ * names its own with no PROCESSOR_ARCHITEW6432, so a 64-bit parent's AMD64
+ * does not reach a 32-bit child, nor a 32-bit parent's x86 a 64-bit one.
+ * Names compare without regard to case; each keeps its spelling.
+ *
+ * @param {Readonly<Record<string, string>>} variables
+ * @param {{ long: boolean, wow64: boolean }} process
+ * @returns {Record<string, string>}
+ */
+export function machineArchitecture(variables, { long, wow64 }){
+    /** @type {Record<string, string>} */
+    const seen = {};
+    /** @param {string} name */
+    const spelling = name=>Object.keys(variables).find(key=>key.toUpperCase() === name) ?? name;
+    const architecture = spelling('PROCESSOR_ARCHITECTURE');
+    const beneath = spelling('PROCESSOR_ARCHITEW6432');
+    for (const [name, value] of Object.entries(variables))
+    {
+        if (name !== beneath)
+        {
+            seen[name] = value;
+        }
+    }
+    seen[architecture] = long ? 'AMD64' : 'x86';
+    if (wow64)
+    {
+        seen[beneath] = 'AMD64';
+    }
+    return seen;
+}
+
+/**
  * @param {EnvironmentHost} host
  */
 export function createEnvironmentFunctions(host){
