@@ -43,12 +43,15 @@ const pause = (ms, signal)=>new Promise((resolve, reject)=>{
  * @param {Object} options
  * @param {(challengeUrl: string) => void} options.onChallenge  Show this as a
  *        QR code; called again when the code changes.
+ * @param {() => void} [options.onScanned]  The code was scanned and waits
+ *        for approval in the app.
  * @param {string} [options.deviceName]  What the app shows the person as the
  *        device asking.
  * @param {AbortSignal} [options.signal]
  * @returns {Promise<SignedIn>}
  */
-export async function signInWithQr(connection, { onChallenge, deviceName = 'Bottlify', signal }){
+export async function signInWithQr(connection, options){
+    const { onChallenge, onScanned, deviceName = 'Bottlify', signal } = options;
     const begun = await connection.call('Authentication.BeginAuthSessionViaQR#1',
         Authentication.BeginAuthSessionViaQRRequest, {
             device_friendly_name: deviceName,
@@ -79,11 +82,15 @@ export async function signInWithQr(connection, { onChallenge, deviceName = 'Bott
         {
             const expired = polled.eresult === EResult.Expired
                 || polled.eresult === EResult.FileNotFound;
-            throw new Error(expired
-                ? 'steam: the QR code expired before it was approved'
-                : `steam: the QR sign-in failed (EResult ${polled.eresult})`);
+            const what = expired ? 'the QR session is gone' : 'the QR sign-in failed';
+            const detail = polled.message ? `: ${polled.message}` : '';
+            throw new Error(`steam: ${what} (EResult ${polled.eresult}${detail})`);
         }
         const body = polled.body;
+        if (body.had_remote_interaction)
+        {
+            onScanned?.();
+        }
         if (body.new_client_id)
         {
             clientId = body.new_client_id;

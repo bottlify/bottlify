@@ -140,6 +140,7 @@ while (!signedIn)
         }
         signedIn = await signInWithQr(connection, {
             signal: abort.signal,
+            onScanned: ()=>console.log(`scanned, awaiting approval, ${new Date().toISOString()}`),
             onChallenge: url=>{
                 if (qrPath)
                 {
