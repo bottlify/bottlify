@@ -422,74 +422,73 @@ function linkedCall(e, target){
     // any top, as a function that does something -- its top and empty code
     // read as one halfword, which is `ANY_TOP` only then. An empty slot's
     // halfword is 0 and a removed one's has the top 0xff (`entries.js`), so
-    // neither passes for a call to address 0 or all ones. Two branches, not
-    // one condition: V8 makes a flag of each comparison it ors.
+    // neither passes for a call to address 0 or all ones. The index, the
+    // label and that halfword come in one load: a direct call's slot is a
+    // constant address past what an arm64 load's offset holds, which V8 moves
+    // into a register, two instructions, for each load from it. The two tests
+    // are one condition, which V8 makes a compare and a conditional compare
+    // before one branch.
+    const key = ()=>(target === null ? b.localGet(Local.eip) : b.i32const(target | 0));
     e.open('linked', ValType.i32);
+    e.open('through', EMPTY);
     e.open('anyTop', EMPTY);
+    b.localGet(Local.t2).load('i64', { offset: 4, align: 2 }).localTee(Local.t64);
     b.localGet(Local.t2).load('i32');
-    if (target === null)
-    {
-        b.localGet(Local.eip);
-    }
-    else
-    {
-        b.i32const(target | 0);
-    }
-    b.op(I32.ne).unlikely().brIf(e.depthOf('anyTop'));
-    b.localGet(Local.t2).load('i32_16u', { offset: 10 }).i32const(ANY_TOP).op(I32.ne)
-        .unlikely().brIf(e.depthOf('anyTop'));
-    countLinked(e);
-    b.localGet(Local.t2).load('i32_16u', { offset: 8 });
-    for (let local = Local.budget; local < STATE_PARAMS; local++)
-    {
-        b.localGet(local);
-    }
-    b.localGet(Local.t2).load('i32', { offset: 4 });
-    b.callIndirect(context.regionType, 0);
+    key();
+    b.op(I32.ne);
+    b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap).i32const(ANY_TOP).op(I32.ne);
+    b.op(I32.or).unlikely().brIf(e.depthOf('anyTop'));
+    linkedCallOf(e);
     b.br(e.depthOf('linked'));
     e.close();
-    // Anything else, out of the way: a slot holding the target compiled for
-    // the top the machine has is called the same way, the rest goes through
-    // the transfer. The index, the label, the top and the empty code in one
-    // word, the call taking two of them: with an empty code of 0 the top two
-    // bytes are the top.
-    b.localGet(Local.t2)
-        .load('i64', { offset: 4, align: 2 }).localTee(Local.t64)
-        .i64const(48n).op(I64.shrU).op(I64.wrap).localTee(Local.t0);
-    b.i32const(ANY_TOP).op(I32.eq).localGet(Local.t0);
+    // Out of the way: a slot holding the target compiled for the top the
+    // machine has is called the same way, the rest goes through the
+    // transfer. The key read again as the low half of a quadword: read as
+    // above, V8 would take the one read and the comparison a value kept for
+    // both ways, made with a `cset` on the way nearly every call goes.
+    b.localGet(Local.t2).load('i64').op(I64.wrap);
+    key();
+    b.op(I32.ne).brIf(e.depthOf('through'));
+    // With an empty code of 0 the halfword is the top.
+    b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap);
     atState(context, b).load('i32_8u', { offset: layout.x87Top });
-    b.op(I32.eq).op(I32.or);
-    b.localGet(Local.t2).load('i32');
+    b.op(I32.eq);
     if (target === null)
     {
         // An empty slot's key is 0 and a removed one's all ones: a call to
         // either address goes through the transfer, which faults it.
-        b.localGet(Local.eip).op(I32.eq).op(I32.and)
-            .localGet(Local.eip).i32const(1).op(I32.add).i32const(1).op(I32.gtU).op(I32.and);
+        b.localGet(Local.eip).i32const(1).op(I32.add).i32const(1).op(I32.gtU).op(I32.and);
     }
-    else
-    {
-        b.i32const(target | 0).op(I32.eq).op(I32.and);
-    }
-    b.op(I32.eqz);
-    e.openIf('unlinked', ValType.i32);
+    b.op(I32.eqz).brIf(e.depthOf('through'));
+    linkedCallOf(e);
+    b.br(e.depthOf('linked'));
+    e.close();
     b.localGet(Local.eip);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
         b.localGet(local);
     }
     b.call(/** @type {number} */ (context.transfer));
-    b.else();
+    e.close();
+}
+
+/**
+ * The slot's function called through the table, its index and label taken
+ * from the word `linkedCall` read into `t64`.
+ *
+ * @param {E} e
+ */
+function linkedCallOf(e){
+    const { b, context } = e;
     countLinked(e);
-    b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).i32const(0xffff).op(I32.and);
+    // Masked as a quadword: V8 takes the shift and the mask as one `ubfx`.
+    b.localGet(Local.t64).i64const(32n).op(I64.shrU).i64const(0xffffn).op(I64.and).op(I64.wrap);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
         b.localGet(local);
     }
     b.localGet(Local.t64).op(I64.wrap);
     b.callIndirect(context.regionType, 0);
-    e.close();
-    e.close();
 }
 
 /**
