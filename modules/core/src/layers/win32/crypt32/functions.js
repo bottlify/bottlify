@@ -16,6 +16,8 @@
  * are not a blob -- is what Windows answers.
  */
 
+import { createCertificateFunctions } from './certificates.js';
+
 const ERROR_INVALID_PARAMETER = 87;
 /** What Windows sets when the blob is damaged or the entropy is not the one it was sealed with. */
 const NTE_BAD_DATA = 0x80090005;
@@ -32,10 +34,18 @@ const HEADER = 16;
  * @property {(code: number) => void} setLastError
  * @property {(bytes: number) => number} localAlloc An LPTR block, which the caller
  *           LocalFrees; 0 when it cannot be had.
+ * @typedef {Crypt32Host & Omit<import('./certificates.js').CertificatesHost,
+ *     keyof Crypt32Host>} Crypt32FullHost
  */
 
-/** @param {Crypt32Host} host */
+/**
+ * The data protection calls, and the certificate calls when the host can
+ * free and knows the time and the roots (certificates.js).
+ *
+ * @param {Crypt32Host | Crypt32FullHost} host
+ */
 export function createCrypt32Functions(host){
+    const certificates = 'localFree' in host ? createCertificateFunctions(host) : {};
     /** @param {number} address */
     const dword = address=>{
         const bytes = host.readMemory(address, 4);
@@ -77,6 +87,7 @@ export function createCrypt32Functions(host){
     };
 
     return {
+        ...certificates,
         /**
          * BOOL CryptProtectData(DATA_BLOB *pDataIn, LPCWSTR szDataDescr,
          *     DATA_BLOB *pOptionalEntropy, PVOID pvReserved,

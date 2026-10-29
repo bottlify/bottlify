@@ -26,6 +26,13 @@ export const EXTENSION = Object.freeze({
     KEY_USAGE: '2.5.29.15',
     BASIC_CONSTRAINTS: '2.5.29.19',
     EXTENDED_KEY_USAGE: '2.5.29.37',
+    SUBJECT_ALT_NAME: '2.5.29.17',
+});
+
+/** Extended key usages a TLS chain is judged for. */
+export const TLS_USAGE = Object.freeze({
+    SERVER_AUTH: '1.3.6.1.5.5.7.3.1',
+    CLIENT_AUTH: '1.3.6.1.5.5.7.3.2',
 });
 
 /** Extended key usages. */
@@ -60,6 +67,15 @@ export const KEY_USAGE = Object.freeze({
  * @property {((bit: number) => boolean) | null} keyUsage  Null when absent.
  * @property {string[] | null} extendedKeyUsage           Null when absent.
  * @property {string[]} unknownCritical   Critical extensions this build does not read.
+ * @property {Uint8Array} signatureParameters  The signature algorithm's parameters, as encoded
+ *           (empty when absent).
+ * @property {string} publicKeyAlgorithm  The subject key's algorithm.
+ * @property {Uint8Array} publicKeyParameters  Its parameters, as encoded (empty when absent).
+ * @property {{ unused: number, bits: Uint8Array }} publicKeyBits  The key's BIT STRING.
+ * @property {{ id: string, critical: boolean, value: Uint8Array }[]} extensions
+ *           Every extension, its value the OCTET STRING's contents.
+ * @property {string[]} dnsNames          The subject alternative name's DNS names.
+ * @property {string | null} commonName   The subject's common name.
  */
 
 /**
@@ -86,6 +102,27 @@ function describeName(name){
         }
     }
     return common ?? values.join(', ');
+}
+
+/**
+ * A Name's common name (the last one, the most specific), or null.
+ *
+ * @param {DerNode} name
+ */
+function commonNameOf(name){
+    let common = null;
+    for (const set of childrenOf(name))
+    {
+        for (const pair of childrenOf(set))
+        {
+            const [type, value] = childrenOf(pair);
+            if (readOid(type) === '2.5.4.3')
+            {
+                common = readString(value);
+            }
+        }
+    }
+    return common;
 }
 
 /**
@@ -118,6 +155,8 @@ export function parseCertificate(der){
     const [tbsNode, algorithmNode, signatureNode] =
         childrenOf(expect(root, TAG.SEQUENCE, 'a certificate'));
     const fields = childrenOf(expect(tbsNode, TAG.SEQUENCE, 'a TBSCertificate'));
+    const [signatureOid, signatureParameters] = childrenOf(
+        expect(algorithmNode, TAG.SEQUENCE, 'a signature algorithm'));
     let at = 0;
     let version = 1;
     if (fields[0]?.tag === context(0))
@@ -130,7 +169,14 @@ export function parseCertificate(der){
     const issuer = expect(fields[at++], TAG.SEQUENCE, 'an issuer');
     const [notBefore, notAfter] = childrenOf(expect(fields[at++], TAG.SEQUENCE, 'a validity'));
     const subject = expect(fields[at++], TAG.SEQUENCE, 'a subject');
-    const publicKey = readPublicKey(fields[at++]);
+    const keyInfo = fields[at++];
+    const publicKey = readPublicKey(keyInfo);
+    const [keyAlgorithm, keyBits] = childrenOf(keyInfo);
+    const [keyOid, keyParameters] = childrenOf(keyAlgorithm);
+    /** @type {Certificate['extensions']} */
+    const extensionList = [];
+    /** @type {string[]} */
+    const dnsNames = [];
 
     /** @type {Certificate['basicConstraints']} */
     let basicConstraints = null;
@@ -146,8 +192,10 @@ export function parseCertificate(der){
         const parts = childrenOf(extension);
         const id = readOid(parts[0]);
         const critical = parts.length === 3 && readBoolean(parts[1]);
-        const value = readNode(contents(expect(parts[parts.length - 1], TAG.OCTET_STRING,
-            'an extension value')));
+        const raw = contents(expect(parts[parts.length - 1], TAG.OCTET_STRING,
+            'an extension value'));
+        const value = readNode(raw);
+        extensionList.push({ id, critical, value: raw });
         switch (id)
         {
             case EXTENSION.BASIC_CONSTRAINTS: {
@@ -164,6 +212,17 @@ export function parseCertificate(der){
             }
             case EXTENSION.EXTENDED_KEY_USAGE:
                 extendedKeyUsage = childrenOf(value).map(readOid);
+                break;
+            case EXTENSION.SUBJECT_ALT_NAME:
+                // dNSName is [2] IMPLICIT IA5String; the other forms are not names
+                // a TLS client matches a host against.
+                for (const general of childrenOf(value))
+                {
+                    if (general.tag === 0x82)
+                    {
+                        dnsNames.push(String.fromCharCode(...contents(general)));
+                    }
+                }
                 break;
             default:
                 if (critical)
@@ -184,12 +243,20 @@ export function parseCertificate(der){
         notBefore: readTime(notBefore),
         notAfter: readTime(notAfter),
         publicKey,
-        signatureAlgorithm: readOid(childrenOf(algorithmNode)[0]),
+        signatureAlgorithm: readOid(signatureOid),
         signature: readBitString(signatureNode).bits,
         basicConstraints,
         keyUsage,
         extendedKeyUsage,
         unknownCritical,
+        signatureParameters: signatureParameters
+            ? encoding(signatureParameters) : new Uint8Array(0),
+        publicKeyAlgorithm: readOid(keyOid),
+        publicKeyParameters: keyParameters ? encoding(keyParameters) : new Uint8Array(0),
+        publicKeyBits: readBitString(keyBits),
+        extensions: extensionList,
+        dnsNames,
+        commonName: commonNameOf(subject),
     };
 }
 

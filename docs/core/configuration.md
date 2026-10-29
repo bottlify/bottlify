@@ -108,7 +108,7 @@ store does not know (`cpu` diagnostics, `store.opened.swept`).
 | `processorMhz` | none | The speed the registry's processor key reports. |
 | `unattended` | `false` | Answer every modal dialog with its default button. |
 | `network` | loopback | The transport under Winsock (a relay client). |
-| `trustedRoots` | Microsoft Root Authority | Roots `WinVerifyTrust` accepts, as DER bytes or base64. |
+| `trustedRoots` | Microsoft Root Authority | The machine's trusted roots, as DER bytes or base64: what `WinVerifyTrust` accepts and what crypt32's ROOT store holds, which `CertGetCertificateChain` ends a chain at. |
 | `handleWords` | `true` | `false` leaves every WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent to the host, with no answers in the guest: the second path their tests compare against. `app.debug.handleWords(on)` switches the same while a program runs. |
 | `http` | `null` | The request function behind WinINet; without it WinINet says there is no network. |
 | `directx` | `'9'` | `'7'`, `'8'` or `'9'`: the DirectX release the registry, `DirectXSetupGetVersion` and DxDiag report. `createApp` sets it from `graphicsApi`. |

@@ -129,6 +129,7 @@ import { UNKNOWN_ORDINALS, createUnknownFunctions } from './shlwapi/unknown.js';
 import { COMPUTER_NAME } from './kernel32/drives.js';
 import { USER_NAME } from './advapi32/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
+import { defaultTrustedRoots } from './wintrust/roots.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
@@ -2963,9 +2964,20 @@ export function createWin32Module(){
 
                 'CRYPT32.dll': createCrypt32Functions({
                     readMemory, writeMemory, readWideString, setLastError: setError,
+                    readCString,
                     // LPTR: fixed and zeroed, as the caller's LocalFree expects.
                     localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
                         .handler([0x40, bytes]) >>> 0,
+                    localFree: address=>void libraries['KERNEL32.dll'].LocalFree
+                        .handler([address]),
+                    now: ()=>kernel.clock.wallClock(),
+                    // The system store ROOT is the machine's trusted roots, the
+                    // ones WinVerifyTrust judges a signature by.
+                    trustedRoots: ()=>(config?.trustedRoots ?? defaultTrustedRoots()).map((
+                        /** @type {Uint8Array | string} */ root)=>
+                        (typeof root === 'string'
+                            ? Uint8Array.from(atob(root), ch=>ch.charCodeAt(0)) : root)),
+                    divergence: config?.divergence,
                 }),
 
                 'POWRPROF.dll': createPowrprofFunctions({ writeMemory, setLastError: setError,
