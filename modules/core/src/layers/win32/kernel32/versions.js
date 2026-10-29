@@ -32,6 +32,9 @@ export const VER_NT_WORKSTATION = 1;
  */
 const VER_SUITE_SINGLEUSERTS = 0x100;
 
+/** GetProductInfo's Professional edition, which 7 Professional and 10 Pro are. */
+const PRODUCT_PROFESSIONAL = 0x30;
+
 /**
  * @typedef {'win2000' | 'winxp' | 'win7' | 'win10'} WindowsName
  */
@@ -74,6 +77,9 @@ const VER_SUITE_SINGLEUSERTS = 0x100;
  * @property {number} suiteMask
  * @property {number} productType
  * @property {string} productName   The registry's ProductName.
+ * @property {number} [edition]  GetProductInfo's product type, the edition
+ *           ProductName names; absent before Vista, which had no editions to
+ *           ask about.
  * @property {ProfileRoots} profiles
  * @property {{ displayVersion: string, releaseId: string, ubr: number } | null} release
  * @property {SystemComponents | null} [components]
@@ -149,6 +155,7 @@ export const WINDOWS_VERSIONS = Object.freeze({
         servicePackMajor: 1, servicePackMinor: 0, csdVersion: 'Service Pack 1',
         suiteMask: VER_SUITE_SINGLEUSERTS, productType: VER_NT_WORKSTATION,
         productName: 'Windows 7 Professional',
+        edition: PRODUCT_PROFESSIONAL,
         profiles: USERS,
         release: null,
     }),
@@ -158,6 +165,7 @@ export const WINDOWS_VERSIONS = Object.freeze({
         servicePackMajor: 0, servicePackMinor: 0, csdVersion: '',
         suiteMask: VER_SUITE_SINGLEUSERTS, productType: VER_NT_WORKSTATION,
         productName: 'Windows 10 Pro',
+        edition: PRODUCT_PROFESSIONAL,
         profiles: USERS,
         // Build 19045 is 22H2. Its ReleaseId stayed at 2009, where it froze
         // when the name moved to DisplayVersion; the update revision is one

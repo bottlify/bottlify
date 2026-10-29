@@ -331,6 +331,24 @@ test('each Windows is answered by GetVersion and GetVersionExA alike', ()=>{
     }
 });
 
+test('GetProductInfo answers the machine\'s edition for a system from Vista on', ()=>{
+    // Wine's kernel32 version test_GetProductInfo: a version before 6.0 is
+    // PRODUCT_UNDEFINED and FALSE; the Steam client asks with 10.0.
+    const PRODUCT_PROFESSIONAL = 0x30;
+    const { host, fns } = setup({ version: WINDOWS_VERSIONS.win10 });
+    assert.equal(fns.GetProductInfo.argBytes, 20);
+    host.view.setUint32(0x400, 0xcdcdcdcd, true);
+    assert.equal(fns.GetProductInfo.handler([10, 0, 0, 0, 0x400]), 1);
+    assert.equal(host.view.getUint32(0x400, true), PRODUCT_PROFESSIONAL, 'Windows 10 Pro');
+    assert.equal(fns.GetProductInfo.handler([5, 1, 3, 0, 0x400]), 0);
+    assert.equal(host.view.getUint32(0x400, true), 0, 'PRODUCT_UNDEFINED');
+    assert.equal(fns.GetProductInfo.handler([10, 0, 0, 0, 0]), 0, 'nowhere to put it');
+
+    const xp = setup({ version: WINDOWS_VERSIONS.winxp });
+    assert.equal(xp.fns.GetProductInfo.handler([6, 0, 0, 0, 0x400]), 0, 'XP has no editions');
+    assert.equal(xp.host.view.getUint32(0x400, true), 0);
+});
+
 test('GetVersionExW fills the wide structures and refuses any other size', ()=>{
     const { host, fns } = setup({ version: WINDOWS_VERSIONS.win7 });
     const address = 0x400;

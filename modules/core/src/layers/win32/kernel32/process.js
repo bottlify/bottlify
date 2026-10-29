@@ -1243,6 +1243,31 @@ export function createProcessFunctions(host){
             code: ()=>Uint8Array.from([0xb8, ...dword(table.GetVersion.handler()), 0xc3]),
         },
 
+        /**
+         * BOOL GetProductInfo(DWORD dwOSMajorVersion, DWORD dwOSMinorVersion,
+         *   DWORD dwSpMajorVersion, DWORD dwSpMinorVersion, PDWORD pdwReturnedProductType)
+         *
+         * The edition the machine is, for any system from Vista on that the
+         * caller names; one before Vista had no editions, so it is
+         * PRODUCT_UNDEFINED and FALSE, as is every question on a machine that
+         * is older itself.
+         */
+        GetProductInfo: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([major, , , , out])=>{
+                const PRODUCT_UNDEFINED = 0;
+                if ((out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const known = (major >>> 0) >= 6 && told.edition !== undefined;
+                host.writeMemory(out >>> 0,
+                    Uint8Array.from(dword(known ? told.edition ?? 0 : PRODUCT_UNDEFINED)));
+                return known ? 1 : 0;
+            },
+        },
+
         /** BOOL GetVersionExA(LPOSVERSIONINFOA lpVersionInformation) */
         GetVersionExA: {
             argBytes: 4,
