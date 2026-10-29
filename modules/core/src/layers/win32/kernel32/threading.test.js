@@ -1219,6 +1219,34 @@ test('DuplicateHandle accepts the pseudo-handles wherever a handle is taken', ()
     assert.ok(writtenU32(written, 0x308) > 0);
 });
 
+test('DuplicateHandle puts a duplicate into another process of the run, and takes one out', ()=>{
+    // A server hands its client the event it signals: the duplicate is in
+    // the client's table, under the client's number.
+    const { fns, kernel, written, host } = setup();
+    const client = fakeKernel();
+    const tables = new Map([[0x2008, {
+        typeOf: (/** @type {number} */ handle)=>client.handles.typeOf(handle),
+        resolve: (/** @type {number} */ handle)=>client.handles.resolve(handle),
+        open: (/** @type {string} */ type, /** @type {any} */ object)=>
+            client.handles.open(type, object),
+        close: (/** @type {number} */ handle)=>client.handles.close(handle),
+    }]]);
+    host.processTable = id=>tables.get(id) ?? null;
+    const record = { id: 0x2008 };
+    const process = kernel.handles.open('process', record);
+    const event = fns.CreateEventA.handler([0, 1, 0, 0]);
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, process, 0x300, 0, 0, 0]), 1);
+    const theirs = writtenU32(written, 0x300);
+    assert.equal(client.handles.resolve(theirs, 'event'), kernel.handles.resolve(event, 'event'),
+        'the same event, in the client\'s table');
+
+    // And back: the client's handle, taken into this process and closed there.
+    assert.equal(fns.DuplicateHandle.handler([process, theirs, 0xffffffff, 0x304, 0, 0, 1]), 1);
+    const ours = writtenU32(written, 0x304);
+    assert.equal(kernel.handles.resolve(ours, 'event'), kernel.handles.resolve(event, 'event'));
+    assert.equal(client.handles.typeOf(theirs), null, 'DUPLICATE_CLOSE_SOURCE closed it there');
+});
+
 test('a wait on a pseudo-handle is a wait on the running object, which is not signalled', ()=>{
     const { fns, kernel, current, written } = setup();
 

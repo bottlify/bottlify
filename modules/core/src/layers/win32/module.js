@@ -410,6 +410,7 @@ export function createWin32Module(){
             // file mapping all share is part of it.
             /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
              *     objects?: any, fileSecurity?: Map<string, any>,
+             *     processTables?: Map<number, any>,
              *     sharedViews?: ReturnType<typeof import('./kernel32/shared-views.js')
              *         .createSharedViews> } | null} */
             const system = config?.system ?? null;
@@ -436,6 +437,23 @@ export function createWin32Module(){
             // What GetCurrentProcessId answers: a child is the process its parent
             // was told of in PROCESS_INFORMATION, not a second copy of the first.
             const processId = (config?.processId ?? 0x1000) >>> 0;
+            // This process's handle table, where another process of the run
+            // duplicates a handle into it (DuplicateHandle).
+            system?.processTables?.set(processId, {
+                typeOf: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                resolve: (/** @type {number} */ handle)=>{
+                    try
+                    {
+                        return kernel.handles.resolve(handle);
+                    }
+                    catch {
+                        return null;
+                    }
+                },
+                open: (/** @type {string} */ type, /** @type {any} */ object)=>
+                    kernel.handles.open(type, object),
+                close: (/** @type {number} */ handle)=>kernel.handles.close(handle),
+            });
 
             /** @type {Record<string, Record<string, any>>} */
             let libraries = {};
@@ -1995,6 +2013,10 @@ export function createWin32Module(){
                         threadBlock: threadMade,
                         /** @param {number} handle */
                         handleType: handle=>kernel.handles.typeOf(handle),
+                        // Another process's table, for a handle duplicated
+                        // into it or out of it.
+                        /** @param {number} id */
+                        processTable: id=>system?.processTables?.get(id) ?? null,
                         /** @param {number} handle */
                         isSocket: handle=>sockets.isValid(handle),
                         /** @param {any} node */

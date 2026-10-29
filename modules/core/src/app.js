@@ -3786,6 +3786,7 @@ function journalEvents(events, into){
  *     logSinks?: Map<Function, (payload: any) => void>,
  *     system?: { namedObjects: Map<string, any>, registry: any, bundle: any, windows?: any,
  *         sharedViews?: any, processDirectory?: Map<number, any>,
+ *         processTables?: Map<number, any>,
  *         ids: { thread: number, process: number }, volume: any },
  *     mainThreadId?: number,
  *     beside?: (request: any) => void,
@@ -9617,7 +9618,7 @@ export async function createApp(options){
      *
      * @type {{ namedObjects: Map<string, any>, registry: any, bundle: any, windows: any,
      *     sharedViews?: any, processDirectory?: Map<number, any>,
-     *     ids: { thread: number, process: number },
+     *     processTables?: Map<number, any>, ids: { thread: number, process: number },
      *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
      *         writables: Map<string, any>, watchers: Set<Function>, revisions?: Int32Array,
      *         sharing?: any, sharingMemory?: SharedArrayBuffer } }}
@@ -9629,6 +9630,8 @@ export async function createApp(options){
         // process's turns (`shared-views.js`).
         sharedViews: createSharedViews(),
         processDirectory: new Map(),
+        // Every process's handle table on this thread, by id (DuplicateHandle).
+        processTables: new Map(),
         ids: { thread: 1, process: 0x2000 },
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set(), ...volumeMemory() } };

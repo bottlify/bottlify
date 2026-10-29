@@ -144,6 +144,11 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           The modules the process has loaded, the image first, for a snapshot's
  *           module list.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(process: number) => ({ typeOf: (handle: number) => string | null,
+ *     resolve: (handle: number) => any, open: (type: string, object: any) => number,
+ *     close: (handle: number) => any } | null)} [processTable]
+ *     The handle table of another process of the run on this thread, by its
+ *     id: where DuplicateHandle puts a duplicate for it, or takes one from it.
  * @property {(handle: number) => boolean} [isSocket]
  *           Whether winsock holds a socket by this number, which the handle
  *           flags are kept for as for a kernel object's.
@@ -1288,13 +1293,46 @@ export function createThreadingFunctions(host){
          * not a copy of the object. Closing either leaves the other usable,
          * which is the property a caller duplicates a handle to get.
          *
-         * Both process handles are ignored: there is one process, and a
-         * duplicate into another one has nowhere to go.
+         * Either process may be another of the run's on this thread: a
+         * server hands its client the handles of the events it signals by
+         * duplicating them into the client, and the client uses the number
+         * it is sent. The duplicate is then in that process's table, under a
+         * number of its own. A process the run cannot reach (in a worker of
+         * its own) is taken for this one.
          */
         DuplicateHandle: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([, source, , target, , inherit, options])=>{
+            handler: ([sourceProcess, source, targetProcess, target, , inherit, options])=>{
+                /** The table a process handle names, or null for this process's own. */
+                const tableOf = (/** @type {number} */ process)=>{
+                    const record = (process >>> 0) === CURRENT_PROCESS ? null
+                        : object(process >>> 0, 'process');
+                    return record && !record.current && typeof record.id === 'number'
+                        ? host.processTable?.(record.id) ?? null : null;
+                };
+                const from = tableOf(sourceProcess);
+                const into = tableOf(targetProcess);
+                if (from)
+                {
+                    const foreign = from.resolve(source >>> 0);
+                    const foreignKind = from.typeOf(source >>> 0);
+                    if (!foreign || foreignKind === null || target === 0)
+                    {
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return 0;
+                    }
+                    host.namedObjects.reference(foreign);
+                    const taken = (into ?? kernel.handles).open(foreignKind, foreign);
+                    if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0)
+                    {
+                        from.close(source >>> 0);
+                    }
+                    host.writeMemory(target >>> 0, new Uint8Array([
+                        taken & 0xff, taken >>> 8 & 0xff, taken >>> 16 & 0xff, taken >>> 24 & 0xff,
+                    ]));
+                    return 1;
+                }
                 const held = object(source >>> 0);
                 const kind = kindOf(source >>> 0);
                 if (!held || target === 0 || kind === null)
@@ -1325,9 +1363,12 @@ export function createThreadingFunctions(host){
                 {
                     held.retain();
                 }
-                const duplicate = kernel.handles.open(kind, held);
-                handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
-                host.pipes?.setInheritable(duplicate, inherit !== 0);
+                const duplicate = (into ?? kernel.handles).open(kind, held);
+                if (!into)
+                {
+                    handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
+                    host.pipes?.setInheritable(duplicate, inherit !== 0);
+                }
                 host.writeMemory(target >>> 0, new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
                     duplicate >>> 16 & 0xff, duplicate >>> 24 & 0xff,

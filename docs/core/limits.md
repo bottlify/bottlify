@@ -126,8 +126,7 @@ differently raises a `divergence` event naming the API.
   pipes, overlapped reads and connects completed through their event and completion port, and a
   pipe end a child inherits (`bInheritHandles`, or a STARTUPINFOEX handle list) under its parent's
   number. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
-  Windows 9x refuses it). Writes are never held back by a full buffer, `DuplicateHandle` into
-  another process duplicates into the caller's own, and `GetOverlappedResult` on a pipe operation
+  Windows 9x refuses it). Writes are never held back by a full buffer, and `GetOverlappedResult` on a pipe operation
   whose OVERLAPPED has no event waits on nothing.
 - A child in a worker of its own shares the run's registry, files, window directory (it finds,
   reads, posts and sends to every other process's windows, and they to its), ids, bundle (a block
