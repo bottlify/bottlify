@@ -3121,10 +3121,7 @@ function imul(e, instruction, flagsLive){
         readOp(e, a);
         readOp(e, c);
         b.op(I32.mul).localSet(Local.t1);
-        writeOp(e, dst, ()=>{
-            b.localGet(Local.t1);
-            mask(e, size);
-        });
+        writeOp(e, dst, ()=>b.localGet(Local.t1));
         return true;
     }
     readSigned(a);
