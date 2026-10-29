@@ -1234,7 +1234,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 if (farPastPrediction(e))
                 {
                     b.localTee(LONG_WIDE).op(I64.wrap);
-                    if (e.blockRetired === 1)
+                    if (e.blockRetired - e.blockCarried === 1)
                     {
                         // Its far exit leaves at the block's start, which then
                         // must not be an entry (`exitBefore`).

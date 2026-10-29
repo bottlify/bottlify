@@ -20,8 +20,10 @@
  * and with the same flags where the program halts (a way out to code that
  * writes the flags first leaves an empty record, so a fault's context is not
  * promised them).
- * Beside them: a narrow register write widened soon after (`widenedNext` in
- * integer.js).
+ * Beside them: loop bodies of blocks that charge the count of the block before
+ * them (`planCarries` in region.js), stopped at a limit and compared with the
+ * interpreter run to the count they report; and a narrow register write
+ * widened soon after (`widenedNext` in integer.js).
  */
 
 import { test } from 'node:test';
@@ -279,8 +281,11 @@ function generate(seed){
     return { code, chunk: CHUNKS[pick(CHUNKS.length)] };
 }
 
-/** @param {number[]} code @param {Record<string, unknown>} config */
-async function runProgram(code, config){
+/**
+ * @param {number[]} code @param {Record<string, unknown>} config
+ * @param {number} [limit]  the instructions the run stops at
+ */
+async function runProgram(code, config, limit = 5_000_000){
     const m = createMachine({ ramSize: END, config: { hotThreshold: 2, ...config } });
     try
     {
@@ -294,7 +299,7 @@ async function runProgram(code, config){
         m.load(SOURCE, source);
         m.setReg('esp', STACK);
         m.setReg('eip', CODE);
-        const stop = await m.run({ maxInstructions: 5_000_000 });
+        const stop = await m.run({ maxInstructions: limit });
         return {
             stop: { reason: stop.reason, vector: stop.vector, retired: stop.retired },
             data: [...m.read(DATA, 0x10000)],
@@ -325,6 +330,104 @@ test('loops left at the budget, a fault or their turns\' end match the interpret
     // Both ways out are met: programs that end at a store's fault, programs mostly translated.
     assert.ok(faults > 10, `${faults} programs end at a fault`);
     assert.ok(translated > 100, `${translated} programs ran mostly translated code`);
+});
+
+/**
+ * A loop whose body is a run of blocks each reached by one way from the block
+ * before (`planCarries`): if/else diamonds (`jcc else; then; jmp join; else:`),
+ * a then-block alone (`jcc join; then`), a jump to the next instruction, and a
+ * break out of the loop, their blocks storing through edi -- off RAM's end
+ * in some programs, a fault in the middle of a block that charges the blocks
+ * before it -- and the turns' count left to the budget's chunks.
+ *
+ * @param {number} seed
+ * @returns {{ code: number[], chunk: number }}
+ */
+function chained(seed){
+    const pick = random(seed);
+    const off = pick(4) === 0;
+    const code = [0xbd, ...le(10)]; // mov ebp, 10
+    const outer = code.length;
+    code.push(0xbf, ...le(off ? END - 4 * (200 + pick(2000)) : DATA + 0x8000)); // mov edi, base
+    code.push(0xbe, ...le(SOURCE + pick(64) * 4)); // mov esi, source
+    code.push(0xb9, ...le(off ? 1 << 16 : 1 + pick(400))); // mov ecx, turns
+    code.push(0xb8, ...le(pick(1 << 30)), 0xba, ...le(pick(1 << 30))); // mov eax, edx
+    const head = code.length;
+    /** @type {number[]} where each break's rel32 is, patched to the loop's end */
+    const breaks = [];
+    /** A straight piece of a block: plain operations, a store at times. */
+    const plain = ()=>{
+        /** @type {number[]} */
+        const out = [];
+        for (let n = 1 + pick(3); n > 0; n--)
+        {
+            out.push(...[[0x01, 0xd0], [0x31, 0xc2], [0xc1, 0xc0, 1 + pick(31)], [0x03, 0x06],
+                [0x89, 0x47, pick(4) * 4], [0x8d, 0x52, pick(128)]][pick(6)]);
+        }
+        return out;
+    };
+    code.push(...plain());
+    for (let k = 1 + pick(4); k > 0; k--)
+    {
+        const form = pick(5);
+        code.push(0xa8, 1 << pick(8)); // test al, bit
+        const cc = 0x74 + pick(2); // jz / jnz
+        if (form === 0)
+        {
+            const then = plain();
+            const other = plain();
+            code.push(cc, then.length + 2, ...then, 0xeb, other.length, ...other);
+        }
+        else if (form === 1)
+        {
+            const then = plain();
+            code.push(cc, then.length, ...then);
+        }
+        else if (form === 2)
+        {
+            code.push(0xeb, 0x00, ...plain()); // jmp to the next instruction
+        }
+        else if (form === 3)
+        {
+            code.push(0x0f, cc + 0x10); // a break: jz / jnz rel32 out of the loop
+            breaks.push(code.length);
+            code.push(0, 0, 0, 0, ...plain());
+        }
+        else
+        {
+            code.push(...plain());
+        }
+    }
+    code.push(0x83, 0xc6, 0x04, 0x83, 0xc7, 0x04, 0x49); // add esi, 4; add edi, 4; dec ecx
+    code.push(0x0f, 0x85, ...le(head - (code.length + 6))); // jnz head
+    for (const at of breaks)
+    {
+        code.splice(at, 4, ...le(code.length - (at + 4)));
+    }
+    code.push(0x89, 0x15, ...le(DATA + 0x40), 0xa3, ...le(DATA + 0x44)); // store edx, eax
+    code.push(0x4d, 0x0f, 0x85, ...le(outer - (code.length + 7)), 0xf4); // dec ebp; jnz outer; hlt
+    return { code, chunk: CHUNKS[pick(CHUNKS.length)] };
+}
+
+test('blocks charging the count of the block before them match the interpreter', async()=>{
+    let faults = 0;
+    for (let seed = 1; seed <= 160; seed++)
+    {
+        const { code, chunk } = chained(seed * 6151);
+        // Stopped by a limit, translated code stops at a way out past it: what
+        // it says it retired is what the interpreter leaves after as many, and
+        // one that ends before it stops (a halt, a fault) ends as the whole run.
+        for (const limit of [5_000_000, 1 + chunk % 997 + seed * 31])
+        {
+            const ran = await runProgram(code, { yieldChunk: chunk }, limit);
+            const counted = await runProgram(code, { translate: false },
+                ran.stop.reason === 'limit' ? ran.stop.retired : 5_000_000);
+            assert.deepEqual({ ...ran, translated: 0 }, counted,
+                `seed ${seed}, chunk ${chunk}, limit ${limit}`);
+            faults += limit === 5_000_000 && counted.stop.reason === 'fault' ? 1 : 0;
+        }
+    }
+    assert.ok(faults > 10, `${faults} programs end at a fault`);
 });
 
 /**

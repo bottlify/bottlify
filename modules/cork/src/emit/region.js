@@ -1308,6 +1308,20 @@ export class RegionEmitter {
         this.runLocal = -1;
         /** Instructions retired in the current block so far, to charge at its end. */
         this.blockRetired = 0;
+        /**
+         * Of `blockRetired`, the instructions of the block before that the block
+         * charges for it (`planCarries`), until its first charge.
+         */
+        this.blockCarried = 0;
+        /** By block, the one block whose count it charges with its own (`planCarries`).
+         * @type {Map<number, number>} */
+        this.carries = new Map();
+        /** By block, what the way into it left uncharged (`carryInto`). @type {Map<number, number>} */
+        this.owed = new Map();
+        /** By block, the ways into it emitted so far (`wayInto`). @type {Map<number, number>} */
+        this.waysIn = new Map();
+        /** The block the way being made carries the count into (`carryInto`), or -1. */
+        this.carrying = -1;
         /** Each block's marks made so far, in a build that marks them (`markBlock`).
          * @type {Map<number, number> | null} */
         this.marksMade = null;
@@ -1598,6 +1612,10 @@ export class RegionEmitter {
         if (memoryPlan !== null && !flat && !this.copyFunction)
         {
             this.planTestedOnce(memoryPlan);
+        }
+        if (!flat && !this.copyFunction)
+        {
+            this.planCarries();
         }
         this.ranges = [];
         this.emitRange(0, blocks.length - 1, false);
@@ -3171,6 +3189,97 @@ export class RegionEmitter {
     }
 
     /**
+     * The blocks that charge the count of the one block before them with
+     * their own: a block inside a loop, not a loop's head -- the dispatch
+     * never enters it -- whose one way in is from a block emitted before it,
+     * and none of whose instructions looks at the budget before charging it
+     * (a string instruction's turns, a port's call to the host). The way in
+     * leaves its count uncharged (`carryInto`), so a straight run of blocks,
+     * a turn of a loop's body down its common path, takes one `sub` off the
+     * budget where it took one a block; every way out of the block charges
+     * the count it carries as its own, and a jump back or a call charges
+     * before it looks at the budget, so every count stays exact.
+     */
+    planCarries(){
+        const blocks = this.region.blocks;
+        /** @type {Map<number, number>} */
+        const index = new Map(blocks.map((block, t)=>[block.start, t]));
+        /** @type {number[][]} by block, the blocks whose ways reach it, once a way */
+        const from = blocks.map(()=>[]);
+        blocks.forEach((block, s)=>{
+            const { kind, targets, next } = block.exit;
+            const ways = [...new Set([...jumpsOf(block, this.returns, this.callReturn, this.labels),
+                ...targets, ...CARRY_NEXT.has(kind) ? [next] : []])];
+            for (const target of ways)
+            {
+                const t = index.get(target ?? -1);
+                if (t !== undefined)
+                {
+                    from[t].push(s);
+                }
+            }
+        });
+        for (const t of this.interior)
+        {
+            const [s, ...more] = from[t];
+            // A block emitted twice (a hoisted loop's copies) has two ways out.
+            if (more.length === 0 && s !== undefined && s < t && !this.loopEnds.has(t)
+                && !this.loopsOntoItself(t) && !this.loopsOntoItself(s)
+                && blocks[t].instructions.every(ins=>!CARRY_STOPS.has(ins.op)
+                    && !ins.prefixes.rep && !ins.prefixes.repne))
+            {
+                this.carries.set(t, s);
+            }
+        }
+    }
+
+    /**
+     * Whether the current block's way into the block at `target` leaves its
+     * count for that block to charge (`planCarries`).
+     *
+     * @param {number} target
+     */
+    carriesInto(target){
+        const at = this.labels.get(target);
+        // A loop run two turns a wasm turn has two ways out to each block after it.
+        return at !== undefined && this.carries.get(at) === this.blockIndex && !this.copying
+            && this.controls.length === this.blockDepth
+            && (this.pairing === null || at >= this.pairing.lo && at <= this.pairing.hi);
+    }
+
+    /**
+     * The way into `target` (`carriesInto`), made by `way`, leaving the
+     * block's count owed to it where the way gets there: an x87 edge that
+     * leaves instead charges it on its way out.
+     *
+     * @param {number} target @param {() => void} way
+     */
+    carryInto(target, way){
+        this.carrying = /** @type {number} */ (this.labels.get(target));
+        way();
+        this.carrying = -1;
+    }
+
+    /**
+     * A way into block `index` from inside the function, counted: a block
+     * that carries a count must have one (`planCarries`), as a way the plan
+     * did not see would come in with the count charged.
+     *
+     * @param {number} index
+     */
+    wayInto(index){
+        if (!this.copying)
+        {
+            this.waysIn.set(index, (this.waysIn.get(index) ?? 0) + 1);
+        }
+        if (this.carrying === index)
+        {
+            this.owed.set(index, this.blockRetired);
+            this.carrying = -1;
+        }
+    }
+
+    /**
      * A block's entry test: the windows it takes from the block before it,
      * tested where it is entered otherwise -- by the dispatch, from another
      * region, from the host -- and left untranslated at its start when one is
@@ -3180,7 +3289,8 @@ export class RegionEmitter {
      */
     emitEntryTests(index){
         const block = this.region.blocks[index];
-        this.blockRetired = 0;
+        this.blockRetired = this.copying ? 0 : this.owed.get(index) ?? 0;
+        this.blockCarried = this.blockRetired;
         this.staleCheck = false;
         this.current = block.instructions[0];
         if (this.x87.active)
@@ -3229,6 +3339,7 @@ export class RegionEmitter {
             this.exitAt(start, Exit.UNTRANSLATED);
             return;
         }
+        this.wayInto(index);
         this.fallInto(index);
     }
 
@@ -3269,7 +3380,14 @@ export class RegionEmitter {
         this.pending = null;
         this.fcmp = null;
         this.dead = false;
-        this.blockRetired = 0;
+        this.blockRetired = this.copying ? 0 : this.owed.get(index) ?? 0;
+        this.blockCarried = this.blockRetired;
+        if (this.owed.has(index) && this.waysIn.get(index) !== 1)
+        {
+            throw new Error(`block ${index}: its count carried, ${this.waysIn.get(index)} ways in`);
+        }
+        this.owed.delete(index);
+        this.waysIn.delete(index);
         this.blockDepth = this.controls.length;
         this.blockIndex = index;
         this.at = -1;
@@ -4011,6 +4129,7 @@ export class RegionEmitter {
         if (this.controls.length === this.blockDepth)
         {
             this.blockRetired = 0;
+            this.blockCarried = 0;
         }
     }
 
@@ -4115,26 +4234,28 @@ export class RegionEmitter {
         switch (exit.kind)
         {
             case 'fallthrough':
-                this.charge();
-                if (next && next.start === exit.targets[0])
+            case 'jump':
+            {
+                const [target] = exit.targets;
+                const way = exit.kind === 'fallthrough' && next && next.start === target
+                    ? ()=>this.fallThrough(after, target) : ()=>this.jumpTo(target);
+                if (this.carriesInto(target))
                 {
-                    this.fallThrough(after, exit.targets[0]);
+                    this.carryInto(target, way);
                     return;
                 }
-                this.jumpTo(exit.targets[0]);
-                return;
-            case 'jump':
                 this.charge();
-                this.jumpTo(exit.targets[0]);
+                way();
                 return;
+            }
             case 'jcc':
             case 'loop':
             {
                 const [taken, notTaken] = exit.targets;
                 const last = block.instructions[block.instructions.length - 1];
-                this.charge();
                 if (this.selfLoop)
                 {
+                    this.charge();
                     // The back edge directly: on the taken edge, and only
                     // there, the budget looked at as any jump does -- a
                     // leave before the decision would have the next run
@@ -4160,21 +4281,46 @@ export class RegionEmitter {
                 }
                 if (next && next.start === notTaken && this.fusesSwitch(block, next))
                 {
+                    this.charge();
                     this.emitFusedSwitch(block, after, next);
                     return;
+                }
+                // A way that carries the count (`planCarries`) leaves it owed;
+                // the other charges it on its own path.
+                const intoTaken = taken !== notTaken && this.carriesInto(taken);
+                const intoNext = taken !== notTaken && this.carriesInto(notTaken);
+                if (!intoTaken && !intoNext)
+                {
+                    this.charge();
                 }
                 this.pushBranchCondition(last);
                 this.openIf('taken');
                 this.payResultFor(taken);
-                this.jumpTo(taken);
+                if (intoTaken)
+                {
+                    this.carryInto(taken, ()=>this.jumpTo(taken));
+                }
+                else
+                {
+                    // Charged inside the `if`, the count stays the block's for
+                    // the way on; the jump's own exits charge nothing more.
+                    const retired = this.blockRetired;
+                    this.charge();
+                    this.blockRetired = 0;
+                    this.jumpTo(taken);
+                    this.blockRetired = retired;
+                }
                 this.close();
                 this.payResultFor(notTaken);
-                if (next && next.start === notTaken)
+                const way = next && next.start === notTaken
+                    ? ()=>this.fallThrough(after, notTaken) : ()=>this.jumpTo(notTaken);
+                if (intoNext)
                 {
-                    this.fallThrough(after, notTaken);
+                    this.carryInto(notTaken, way);
                     return;
                 }
-                this.jumpTo(notTaken);
+                this.charge();
+                way();
                 return;
             }
             case 'cut':
@@ -4339,6 +4485,7 @@ export class RegionEmitter {
                 if (label >= range.lo && label <= range.hi && item
                     && (!item.loop || item.start === label))
                 {
+                    this.wayInto(label);
                     if (item.pair !== true && !item.loop && !this.takesFrom(label)
                         && this.entryTested(label))
                     {
@@ -4471,7 +4618,7 @@ export class RegionEmitter {
      * @param {number} eip @param {number} kind @param {number} [vector]
      */
     exitBefore(eip, kind, vector = 0){
-        if (kind === Exit.UNTRANSLATED && this.blockRetired === 1)
+        if (kind === Exit.UNTRANSLATED && this.blockRetired - this.blockCarried === 1)
         {
             // The block's first instruction is the other executor's: the
             // block retires nothing, so it must not be an entry (see
@@ -5242,6 +5389,16 @@ const READ_LOOP_OPS = new Set(['mov', 'movzx', 'movsx', 'add', 'sub', 'adc', 'sb
 
 /** How a block of a loop run two turns a wasm turn may leave (`pairs`). */
 const PAIRED_EXITS = new Set(['fallthrough', 'jump', 'jcc', 'loop']);
+
+/**
+ * The exits after which the code at the next address may run in the region:
+ * a way in that `jumpsOf` leaves out where the call is not formed in.
+ */
+const CARRY_NEXT = new Set(['fallthrough', 'jcc', 'loop', 'call', 'trap']);
+
+/** Instructions that look at the budget before they charge it (`planCarries`). */
+const CARRY_STOPS = new Set(['movs', 'stos', 'lods', 'cmps', 'scas', 'ins', 'outs', 'in', 'out',
+    'int', 'int1', 'int3', 'into', 'syscall', 'sysenter', 'hlt']);
 
 /**
  * The instructions that may reach the host and come back into the function:
