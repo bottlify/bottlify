@@ -1779,8 +1779,17 @@ export function x87Prologue(e){
     const x = e.x87;
     // The top as the machine has it: a block whose stack shape the tracking
     // does not know sets no top of its own, and writes this one back.
-    atState(e.context, b).load('i32_8u', { offset: layout.x87Top }).localSet(Local.x87Top);
-    atState(e.context, b).load('i32_8u', { offset: layout.x87Empty }).localSet(Local.x87Empty);
+    if (pairedTop(layout))
+    {
+        atState(e.context, b).load('i32_16u', { offset: layout.x87Top }).localTee(Local.x87Empty)
+            .i32const(0xff).op(I32.and).localSet(Local.x87Top);
+        b.localGet(Local.x87Empty).i32const(8).op(I32.shrU).localSet(Local.x87Empty);
+    }
+    else
+    {
+        atState(e.context, b).load('i32_8u', { offset: layout.x87Top }).localSet(Local.x87Top);
+        atState(e.context, b).load('i32_8u', { offset: layout.x87Empty }).localSet(Local.x87Empty);
+    }
     atState(e.context, b).load('i32_16u', { offset: layout.x87Status }).localSet(Local.x87Status);
     atState(e.context, b).load('i32_16u', { offset: layout.x87Control }).localSet(Local.x87Control);
     b.i32const(0).localSet(Local.x87Dirty);
@@ -1859,7 +1868,7 @@ export function x87LoadRegisters(e, needed){
             b.i32const(0).localSet(x.dyn);
             return;
         }
-        atState(e.context, b).load('i32_8u', { offset: exactAt }).localSet(x.dyn);
+        atState(e.context, b).load(exactLoad(layout), { offset: exactAt }).localSet(x.dyn);
         for (let k = 0; k < 8; k++)
         {
             atState(e.context, b).load('i64', { offset: layout.x87 + k * 16 + 8 })
@@ -1877,6 +1886,29 @@ export function x87LoadRegisters(e, needed){
 const exactPlace = layout=>(layout.x87Format === 'f64' ? layout.x87Exact ?? -1 : -1);
 
 /**
+ * The state block lies 4 KiB in (`ownLayout`), past an arm64 byte load's own
+ * offset (4095) but within a halfword's (8190, even): the top and the empty
+ * mask side by side are read and written as one halfword, and the exact marks
+ * as a halfword whose high byte nothing uses -- one machine instruction each
+ * where a byte's offset took two.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ */
+const pairedTop = layout=>layout.x87Empty === layout.x87Top + 1 && layout.x87Top % 2 === 0;
+
+/**
+ * Whether the exact marks are read and written as a halfword: the block has
+ * room past the byte (`pairedTop`).
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ */
+const exactWide = layout=>exactPlace(layout) % 2 === 0 && layout.xmm - exactPlace(layout) >= 2;
+/** @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout */
+const exactLoad = layout=>(exactWide(layout) ? 'i32_16u' : 'i32_8u');
+/** @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout */
+const exactStore = layout=>(exactWide(layout) ? 'i32_16' : 'i32_8');
+
+/**
  * The epilogue: top, the masks and words, and every dirty register back
  * into the state block. The current top is in its local, set at every
  * block start and kept by every push and pop. A region that also translated
@@ -1888,8 +1920,16 @@ const exactPlace = layout=>(layout.x87Format === 'f64' ? layout.x87Exact ?? -1 :
 export function x87Epilogue(e){
     const { b, layout } = e;
     const x = e.x87;
-    atState(e.context, b).localGet(Local.x87Top).store('i32_8', { offset: layout.x87Top });
-    atState(e.context, b).localGet(Local.x87Empty).store('i32_8', { offset: layout.x87Empty });
+    if (pairedTop(layout))
+    {
+        atState(e.context, b).localGet(Local.x87Top).localGet(Local.x87Empty).i32const(8)
+            .op(I32.shl).op(I32.or).store('i32_16', { offset: layout.x87Top });
+    }
+    else
+    {
+        atState(e.context, b).localGet(Local.x87Top).store('i32_8', { offset: layout.x87Top });
+        atState(e.context, b).localGet(Local.x87Empty).store('i32_8', { offset: layout.x87Empty });
+    }
     atState(e.context, b).localGet(Local.x87Status).store('i32_16', { offset: layout.x87Status });
     if (x.controlWritten)
     {
@@ -1953,7 +1993,8 @@ export function x87StoreRegisters(e, written){
     {
         // What the region knows at run time, its own quadwords and the ones
         // it came in with alike.
-        atState(e.context, b).localGet(x.dyn).store('i32_8', { offset: exactPlace(layout) });
+        atState(e.context, b).localGet(x.dyn)
+            .store(exactStore(layout), { offset: exactPlace(layout) });
         for (let k = 0; k < 8; k++)
         {
             atState(e.context, b).localGet(x.shadow[k])
@@ -1979,9 +2020,9 @@ export function x87DropExact(e, mask){
     {
         return;
     }
-    atState(e.context, atState(e.context, b)).load('i32_8u', { offset: at });
+    atState(e.context, atState(e.context, b)).load(exactLoad(layout), { offset: at });
     mask();
-    b.i32const(-1).op(I32.xor).op(I32.and).store('i32_8', { offset: at });
+    b.i32const(-1).op(I32.xor).op(I32.and).store(exactStore(layout), { offset: at });
 }
 
 /**
