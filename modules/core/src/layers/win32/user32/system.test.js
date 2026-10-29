@@ -3226,6 +3226,17 @@ test('SubtractRect takes off a band that covers one side right across, and nothi
     assert.deepEqual(subtract([5, 5, 5, 10], [0, 0, 1, 1]), [0, [0, 0, 0, 0]]);
 });
 
+test('a power or suspend registration is a handle nothing uses, taken back once', ()=>{
+    const { fns } = setup();
+    const power = fns.RegisterSuspendResumeNotification.handler([0x1234, 0]);
+    assert.notEqual(power, 0, 'a suspend notification: a handle nothing uses');
+    assert.equal(fns.UnregisterSuspendResumeNotification.handler([power]), 1);
+    assert.equal(fns.UnregisterSuspendResumeNotification.handler([power]), 0, 'once');
+    assert.equal(fns.RegisterPowerSettingNotification.handler([0x1234, 0, 0]), 0, 'no GUID');
+    const setting = fns.RegisterPowerSettingNotification.handler([0x1234, 0x5000, 0]);
+    assert.equal(fns.UnregisterPowerSettingNotification.handler([setting]), 1);
+});
+
 test('a device-change registration is a handle, taken back once and not twice', ()=>{
     const { fns, errors } = setup();
     assert.equal(fns.RegisterDeviceNotificationA.argBytes, 12);

@@ -2499,6 +2499,17 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return (wide ? writeWideString : writeString)(out >>> 0, record.className, room);
     };
 
+    /** A power notification's handle let go. @param {number} handle */
+    const unregisterPower = handle=>{
+        if (host.handles.typeOf?.(handle >>> 0) !== 'power-notification')
+        {
+            host.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        host.handles.close(handle >>> 0);
+        return 1;
+    };
+
     return {
         /** int GetSystemMetrics(int nIndex) */
         GetSystemMetrics: {
@@ -4758,6 +4769,53 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 host.handles.close(handle >>> 0);
                 return 1;
             },
+        },
+
+        /**
+         * HPOWERNOTIFY RegisterPowerSettingNotification(HANDLE hRecipient,
+         *     LPCGUID PowerSettingGuid, DWORD Flags), and
+         *     RegisterSuspendResumeNotification(HANDLE hRecipient, DWORD Flags)
+         *
+         * Power settings changing and the machine suspending are told to the
+         * window as WM_POWERBROADCAST. Neither happens here, so the
+         * registration is a handle nothing will ever use, as a device
+         * notification's is.
+         */
+        RegisterPowerSettingNotification: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([recipient, setting])=>{
+                if ((recipient >>> 0) === 0 || (setting >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return host.handles.open('power-notification', { recipient: recipient >>> 0 });
+            },
+        },
+        RegisterSuspendResumeNotification: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([recipient])=>{
+                if ((recipient >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return host.handles.open('power-notification', { recipient: recipient >>> 0 });
+            },
+        },
+
+        /** BOOL UnregisterPowerSettingNotification(HPOWERNOTIFY), UnregisterSuspendResumeNotification alike */
+        UnregisterPowerSettingNotification: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>unregisterPower(handle),
+        },
+        UnregisterSuspendResumeNotification: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>unregisterPower(handle),
         },
 
         /**
