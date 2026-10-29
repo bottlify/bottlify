@@ -7,14 +7,17 @@
 /**
  * A float compare whose flags only its block's final branch reads makes no
  * flags: the branch compares the operands (`fcmp`, `fusesCompare` in
- * region.js). Instructions that leave the flags be may stand between the two
- * -- a compiler schedules a store or a multiply there -- the operands waiting
- * in locals of their own, and a way out of one of them makes the flags the
- * compare left (`payFloatCompare`). Seeded sequences of SSE compares of both
- * widths, then flag-neutral forms (scalar arithmetic on the compared
- * registers, moves, stores, one into the code page that leaves after it), then
- * a conditional branch of every condition, judged against the instruction
- * model: the registers, the flags and the memory must come out the same.
+ * region.js); so does a `bt` whose carry a `jb` or `jae` alone reads, the
+ * branch testing its bit (`carryBit`). Instructions that leave the flags be
+ * may stand between the two -- a compiler schedules a store or a multiply
+ * there -- the operands waiting in locals of their own, and a way out of one
+ * of them makes the flags the compare left (`payFloatCompare`,
+ * `payBitTest`). Seeded sequences of SSE compares of both widths and bit
+ * tests, then flag-neutral forms (scalar arithmetic on the compared
+ * registers, moves, stores, one into the code page that leaves after it),
+ * then a conditional branch of every condition, judged against the
+ * instruction model: the registers, the flags and the memory must come out
+ * the same.
  */
 
 import { test } from 'node:test';
@@ -33,6 +36,10 @@ const COMPARES = [
     { name: 'comisd xmm2, xmm0', bytes: [0x66, 0x0f, 0x2f, 0xd0] },
     { name: 'ucomisd xmm2, [m+8]', bytes: [0x66, 0x0f, 0x2e, 0x15, ...at(DATA + 8)] },
     { name: 'comiss xmm0, xmm0', bytes: [0x0f, 0x2f, 0xc0] },
+    // a bit test, whose carry a jb or jae alone reads
+    { name: 'bt eax, ecx', bytes: [0x0f, 0xa3, 0xc8] },
+    { name: 'bt ecx, 3', bytes: [0x0f, 0xba, 0xe1, 0x03] },
+    { name: 'bt dword [m], 9', bytes: [0x0f, 0xba, 0x25, ...at(DATA), 0x09] },
 ];
 
 /** @type {import('../testing/sequences.js').Form[]} */
@@ -80,14 +87,20 @@ const AFTER = [
     { name: 'add eax, ebx', bytes: [0x01, 0xd8] },
 ];
 
-/** Every sequence's first instruction, at the code page's start. */
-const FIRST = [{ name: 'mov edx, 0x11111111', bytes: [0xba, 0x11, 0x11, 0x11, 0x11] }];
+/**
+ * Every sequence's first instruction, at the code page's start: a register a
+ * bit test reads given one of several values, its immediate's low byte 0x11.
+ */
+const FIRST = [0x11, 0x2211, 0x80000311, 0x7f0f0f11, 0x10011, 0xffffff11].flatMap(value=>[
+    { name: `mov eax, ${value.toString(16)}`, bytes: [0xb8, ...at(value)] },
+    { name: `mov ecx, ${value.toString(16)}`, bytes: [0xb9, ...at(value)] },
+]);
 
 const POOL = [...COMPARES, ...BETWEEN, ...BRANCHES, ...AFTER, ...FIRST];
 const SEQUENCES = 4000;
 
-test('a float compare fused with its branch over the instructions between them leaves the'
-    + ' flags and the state as the instruction model does', async()=>{
+test('a float compare or a bit test fused with its branch over the instructions between'
+    + ' them leaves the flags and the state as the instruction model does', async()=>{
     const judge = createJudge({ pool: POOL });
     const next = random(0xf05ed);
     /** @param {number} from @param {number} count */
@@ -98,7 +111,7 @@ test('a float compare fused with its branch over the instructions between them l
     for (let k = 0; k < SEQUENCES; k++)
     {
         // a compare, zero to four between, a branch
-        const body = [POOL.length - 1, pick(0, COMPARES.length)];
+        const body = [pick(POOL.length - FIRST.length, FIRST.length), pick(0, COMPARES.length)];
         for (let n = Math.floor(next() * 5); n > 0; n--)
         {
             body.push(pick(COMPARES.length, BETWEEN.length));

@@ -24,11 +24,11 @@
  */
 
 import { registerLocal } from './width.js';
-import { ARITH_FLAGS, CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
+import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
-import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT } from './region.js';
+import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT, keepsFlags } from './region.js';
 import { prepare, readAddress, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
@@ -1882,17 +1882,6 @@ function comparison(e, dst, src, double, flagsLive){
     e.orFlag(ZF);
     b.localGet(Local.t1).localGet(a).localGet(c).op(flt).op(I32.or);
     e.orFlag(CF);
-}
-
-/**
- * Whether an instruction may stand between a fused float compare and its
- * branch (`comparison`): it neither reads nor writes an arithmetic flag.
- *
- * @param {import('../decode/decoder.js').Instruction} instruction
- */
-function keepsFlags(instruction){
-    return ((instruction.flagsRead | instruction.flagsWritten | instruction.flagsUndefined)
-        & ARITH_FLAGS) === 0;
 }
 
 /**

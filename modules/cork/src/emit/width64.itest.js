@@ -122,11 +122,12 @@ test('width edges of moves, scans, swaps and widenings run in the shared emitter
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
 
-test('a float compare fused with its branch over stores and arithmetic between them runs in the'
-    + ' shared emitter\'s regions as interpreted', ()=>{
+test('a float compare or a bit test fused with its branch over stores and arithmetic between'
+    + ' them runs in the shared emitter\'s regions as interpreted', ()=>{
     // xmm0 from rcx, xmm1 from ebx; the compare, what stands between, a branch
     // of each condition past `add edx, 1`, the flags written again after it.
-    const compares = ['0f2fc1', '0f2ec8', '660f2fc1', '0f2fc0'];
+    // and bit tests, of rcx by rax's low bits and of ecx by ebx's
+    const compares = ['0f2fc1', '0f2ec8', '660f2fc1', '0f2fc0', '480fa3c1', '0fa3d9'];
     const between = ['', 'f30f110424', 'f30f59c8', 'c7042400000000', '8908', // 8908 faults: rax
         'f30f110424f30f59c80f28c8'];
     const conditions = ['72', '73', '74', '75', '76', '77', '7a', '7b', '7c', '7e'];

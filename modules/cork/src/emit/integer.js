@@ -29,7 +29,7 @@ import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
-import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
+import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
     windowAddress,
@@ -3831,7 +3831,14 @@ function bitTest(e, instruction, flagsLive){
     }
     readOp(e, dst);
     b.localSet(Local.t1);
-    if (flagsLive)
+    const carry = fusedCarry(e, op, flagsLive);
+    if (carry >= 0)
+    {
+        b.localGet(Local.t1).localGet(Local.count).op(I32.shrU).i32const(1).op(I32.and)
+            .localSet(carry);
+        e.carryBit = carry;
+    }
+    else if (flagsLive)
     {
         e.eagerWrite(CF);
         b.localGet(Local.t1).localGet(Local.count).op(I32.shrU).i32const(1).op(I32.and);
@@ -3857,6 +3864,21 @@ function bitTest(e, instruction, flagsLive){
         });
     }
     return true;
+}
+
+/**
+ * The local a `bt` leaves its bit in when the block's final branch alone
+ * reads its carry (`fuseBitTest`): compilers test a bit with `bt` and a `jb`
+ * or `jae`, an x86-64 gcc with work scheduled between. -1 otherwise.
+ *
+ * @param {E} e @param {string} op @param {boolean} flagsLive
+ */
+function fusedCarry(e, op, flagsLive){
+    if (op !== 'bt' || !flagsLive)
+    {
+        return -1;
+    }
+    return e.fuseBitTest(e.region.blocks[e.blockIndex].instructions.indexOf(e.current), keepsFlags);
 }
 
 /**
@@ -3922,9 +3944,13 @@ function bitTestLong(e, instruction, flagsLive){
             b.i32const(1).localGet(Local.count).op(I32.shl);
         }
     };
-    if (flagsLive)
+    const carry = fusedCarry(e, op, flagsLive);
+    if (carry >= 0 || flagsLive)
     {
-        e.eagerWrite(CF);
+        if (carry < 0)
+        {
+            e.eagerWrite(CF);
+        }
         b.localGet(value);
         pushBit();
         b.op(ops.and);
@@ -3936,7 +3962,15 @@ function bitTestLong(e, instruction, flagsLive){
         {
             b.i32const(0).op(I32.ne);
         }
-        e.orFlag(CF);
+        if (carry >= 0)
+        {
+            b.localSet(carry);
+            e.carryBit = carry;
+        }
+        else
+        {
+            e.orFlag(CF);
+        }
     }
     if (op !== 'bt')
     {
