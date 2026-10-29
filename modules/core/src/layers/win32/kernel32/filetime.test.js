@@ -24,6 +24,10 @@ function setup(){
             errors.push(code);
         },
         resolveHandle: (handle, type)=>{
+            if (handle === 12 && type === 'pipe')
+            {
+                return { instance: { pipe: { name: '\\\\.\\pipe\\crashpad_1' } } };
+            }
             if (handle !== 8 || (type && type !== 'file'))
             {
                 throw new Error('bad handle');
@@ -233,6 +237,14 @@ test('GetFileInformationByHandleEx answers the four classes and refuses the rest
     assert.equal(fns.GetFileInformationByHandleEx.handler([99, 0, 0x400, 40]), 0);
     assert.equal(errors.at(-1), 6);
     assert.equal(fns.GetFileInformationByHandleEx.argBytes, 16);
+
+    // A named pipe's end: its name below the pipe file system's root.
+    assert.equal(fns.GetFileInformationByHandleEx.handler([12, 2, 0x400, 0x100]), 1);
+    const pipeName = String.fromCharCode(...Array.from({ length: view.getUint32(0x400, true) / 2 },
+        (_, at)=>view.getUint16(0x404 + at * 2, true)));
+    assert.equal(pipeName, '\\crashpad_1');
+    assert.equal(fns.GetFileInformationByHandleEx.handler([12, 1, 0x400, 24]), 1);
+    assert.equal(fns.GetFileInformationByHandleEx.handler([12, 0, 0x400, 40]), 0);
 });
 
 /**

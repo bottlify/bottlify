@@ -571,6 +571,42 @@ export function createFileTimeFunctions(host){
         return 1;
     };
 
+    /**
+     * GetFileInformationByHandleEx on a named pipe's end.
+     *
+     * @param {any} end @param {number} kind @param {number} at @param {number} room
+     */
+    const pipeInformation = (end, kind, at, room)=>{
+        if (kind === FILE_NAME_INFO)
+        {
+            const full = String(end.instance?.pipe?.name ?? '');
+            const name = full.replace(/^\\\\[.?]\\pipe/i, '');
+            const bytes = new Uint8Array(4 + name.length * 2);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(0, name.length * 2, true);
+            [...name].forEach((character, index)=>
+                view.setUint16(4 + index * 2, character.charCodeAt(0), true));
+            if (room < 4 || at === 0)
+            {
+                return fail(ERROR_BAD_LENGTH);
+            }
+            host.writeMemory(at, bytes.subarray(0, Math.min(room, bytes.length)));
+            return room < bytes.length ? fail(ERROR_MORE_DATA) : 1;
+        }
+        if (kind === FILE_STANDARD_INFO)
+        {
+            if (room < 24 || at === 0)
+            {
+                return fail(ERROR_BAD_LENGTH);
+            }
+            const bytes = new Uint8Array(24);
+            new DataView(bytes.buffer).setUint32(16, 1, true);
+            host.writeMemory(at, bytes);
+            return 1;
+        }
+        return fail(ERROR_INVALID_PARAMETER);
+    };
+
     return {
         /**
          * BOOL FileTimeToLocalFileTime(const FILETIME *lpFileTime,
@@ -771,6 +807,15 @@ export function createFileTimeFunctions(host){
         },
 
         /**
+         * The classes a named pipe's end answers (a crash reporter checks the
+         * name of the pipe it was handed): its name below the pipe file
+         * system's root, \\name for \\.\pipe\name; its standard
+         * information, a file of no size that is no directory; anything
+         * else is refused.
+         *
+         * @param {any} end @param {number} kind @param {number} at @param {number} room
+         */
+        /**
          * BOOL GetFileInformationByHandleEx(HANDLE hFile,
          *   FILE_INFO_BY_HANDLE_CLASS FileInformationClass, LPVOID lpFileInformation,
          *   DWORD dwBufferSize)
@@ -788,7 +833,9 @@ export function createFileTimeFunctions(host){
                 const file = object(handle, 'file');
                 if (!file)
                 {
-                    return fail(ERROR_INVALID_HANDLE);
+                    const end = object(handle, 'pipe');
+                    return end ? pipeInformation(end, kind >>> 0, buffer >>> 0, size >>> 0)
+                        : fail(ERROR_INVALID_HANDLE);
                 }
                 if ((kind >>> 0) === FILE_ID_BOTH_DIRECTORY_INFO
                     || (kind >>> 0) === FILE_ID_BOTH_DIRECTORY_RESTART_INFO)
