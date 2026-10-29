@@ -505,6 +505,16 @@ builds this project's fixtures emits /EHs tables, so no program here exercises i
 called by the dispatcher throws from inside the walk, which the 64-bit dispatcher has no test for.
 Revisit when a 64-bit program is found that needs it. *2026-10-29.*
 
+**A54. A 64-bit process's window messages carry 32-bit WPARAM and LPARAM values.** The
+message queue and every handler that sends, posts or answers a message keep its parameters as
+the dwords a 32-bit process has; at 64 bits a value is widened as its type widens a 32-bit one,
+a WPARAM (UINT_PTR) zero-extended and an LPARAM (LONG_PTR) sign-extended, when it reaches a
+window procedure or a MSG, and an LRESULT is sign-extended into RAX, a late one included. Every
+pointer and handle the engine hands out lies below 2 GiB, so a pointer in either parameter
+reaches the procedure whole and -1 is -1; a value that needs the high half of a quadword loses
+it. Carrying quadwords through the queue would change every handler that reads a message;
+revisit when a program is found that passes one. *2026-10-29.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

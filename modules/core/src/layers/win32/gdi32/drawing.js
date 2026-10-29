@@ -50,9 +50,13 @@ import {
 } from './paths.js';
 import {
     BITMAP,
+    BITMAP64,
     BITMAPCOREHEADER,
     BITMAPINFOHEADER,
     DIBSECTION,
+    DIBSECTION64,
+    EXTLOGPEN64,
+    LOGBRUSH64,
     PALETTEENTRY_SIZE,
     colorEntryBytes,
     ddbStride,
@@ -4753,7 +4757,8 @@ export function createDrawingFunctions(
     const getObject = ([handle, size, out], wide)=>{
         const record = objects.get(handle);
         const shape = record
-            ? describeObject(record, (out >>> 0) === 0 ? 0 : size | 0, wide)
+            ? describeObject(record, (out >>> 0) === 0 ? 0 : size | 0, wide,
+                host.pointerSize === 8)
             : null;
         if (!shape)
         {
@@ -4895,9 +4900,11 @@ export function createDrawingFunctions(
  *        DIBSECTION to a caller with room for one and a BITMAP to any other,
  *        a null buffer's question included.
  * @param {boolean} wide  GetObjectW: a font's face name is UTF-16.
+ * @param {boolean} [long]  For a 64-bit process, whose BITMAP, DIBSECTION,
+ *        LOGBRUSH and EXTLOGPEN have their pointer-sized fields eight bytes wide.
  * @returns {Uint8Array | null}
  */
-function describeObject(record, room, wide){
+function describeObject(record, room, wide, long = false){
     const attributes = record.attributes ?? {};
     switch (record.type){
         // LOGPEN: style, POINT width, colour.
@@ -4905,6 +4912,23 @@ function describeObject(record, room, wide){
         // width, brush style, colour, hatch and the dash table. A buffer
         // short of the dashes is refused, as one short of the rest is.
         case 'pen':
+            if (long && attributes.extended !== undefined)
+            {
+                /** @type {number[]} */
+                const entries = attributes.entries ?? [];
+                // Up to its last dash, as the 32-bit one is.
+                const bytes = new Uint8Array(EXTLOGPEN64.elpStyleEntry + entries.length * 4);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(EXTLOGPEN64.elpPenStyle, attributes.extended >>> 0, true);
+                view.setUint32(EXTLOGPEN64.elpWidth, attributes.width | 0, true);
+                view.setUint32(EXTLOGPEN64.elpBrushStyle, attributes.brushStyle >>> 0, true);
+                view.setUint32(EXTLOGPEN64.elpColor, attributes.color >>> 0, true);
+                view.setUint32(EXTLOGPEN64.elpHatch, attributes.hatch >>> 0, true);
+                view.setUint32(EXTLOGPEN64.elpNumEntries, entries.length, true);
+                entries.forEach((entry, index)=>view.setUint32(
+                    EXTLOGPEN64.elpStyleEntry + index * 4, entry >>> 0, true));
+                return bytes;
+            }
             return attributes.extended !== undefined
                 ? dwords([attributes.extended >>> 0, attributes.width | 0,
                     attributes.brushStyle >>> 0, attributes.color >>> 0, attributes.hatch >>> 0,
@@ -4912,9 +4936,17 @@ function describeObject(record, room, wide){
                 : dwords([attributes.style | 0, attributes.width | 0, 0, attributes.color >>> 0]);
         // LOGBRUSH: style, colour, hatch.
         case 'brush':
+            if (long)
+            {
+                const bytes = new Uint8Array(LOGBRUSH64.SIZE);
+                bytes.set(dwords([attributes.style | 0, attributes.color >>> 0,
+                    attributes.hatch | 0]));
+                return bytes;
+            }
             return dwords([attributes.style | 0, attributes.color >>> 0, attributes.hatch | 0]);
         case 'bitmap':
-            return describeBitmap(attributes, room >= DIBSECTION.SIZE);
+            return describeBitmap(attributes,
+                room >= (long ? DIBSECTION64 : DIBSECTION).SIZE, long);
         case 'font':
             return logFontBytes(attributes, wide);
         // A palette is the WORD count of its entries.
@@ -4943,22 +4975,25 @@ function dwords(values){
  * device-dependent bitmap has none, which is what a NULL bmBits says.
  *
  * @param {any} attributes @param {boolean} asSection
+ * @param {boolean} [long]  A 64-bit process's layouts.
  */
-function describeBitmap(attributes, asSection){
+function describeBitmap(attributes, asSection, long = false){
+    const BITMAP_ = long ? BITMAP64 : BITMAP;
+    const DIBSECTION_ = long ? DIBSECTION64 : DIBSECTION;
     const width = attributes.width | 0;
     const height = attributes.height | 0;
     const bitCount = attributes.bitCount ?? 32;
     const section = attributes.section >>> 0;
     const stride = section !== 0 ? dibStride(width, bitCount) : ddbStride(width, bitCount);
-    const bytes = new Uint8Array(section !== 0 && asSection ? DIBSECTION.SIZE : BITMAP.SIZE);
+    const bytes = new Uint8Array(section !== 0 && asSection ? DIBSECTION_.SIZE : BITMAP_.SIZE);
     const view = new DataView(bytes.buffer);
-    view.setInt32(BITMAP.bmWidth, width, true);
-    view.setInt32(BITMAP.bmHeight, height, true);
-    view.setInt32(BITMAP.bmWidthBytes, stride, true);
-    view.setUint16(BITMAP.bmPlanes, attributes.planes ?? 1, true);
-    view.setUint16(BITMAP.bmBitsPixel, bitCount, true);
-    view.setUint32(BITMAP.bmBits, section, true);
-    if (bytes.length === BITMAP.SIZE)
+    view.setInt32(BITMAP_.bmWidth, width, true);
+    view.setInt32(BITMAP_.bmHeight, height, true);
+    view.setInt32(BITMAP_.bmWidthBytes, stride, true);
+    view.setUint16(BITMAP_.bmPlanes, attributes.planes ?? 1, true);
+    view.setUint16(BITMAP_.bmBitsPixel, bitCount, true);
+    view.setUint32(BITMAP_.bmBits, section, true);
+    if (bytes.length === BITMAP_.SIZE)
     {
         return bytes;
     }
@@ -4966,12 +5001,12 @@ function describeBitmap(attributes, asSection){
     // height without its sign, the image size worked out, and the colour
     // table counted in full.
     /** @param {number} field @param {number} value */
-    const header = (field, value)=>view.setInt32(DIBSECTION.dsBmih + field, value | 0, true);
+    const header = (field, value)=>view.setInt32(DIBSECTION_.dsBmih + field, value | 0, true);
     header(BITMAPINFOHEADER.biSize, BITMAPINFOHEADER.SIZE);
     header(BITMAPINFOHEADER.biWidth, width);
     header(BITMAPINFOHEADER.biHeight, height);
-    view.setUint16(DIBSECTION.dsBmih + BITMAPINFOHEADER.biPlanes, 1, true);
-    view.setUint16(DIBSECTION.dsBmih + BITMAPINFOHEADER.biBitCount, bitCount, true);
+    view.setUint16(DIBSECTION_.dsBmih + BITMAPINFOHEADER.biPlanes, 1, true);
+    view.setUint16(DIBSECTION_.dsBmih + BITMAPINFOHEADER.biBitCount, bitCount, true);
     header(BITMAPINFOHEADER.biCompression, attributes.compression ?? BI_RGB);
     header(BITMAPINFOHEADER.biSizeImage, stride * height);
     header(BITMAPINFOHEADER.biXPelsPerMeter, attributes.pelsPerMeter?.[0] ?? 0);
@@ -4980,7 +5015,7 @@ function describeBitmap(attributes, asSection){
     const masks = attributes.bitfields ?? [0, 0, 0];
     for (let index = 0; index < 3; index++)
     {
-        view.setUint32(DIBSECTION.dsBitfields + index * 4, masks[index] >>> 0, true);
+        view.setUint32(DIBSECTION_.dsBitfields + index * 4, masks[index] >>> 0, true);
     }
     return bytes;
 }

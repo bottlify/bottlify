@@ -14,10 +14,12 @@ import {
     readMessage,
     readU32,
     readWindowClass,
+    userLayouts,
+    writeFields,
     writeMessage,
     writeRect,
     writeU32s,
-    writeWindowClassA,
+    writeWindowClass,
 } from './structs.js';
 
 function fakeMemory(size = 0x200){
@@ -93,7 +95,7 @@ test('a class written back reads the same way it was read', ()=>{
         icon: 1, cursor: 2, background: 3, menuName: 0, className: 0x1234, iconSm: 9,
     };
 
-    writeWindowClassA(memory, 0x40, fields);
+    writeWindowClass(memory, 0x40, fields);
 
     const read = readWindowClass(memory, 0x40, WNDCLASSA);
     assert.deepEqual(read, { ...fields, iconSm: 0 });
@@ -117,4 +119,54 @@ test('a RECT is written left, top, right, bottom and in that order', ()=>{
 
     const written = [0, 1, 2, 3].map(index=>readU32(memory, 0xc0 + (index * 4)));
     assert.deepEqual(written, [1, 2, 3, 4]);
+});
+
+test('a 64-bit process\'s structures have their pointers eight bytes wide, as winuser.h has them',
+    ()=>{
+    // The offsets _WIN64 gives each: a pointer, a handle or a message
+    // parameter on an eight-byte boundary, the end padded to eight.
+        const L = userLayouts(8);
+        assert.deepEqual([L.WNDCLASSA.lpfnWndProc, L.WNDCLASSA.cbClsExtra, L.WNDCLASSA.hInstance,
+            L.WNDCLASSA.lpszClassName, L.WNDCLASSA.SIZE], [8, 16, 24, 64, 72]);
+        assert.deepEqual([L.WNDCLASSEXA.style, L.WNDCLASSEXA.lpfnWndProc, L.WNDCLASSEXA.hIconSm,
+            L.WNDCLASSEXA.SIZE], [4, 8, 72, 80]);
+        assert.deepEqual([L.MSG.message, L.MSG.wParam, L.MSG.lParam, L.MSG.time, L.MSG.ptX,
+            L.MSG.SIZE], [8, 16, 24, 32, 36, 48]);
+        assert.deepEqual([L.PAINTSTRUCT.fErase, L.PAINTSTRUCT.rcPaint, L.PAINTSTRUCT.rgbReserved,
+            L.PAINTSTRUCT.SIZE], [8, 12, 36, 72]);
+        assert.deepEqual([L.CREATESTRUCTA.cy, L.CREATESTRUCTA.style, L.CREATESTRUCTA.lpszName,
+            L.CREATESTRUCTA.dwExStyle, L.CREATESTRUCTA.SIZE], [32, 48, 56, 72, 80]);
+        assert.deepEqual([L.WINDOWPOS.x, L.WINDOWPOS.flags, L.WINDOWPOS.SIZE], [16, 32, 40]);
+        assert.deepEqual([L.NCCALCSIZE_PARAMS.lppos, L.NCCALCSIZE_PARAMS.SIZE], [48, 56]);
+        assert.equal(userLayouts(4).MSG, MSG, 'and a 32-bit one\'s are the ones it always had');
+    });
+
+test('a 64-bit field widens a dword as its type does: a handle and an LPARAM by sign', ()=>{
+    const memory = fakeMemory();
+    const L = userLayouts(8);
+    memory.bytes.fill(0xaa);
+    writeMessage(memory, 0x80, { hwnd: 0x40, message: 0x0100, wParam: 0x80000001, lParam: -3,
+        time: 7, x: 3, y: 4 }, L);
+    const view = new DataView(memory.bytes.buffer);
+    assert.equal(view.getBigUint64(0x80, true), 0x40n);
+    assert.equal(view.getBigUint64(0x80 + 16, true), 0x80000001n, 'a WPARAM as a UINT');
+    assert.equal(view.getBigInt64(0x80 + 24, true), -3n, 'an LPARAM as a LONG');
+    assert.equal(memory.bytes[0x80 + 44], 0xaa, 'lPrivate is the system\'s and left alone');
+    assert.deepEqual(readMessage(memory, 0x80, L),
+        { hwnd: 0x40, message: 0x0100, wParam: 0x80000001, lParam: 0xfffffffd, time: 7 });
+
+    writeFields(memory, 0x100, L, L.WINDOWPOS, { hwndInsertAfter: -1, flags: 4 });
+    assert.equal(view.getBigInt64(0x100 + 8, true), -1n, 'HWND_TOPMOST is -1 whole');
+    assert.equal(view.getUint32(0x100 + 32, true), 4);
+});
+
+test('a class written back at 64 bits reads the same way it was read', ()=>{
+    const memory = fakeMemory();
+    const L = userLayouts(8);
+    const fields = {
+        style: 3, wndProc: 0x401000, classExtra: 0, windowExtra: 8, instance: 0x400000,
+        icon: 1, cursor: 2, background: 3, menuName: 0, className: 0x1234, iconSm: 9,
+    };
+    writeWindowClass(memory, 0x40, fields, L, L.WNDCLASSEXA);
+    assert.deepEqual(readWindowClass(memory, 0x40, L.WNDCLASSEXA), fields);
 });

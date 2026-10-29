@@ -91,12 +91,12 @@ const keepsStrings = (message, style)=>{
         : (style & LBS_OWNERDRAW) === 0 || (style & LBS_HASSTRINGS) !== 0;
 };
 
-/** CREATESTRUCT: the two string pointers in it, and its size. */
-const CREATESTRUCT_NAME = 36;
-const CREATESTRUCT_CLASS = 40;
-const CREATESTRUCT_SIZE = 48;
-const CREATESTRUCT_PARAMS = 0;
-const CREATESTRUCT_EXSTYLE = 44;
+/**
+ * CREATESTRUCT: the two string pointers in it, its creation parameter, its
+ * extended style and its size, at either width.
+ */
+const CREATESTRUCT32 = Object.freeze({ NAME: 36, CLASS: 40, SIZE: 48, PARAMS: 0, EXSTYLE: 44 });
+const CREATESTRUCT64 = Object.freeze({ NAME: 56, CLASS: 64, SIZE: 80, PARAMS: 0, EXSTYLE: 72 });
 const WS_EX_MDICHILD = 0x00000040;
 /** MDICREATESTRUCT: the class and title first, nine dwords in all. */
 const MDICREATESTRUCT_SIZE = 36;
@@ -114,6 +114,8 @@ const MAX_TEXT = 0x8000;
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [release]
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose CREATESTRUCT
+ *     has its pointers eight bytes wide.
  */
 
 /**
@@ -378,6 +380,10 @@ export function translated(memory, message, toUnicode, call, style = undefined){
  * @returns {{ size: number, build: (base: number) => Uint8Array }}
  */
 function createStruct(memory, address, fromUnicode, toUnicode){
+    const wide = memory.pointerSize === 8;
+    const { NAME: CREATESTRUCT_NAME, CLASS: CREATESTRUCT_CLASS, SIZE: CREATESTRUCT_SIZE,
+        PARAMS: CREATESTRUCT_PARAMS, EXSTYLE: CREATESTRUCT_EXSTYLE }
+        = wide ? CREATESTRUCT64 : CREATESTRUCT32;
     const header = memory.readMemory(address >>> 0, CREATESTRUCT_SIZE);
     const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
     const name = view.getUint32(CREATESTRUCT_NAME, true);
@@ -386,8 +392,10 @@ function createStruct(memory, address, fromUnicode, toUnicode){
     const classBytes = cls <= LAST_ATOM
         ? null : textBytes(readText(memory, cls, fromUnicode), toUnicode);
     const params = view.getUint32(CREATESTRUCT_PARAMS, true);
-    const mdi = (view.getUint32(CREATESTRUCT_EXSTYLE, true) & WS_EX_MDICHILD) !== 0 && params !== 0
-        ? memory.readMemory(params, MDICREATESTRUCT_SIZE) : null;
+    // An MDI child's MDICREATESTRUCT is copied at 32 bits only; at 64 its
+    // names reach the procedure as they were given.
+    const mdi = !wide && (view.getUint32(CREATESTRUCT_EXSTYLE, true) & WS_EX_MDICHILD) !== 0
+        && params !== 0 ? memory.readMemory(params, MDICREATESTRUCT_SIZE) : null;
     const mdiView = mdi ? new DataView(mdi.buffer, mdi.byteOffset, mdi.byteLength) : null;
     const mdiClass = mdiView ? mdiView.getUint32(0, true) : 0;
     const mdiTitle = mdiView ? mdiView.getUint32(4, true) : 0;

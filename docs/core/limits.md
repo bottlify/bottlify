@@ -7,8 +7,9 @@ differently raises a `divergence` event naming the API.
 
 - 32-bit x86 programs: a PE32 image for i386. A 64-bit (PE32+) image runs on one executor, with
   its pages below 4 GiB, as far as console programs on msvcrt or vcruntime140 go, structured and
-  C++ exceptions and floating-point arguments and results included: the structures of window
-  programs, hooks, Direct3D and OpenGL are not there yet at 64 bits (`roadmap/x64.md`).
+  C++ exceptions, floating-point arguments and results, and a window program's classes,
+  windows, messages and painting included: dialogs, MDI, hooks, Direct3D and OpenGL are not
+  there yet at 64 bits (`roadmap/x64.md`). A message's WPARAM and LPARAM keep 32 bits there.
   A structured exception there passes no `_set_se_translator` translator. A 16-bit (NE) image is
   refused when it is loaded.
 - Only user mode. There is no kernel underneath; the engine's layers answer every system call.

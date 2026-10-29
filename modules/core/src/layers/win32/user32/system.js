@@ -45,7 +45,9 @@ import {
     MONITORINFO,
     WINDOWINFO,
     WINDOWPLACEMENT,
+    putFields,
     readRect,
+    userLayouts,
     writeRect,
     writeU16,
     writeU32s,
@@ -73,8 +75,6 @@ const SWP_NOACTIVATE = 0x0010;
 const WM_CHILDACTIVATE = 0x0022;
 const WM_WINDOWPOSCHANGING = 0x0046;
 const WM_WINDOWPOSCHANGED = 0x0047;
-/** WINDOWPOS: hwnd, hwndInsertAfter, x, y, cx, cy, flags. */
-const WINDOWPOS_SIZE = 28;
 const SWP_SHOWWINDOW = 0x0040;
 const SWP_HIDEWINDOW = 0x0080;
 const SWP_FRAMECHANGED = 0x0020;
@@ -586,6 +586,8 @@ const SW_SHOWNA = 8;
 export function createSystemFunctions({ host, live, windows, classes, elsewhere = ()=>null,
     names = createWindowDirectory() })
 {
+    /** The structures at the process's width (`structs.js`). */
+    const layouts = userLayouts(host.pointerSize);
     /**
      * A window as the program is told of it: the desktop, the one window
      * here that is not the program's, as none.
@@ -904,7 +906,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const thread = caller ?? host.callerThread?.();
-        const pos = host.send && host.allocate ? host.allocate(WINDOWPOS_SIZE) : 0;
+        const { WINDOWPOS } = layouts;
+        const pos = host.send && host.allocate ? host.allocate(WINDOWPOS.SIZE) : 0;
         if (!pos)
         {
             return place(args, thread);
@@ -914,17 +917,23 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // enforces its constraints there -- and what became of it after, with
         // the client area's moving and sizing told apart, from which
         // DefWindowProc tells it WM_MOVE and WM_SIZE.
-        const struct = new Uint8Array(WINDOWPOS_SIZE);
-        const view = new DataView(struct.buffer);
-        args.slice(0, 7).forEach((value, index)=>view.setUint32(index * 4, value >>> 0, true));
-        host.writeMemory(pos, struct);
+        /** @param {number[]} values  hwnd, hwndInsertAfter, x, y, cx, cy, flags */
+        const posBytes = values=>{
+            const bytes = new Uint8Array(WINDOWPOS.SIZE);
+            const [hwnd, hwndInsertAfter, x, y, cx, cy, flags] = values;
+            putFields(new DataView(bytes.buffer), 0, layouts, WINDOWPOS,
+                { hwnd, hwndInsertAfter, x, y, cx, cy, flags });
+            return bytes;
+        };
+        host.writeMemory(pos, posBytes(args.slice(0, 7)));
         const asked = (args[6] >>> 0 & SWP_NOSENDCHANGING) !== 0 ? 0
             : host.send(record.hwnd, WM_WINDOWPOSCHANGING, 0, pos, thread);
         return andThen(asked, ()=>{
-            const given = host.readMemory(pos, WINDOWPOS_SIZE);
-            const read = new DataView(given.buffer, given.byteOffset, WINDOWPOS_SIZE);
-            const [, after, x, y, cx, cy, flags] = [0, 1, 2, 3, 4, 5, 6]
-                .map(index=>read.getInt32(index * 4, true));
+            const given = host.readMemory(pos, WINDOWPOS.SIZE);
+            const read = new DataView(given.buffer, given.byteOffset, WINDOWPOS.SIZE);
+            const [after, x, y, cx, cy, flags] = [WINDOWPOS.hwndInsertAfter, WINDOWPOS.x,
+                WINDOWPOS.y, WINDOWPOS.cx, WINDOWPOS.cy, WINDOWPOS.flags]
+                .map(offset=>read.getInt32(offset, true));
             const before = { window: host.geometry.windowRect(record),
                 client: host.geometry.clientRect(record), visible: host.shown(record) };
             // A new size or a changed frame asks the procedure where its
@@ -957,10 +966,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 {
                     return 0;
                 }
-                const told = new DataView(new ArrayBuffer(WINDOWPOS_SIZE));
-                [record.hwnd, after, record.x, record.y, record.width, record.height, final]
-                    .forEach((value, index)=>told.setUint32(index * 4, value >>> 0, true));
-                host.writeMemory(pos, new Uint8Array(told.buffer));
+                host.writeMemory(pos, posBytes([record.hwnd, after, record.x, record.y,
+                    record.width, record.height, final]));
                 return host.send(record.hwnd, WM_WINDOWPOSCHANGED, 0, pos, thread);
             };
             return andThen(calculated, ()=>andThen(place([record.hwnd, after, x, y, cx, cy, flags],
@@ -1279,6 +1286,49 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // them would be reading whatever happens to follow in our own record.
         cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
         return at >= 0 && at + 4 <= cls.extra.byteLength ? cls.extra.getUint32(at, true) : 0;
+    };
+
+    /**
+     * A pointer-sized class long of a 64-bit process: eight of the class's
+     * extra bytes whole, or a field sign-extended from its dword.
+     *
+     * @param {any} cls @param {number} index
+     * @returns {bigint}
+     */
+    const readClassLongPtr = (cls, index)=>{
+        const at = index | 0;
+        if (at >= 0)
+        {
+            cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
+            return at + 8 <= cls.extra.byteLength ? cls.extra.getBigUint64(at, true) : 0n;
+        }
+        return BigInt.asUintN(64, BigInt(readClassLong(cls, index) | 0));
+    };
+
+    /**
+     * SetClassLongPtr: answers the long it replaced.
+     *
+     * @param {number} hwnd @param {number} index @param {number} low @param {number} high
+     * @returns {bigint}
+     */
+    const setClassLongPtr = (hwnd, index, low, high)=>{
+        const cls = classOfWindow(hwnd);
+        if (!cls)
+        {
+            return 0n;
+        }
+        const previous = readClassLongPtr(cls, index);
+        const at = index | 0;
+        if (at < 0)
+        {
+            writeClassLong(cls, index, low);
+        }
+        else if (at + 8 <= cls.extra.byteLength)
+        {
+            cls.extra.setUint32(at, low >>> 0, true);
+            cls.extra.setUint32(at + 4, high >>> 0, true);
+        }
+        return previous;
     };
 
     /**
@@ -5141,6 +5191,44 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 return cls ? readClassLong(cls, index) : 0;
             },
         },
+
+        // A 64-bit user32's pointer-sized class longs: eight of the class's
+        // extra bytes whole, or a field GCLP_ names sign-extended from the
+        // dword the class keeps.
+        ...host.pointerSize === 8 ? {
+            /** ULONG_PTR GetClassLongPtrA(HWND hWnd, int nIndex) */
+            GetClassLongPtrA: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([hwnd, index])=>{
+                    const cls = classOfWindow(hwnd);
+                    return cls ? readClassLongPtr(cls, index) : 0n;
+                },
+            },
+            /** ULONG_PTR GetClassLongPtrW(HWND hWnd, int nIndex) */
+            GetClassLongPtrW: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([hwnd, index])=>{
+                    const cls = classOfWindow(hwnd);
+                    return cls ? readClassLongPtr(cls, index) : 0n;
+                },
+            },
+            /** ULONG_PTR SetClassLongPtrA(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
+            SetClassLongPtrA: {
+                argBytes: 16,
+                quadwords: [2],
+                /** @param {number[]} args */
+                handler: ([hwnd, index, low, high])=>setClassLongPtr(hwnd, index, low, high),
+            },
+            /** ULONG_PTR SetClassLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
+            SetClassLongPtrW: {
+                argBytes: 16,
+                quadwords: [2],
+                /** @param {number[]} args */
+                handler: ([hwnd, index, low, high])=>setClassLongPtr(hwnd, index, low, high),
+            },
+        } : {},
 
         /** DWORD SetClassLongA(HWND hWnd, int nIndex, LONG dwNewLong) */
         SetClassLongA: {

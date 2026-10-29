@@ -455,3 +455,37 @@ test('a routine called back returns, for an unwinder, into the code that called 
     assert.equal(made.callerOf(thread('other'), frameBase + 4), null,
         'and another thread has no such frame');
 });
+
+test('a 64-bit routine is handed a negative argument sign-extended, any other zero-extended',
+    ()=>{
+        // An LPARAM of -1 is -1 whole to the procedure, as a LONG widens; a
+        // WPARAM held unsigned, and every address, keeps a zero high half.
+        /** @type {Map<number, number>} */
+        const written = new Map();
+        /** @type {any[]} */
+        const resumed = [];
+        const made = createCallbacks({
+            cpu: { readReg32: ()=>0, bits: ()=>64 },
+            kernel: {
+                threads: ()=>[],
+                /** @param {any} who @param {any} where */
+                scheduleResume: (who, where)=>resumed.push(where),
+            },
+            memory: {
+                /** @param {number} address @param {number} value */
+                writeU32: (address, value)=>written.set(address >>> 0, value >>> 0),
+            },
+            reserveTrap: ()=>({ id: 1, address: SENTINEL }),
+        });
+        made.reserve();
+        made.placeLongCall(()=>0x9000);
+        made.call({ thread: thread('main'), entry: 0x402000,
+            args: [0x40, 0x0400, 0x80000001, -1], stackAtRest: 0x2ff000 });
+        const frameBase = resumed[0].esp;
+        /** @param {number} at */
+        const quad = at=>[written.get(frameBase + at), written.get(frameBase + at + 4)];
+        assert.deepEqual(quad(16), [0x80000001, 0], 'R8, a WPARAM');
+        assert.deepEqual(quad(24), [0xffffffff, 0xffffffff], 'R9, an LPARAM of -1');
+        assert.deepEqual(quad(0), [0x40, 0]);
+        assert.deepEqual(quad(32), [SENTINEL, 0], 'the return into the sentinel');
+    });

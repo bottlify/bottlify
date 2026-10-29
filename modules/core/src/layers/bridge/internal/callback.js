@@ -203,9 +203,11 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
      * `LONG_CALL_CODE` to pop, then the return address -- RSP eight past a
      * multiple of 16 when the routine is entered -- the four home slots, which
      * hold the first four arguments too, the rest of the arguments, and a
-     * spare quadword for the sentinel's park, as in the 32-bit frame. Every
-     * quadword's high half is zero: an argument is a dword, and every address
-     * lies below 4 GiB.
+     * spare quadword for the sentinel's park, as in the 32-bit frame. An
+     * argument is a dword widened by its sign as JavaScript holds it: a
+     * negative one -- an LPARAM of -1, a handle such as HWND_TOPMOST -- is
+     * sign-extended as a LONG is, any other zero-extended, which keeps every
+     * address below 4 GiB as it is.
      *
      * @param {number} resting @param {number[]} args
      * @returns {{ frameBase: number, extent: number }}
@@ -216,7 +218,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         /** @param {number} at @param {number} value */
         const quad = (at, value)=>{
             memory.writeU32(at, value);
-            memory.writeU32(at + 4, 0);
+            memory.writeU32(at + 4, value < 0 ? 0xffffffff : 0);
         };
         for (let index = 0; index < slots; index++)
         {

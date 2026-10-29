@@ -941,6 +941,9 @@ export function createWin32Module(){
                 }
             };
             const gdi = createGdiFunctions({
+                // GetObject's BITMAP, DIBSECTION, LOGBRUSH and EXTLOGPEN at the
+                // process's width.
+                pointerSize,
                 readMemory,
                 writeMemory,
                 fillMemory,
@@ -3002,6 +3005,9 @@ export function createWin32Module(){
                             kernel.clock.virtualTime() + delay, 0, ()=>fire()) === true;
                     },
                     dispatching,
+                    // Every structure user32 reads or writes is laid out at
+                    // the process's width (`user32/structs.js`).
+                    pointerSize,
                     // One line per message a window procedure receives, under
                     // its own category and nothing at all when nobody asked: a
                     // program's calls say what it asked, never what it was told,
@@ -3019,8 +3025,11 @@ export function createWin32Module(){
                     },
                     dispatch: (wndProc, message, thread)=>bridge.callGuest({
                         entry: wndProc,
-                        // The four arguments a window procedure declares, in order.
-                        args: [message.hwnd, message.message, message.wParam, message.lParam],
+                        // The four arguments a window procedure declares, in
+                        // order: at 64 bits a WPARAM widens as the UINT it is
+                        // kept as, an LPARAM as the LONG (`callback.js`).
+                        args: [message.hwnd >>> 0, message.message >>> 0,
+                            message.wParam >>> 0, message.lParam | 0],
                         thread,
                     }),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
