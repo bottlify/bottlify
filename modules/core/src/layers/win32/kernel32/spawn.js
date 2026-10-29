@@ -889,7 +889,15 @@ export function createSpawnFunctions(host){
                 // The same default GetCurrentProcessId falls back to.
                 if (wanted === ((host.processId ?? 0x1000) >>> 0))
                 {
-                    return CURRENT_PROCESS;
+                    // A real handle, never the pseudo-handle: a browser opens
+                    // itself to hand the handle to a child it starts, and in
+                    // the child (HANDLE)-1 would be the child. The record its
+                    // parent holds is the one every process waits on; a
+                    // process nobody started has none, and its own handle is
+                    // the pseudo-handle's object.
+                    const self = kernel.processes.find?.(wanted)
+                        ?? { kind: 'process', current: true, imagePath: host.imagePath?.() ?? '' };
+                    return kernel.handles.open('process', self);
                 }
                 // A child, or any process of the run on this thread: a crash
                 // reporter opens the client that asked it for a dump.

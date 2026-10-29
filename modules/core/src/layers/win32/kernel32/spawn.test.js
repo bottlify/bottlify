@@ -471,8 +471,9 @@ test('OpenProcess finds the program itself, its children and the run\'s other pr
     assert.notEqual(opened, 0);
     assert.notEqual(opened, child.handle, 'a handle of its own');
     assert.equal(host.kernel.handles.resolve(opened, 'process'), child);
-    assert.equal(fns.OpenProcess.handler([PROCESS_ALL_ACCESS, 0, 0x1000]), CURRENT_PROCESS,
-        'the program itself');
+    const itself = fns.OpenProcess.handler([PROCESS_ALL_ACCESS, 0, 0x1000]);
+    assert.notEqual(itself, CURRENT_PROCESS, 'the program itself, by a real handle');
+    assert.equal(host.kernel.handles.resolve(itself, 'process')?.current, true);
     assert.equal(fns.OpenProcess.handler([PROCESS_ALL_ACCESS, 0, 0x7777]), 0);
     assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER);
 
