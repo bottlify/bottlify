@@ -117,6 +117,7 @@ import { createEventLogFunctions } from './advapi32/eventlog.js';
 import { createCabinetFunctions } from './cabinet/functions.js';
 import { MSI_ORDINALS } from './msi/ordinals.js';
 import { SHLWAPI_ORDINALS } from './shlwapi/forwards.js';
+import { UNKNOWN_ORDINALS, createUnknownFunctions } from './shlwapi/unknown.js';
 import { COMPUTER_NAME } from './kernel32/drives.js';
 import { USER_NAME } from './advapi32/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
@@ -2579,7 +2580,7 @@ export function createWin32Module(){
                             .handler([hwnd, message, wParam, lParam]),
                 }),
 
-                'SHLWAPI.dll': createShlwapiFunctions({
+                'SHLWAPI.dll': { ...createShlwapiFunctions({
                     readCString, readWideString, readMemory, writeMemory,
                     setLastError: setError,
                     files: volume,
@@ -2631,6 +2632,16 @@ export function createWin32Module(){
                     },
                     divergence: config?.divergence,
                 }),
+                // The helpers over the program's own objects call their methods.
+                ...createUnknownFunctions({
+                    readMemory, writeMemory,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>heap.free(address),
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                }) },
 
                 'ADVPACK.dll': createAdvpackFunctions({
                     isAdministrator: ()=>isTokenMember(ADMINISTRATORS_SID),
@@ -3816,7 +3827,7 @@ export function createWin32Module(){
                     'MSI.dll': MSI_ORDINALS,
                     // A program of the 9x era imports shlwapi's wide-character
                     // wrappers by number alone.
-                    'SHLWAPI.dll': SHLWAPI_ORDINALS,
+                    'SHLWAPI.dll': { ...SHLWAPI_ORDINALS, ...UNKNOWN_ORDINALS },
                     'SHELL32.dll': SHELL32_ORDINALS,
                     'DPLAYX.dll': DPLAYX_ORDINALS,
                 }),
