@@ -113,6 +113,8 @@ import { createDbghelpFunctions } from './dbghelp/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createDhcpFunctions, createWinhttpFunctions } from './winhttp/functions.js';
 import { createCombaseFunctions } from './combase/functions.js';
+import { createDwmapiFunctions, createSessionInformationFunctions, createShcoreFunctions }
+    from './display/functions.js';
 import { createImageCertificateFunctions } from './dbghelp/image-certificates.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
@@ -420,6 +422,19 @@ export function createWin32Module(){
             const namedObjects = system?.objects
                 ? createRemoteNamedObjects({ objects: system.objects, kernel })
                 : createNamedObjects({ table: system?.namedObjects });
+            /** @type {import('./display/functions.js').DisplayHost} */
+            const displayHost = {
+                readMemory: (address, length)=>readMemory(address, length),
+                writeMemory: (address, bytes)=>writeMemory(address, bytes),
+                setLastError: code=>setError(code),
+                windowRect: (hwnd, out)=>libraries['USER32.dll'].GetWindowRect
+                    .handler([hwnd, out]) >>> 0,
+                allocate: bytes=>libraries['KERNEL32.dll'].LocalAlloc
+                    .handler([0x40, bytes]) >>> 0,
+                free: address=>void libraries['KERNEL32.dll'].LocalFree.handler([address]),
+                userName: USER_NAME,
+                computerName: COMPUTER_NAME,
+            };
             // This process's views of sections, by address: mapping.js keeps
             // them, VirtualQuery answers them as the regions they are.
             /** @type {Map<number, { length: number, writable: boolean }>} */
@@ -3102,7 +3117,9 @@ export function createWin32Module(){
                 }),
 
                 'POWRPROF.dll': createPowrprofFunctions({ writeMemory, setLastError: setError,
-                    processors: processors.count(), mhz: config?.processorMhz ?? PROCESSOR.mhz }),
+                    processors: processors.count(), mhz: config?.processorMhz ?? PROCESSOR.mhz,
+                    localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
+                        .handler([0x40, bytes]) >>> 0 }),
                 'pdh.dll': createPdhFunctions({ writeMemory }),
                 // CNG's generator, where a program built for Vista on takes its seeds.
                 'bcrypt.dll': createBcryptFunctions({ writeMemory, readMemory }),
@@ -3487,7 +3504,12 @@ export function createWin32Module(){
                 // for its online modes: none of them on this machine.
                 'NETAPI32.dll': createNetbiosFunctions({ readMemory, writeMemory }),
                 'TAPI32.dll': createTelephonyFunctions({ readMemory, writeMemory }),
-                'WTSAPI32.dll': createSessionNotificationFunctions(),
+                'WTSAPI32.dll': { ...createSessionNotificationFunctions(),
+                    ...createSessionInformationFunctions(displayHost) },
+                // A monitor's DPI and the process's awareness, and the window
+                // manager's attributes: one 96-DPI display, composition on.
+                'SHCORE.dll': createShcoreFunctions(displayHost),
+                'dwmapi.dll': createDwmapiFunctions(displayHost),
                 'USERENV.dll': createUserenvFunctions({
                     block: ()=>libraries['KERNEL32.dll'].GetEnvironmentStringsW.handler([]),
                     free: block=>libraries['KERNEL32.dll'].FreeEnvironmentStringsW

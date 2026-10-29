@@ -3237,6 +3237,22 @@ test('a power or suspend registration is a handle nothing uses, taken back once'
     assert.equal(fns.UnregisterPowerSettingNotification.handler([setting]), 1);
 });
 
+test('a desktop with no pens or touch, no display configuration database, at 96 DPI', ()=>{
+    const { fns, memory } = setup();
+    assert.equal(fns.IsProcessDPIAware.handler([]), 0);
+    assert.equal(fns.SetProcessDPIAware.handler([]), 1);
+    assert.equal(fns.IsProcessDPIAware.handler([]), 1);
+    memory.putU32s(0x7000, [8, 0xdead]);
+    assert.equal(fns.GetLastInputInfo.handler([0x7000]), 1);
+    assert.equal(memory.u32(0x7004), 0);
+    memory.putU32s(0x7000, [7]);
+    assert.equal(fns.GetLastInputInfo.handler([0x7000]), 0, 'a LASTINPUTINFO of another size');
+    memory.putU32s(0x7010, [5]);
+    assert.equal(fns.GetPointerDevices.handler([0x7010, 0]), 1);
+    assert.equal(memory.u32(0x7010), 0);
+    assert.equal(fns.GetDisplayConfigBufferSizes.handler([2, 0x7020, 0x7024]), 50);
+});
+
 test('a device-change registration is a handle, taken back once and not twice', ()=>{
     const { fns, errors } = setup();
     assert.equal(fns.RegisterDeviceNotificationA.argBytes, 12);

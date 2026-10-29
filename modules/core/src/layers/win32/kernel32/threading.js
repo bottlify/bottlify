@@ -1304,6 +1304,21 @@ export function createThreadingFunctions(host){
         OpenWaitableTimerW: openWaitableTimer.wide,
 
         /**
+         * BOOL CompareObjectHandles(HANDLE hFirstObjectHandle, HANDLE hSecondObjectHandle)
+         *
+         * Whether two handles name one kernel object; a handle that names
+         * none is not the same as anything.
+         */
+        CompareObjectHandles: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, second])=>{
+                const one = object(first >>> 0);
+                return one && one === object(second >>> 0) ? 1 : 0;
+            },
+        },
+
+        /**
          * BOOL DuplicateHandle(HANDLE hSourceProcessHandle, HANDLE hSourceHandle,
          *   HANDLE hTargetProcessHandle, LPHANDLE lpTargetHandle,
          *   DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwOptions)

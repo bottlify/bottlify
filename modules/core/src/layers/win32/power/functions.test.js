@@ -55,3 +55,19 @@ test('a pdh query opens and closes, and finds no counter to add or collect', ()=
     assert.equal(m.pdh.PdhCloseQuery.handler([query]), 0xc0000bbc);
     assert.equal(m.pdh.PdhCollectQueryData.handler([query]), 0xc0000bbc);
 });
+
+test('the platform is a desktop on the Balanced scheme, which keeps no settings to read', ()=>{
+    const memory = new Uint8Array(0x1000);
+    const fns = createPowrprofFunctions({
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        setLastError: ()=>{},
+        processors: 1,
+        mhz: 2000,
+        localAlloc: ()=>0x800,
+    });
+    assert.equal(fns.PowerDeterminePlatformRoleEx.handler(), 1);
+    assert.equal(fns.PowerGetActiveScheme.handler([0, 0x100]), 0);
+    assert.equal(new DataView(memory.buffer).getUint32(0x100, true), 0x800);
+    assert.equal(new DataView(memory.buffer).getUint32(0x800, true), 0x381b4222);
+    assert.equal(fns.PowerReadACValue.handler(), 2);
+});

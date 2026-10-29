@@ -306,6 +306,7 @@ const VK_DECIMAL = 0x6e;
 const VK_DELETE = 0x2e;
 const WM_MOUSEMOVE = 0x0200;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_NOT_SUPPORTED = 50;
 /** The ids of the system's cursors SetSystemCursor replaces (OCR_NORMAL to OCR_APPSTARTING). */
 const SYSTEM_CURSOR_IDS = Object.freeze([32512, 32513, 32514, 32515, 32516, 32640, 32641, 32642,
     32643, 32644, 32645, 32646, 32648, 32649, 32650]);
@@ -2498,6 +2499,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         }
         return (wide ? writeWideString : writeString)(out >>> 0, record.className, room);
     };
+
+    /** Whether the process said it is DPI-aware. */
+    let dpiAware = false;
 
     /** A power notification's handle let go. @param {number} handle */
     const unregisterPower = handle=>{
@@ -4770,6 +4774,81 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 return 1;
             },
         },
+
+        /**
+         * BOOL SetProcessDPIAware(void), BOOL IsProcessDPIAware(void)
+         *
+         * The one display is at 96 DPI, so an aware process and an unaware one
+         * see the same pixels; whether it said so is kept.
+         */
+        SetProcessDPIAware: {
+            argBytes: 0,
+            handler: ()=>{
+                dpiAware = true;
+                return 1;
+            },
+        },
+        IsProcessDPIAware: { argBytes: 0, handler: ()=>(dpiAware ? 1 : 0) },
+
+        /**
+         * BOOL GetLastInputInfo(PLASTINPUTINFO plii): cbSize, then dwTime, the
+         * tick count of the last input -- nobody's input is counted apart
+         * here, so the start of the run.
+         */
+        GetLastInputInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([info])=>{
+                if ((info >>> 0) === 0
+                    || new DataView(host.readMemory(info >>> 0, 4).slice().buffer)
+                        .getUint32(0, true) !== 8)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeU32s(host, (info >>> 0) + 4, [0]);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetPointerDevices(UINT32 *deviceCount, POINTER_DEVICE_INFO *pointerDevices)
+         *
+         * No pen and no touch screen: the mouse is not a pointer device in
+         * this sense, so none are listed.
+         */
+        GetPointerDevices: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([count])=>{
+                if ((count >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeU32s(host, count >>> 0, [0]);
+                return 1;
+            },
+        },
+
+        /** BOOL RegisterPointerDeviceNotifications(HWND window, BOOL notifyRange): none ever come. */
+        RegisterPointerDeviceNotifications: { argBytes: 8, handler: ()=>1 },
+
+        /** DWORD GetGuiResources(HANDLE hProcess, DWORD uiFlags): not counted here. */
+        GetGuiResources: { argBytes: 8, handler: ()=>0 },
+
+        /**
+         * LONG GetDisplayConfigBufferSizes(UINT32 flags, UINT32 *numPathArrayElements,
+         *     UINT32 *numModeInfoArrayElements), and QueryDisplayConfig and
+         *     DisplayConfigGetDeviceInfo
+         *
+         * The display configuration database is not kept: ERROR_NOT_SUPPORTED,
+         * the answer of a driver without it, and a caller falls back to
+         * EnumDisplayDevices and EnumDisplaySettings.
+         */
+        GetDisplayConfigBufferSizes: { argBytes: 12, handler: ()=>ERROR_NOT_SUPPORTED },
+        QueryDisplayConfig: { argBytes: 24, handler: ()=>ERROR_NOT_SUPPORTED },
+        DisplayConfigGetDeviceInfo: { argBytes: 4, handler: ()=>ERROR_NOT_SUPPORTED },
 
         /**
          * HPOWERNOTIFY RegisterPowerSettingNotification(HANDLE hRecipient,

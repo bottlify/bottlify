@@ -1209,6 +1209,16 @@ test('GetModuleHandleEx takes a reference unless told not to, and finds a module
         assert.equal(fns.GetModuleHandleExW.argBytes, 12);
     });
 
+test('the unbiased interrupt time is the uptime in 100-nanosecond units', ()=>{
+    const { host, fns, u64 } = setup();
+    host.clock.uptimeMs = 1500;
+    assert.equal(fns.QueryUnbiasedInterruptTime.handler([0x400]), 1);
+    assert.equal(u64(0x400), 15_000_000n);
+    assert.equal(fns.QueryUnbiasedInterruptTime.handler([0]), 0);
+    fns.QueryUnbiasedInterruptTimePrecise.handler([0x408]);
+    assert.equal(u64(0x408), 15_000_000n);
+});
+
 test('the power status is a desktop on mains power, with no battery', ()=>{
     const { host, fns } = setup();
     assert.equal(fns.GetSystemPowerStatus.handler([0x800]), 1);

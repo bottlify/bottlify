@@ -41,7 +41,17 @@ const PDH_NO_DATA = 0x800007d5;
  * @property {(code: number) => void} setLastError
  * @property {number} processors  How many processors the process is told of.
  * @property {number} mhz  Their speed, as the registry's `~MHz` says it.
+ * @property {(bytes: number) => number} [localAlloc]  LPTR memory the caller LocalFrees
  */
+
+/** The Balanced scheme's GUID, {381b4222-f694-41f0-9685-ff5bb260df2e}, as its bytes. */
+const BALANCED = Uint8Array.of(0x22, 0x42, 0x1b, 0x38, 0x94, 0xf6, 0xf0, 0x41,
+    0x96, 0x85, 0xff, 0x5b, 0xb2, 0x60, 0xdf, 0x2e);
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** POWER_PLATFORM_ROLE's PlatformRoleDesktop. */
+const PLATFORM_ROLE_DESKTOP = 1;
 
 /** @param {number} value */
 const dword = value=>{
@@ -63,6 +73,45 @@ export function createPowrprofFunctions(host){
     });
 
     return {
+        /** POWER_PLATFORM_ROLE PowerDeterminePlatformRoleEx(ULONG Version): a desktop. */
+        PowerDeterminePlatformRoleEx: { argBytes: 4, handler: ()=>PLATFORM_ROLE_DESKTOP },
+        PowerDeterminePlatformRole: { argBytes: 0, handler: ()=>PLATFORM_ROLE_DESKTOP },
+
+        /**
+         * DWORD PowerGetActiveScheme(HKEY UserRootPowerKey, GUID **ActivePolicyGuid)
+         *
+         * Balanced, the one scheme, in a block the caller LocalFrees.
+         */
+        PowerGetActiveScheme: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const block = host.localAlloc?.(16) ?? 0;
+                if (block === 0)
+                {
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                }
+                host.writeMemory(block, BALANCED);
+                host.writeMemory(out >>> 0, dword(block));
+                return ERROR_SUCCESS;
+            },
+        },
+
+        /**
+         * DWORD PowerReadACValue(HKEY, const GUID *Scheme, const GUID *SubGroup,
+         *     const GUID *Setting, PULONG Type, LPBYTE Buffer, LPDWORD BufferSize),
+         *     PowerReadDCValue alike
+         *
+         * The scheme keeps no settings to read: ERROR_FILE_NOT_FOUND, as for a
+         * setting the scheme does not have.
+         */
+        PowerReadACValue: { argBytes: 28, handler: ()=>ERROR_FILE_NOT_FOUND },
+        PowerReadDCValue: { argBytes: 28, handler: ()=>ERROR_FILE_NOT_FOUND },
+
         /** BOOLEAN GetActivePwrScheme(PUINT puiID): scheme 0, the only one. */
         GetActivePwrScheme: {
             argBytes: 4,

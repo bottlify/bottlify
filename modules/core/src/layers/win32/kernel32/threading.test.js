@@ -1695,3 +1695,14 @@ test('GetMappedFileName names an image in its volume\'s device, and nothing else
     assert.equal(fns.K32GetMappedFileNameW.handler([0x44, 0x401234, 0x3000, 260]), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
 });
+
+test('CompareObjectHandles says whether two handles name one object', ()=>{
+    const { fns, written } = setup();
+    const event = fns.CreateEventA.handler([0, 1, 0, 0]);
+    fns.DuplicateHandle.handler([0xffffffff, event, 0xffffffff, 0x300, 0, 0, 2]);
+    const copy = writtenU32(written, 0x300);
+    const other = fns.CreateEventA.handler([0, 1, 0, 0]);
+    assert.equal(fns.CompareObjectHandles.handler([event, copy]), 1);
+    assert.equal(fns.CompareObjectHandles.handler([event, other]), 0);
+    assert.equal(fns.CompareObjectHandles.handler([0x9999, 0x9999]), 0, 'no object at all');
+});

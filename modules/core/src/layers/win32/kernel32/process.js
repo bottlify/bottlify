@@ -1456,6 +1456,36 @@ export function createProcessFunctions(host){
             ...clockGuest('counter'),
         },
 
+        /**
+         * BOOL QueryUnbiasedInterruptTime(PULONGLONG), and the Precise form
+         * (which returns nothing): the time since boot in 100-nanosecond
+         * units, with no suspended time to leave out -- this machine is never
+         * suspended.
+         */
+        QueryUnbiasedInterruptTime: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeU64(pointer >>> 0, BigInt(Math.floor(host.now() * 10_000)));
+                return 1;
+            },
+        },
+        QueryUnbiasedInterruptTimePrecise: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) !== 0)
+                {
+                    writeU64(pointer >>> 0, BigInt(Math.floor(host.now() * 10_000)));
+                }
+                return 0;
+            },
+        },
+
         /** BOOL QueryPerformanceFrequency(LARGE_INTEGER *lpFrequency) */
         QueryPerformanceFrequency: {
             argBytes: 4,

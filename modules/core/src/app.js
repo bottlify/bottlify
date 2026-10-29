@@ -1410,6 +1410,8 @@ const API_SETS = [
     [/^api-ms-win-crt-[a-z0-9-]+$/, 'ucrtbase'],
     [/^api-ms-win-(core-(localregistry|registry)|eventing|security)-[a-z0-9-]+$/, 'advapi32'],
     [/^api-ms-win-core-winrt-[a-z0-9-]+$/, 'combase'],
+    [/^api-ms-win-shcore-[a-z0-9-]+$/, 'shcore'],
+    [/^api-ms-win-power-[a-z0-9-]+$/, 'powrprof'],
     [/^api-ms-win-core-(?!winrt|com-)[a-z0-9-]+$/, 'kernel32'],
 ];
 
