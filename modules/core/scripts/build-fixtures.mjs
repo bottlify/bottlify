@@ -127,7 +127,17 @@ const IMPORTS = {
     'GDI32.dll': {
         undecorated: ['CreateSolidBrush@4', 'CreatePen@12', 'SelectObject@8', 'DeleteObject@4',
             'Rectangle@20', 'TextOutA@20', 'GetPixel@12', 'GetObjectA@12',
-            'CreateDIBSection@24'],
+            'CreateDIBSection@24', 'ChoosePixelFormat@8', 'SetPixelFormat@12', 'SwapBuffers@4'],
+    },
+    'OPENGL32.dll': {
+        undecorated: [
+            'wglCreateContext@4', 'wglMakeCurrent@8', 'wglDeleteContext@4',
+            'wglGetProcAddress@4', 'glGetString@4', 'glClearColor@16', 'glClear@4',
+            'glViewport@16', 'glMatrixMode@4', 'glLoadIdentity@0', 'glOrtho@48',
+            'glTranslated@24', 'glDepthRange@16', 'glLineWidth@4', 'glGetFloatv@8',
+            'glGetDoublev@8', 'glVertexPointer@16', 'glGetPointerv@8', 'glBegin@4', 'glEnd@0',
+            'glColor3f@12', 'glVertex2f@8', 'glFlush@0', 'glGetError@0',
+        ],
     },
     'D3D9.dll': {
         undecorated: ['Direct3DCreate9@4'],
@@ -193,6 +203,8 @@ const PROGRAMS = [
     { name: 'float64', source: 'float64.c', cxx: false, x64: true },
     { name: 'window64', source: 'window64.c', cxx: false, x64: true },
     { name: 'hook64', source: 'hook64.c', cxx: false, x64: true },
+    { name: 'd3d9_64', source: 'd3d9_64.c', cxx: false, x64: true },
+    { name: 'gl64', source: 'gl64.c', cxx: false, x64: true },
     { name: 'cxxeh64', source: 'cxxeh64.cpp', cxx: true, x64: true,
         guestHandler: 'via_guest_handler' },
     { name: 'cxxeh64fh4', source: 'cxxeh64.cpp', cxx: true, x64: true, fh4: true,

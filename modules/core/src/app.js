@@ -4567,6 +4567,17 @@ async function buildApp(options){
             // build composes below -- the device, the presenter, the screen --
             // is the run's and wins over a caller's value of the same name.
             ...options.graphics,
+            // A 64-bit process's structures, and none of the layer's i386 code.
+            ...long ? {
+                pointerSize: 8,
+                // A float a method answers goes to XMM0 at 64 bits, which the
+                // bridge leaves as the handler set it.
+                floatResult: (/** @type {number} */ value)=>{
+                    const bits = new DataView(new ArrayBuffer(4));
+                    bits.setFloat32(0, value, true);
+                    core.api('cpu').writeXmm(0, Uint32Array.of(bits.getUint32(0, true), 0, 0, 0));
+                },
+            } : {},
             choice: options.graphicsApi,
             // Whose frames this machine's devices present: the run's screen
             // is composed of every process's picture by its windows.

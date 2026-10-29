@@ -30,7 +30,8 @@
 import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
 import { fpuSetupCode } from './fpu.js';
 import {
-    D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, lockRectInto, D3DPRESENT_PARAMETERS9,
+    D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, D3DLOCKED_BOX64, D3DLOCKED_RECT,
+    D3DLOCKED_RECT64, lockRectInto, D3DPRESENT_PARAMETERS9, D3DPRESENT_PARAMETERS9_64,
     POINT, RECT, createFields, createLightReader, dwordsOf, floatsOf, intsOf, putLight, putMaterial,
 } from './structs.js';
 import {
@@ -56,7 +57,8 @@ import {
     D3DVIEWPORT9, D3DVOLUME_DESC9,
 } from '../d3d9/structs.js';
 import {
-    ADAPTER_STRING_LENGTH, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
+    ADAPTER_STRING_LENGTH, D3DDEVICE_CREATION_PARAMETERS, D3DDEVICE_CREATION_PARAMETERS64,
+    D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES,
 } from '../d3d8/structs.js';
 import { D3DFMT_INDEX, D3DFMT, D3DPOOL, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
@@ -204,13 +206,17 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     their own for those setters' code, which no slice ends inside unless `unbroken`
  *     is false.
  * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
+ * @param {4 | 8} [deps.pointerSize]  8 for a 64-bit process, whose structures lay out a
+ *     pointer or a handle in eight bytes and whose out parameters take one whole.
+ * @param {(value: number) => void} [deps.floatResult]  Sets a float a method answers
+ *     where its caller reads it, when that is not EAX: XMM0 in a 64-bit process.
  */
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
         windowClientSize, gdi, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         allocate, allocateCode, ringBytes,
-        traps = new Set(), phases },
+        traps = new Set(), phases, pointerSize = 4, floatResult },
 )
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
@@ -231,6 +237,27 @@ export function createDirect3D9Seam(
     /** @param {string} name */
     const deviceGroup = name=>(GUEST_GETTERS.has(name) ? 'getters' : 'ring');
     const fields = createFields(memory);
+    const long = pointerSize === 8;
+    /**
+     * An interface, an address or a handle written to an out parameter: in a
+     * 64-bit process the parameter is eight bytes and its high half is
+     * written too, as zero -- whatever the program left there would otherwise
+     * make the pointer it reads back another one.
+     *
+     * @param {number} address @param {number} value
+     */
+    const writePointer = (address, value)=>{
+        fields.writeU32(address, value);
+        if (long)
+        {
+            fields.writeU32((address >>> 0) + 4, 0);
+        }
+    };
+    const PRESENT_PARAMETERS = long ? D3DPRESENT_PARAMETERS9_64 : D3DPRESENT_PARAMETERS9;
+    const CREATION_PARAMETERS = long ? D3DDEVICE_CREATION_PARAMETERS64
+        : D3DDEVICE_CREATION_PARAMETERS;
+    const LOCKED_RECT = long ? D3DLOCKED_RECT64 : D3DLOCKED_RECT;
+    const LOCKED_BOX = long ? D3DLOCKED_BOX64 : D3DLOCKED_BOX;
     const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
     /**
      * The rate of the mode the device runs in: the one a full-screen device
@@ -316,7 +343,7 @@ export function createDirect3D9Seam(
     const clearAndRefuse = (out, hr)=>{
         if ((out >>> 0) !== 0)
         {
-            fields.writeU32(out >>> 0, 0);
+            writePointer(out >>> 0, 0);
         }
         return hr;
     };
@@ -359,7 +386,7 @@ export function createDirect3D9Seam(
             }
         }
         const pointer = publisher.publish(object, interfaces, id);
-        fields.writeU32(out, pointer);
+        writePointer(out, pointer);
         return pointer === 0 ? failure : D3D_OK;
     };
 
@@ -432,7 +459,7 @@ export function createDirect3D9Seam(
             return D3DERR_INVALIDCALL;
         }
         device.addRef();
-        fields.writeU32(out >>> 0,
+        writePointer(out >>> 0,
             publisher.publish(device, deviceInterfaces, IID_IDirect3DDevice9));
         return D3D_OK;
     };
@@ -713,7 +740,7 @@ export function createDirect3D9Seam(
         /** @param {any} surface @param {number[]} args */
         LockRect: (surface, [out, rect, flags])=>noteLevel(surface, null, true,
             lockRectInto(fields, out, locked=>surface.LockRect(locked, readRect(rect),
-                flags >>> 0))),
+                flags >>> 0), LOCKED_RECT)),
         /** @param {any} surface */
         UnlockRect: surface=>noteLevel(surface, null, false, surface.UnlockRect()),
         /** @param {any} surface @param {number[]} args */
@@ -728,7 +755,7 @@ export function createDirect3D9Seam(
             const answer = hr=>{
                 if (hr === D3D_OK)
                 {
-                    fields.writeU32(out >>> 0, held.dc ?? 0);
+                    writePointer(out >>> 0, held.dc ?? 0);
                     // Every level's lock is the host's while it is held.
                     shadowOf(owners.get(surface) ?? owners.get(surface.container))
                         ?.familyBusy(surface.container ?? surface, true);
@@ -875,7 +902,7 @@ export function createDirect3D9Seam(
         /** @param {any} texture @param {number[]} args */
         LockRect: (texture, [level, out, rect, flags])=>noteLevel(texture, level >>> 0, true,
             lockRectInto(fields, out, locked=>texture.LockRect(level >>> 0, locked,
-                readRect(rect), flags >>> 0))),
+                readRect(rect), flags >>> 0), LOCKED_RECT)),
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [level])=>noteLevel(texture, level >>> 0, false,
             texture.UnlockRect(level >>> 0)),
@@ -906,7 +933,7 @@ export function createDirect3D9Seam(
         /** @param {any} texture @param {number[]} args */
         LockRect: (texture, [face, level, out, rect, flags])=>lockRectInto(fields, out,
             locked=>texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
-                flags >>> 0)),
+                flags >>> 0), LOCKED_RECT),
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
         /** @param {any} texture @param {number[]} args */
@@ -967,11 +994,11 @@ export function createDirect3D9Seam(
         }
         if (hr === D3D_OK)
         {
-            fields.writeStruct(out >>> 0, D3DLOCKED_BOX, locked);
+            fields.writeStruct(out >>> 0, LOCKED_BOX, long ? { ...locked, pBitsHigh: 0 } : locked);
         }
         else
         {
-            fields.writeU32((out >>> 0) + D3DLOCKED_BOX.pBits, 0);
+            writePointer((out >>> 0) + LOCKED_BOX.pBits, 0);
         }
         return hr;
     };
@@ -1086,7 +1113,7 @@ export function createDirect3D9Seam(
             {
                 // Cleared on a refusal: a program that reads the pointer
                 // rather than the result writes through whatever was there.
-                fields.writeU32(out >>> 0, hr === D3D_OK ? locked.pBits ?? 0 : 0);
+                writePointer(out >>> 0, hr === D3D_OK ? locked.pBits ?? 0 : 0);
             }
             return hr;
         },
@@ -1608,7 +1635,7 @@ export function createDirect3D9Seam(
                 // The object that made the device, as it was made: one made by
                 // Direct3DCreate9Ex is handed back as its IDirect3D9Ex, whose
                 // table begins with IDirect3D9's, as Windows hands it back.
-                fields.writeU32(out >>> 0, exRoots.has(held.direct3D)
+                writePointer(out >>> 0, exRoots.has(held.direct3D)
                     ? publisher.publish(held.direct3D, rootExInterfaces, IID_IDirect3D9Ex)
                     : publisher.publish(held.direct3D, rootInterfaces, IID_IDirect3D9));
             }
@@ -1652,7 +1679,8 @@ export function createDirect3D9Seam(
             const hr = device.GetCreationParameters(held);
             if (hr === D3D_OK && held.parameters)
             {
-                fields.writeStruct(out >>> 0, D3DDEVICE_CREATION_PARAMETERS, held.parameters);
+                fields.writeStruct(out >>> 0, CREATION_PARAMETERS,
+                    long ? { ...held.parameters, hFocusWindowHigh: 0 } : held.parameters);
             }
             return hr;
         },
@@ -1702,7 +1730,7 @@ export function createDirect3D9Seam(
                 held);
             if (hr !== D3D_OK || !held.swapChain)
             {
-                fields.writeU32(out >>> 0, 0);
+                writePointer(out >>> 0, 0);
                 return hr;
             }
             writePresentParameters(parameters >>> 0, wanted);
@@ -1726,7 +1754,7 @@ export function createDirect3D9Seam(
                 return handBack(held.swapChain, chainInterfacesOf(device), IID_IDirect3DSwapChain9,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
-            fields.writeU32(out >>> 0, 0);
+            writePointer(out >>> 0, 0);
             return hr;
         },
         /** @param {any} device */
@@ -1797,7 +1825,7 @@ export function createDirect3D9Seam(
             // A refusal clears the pointer (Wine's d3d9 test_swapchain).
             if (hr !== D3D_OK && (out >>> 0) !== 0)
             {
-                fields.writeU32(out >>> 0, 0);
+                writePointer(out >>> 0, 0);
             }
             return hr;
         },
@@ -2090,7 +2118,7 @@ export function createDirect3D9Seam(
             // Cleared when there is nothing to hand back: this call is how a
             // program asks whether the device has a depth buffer, and it
             // tests the pointer rather than the HRESULT.
-            fields.writeU32(out >>> 0, 0);
+            writePointer(out >>> 0, 0);
             return hr;
         },
 
@@ -2365,7 +2393,7 @@ export function createDirect3D9Seam(
                 // Written whichever way it went: a stage with nothing bound
                 // answers a null pointer rather than leaving the caller's
                 // variable holding the texture it last read.
-                fields.writeU32(out >>> 0, held.texture
+                writePointer(out >>> 0, held.texture
                     ? publisher.publish(held.texture, textureInterfacesFor(held.texture),
                         textureInterfacesFor(held.texture)[0].id)
                     : 0);
@@ -2502,9 +2530,15 @@ export function createDirect3D9Seam(
         // register and not in EAX; the bridge returns EAX. The value a program
         // reads is therefore not the one kept, and the call is reported so a
         // run knows -- a program that reads this is rare, and one that acts on
-        // it rarer, since the capability block claims no patches.
+        // it rarer, since the capability block claims no patches. A 64-bit
+        // caller reads XMM0, which is set.
         /** @param {any} device */
         GetNPatchMode: (/** @type {any} */ device)=>{
+            if (floatResult)
+            {
+                floatResult(device.GetNPatchMode());
+                return 0;
+            }
             divergence?.('Direct3D 9', 'GetNPatchMode returns a float in ST(0), which this'
                 + ' seam cannot set; the caller reads an unrelated value');
             return device.GetNPatchMode() | 0;
@@ -2588,7 +2622,7 @@ export function createDirect3D9Seam(
                 {
                     owners.set(held.declaration, device);
                 }
-                fields.writeU32(out >>> 0, held.declaration
+                writePointer(out >>> 0, held.declaration
                     ? publisher.publish(held.declaration, declarationInterfaces,
                         IID_IDirect3DVertexDeclaration9)
                     : 0);
@@ -2630,7 +2664,7 @@ export function createDirect3D9Seam(
                 return handBack(held.shader, vertexShaderInterfaces, IID_IDirect3DVertexShader9,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
-            fields.writeU32(out >>> 0, 0);
+            writePointer(out >>> 0, 0);
             return hr;
         },
         /** @param {any} device @param {number[]} args */
@@ -2646,7 +2680,7 @@ export function createDirect3D9Seam(
             const hr = device.GetVertexShader(held);
             if (hr === D3D_OK)
             {
-                fields.writeU32(out >>> 0, held.shader
+                writePointer(out >>> 0, held.shader
                     ? publisher.publish(held.shader, vertexShaderInterfaces,
                         IID_IDirect3DVertexShader9)
                     : 0);
@@ -2674,7 +2708,7 @@ export function createDirect3D9Seam(
                 return handBack(held.shader, pixelShaderInterfaces, IID_IDirect3DPixelShader9,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
-            fields.writeU32(out >>> 0, 0);
+            writePointer(out >>> 0, 0);
             return hr;
         },
         /** @param {any} device @param {number[]} args */
@@ -2690,7 +2724,7 @@ export function createDirect3D9Seam(
             const hr = device.GetPixelShader(held);
             if (hr === D3D_OK)
             {
-                fields.writeU32(out >>> 0, held.shader
+                writePointer(out >>> 0, held.shader
                     ? publisher.publish(held.shader, pixelShaderInterfaces,
                         IID_IDirect3DPixelShader9)
                     : 0);
@@ -2721,7 +2755,7 @@ export function createDirect3D9Seam(
             const hr = device.GetStreamSource(index >>> 0, held);
             if (hr === D3D_OK)
             {
-                fields.writeU32(out >>> 0, held.buffer
+                writePointer(out >>> 0, held.buffer
                     ? publisher.publish(held.buffer, vertexBufferInterfaces,
                         IID_IDirect3DVertexBuffer9)
                     : 0);
@@ -2769,7 +2803,7 @@ export function createDirect3D9Seam(
             const hr = device.GetIndices(held);
             if (hr === D3D_OK)
             {
-                fields.writeU32(out >>> 0, held.buffer
+                writePointer(out >>> 0, held.buffer
                     ? publisher.publish(held.buffer, indexBufferInterfaces,
                         IID_IDirect3DIndexBuffer9)
                     : 0);
@@ -3001,7 +3035,7 @@ export function createDirect3D9Seam(
      * @param {number} parameters @param {number} mode
      */
     const modeFits = (parameters, mode)=>{
-        const raw = fields.readStruct(parameters, D3DPRESENT_PARAMETERS9);
+        const raw = fields.readStruct(parameters, PRESENT_PARAMETERS);
         if (raw.Windowed !== 0)
         {
             return mode === 0;
@@ -3024,7 +3058,7 @@ export function createDirect3D9Seam(
      *        previous device was made into.
      */
     const readPresentParameters = (address, window = 0)=>{
-        const raw = fields.readStruct(address, D3DPRESENT_PARAMETERS9);
+        const raw = fields.readStruct(address, PRESENT_PARAMETERS);
         const display = screen();
         // A size asked for as zero by zero means the device window's client
         // area, which is what the real device answers and what the program's
@@ -3074,7 +3108,7 @@ export function createDirect3D9Seam(
      * @param {number} address
      */
     const fullScreenUnlikeAnyMode = address=>{
-        const raw = fields.readStruct(address, D3DPRESENT_PARAMETERS9);
+        const raw = fields.readStruct(address, PRESENT_PARAMETERS);
         if (raw.Windowed !== 0)
         {
             return false;
@@ -3091,7 +3125,7 @@ export function createDirect3D9Seam(
      * @param {number} address @param {any} parameters
      */
     const writePresentParameters = (address, parameters)=>{
-        fields.writeStruct(address, D3DPRESENT_PARAMETERS9, {
+        fields.writeStruct(address, PRESENT_PARAMETERS, {
             BackBufferWidth: parameters.backBufferWidth,
             BackBufferHeight: parameters.backBufferHeight,
             BackBufferFormat: parameters.backBufferFormat,
@@ -3101,7 +3135,7 @@ export function createDirect3D9Seam(
 
     /** @param {number} address @param {any} parameters */
     const writeAllPresentParameters = (address, parameters)=>{
-        fields.writeStruct(address, D3DPRESENT_PARAMETERS9, {
+        fields.writeStruct(address, PRESENT_PARAMETERS, {
             BackBufferWidth: parameters.backBufferWidth ?? 0,
             BackBufferHeight: parameters.backBufferHeight ?? 0,
             BackBufferFormat: parameters.backBufferFormat ?? 0,
@@ -3110,6 +3144,7 @@ export function createDirect3D9Seam(
             MultiSampleQuality: 0,
             SwapEffect: parameters.swapEffect ?? 0,
             hDeviceWindow: parameters.hDeviceWindow ?? 0,
+            ...long ? { hDeviceWindowHigh: 0 } : {},
             Windowed: parameters.windowed === false ? 0 : 1,
             EnableAutoDepthStencil: parameters.enableAutoDepthStencil ? 1 : 0,
             AutoDepthStencilFormat: parameters.autoDepthStencilFormat ?? 0,
@@ -3300,12 +3335,12 @@ export function createDirect3D9Seam(
             || (parameters >>> 0) === 0
             || processing === 0 || (processing & (processing - 1)) !== 0)
         {
-            fields.writeU32(out >>> 0, 0);
+            writePointer(out >>> 0, 0);
             return D3DERR_INVALIDCALL;
         }
         if (fullScreenUnlikeAnyMode(parameters >>> 0))
         {
-            fields.writeU32(out >>> 0, 0);
+            writePointer(out >>> 0, 0);
             return D3DERR_INVALIDCALL;
         }
         const wanted = readPresentParameters(parameters >>> 0, focus >>> 0);
@@ -3318,7 +3353,7 @@ export function createDirect3D9Seam(
         }, exRoots.has(root));
         if (hr !== D3D_OK || !held.device)
         {
-            fields.writeU32(out >>> 0, 0);
+            writePointer(out >>> 0, 0);
             return hr;
         }
         writePresentParameters(parameters >>> 0, wanted);
@@ -3461,7 +3496,7 @@ export function createDirect3D9Seam(
             {
                 if ((out >>> 0) !== 0)
                 {
-                    fields.writeU32(out >>> 0, 0);
+                    writePointer(out >>> 0, 0);
                 }
                 return D3DERR_INVALIDCALL;
             }
@@ -3591,7 +3626,7 @@ export function createDirect3D9Seam(
             }
             if (!root)
             {
-                fields.writeU32(out >>> 0, 0);
+                writePointer(out >>> 0, 0);
                 return D3DERR_NOTAVAILABLE;
             }
             exRoots.add(root);

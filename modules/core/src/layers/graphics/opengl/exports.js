@@ -182,6 +182,125 @@ export const ARGUMENT_WORDS = Object.freeze(Object.fromEntries(
             ...(EXTENSION_WORDS[Number(words)] ?? []),
         ]])));
 
+/**
+ * The exports whose arguments include a GLfloat or a GLdouble, as a letter per
+ * argument in order: `f` a float, `d` a double, `i` anything else (an integer,
+ * an enum, a handle, a pointer). A 32-bit caller pushes a float as one word
+ * and a double as two, which the handlers decode; a 64-bit caller passes one
+ * among its first four arguments in the XMM register of its position, and a
+ * double past them in a single slot, so the bridge has to know which they
+ * are (`floats`). A family whose name ends in a count and a type --
+ * `glVertex3f`, `glMultiTexCoord2dARB` -- takes that many of that type last,
+ * after the integers before them, and needs no entry; these are the rest,
+ * transcribed from the specification's prototypes. `floatArguments` checks
+ * each against `ARGUMENT_WORDS`.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const FLOAT_SIGNATURES = Object.freeze({
+    glAccum: 'if',
+    glAlphaFunc: 'if',
+    glBitmap: 'iiffffi',
+    glClearAccum: 'ffff',
+    glClearColor: 'ffff',
+    glClearDepth: 'd',
+    glClearIndex: 'f',
+    glDepthRange: 'dd',
+    glFogCoorddEXT: 'd',
+    glFogCoordfEXT: 'f',
+    glFogf: 'if',
+    glFrustum: 'dddddd',
+    glIndexd: 'd',
+    glIndexf: 'f',
+    glLightModelf: 'if',
+    glLightf: 'iif',
+    glLineWidth: 'f',
+    glMap1d: 'iddiii',
+    glMap1f: 'iffiii',
+    glMap2d: 'iddiiddiii',
+    glMap2f: 'iffiiffiii',
+    glMapGrid1d: 'idd',
+    glMapGrid1f: 'iff',
+    glMapGrid2d: 'iddidd',
+    glMapGrid2f: 'iffiff',
+    glMaterialf: 'iif',
+    glOrtho: 'dddddd',
+    glPassThrough: 'f',
+    glPixelStoref: 'if',
+    glPixelTransferf: 'if',
+    glPixelZoom: 'ff',
+    glPointSize: 'f',
+    glPolygonOffset: 'ff',
+    glRectd: 'dddd',
+    glRectf: 'ffff',
+    glRotated: 'dddd',
+    glRotatef: 'ffff',
+    glScaled: 'ddd',
+    glScalef: 'fff',
+    glTexEnvf: 'iif',
+    glTexGend: 'iid',
+    glTexGenf: 'iif',
+    glTexParameterf: 'iif',
+    glTranslated: 'ddd',
+    glTranslatef: 'fff',
+    wglUseFontOutlinesA: 'iiiiffii',
+    wglUseFontOutlinesW: 'iiiiffii',
+});
+
+/** A family's count and type: `3f` of glVertex3f, `4Nub` of glVertexAttrib4NubARB. */
+const FAMILY = /(?<count>[1-4])N?(?<type>ub|us|ui|b|s|i|f|d)(?:ARB|EXT)?$/;
+
+/** The words each export takes, by name. */
+const WORDS_OF = new Map(Object.entries(ARGUMENT_WORDS)
+    .flatMap(([words, names])=>names.map(name=>[name, Number(words)])));
+
+/**
+ * The float and double arguments of an export, by their first word (the
+ * bridge's `floats`); null for one that takes none.
+ *
+ * @param {string} name
+ * @returns {Record<number, 'f32' | 'f64'> | null}
+ */
+export function floatArguments(name){
+    const words = WORDS_OF.get(name);
+    if (words === undefined)
+    {
+        return null;
+    }
+    let signature = FLOAT_SIGNATURES[name];
+    const family = signature === undefined ? FAMILY.exec(name) : null;
+    if (family?.groups && (family.groups.type === 'f' || family.groups.type === 'd'))
+    {
+        const count = Number(family.groups.count);
+        const size = family.groups.type === 'd' ? 2 : 1;
+        signature = 'i'.repeat(words - count * size) + family.groups.type.repeat(count);
+    }
+    if (signature === undefined)
+    {
+        return null;
+    }
+    /** @type {Record<number, 'f32' | 'f64'>} */
+    const floats = {};
+    let at = 0;
+    for (const letter of signature)
+    {
+        if (letter === 'f')
+        {
+            floats[at] = 'f32';
+        }
+        else if (letter === 'd')
+        {
+            floats[at] = 'f64';
+        }
+        at += letter === 'd' ? 2 : 1;
+    }
+    if (at !== words)
+    {
+        throw new Error(`opengl: ${name}'s arguments take ${at} words, not ${words}`);
+    }
+    return Object.keys(floats).length === 0 ? null : floats;
+}
+
 /** Where the handles this layer hands out start. Nothing else mints these. */
 const HANDLE_BASE = 0x0e000000;
 
@@ -300,6 +419,9 @@ const LIST_TYPES = new Map([
  *           era opens and wrong as soon as it opens two.
  * @property {() => void} [presented]  Told of every frame a program swaps.
  * @property {() => number} [currentThread]
+ * @property {4 | 8} [pointerSize]
+ *           8 in a 64-bit process, where a pointer a query writes back is
+ *           eight bytes.
  * @property {() => number} [currentTeb]
  *           The calling thread's TEB, where the routines of the command ring
  *           find the block of the context current on it. Absent, every call
@@ -737,9 +859,12 @@ export function createOpengl(services){
      * which is what the specification says and what a program that probes for
      * an extension's limit depends on.
      *
+     * A pointer the query answers takes eight bytes in a 64-bit process, the
+     * high half zero (`pointerSize`).
+     *
      * @param {number} address
      * @param {number[] | null} values
-     * @param {'byte' | 'word' | 'float' | 'double'} as
+     * @param {'byte' | 'word' | 'float' | 'double' | 'pointer'} as
      */
     const writeQuery = (address, values, as)=>{
         if (!values || (address >>> 0) === 0)
@@ -757,11 +882,17 @@ export function createOpengl(services){
             services.writeMemory(address >>> 0, bytes);
             return;
         }
-        const length = count * (as === 'double' ? 8 : 4);
+        const wide = as === 'pointer' && services.pointerSize === 8;
+        const length = count * (as === 'double' || wide ? 8 : 4);
         const view = answerView(length);
         for (let index = 0; index < count; index++)
         {
-            if (as === 'word')
+            if (wide)
+            {
+                view.setUint32(index * 8, values[index] >>> 0, true);
+                view.setUint32(index * 8 + 4, 0, true);
+            }
+            else if (as === 'word' || as === 'pointer')
             {
                 view.setInt32(index * 4, values[index] | 0, true);
             }
@@ -1549,7 +1680,7 @@ export function createOpengl(services){
         glGetDoublev: ([query, out])=>
             call(context=>writeQuery(out, context.glGetFloatv(query >>> 0), 'double')),
         glGetPointerv: ([query, out])=>
-            call(context=>writeQuery(out, context.glGetPointerv(query >>> 0), 'word')),
+            call(context=>writeQuery(out, context.glGetPointerv(query >>> 0), 'pointer')),
         glGetClipPlane: ([plane, out])=>
             call(context=>writeQuery(out, context.glGetClipPlane(plane >>> 0), 'double')),
 
@@ -1846,7 +1977,7 @@ export function createOpengl(services){
         glGetBufferParameterivARB: ([target, parameter, out])=>call(context=>writeQuery(
             out, context.glGetBufferParameterivARB(target >>> 0, parameter >>> 0), 'word')),
         glGetBufferPointervARB: ([target, parameter, out])=>call(context=>writeQuery(
-            out, context.glGetBufferPointervARB(target >>> 0, parameter >>> 0), 'word')),
+            out, context.glGetBufferPointervARB(target >>> 0, parameter >>> 0), 'pointer')),
 
         // --- GL_ARB_vertex_program and GL_ARB_fragment_program ---
 
@@ -1926,7 +2057,7 @@ export function createOpengl(services){
         glGetVertexAttribivARB: ([index, pname, out])=>call(context=>writeQuery(
             out, context.glGetVertexAttribfvARB(index >>> 0, pname >>> 0), 'word')),
         glGetVertexAttribPointervARB: ([index, pname, out])=>call(context=>writeQuery(
-            out, context.glGetVertexAttribPointervARB(index >>> 0, pname >>> 0), 'word')),
+            out, context.glGetVertexAttribPointervARB(index >>> 0, pname >>> 0), 'pointer')),
 
         // --- the attribute stacks ---
 

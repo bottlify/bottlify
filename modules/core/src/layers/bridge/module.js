@@ -893,6 +893,7 @@ export function createBridgeModule(){
                     state.vtables = createVtables({
                         memory,
                         heap,
+                        long: ()=>cpu.bits?.() === 64,
                         register: (/** @type {string} */ name, /** @type {any} */ fn)=>
                             this.register(name, fn),
                     });

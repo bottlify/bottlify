@@ -717,3 +717,67 @@ test('an interface answered with another\'s pointer is that pointer, and counts 
     assert.deepEqual(references, [IID]);
     assert.equal(f.table.publish(shared, IID_B), pointer, 'and published directly as well');
 });
+
+test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 code, and their'
+    + ' floats declared', ()=>{
+    // Every pointer the table and the interface hold is eight bytes with the
+    // high half zero, and so is a pointer QueryInterface writes; a method or a
+    // count that would run in the guest is its trap, because that code is i386.
+    /** @type {Map<number, number>} */
+    const words = new Map();
+    /** @type {Map<string, any>} */
+    const registered = new Map();
+    let next = 0x2000;
+    const table = createVtables({
+        memory: {
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>words.set(address, value >>> 0),
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>(address === 0x5000 ? guidBytes(IID)
+                : new Uint8Array(length)),
+        },
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            registered.set(name, fn);
+            return 0x1000 + registered.size * 0x10;
+        },
+        heap: {
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes;
+                return at;
+            },
+            allocateCode: ()=>0x6000,
+        },
+        long: ()=>true,
+    });
+    const methods = [
+        ...METHODS.slice(0, 3),
+        { name: 'Draw', argBytes: 8, guest: ()=>0x7000 },
+        { name: 'Scale', argBytes: 8, floats: { 1: /** @type {'f32'} */ ('f32') } },
+    ];
+    const longObject = {
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods } : null),
+        addRef: ()=>2,
+        release: ()=>1,
+        guestState: ()=>0x9abc,
+    };
+    const pointer = table.publish(longObject, IID);
+    const vtable = /** @type {number} */ (words.get(pointer));
+    assert.equal(words.get(pointer + 4), 0, 'the table\'s pointer is a quadword');
+    assert.equal(words.get(pointer + 8), 0x9abc, 'the state word is the next quadword');
+    const slots = [0, 1, 2, 3, 4].map(index=>[words.get(vtable + index * 8),
+        words.get(vtable + index * 8 + 4)]);
+    assert.ok(slots.every(([, high])=>high === 0), 'each slot eight bytes, its high half zero');
+    assert.deepEqual(slots.map(([low])=>low), [1, 2, 3, 4, 5].map(index=>0x1000 + index * 0x10),
+        'every slot a trap: AddRef, Release and the guest method too');
+    assert.deepEqual(registered.get(`${IID}::Scale`).floats, { 1: 'f32' },
+        'a float argument is declared to the bridge');
+
+    words.set(0x8000, 0xdead);
+    words.set(0x8004, 0xbeef);
+    assert.equal(registered.get(`${IID}::QueryInterface`).handler([pointer, 0x5000, 0x8000]), 0);
+    assert.deepEqual([words.get(0x8000), words.get(0x8004)], [pointer, 0],
+        'QueryInterface writes the pointer whole');
+});
