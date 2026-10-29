@@ -75,6 +75,19 @@ const SERVENT = { s_name: 0, s_aliases: 4, s_port: 8, s_proto: 12, SIZE: 16 };
 
 /** The one extension lookup a program makes before it settles for the plain calls. */
 const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
+/**
+ * The WSAIoctl controls a program sets on a socket as it makes it (mstcpip.h,
+ * ws2def.h): what a UDP socket does with an ICMP unreachable or a TTL
+ * expiry, TCP keep-alive's timing, the loopback fast path, the base
+ * provider's handle, and the address a socket would send from.
+ */
+const SIO_KEEPALIVE_VALS = 0x98000004;
+const SIO_UDP_CONNRESET = 0x9800000c;
+const SIO_UDP_NETRESET = 0x9800000f;
+const SIO_LOOPBACK_FAST_PATH = 0x98000010;
+const SIO_BASE_HANDLE = 0x48000022;
+const SIO_ADDRESS_LIST_QUERY = 0x48000016;
+const SIO_ROUTING_INTERFACE_QUERY = 0xc8000014;
 
 /**
  * The extension functions SIO_GET_EXTENSION_FUNCTION_POINTER names by GUID
@@ -1660,6 +1673,94 @@ export function createWinsockFunctions(host){
                 if ((command >>> 0) === FIONBIO)
                 {
                     return ioctl(handle, command, input);
+                }
+                const socket = /** @type {any} */ (socketOf(handle));
+                /** An out-buffer answer of `bytes`, its size in `returned`. @param {Uint8Array} bytes */
+                const answerWith = bytes=>{
+                    if ((output >>> 0) === 0 || (outputSize >>> 0) < bytes.length)
+                    {
+                        if ((returned >>> 0) !== 0)
+                        {
+                            writeDword(returned, bytes.length);
+                        }
+                        return fail(WSAEFAULT);
+                    }
+                    host.writeMemory(output >>> 0, bytes);
+                    if ((returned >>> 0) !== 0)
+                    {
+                        writeDword(returned, bytes.length);
+                    }
+                    return ok(0);
+                };
+                switch (command >>> 0)
+                {
+                    // A datagram socket's: an ICMP unreachable or expired TTL
+                    // reported to the next receive, or not. No ICMP reaches a
+                    // socket here, so the choice is kept and changes nothing.
+                    case SIO_UDP_CONNRESET:
+                    case SIO_UDP_NETRESET:
+                        if (isStream(socket))
+                        {
+                            return fail(WSAEINVAL);
+                        }
+                        if ((inputSize >>> 0) < 4 || (input >>> 0) === 0)
+                        {
+                            return fail(WSAEFAULT);
+                        }
+                        return ok(0);
+                    // A stream socket's keep-alive timing (struct tcp_keepalive)
+                    // and its loopback fast path: kept, with nothing to time or
+                    // to shorten -- the relay keeps the real connection alive.
+                    case SIO_KEEPALIVE_VALS:
+                    case SIO_LOOPBACK_FAST_PATH:
+                        if (!isStream(socket))
+                        {
+                            return fail(WSAEOPNOTSUPP);
+                        }
+                        if ((input >>> 0) === 0 || (inputSize >>> 0)
+                            < ((command >>> 0) === SIO_KEEPALIVE_VALS ? 12 : 4))
+                        {
+                            return fail(WSAEFAULT);
+                        }
+                        return ok(0);
+                    // No layered provider sits over the base one: the socket is
+                    // its own base.
+                    case SIO_BASE_HANDLE: {
+                        const bytes = new Uint8Array(4);
+                        new DataView(bytes.buffer).setUint32(0, handle >>> 0, true);
+                        return answerWith(bytes);
+                    }
+                    // SOCKET_ADDRESS_LIST of the machine's one address: a count,
+                    // a SOCKET_ADDRESS (pointer, length), then the sockaddr_in
+                    // it points at, in the same buffer.
+                    case SIO_ADDRESS_LIST_QUERY: {
+                        const bytes = new Uint8Array(12 + SOCKADDR_IN_SIZE);
+                        const view = new DataView(bytes.buffer);
+                        view.setUint32(0, 1, true);
+                        view.setUint32(4, ((output >>> 0) + 12) >>> 0, true);
+                        view.setInt32(8, SOCKADDR_IN_SIZE, true);
+                        const address = new Uint8Array(SOCKADDR_IN_SIZE);
+                        writeSockaddr((/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+                            address.set(data, at), 0,
+                        { host: registry.localAddress(), port: 0 });
+                        bytes.set(address, 12);
+                        return answerWith(bytes);
+                    }
+                    // The local address a datagram to the destination would
+                    // leave from: the machine's one address.
+                    case SIO_ROUTING_INTERFACE_QUERY: {
+                        if ((input >>> 0) === 0 || (inputSize >>> 0) < SOCKADDR_IN_SIZE)
+                        {
+                            return fail(WSAEFAULT);
+                        }
+                        const address = new Uint8Array(SOCKADDR_IN_SIZE);
+                        writeSockaddr((/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+                            address.set(data, at), 0,
+                        { host: registry.localAddress(), port: 0 });
+                        return answerWith(address);
+                    }
+                    default:
+                        break;
                 }
                 if ((command >>> 0) === FIONREAD)
                 {

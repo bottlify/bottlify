@@ -644,6 +644,41 @@ test('WSAIoctl is ioctlsocket with buffers, and refuses the extension lookup', (
     assert.equal(fx.call('WSAGetLastError'), 10038, 'WSAENOTSOCK');
 });
 
+test('the controls a socket is set up with: UDP resets, keep-alive, its base and its address',
+    ()=>{
+        const fx = fixture();
+        const stream = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        const datagram = fx.call('socket', [AF_INET, SOCK_DGRAM, 0]);
+        const IN = 0x900;
+        const ANSWER = 0x980;
+        const RETURNED = 0x9f0;
+        fx.setDword(IN, 0);
+        assert.equal(fx.call('WSAIoctl', [datagram, 0x9800000c, IN, 4, 0, 0, RETURNED, 0, 0]), 0,
+            'SIO_UDP_CONNRESET');
+        assert.equal(fx.call('WSAIoctl', [datagram, 0x9800000f, IN, 4, 0, 0, RETURNED, 0, 0]), 0,
+            'SIO_UDP_NETRESET');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x9800000c, IN, 4, 0, 0, RETURNED, 0, 0]),
+            SOCKET_ERROR, 'a stream socket has no UDP resets');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x98000004, IN, 12, 0, 0, RETURNED, 0, 0]), 0,
+            'SIO_KEEPALIVE_VALS');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x98000004, IN, 4, 0, 0, RETURNED, 0, 0]),
+            SOCKET_ERROR, 'a tcp_keepalive is twelve bytes');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x98000010, IN, 4, 0, 0, RETURNED, 0, 0]), 0,
+            'SIO_LOOPBACK_FAST_PATH');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x48000022, 0, 0, ANSWER, 4, RETURNED, 0, 0]), 0);
+        assert.equal(fx.dword(ANSWER), stream, 'SIO_BASE_HANDLE: its own base');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x48000016, 0, 0, ANSWER, 64, RETURNED, 0, 0]), 0);
+        assert.deepEqual([fx.dword(ANSWER), fx.dword(ANSWER + 4), fx.dword(ANSWER + 8)], [1, ANSWER + 12, 16],
+            'SIO_ADDRESS_LIST_QUERY: one address, in the buffer after the list');
+        assert.equal(fx.dword(RETURNED), 28);
+        assert.equal(fx.call('WSAIoctl', [stream, 0x48000016, 0, 0, ANSWER, 8, RETURNED, 0, 0]),
+            SOCKET_ERROR, 'too small a buffer');
+        assert.equal(fx.dword(RETURNED), 28, 'and the size it needs');
+        assert.equal(fx.call('WSAIoctl', [datagram, 0xc8000014, IN, 16, ANSWER, 16, RETURNED, 0, 0]),
+            0, 'SIO_ROUTING_INTERFACE_QUERY');
+        assert.equal(fx.dword(ANSWER) & 0xffff, AF_INET);
+    });
+
 test('SIO_GET_EXTENSION_FUNCTION_POINTER answers mswsock\'s export for each GUID mswsock.h names',
     async()=>{
         /** @type {string[]} */
