@@ -5,10 +5,11 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { throughGuestHandler, toFrameHandler4 } from './lib/eh-tables.mjs';
 
 /**
  * Builds the compiled fixtures under test/fixtures from their sources in
@@ -28,7 +29,11 @@ import { fileURLToPath } from 'node:url';
  * `/Brepro` keeps the output byte-identical from one build to the next. Named
  * fixtures alone are built when names are given. An x86-64 fixture is built
  * for x86_64-pc-windows-msvc against import libraries of its own, at the
- * linker's default base above 4 GiB, which the loader moves below it.
+ * linker's default base above 4 GiB, which the loader moves below it. An
+ * x86-64 C++ fixture is compiled to assembly first, so its exception tables
+ * can be rewritten before it is assembled (`lib/eh-tables.mjs`): into the
+ * form `__CxxFrameHandler4` reads, and with chosen functions' frames handed
+ * to a language handler of the program's own.
  *
  *     node scripts/build-fixtures.mjs [name...]
  */
@@ -64,6 +69,7 @@ const IMPORTS = {
             'FlsGetValue@4', 'FlsSetValue@8', 'EncodePointer@4', 'DecodePointer@4',
             'GetProcessHeap@0', 'HeapAlloc@12', 'HeapFree@12', 'HeapSize@12', 'HeapReAlloc@16',
             'GlobalAlloc@8', 'GlobalFree@4', 'lstrlenA@4', 'lstrlenW@4', 'lstrcpyA@8',
+            'EnumSystemLocalesA@8',
         ],
     },
     'SHELL32.dll': {
@@ -126,7 +132,8 @@ const IMPORTS = {
             '__CxxFrameHandler3', '__C_specific_handler', '_CxxThrowException@8',
             '_except_handler3',
             'qsort',
-            '??3@YAXPAX@Z', '_setjmp3', 'longjmp', 'fprintf', 'fwrite', 'fread', '__iob_func',
+            '??3@YAXPAX@Z', '??3@YAXPEAX@Z', '_setjmp3', 'longjmp', 'fprintf', 'fwrite', 'fread',
+            '__iob_func',
             '_iob DATA', '_osver DATA', '_winver DATA', '_winmajor DATA', '_winminor DATA',
             '_HUGE DATA', '_environ DATA', '__getmainargs', '_initterm', '_onexit',
             '__dllonexit', 'fputs', 'fputc', 'exit', '__initenv DATA', 'strlen', 'memset',
@@ -134,9 +141,21 @@ const IMPORTS = {
         ],
         decorated: ['_seh_longjmp_unwind@4'],
     },
+    'VCRUNTIME140.dll': {
+        undecorated: ['_CxxThrowException@8', '__CxxFrameHandler3', '__C_specific_handler'],
+    },
+    'VCRUNTIME140_1.dll': {
+        undecorated: ['__CxxFrameHandler4'],
+    },
 };
 
-/** Each fixture: its source, and whether it is C++. */
+/**
+ * Each fixture: its source, and whether it is C++. An x86-64 C++ fixture may
+ * have its tables rewritten for `__CxxFrameHandler4` (`fh4`), and the frames
+ * of the functions whose names contain `guestHandler` handed to the program's
+ * `guest_language_handler`; `runtime` names the libraries whose exports it
+ * takes first where two export the same name.
+ */
 const PROGRAMS = [
     { name: 'seh', source: 'seh.c', cxx: false },
     { name: 'cxxeh', source: 'cxxeh.cpp', cxx: true },
@@ -161,6 +180,10 @@ const PROGRAMS = [
     { name: 'crt64', source: 'crt64.c', cxx: false, x64: true },
     { name: 'win64', source: 'win64.c', cxx: false, x64: true },
     { name: 'seh64', source: 'seh64.c', cxx: false, x64: true },
+    { name: 'cxxeh64', source: 'cxxeh64.cpp', cxx: true, x64: true,
+        guestHandler: 'via_guest_handler' },
+    { name: 'cxxeh64fh4', source: 'cxxeh64.cpp', cxx: true, x64: true, fh4: true,
+        guestHandler: 'via_guest_handler', runtime: ['VCRUNTIME140.dll', 'VCRUNTIME140_1.dll'] },
 ];
 
 /** The fixtures named on the command line, or every one. */
@@ -193,8 +216,8 @@ try
 {
     /** @type {string[]} */
     const libraries = [];
-    /** @type {string[]} */
-    const libraries64 = [];
+    /** @type {Map<string, string>} */
+    const libraries64 = new Map();
     for (const [dll, { undecorated = [], decorated = [] }] of Object.entries(IMPORTS))
     {
         // x64 names carry no stdcall suffix: one convention, undecorated.
@@ -202,7 +225,7 @@ try
         const base64 = join(work, `${dll}-x64`);
         await writeFile(`${base64}.def`, `LIBRARY ${dll}\nEXPORTS\n${names64.join('\n')}\n`);
         run('llvm-dlltool', ['-m', 'i386:x86-64', '-d', `${base64}.def`, '-l', `${base64}.lib`]);
-        libraries64.push(`${base64}.lib`);
+        libraries64.set(dll, `${base64}.lib`);
         for (const [kind, names, kill] of /** @type {const} */ ([
             ['undecorated', undecorated, true], ['decorated', decorated, false],
         ]))
@@ -223,17 +246,42 @@ try
     run('clang', ['--target=i686-pc-windows-msvc', '-c', join(SOURCES, 'support.c'),
         '-o', support]);
 
-    for (const { name, source, cxx, x64 } of chosen)
+    for (const { name, source, cxx, x64, fh4, guestHandler, runtime = [] } of chosen)
     {
         const object = join(work, `${name}.obj`);
         if (x64)
         {
-            run('clang', ['--target=x86_64-pc-windows-msvc', '-O2', '-fms-extensions',
-                '-fno-stack-protector', '-mno-stack-arg-probe', '-c', join(SOURCES, source),
-                '-o', object]);
+            const flags = ['--target=x86_64-pc-windows-msvc', '-O2', '-fms-extensions',
+                '-fno-stack-protector', '-mno-stack-arg-probe'];
+            if (cxx)
+            {
+                // Through assembly, so the exception tables can be rewritten.
+                const assembly = join(work, `${name}.s`);
+                run('clang', [...flags, '-fexceptions', '-fcxx-exceptions', '-fno-rtti',
+                    ...fh4 ? ['-DFRAME_HANDLER=__CxxFrameHandler4'] : [],
+                    '-S', join(SOURCES, source), '-o', assembly]);
+                let text = await readFile(assembly, 'utf8');
+                if (fh4)
+                {
+                    text = toFrameHandler4(text);
+                }
+                if (guestHandler)
+                {
+                    text = throughGuestHandler(text, guestHandler, 'guest_language_handler');
+                }
+                await writeFile(assembly, text);
+                run('clang', ['--target=x86_64-pc-windows-msvc', '-c', assembly, '-o', object]);
+            }
+            else
+            {
+                run('clang', [...flags, '-c', join(SOURCES, source), '-o', object]);
+            }
+            // The libraries named first are searched first.
+            const ordered = [...runtime.map(dll=>libraries64.get(dll) ?? ''),
+                ...[...libraries64].filter(([dll])=>!runtime.includes(dll)).map(([, lib])=>lib)];
             run('lld-link', ['/nologo', '/entry:mainCRTStartup', '/subsystem:console',
                 '/nodefaultlib', '/Brepro', `/out:${join(FIXTURES, `${name}.exe`)}`, object,
-                ...libraries64]);
+                ...ordered]);
             console.log(`test/fixtures/${name}.exe`);
             continue;
         }

@@ -992,6 +992,19 @@ export function createBridgeModule(){
                 recentlyStarted: ()=>live() ? state.callbacks.recentlyStarted() : [],
 
                 /**
+                 * Where a routine the host called back returns to on the guest
+                 * side, by the stack its frame left once undone: the call into
+                 * the host that made the callback. What a 64-bit exception
+                 * walk crosses a host call by; null when `stack` is no
+                 * callback's return.
+                 *
+                 * @param {any} thread @param {number} stack
+                 * @returns {{ rip: number, rsp: number } | null}
+                 */
+                callbackCaller: (thread, stack)=>(live() && thread
+                    ? state.callbacks.callerOf(thread, stack >>> 0) : null),
+
+                /**
                  * The recorded session: every event at this seam, in order.
                  *
                  * Empty unless the build was configured to record. Written out, it

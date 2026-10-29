@@ -436,3 +436,22 @@ test('a call that builds its callback before it suspends keeps it', ()=>{
     assert.equal(main.awaitingHost, false, 'the thread is sent to run the callback');
     assert.equal(made.returned(main), true, 'whose frame is still there to return to');
 });
+
+test('a routine called back returns, for an unwinder, into the code that called the host', ()=>{
+    // A 64-bit exception walk undoes the frames of a callback and lands on its
+    // return into the sentinel: the guest code that goes on from there is the
+    // caller of the host call that made the callback, not anything on the stack.
+    const worker = thread('main');
+    const { made, resumed } = callbacks([worker]);
+    made.reserve();
+    made.suspended(worker, { name: 'KERNEL32.dll!EnumSystemLocalesA', restingStack: 0x2ff000,
+        hostReturn: 0x401234 });
+    made.call({ thread: worker, entry: 0x402000, args: [7], stackAtRest: 0x2fefc0 });
+    const frameBase = resumed[0][1].esp;
+
+    assert.deepEqual(made.callerOf(worker, frameBase + 4), { rip: 0x401234, rsp: 0x2ff000 },
+        'the stack past the callback\'s return address is inside its frame');
+    assert.equal(made.callerOf(worker, 0x2ff100), null, 'a stack above every frame is none');
+    assert.equal(made.callerOf(thread('other'), frameBase + 4), null,
+        'and another thread has no such frame');
+});

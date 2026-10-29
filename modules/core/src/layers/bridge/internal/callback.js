@@ -458,6 +458,43 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         waiting: thread=>thread ? hostCalls(thread).map(call=>call.name) : [],
 
         /**
+         * The host call a callback returns into, by the stack its routine's
+         * frame left once undone -- somewhere inside the frame built for it:
+         * the deepest suspended call above that frame, which is the one that
+         * made it. Its return address and the stack past it are where the
+         * guest code that called the host goes on.
+         *
+         * @param {any} thread @param {number} stack
+         * @returns {{ rip: number, rsp: number } | null}
+         */
+        callerOf(thread, stack){
+            const frames = callbackFrames(thread);
+            let at = frames.length - 1;
+            while (at >= 0
+                && !(stack > frames[at].frameBase >>> 0 && stack <= frames[at].extent >>> 0))
+            {
+                at--;
+            }
+            if (at < 0)
+            {
+                return null;
+            }
+            const extent = frames[at].extent >>> 0;
+            const suspended = hostCalls(thread);
+            let made = suspended.length - 1;
+            while (made >= 0 && (suspended[made].restingStack >>> 0) < extent)
+            {
+                made--;
+            }
+            if (made < 0)
+            {
+                return null;
+            }
+            return { rip: suspended[made].hostReturn >>> 0,
+                rsp: suspended[made].restingStack >>> 0 };
+        },
+
+        /**
          * Where the guest was last sent, newest last, and by which host call.
          *
          * @returns {{ entry: number, by: string, thread: string }[]}

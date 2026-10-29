@@ -496,6 +496,15 @@ counted (`moved.copied` in the device's shadow diagnostics). The price is a copy
 Call of Duty 4 locks part of its 4.5 MB skinning buffer with DISCARD every frame, and its moves
 copied 25.5 GB in a run of 326 s (27 620 moves, three executors, the fake GPU). *2026-10-24.*
 
+**A53. A 64-bit process's C++ frames do not call the `_set_se_translator` translator.** At 32
+bits a structured exception reaching a C++ frame with try blocks is handed to the translator the
+program installed, which turns it into a C++ throw; a 64-bit frame keeps the translator
+`_set_se_translator` set and answers it back, but searches as though none were set, and says so
+with a `divergence`. The translator is documented for code built with /EHa, and the compiler that
+builds this project's fixtures emits /EHs tables, so no program here exercises it; a translator
+called by the dispatcher throws from inside the walk, which the 64-bit dispatcher has no test for.
+Revisit when a 64-bit program is found that needs it. *2026-10-29.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
