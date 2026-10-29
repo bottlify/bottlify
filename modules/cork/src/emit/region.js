@@ -416,8 +416,14 @@ export function prepareModule(m, layout, features, memory = {},
     {
         throw new Error('emit: a 64-bit layout needs a flag record and SIMD');
     }
+    // At least the guest's RAM, which every memory a module is given holds:
+    // the host's compiler then knows a constant address inside it in bounds,
+    // and compares a word there in place, where with one page it loaded the
+    // word as well (a switch's table entry, x64).
+    const ramPages = Math.ceil(((layout.ramBase ?? 0) + layout.ramSize) / 65536);
     m.importMemory('env', 'memory', {
-        min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
+        min: Math.max(1, Math.min(ramPages, memory.maxPages ?? ramPages)),
+        ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
         shared: memory.shared ?? false,
     });
     const bases = importBases(m, layout);
