@@ -1602,10 +1602,11 @@ test('the wide and uncounted OEM conversions agree with the counted ANSI ones', 
     assert.deepEqual([...memory.readMemory(OUT_BUFFER, 6)], [0xfc, 0x00, 0x61, 0x00, 0, 0]);
     assert.equal(fns.CharToOemW.handler([OUT_BUFFER, OUT_BUFFER + 8]), 1);
     assert.deepEqual([...memory.readMemory(OUT_BUFFER + 8, 3)], [0x81, 0x61, 0x00]);
-    // A character page 437 has no byte for becomes the default character.
+    // A character page 437 has nothing close to becomes '_', as
+    // WideCharToMultiByte(CP_OEMCP) answers with "_" as its default (text.c).
     memory.writeMemory(OUT_BUFFER, Uint8Array.of(0xac, 0x20, 0x62, 0x00));
     assert.equal(fns.CharToOemBuffW.handler([OUT_BUFFER, OUT_BUFFER + 8, 2]), 1);
-    assert.deepEqual([...memory.readMemory(OUT_BUFFER + 8, 2)], [0x3f, 0x62]);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER + 8, 2)], [0x5f, 0x62]);
     memory.writeMemory(TEXT_BUFFER, Uint8Array.of(0xfc, 0x61, 0x00));
     assert.equal(fns.CharToOemA.handler([TEXT_BUFFER, OUT_BUFFER]), 1);
     assert.deepEqual([...memory.readMemory(OUT_BUFFER, 3)], [0x81, 0x61, 0x00]);
