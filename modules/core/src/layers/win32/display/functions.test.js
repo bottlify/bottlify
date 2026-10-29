@@ -75,3 +75,12 @@ test('the console session, active, the machine\'s user\'s', ()=>{
     assert.deepEqual(freed, [0x8000]);
     assert.equal(fns.WTSQuerySessionInformationW.handler([0, 7, 8, 0x100, 0x104]), 0);
 });
+
+test('DirectWrite is refused as a system without it, its factory cleared', async()=>{
+    const { createDwriteFunctions } = await import('./functions.js');
+    const memory = new Uint8Array(0x100);
+    const fns = createDwriteFunctions({ writeMemory: (address, bytes)=>memory.set(bytes, address) });
+    memory.fill(0xff, 0x10, 0x14);
+    assert.equal(fns.DWriteCreateFactory.handler([0, 0x20, 0x10]) >>> 0, 0x80004001, 'E_NOTIMPL');
+    assert.deepEqual([...memory.subarray(0x10, 0x14)], [0, 0, 0, 0]);
+});

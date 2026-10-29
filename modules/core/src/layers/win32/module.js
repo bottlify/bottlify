@@ -113,8 +113,8 @@ import { createDbghelpFunctions } from './dbghelp/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createDhcpFunctions, createWinhttpFunctions } from './winhttp/functions.js';
 import { createCombaseFunctions } from './combase/functions.js';
-import { createDwmapiFunctions, createSessionInformationFunctions, createShcoreFunctions }
-    from './display/functions.js';
+import { createDwmapiFunctions, createDwriteFunctions, createSessionInformationFunctions,
+    createShcoreFunctions } from './display/functions.js';
 import { createImageCertificateFunctions } from './dbghelp/image-certificates.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
@@ -3510,6 +3510,8 @@ export function createWin32Module(){
                 // manager's attributes: one 96-DPI display, composition on.
                 'SHCORE.dll': createShcoreFunctions(displayHost),
                 'dwmapi.dll': createDwmapiFunctions(displayHost),
+                'DWrite.dll': createDwriteFunctions({ ...displayHost,
+                    divergence: config?.divergence }),
                 'USERENV.dll': createUserenvFunctions({
                     block: ()=>libraries['KERNEL32.dll'].GetEnvironmentStringsW.handler([]),
                     free: block=>libraries['KERNEL32.dll'].FreeEnvironmentStringsW

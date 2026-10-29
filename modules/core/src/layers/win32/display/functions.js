@@ -299,3 +299,34 @@ export function createSessionInformationFunctions(host){
 }
 
 
+/**
+ * DWrite: the text and font system's factory, which a browser asks for first
+ * of all its font calls. DirectWrite is not provided: the factory is refused
+ * with E_NOTIMPL and its out pointer cleared, as on a system without the
+ * component, and the refusal is said once.
+ *
+ * @param {Pick<DisplayHost, 'writeMemory'>
+ *     & { divergence?: (api: string, detail: string) => void }} host
+ */
+export function createDwriteFunctions(host){
+    let said = false;
+    return {
+        /** HRESULT DWriteCreateFactory(DWRITE_FACTORY_TYPE, REFIID, IUnknown **factory) */
+        DWriteCreateFactory: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    host.writeMemory(out >>> 0, dword(0));
+                }
+                if (!said)
+                {
+                    said = true;
+                    host.divergence?.('DWriteCreateFactory', 'DirectWrite is not provided');
+                }
+                return 0x80004001 | 0;
+            },
+        },
+    };
+}
