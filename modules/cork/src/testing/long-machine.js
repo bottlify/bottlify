@@ -58,14 +58,15 @@ export function fill(seed, size){
  * A machine with the corpus's data and code areas open and every other page closed.
  *
  * @param {{ config?: Record<string, unknown>, trapPort?: number, tiered?: boolean,
- *     makeRunner?: MakeRunner | null, ramSize?: number }} [options]  `config`: the runtime's
+ *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[] }} [options]
+ *     `closed`: pages of the code area closed too, by address; `config`: the runtime's
  *     settings over the runner's; `tiered`: what no region holds runs on the interpreter tier
  *     in wasm (`createWasmInterpreter`), `interp64.js` taking what it hands back; `ramSize`:
  *     the RAM past the code area, 1 GiB for one a power of two (the translator's reads
  *     wrapped with one `and`, a struct's field reads off one wrapped sum)
  */
 export function machine({ config = {}, trapPort = undefined, tiered = false,
-    makeRunner = null, ramSize = CORPUS.codeAt + 0x100000 } = {})
+    makeRunner = null, ramSize = CORPUS.codeAt + 0x100000, closed = [] } = {})
 {
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
@@ -75,6 +76,10 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
     for (const [at, size] of [[CORPUS.dataAt, CORPUS.dataSize], [CORPUS.codeAt, CORPUS.codeSize]])
     {
         flags.fill(0, at >>> 12, (at + size) >>> 12);
+    }
+    for (const at of closed)
+    {
+        flags[at >>> 12] = PageFlag.INACCESSIBLE;
     }
     const tier = tiered ? createWasmInterpreter({ memory, layout,
         area: layout.tables + tablesSize(layout),
@@ -505,12 +510,13 @@ export function run(m, translated, budget = 7){
  *
  * @param {any[]} cases
  * @param {{ budget?: number, config?: Record<string, unknown>, tiered?: boolean,
- *     makeRunner?: MakeRunner | null, ramSize?: number }} [options]  `budget`: each
- *     translated run's; the rest the translated machine's (`machine`)
+ *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[] }} [options]
+ *     `budget`: each translated run's; `closed` both machines'; the rest the translated
+ *     machine's (`machine`)
  */
 export function compare(cases, { budget = 7, ...options } = {}){
     const translatedMachine = machine(options);
-    const interpretedMachine = machine();
+    const interpretedMachine = machine({ closed: options.closed });
     /** @type {string[]} */
     const failures = [];
     let exits = 0;

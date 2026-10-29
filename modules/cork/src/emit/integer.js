@@ -29,7 +29,7 @@ import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
-import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
+import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
     windowAddress,
@@ -436,36 +436,66 @@ function linkedCall(e, target){
     // any top, as a function that does something -- its top and empty code
     // read as one halfword, which is `ANY_TOP` only then. An empty slot's
     // halfword is 0 and a removed one's has the top 0xff (`entries.js`), so
-    // neither passes for a call to address 0 or all ones. The index, the
-    // label and that halfword come in one load: a direct call's slot is a
-    // constant address past what an arm64 load's offset holds, which V8 moves
-    // into a register, two instructions, for each load from it. On an arm64
-    // host the two tests are one condition, which V8 makes a compare and a
-    // conditional compare before one branch; an x64 host has no conditional
-    // compare, and V8 makes a flag of each comparison it ors, so there they
-    // are two branches, another key straight to the transfer.
+    // neither passes for a call to address 0 or all ones. On an arm64 host
+    // the index, the label and that halfword come in one load: a direct
+    // call's slot is a constant address past what an arm64 load's offset
+    // holds, which V8 moves into a register, two instructions, for each load
+    // from it. And there the two tests are one condition, which V8 makes a
+    // compare and a conditional compare before one branch. An x64 load takes
+    // the address as its offset for nothing, and the fields taken out of one
+    // quadword cost more than their own loads (cork-bench calls512-scatter
+    // +1.3 % at 64 bits, calls512-order +0.3 % at 32); an x64 host has no
+    // conditional compare either, and V8 makes a flag of each comparison it
+    // ors, so there the two are two branches, another key straight to the
+    // transfer.
     const key = ()=>(target === null ? b.localGet(Local.eip) : b.i32const(target | 0));
     const oneTest = context.features?.armHost === true;
     e.open('linked', ValType.i32);
     e.open('through', EMPTY);
     e.open('anyTop', EMPTY);
-    b.localGet(Local.t2).load('i64', { offset: 4, align: 2 }).localTee(Local.t64);
+    if (oneTest)
+    {
+        b.localGet(Local.t2).load('i64', { offset: 4, align: 2 }).localTee(Local.t64);
+    }
     b.localGet(Local.t2).load('i32');
     key();
     b.op(I32.ne);
     if (!oneTest)
     {
         b.unlikely().brIf(e.depthOf('through'));
+        b.localGet(Local.t2).load('i32_16u', { offset: 10 });
     }
-    b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap).i32const(ANY_TOP).op(I32.ne);
+    else
+    {
+        b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap);
+    }
+    b.i32const(ANY_TOP).op(I32.ne);
     if (oneTest)
     {
         b.op(I32.or);
     }
     b.unlikely().brIf(e.depthOf('anyTop'));
-    linkedCallOf(e);
+    if (oneTest)
+    {
+        linkedCallOf(e);
+    }
+    else
+    {
+        countLinked(e);
+        b.localGet(Local.t2).load('i32_16u', { offset: 8 });
+        for (let local = Local.budget; local < STATE_PARAMS; local++)
+        {
+            b.localGet(local);
+        }
+        b.localGet(Local.t2).load('i32', { offset: 4 });
+        b.callIndirect(context.regionType, 0);
+    }
     b.br(e.depthOf('linked'));
     e.close();
+    if (!oneTest)
+    {
+        b.localGet(Local.t2).load('i64', { offset: 4, align: 2 }).localSet(Local.t64);
+    }
     // Out of the way: a slot holding the target compiled for the top the
     // machine has is called the same way, the rest goes through the
     // transfer. Under one test the key is read again, as the low half of a
@@ -4178,7 +4208,14 @@ function bitTest(e, instruction, flagsLive){
     }
     readOp(e, dst);
     b.localSet(Local.t1);
-    if (flagsLive)
+    const carry = fusedCarry(e, op, flagsLive);
+    if (carry >= 0)
+    {
+        b.localGet(Local.t1).localGet(Local.count).op(I32.shrU).i32const(1).op(I32.and)
+            .localSet(carry);
+        e.carryBit = carry;
+    }
+    else if (flagsLive)
     {
         e.eagerWrite(CF);
         b.localGet(Local.t1).localGet(Local.count).op(I32.shrU).i32const(1).op(I32.and);
@@ -4204,6 +4241,21 @@ function bitTest(e, instruction, flagsLive){
         });
     }
     return true;
+}
+
+/**
+ * The local a `bt` leaves its bit in when the block's final branch alone
+ * reads its carry (`fuseBitTest`): compilers test a bit with `bt` and a `jb`
+ * or `jae`, an x86-64 gcc with work scheduled between. -1 otherwise.
+ *
+ * @param {E} e @param {string} op @param {boolean} flagsLive
+ */
+function fusedCarry(e, op, flagsLive){
+    if (op !== 'bt' || !flagsLive)
+    {
+        return -1;
+    }
+    return e.fuseBitTest(e.region.blocks[e.blockIndex].instructions.indexOf(e.current), keepsFlags);
 }
 
 /**
@@ -4269,9 +4321,13 @@ function bitTestLong(e, instruction, flagsLive){
             b.i32const(1).localGet(Local.count).op(I32.shl);
         }
     };
-    if (flagsLive)
+    const carry = fusedCarry(e, op, flagsLive);
+    if (carry >= 0 || flagsLive)
     {
-        e.eagerWrite(CF);
+        if (carry < 0)
+        {
+            e.eagerWrite(CF);
+        }
         b.localGet(value);
         pushBit();
         b.op(ops.and);
@@ -4283,7 +4339,15 @@ function bitTestLong(e, instruction, flagsLive){
         {
             b.i32const(0).op(I32.ne);
         }
-        e.orFlag(CF);
+        if (carry >= 0)
+        {
+            b.localSet(carry);
+            e.carryBit = carry;
+        }
+        else
+        {
+            e.orFlag(CF);
+        }
     }
     if (op !== 'bt')
     {

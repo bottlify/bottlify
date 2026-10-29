@@ -2307,3 +2307,45 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** As the entries above.
 - **Decision.** Not taken. Worth measuring again only for sites whose samples show many
   calls to other targets, the call kept out of the hot code's function.
+
+### 2026-10-29: long mode's owed compare result answered for je/jne by an i64 compare
+
+- **Idea.** With a `cmp` whose result its block's final branch leaves unmade at 64 bits too
+  (`oweResult`, `owesTo`), a `je` or `jne` compares the record's two operands: as i64, the
+  record holding a narrower compare's operands zero-extended, so one compare serves every width.
+- **Workload.** cork-bench x86-64 images, `tools/cork-bench/ir.sh` with `WASM=1 CLOCK=0.001
+  ITERS=1000`, node 26.13.0 (V8 14.6) x64, machine instructions an iteration in V8's printed wasm
+  code; one run an arm (the column repeats to the instruction run to run). Arms: the tree at
+  8740b9eb with the float-compare fusion over instructions between (this branch's first change),
+  without and with the owed result at 64 bits.
+- **Values.** Without, then with the i64 compare: tree 3,117,594 -> 3,160,406 (+1.4 %); sort
+  4,029,716 -> 3,793,562 (-5.9 %); crc 1,991,978 -> 1,991,020; vm 2,434,503 -> 2,434,503.
+- **Why.** tree's hot `cmp r32, r32; je`: V8 extends the dword operand into a register of its own
+  before a 64-bit compare (`movl r12, r11; cmpq rsi, r12`) where the made result's
+  `i32.eqz` had been one `cmpl`.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken as such: a narrower compare's operands are wrapped and compared as i32,
+  a quadword's as i64 (tree 3,117,594, its base; sort 3,791,850).
+
+### 2026-10-29: a linked call's slot read in one quadword load on an x64 host
+
+- **Idea.** fe40382e read a linked call's slot (the index, the label and the top-and-empty
+  halfword) in one i64 load, taking each field out with shifts and masks, where it had been
+  three loads: on arm64 a constant address past a load's offset costs two instructions a load
+  (4da46ec1 kept the one load on both hosts when it took the one condition back to arm64).
+- **Workload.** cork-bench, both widths, `tools/cork-bench/ir.sh` with `WASM=1 CLOCK=0.001
+  ITERS=1000`, node 26.13.0 (V8 14.6) x64, machine instructions an iteration in V8's printed wasm
+  code, two runs an arm (identical to the instruction; load and lua one). Arms: cork2-x64-speed
+  at 35c25a0 (the one load on both hosts), and the same with three loads on an x64 host.
+- **Values.** One load, then three: calls512-order 5,242,588 -> 5,128,910 (x32), 5,998,645 ->
+  5,843,891 (x64); calls512-scatter 5,251,383 -> 5,139,761, 4,989,406 -> 4,825,586; load
+  2,501,119 -> 2,478,182, 2,974,678 -> 2,949,159; lua 33,891,535 -> 33,757,597, 36,667,831 ->
+  36,366,200; the other workloads within 0.1 %, none higher. Per commit of the base's history
+  (x64): fe40382e calls512-scatter +3.18 %, calls512-order +3.00 % (x32 +3.50 %); 4da46ec1 -1.80,
+  -1.99 (x32 -3.10 %).
+- **Why.** An x64 load takes the constant address as its offset for nothing; the fields out of one
+  quadword are shifts and masks the separate loads did not need.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded. arm64: not measured here (the one load stays there).
+- **Decision.** On an x64 host three loads again; arm64 keeps the one load.

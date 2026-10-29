@@ -28,7 +28,7 @@ import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
-import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT } from './region.js';
+import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT, keepsFlags } from './region.js';
 import { prepare, readAddress, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
@@ -1851,9 +1851,22 @@ function comparison(e, dst, src, double, flagsLive){
     const a = double ? Local.d0 : Local.f0;
     const c = double ? Local.d1 : Local.f1;
     const [feq, flt, fne] = double ? [0x61, 0x63, 0x62] : [F32.eq, F32.lt, F32.ne];
-    // Read by the branch right after it alone: the branch compares f0 and f1.
-    if (e.fusesCompare(e.region.blocks[e.blockIndex].instructions.indexOf(e.current), ()=>false))
+    // Read by the block's branch alone: the branch compares the operands. A
+    // compiler schedules other work between the two (an x64 gcc a store, a
+    // multiply); what stands there leaves the flags be, and a way out of it
+    // makes them (`payFloatCompare`). Its scalar forms use f0 and f1, so the
+    // operands wait in locals of their own.
+    const instructions = e.region.blocks[e.blockIndex].instructions;
+    const at = instructions.indexOf(e.current);
+    if (e.fusesCompare(at, keepsFlags))
     {
+        if (at + 2 < instructions.length)
+        {
+            const [ka, kc] = [e.compareLocal(0, double), e.compareLocal(1, double)];
+            b.localGet(a).localSet(ka).localGet(c).localSet(kc);
+            e.fcmp = { a: ka, c: kc, double };
+            return;
+        }
         e.fcmp = { a, c, double };
         return;
     }

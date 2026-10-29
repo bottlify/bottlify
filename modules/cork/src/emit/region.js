@@ -45,14 +45,14 @@
  * for an instruction whose flags nothing reads before the next writer.
  */
 
-import { CF, DF, ARITH_FLAGS } from '../decode/table.js';
+import { CF, DF, PF, ZF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import {
     ARITH, CARRY_IN_WORD, I32, I64, Kind, MASKS, eagerFlagsOf, emitCondition, emitFlag, kindOf,
     recordOffsets, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
-import { copyLoopOf, emitCopyAtOnce } from './copy-loop.js';
+import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
     planLoop, planRegion, readsWrapped, registersChanged,
@@ -1271,6 +1271,12 @@ export class RegionEmitter {
          */
         this.fcmp = null;
         /**
+         * The local a `bt` whose carry only the block's final branch reads
+         * left its bit in (`fuseBitTest`): the branch tests it, and the flags
+         * are never made. -1 when none.
+         */
+        this.carryBit = -1;
+        /**
          * Whether the instruction being emitted is a `cmp` the block's final
          * conditional branch alone reads (`oweResult`).
          */
@@ -1409,6 +1415,14 @@ export class RegionEmitter {
         this.lows = new Map();
         /** Those locals, one an xmm register and width. @type {Map<string, number>} */
         this.lowLocals = new Map();
+        /**
+         * The locals a fused float compare keeps its operands in while
+         * instructions stand between it and its branch (`compareLocal`), by
+         * operand and width. @type {Map<string, number>}
+         */
+        this.compareLocals = new Map();
+        /** The i32 local a fused `bt` keeps its bit in (`fuseBitTest`), -1 until made. */
+        this.bitLocal = -1;
         /**
          * The xmm registers whose low lane only their `lows` local holds yet,
          * the vector's own lane behind it: put back (`settleLows`) where the
@@ -1591,6 +1605,25 @@ export class RegionEmitter {
             local = this.localTypes.length + STATE_PARAMS;
             this.localTypes.push(double ? ValType.f64 : ValType.f32);
             this.lowLocals.set(key, local);
+        }
+        return local;
+    }
+
+    /**
+     * A local a fused float compare's operand is kept in across the
+     * instructions between it and its branch, which may use the scratch
+     * floats it was compared in (`fusesCompare`).
+     *
+     * @param {0 | 1} operand @param {boolean} double
+     */
+    compareLocal(operand, double){
+        const key = `${operand}${double ? 'd' : 's'}`;
+        let local = this.compareLocals.get(key);
+        if (local === undefined)
+        {
+            local = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(double ? ValType.f64 : ValType.f32);
+            this.compareLocals.set(key, local);
         }
         return local;
     }
@@ -2831,7 +2864,35 @@ export class RegionEmitter {
         if (this.resultOwed !== null && this.pending?.kind === Kind.SUB && cc >> 1 === 2)
         {
             // je/jne of a compare: its operands equal or not, the result unmade.
-            this.b.localGet(Local.op1).localGet(Local.op2).op((cc & 1) === 0 ? I32.eq : I32.ne);
+            // Long mode's narrower operands compared as the i32s they were: an
+            // i64 compare of the zero-extended pair costs V8 a move to extend.
+            if (this.width.bits === 64 && this.resultOwed === 8)
+            {
+                this.b.localGet(Local.op1).localGet(Local.op2)
+                    .op((cc & 1) === 0 ? I64.eq : I64.ne);
+                return;
+            }
+            for (const operand of [Local.op1, Local.op2])
+            {
+                this.b.localGet(operand);
+                if (this.width.bits === 64)
+                {
+                    this.b.op(I64.wrap);
+                }
+            }
+            this.b.op((cc & 1) === 0 ? I32.eq : I32.ne);
+            return;
+        }
+        if (this.carryBit >= 0)
+        {
+            // jb/jae of a fused `bt`: the bit itself.
+            this.b.localGet(this.carryBit);
+            if ((cc & 1) === 1)
+            {
+                this.b.op(I32.eqz);
+            }
+            this.carryBit = -1;
+            this.fusedCompares++;
             return;
         }
         if (this.fcmp !== null)
@@ -2983,7 +3044,7 @@ export class RegionEmitter {
      */
     owesTo(block){
         const last = block.instructions.at(-1);
-        return block.exit.kind === 'jcc' && this.width.bits === 32 && last?.cc !== undefined
+        return block.exit.kind === 'jcc' && last?.cc !== undefined
             && [1, 2, 3, 6, 7].includes(last.cc >> 1);
     }
 
@@ -3003,6 +3064,72 @@ export class RegionEmitter {
         this.resultOwed = size;
     }
 
+    /**
+     * The flags of a fused float compare (`fcmp`) made into the word, on a way
+     * out of an instruction between it and its branch: the code it leaves for
+     * reads them as the compare left them -- ZF, PF and CF from its operands,
+     * OF, SF and AF clear, the record empty. Not the emitter's state: the way
+     * on still has the branch compare the operands.
+     */
+    payFloatCompare(){
+        const { b } = this;
+        const fcmp = /** @type {import('./x87.js').FloatCompare} */ (this.fcmp);
+        const { a, c, double } = fcmp;
+        const [eq, ne, lt] = double ? [0x61, 0x62, 0x63] : [0x5b, 0x5c, 0x5d];
+        const unordered = ()=>b.localGet(a).localGet(a).op(ne).localGet(c).localGet(c).op(ne)
+            .op(I32.or);
+        b.i32const(0).localSet(Local.kind);
+        b.localGet(Local.flags).i32const(~ARITH_FLAGS).op(I32.and).localSet(Local.flags);
+        unordered();
+        this.orFlag(PF);
+        unordered();
+        b.localGet(a).localGet(c).op(eq).op(I32.or);
+        this.orFlag(ZF);
+        unordered();
+        b.localGet(a).localGet(c).op(lt).op(I32.or);
+        this.orFlag(CF);
+    }
+
+    /**
+     * Whether a `bt` at `at` in the current block may leave its carry to the
+     * block's final branch alone (`carryBit`): a `jb` or `jae`, the flags
+     * read by nothing else (`fusesCompare`), and what stands between leaving
+     * them be. Then the bit goes into a local of its own, which this answers.
+     *
+     * @param {number} at
+     * @param {(instruction: import('../decode/decoder.js').Instruction) => boolean} between
+     * @returns {number} the local, or -1
+     */
+    fuseBitTest(at, between){
+        const block = this.region.blocks[this.blockIndex];
+        const last = block.instructions.at(-1);
+        if (last?.cc === undefined || last.cc >> 1 !== 1 || !this.fusesCompare(at, between))
+        {
+            return -1;
+        }
+        if (this.bitLocal < 0)
+        {
+            this.bitLocal = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(ValType.i32);
+        }
+        return this.bitLocal;
+    }
+
+    /**
+     * The flags of a fused `bt` (`carryBit`) made into the word, on a way out
+     * of an instruction between it and its branch: the record folded as a
+     * read of a flag folds it, the carry the bit. Not the emitter's state, as
+     * `payFloatCompare`.
+     */
+    payBitTest(){
+        const { b } = this;
+        b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
+            .localGet(Local.cin).localGet(Local.flags);
+        b.call(this.context.materialise);
+        b.i32const(~CF).op(I32.and).localGet(this.carryBit).op(I32.or).localSet(Local.flags);
+        b.i32const(0).localSet(Local.kind);
+    }
+
     /** The owed result made (`oweResult`), on the way being emitted. */
     payResult(){
         const size = this.resultOwed;
@@ -3010,10 +3137,31 @@ export class RegionEmitter {
         {
             return;
         }
-        this.b.localGet(Local.op1).localGet(Local.op2).op(I32.sub);
+        // As `record` leaves it: long mode's narrower result zero-extended.
+        const wide = this.width.bits === 64;
+        if (wide && size === 8)
+        {
+            this.b.localGet(Local.op1).localGet(Local.op2).op(I64.sub).localSet(Local.res);
+            return;
+        }
+        this.b.localGet(Local.op1);
+        if (wide)
+        {
+            this.b.op(I64.wrap);
+        }
+        this.b.localGet(Local.op2);
+        if (wide)
+        {
+            this.b.op(I64.wrap);
+        }
+        this.b.op(I32.sub);
         if (size < 4)
         {
             this.b.i32const(MASKS[widthCode(size)]).op(I32.and);
+        }
+        if (wide)
+        {
+            this.b.op(I64_EXTEND_U);
         }
         this.b.localSet(Local.res);
     }
@@ -3820,6 +3968,7 @@ export class RegionEmitter {
         this.hint = undefined;
         this.pending = null;
         this.fcmp = null;
+        this.carryBit = -1;
         this.dead = false;
         this.blockRetired = this.copying ? 0 : this.owed.get(index) ?? 0;
         this.blockCarried = this.blockRetired;
@@ -3948,16 +4097,29 @@ export class RegionEmitter {
         this.open(`selfDone${index}`, EMPTY);
         const copy = this.width.bits === 32 && this.context.undo === undefined
             ? copyLoopOf(block) : null;
-        if (copy !== null)
+        const indexed = this.width.bits === 64 && this.context.undo === undefined
+            ? indexedCopyOf(block) : null;
+        if (copy !== null || indexed !== null)
         {
             const pending = this.pending;
-            emitCopyAtOnce(this, block, copy, `selfDone${index}`, ()=>{
-                this.current = block.instructions[1];
-                this.flagsAfter = this.flagsAfterEach[1];
+            const at = indexed?.compare ?? 1;
+            const emitCompare = ()=>{
+                this.current = block.instructions[at];
+                this.flagsAfter = this.flagsAfterEach[at];
                 this.memPlan = null;
-                emitInstruction(this, block.instructions[1], live[1]);
-            }, import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile
-                ? times=>this.countBlock(block.start, times) : null);
+                emitInstruction(this, block.instructions[at], live[at]);
+            };
+            const profile = import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile
+                ? (/** @type {number} */ times)=>this.countBlock(block.start, times) : null;
+            if (copy !== null)
+            {
+                emitCopyAtOnce(this, block, copy, `selfDone${index}`, emitCompare, profile);
+            }
+            else if (indexed !== null)
+            {
+                emitIndexedCopyAtOnce(this, block, indexed, `selfDone${index}`, emitCompare,
+                    profile);
+            }
             this.pending = pending;
         }
         this.openLoop(`self${index}`);
@@ -3984,6 +4146,7 @@ export class RegionEmitter {
             this.blockDepth = this.controls.length;
             this.pending = null;
             this.fcmp = null;
+            this.carryBit = -1;
             this.resultOwed = null;
             this.dead = false;
             const counted = this.instructions;
@@ -4072,6 +4235,7 @@ export class RegionEmitter {
                 this.resultOwed = null;
                 this.pending = null;
                 this.fcmp = null;
+                this.carryBit = -1;
                 this.emitInstructions(block, index, live,
                     new Map([...streams.plan].map(([i, slot])=>[i, { ...slot }])));
                 this.instructions = counted;
@@ -5110,6 +5274,14 @@ export class RegionEmitter {
         if (!emptied)
         {
             this.payResult();
+            if (this.fcmp !== null)
+            {
+                this.payFloatCompare();
+            }
+            if (this.carryBit >= 0)
+            {
+                this.payBitTest();
+            }
         }
         else if (this.pathStores)
         {
@@ -5141,6 +5313,18 @@ export class RegionEmitter {
         }
         this.b.br(this.depthOf(emptied ? 'emptied' : 'out'));
     }
+}
+
+/**
+ * Whether an instruction may stand between a compare whose flags only the
+ * block's final branch reads and that branch (`fusesCompare`): it neither
+ * reads nor writes an arithmetic flag.
+ *
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ */
+export function keepsFlags(instruction){
+    return ((instruction.flagsRead | instruction.flagsWritten | instruction.flagsUndefined)
+        & ARITH_FLAGS) === 0;
 }
 
 /**
