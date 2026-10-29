@@ -151,7 +151,10 @@ export function createDriveFunctions(host){
 
     /**
      * The drive letter a path names, or null when it names none. A path with no
-     * drive means the current one, which is the first mounted letter.
+     * drive means the current one, which is the first mounted letter. The
+     * Win32 file namespace's `\\?\` and the device namespace's `\\.\` name
+     * the same drive with their prefix in front, and a program that writes
+     * its paths long asks about its drive that way.
      *
      * @param {string} path
      */
@@ -160,7 +163,7 @@ export function createDriveFunctions(host){
         {
             return letters()[0] ?? null;
         }
-        const found = /^([A-Za-z]):/.exec(path);
+        const found = /^(?:\\\\[?.]\\)?([A-Za-z]):/.exec(path);
         return found ? found[1].toUpperCase() : null;
     };
 

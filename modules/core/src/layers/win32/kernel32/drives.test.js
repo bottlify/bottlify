@@ -284,6 +284,22 @@ test('a disc is full, sized as the disc, and keeps its own label', ()=>{
     assert.equal(errors.at(-1), 19, 'ERROR_WRITE_PROTECT');
 });
 
+test('a directory written in the file or device namespace names its drive', ()=>{
+    // A program that writes its paths long asks GetDiskFreeSpaceEx about
+    // `\\?\C:\Program Files\Steam\` and stops when no drive answers.
+    const { fns, bytes } = setup(['C']);
+    const bs = String.fromCharCode(92);
+    plant(bytes, 0x200, `${bs}${bs}?${bs}C:${bs}Program Files${bs}Steam${bs}`);
+    assert.equal(fns.GetDiskFreeSpaceExA.handler([0x200, 0x110, 0x118, 0x120]), 1);
+    assert.equal(dword(bytes, 0x118) + dword(bytes, 0x11c) * 0x1_0000_0000,
+        32 * 1024 * 1024 * 1024);
+    plant(bytes, 0x200, `${bs}${bs}.${bs}C:${bs}`);
+    assert.equal(fns.GetDiskFreeSpaceExA.handler([0x200, 0x110, 0x118, 0x120]), 1);
+    plant(bytes, 0x200, `${bs}${bs}?${bs}Q:${bs}`);
+    assert.equal(fns.GetDiskFreeSpaceExA.handler([0x200, 0x110, 0x118, 0x120]), 0,
+        'a drive the machine has not got, in either spelling');
+});
+
 test('the wide free-space calls answer what the A calls answer', ()=>{
     const { fns, bytes } = setup(['C']);
     plant(bytes, 0x200, 'C:' + String.fromCharCode(92));
