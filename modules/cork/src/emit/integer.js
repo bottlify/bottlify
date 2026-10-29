@@ -1168,6 +1168,14 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 push(e, 4, ()=>b.i32const(next));
             }
+            if (instruction.thunk !== undefined)
+            {
+                // A call to an import thunk, formed as the call through its slot
+                // (`thunkCall` in region.js): the thunk's jump has run too, for
+                // every way on from here; a slot read or a push that faults
+                // left before the call.
+                e.blockRetired++;
+            }
             if (dst.kind === 'rel' && dst.target === next && !instruction.prefixes.operand)
             {
                 // `call $+5`: the push, and the block goes on (`exitOf`).

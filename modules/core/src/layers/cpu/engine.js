@@ -299,6 +299,8 @@ export function engineContractProblem(engineModule, url){
  *     Default 1024.
  * @property {boolean} [runtimeHelpers]  A call to a compiler's runtime helper (MSVC's `_ftol2`)
  *     formed as what it amounts to. Default true.
+ * @property {boolean} [importThunks]  A direct call to an import thunk (`jmp [slot]` alone)
+ *     formed as the call through its slot. Default true.
  * @property {boolean} [callTargets]  Indirect calls sampled and their few small callees formed
  *     in. Default true.
  * @property {number} [predictAfter]  Samples of one call before its callees are looked at.

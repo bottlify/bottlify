@@ -26,7 +26,7 @@
  * publishes code for bytes that changed while it was being compiled.
  */
 
-import { emptyCode, formRegion, formShared, hashRegion } from '../region.js';
+import { codeSpans, emptyCode, formRegion, formShared, hashRegion } from '../region.js';
 import { CallStack, TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
 import { MODE_64, decode } from '../decode/decoder.js';
 import { NanRecord, RANGE, SHAPE, isX87, trackRegion } from '../emit/x87.js';
@@ -252,6 +252,12 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // (MSVC's _ftol2) formed as the instructions it amounts to (false:
         // every such call runs the helper's own code; helpers.js).
         runtimeHelpers: true,
+        // A direct call to an import thunk -- `jmp [slot]` alone, as a linker
+        // makes one for each function a module imports -- formed as the call
+        // through the slot it amounts to, the thunk's jump counted with it
+        // (false: the thunk formed in as a callee, its jump and the callee's
+        // return each a transfer through the entry hash; region.js).
+        importThunks: true,
         // Indirect calls sampled while the translator runs, and a region whose
         // indirect call keeps going to a few small leaf callees formed again
         // with them in it: the call compares its target with each and jumps
@@ -575,7 +581,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
         helpers: settings.runtimeHelpers !== false, leafBlocks: settings.leafBlocks,
         leafBytes: settings.leafBytes, switchEntries: settings.switchEntries,
-        formDepth: settings.formDepth,
+        formDepth: settings.formDepth, importThunks: settings.importThunks !== false,
         // Long mode's code formed as long mode's, the shared emitter's own cuts in it.
         ...layout.bits === 64 ? { mode: MODE_64 } : {} };
     /** The same on this thread, with the host's copy of a span at once where it has one; a
@@ -2557,22 +2563,23 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         /** @type {Map<number, [number, number]>} */
         const extents = new Map();
-        for (const block of region.blocks)
+        const code = codeSpans(region);
+        for (const [start, end] of code)
         {
-            if (block.end <= block.start)
+            if (end <= start)
             {
                 continue;
             }
-            // As `markCode` takes the block: the granules of its first and last
+            // As `markCode` takes the span: the granules of its first and last
             // byte on each page it touches.
-            const first = block.start >>> 12;
-            const last = (block.end - 1) >>> 12;
+            const first = start >>> 12;
+            const last = (end - 1) >>> 12;
             for (let page = first; page <= last; page++)
             {
                 const from = page === first
-                    ? (block.start & 0xfff) >>> Tables.CODE_GRANULE_SHIFT : 0;
+                    ? (start & 0xfff) >>> Tables.CODE_GRANULE_SHIFT : 0;
                 const to = page === last
-                    ? (((block.end - 1) & 0xfff) >>> Tables.CODE_GRANULE_SHIFT) + 1 : GRANULES;
+                    ? (((end - 1) & 0xfff) >>> Tables.CODE_GRANULE_SHIFT) + 1 : GRANULES;
                 const extent = extents.get(page);
                 if (extent === undefined)
                 {
@@ -2703,9 +2710,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             }
             holders.add(record);
         }
-        for (const block of region.blocks)
+        for (const [start, end] of code)
         {
-            pages.markCode(block.start, block.end - block.start);
+            pages.markCode(start, end - start);
         }
         if (loose && (stackPages.size > 0 || codeShared !== null)
             && [...region.pages].some(page=>stackPages.has(page)
