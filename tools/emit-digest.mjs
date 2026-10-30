@@ -53,6 +53,14 @@ if ((args.includes('--check') || args.includes('--write'))
 const IMAGE_BASE = 0x401000;
 const IMAGES = new URL('./cork-bench/images/', import.meta.url);
 
+/**
+ * The host every module is emitted for, whatever machine runs the gate: an x64
+ * one, which is where the kept digest was written. An arm64 host emits some
+ * forms otherwise, and the gate would fail there for a translation nobody changed.
+ */
+const HOST = { simd: true, tailCalls: true, sharedMemory: true, defaultNaNNegative: true,
+    armHost: false };
+
 /** The option sets a module is emitted under: the configurations runs use. */
 const OPTIONS = [
     {},
@@ -61,7 +69,7 @@ const OPTIONS = [
     { precise: true },
     { wide: true },
     { checked: false },
-];
+].map(options=>({ ...options, hostFeatures: HOST }));
 
 const digest = createHash('sha256');
 /** @type {string[]} */
