@@ -59,6 +59,13 @@ export async function logOn(connection, { accountName, refreshToken, machineName
     const licensesMessage = connection.next(EMsg.ClientLicenseList);
     const response = connection.next(EMsg.ClientLogOnResponse);
     const loggedOff = connection.next(EMsg.ClientLoggedOff);
+    // Each is awaited only on the path that needs it. A logon refused, or a
+    // token that is not one, leaves the rest to reject when the connection
+    // closes -- unheard, that rejection ends a Node process.
+    for (const waiting of [licensesMessage, response, loggedOff])
+    {
+        waiting.catch(()=>{});
+    }
     connection.setSession(steamIdOfToken(refreshToken), 0);
     connection.send(EMsg.ClientLogon, ClientLogon, {
         protocol_version: PROTOCOL_VERSION,

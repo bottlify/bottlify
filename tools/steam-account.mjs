@@ -11,8 +11,8 @@
  *
  *   node tools/steam-account.mjs --session <file> --out <account.json>
  *
- * --session is { accountName, refreshToken }, as the launcher's /steam page
- * keeps it in bottlify-ui/.steam/session.json.
+ * --session is { accountName, refreshToken }, as tools/steam-signin.mjs
+ * --token writes it.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';

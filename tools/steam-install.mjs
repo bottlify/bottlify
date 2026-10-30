@@ -12,10 +12,11 @@
  *   NODE_USE_ENV_PROXY=1 node tools/steam-install.mjs --session <file> --app <id> --out <dir>
  *       [--branch public] [--language english] [--depots 401,402] [--jobs 16]
  *
- * --session is a signed-in session, { accountName, refreshToken }: the
- * launcher's /steam page keeps one in bottlify-ui/.steam/session.json, and
- * tools/steam-signin.mjs --token writes the same. A run stopped part way is
- * run again: a file already whole (its size and SHA-1) is kept.
+ * --session is a signed-in session, { accountName, refreshToken }, as
+ * tools/steam-signin.mjs --token writes it; `--session -` reads it from stdin,
+ * which is how the launcher hands over a browser's session without writing
+ * it to a file. A run stopped part way is run again: a file already whole
+ * (its size and SHA-1) is kept.
  */
 
 import { createHash } from 'node:crypto';
@@ -64,7 +65,7 @@ if (!connection)
 {
     throw new Error('no Steam connection manager answered');
 }
-const session = JSON.parse(readFileSync(sessionPath, 'utf8'));
+const session = JSON.parse(readFileSync(sessionPath === '-' ? 0 : sessionPath, 'utf8'));
 await logOn(connection, session);
 console.log(`logged on as ${session.accountName}`);
 
