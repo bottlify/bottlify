@@ -26,6 +26,9 @@
 // A bundle's translations are kept beside its saves in the origin's file
 // system; a launcher clears them from here, as it opens the saves.
 export { clearTranslations } from './layers/cpu/internal/translation-store.js';
+// Everything this browser keeps of a bottle -- caches and saves -- listed and
+// removed by kind, for a launcher's storage screen.
+export { bottleStorage, clearBottleStorage, storageName } from './storage-budget.js';
 
 /** Magic and version of the packed session. */
 const MAGIC = 0x53544201; // "BTS", version 1

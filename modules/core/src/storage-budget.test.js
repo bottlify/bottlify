@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { keepStorageWithin, STORAGE_SHARE } from './storage-budget.js';
+import {
+    bottleStorage, clearBottleStorage, keepStorageWithin, STORAGE_SHARE,
+} from './storage-budget.js';
 
 /**
  * The origin's file system as the budget reads it: directories of files that
@@ -133,4 +135,113 @@ test('a browser that gives no estimate is not measured, and nothing goes', async
     const result = await keepStorageWithin({ root, estimate: {}, keep: {} });
     assert.equal(result.measured, false);
     assert.equal(root.children.size, 11);
+});
+
+/**
+ * A browser over a fake origin: its storage, and locks of which `held` are
+ * taken by runs.
+ *
+ * @param {any} root @param {string[]} [held]
+ */
+function browser(root, held = []){
+    return {
+        storage: {
+            getDirectory: async()=>root,
+            estimate: async()=>({ usage: 5000, quota: 100000 }),
+            persisted: async()=>true,
+        },
+        locks: {
+            query: async()=>({ held: held.map(name=>({ name })) }),
+            /** @param {string} name @param {any} options @param {Function} work */
+            request: async(name, options, work)=>work(held.includes(name) ? null : { name }),
+        },
+    };
+}
+
+/**
+ * Two packings of one bottle's blocks, its translations and saves; an orphan's
+ * cache with the appended layout's table left beside it; a session alone.
+ */
+function bottles(){
+    const root = fakeDirectory();
+    root.file('game-0a1b2c3d.blocks', 500, 9);
+    root.file('game-0a1b2c3d.present', 2, 9);
+    root.file('game-0a1b2c3d.order', 8, 9);
+    root.file('game-ffffffff.blocks', 300, 1);
+    root.file('gone-12345678.blocks', 700, 3);
+    root.file('gone-12345678.present', 1, 3);
+    root.file('gone-12345678.slots', 40, 3);
+    // A cache whose data is cut into segments rather than one file.
+    root.file('split-abcdef01.blocks.0', 60, 7);
+    root.file('split-abcdef01.blocks.1', 40, 7);
+    root.file('split-abcdef01.present', 1, 7);
+    root.file('solo.session', 60, 4);
+    const saves = root.directory('game.files');
+    saves.file('a', 30, 5);
+    saves.file('b', 20, 6);
+    root.directory('bottles').directory('game').file('bundle.btl', 9999, 1);
+    const cork = root.directory('cork');
+    cork.directory('game.v9').file('records', 100, 9);
+    cork.directory('gone.v8').file('records', 70, 2);
+    return root;
+}
+
+test('every bottle\'s storage is listed by kind, an orphan\'s and a leftover table too', async()=>{
+    const listed = await bottleStorage(browser(bottles(), ['bottlify-cork:game']));
+    assert.equal(listed.usage, 5000);
+    assert.equal(listed.quota, 100000);
+    assert.equal(listed.persisted, true);
+    const by = Object.fromEntries(listed.bottles.map(one=>[one.bottle, one]));
+    assert.deepEqual(Object.keys(by).sort(), ['game', 'gone', 'solo', 'split'],
+        'a launcher\'s own folders are not the engine\'s to list');
+    assert.equal(by.split.blocks, 101, 'a segmented cache counts every segment');
+    assert.deepEqual(by.game, { bottle: 'game', busy: true, blocks: 810, translations: 100,
+        saves: 50 }, 'both packings\' blocks, the session\'s folder added up');
+    assert.deepEqual(by.gone, { bottle: 'gone', busy: false, blocks: 741, translations: 70,
+        saves: 0 });
+    assert.deepEqual(by.solo, { bottle: 'solo', busy: false, blocks: 0, translations: 0,
+        saves: 60 }, 'a session in its one-file form');
+});
+
+test('clearing a bottle\'s cache takes its blocks and translations and never its saves', async()=>{
+    const root = bottles();
+    const removed = await clearBottleStorage('gone', ['blocks', 'translations'], browser(root));
+    assert.deepEqual(removed.map(one=>`${one.kind}:${one.name}:${one.bytes}`).sort(),
+        ['blocks:gone-12345678:741', 'translations:gone.v8:70']);
+    assert.ok(!root.children.has('gone-12345678.slots'), 'the leftover table goes with its cache');
+    assert.ok(!root.children.get('cork').children.has('gone.v8'));
+
+    await clearBottleStorage('game', ['blocks', 'translations'], browser(root));
+    assert.ok(root.children.has('game.files'), 'saves are not a cache');
+    assert.ok(![...root.children.keys()].some(name=>name.startsWith('game-')));
+    assert.ok(root.children.has('bottles') && root.children.has('solo.session'));
+
+    await clearBottleStorage('split', ['blocks'], browser(root));
+    assert.ok(![...root.children.keys()].some(name=>name.startsWith('split-')),
+        'every segment goes with its cache');
+});
+
+test('saves go only when asked for, in either form', async()=>{
+    const root = bottles();
+    await clearBottleStorage('solo', ['saves'], browser(root));
+    assert.ok(!root.children.has('solo.session'));
+    await clearBottleStorage('game', ['saves'], browser(root));
+    assert.ok(!root.children.has('game.files'));
+    assert.ok(root.children.has('game-0a1b2c3d.blocks'), 'the cache stays');
+});
+
+test('a running bottle is refused and keeps everything', async()=>{
+    const root = bottles();
+    await assert.rejects(clearBottleStorage('game', ['blocks', 'translations', 'saves'],
+        browser(root, ['bottlify-cork:game'])), /in use by a running title/);
+    assert.ok(root.children.has('game-0a1b2c3d.blocks') && root.children.has('game.files'));
+});
+
+test('a browser that says nothing of its usage is not measured', async()=>{
+    const root = bottles();
+    const listed = await bottleStorage({ storage: { getDirectory: async()=>root }, locks: {} });
+    assert.equal(listed.usage, null);
+    assert.equal(listed.quota, null);
+    assert.equal(listed.persisted, null);
+    assert.equal(listed.bottles.length, 4);
 });
