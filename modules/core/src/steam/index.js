@@ -9,3 +9,6 @@ export { signInWithQr } from './auth.js';
 export { logOn, library, productInfo, steamIdOfToken } from './session.js';
 export { encodeQr, qrToSvg } from './qr.js';
 export { parseText, parseBinary } from './keyvalues.js';
+export {
+    FILE_FLAG_DIRECTORY, contentServers, depotKey, downloadChunk, manifest, manifestRequestCode,
+} from './depot.js';
