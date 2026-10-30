@@ -26,8 +26,24 @@ import {
  * are the application behind the worker and the GPU it would open.
  */
 
-/** A wait for everything queued on the ports to be delivered. */
-const settled = ()=>new Promise(resolve=>setTimeout(resolve, 20));
+/** Hops a message and the answers it sets off take, with room to spare. */
+const SETTLE_TURNS = 20;
+
+/**
+ * A wait for everything queued on the ports to be delivered: past every timer
+ * of 20 ms or less (the keeper's poll among them), then turns of the event
+ * loop, each delivering the messages the last one posted. Both ends share this
+ * thread, so the turns, not the clock, carry a message and its answers over: a
+ * timer alone may come due in the turn that delivers them, on a machine that
+ * kept this thread off its core, and run before them.
+ */
+const settled = async()=>{
+    await new Promise(resolve=>setTimeout(resolve, 20));
+    for (let turn = 0; turn < SETTLE_TURNS; turn++)
+    {
+        await new Promise(resolve=>setImmediate(resolve));
+    }
+};
 
 /** Waits for a condition to hold, so no test depends on a keeper poll landing in time. */
 /** @param {() => Promise<boolean> | boolean} check @param {number} [timeoutMs] */
