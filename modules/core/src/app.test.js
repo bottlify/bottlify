@@ -1214,7 +1214,7 @@ test("a page's pacing sleeps to a deadline rather than spinning macrotasks to it
     assert.equal(laps, 0, 'no macrotask on the way to the deadline');
     assert.ok(performance.now() - before >= 4, 'the deadline is waited out');
     await pacing.wait({ timer: false, sleep: true, deadlineMs: 10_000, wakes: [] });
-    assert.deepEqual(naps.mock.calls.map(call=>call.arguments[3]), [5, 20],
+    assert.deepEqual(naps.mock.calls.map((/** @type {any} */ call)=>call.arguments[3]), [5, 20],
         'to the deadline, and a look at most, whatever the deadline');
     naps.mock.restore();
     assert.equal(pacing.counts?.().napped, 2);
