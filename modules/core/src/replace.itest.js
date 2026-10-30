@@ -428,7 +428,7 @@ test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it t
 for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
 {
     test(`a process's windows go when it exits, and the one started in its place finds none of`
-        + ` them (concurrency ${concurrency})`, { timeout: 60000 }, async t=>{
+        + ` them (concurrency ${concurrency})`, { timeout: 120_000 }, async t=>{
         // InstallShield's setup shows a window, starts a copy of itself and
         // exits; the copy shows its wizard. On Windows the first process's
         // windows are destroyed with it. Carried into the copy, its window
@@ -460,15 +460,25 @@ for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
                 0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
-        // Exits with FindWindowA(NULL, title): zero when the parent's window is gone.
+        // Looks with FindWindowA(NULL, title) until the parent's window is
+        // gone, then exits. Started before the parent's ExitProcess, the child
+        // may look while the parent still stands, on Windows too: which of
+        // the two runs first is the machine's to decide, and a busy one ran
+        // the child's look first (concurrency 1, eight busy loops beside the
+        // suite). A window carried into the copy is never gone: the run then
+        // ends at its bound, not with the child's exit.
         const child = buildExe({
-            imports: { 'USER32.dll': ['FindWindowA'], 'KERNEL32.dll': ['ExitProcess'] },
+            imports: { 'USER32.dll': ['FindWindowA'], 'KERNEL32.dll': ['Sleep', 'ExitProcess'] },
             codeSize: 0x40,
             data: { title: ascii('left by the parent') },
             code: ({ iat, at })=>[
-                0x68, ...u32(at('title')), 0x6a, 0,
+                0x68, ...u32(at('title')), 0x6a, 0, //   L: push title; push NULL
                 0xff, 0x15, ...u32(iat('FindWindowA')),
-                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+                0x85, 0xc0, //                            test eax, eax
+                0x74, 0x0a, //                            jz gone
+                0x6a, 0x01, 0xff, 0x15, ...u32(iat('Sleep')),
+                0xeb, 0xe5, //                            jmp L
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')), // gone: ExitProcess(0)
             ],
         });
         const app = await createApp({
