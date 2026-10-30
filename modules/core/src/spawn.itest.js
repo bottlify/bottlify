@@ -308,28 +308,37 @@ const ascii = text=>[...text].map(character=>character.charCodeAt(0)).concat(0);
 
 /**
  * A launcher: it names an event, starts its game, and waits for either the
- * game's process or the event; then it waits for the game to end and exits
- * with the index WaitForMultipleObjects answered, the last of the two to go.
- * The game opens the event by name, signals it, and exits a moment later:
- * whenever the launcher reaches its wait, the event came first.
+ * game's process or the event; then it says it woke, waits for the game to
+ * end and exits with the index WaitForMultipleObjects answered, the last of
+ * the two to go. The game opens the event by name, signals it, and exits once
+ * the launcher has woken: whenever the launcher reaches its wait, the event
+ * came first and the process has not ended -- the game's exit held back by
+ * the launcher's word, not by a sleep of 200 ms a busy machine could outlast
+ * before the launcher got to its wait.
  */
 function buildLauncher(){
     const parent = buildExe({
         imports: { 'KERNEL32.dll': ['CreateEventA', 'CreateProcessA',
-            'WaitForMultipleObjects', 'WaitForSingleObject', 'ExitProcess'] },
+            'WaitForMultipleObjects', 'WaitForSingleObject', 'SetEvent', 'ExitProcess'] },
         data: {
             name: ascii('LAUNCHED_OK'),
+            wokeName: ascii('LAUNCHER_WOKE'),
             command: ascii('C:\\App\\game.exe'),
             startup: [...u32(68), ...new Array(64).fill(0)],
             info: new Array(16).fill(0),
             set: new Array(8).fill(0),
+            woke: new Array(4).fill(0),
         },
-        codeSize: 0x80,
+        codeSize: 0xa0,
         code: ({ iat, at })=>[
             // CreateEventA(0, 0, 0, name)
             0x68, ...u32(at('name')), 0x6a, 0, 0x6a, 0, 0x6a, 0,
             0xff, 0x15, ...u32(iat('CreateEventA')),
             0xa3, ...u32(at('set') + 4),                              // set[1] = event
+            // CreateEventA(0, 1, 0, wokeName)
+            0x68, ...u32(at('wokeName')), 0x6a, 0, 0x6a, 1, 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateEventA')),
+            0xa3, ...u32(at('woke')),
             // CreateProcessA(0, command, ..., &startup, &info)
             0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
             0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
@@ -340,6 +349,7 @@ function buildLauncher(){
             0x6a, 0xff, 0x6a, 0, 0x68, ...u32(at('set')), 0x6a, 2,
             0xff, 0x15, ...u32(iat('WaitForMultipleObjects')),
             0x89, 0xc6,                                                // mov esi, eax
+            0xff, 0x35, ...u32(at('woke')), 0xff, 0x15, ...u32(iat('SetEvent')),
             // WaitForSingleObject(info.hProcess, INFINITE)
             0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
             0xff, 0x15, ...u32(iat('WaitForSingleObject')),
@@ -347,6 +357,30 @@ function buildLauncher(){
         ],
     });
     const game = buildExe({
+        imports: { 'KERNEL32.dll': ['OpenEventA', 'SetEvent', 'WaitForSingleObject',
+            'ExitProcess'] },
+        data: { name: ascii('LAUNCHED_OK'), wokeName: ascii('LAUNCHER_WOKE') },
+        code: ({ iat, at })=>[
+            // SetEvent(OpenEventA(EVENT_ALL_ACCESS, FALSE, name))
+            0x68, ...u32(at('name')), 0x6a, 0, 0x68, ...u32(0x1f0003),
+            0xff, 0x15, ...u32(iat('OpenEventA')),
+            0x50, 0xff, 0x15, ...u32(iat('SetEvent')),
+            // WaitForSingleObject(OpenEventA(EVENT_ALL_ACCESS, FALSE, wokeName), INFINITE)
+            0x68, ...u32(at('wokeName')), 0x6a, 0, 0x68, ...u32(0x1f0003),
+            0xff, 0x15, ...u32(iat('OpenEventA')),
+            0x6a, 0xff, 0x50, 0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    return { parent, game };
+}
+
+/**
+ * A helper that opens the event by name, signals it, and exits a moment later
+ * (Sleep(200)): its parent's waits end the same however the two are scheduled.
+ */
+function buildSetter(){
+    return buildExe({
         imports: { 'KERNEL32.dll': ['OpenEventA', 'SetEvent', 'Sleep', 'ExitProcess'] },
         data: { name: ascii('LAUNCHED_OK') },
         code: ({ iat, at })=>[
@@ -358,7 +392,6 @@ function buildLauncher(){
             0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
         ],
     });
-    return { parent, game };
 }
 
 test('a launcher waiting on its game or the event the game sets is woken by the event',
@@ -517,7 +550,7 @@ function buildSignalled(){
             0x6a, 3, 0xff, 0x15, ...u32(iat('ExitProcess')),
         ],
     });
-    return { parent, game: buildLauncher().game };
+    return { parent, game: buildSetter() };
 }
 
 test('a parent waiting on something its child sets, not on the child, outlives the child',
