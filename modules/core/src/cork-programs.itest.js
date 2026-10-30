@@ -228,11 +228,11 @@ test('a loop calling an import runs and translates under cork',
         // The loop traps an import every iteration, so its rate is the trap
         // channel's cost as much as the executor's; the compute loop below is
         // where the executor shows.
-        const corkRate = cork.instructions / cork.ms / 1000;
-        const modelRate = reference.instructions / reference.ms / 1000;
+        const corkRate = cork.instructions / cork.cpuMs / 1000;
+        const modelRate = reference.instructions / reference.cpuMs / 1000;
         console.log(`cork loop: share ${cork.cork.translatedShare.toFixed(2)},`
             + ` regions ${cork.cork.regions},`
-            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s`);
+            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s of processor time`);
         // E: the translator's cost is a fixed warm-up, not a per-slice toll.
         // The two runs below leave the same regions, so whatever the longer
         // one pays more is the engine thread translating on the slice path
