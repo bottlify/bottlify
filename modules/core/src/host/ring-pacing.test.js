@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { createRingMemory } from '../system/ring.js';
+import { createRingMemory, waitDoorbell } from '../system/ring.js';
 import { createInboundReader, createInboundWriter } from './inbound.js';
 import { ringPacing } from './ring-pacing.js';
 
@@ -34,18 +34,31 @@ test('an idle engine sleeps on the doorbell and a write from another thread wake
     { timeout: 20000 }, async()=>{
         /** @type {any[]} */
         const received = [];
-        const { memory, pacing, macrotasks } = pacingOver(received);
+        // The sleeps begun, counted where the writer reads them: it writes once
+        // the engine is on its second, whatever the machine's load, and the
+        // doorbell's count read before that sleep ends it however the two
+        // threads' steps fall.
+        const asleep = new Int32Array(new SharedArrayBuffer(4));
+        const { memory, pacing, macrotasks } = pacingOver(received, {
+            sleep: (/** @type {Parameters<typeof waitDoorbell>} */ ...args)=>{
+                Atomics.add(asleep, 0, 1);
+                Atomics.notify(asleep, 0);
+                return waitDoorbell(...args);
+            },
+        });
         const writer = new Worker(`
             const { workerData } = require('node:worker_threads');
             import(workerData.inbound).then(({ createInboundWriter })=>{
                 const ring = createInboundWriter(workerData.memory);
-                // Long after the engine is asleep, however slowly this thread started.
-                setTimeout(()=>ring.send({ type: 'input', event: { kind: 'key', code: 'KeyQ' } },
-                    ()=>{ throw new Error('posted'); }), 150);
+                while (Atomics.load(workerData.asleep, 0) < 2)
+                {
+                    Atomics.wait(workerData.asleep, 0, Atomics.load(workerData.asleep, 0), 1000);
+                }
+                ring.send({ type: 'input', event: { kind: 'key', code: 'KeyQ' } },
+                    ()=>{ throw new Error('posted'); });
             });`, { eval: true, workerData: {
-            inbound: new URL('./inbound.js', import.meta.url).href, memory } });
-        let rounds = 0;
-        while (received.length === 0 && rounds++ < 1000)
+            inbound: new URL('./inbound.js', import.meta.url).href, memory, asleep } });
+        while (received.length === 0)
         {
             await pacing.wait(idle);
         }
@@ -70,14 +83,16 @@ test('a sleep ends at the guest\'s own deadline, and a message already written i
     assert.ok(slept >= 14, `${slept.toFixed(1)} ms: to the deadline, not short of it`);
     assert.equal(pacing.counts().woken, 0, 'the deadline ended it: nothing rang');
     createInboundWriter(memory).send({ type: 'visibility', hidden: true }, ()=>{});
-    const again = performance.now();
     pacing.wait({ ...idle, deadlineMs: 1000 });
-    assert.ok(performance.now() - again < 10, 'the record was there: no sleep');
+    assert.equal(pacing.counts().slept, 1, 'the record was there: no sleep');
     assert.deepEqual(received, [{ type: 'visibility', hidden: true }]);
 });
 
 test('with a host answer outstanding the wait stays on the event loop and ends with it',
-    { timeout: 5000 }, async()=>{
+    { timeout: 5000 }, async t=>{
+        // The deadline's timer on a clock of the test's, never moved: what ends
+        // the wait can only be the answer.
+        t.mock.timers.enable({ apis: ['setTimeout'] });
         /** @type {any[]} */
         const received = [];
         /** @type {any[]} */
@@ -92,10 +107,16 @@ test('with a host answer outstanding the wait stays on the event loop and ends w
         const answered = new Promise(resolve=>{
             answer = ()=>resolve();
         });
-        setTimeout(answer, 5);
-        const started = performance.now();
-        await pacing.wait({ ...idle, deadlineMs: 5000, wakes: [answered] });
-        assert.ok(performance.now() - started < 1000, 'the answer ended it, not the deadline');
+        let ended = false;
+        const waiting = pacing.wait({ ...idle, deadlineMs: 5000, wakes: [answered] }).then(()=>{
+            ended = true;
+        });
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.equal(ended, false, 'waiting on the event loop');
+        answer();
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.equal(ended, true, 'the answer ended it, not the deadline');
+        await waiting;
         assert.deepEqual(blocked, [], 'the thread was never blocked while the event loop owed it');
     });
 
