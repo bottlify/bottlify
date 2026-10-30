@@ -585,7 +585,8 @@ function returnsEarly(list){
  * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
- *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean,
+ *     points?: { sprite: boolean }, alphaTest?: number, srgbWrite?: boolean,
+ *     nanProbe?: boolean,
  *     tableFogOverDepth?: boolean, rectangleBump?: boolean, ones?: readonly number[],
  *     sampling?: readonly (SamplerVariant | undefined)[],
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState }} [options]
@@ -617,6 +618,8 @@ function returnsEarly(list){
  *        reads sample, and `projectedBy` the component each stage's
  *        coordinates are divided by under D3DTTFF_PROJECTED ('' for none),
  *        which a 1.0 to 1.3 shader's reads honour.
+ *        `srgbWrite` encodes every colour the pixel shader writes from
+ *        linear to sRGB, as D3DRS_SRGBWRITEENABLE has Direct3D 9 write it.
  *        `ones` is, by sampler number (s#, or the stage a 1.x read names),
  *        the channels the texture bound there samples as one that the GPU's
  *        texture lacks (`sampledOnes` in `constants.js`); absent or zero, a
@@ -2033,6 +2036,22 @@ export function translateShader(parsed, options = {}){
                     'c[_alphaRef].x')})) {`,
                 '        discard;',
                 '    }');
+        }
+        // D3DRS_SRGBWRITEENABLE: every colour written is encoded from linear
+        // to sRGB on its way out, alpha as it is -- the last thing before
+        // the target, after fog and the alpha test. Encoded here rather than
+        // through an sRGB view of the target, so the blend runs on the
+        // encoded values, as Direct3D 9 hardware blended.
+        if (options.srgbWrite === true)
+        {
+            for (const target of [...pixelOutputs].sort())
+            {
+                const at = body.indexOf(`    out.oC${target} = oC${target};`);
+                const c = `clamp(oC${target}.rgb, vec3f(0.0), vec3f(1.0))`;
+                body.splice(at < 0 ? body.length : at, 0,
+                    `    oC${target} = vec4f(select(1.055 * pow(${c}, vec3f(1.0 / 2.4)) - 0.055,`
+                    + ` 12.92 * ${c}, ${c} <= vec3f(0.0031308)), oC${target}.a);`);
+            }
         }
         entry = 'ps_main';
     }

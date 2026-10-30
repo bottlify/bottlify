@@ -1229,7 +1229,15 @@ specular = 'input.specular', sprite = false, table = tableFog(position))
     const colourKey = state.stages.some(stage=>stage.colorKey !== undefined)
         ? '\n    if (colourKeyed)\n    {\n        discard;\n    }'
         : '';
-    return `${stages}${highlight}${fog}${alphaTest}${colourKey}`;
+    // D3DRS_SRGBWRITEENABLE: the colour encoded from linear to sRGB on its
+    // way into an eight-bit target, the last thing before it, as the
+    // programmable stage encodes it.
+    const encode = state.srgbWrite
+        ? '\n    current = vec4f(select(1.055 * pow(saturate(current.rgb), vec3f(1.0 / 2.4))'
+            + ' - 0.055, 12.92 * saturate(current.rgb), saturate(current.rgb) <= vec3f(0.0031308)),'
+            + ' current.a);'
+        : '';
+    return `${stages}${highlight}${fog}${alphaTest}${colourKey}${encode}`;
 }
 
 /**

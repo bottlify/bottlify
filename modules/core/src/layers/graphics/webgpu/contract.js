@@ -83,6 +83,8 @@
  * @typedef {Object} Surface
  * @property {any} texture
  * @property {any} view
+ * @property {any} [srgbView]  The same texels through the format's sRGB twin, for a
+ *           surface made with that twin among its `viewFormats`.
  * @property {number} width
  * @property {number} height
  * @property {string} format

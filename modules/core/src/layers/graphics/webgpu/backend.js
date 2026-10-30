@@ -434,13 +434,20 @@ export function createBackend(options){
                 ? TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
                     | TextureUsage.COPY_SRC
                 : descriptor.usage,
+            ...(descriptor.viewFormats?.length ? { viewFormats: descriptor.viewFormats } : {}),
         });
         profiler.count('surfacesCreated');
+        const dimension = descriptor.dimension === undefined ? {}
+            : { dimension: descriptor.dimension };
+        // The same texels read through their sRGB twin, decoded to linear
+        // before filtering: what a sampler asked to read sRGB is given.
+        const srgb = /** @type {string[] | undefined} */ (descriptor.viewFormats)
+            ?.find(format=>format.endsWith('-srgb'));
         return {
             texture,
-            view: texture.createView(descriptor.dimension === undefined
-                ? { label }
-                : { label, dimension: descriptor.dimension }),
+            view: texture.createView({ label, ...dimension }),
+            ...(srgb ? { srgbView: texture.createView({ label: `${label}-srgb`, format: srgb,
+                ...dimension }) } : {}),
             width: descriptor.width,
             height: descriptor.height,
             format: descriptor.format,

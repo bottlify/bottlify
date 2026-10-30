@@ -1014,8 +1014,8 @@ test('StretchRect copies equal rectangles and refuses a stretch, saying why', ()
 
 test('a draw whose declaration reads nothing from stream zero needs no buffer there', ()=>{
     // Direct3D draws what the declaration reads; stream zero unbound is a draw's own
-    // business when no element is there. One that reads it and has nothing there is refused,
-    // saying so.
+    // business when no element is there. One that reads it and has nothing there is not
+    // checked either (Wine's test_null_stream): D3D_OK, nothing drawn, and said so.
     /** @type {string[]} */
     const reports = [];
     const { device } = make({ services: { divergence: (/** @type {string} */ _api,
@@ -1036,9 +1036,9 @@ test('a draw whose declaration reads nothing from stream zero needs no buffer th
     device.CreateVertexDeclaration([element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0)],
         here);
     device.SetVertexDeclaration(here.declaration);
-    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3DERR_INVALIDCALL);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
     device.EndScene();
-    assert.ok(reports.some(line=>/no vertex buffer on stream 0 was refused; its declaration reads streams 0/
+    assert.ok(reports.some(line=>/no vertex buffer on stream 0 drew nothing, as vertices read from no buffer do; its declaration reads streams 0/
         .test(line)), reports.join(' | '));
 });
 

@@ -670,10 +670,6 @@ test('a programmable draw is not blind to the dump: shaders, declaration and sam
 });
 
 test('a dump line names the sRGB states a draw was asked to read and write with', async()=>{
-    // Nothing here decodes or encodes sRGB, so a program that sets the
-    // states without asking CheckDeviceFormat first draws in the wrong
-    // space; whether it did is a question about one frame, answered by its
-    // dump.
     const h = harness({ dumpDraws: true });
     /** @type {{ shader?: any }} */
     const vs = {};
@@ -715,6 +711,59 @@ test('a dump line names the sRGB states a draw was asked to read and write with'
     h.vb.release();
     assert.equal(h.device.release(), 0);
 });
+
+test('a stage read as sRGB samples its texture decoded, and a target written as sRGB is encoded',
+    async()=>{
+        // D3DSAMP_SRGBTEXTURE reads the texels through the texture's sRGB
+        // view, decoded before filtering; D3DRS_SRGBWRITEENABLE has the pixel
+        // shader encode what it writes into an eight-bit target.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        /** The formats of the views the draw's bind groups sampled. */
+        const sampledFormats = ()=>[...h.groupsOfDraw().values()].flatMap(group=>group.descriptor
+            .entries.map((/** @type {any} */ entry)=>entry.resource?.viewDescriptor?.format)
+            .filter(Boolean));
+        const pixelCode = ()=>h.gpu.of('createShaderModule')
+            .map((/** @type {any} */ call)=>call.descriptor.code).filter(code=>code.includes('ps_main'));
+
+        await h.draw();
+        assert.deepEqual(sampledFormats(), [], 'a plain read samples the texture as stored');
+        assert.ok(pixelCode().every(code=>!code.includes('12.92')));
+        const made = h.gpu.of('createTexture').map((/** @type {any} */ call)=>call.descriptor)
+            .find((/** @type {any} */ descriptor)=>descriptor.label === 'texture');
+        assert.deepEqual(made.viewFormats, [`${made.format}-srgb`]);
+
+        assert.equal(h.device.SetSamplerState(0, D3DSAMP.SRGBTEXTURE, 1), D3D_OK);
+        h.gpu.calls.length = 0;
+        await h.draw();
+        assert.deepEqual(sampledFormats(), [`${made.format}-srgb`]);
+
+        assert.equal(h.device.SetRenderState(D3DRS9.SRGBWRITEENABLE, 1), D3D_OK);
+        await h.draw();
+        assert.ok(pixelCode().some(code=>code.includes('12.92')),
+            'the shader encodes its colour to sRGB');
+        assert.deepEqual(h.reports, []);
+
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        vs.shader.release();
+        ps.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
 
 test('a screen quad in target pixels draws past a bound vertex shader, which runs again after',
     async()=>{

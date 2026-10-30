@@ -58,6 +58,7 @@ import {
 import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
     IDENTITY, STAGE_COUNT, createRenderer, gpuFormatOf, multiplyMatrices, sameLight,
+    srgbViewFormats,
     vertexCountOf,
 } from '../d3d8/render.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
@@ -584,10 +585,12 @@ export function createDirect3D9(options = {}){
             {
                 return D3DERR_NOTAVAILABLE;
             }
-            // D3DUSAGE_QUERY_SRGBREAD and _SRGBWRITE: nothing here reads or
-            // writes a texture as sRGB, so a program told yes would draw in
-            // the wrong space -- told no, it does its own correction or none.
-            if ((usage & (USAGE_QUERY_SRGBREAD | USAGE_QUERY_SRGBWRITE)) !== 0)
+            // D3DUSAGE_QUERY_SRGBREAD and _SRGBWRITE: the eight-bit and DXT
+            // formats, whose GPU surface has an sRGB twin a stage reads
+            // through (D3DSAMP_SRGBTEXTURE) and whose target a shader writes
+            // encoded (D3DRS_SRGBWRITEENABLE); a floating-point one is neither.
+            if ((usage & (USAGE_QUERY_SRGBREAD | USAGE_QUERY_SRGBWRITE)) !== 0
+                && (info.depth || srgbViewFormats(gpuFormatOf(format, 4, 4, true)).length === 0))
             {
                 return D3DERR_NOTAVAILABLE;
             }
@@ -1734,8 +1737,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * buffer only at a multiple of four bytes, so a remainder that is not one
      * is the one offset refused.
      *
-     * @returns {number | null} null when the binding is unusable
+     * @returns {number | null} null when the binding is unusable, DRAWS_NOTHING for
+     *     a stream zero the declaration reads with no buffer there
      */
+    /** What `streamBias` answers for a draw that reads a stream zero holding no buffer. */
+    const DRAWS_NOTHING = -1;
     /** The whole vertices the last draw folded into its first (`streamBias`), for the renderer. */
     let foldedBias = 0;
     /**
@@ -1773,12 +1779,18 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         }
         if (!source?.buffer || !(source.stride > 0))
         {
+            // Direct3D does not check that a stream the declaration reads holds
+            // a buffer: a draw with one unbound answers D3D_OK (Wine's d3d9
+            // test_null_stream). Its vertices come from no buffer -- positions of
+            // nothing, which the hardware of the time drew as nothing -- and
+            // here it is not drawn.
             const read = [...new Set(elements.map((/** @type {any} */ e)=>e.Stream))].join(',');
             report(`draw-stream-${source?.buffer ? 'stride' : 'buffer'}-${read}`,
                 `a draw with ${source?.buffer ? `stride ${source.stride}` : 'no vertex buffer'}`
-                + ` on stream 0 was refused; its declaration reads streams ${read || 'none'}`
+                + ` on stream 0 drew nothing, as vertices read from no buffer do; its`
+                + ` declaration reads streams ${read || 'none'}`
                 + ` (FVF 0x${(vertexDeclaration.fvf ?? 0).toString(16)})`);
-            return null;
+            return source?.buffer ? null : DRAWS_NOTHING;
         }
         // The first vertex moves every stream that steps with it, so no more
         // vertices are folded than each further stream the declaration reads
@@ -2479,7 +2491,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const target = renderTargets.get(0);
             return {
                 drawable: (inScene ? 1 : 0) | (declared ? 2 : 0)
-                    | (streamBias() !== null ? 4 : 0) | (indices ? 8 : 0)
+                    | ((streamBias() ?? DRAWS_NOTHING) >= 0 ? 4 : 0) | (indices ? 8 : 0)
                     | (depthStencil ? 16 : 0)
                     | (depthStencil && describe(depthStencil).Format === D3DFMT.D24S8 ? 32 : 0),
                 targetWidth: target ? describe(target).Width : 0,
@@ -3429,6 +3441,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (bias === DRAWS_NOTHING)
+            {
+                return D3D_OK;
+            }
             noteUndrawable();
             if (services.drawsFrom)
             {
@@ -3457,6 +3473,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (drawPreconditions(type, primitiveCount) !== D3D_OK || bias === null || !indices)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (bias === DRAWS_NOTHING)
+            {
+                return D3D_OK;
             }
             noteUndrawable();
             baseVertexIndex = base + bias;

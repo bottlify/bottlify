@@ -962,6 +962,17 @@ const decodeAti = (bytes, format, width, height)=>{
 };
 
 /**
+ * The sRGB twin a colour surface of a GPU format is also viewed through, for
+ * a stage that reads it as sRGB (D3DSAMP_SRGBTEXTURE): the eight-bit and BC
+ * formats, the ones Direct3D 9 decodes; none for the rest.
+ *
+ * @param {string} format
+ * @returns {string[]}
+ */
+export const srgbViewFormats = format=>(/^(rgba8unorm|bgra8unorm|bc[1237]-rgba-unorm)$/.test(format)
+    ? [`${format}-srgb`] : []);
+
+/**
  * @param {number} format  D3DFMT
  * @param {number} width @param {number} height  the surface's base level
  * @param {boolean} compressedTextures  whether the device keeps BC blocks at all;
@@ -2031,11 +2042,19 @@ const readsSrgb = (model, stage)=>(model.stageStates(stage)?.get(SRGB_TEXTURE) ?
 const writesSrgb = model=>(model.renderStates.get(D3DRS9.SRGBWRITEENABLE) ?? 0) !== 0;
 
 /**
+ * Whether a draw's colour is encoded to sRGB on its way out: asked for, and
+ * the target one Direct3D 9 writes as sRGB, an eight-bit one; a
+ * floating-point target takes the value as it is.
+ *
+ * @param {RenderModel} model @param {string | undefined} targetFormat  The GPU format.
+ */
+const encodesSrgb = (model, targetFormat)=>writesSrgb(model)
+    && targetFormat !== undefined && srgbViewFormats(targetFormat).length > 0;
+
+/**
  * A draw's sRGB states as a dump writes them: `w` for a target written as
- * sRGB, then each stage sampled as sRGB; nothing when neither. What the
- * program asked, not what was done: every texel here is read and written as
- * stored, and CheckDeviceFormat says so, so only a program that sets the
- * states without asking draws with this note, and draws in the wrong space.
+ * sRGB, then each stage sampled as sRGB; nothing when neither: what the
+ * program asked, whether or not the target or the texture has an sRGB form.
  *
  * @param {RenderModel} model
  */
@@ -2051,6 +2070,17 @@ const srgbNoteOf = model=>{
     const write = writesSrgb(model);
     return write || stages.length > 0 ? ` srgb=${write ? 'w' : ''}${stages.join(',')}` : '';
 };
+
+/**
+ * The view a stage samples a surface through: its sRGB one where the stage
+ * reads sRGB and the surface has one, so texels are decoded to linear before
+ * they are filtered, as Direct3D 9 hardware decodes them.
+ *
+ * @param {{ view: any, srgbView?: any }} surface @param {RenderModel} model
+ * @param {number} stage
+ */
+const sampledView = (surface, model, stage)=>(surface.srgbView && readsSrgb(model, stage)
+    ? surface.srgbView : surface.view);
 
 /** @param {RenderModel} model @param {boolean} mips */
 const stageFlags = (model, mips)=>{
@@ -2590,6 +2620,7 @@ export function pipelineStateOf(model, shape){
         pixelShader: 0,
         targetFormat: shape.targetFormat,
         depthFormat: shape.depthFormat,
+        ...(encodesSrgb(model, shape.targetFormat) ? { srgbWrite: true } : {}),
         topology: shape.topology === POINT_QUADS ? 'point-list' : shape.topology,
         depthTest,
         depthWrite: depthTest && rs('ZWRITEENABLE') !== 0,
@@ -5263,11 +5294,13 @@ export function createRenderer(options){
                     + ' has no GPU format');
             }
             const depth = info.depth;
+            const format = gpuFormatOf(desc.Format, desc.Width, desc.Height, compressedTextures,
+                float32);
             made = backend.createSurface({
                 width: desc.Width,
                 height: desc.Height,
-                format: gpuFormatOf(desc.Format, desc.Width, desc.Height, compressedTextures,
-                    float32),
+                format,
+                viewFormats: depth ? [] : srgbViewFormats(format),
                 label: depth ? 'depth' : 'target',
                 ...narrowed(desc.Format),
                 // A colour target is copied into as well as out of: a program
@@ -5678,11 +5711,13 @@ export function createRenderer(options){
         }
         if (!record.gpu)
         {
+            const format = gpuFormatOf(record.format, record.width, record.height,
+                compressedTextures, float32);
             record.gpu = backend.createSurface({
                 width: record.width,
                 height: record.height,
-                format: gpuFormatOf(record.format, record.width, record.height, compressedTextures,
-                    float32),
+                format,
+                viewFormats: srgbViewFormats(format),
                 ...narrowed(record.format),
                 mipLevelCount: record.gpuLevels,
                 ...(record.faces === 6 ? { layers: 6, dimension: 'cube' } : {}),
@@ -6395,7 +6430,8 @@ export function createRenderer(options){
             // A binding moves no state version, and a managed texture's own
             // level of detail is part of how it is sampled.
             const lod = lodOf(texture);
-            const view = texture ? uploadIfDirty(texture).view : placeholderView(planned.dimension);
+            const view = texture ? sampledView(uploadIfDirty(texture), model, planned.stage)
+                : placeholderView(planned.dimension);
             const sampler = lod === planned.lod
                 ? planned.sampler
                 : programSamplerFor(model.stageStates(planned.stage), lod);
@@ -6794,9 +6830,14 @@ export function createRenderer(options){
         const clipping = clippingOf(model, { clipping: !transformed, clipDistances });
         const planes = clipStateOf(clipping);
         const discards = planes !== null && !planes.distances;
+        // D3DRS_SRGBWRITEENABLE encodes what the shader writes into a target
+        // whose format Direct3D 9 writes as sRGB, the eight-bit ones; a
+        // floating-point target takes the value as it is.
+        const srgbWrite = encodesSrgb(model, surfaceFor(model.renderTarget).format);
         const pixel = translationOf(pixelShader,
             `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${sampling.pixelKey}`
                 + (alphaFunc === undefined ? '' : `|a${alphaFunc}`) + (nanProbe ? '|nan' : '')
+                + (srgbWrite ? '|srgb' : '')
                 + (rectangleBump ? '|rb' : '')
                 + (discards ? `|k${planes.count}` : ''),
             ()=>translateShader(
@@ -6809,6 +6850,7 @@ export function createRenderer(options){
                     ...(sampling.pixelOnes ? { ones: sampling.pixelOnes } : {}),
                     ...(sampling.pixelVariants ? { sampling: sampling.pixelVariants } : {}),
                     ...(alphaFunc === undefined ? {} : { alphaTest: alphaFunc }),
+                    ...(srgbWrite ? { srgbWrite } : {}),
                     ...(nanProbe ? { nanProbe } : {}),
                     ...(rectangleBump ? { rectangleBump } : {}),
                     ...(discards ? { clip: planes } : {}),
@@ -6984,7 +7026,7 @@ export function createRenderer(options){
                 // translation pair is one pipeline.
                 key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
                     + `/${shapes}/${stride}${streamsKey(layout)}${hybridKey}`
-                    + (sampling.key === '' ? '' : `|${sampling.key}`),
+                    + (sampling.key === '' ? '' : `|${sampling.key}`) + (srgbWrite ? '|srgb' : ''),
                 vertex, pixel, layout,
             },
         };
@@ -7059,7 +7101,7 @@ export function createRenderer(options){
             stage: index,
             texture,
             record: texture ? textures.get(texture) : null,
-            view: texture ? uploadIfDirty(texture).view : placeholderView(),
+            view: texture ? sampledView(uploadIfDirty(texture), model, index) : placeholderView(),
             sampler: pieces.samplers[index],
             placeholder: !texture,
         }));
@@ -9055,7 +9097,8 @@ export function createRenderer(options){
             return {
                 texture,
                 record: texture ? textures.get(texture) : null,
-                view: texture ? uploadIfDirty(texture).view : placeholderView(),
+                view: texture ? sampledView(uploadIfDirty(texture), model, index)
+                    : placeholderView(),
                 sampler: samplerFor(model.stageStates(index)),
                 // Which of those two it was, recorded rather than inferred: a
                 // stage bound to the placeholder samples a texture nothing

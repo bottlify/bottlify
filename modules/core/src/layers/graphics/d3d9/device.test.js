@@ -569,14 +569,18 @@ test('a fresh device has a white material, not a black one', ()=>{
     assertFullyReleased(device);
 });
 
-test('sRGB reads and writes are not offered: nothing here reads or writes in that space', ()=>{
+test('sRGB reads and writes are offered for the eight-bit and DXT formats alone', ()=>{
     const d3d = createDirect3D9({});
-    assert.equal(d3d.CheckDeviceFormat(0x00010000, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8),
-        D3DERR_NOTAVAILABLE, 'D3DUSAGE_QUERY_SRGBREAD');
-    assert.equal(d3d.CheckDeviceFormat(0x00040000 | D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE,
-        D3DFMT.A8R8G8B8), D3DERR_NOTAVAILABLE, 'D3DUSAGE_QUERY_SRGBWRITE');
-    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8), D3D_OK,
-        'the format itself is there');
+    const SRGBREAD = 0x00010000;
+    const SRGBWRITE = 0x00040000;
+    assert.equal(d3d.CheckDeviceFormat(SRGBREAD, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(SRGBREAD, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(SRGBWRITE | D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE,
+        D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(SRGBREAD, D3DRTYPE.TEXTURE, D3DFMT.A16B16G16R16F),
+        D3DERR_NOTAVAILABLE, 'a floating-point format is linear already');
+    assert.equal(d3d.CheckDeviceFormat(SRGBWRITE | D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE,
+        D3DFMT.A16B16G16R16F), D3DERR_NOTAVAILABLE);
 });
 
 // --- the block-compressed formats ---

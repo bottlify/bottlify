@@ -1043,7 +1043,7 @@ test('a device with no backend answers every drawing call and records nothing', 
     await device.idle();
 });
 
-test('a draw needs a position in its format and a bound stream, and no scene', ()=>{
+test('a draw needs a position in its format, and neither a bound stream nor a scene', ()=>{
     const h = harness();
     const { device } = h;
     /** @type {{ buffer?: any }} */
@@ -1065,8 +1065,10 @@ test('a draw needs a position in its format and a bound stream, and no scene', (
 
     assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
     assert.equal(device.SetStreamSource(0, null, 0, 0), D3D_OK);
-    assert.notEqual(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK,
-        'and nothing is bound to read vertices from');
+    // Not checked by Direct3D either (Wine's test_null_stream): answered, and
+    // nothing is drawn from no buffer.
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK,
+        'nothing bound to read vertices from is not refused');
 });
 
 test('a lock reports guest memory, and a second lock of the same buffer nests', ()=>{
