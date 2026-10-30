@@ -61,6 +61,10 @@ function fakeStore(){
         truncate(path, size){
             files.set(path, new Uint8Array(size));
         },
+        /** @param {string} path */
+        remove(path){
+            files.delete(path);
+        },
     };
 }
 
@@ -130,6 +134,27 @@ test('a cache belonging to a different bundle is discarded, not believed', async
     const other = await createBlockCache({ store, ...OPTIONS, blockCount: 500 });
     assert.equal(other.has(5), false);
     assert.equal(other.diagnostics().resident, 0);
+});
+
+test('a cache an appended layout laid out again is discarded, its table with it', async()=>{
+    // A run of a build that appended blocks rewrote the data file in arrival
+    // order and left the bitmap beside it: believed, it hands a game another
+    // block's bytes.
+    const store = fakeStore();
+    const first = await createBlockCache({ store, ...OPTIONS });
+    first.put(5, new Uint8Array(16).fill(0xab));
+    await first.persist();
+    store.files.set('war.slots', new Uint8Array(OPTIONS.blockCount * 4));
+
+    const second = await createBlockCache({ store, ...OPTIONS });
+    assert.equal(second.has(5), false);
+    assert.equal(store.files.has('war.slots'), false,
+        'the table goes, so the next run believes its own');
+    assert.equal(store.files.get('war.blocks')?.length, 0);
+    second.put(5, new Uint8Array(16).fill(0xcd));
+    await second.persist();
+    const third = await createBlockCache({ store, ...OPTIONS });
+    assert.deepEqual(third.read(5, 16), new Uint8Array(16).fill(0xcd));
 });
 
 test('asking for local storage where there is none is not an error', async()=>{

@@ -500,10 +500,15 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
     assert.ok(codecs.has(Codec.STORED) && codecs.size > 1, 'the fixture has blocks kept both ways');
     /** @param {Uint8Array} present */
     const root = present=>({
-        getFileHandle: async(/** @type {string} */ file)=>({
-            getFile: async()=>new Blob(/** @type {BlobPart[]} */ ([file === `${name}.present` ? present
-                : file === `${name}.blocks` ? blocks : assert.fail(file)])),
-        }),
+        // As the origin's file system answers: a file that is not there is refused.
+        getFileHandle: async(/** @type {string} */ file)=>{
+            if (file !== `${name}.present` && file !== `${name}.blocks`)
+            {
+                throw new DOMException(`no ${file}`, 'NotFoundError');
+            }
+            return { getFile: async()=>new Blob(/** @type {BlobPart[]} */ (
+                [file === `${name}.present` ? present : blocks])) };
+        },
     });
     const whole = new Uint8Array(Math.ceil(bundle.blockCount / 8));
     for (let at = 0; at < bundle.blockCount; at++)

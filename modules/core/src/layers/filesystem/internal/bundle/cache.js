@@ -70,6 +70,31 @@ export async function resolveBlockStore(spec){
     return createOpfsStore({ root: await storage.getDirectory() });
 }
 
+/**
+ * The table a short-lived appended layout kept beside a cache: its blocks were
+ * laid in the order they came, not at their index, while the bitmap beside
+ * them still said where they had been. A cache that has one is not believed.
+ *
+ * @param {string} file  The cache's file name, without its suffix.
+ */
+const appendedTable = file=>`${file}.slots`;
+
+/**
+ * Whether a cache at the root of the origin's file system holds that table.
+ *
+ * @param {FileSystemDirectoryHandle} root @param {string} file
+ */
+const relaidAt = async(root, file)=>{
+    try
+    {
+        await root.getFileHandle(appendedTable(file));
+        return true;
+    }
+    catch {
+        return false;
+    }
+};
+
 /** Bytes of bitmap for this many blocks. @param {number} blockCount */
 const bitmapBytes = blockCount=>Math.ceil(blockCount / 8);
 
@@ -106,7 +131,7 @@ export async function bundleResidency({ root, id, bundle }){
     catch {
         // No cache yet: nothing of it is here.
     }
-    if (bitmap && bitmap.length !== bitmapBytes(bundle.blockCount))
+    if (bitmap && (bitmap.length !== bitmapBytes(bundle.blockCount) || await relaidAt(root, name)))
     {
         bitmap = null;
     }
@@ -182,7 +207,7 @@ export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
     catch {
         return null;
     }
-    if (bitmap.length !== bitmapBytes(bundle.blockCount))
+    if (bitmap.length !== bitmapBytes(bundle.blockCount) || await relaidAt(root, name))
     {
         return null;
     }
@@ -377,7 +402,8 @@ export async function createBlockCache(options){
     // A bitmap of the wrong size belongs to a different bundle, or to a version
     // of this one with different blocks. Either way the slots underneath it mean
     // something else, so it starts again rather than being partly believed.
-    const held = store.stat(bitmapPath);
+    const relaid = store.stat(appendedTable(file)) !== null;
+    const held = relaid ? null : store.stat(bitmapPath);
     /**
      * The order the last run first asked for its blocks in: what a filler
      * should bring in before anything else, because a start reads the same
@@ -395,6 +421,11 @@ export async function createBlockCache(options){
     }
     else
     {
+        if (relaid)
+        {
+            store.truncate(dataPath, 0);
+            store.remove(appendedTable(file));
+        }
         store.truncate(bitmapPath, bitmap.length);
         store.write(bitmapPath, 0, bitmap);
         store.truncate(orderPath, 0);
