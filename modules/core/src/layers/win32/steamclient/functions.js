@@ -73,6 +73,18 @@ const CLIENT_APPROVE_SIZE = 16;
 /** EUserHasLicenseForAppResult. */
 const HAS_LICENSE = 0;
 const DOES_NOT_HAVE_LICENSE = 1;
+/**
+ * SteamAPICallCompleted_t: the call, the callback its result is, the result's
+ * size -- what steam_api's call results learn a call finished from.
+ */
+const API_CALL_COMPLETED = 703;
+const API_CALL_COMPLETED_SIZE = 16;
+/** ESteamAPICallFailure. */
+const CALL_FAILURE_NONE = -1;
+const CALL_FAILURE_INVALID_HANDLE = 2;
+/** CheckFileSignature_t, and the ECheckFileSignature the client knows: it holds no app's signatures. */
+const CHECK_FILE_SIGNATURE = 705;
+const NO_SIGNATURES_FOR_THIS_APP = 3;
 
 /**
  * @param {SteamclientHost} host
@@ -165,6 +177,56 @@ export function createSteamclientFunctions(host){
     };
     /** @type {number} the CallbackMsg_t and data last handed out, until freed */
     let message = 0;
+
+    /**
+     * An API call's result, by the SteamAPICall_t the method returned. Every
+     * call here completes at once; a game polls IsAPICallCompleted or waits
+     * for SteamAPICallCompleted_t, then fetches the result by its callback id.
+     * A result is kept for the run rather than dropped once fetched: a game
+     * issues a handful, and one polled again after its fetch still answers.
+     *
+     * @type {Map<bigint, { id: number, data: Uint8Array }>}
+     */
+    const results = new Map();
+    let lastCall = 0n;
+    /** @param {number} id @param {Uint8Array} data @returns {bigint} the call */
+    const complete = (id, data)=>{
+        const call = ++lastCall;
+        results.set(call, { id, data });
+        const done = new Uint8Array(API_CALL_COMPLETED_SIZE);
+        const view = new DataView(done.buffer);
+        view.setBigUint64(0, call, true);
+        view.setInt32(8, id, true);
+        view.setUint32(12, data.length, true);
+        post(1, API_CALL_COMPLETED, done);
+        return call;
+    };
+    /** @param {number} low @param {number} high */
+    const callOf = (low, high)=>results.get((BigInt(high >>> 0) << 32n) | BigInt(low >>> 0));
+    /** @param {number} at @param {boolean} value */
+    const writeBool = (at, value)=>{
+        if ((at >>> 0) !== 0)
+        {
+            host.writeMemory(at >>> 0, Uint8Array.of(value ? 1 : 0));
+        }
+    };
+    /**
+     * GetAPICallResult's answer: the result copied out when it is the
+     * callback asked for and fits, failed otherwise.
+     *
+     * @param {number[]} args  The call's two halves, out, its size, the callback expected, failed.
+     */
+    const fetchResult = ([low, high, out, size, expected, failed])=>{
+        const result = callOf(low, high);
+        const ok = !!result && result.id === expected && result.data.length <= size
+            && (out >>> 0) !== 0;
+        if (ok)
+        {
+            host.writeMemory(out >>> 0, result.data);
+        }
+        writeBool(failed, !ok);
+        return ok ? 1 : 0;
+    };
 
     /** Every behaviour by method name, shared by every version that has it. */
     /** @type {Record<string, import('./objects.js').Behaviour>} */
@@ -282,13 +344,16 @@ export function createSteamclientFunctions(host){
         IsSteamInBigPictureMode: ()=>0,
         IsSteamChinaLauncher: ()=>0,
         GetSteamUILanguage: ()=>constant(language),
-        IsAPICallCompleted: ([, , failed])=>{
-            if ((failed >>> 0) !== 0)
-            {
-                host.writeMemory(failed >>> 0, Uint8Array.of(1));
-            }
-            return 0;
+        IsAPICallCompleted: ([low, high, failed])=>{
+            const known = !!callOf(low, high);
+            writeBool(failed, !known);
+            return known ? 1 : 0;
         },
+        GetAPICallFailureReason: ([low, high])=>(callOf(low, high)
+            ? CALL_FAILURE_NONE : CALL_FAILURE_INVALID_HANDLE),
+        GetAPICallResult: fetchResult,
+        CheckFileSignature: ()=>complete(CHECK_FILE_SIGNATURE,
+            new Uint8Array(Uint32Array.of(NO_SIGNATURES_FOR_THIS_APP).buffer)),
 
         // ISteamFriends
         GetPersonaName: ()=>constant(account?.personaName ?? account?.accountName ?? ''),
@@ -401,13 +466,7 @@ export function createSteamclientFunctions(host){
          * bool Steam_GetAPICallResult(HSteamPipe, SteamAPICall_t, void* callback,
          *     int size, int expected, bool* failed)
          */
-        Steam_GetAPICallResult: cdecl(28, ([, , , , , , failed])=>{
-            if ((failed >>> 0) !== 0)
-            {
-                host.writeMemory(failed >>> 0, Uint8Array.of(1));
-            }
-            return 0;
-        }),
+        Steam_GetAPICallResult: cdecl(28, ([, ...args])=>fetchResult(args)),
         /** void Steam_ReleaseThreadLocalMemory(bool threadExit) */
         Steam_ReleaseThreadLocalMemory: cdecl(4),
         /** HSteamUser Steam_GetHSteamUserCurrent(void) */
