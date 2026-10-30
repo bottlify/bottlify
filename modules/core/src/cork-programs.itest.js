@@ -34,7 +34,12 @@ const layerOf = (app, name)=>app.diagnostics()
 
 /** @param {string} name */
 const FIXTURE = name=>new URL(`../test/fixtures/${name}`, import.meta.url);
-const ITERATIONS = 2_000_000;
+/**
+ * Calls the loop makes into the host: enough that the warm-up is a small part
+ * of the run and the longer run four times the shorter, a quarter million --
+ * at two million the test took 68 s of an otherwise quiet machine.
+ */
+const ITERATIONS = 250_000;
 /** Cork with nothing translated and no wasm tier: the reference a run is judged against. */
 const MODEL = { translate: false, wasmInterpreter: false };
 
