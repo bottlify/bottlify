@@ -15,7 +15,7 @@
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PAGES, PLATFORMS, manifestFor } from '../src/manifest.js';
+import { HOSTS, PAGES, PLATFORMS, manifestFor } from '../src/manifest.js';
 
 const HERE = fileURLToPath(new URL('..', import.meta.url));
 // Core beside it in this repository, not the package node_modules names: a
@@ -53,6 +53,18 @@ export async function build(out = join(HERE, 'dist')){
         {
             await mkdir(dirname(join(dir, to)), { recursive: true });
             await copyFile(from, join(dir, to));
+        }
+        const hosts = HOSTS[flavour];
+        if (hosts)
+        {
+            const script = await readFile(join(HERE, 'src', 'content.js'), 'utf8');
+            const blank = 'const HOSTS = /** @type {RegExp | null} */ (null);';
+            if (!script.includes(blank))
+            {
+                throw new Error('content.js lost the line the build writes its hosts into');
+            }
+            await writeFile(join(dir, 'content.js'),
+                script.replace(blank, ()=>`const HOSTS = new RegExp(${JSON.stringify(hosts)});`));
         }
         await writeFile(join(dir, 'manifest.json'),
             `${JSON.stringify(manifestFor(flavour, version), null, 2)}\n`);

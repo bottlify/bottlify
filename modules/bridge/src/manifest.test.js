@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { manifestFor } from './manifest.js';
+import { HOSTS, manifestFor } from './manifest.js';
 
 test('the public build reaches Bottlify\'s own sites and the platforms, nothing local', ()=>{
     const manifest = manifestFor('public', '1.2.3');
@@ -41,4 +41,19 @@ test('every page is a host permission, and the CM socket is listed as wss', ()=>
             assert.ok(existsSync(new URL(`../${ruleset.path}`, import.meta.url)), ruleset.path);
         }
     }
+});
+
+test('the dev bridge answers on a local launcher and Bottlify\'s sites alone', ()=>{
+    const hosts = new RegExp(/** @type {string} */ (HOSTS.dev));
+    for (const host of ['localhost', 'bottlify.localhost', '127.0.0.1', '192.168.100.22',
+        '192.168.0.5', 'bottlify.app', 'play.bottlify.app'])
+    {
+        assert.ok(hosts.test(host), host);
+    }
+    for (const host of ['example.com', '10.0.0.5', '192.169.1.1', 'evilbottlify.app',
+        'bottlify.app.example.com', 'localhost.example.com', '1192.168.1.1'])
+    {
+        assert.ok(!hosts.test(host), host);
+    }
+    assert.equal(HOSTS.public, null, 'the public build is matched on its sites alone');
 });

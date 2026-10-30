@@ -16,6 +16,13 @@
  */
 
 (()=>{
+    // The hosts this build answers on beyond what its manifest matches; the
+    // build writes the dev build's (manifest.js HOSTS), null answers anywhere.
+    const HOSTS = /** @type {RegExp | null} */ (null);
+    if (HOSTS && !HOSTS.test(location.hostname))
+    {
+        return;
+    }
     const { chrome } = /** @type {any} */ (globalThis);
     const url = (/** @type {string} */ path)=>chrome.runtime.getURL(path);
     const version = chrome.runtime.getManifest().version;

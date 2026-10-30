@@ -24,6 +24,19 @@ export const PAGES = Object.freeze({
 });
 
 /**
+ * The hosts a build's bridge answers on, by name, where its match patterns
+ * cannot say it: the dev build, matched on every page, answers on a local
+ * launcher's alone -- localhost, 127.x, a 192.168.x.x network address -- and
+ * on Bottlify's sites. Null: every page the build is matched on.
+ */
+export const HOSTS = Object.freeze({
+    public: null,
+    dev: [String.raw`localhost|.+\.localhost`, String.raw`127\.\d+\.\d+\.\d+`,
+        String.raw`192\.168\.\d+\.\d+`, String.raw`(play\.)?bottlify\.app`]
+        .map(host=>`^(${host})$`).join('|'),
+});
+
+/**
  * Each platform: its ruleset (switched on and off as one) and the hosts the
  * ruleset and the bridge's own requests reach.
  */
