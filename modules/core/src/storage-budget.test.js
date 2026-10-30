@@ -53,7 +53,7 @@ function fakeDirectory(refused = new Set()){
 function origin(refused){
     const root = fakeDirectory(refused);
     root.file('old-aaaa.blocks', 300, 1);
-    root.file('old-aaaa.present', 1, 1);
+    root.file('old-aaaa.slots', 1, 1);
     root.file('old-aaaa.order', 1, 1);
     root.file('mid-bbbb.blocks', 200, 5);
     root.file('mid-bbbb.present', 1, 5);
@@ -94,7 +94,8 @@ test('past its budget the oldest caches go first, never the run\'s own or a sess
         'the oldest first, the run\'s own bundle\'s earlier packing among them');
     assert.equal(result.freed, 702);
     assert.equal(result.over, false);
-    assert.ok(!root.children.has('old-aaaa.blocks') && !root.children.has('old-aaaa.order'));
+    assert.ok(!root.children.has('old-aaaa.blocks') && !root.children.has('old-aaaa.slots')
+        && !root.children.has('old-aaaa.order'));
     assert.ok(root.children.has('game-cccc.blocks'), 'the run\'s own blocks stay');
     assert.ok(root.children.has('game.files') && root.children.has('game.session'),
         'a session is never a cache');
