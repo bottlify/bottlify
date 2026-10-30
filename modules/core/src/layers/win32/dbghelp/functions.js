@@ -17,6 +17,7 @@
  */
 
 const ERROR_INVALID_ADDRESS = 487;
+const ERROR_NOT_SUPPORTED = 50;
 const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_PATH_NOT_FOUND = 3;
@@ -253,6 +254,18 @@ export function createDbghelpFunctions(host){
 
         /** BOOL SymCleanup(HANDLE hProcess) */
         SymCleanup: { argBytes: 4, handler: ()=>1 },
+
+        /**
+         * BOOL MiniDumpWriteDump(HANDLE hProcess, DWORD ProcessId, HANDLE hFile,
+         *     MINIDUMP_TYPE DumpType, PMINIDUMP_EXCEPTION_INFORMATION,
+         *     PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION)
+         *
+         * No minidump is written here: FALSE, as a dump that could not be
+         * made answers, which a crash handler reports and goes on from. Called
+         * only once a program has crashed, and the engine's own record of the
+         * fault is the one that says what happened.
+         */
+        MiniDumpWriteDump: { argBytes: 28, handler: ()=>fail(0, ERROR_NOT_SUPPORTED) },
 
         /**
          * DWORD SymLoadModule(HANDLE hProcess, HANDLE hFile, PCSTR ImageName,

@@ -106,6 +106,18 @@ const MF_HELP = 0x4000;
 const CHECK_MARK_SIZE = 13;
 /** What a call handed a handle that names no menu leaves for GetLastError. */
 const ERROR_INVALID_MENU_HANDLE = 1401;
+/** MENUINFO's fMask bits. */
+const MIM_MAXHEIGHT = 0x1;
+const MIM_BACKGROUND = 0x2;
+const MIM_HELPID = 0x4;
+const MIM_MENUDATA = 0x8;
+const MIM_STYLE = 0x10;
+const MIM_APPLYTOSUBMENUS = 0x80000000;
+/** MENUINFO as each width lays it out: cbSize, fMask, dwStyle, cyMax, then the brush, help id and data. */
+const MENUINFO_LAYOUTS = Object.freeze([
+    { SIZE: 28, STYLE: 8, MAX_HEIGHT: 12, BACKGROUND: 16, HELP_ID: 20, DATA: 24 },
+    { SIZE: 40, STYLE: 8, MAX_HEIGHT: 12, BACKGROUND: 16, HELP_ID: 24, DATA: 32 },
+]);
 /** And one handed a handle that names no window, or a bad argument. */
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
 const ERROR_INVALID_PARAMETER = 87;
@@ -796,6 +808,71 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         const bytes = host.readMemory(address, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
+
+    /**
+     * SetMenuInfo and GetMenuInfo, the structure's layout told by its cbSize:
+     * the pointer-wide brush and menu data at their places for each width.
+     *
+     * @param {boolean} set
+     */
+    const menuInfo = set=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, info])=>{
+            const menu = menuOf(handle);
+            if (!menu)
+            {
+                host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
+                return 0;
+            }
+            const size = (info >>> 0) === 0 ? 0 : readU32(info >>> 0);
+            const layout = MENUINFO_LAYOUTS.find(each=>each.SIZE === size);
+            if (!layout)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const mask = readU32((info >>> 0) + 4);
+            const fields = /** @type {const} */ ([[MIM_STYLE, 'style', layout.STYLE],
+                [MIM_MAXHEIGHT, 'maxHeight', layout.MAX_HEIGHT],
+                [MIM_BACKGROUND, 'background', layout.BACKGROUND],
+                [MIM_HELPID, 'helpId', layout.HELP_ID], [MIM_MENUDATA, 'data', layout.DATA]]);
+            if (set)
+            {
+                /** @param {any} each */
+                const apply = each=>{
+                    for (const [bit, name, at] of fields)
+                    {
+                        if ((mask & bit) !== 0)
+                        {
+                            each.info = { ...each.info, [name]: readU32((info >>> 0) + at) };
+                        }
+                    }
+                };
+                apply(menu);
+                if ((mask & MIM_APPLYTOSUBMENUS) !== 0)
+                {
+                    for (const item of menu.items)
+                    {
+                        const sub = item.submenu ? menuOf(item.submenu) : null;
+                        if (sub)
+                        {
+                            apply(sub);
+                        }
+                    }
+                }
+                return 1;
+            }
+            for (const [bit, name, at] of fields)
+            {
+                if ((mask & bit) !== 0)
+                {
+                    writeU32s((info >>> 0) + at, [menu.info?.[name] ?? 0]);
+                }
+            }
+            return 1;
+        },
+    });
 
     /** @param {number} address @param {number[]} values */
     const writeU32s = (address, values)=>{
@@ -1970,6 +2047,19 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 return record.systemMenu;
             },
         },
+
+        /**
+         * BOOL SetMenuInfo(HMENU, LPCMENUINFO) and BOOL GetMenuInfo(HMENU, LPMENUINFO)
+         *
+         * A menu's own settings, each field written or read as fMask names
+         * it: its style, its greatest height, its background brush, its help
+         * context and the program's own value. MIM_APPLYTOSUBMENUS hands what
+         * is set to every submenu as well. A structure whose cbSize is
+         * neither width's MENUINFO is refused with ERROR_INVALID_PARAMETER,
+         * a handle that names no menu with ERROR_INVALID_MENU_HANDLE.
+         */
+        SetMenuInfo: menuInfo(true),
+        GetMenuInfo: menuInfo(false),
 
         /** int GetMenuItemCount(HMENU hMenu) */
         GetMenuItemCount: {

@@ -5518,6 +5518,37 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         },
 
         /**
+         * BOOL GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
+         *
+         * The GUITHREADINFO of the thread with the input: cbSize, flags, then
+         * the active, focus, capture, menu-owner, move-size and caret windows
+         * (each a pointer wide) and the caret's rectangle. No menu is tracked
+         * and no window moved here, and the caret is not reported, so those
+         * stay zero. A structure whose cbSize is not its size is refused.
+         */
+        GetGUIThreadInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                const pointer = host.pointerSize ?? 4;
+                const size = 8 + 6 * pointer + 16;
+                if ((out >>> 0) === 0 || readU32(out >>> 0) !== size)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const bytes = new Uint8Array(size);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, size, true);
+                const held = [host.active?.() ?? 0, host.focus?.() ?? 0, host.capture()];
+                held.forEach((hwnd, index)=>
+                    view.setUint32(8 + index * pointer, hwnd >>> 0, true));
+                host.writeMemory(out >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
          * HWND GetForegroundWindow(void)
          *
          * The run's: another program's window when another program has it.

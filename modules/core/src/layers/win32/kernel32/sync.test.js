@@ -1070,7 +1070,8 @@ test('a count of nothing or of too much is ERROR_INVALID_PARAMETER', ()=>{
     assert.deepEqual(host.errors, [87, 87]);
 });
 
-test('GetThreadContext fills the groups asked for, and SetThreadContext is refused', ()=>{
+test('GetThreadContext fills the groups asked for, and SetThreadContext of registers is'
+    + ' refused', ()=>{
     const host = /** @type {any} */ (fakeHost());
     const said = /** @type {string[]} */ ([]);
     host.divergence = (/** @type {string} */ api)=>said.push(api);
@@ -1101,6 +1102,35 @@ test('GetThreadContext fills the groups asked for, and SetThreadContext is refus
     assert.equal(fns.SetThreadContext.handler([0x20, at]), 0);
     assert.deepEqual(said, ['SetThreadContext']);
     assert.equal(fns.GetThreadContext.handler([0x99, at]), 0, 'no such thread');
+});
+
+test('SetThreadContext of the debug registers alone, breakpoints off, is the state already', ()=>{
+    // A program clearing hardware breakpoints from its threads: none is ever
+    // set here, so it is answered; one enabling a breakpoint is not honoured.
+    const host = /** @type {any} */ (fakeHost());
+    const said = /** @type {string[]} */ ([]);
+    host.divergence = (/** @type {string} */ api, /** @type {string} */ detail)=>
+        said.push(`${api}: ${detail}`);
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+    const at = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    const CONTEXT_DEBUG_REGISTERS = 0x10010;
+    view.setUint32(at, CONTEXT_DEBUG_REGISTERS, true);
+    for (let offset = 4; offset <= 0x18; offset += 4)
+    {
+        view.setUint32(at + offset, 0, true);
+    }
+    assert.equal(fns.SetThreadContext.handler([0x20, at]), 1);
+    assert.deepEqual(said, []);
+
+    view.setUint32(at + 0x18, 0x1, true);
+    assert.equal(fns.SetThreadContext.handler([0x20, at]), 1);
+    assert.deepEqual(said, ['SetThreadContext: hardware breakpoints are set and not honoured']);
+
+    view.setUint32(at, CONTEXT_DEBUG_REGISTERS | 0x10001, true);
+    assert.equal(fns.SetThreadContext.handler([0x20, at]), 0,
+        'with the control registers, refused');
 });
 
 test('GetThreadSelectorEntry describes the flat selectors and the thread block behind FS', ()=>{

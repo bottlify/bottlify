@@ -1660,6 +1660,14 @@ export function createHeapFunctions(host){
                     // made around something that is in its way.
                     const start = (requested & ~(ALLOCATION_GRANULARITY - 1)) >>> 0;
                     const span = roundUp(requested + size - start, PAGE_SIZE);
+                    // Past the end of user address space Windows refuses the
+                    // reservation as an invalid parameter, as it does here: no
+                    // divergence, the program is asking where nothing can be.
+                    if (start + span > USER_ADDRESS_SPACE_TOP)
+                    {
+                        host.setLastError(ERROR_INVALID_PARAMETER);
+                        return 0;
+                    }
                     if (!allocator.allocateAt(start, span, { owner: VIRTUAL }))
                     {
                         host.setLastError(ERROR_INVALID_ADDRESS);

@@ -136,6 +136,9 @@ const DESCRIPTION = 'Ethernet Adapter';
 export const HARDWARE_ADDRESS = Object.freeze([0x02, 0x00, 0x4c, 0x55, 0x00, 0x01]);
 
 const LOOPBACK_NET = 127;
+/** MIB_IPADDRROW: address, index, mask, broadcast, reassembly size, unused and type. */
+const IP_ADDR_ROW = 24;
+const MIB_IPADDR_PRIMARY = 0x0001;
 /** The adapter and the loopback interface. */
 const INTERFACES = 2;
 
@@ -557,6 +560,58 @@ export function createIphlpapiFunctions(host){
                     return ERROR_BUFFER_OVERFLOW;
                 }
                 host.writeMemory(info >>> 0, adapter(info >>> 0));
+                return NO_ERROR;
+            },
+        },
+        /**
+         * DWORD GetIpAddrTable(PMIB_IPADDRTABLE pIpAddrTable, PULONG pdwSize, BOOL bOrder)
+         *
+         * The IPv4 addresses: the adapter's where it has a network, and the
+         * loopback's, each a MIB_IPADDRROW (the address in network order, the
+         * interface, the mask, the broadcast's low bit, the largest
+         * reassembly, and the primary type), in address order when asked.
+         * The size the table needs with ERROR_INSUFFICIENT_BUFFER while the
+         * buffer is short of it or absent.
+         */
+        GetIpAddrTable: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([table, size, order])=>{
+                if ((size >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const own = (host.localAddress?.() ?? 0) >>> 0;
+                const rows = [
+                    ...own !== 0 && own >>> 24 !== LOOPBACK_NET
+                        ? [{ address: own, index: INDEX, mask: 0xffffff00 }] : [],
+                    { address: (LOOPBACK_NET << 24 | 1) >>> 0, index: LOOPBACK_INDEX,
+                        mask: 0xff000000 },
+                ];
+                if ((order | 0) !== 0)
+                {
+                    rows.sort((a, b)=>a.address - b.address);
+                }
+                const needed = 4 + rows.length * IP_ADDR_ROW;
+                if ((table >>> 0) === 0 || readU32(size >>> 0) < needed)
+                {
+                    writeU32(size >>> 0, needed);
+                    return ERROR_INSUFFICIENT_BUFFER;
+                }
+                const bytes = new Uint8Array(needed);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, rows.length, true);
+                rows.forEach((row, at)=>{
+                    const base = 4 + at * IP_ADDR_ROW;
+                    // Network order: the first octet first in memory.
+                    view.setUint32(base, row.address, false);
+                    view.setUint32(base + 4, row.index, true);
+                    view.setUint32(base + 8, row.mask, false);
+                    view.setUint32(base + 12, 1, true);
+                    view.setUint32(base + 16, 0xffff, true);
+                    view.setUint16(base + 22, MIB_IPADDR_PRIMARY, true);
+                });
+                host.writeMemory(table >>> 0, bytes);
                 return NO_ERROR;
             },
         },

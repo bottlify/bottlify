@@ -57,6 +57,13 @@ const STATUS_ACCESS_DENIED = 0xc0000022;
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
+
+/** Software Restriction Policy: the two scopes and five levels SaferCreateLevel opens. */
+const SAFER_SCOPES = new Set([1, 2]);
+const SAFER_LEVELID_FULLYTRUSTED = 0x40000;
+const SAFER_LEVELS = new Set([0, 0x1000, 0x10000, 0x20000, SAFER_LEVELID_FULLYTRUSTED]);
+/** SaferComputeTokenFromLevel answers no token for a level that changes nothing. */
+const SAFER_TOKEN_NULL_IF_EQUAL = 0x1;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_TOKEN = 1008;
 const ERROR_NO_SUCH_PRIVILEGE = 1313;
@@ -805,7 +812,8 @@ export const accountNamed = written=>{
  * @property {(code: number) => void} setLastError
  * @property {(bytes: number) => number} allocate  LocalFree-compatible.
  * @property {{ open: (type: string, object: any) => number,
- *              resolve: (handle: number, type?: string) => any }} handles
+ *              resolve: (handle: number, type?: string) => any,
+ *              close?: (handle: number) => any }} handles
  *           The one handle table: a token is closed with CloseHandle like
  *           everything else.
  * @property {(handle: number, wanted: number) => Uint8Array | null} [serviceSecurity]
@@ -2911,6 +2919,90 @@ export function createTokenFunctions(host){
                 writeDword(out >>> 0, host.handles.open('token', {
                     ...token, disabled: [...token.disabled ?? [], ...disabled],
                 }));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SaferCreateLevel(DWORD dwScopeId, DWORD dwLevelId, DWORD OpenFlags,
+         *   SAFER_LEVEL_HANDLE *pLevelHandle, LPVOID lpReserved)
+         *
+         * A handle onto one of the five Software Restriction Policy levels,
+         * in the machine's scope or the user's; any other scope or level is
+         * ERROR_INVALID_PARAMETER.
+         */
+        SaferCreateLevel: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([scope, level, , out])=>{
+                if (!SAFER_SCOPES.has(scope >>> 0) || !SAFER_LEVELS.has(level >>> 0)
+                    || (out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                writeDword(out >>> 0, host.handles.open('saferLevel', { level: level >>> 0 }));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SaferComputeTokenFromLevel(SAFER_LEVEL_HANDLE LevelHandle,
+         *   HANDLE InAccessToken, PHANDLE OutAccessToken, DWORD dwFlags, LPVOID lpReserved)
+         *
+         * The token a program started at the level runs with: made from the
+         * one given, or the process's own for none. With one account and no
+         * access checks a restricted level changes nothing a caller can see
+         * but the token's own answers. SAFER_TOKEN_NULL_IF_EQUAL answers no
+         * token for a level that restricts nothing, the fully trusted one.
+         */
+        SaferComputeTokenFromLevel: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, given, out, flags])=>{
+                let held = null;
+                try
+                {
+                    held = host.handles.resolve(handle >>> 0, 'saferLevel');
+                }
+                catch (e){
+                    void e;
+                }
+                if (!held)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const token = (given >>> 0) === 0 ? { process: CURRENT_PROCESS }
+                    : tokenNamed(given);
+                if (!token || (out >>> 0) === 0)
+                {
+                    return fail(token ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
+                }
+                if (((flags >>> 0) & SAFER_TOKEN_NULL_IF_EQUAL) !== 0
+                    && held.level === SAFER_LEVELID_FULLYTRUSTED)
+                {
+                    writeDword(out >>> 0, 0);
+                    return 1;
+                }
+                writeDword(out >>> 0, host.handles.open('token',
+                    { ...token, saferLevel: held.level }));
+                return 1;
+            },
+        },
+
+        /** BOOL SaferCloseLevel(SAFER_LEVEL_HANDLE hLevelHandle) */
+        SaferCloseLevel: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                try
+                {
+                    host.handles.resolve(handle >>> 0, 'saferLevel');
+                }
+                catch (e){
+                    void e;
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                host.handles.close?.(handle >>> 0);
                 return 1;
             },
         },

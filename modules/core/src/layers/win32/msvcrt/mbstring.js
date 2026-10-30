@@ -219,6 +219,34 @@ export function createWideFunctions(host){
             },
         },
 
+        /**
+         * size_t wcsxfrm(wchar_t *destination, const wchar_t *source, size_t count)
+         *
+         * strxfrm over wide strings: under the C locale a string is its own
+         * key, as much of it and its terminator as `count` characters hold,
+         * its length whatever fits. No source, or no destination for a count,
+         * is INT_MAX and EINVAL.
+         */
+        wcsxfrm: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([destination, source, count])=>{
+                const room = count >>> 0;
+                if ((source >>> 0) === 0 || ((destination >>> 0) === 0 && room !== 0))
+                {
+                    host.errno?.(EINVAL);
+                    return 0x7fffffff;
+                }
+                const text = readWideUpTo(source, MAX_STRING);
+                if (room !== 0)
+                {
+                    writeWide(destination, `${text}\0`.slice(0, room), false);
+                }
+                return text.length;
+            },
+        },
+
         ...host.allocate ? {
             /**
              * wchar_t *_wcsdup(const wchar_t *text)

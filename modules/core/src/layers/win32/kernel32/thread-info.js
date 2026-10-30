@@ -407,7 +407,38 @@ export function createThreadInfoFunctions(host){
         }
     };
 
+    /** What SetThreadStackGuarantee was given, by thread. @type {WeakMap<object, number>} */
+    const stackGuarantees = new WeakMap();
+
     return {
+        /**
+         * BOOL SetThreadStackGuarantee(PULONG StackSizeInBytes)
+         *
+         * The calling thread's guarantee becomes the size asked for unless it
+         * is smaller than the one it has, and the size comes back as the one
+         * it had (0 at first). The guarantee is what a stack overflow leaves
+         * for its handler; a thread's stack here is committed whole, so it is
+         * kept and answered back.
+         */
+        SetThreadStackGuarantee: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const thread = host.currentThread();
+                const bytes = host.readMemory(pointer >>> 0, 4);
+                const asked = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+                const had = (thread && stackGuarantees.get(thread)) ?? 0;
+                if (thread && asked > had)
+                {
+                    stackGuarantees.set(thread, asked);
+                }
+                const previous = new Uint8Array(4);
+                new DataView(previous.buffer).setUint32(0, had, true);
+                host.writeMemory(pointer >>> 0, previous);
+                return 1;
+            },
+        },
+
         /**
          * BOOL GetThreadGroupAffinity(HANDLE hThread, PGROUP_AFFINITY GroupAffinity)
          *

@@ -2228,6 +2228,25 @@ export function createLocaleFunctions(host){
             },
         },
 
+        /**
+         * BOOL IsValidLocaleName(LPCWSTR lpLocaleName)
+         *
+         * Whether a locale has the name, a neutral one ("en") included; the
+         * empty name is the invariant locale's, and NULL names none.
+         */
+        IsValidLocaleName: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>{
+                if ((name >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const asked = readWide(name >>> 0, host.stringLength(name >>> 0, 2));
+                return asked === '' || lcidOfName(asked, true) !== 0 ? 1 : 0;
+            },
+        },
+
         /** LANGID GetUserDefaultLangID(VOID) */
         GetUserDefaultLangID: { argBytes: 0, handler: ()=>LANGID_EN_US },
 

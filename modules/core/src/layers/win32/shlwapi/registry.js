@@ -16,6 +16,7 @@
 import { dword, u32 } from './text.js';
 
 const ERROR_SUCCESS = 0;
+const ERROR_FILE_NOT_FOUND = 2;
 const KEY_READ = 0x20019;
 const HKEY_CURRENT_USER = 0x80000001;
 const HKEY_LOCAL_MACHINE = 0x80000002;
@@ -356,6 +357,63 @@ export function createRegistryHelpers(host){
     };
 
     /**
+     * SHRegGetUSValue for either spelling: the value under the user's key,
+     * then the machine's -- only the machine's when the caller ignores the
+     * user's -- its type and as much of its data as the buffer holds, and
+     * ERROR_MORE_DATA with the size needed when it holds less. Where neither
+     * has it, a default given is copied in, as much as fits, and the call
+     * succeeds; otherwise the lookup's ERROR_FILE_NOT_FOUND (Wine's shlwapi
+     * SHRegQueryUSValue).
+     *
+     * @param {'A' | 'W'} width
+     */
+    const getUSValue = width=>({
+        argBytes: 32,
+        /** @param {number[]} args */
+        handler: ([subKey, value, typeOut, data, sizeOut, ignoreUser, fallback, fallbackSize])=>{
+            const read = /** @type {(address: number, length: number) => Uint8Array} */ (
+                host.readMemory);
+            const room = (sizeOut >>> 0) !== 0 ? u32(read(sizeOut >>> 0, 4)) : 0;
+            const roots = (ignoreUser | 0) !== 0
+                ? [HKEY_LOCAL_MACHINE] : [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE];
+            for (const root of roots)
+            {
+                const found = readValue(width, root, subKey, value);
+                if (!found?.found)
+                {
+                    continue;
+                }
+                if ((typeOut >>> 0) !== 0)
+                {
+                    host.writeMemory(typeOut >>> 0, dword(found.type));
+                }
+                if ((sizeOut >>> 0) !== 0)
+                {
+                    host.writeMemory(sizeOut >>> 0, dword(found.data.length));
+                }
+                if ((data >>> 0) === 0)
+                {
+                    return ERROR_SUCCESS;
+                }
+                if (found.data.length > room)
+                {
+                    return ERROR_MORE_DATA;
+                }
+                host.writeMemory(data >>> 0, found.data);
+                return ERROR_SUCCESS;
+            }
+            if ((fallback >>> 0) !== 0 && (fallbackSize >>> 0) !== 0 && (sizeOut >>> 0) !== 0
+                && (data >>> 0) !== 0)
+            {
+                host.writeMemory(data >>> 0,
+                    read(fallback >>> 0, Math.min(fallbackSize >>> 0, room)).slice());
+                return ERROR_SUCCESS;
+            }
+            return ERROR_FILE_NOT_FOUND;
+        },
+    });
+
+    /**
      * SHGetValue for either spelling: SHQueryValueEx on the subkey, opened
      * for the call.
      *
@@ -420,6 +478,14 @@ export function createRegistryHelpers(host){
          */
         SHGetValueA: getValue('A'),
         SHGetValueW: getValue('W'),
+
+        /**
+         * LSTATUS SHRegGetUSValueA(LPCSTR pszSubKey, LPCSTR pszValue, DWORD *pdwType,
+         *     void *pvData, DWORD *pcbData, BOOL fIgnoreHKCU, void *pvDefaultData,
+         *     DWORD dwDefaultDataSize)
+         */
+        SHRegGetUSValueA: getUSValue('A'),
+        SHRegGetUSValueW: getUSValue('W'),
 
         /**
          * BOOL SHRegGetBoolUSValueA(LPCSTR pszSubKey, LPCSTR pszValue,

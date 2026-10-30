@@ -126,6 +126,8 @@ const WOW64_DIRECTORY = 'C:\\WINDOWS\\SysWOW64';
 /** The machines a process here runs on, as an image header names them. */
 const IMAGE_FILE_MACHINE_I386 = 0x14c;
 const IMAGE_FILE_MACHINE_AMD64 = 0x8664;
+/** What a process that does not run from an app package is answered by the package calls. */
+const APPMODEL_ERROR_NO_PACKAGE = 15700;
 
 /** 100ns units between the FILETIME epoch (1601-01-01) and the Unix one. */
 const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
@@ -1166,6 +1168,30 @@ export function createSystemFunctions(host){
             argBytes: 0,
             handler: ()=>processors.processorOf(host.currentThread()) >>> 0,
         },
+
+        /**
+         * VOID GetCurrentProcessorNumberEx(PPROCESSOR_NUMBER ProcNumber)
+         *
+         * The same processor as a PROCESSOR_NUMBER: group 0, the only one
+         * there is, its number, and the reserved byte zero.
+         */
+        GetCurrentProcessorNumberEx: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                const number = processors.processorOf(host.currentThread()) & 0xff;
+                host.writeMemory(out >>> 0, Uint8Array.of(0, 0, number, 0));
+                return 0;
+            },
+        },
+
+        /**
+         * LONG GetCurrentPackageId(UINT32 *bufferLength, BYTE *buffer)
+         *
+         * No process here runs from an app package: APPMODEL_ERROR_NO_PACKAGE,
+         * what Windows answers a desktop program, the buffer untouched.
+         */
+        GetCurrentPackageId: { argBytes: 8, handler: ()=>APPMODEL_ERROR_NO_PACKAGE },
 
         /**
          * BOOL IsWow64Process(HANDLE hProcess, PBOOL Wow64Process)

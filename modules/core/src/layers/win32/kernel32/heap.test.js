@@ -700,6 +700,23 @@ test('VirtualAlloc refuses a type that asks for nothing, or MEM_RESET with more'
         'a hint nothing here acts on is not a reason to refuse');
 });
 
+test('a reservation past the end of user address space is an invalid parameter, said nowhere', ()=>{
+    // Windows refuses it the same way: no divergence to report.
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {string[]} */
+    const said = [];
+    const fns = createHeapFunctions({ ...fakeHost(RESERVING_ARENA),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            said.push(`${api}: ${detail}`) });
+    assert.equal(fns.VirtualAlloc.handler([0xffee0000, GRANULARITY, MEM_RESERVE, 0x04]), 0);
+    assert.equal(fns.VirtualAlloc.handler([0x7ffe0000, 2 * GRANULARITY, MEM_RESERVE, 0x04]), 0,
+        'one that runs over the end too');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    assert.deepEqual(said, []);
+});
+
 test('MEM_RESET keeps the pages and what is in them, inside a reservation only', ()=>{
     const { host, fns, errors } = recording();
     const reserved = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE | MEM_COMMIT, 0x04]);

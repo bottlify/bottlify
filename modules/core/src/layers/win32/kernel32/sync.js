@@ -106,6 +106,12 @@ const CONTEXT_INTEGER = 0x10002;
 const CONTEXT_SEGMENTS = 0x10004;
 const CONTEXT_DEBUG_REGISTERS = 0x10010;
 const CONTEXT_BYTES = 0x2cc;
+/** The bits of ContextFlags that name a part of the context, the machine's bit aside. */
+const CONTEXT_PARTS = 0x3f;
+/** The 32-bit CONTEXT's head: its flags, then Dr0-Dr3, Dr6 and Dr7. */
+const CONTEXT_DEBUG = Object.freeze({ FLAGS: 0x00, DR7: 0x18, SIZE: 0x1c });
+/** Dr7's local and global enables of the four breakpoints. */
+const DR7_ENABLES = 0xff;
 
 /** Milliseconds from the FILETIME epoch (1601) to the Unix one, for thread times. */
 const FILETIME_EPOCH_MS = 11644473600000;
@@ -1272,6 +1278,25 @@ export function createSyncFunctions(host){
                 {
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
+                }
+                // The debug registers alone, every breakpoint off: the state a
+                // thread here is always in, since none is ever set -- what a
+                // program clearing hardware breakpoints from its threads asks.
+                // One that enables a breakpoint is not honoured, and says so.
+                if (handleSize === 4)
+                {
+                    const bytes = host.readMemory(context >>> 0, CONTEXT_DEBUG.SIZE);
+                    const view = new DataView(bytes.buffer, bytes.byteOffset, CONTEXT_DEBUG.SIZE);
+                    const flags = view.getUint32(CONTEXT_DEBUG.FLAGS, true);
+                    if ((flags & CONTEXT_PARTS & ~CONTEXT_DEBUG_REGISTERS) === 0)
+                    {
+                        if ((view.getUint32(CONTEXT_DEBUG.DR7, true) & DR7_ENABLES) !== 0)
+                        {
+                            host.divergence?.('SetThreadContext',
+                                'hardware breakpoints are set and not honoured');
+                        }
+                        return 1;
+                    }
                 }
                 host.divergence?.('SetThreadContext', 'the registers of a thread are not replaced');
                 host.setLastError?.(ERROR_ACCESS_DENIED);

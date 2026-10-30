@@ -174,3 +174,26 @@ test('SHQueryValueEx and SHGetValue answer an expandable string expanded, as REG
     assert.equal(await get([0x80000001, m.put('Software\\None'), m.put('Test1'), type, buffer,
         m.count(64)]), 2, 'no such key');
 });
+
+test('SHRegGetUSValue reads the user\'s value, then the machine\'s, then the default', ()=>{
+    const { m, set } = registryMachine();
+    set(HKEY_CURRENT_USER, 'Software\\Test', 'Both', REG_DWORD, Uint8Array.of(1, 0, 0, 0));
+    set(HKEY_LOCAL_MACHINE, 'Software\\Test', 'Both', REG_DWORD, Uint8Array.of(2, 0, 0, 0));
+    /** @param {string} name @param {number} ignore @param {number} [fallback] */
+    const get = (name, ignore, fallback = 0)=>{
+        const type = m.count(0);
+        const data = m.count(0xcccccccc);
+        const size = m.count(4);
+        const status = m.fns.SHRegGetUSValueA.handler([m.put('Software\\Test'), m.put(name), type,
+            data, size, ignore, fallback, fallback ? 4 : 0]);
+        return { status, type: m.dwordAt(type), data: m.dwordAt(data), size: m.dwordAt(size) };
+    };
+    assert.deepEqual(get('Both', 0), { status: 0, type: REG_DWORD, data: 1, size: 4 });
+    assert.deepEqual(get('Both', 1).data, 2, 'the machine\'s, the user ignored');
+    assert.equal(get('Missing', 0).status, 2, 'ERROR_FILE_NOT_FOUND');
+    const fallback = m.count(7);
+    const given = get('Missing', 0, fallback);
+    assert.equal(given.status, 0);
+    assert.equal(given.data, 7, 'the default copied in');
+    assert.equal(m.fns.SHRegGetUSValueA.argBytes, 32);
+});

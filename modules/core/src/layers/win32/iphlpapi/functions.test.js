@@ -271,3 +271,22 @@ test('a connection table with no rows; changes never come; DHCP cannot be asked'
     view.setUint32(0x300, 7, true);
     assert.equal(fns.IpReleaseAddress.handler([0x300]), 87);
 });
+
+test('GetIpAddrTable lists the adapter\'s address and the loopback\'s, in order when asked', ()=>{
+    const { view, fns } = machine(0xc0a80105);
+    view.setUint32(SIZE, 0, true);
+    assert.equal(fns.GetIpAddrTable.handler([0, SIZE, 1]), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(view.getUint32(SIZE, true), 4 + 2 * 24);
+    assert.equal(fns.GetIpAddrTable.handler([INFO, SIZE, 1]), 0);
+    assert.equal(view.getUint32(INFO, true), 2);
+    // In network order, the loopback (127.0.0.1) before 192.168.1.5.
+    assert.equal(view.getUint32(INFO + 4, false), 0x7f000001);
+    assert.equal(view.getUint32(INFO + 4 + 8, false), 0xff000000, 'its mask');
+    assert.equal(view.getUint32(INFO + 28, false), 0xc0a80105);
+    assert.equal(view.getUint16(INFO + 28 + 22, true), 1, 'MIB_IPADDR_PRIMARY');
+    assert.equal(fns.GetIpAddrTable.handler([INFO, 0, 0]), 87, 'no size at all');
+    const offline = machine();
+    offline.view.setUint32(SIZE, 0x100, true);
+    assert.equal(offline.fns.GetIpAddrTable.handler([INFO, SIZE, 0]), 0);
+    assert.equal(offline.view.getUint32(INFO, true), 1, 'with no network, the loopback alone');
+});

@@ -1284,3 +1284,32 @@ test('ConvertStringSidToSid reads hex anywhere, and wants a sub-authority', ()=>
     assert.equal(fns.ConvertStringSidToSidA.handler([0x300, OUT]), 0);
     assert.equal(errors.at(-1), 1337);
 });
+
+test('SaferCreateLevel opens a level, SaferComputeTokenFromLevel makes a token at it', ()=>{
+    // Steam's client starts programs with a token computed at the normal
+    // user's level; one that restricts nothing may be asked for as no token.
+    const { errors, fns, dword, table } = setup();
+    const SAFER_SCOPEID_USER = 2;
+    const SAFER_LEVELID_NORMALUSER = 0x20000;
+    const SAFER_LEVELID_FULLYTRUSTED = 0x40000;
+    const SAFER_TOKEN_NULL_IF_EQUAL = 1;
+    assert.equal(fns.SaferCreateLevel.handler([SAFER_SCOPEID_USER, SAFER_LEVELID_NORMALUSER, 1,
+        OUT, 0]), 1);
+    const level = dword(OUT);
+    assert.equal(table.get(level)?.type, 'saferLevel');
+    assert.equal(fns.SaferComputeTokenFromLevel.handler([level, 0, NEEDED, 0, 0]), 1);
+    assert.equal(table.get(dword(NEEDED))?.type, 'token');
+    assert.equal(table.get(dword(NEEDED))?.object.process, CURRENT_PROCESS,
+        'made from the process\'s own when none is given');
+
+    assert.equal(fns.SaferCreateLevel.handler([SAFER_SCOPEID_USER, SAFER_LEVELID_FULLYTRUSTED, 1,
+        OUT, 0]), 1);
+    assert.equal(fns.SaferComputeTokenFromLevel.handler([dword(OUT), 0, NEEDED,
+        SAFER_TOKEN_NULL_IF_EQUAL, 0]), 1);
+    assert.equal(dword(NEEDED), 0, 'fully trusted changes nothing: no token');
+
+    assert.equal(fns.SaferCreateLevel.handler([3, SAFER_LEVELID_NORMALUSER, 1, OUT, 0]), 0);
+    assert.equal(fns.SaferCreateLevel.handler([SAFER_SCOPEID_USER, 0x1234, 1, OUT, 0]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    assert.equal(fns.SaferCloseLevel.handler([level]), 1);
+});

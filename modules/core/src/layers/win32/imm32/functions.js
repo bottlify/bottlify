@@ -89,7 +89,7 @@ export function createImmFunctions(host){
         },
     };
 
-    return {
+    const table = {
         /**
          * HIMC ImmAssociateContext(HWND hWnd, HIMC hIMC)
          *
@@ -110,6 +110,18 @@ export function createImmFunctions(host){
 
         /** BOOL ImmReleaseContext(HWND hWnd, HIMC hIMC) */
         ImmReleaseContext: { argBytes: 8, handler: ()=>1 },
+
+        /**
+         * LPINPUTCONTEXT ImmLockIMC(HIMC hIMC), BOOL ImmUnlockIMC(HIMC hIMC),
+         * LPVOID ImmLockIMCC(HIMCC hIMCC) and BOOL ImmUnlockIMCC(HIMCC hIMCC)
+         *
+         * No input context is ever handed out (ImmGetContext), so none can be
+         * locked: NULL, and FALSE for the unlock, as an invalid handle answers.
+         */
+        ImmLockIMC: { argBytes: 4, handler: ()=>0 },
+        ImmUnlockIMC: { argBytes: 4, handler: ()=>0 },
+        ImmLockIMCC: { argBytes: 4, handler: ()=>0 },
+        ImmUnlockIMCC: { argBytes: 4, handler: ()=>0 },
 
         /**
          * LONG ImmGetCompositionStringA(HIMC hIMC, DWORD dwIndex, LPVOID lpBuf, DWORD dwBufLen)
@@ -353,4 +365,6 @@ export function createImmFunctions(host){
             },
         },
     };
+    // The IME messages carry no text, so the W form is the same answer.
+    return { ...table, ImmIsUIMessageW: table.ImmIsUIMessageA };
 }

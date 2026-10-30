@@ -1709,3 +1709,22 @@ test('CreateIconFromResourceEx makes an icon or cursor of one resource entry\'s 
     assert.equal(fns.CreateIconFromResourceEx.argBytes, 28);
     assert.equal(fns.CreateIconFromResource.argBytes, 16);
 });
+
+test('SetMenuInfo keeps a menu\'s own settings by mask, GetMenuInfo reads them back', ()=>{
+    const { memory, fns } = setup();
+    const menu = fns.CreateMenu.handler([]);
+    const MIM_STYLE = 0x10;
+    const MIM_MENUDATA = 0x8;
+    const MNS_NOTIFYBYPOS = 0x08000000;
+    memory.putU32s(INFO, [28, MIM_STYLE | MIM_MENUDATA, MNS_NOTIFYBYPOS, 0, 0, 0, 0x1234]);
+    assert.equal(fns.SetMenuInfo.handler([menu, INFO]), 1);
+    memory.putU32s(INFO, [28, MIM_STYLE | MIM_MENUDATA, 0, 0, 0, 0, 0]);
+    assert.equal(fns.GetMenuInfo.handler([menu, INFO]), 1);
+    assert.equal(memory.u32(INFO + 8), MNS_NOTIFYBYPOS);
+    assert.equal(memory.u32(INFO + 24), 0x1234);
+
+    memory.putU32s(INFO, [27, MIM_STYLE]);
+    assert.equal(fns.GetMenuInfo.handler([menu, INFO]), 0, 'a cbSize of neither width');
+    memory.putU32s(INFO, [28, MIM_STYLE]);
+    assert.equal(fns.GetMenuInfo.handler([0x9999, INFO]), 0, 'no such menu');
+});

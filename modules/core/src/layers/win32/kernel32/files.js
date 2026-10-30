@@ -3331,6 +3331,31 @@ export function createFileFunctions(host){
         CreateFileW: { ...createFile.wide, natives },
 
         /**
+         * HANDLE CreateFile2(LPCWSTR, DWORD dwDesiredAccess, DWORD dwShareMode,
+         *   DWORD dwCreationDisposition, LPCREATEFILE2_EXTENDED_PARAMETERS)
+         *
+         * CreateFileW with its attributes, flags and quality-of-service flags
+         * in a structure: dwSize, dwFileAttributes, dwFileFlags,
+         * dwSecurityQosFlags, then the security attributes and the template,
+         * which CreateFileW does not look at either.
+         */
+        CreateFile2: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([name, access, share, disposition, parameters])=>{
+                let flags = 0;
+                if ((parameters >>> 0) !== 0)
+                {
+                    const bytes = host.readMemory(parameters >>> 0, 16);
+                    const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
+                    flags = (view.getUint32(4, true) | view.getUint32(8, true)
+                        | view.getUint32(12, true)) >>> 0;
+                }
+                return createFile.wide.handler([name, access, share, 0, disposition, flags, 0]);
+            },
+        },
+
+        /**
          * BOOL ReadFile(HANDLE, LPVOID, DWORD, LPDWORD lpNumberOfBytesRead,
          *               LPOVERLAPPED)
          *
