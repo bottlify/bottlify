@@ -269,7 +269,7 @@ test('DirectX\'s setup library is answered here even where the program brought i
     // a restart a game's installer stops at; the table answers it is in place.
     const api = await win32Module.create({}, stubHost());
     assert.deepEqual(api.runtimes(),
-        ['DSETUP.dll', 'MSVCR80.dll', 'libcef.dll']);
+        ['DSETUP.dll', 'MSVCR80.dll', 'libcef.dll', 'steamclient.dll']);
     assert.ok('DSETUP.dll' in api.libraries(), 'with a table');
     // The Visual C++ 2005 runtime likewise: a program built with it reads
     // _acmdln through its import first thing, and a stub there is a pointer

@@ -247,7 +247,8 @@ const hashText = (hash, text)=>{
  *     versions name its DirectX -- 7.0, 8.1, or 9.0c for 9 and 10. Absent,
  *     every library and DirectX 9.0c; any other name is refused.
  * @property {{ network?: any, trustedRoots?: (Uint8Array | string)[],
- *     handleWords?: boolean }} [win32]
+ *     handleWords?: boolean,
+ *     steam?: import('./layers/win32/steamclient/functions.js').SteamAccount }} [win32]
  *     `network` is the transport under Winsock, in the shape the win32 layer's
  *     `wsock32/transport.js` names: what a relay client hands back, or an
  *     embedder's own. Absent, Winsock runs over the loopback adapter and
@@ -258,6 +259,10 @@ const hashText = (hash, text)=>{
  *     nothing. `handleWords: false` leaves out the table of handle words that
  *     WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent answer from in
  *     the guest, so every such call is the host's: the second path of their gates.
+ *     `steam` is a signed-in Steam account (its Steam ID, name and the app ids
+ *     its licences grant, as the embedder established with the person's own
+ *     sign-in): the run then has a Steam client running, which a game's
+ *     Steamworks calls reach, answering an app as owned only when it is listed.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
@@ -4916,6 +4921,9 @@ async function buildApp(options){
             trustedRoots: options.win32?.trustedRoots,
             // Off only for a gate's second path (`handleWords`).
             handleWords: options.win32?.handleWords,
+            // The Steam account the embedder signed in with and the games it
+            // owns: the run's Steam client answers a game for it.
+            steam: options.win32?.steam,
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,

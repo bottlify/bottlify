@@ -78,6 +78,8 @@ import {
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createLibcefFunctions } from './libcef/functions.js';
+import { STEAM_PATH, announceSteamClient, createSteamclientFunctions }
+    from './steamclient/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
 import { createLoopbackAdapter } from './wsock32/loopback.js';
 import { createWinmmFunctions, WINMM_ORDINALS } from './winmm/functions.js';
@@ -743,6 +745,21 @@ export function createWin32Module(){
             if (system)
             {
                 system.registry = hive;
+            }
+            // A run made with a signed-in Steam account has its client running,
+            // as a game finds one: a process that stays in the run's directory
+            // for as long as the run lasts, and the registry saying so.
+            if (config?.steam && processDirectory && !inheritedHive)
+            {
+                const ids = /** @type {any} */ (system)?.ids;
+                const pid = typeof ids?.take === 'function' ? ids.take('process', 8)
+                    : ids ? (ids.process += 8) - 8 : 0x1ff8;
+                processDirectory.set(pid, { kind: 'process', id: pid, threadId: pid + 1,
+                    imagePath: `${STEAM_PATH}\\steam.exe`, commandLine: '', suspended: false,
+                    completed: false, exitCode: kernel.processes.STILL_ACTIVE, started: true,
+                    exited: kernel.createEvent({ manualReset: true, signalled: false,
+                        name: `process ${pid}` }) });
+                announceSteamClient(hive, { pid, account: config.steam });
             }
             // The descriptors programs set on files are the run's, not a
             // process's: a setup that writes one and a service that reads it
@@ -3561,6 +3578,18 @@ export function createWin32Module(){
                 'dwmapi.dll': createDwmapiFunctions(displayHost),
                 'DWrite.dll': createDwriteFunctions({ ...displayHost,
                     divergence: config?.divergence }),
+                // The Steam client's side of a game's Steamworks calls, for the
+                // account the launcher signed in with (steamclient/).
+                'steamclient.dll': createSteamclientFunctions({ readMemory, writeMemory,
+                    readCString, account: config?.steam ?? null,
+                    allocate: displayHost.allocate,
+                    register: (name, fn)=>bridge.register(name, fn),
+                    answerHigh: high=>bridge.answerHigh(high),
+                    environment: name=>Object.entries(/** @type {any} */ (
+                        libraries['KERNEL32.dll'])?.[ENVIRONMENT_NOW]?.() ?? {})
+                        .find(([variable])=>variable.toUpperCase() === name.toUpperCase())?.[1]
+                        ?? null,
+                    divergence: config?.divergence, log: text=>trace(`steamclient: ${text}`) }),
                 // Chromium's embedding API, answered by the host's own browser
                 // rather than by the framework a program ships (libcef/).
                 'libcef.dll': createLibcefFunctions({ readMemory, writeMemory,
@@ -4422,11 +4451,12 @@ export function createWin32Module(){
                  * translator to carry. The C++ libraries are not among them
                  * until they export all a program's own copy does: a copy the
                  * program brought answers what this one does not have. And
-                 * Chromium's embedding framework, whose browser is the host's.
+                 * Chromium's embedding framework, whose browser is the host's,
+                 * and the Steam client's library, answered for the signed-in account.
                  *
                  * @returns {string[]}
                  */
-                runtimes: ()=>['DSETUP.dll', 'MSVCR80.dll', 'libcef.dll'],
+                runtimes: ()=>['DSETUP.dll', 'MSVCR80.dll', 'libcef.dll', 'steamclient.dll'],
 
                 /**
                  * The libraries with a table here that are not Windows' own but a

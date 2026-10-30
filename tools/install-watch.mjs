@@ -55,7 +55,9 @@
  *
  * `--bundle ID` runs an installed program instead (its blocks kept in
  * `bundles/ID/blocks`, or the folder `--blocks DIR` names, between runs), `--file HOST=GUEST` putting
- * a file of this disk on its volume first (and `--reg 'HKCU\path\name=value'` a
+ * a file of this disk on its volume first (`--steam ACCOUNT` signs the run in to
+ * Steam as tools/steam-account.mjs's account, for the engine's Steam client;
+ * and `--reg 'HKCU\path\name=value'` a
  * registry value, a string or `dword:N`): the bundle in
  * `bundles/ID`, mounted where its installation put it, started at its entry
  * or at `--which`, a path in the bundle -- a launcher's dialog driven by the
@@ -261,9 +263,17 @@ const network = await relayFromArgv(argv);
 const roots = rootsFromArgv(argv);
 const started = Date.now();
 const seconds = ()=>((Date.now() - started) / 1000).toFixed(1);
+// `--steam ACCOUNT`: the signed-in Steam account and the games it owns
+// (tools/steam-account.mjs), which the engine's Steam client answers with.
+// `--steam-app N` is the app being run, as Steam tells a game it starts.
+const steam = argv.includes('--steam')
+    ? { ...JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')),
+        ...argv.includes('--steam-app')
+            ? { appId: Number(argv[argv.indexOf('--steam-app') + 1]) } : {} }
+    : null;
 const app = await createApp({
     win32: { ...network ? { network } : {},
-        ...roots ? { trustedRoots: roots } : {} },
+        ...roots ? { trustedRoots: roots } : {}, ...steam ? { steam } : {} },
     executable: prefix.executable,
     imagePath: prefix.imagePath,
     // `--args '...'`: what follows the program's own path on its command line.
@@ -706,7 +716,8 @@ for (const entry of all('--reg'))
     const dword = /^dword:(\d+)$/.exec(value);
     hive.setValue(key, name, dword ? 4 : 1, dword
         ? new Uint8Array(Uint32Array.of(Number(dword[1])).buffer)
-        : new Uint8Array(Uint16Array.from(value, character=>character.charCodeAt(0)).buffer));
+        // Narrow, as the hive keeps a string.
+        : Uint8Array.from([...value, '\0'], character=>character.charCodeAt(0) & 0xff));
 }
 
 try

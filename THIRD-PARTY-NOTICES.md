@@ -178,3 +178,15 @@ Joliet specification.
 - Location in this repository: `modules/core/src/steam/lzma.js`, a decoder for raw streams of
   known length; no code is copied, the decoder is original work under the MPL
 - License: public domain
+
+## The Steamworks SDK's interface headers: used as a specification
+
+- Source: Valve's Steamworks SDK headers (`isteamclient.h`, `isteamuser.h` and the rest, every
+  interface version a game may ask for, as the SDK's history is kept by projects that carry it):
+  each interface's methods in vtable order and their parameter and return types
+- Location in this repository: `modules/core/src/layers/win32/steamclient/interfaces.js`, written
+  by `tools/steam-interfaces.mjs` -- each method's name, its argument bytes on an x86 stack and how
+  it returns, which is the binary interface a game compiled against; no code is copied, and the
+  client that answers the methods is original work under the MPL
+- License: the Steamworks SDK Access Agreement governs the SDK; the layouts are facts of the
+  binary interface, reproduced for interoperability
