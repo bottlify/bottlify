@@ -35,6 +35,14 @@ const HOT_JUMPS = 50;
 const INTERPRET_CHUNK = 1 << 16;
 /** Instructions a region runs at a time, so a loop that never leaves still yields. */
 const REGION_CHUNK = 1 << 24;
+/**
+ * The program's clock: a millisecond a million instructions retired, about
+ * what translated code runs at. The translator times a page's rewrites
+ * (`volatileWindowMs`) by it, so which code runs translated follows the program
+ * alone -- by the host's clock it followed how busy the machine was, and a
+ * program run twice was translated two ways.
+ */
+const PROGRAM_MS = 1e-6;
 
 /**
  * Why a run ended: the program's `hlt`; an `int n` (eip past it, `vector` n); a
@@ -53,13 +61,18 @@ const REGION_CHUNK = 1 << 24;
 
 /**
  * @param {{ ramSize?: number, config?: import('../../core/src/layers/cpu/engine.js').EngineConfig,
- *     trapPort?: number, features?: import('./wasm/features.js').Features }} [options]
+ *     trapPort?: number, features?: import('./wasm/features.js').Features,
+ *     now?: () => number }} [options]
  *     `ramSize`: guest memory in bytes, a multiple of 64 KiB (default 16 MiB); `config`: the
  *     translator's (`EngineConfig`); `trapPort`: an I/O port whose `out` stops the run as a
  *     `trap` (default none: every `out` is one); `features`: the host the translator makes
- *     code for, another than this one (an arm64 one's, `armHost`), this one's by default
+ *     code for, another than this one (an arm64 one's, `armHost`), this one's by default;
+ *     `now`: the clock in milliseconds the translator times a page's rewrites by, the
+ *     program's own by default (`PROGRAM_MS`)
  */
-export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, features } = {}){
+export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, features,
+    now = undefined } = {})
+{
     const layout = ownLayout({ ramSize,
         ...(config.hashSlots === undefined ? {} : { hashSlots: config.hashSlots }) });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
@@ -76,8 +89,11 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
     const rdtsc = ()=>BigInt(Math.round((performance.now() - started) * 1e6));
     /** @type {number[]} */
     const trapped = [];
+    /** Instructions retired by every run so far: the program's clock (`PROGRAM_MS`). */
+    let elapsed = 0;
     const runtime = createCorkRuntime({
         memory, layout, ...(features === undefined ? {} : { features }),
+        now: now ?? (()=>elapsed * PROGRAM_MS),
         // Formed after every run of the interpreter: there are no frames to pace it.
         config: { feed: 'slice', ...config, ...(trapPort === undefined ? {} : { trapPort }) },
         read: address=>bytes()[layout.ramBase + address],
@@ -217,6 +233,7 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
             {
                 const exit = runtime.run(entry, Math.min(remaining, regionChunk));
                 retired += exit.retired;
+                elapsed += exit.retired;
                 translated += exit.retired;
                 if (exit.kind === 'halt')
                 {
@@ -248,6 +265,7 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
             const { retired: stepped, stop } = interpretFrom(Math.min(remaining, interpretChunk),
                 entry >= 0);
             retired += stepped;
+            elapsed += stepped;
             if (stop !== null)
             {
                 return ended(stop);

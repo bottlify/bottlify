@@ -29,6 +29,9 @@ export function machine(config = {}){
         read: address=>bytes()[layout.ramBase + address],
         imports: { trap: ()=>0, getEflags: ()=>view().getUint32(layout.eflags, true),
             x87Read: ()=>0, rdtsc: ()=>0n },
+        // A page's rewrites timed on a clock of the test's, standing still: how
+        // many make a page volatile, not how fast the machine made them.
+        now: ()=>0,
     });
     return {
         runtime,

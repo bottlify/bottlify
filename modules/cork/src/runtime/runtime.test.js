@@ -30,6 +30,9 @@ function machine(config = {}, ramSize = 4 << 20, imports = {}){
         read: address=>bytes()[layout.ramBase + address],
         imports: { trap: ()=>0, getEflags: ()=>view().getUint32(layout.eflags, true),
             x87Read: ()=>0, rdtsc: ()=>0n, ...imports },
+        // A page's rewrites all at one moment: what makes it volatile is how
+        // many there were, never how long a busy machine took between them.
+        now: ()=>0,
     });
     return {
         layout, memory, runtime,
