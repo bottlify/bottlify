@@ -169,3 +169,12 @@ Joliet specification.
   `WINDOWS_ZONES` table, as the key and zone names alone; the rules of each zone are not copied
   but read at run time from the platform's own zone data
 - License: Unicode License v3 (https://www.unicode.org/license.txt)
+
+## The LZMA specification: used as a specification
+
+- Source: Igor Pavlov's `lzma-specification.txt` from the LZMA SDK (https://www.7-zip.org/sdk.html),
+  placed in the public domain: the range coder, the probability model and its constants, the
+  literal, match and repeat-distance coding
+- Location in this repository: `modules/core/src/steam/lzma.js`, a decoder for raw streams of
+  known length; no code is copied, the decoder is original work under the MPL
+- License: public domain
