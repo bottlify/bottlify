@@ -77,6 +77,7 @@ import {
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
+import { createLibcefFunctions } from './libcef/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
 import { createLoopbackAdapter } from './wsock32/loopback.js';
 import { createWinmmFunctions, WINMM_ORDINALS } from './winmm/functions.js';
@@ -3560,6 +3561,18 @@ export function createWin32Module(){
                 'dwmapi.dll': createDwmapiFunctions(displayHost),
                 'DWrite.dll': createDwriteFunctions({ ...displayHost,
                     divergence: config?.divergence }),
+                // Chromium's embedding API, answered by the host's own browser
+                // rather than by the framework a program ships (libcef/).
+                'libcef.dll': createLibcefFunctions({ readMemory, writeMemory,
+                    allocate: displayHost.allocate,
+                    free: displayHost.free,
+                    register: (name, fn)=>bridge.register(name, fn),
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread(),
+                    commandLine: ()=>readWideString(
+                        libraries['KERNEL32.dll'].GetCommandLineW.handler([]) >>> 0, 0x8000),
+                    log: text=>trace(`libcef: ${text}`),
+                    divergence: config?.divergence }),
                 'USERENV.dll': createUserenvFunctions({
                     block: ()=>libraries['KERNEL32.dll'].GetEnvironmentStringsW.handler([]),
                     free: block=>libraries['KERNEL32.dll'].FreeEnvironmentStringsW
@@ -4408,11 +4421,12 @@ export function createWin32Module(){
                  * code where a program's copy is one more runtime for the
                  * translator to carry. The C++ libraries are not among them
                  * until they export all a program's own copy does: a copy the
-                 * program brought answers what this one does not have.
+                 * program brought answers what this one does not have. And
+                 * Chromium's embedding framework, whose browser is the host's.
                  *
                  * @returns {string[]}
                  */
-                runtimes: ()=>['DSETUP.dll', 'MSVCR80.dll'],
+                runtimes: ()=>['DSETUP.dll', 'MSVCR80.dll', 'libcef.dll'],
 
                 /**
                  * The libraries with a table here that are not Windows' own but a
