@@ -1628,6 +1628,11 @@ export function createCpuModule(){
                     sharedMemory: typeof SharedArrayBuffer === 'function'
                         && instance.host.wasmMemory?.()?.buffer instanceof SharedArrayBuffer,
                     executorsRefused: instance.executorsRefused,
+                    // The executors asked for and not open yet, by index: a worker
+                    // takes some tens of milliseconds to open, and more on a busy
+                    // machine, so one asked for at a run's start may still be
+                    // opening when a short run ends.
+                    executorsOpening: [...instance.opening.keys()],
                     // Whether the executors keep the program's plain accesses in
                     // order (cork's `ordered`, as the run asked); null on one executor.
                     ordered: instance.ordered,

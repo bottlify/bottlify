@@ -28,6 +28,8 @@ const u32 = value=>[
 ];
 
 const WORKER_OFFSET = 0x200;
+/** CreateThread's flag: the thread made stopped, until ResumeThread. */
+const CREATE_SUSPENDED = 4;
 
 /**
  * A program of a main thread and a worker routine at `WORKER_OFFSET`.
@@ -257,27 +259,44 @@ test('a run keeps in its store how many executors its threads opened, and the ne
             records.set(key, bytes.slice());
         },
     };
-    const twoComputing = buildProgram(['CreateThread', 'WaitForSingleObject', 'ExitProcess'],
-        { first: [0, 0, 0, 0], second: [0, 0, 0, 0] }, ({ call, at, start })=>{
-            /** WaitForSingleObject([slot], INFINITE) @param {string} slot */
-            const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
-                ...call('WaitForSingleObject')];
-            return {
-                main: [...start('first'), ...start('second'), ...wait('first'), ...wait('second'),
-                    0x6a, 0x07, ...call('ExitProcess')],
-                worker: [
-                    0xb9, ...u32(LOOPS * 10), //       mov ecx, 10 * LOOPS
-                    0x49, 0x75, 0xfd, //               L: dec ecx; jnz L
-                    0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
-                ],
-            };
-        });
-    // One thread that wants no executor, alive long enough for one to open.
+    // Two threads computing, each pinned to a processor of its own past the
+    // first: neither runs anywhere but on its own executor, so the run cannot
+    // end before both have opened, however long a busy machine takes to open
+    // them.
+    const twoComputing = buildProgram(['CreateThread', 'SetThreadAffinityMask', 'ResumeThread',
+        'WaitForSingleObject', 'ExitProcess'],
+    { first: [0, 0, 0, 0], second: [0, 0, 0, 0] }, ({ call, at, start })=>{
+        /** WaitForSingleObject([slot], INFINITE) @param {string} slot */
+        const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
+            ...call('WaitForSingleObject')];
+        /**
+         * Made suspended, pinned to `processor`, and let go.
+         * @param {string} slot @param {number} processor
+         */
+        const pinned = (slot, processor)=>[...start(slot, CREATE_SUSPENDED),
+            0x6a, 1 << processor, 0xff, 0x35, ...u32(at(slot)), ...call('SetThreadAffinityMask'),
+            0xff, 0x35, ...u32(at(slot)), ...call('ResumeThread')];
+        return {
+            main: [...pinned('first', 1), ...pinned('second', 2), ...wait('first'),
+                ...wait('second'), 0x6a, 0x07, ...call('ExitProcess')],
+            worker: [
+                0xb9, ...u32(LOOPS), //            mov ecx, LOOPS
+                0x49, 0x75, 0xfd, //               L: dec ecx; jnz L
+                0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
+            ],
+        };
+    });
+    // One thread that wants no executor, alive long enough for the store's
+    // answer to have come at the start.
     const oneSleeping = buildProgram(['Sleep', 'ExitProcess'], {}, ({ call })=>({
         main: [0x68, ...u32(1500), ...call('Sleep'), 0x6a, 0x07, ...call('ExitProcess')],
         worker: [],
     }));
-    /** @param {Uint8Array} executable @returns {Promise<number>} executors opened */
+    /**
+     * @param {Uint8Array} executable
+     * @returns {Promise<{ open: number, opening: number }>} executors open, and asked for
+     *     and still opening, at the run's end
+     */
     const opened = async executable=>{
         const app = await createApp({ executable, cpu: { cores: 4, eager: false },
             cork: { config: { store } } });
@@ -286,18 +305,23 @@ test('a run keeps in its store how many executors its threads opened, and the ne
             assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
             const tables = await app.diagnostics();
             const cpu = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'cpu');
-            return cpu?.metrics?.executors?.length ?? 0;
+            return { open: cpu?.metrics?.executors?.length ?? 0,
+                opening: cpu?.metrics?.executorsOpening?.length ?? 0 };
         }
         finally
         {
             await app.dispose();
         }
     };
-    const first = await opened(twoComputing);
-    assert.ok(first >= 1, `${first} executors opened by two threads computing`);
+    const { open: first } = await opened(twoComputing);
+    assert.ok(first >= 2, `${first} executors opened by two threads pinned past the first`);
     const kept = ()=>[...(records.get(EXECUTORS_OPENED_KEY) ?? [])];
     assert.deepEqual(kept(), [first], 'kept as they opened');
-    assert.equal(await opened(oneSleeping), first, 'opened at the start of the next run');
+    // Asked for at the start, before any thread wanted one: open, or still
+    // opening where the machine is slow to open a worker -- a run of a second
+    // and a half is no bound on that.
+    const next = await opened(oneSleeping);
+    assert.equal(next.open + next.opening, first, 'opened at the start of the next run');
     assert.deepEqual(kept(), [first], 'and kept, not lowered');
 });
 
