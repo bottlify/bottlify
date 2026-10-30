@@ -1353,12 +1353,12 @@ test('a region formed as its record says, its callees formed in, and refused for
     {
         // The worker ready first: until then a batch is emitted here, from the region as
         // formed here.
-        for (let i = 0; i < 500 && second.runtime.diagnostics().worker !== 'ready'; i++)
+        while (second.runtime.diagnostics().worker !== 'ready')
         {
             await new Promise(resolve=>setTimeout(resolve, 10));
         }
         second.runtime.noteHot(CODE);
-        for (let i = 0; i < 200 && second.runtime.entryOf(CODE) < 0; i++)
+        while (second.runtime.entryOf(CODE) < 0)
         {
             await second.runtime.translatePending();
             await new Promise(resolve=>setTimeout(resolve, 10));
@@ -2013,7 +2013,7 @@ test('a batch the worker forms from a copy of its pages runs as the one formed h
     m.runtime.noteHot(CODE, 0, 2);
     // The worker opens on its own turn; the batch goes once it is there.
     let published = false;
-    for (let i = 0; i < 200 && !published; i++)
+    while (!published)
     {
         await m.runtime.translatePending();
         await new Promise(resolve=>setTimeout(resolve, 10));
@@ -2040,7 +2040,7 @@ test('the worker rings the engine\'s doorbell after each answer it posts, its re
          * @param {number} expected
          */
         const rungTo = async expected=>{
-            for (let i = 0; i < 500 && count() < expected; i++)
+            while (count() < expected)
             {
                 await new Promise(resolve=>setTimeout(resolve, 10));
             }
@@ -2049,7 +2049,7 @@ test('the worker rings the engine\'s doorbell after each answer it posts, its re
         {
             // Ready first, as the runtime has heard it: until then a batch is
             // emitted here, and nothing rings.
-            for (let i = 0; i < 500 && m.runtime.diagnostics().worker !== 'ready'; i++)
+            while (m.runtime.diagnostics().worker !== 'ready')
             {
                 await new Promise(resolve=>setTimeout(resolve, 10));
             }
@@ -2059,7 +2059,7 @@ test('the worker rings the engine\'s doorbell after each answer it posts, its re
             m.setReg(4, 0x80000);
             m.runtime.noteHot(CODE, 0, 2);
             let published = false;
-            for (let i = 0; i < 200 && !published; i++)
+            while (!published)
             {
                 await m.runtime.translatePending();
                 await new Promise(resolve=>setTimeout(resolve, 10));
@@ -2078,7 +2078,12 @@ test('the worker rings the engine\'s doorbell after each answer it posts, its re
 
 test('a batch whose answer waits behind a hold of the engine thread past the limit is not given up',
     async()=>{
-        const m = machine({ worker: true, inFlightMs: 200 });
+        // The worker rings after each answer it posts: what says, through a
+        // hold that keeps the event loop from delivering it, that it answered.
+        const posted = { buffer: new SharedArrayBuffer(4), index: 0 };
+        const answered = ()=>Atomics.load(new Int32Array(posted.buffer), 0);
+        const m = machine({ worker: true, inFlightMs: 200,
+            doorbell: { posted, bell: { buffer: new SharedArrayBuffer(8), index: 1 } } });
         const OTHER = 0x2000;
         m.write(CODE, COUNTDOWN);
         m.write(OTHER, COUNTDOWN);
@@ -2087,24 +2092,26 @@ test('a batch whose answer waits behind a hold of the engine thread past the lim
         {
             // The worker is open once a first batch has come back from it.
             m.runtime.noteHot(OTHER, 0, 2);
-            for (let i = 0; i < 200 && m.runtime.entryOf(OTHER) < 0; i++)
+            while (m.runtime.entryOf(OTHER) < 0)
             {
                 await m.runtime.translatePending();
                 await new Promise(resolve=>setTimeout(resolve, 10));
             }
             assert.ok(m.runtime.entryOf(OTHER) >= 0, 'the worker answers');
+            const before = answered();
             m.runtime.noteHot(CODE, 0, 2);
             await m.runtime.translatePending();
             // The engine thread held well past the limit: the worker answers meanwhile, and
-            // its answer waits in the queue for the hold to end.
+            // its answer waits in the queue for the hold to end. Held until it has, as its
+            // ring says, however long a busy machine keeps the worker from it.
             const until = performance.now() + 1200;
-            while (performance.now() < until)
+            while (performance.now() < until || answered() === before)
             {
                 // Holding.
             }
             await m.runtime.translatePending();
             m.runtime.noteHot(CODE, 0, 4);
-            for (let i = 0; i < 20 && m.runtime.entryOf(CODE) < 0; i++)
+            while (m.runtime.entryOf(CODE) < 0)
             {
                 await new Promise(resolve=>setTimeout(resolve, 10));
                 await m.runtime.translatePending();
@@ -2126,7 +2133,7 @@ test('a batch whose answer waits behind a hold of the engine thread past the lim
  * @param {ReturnType<typeof machine>} m
  */
 async function untilWorkerLoaded(m){
-    for (let i = 0; i < 300 && m.runtime.diagnostics().worker !== 'ready'; i++)
+    while (m.runtime.diagnostics().worker !== 'ready')
     {
         await new Promise(resolve=>setTimeout(resolve, 10));
     }
@@ -2151,7 +2158,7 @@ test('what queues while a batch is with the worker goes out when its answer come
             m.runtime.noteHot(B, 0, 2);
             assert.equal(await m.runtime.translatePending(), 0, 'one batch out at a time');
             // Nobody asks again: A's answer sends B.
-            for (let i = 0; i < 200 && m.runtime.entryOf(B) < 0; i++)
+            while (m.runtime.entryOf(B) < 0)
             {
                 await new Promise(resolve=>setTimeout(resolve, 10));
             }
@@ -2207,7 +2214,7 @@ test('a worker that cannot load is dropped and the batches are emitted inline', 
     m.setReg(4, 0x80000);
     m.runtime.noteHot(CODE, 0, 2);
     let published = false;
-    for (let i = 0; i < 200 && !published; i++)
+    while (!published)
     {
         await m.runtime.translatePending();
         await new Promise(resolve=>setTimeout(resolve, 10));
@@ -2217,7 +2224,7 @@ test('a worker that cannot load is dropped and the batches are emitted inline', 
     /** @returns {string[]} */
     const lost = ()=>Object.keys(m.runtime.diagnostics().refused ?? {})
         .filter(reason=>reason.startsWith('worker: '));
-    for (let i = 0; i < 200 && lost().length === 0; i++)
+    while (lost().length === 0)
     {
         await new Promise(resolve=>setTimeout(resolve, 10));
     }
@@ -2667,7 +2674,7 @@ test('two modules that keep transferring into each other are gathered into one, 
     /** Translates until the condition holds, the worker answering on its own turns.
      * @param {() => boolean} done */
     const until = async done=>{
-        for (let i = 0; i < 300 && !done(); i++)
+        while (!done())
         {
             await m.runtime.translatePending();
             await new Promise(resolve=>setTimeout(resolve, 10));
@@ -2711,7 +2718,7 @@ test('after a merge, the next waits for translated instructions in proportion to
     m.write(OTHER, callLoop(3_000_000));
     /** @param {() => boolean} done */
     const until = async done=>{
-        for (let i = 0; i < 300 && !done(); i++)
+        while (!done())
         {
             await m.runtime.translatePending();
             await new Promise(resolve=>setTimeout(resolve, 10));
@@ -2770,7 +2777,7 @@ function mergeMachine(config){
      * @param {() => boolean} done */
     const until = async done=>{
         await loaded;
-        for (let i = 0; i < 300 && !done(); i++)
+        while (!done())
         {
             await m.runtime.translatePending();
             await new Promise(resolve=>setTimeout(resolve, 10));
