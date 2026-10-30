@@ -161,3 +161,12 @@ test('a running client is announced as Steam writes it: its pid and its library'
     assert.equal(new TextDecoder().decode(value('SteamClientDll')),
         'C:\\Program Files (x86)\\Steam\\steamclient.dll\0', 'narrow, as the hive keeps a string');
 });
+
+test('a method a PlayStation 3 build alone has is no slot of the Windows vtable', ()=>{
+    // GetISteamPS3OverlayRender sits under #ifdef _PS3 in SteamClient012's
+    // header; counted, every later slot is one late, and steam_api's call for
+    // HTTP lands on it with its three arguments left on the stack.
+    const slots = INTERFACES.SteamClient012.split(',').map(entry=>entry.split(':')[0]);
+    assert.equal(slots.includes('GetISteamPS3OverlayRender'), false);
+    assert.equal(slots.indexOf('GetISteamHTTP'), slots.indexOf('BShutdownIfAllPipesClosed') + 1);
+});

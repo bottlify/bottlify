@@ -112,11 +112,70 @@ function argumentBytes(parameters){
     return bytes;
 }
 
+/** What a 32-bit Windows client build defines; anything else is not defined. */
+const DEFINED = new Set(['STEAM_WIN32', '_WIN32', 'WIN32', 'VALVE_CALLBACK_PACK_LARGE']);
+
+/**
+ * The lines a 32-bit Windows build compiles: a method under `#ifdef _PS3` is
+ * no slot of the Windows vtable. Header guards and unknown conditions are
+ * taken as true.
+ *
+ * @param {string} text
+ */
+function preprocess(text){
+    /** @type {{ taking: boolean, taken: boolean }[]} */
+    const stack = [];
+    const on = ()=>stack.every(level=>level.taking);
+    /** @param {string} condition */
+    const holds = condition=>{
+        const expression = condition.replace(/defined\s*\(\s*(\w+)\s*\)/g,
+            (_, name)=>String(DEFINED.has(name)));
+        return /^[\s()!&|truefals]*$/.test(expression)
+            ? Boolean(new Function(`return (${expression});`)()) : true;
+    };
+    const out = [];
+    for (const line of text.split('\n'))
+    {
+        const directive = /^\s*#\s*(ifdef|ifndef|if|elif|else|endif)\b\s*(.*)$/.exec(line);
+        if (!directive)
+        {
+            out.push(on() ? line : '');
+            continue;
+        }
+        const [, kind, rest] = directive;
+        const name = rest.trim().split(/\s/)[0];
+        if (kind === 'ifdef' || kind === 'ifndef' || kind === 'if')
+        {
+            const taking = kind === 'ifdef' ? DEFINED.has(name)
+                : kind === 'ifndef' ? !DEFINED.has(name) : holds(rest);
+            stack.push({ taking, taken: taking });
+        }
+        else if (kind === 'elif' && stack.length > 0)
+        {
+            const level = stack[stack.length - 1];
+            level.taking = !level.taken && holds(rest);
+            level.taken ||= level.taking;
+        }
+        else if (kind === 'else' && stack.length > 0)
+        {
+            const level = stack[stack.length - 1];
+            level.taking = !level.taken;
+            level.taken = true;
+        }
+        else if (kind === 'endif')
+        {
+            stack.pop();
+        }
+        out.push('');
+    }
+    return out.join('\n');
+}
+
 /** @type {Record<string, string>} */
 const interfaces = {};
 for (const file of readdirSync(directory).filter(name=>/^isteam[a-z]+\d*\.h$/.test(name)).sort())
 {
-    const text = readFileSync(join(directory, file), 'utf8')
+    const text = preprocess(readFileSync(join(directory, file), 'utf8'))
         .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
         // A private method is still a slot: its wrapper goes, the method stays.
         .replace(/\bSTEAM_PRIVATE_API\s*\(\s*(virtual[^;]*;)\s*\)/g, '$1')
