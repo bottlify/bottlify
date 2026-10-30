@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
 import { writeBundle } from './bundle-node.js';
+import { SEGMENT_BLOCKS } from './layers/filesystem/internal/bundle/cache.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
 import { assemble, buildExe } from '../../../tools/make-pe.mjs';
 
@@ -626,4 +627,45 @@ test('a preload with nowhere to keep the blocks says so and the program reads as
         assert.equal(told.length, 1);
         assert.equal(typeof told[0].unbacked, 'string');
         assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 40000 }), 0);
+    });
+
+test('a bundle whose program sits past the quota starts, its late blocks read first',
+    { timeout: 120_000 }, async t=>{
+        // The file the fixture reads is packed after two segments of filler,
+        // the way a game keeps its program past gigabytes of archives. A store
+        // whose quota is short of that offset refused the first write of a
+        // cache laid out at index * blockSize, and the start failed.
+        const segment = SEGMENT_BLOCKS * BLOCK_SIZE;
+        const source = await bundleWith(PLANTED, 2 * segment + BLOCK_SIZE);
+        t.after(()=>source.cleanup());
+        const quota = segment + segment / 2;
+        const store = fakeStore();
+        const files = new Map();
+        /** @param {string} path @param {number} at @param {Uint8Array} bytes */
+        const write = (path, at, bytes)=>{
+            const size = Math.max(store.stat(path)?.size ?? 0, at + bytes.length);
+            const total = [...files].reduce((sum, [name, held])=>sum + (name === path ? 0 : held),
+                size);
+            if (total > quota)
+            {
+                throw new DOMException('past the quota', 'QuotaExceededError');
+            }
+            files.set(path, size);
+            store.write(path, at, bytes);
+        };
+        const app = await createApp({
+            executable: new Uint8Array(await readFile(FIXTURE)),
+            bundle: { fetch: source.fetch, prefix: '', prefetch: false, id: 'late',
+                store: { ...store, write } },
+        });
+        t.after(()=>app.dispose());
+        let printed = '';
+        app.on('output', (/** @type {any} */ payload)=>{
+            printed += payload.text;
+        });
+        assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 60_000 }), 0);
+        assert.equal(printed, PLANTED);
+        const segments = [...files.keys()].filter(path=>/\.blocks\.\d+$/.test(path));
+        assert.ok(segments.length > 0 && segments.every(path=>files.get(path) <= segment),
+            `kept on the store, a segment long at most: ${JSON.stringify([...files])}`);
     });

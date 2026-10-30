@@ -174,7 +174,8 @@ function bottles(){
     // A cache whose data is cut into segments rather than one file.
     root.file('split-abcdef01.blocks.0', 60, 7);
     root.file('split-abcdef01.blocks.1', 40, 7);
-    root.file('split-abcdef01.present', 1, 7);
+    root.file('split-abcdef01.blocks.135', 9, 7);
+    root.file('split-abcdef01.held', 1, 7);
     root.file('solo.session', 60, 4);
     const saves = root.directory('game.files');
     saves.file('a', 30, 5);
@@ -194,7 +195,7 @@ test('every bottle\'s storage is listed by kind, an orphan\'s and a leftover tab
     const by = Object.fromEntries(listed.bottles.map(one=>[one.bottle, one]));
     assert.deepEqual(Object.keys(by).sort(), ['game', 'gone', 'solo', 'split'],
         'a launcher\'s own folders are not the engine\'s to list');
-    assert.equal(by.split.blocks, 101, 'a segmented cache counts every segment');
+    assert.equal(by.split.blocks, 110, 'a segmented cache counts every segment');
     assert.deepEqual(by.game, { bottle: 'game', busy: true, blocks: 810, translations: 100,
         saves: 50 }, 'both packings\' blocks, the session\'s folder added up');
     assert.deepEqual(by.gone, { bottle: 'gone', busy: false, blocks: 741, translations: 70,
@@ -244,4 +245,30 @@ test('a browser that says nothing of its usage is not measured', async()=>{
     assert.equal(listed.quota, null);
     assert.equal(listed.persisted, null);
     assert.equal(listed.bottles.length, 4);
+});
+
+test('past the budget a segmented cache goes whole, its bitmap first', async()=>{
+    const root = fakeDirectory();
+    /** @type {string[]} */
+    const removed = [];
+    const remove = root.removeEntry;
+    root.removeEntry = async(/** @type {string} */ name)=>{
+        removed.push(name);
+        await remove(name);
+    };
+    root.file('big-ffffffff.blocks.0', 300, 1);
+    root.file('big-ffffffff.blocks.70', 200, 1);
+    root.file('big-ffffffff.blocks.135', 100, 1);
+    root.file('big-ffffffff.held', 9, 1);
+    root.file('big-ffffffff.order', 4, 1);
+    root.file('game-cccccccc.blocks.3', 500, 9);
+    root.file('game-cccccccc.held', 1, 9);
+    const result = await keepStorageWithin({ root, estimate: { usage: 4000, quota: 4000 },
+        keep: { blocks: 'game-cccccccc' } });
+    assert.ok(result.measured);
+    assert.deepEqual(result.evicted, [{ kind: 'blocks', name: 'big-ffffffff', bytes: 613 }]);
+    assert.equal(removed[0], 'big-ffffffff.held',
+        'a removal cut short leaves no bitmap naming a segment gone');
+    assert.deepEqual([...root.children.keys()].sort(),
+        ['game-cccccccc.blocks.3', 'game-cccccccc.held'], 'every segment went, the run\'s stayed');
 });
