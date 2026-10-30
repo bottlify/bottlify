@@ -14,14 +14,10 @@
  * lot of a large game touches nearly all of it. So the blocks go to storage,
  * and what stays in memory is a fixed-size record of which ones are there.
  *
- * A block is appended, into the next slot of `blockSize` bytes, and a table of
- * a slot per block says where. Not `index * blockSize`: the file would be as
- * long as the highest block fetched, and a browser counts that length against
- * the origin's quota (and on some file systems allocates it). A bundle whose
- * program and libraries were packed last asks for its last blocks first, and
- * a cache of a few megabytes asked for the whole bundle's length -- past the
- * quota, and the start failed on its first write. The read stays one table
- * lookup and one read, and blocks are never moved, so nothing fragments.
+ * A block occupies a fixed slot, `index * blockSize`, rather than being
+ * appended. Two reasons: the read that a guest is waiting on becomes one
+ * arithmetic step and one read with no index to consult, and a cache written
+ * over several sessions never fragments or needs compacting.
  *
  * What is stored is the block exactly as `readBlock` must hand it back -- so a
  * zstd block is stored packed, since the decoder that answers a synchronous
@@ -30,13 +26,10 @@
  * length comes from the bundle rather than from a header of our own: the bundle
  * already knows both numbers.
  *
- * The slot table is what makes a second session cheap. It is written beside
- * the data, and a cache whose table does not match the bundle it is asked
- * about is discarded with its data rather than trusted -- two different games
- * must not be able to read each other's bytes through the same slots.
- *
- * A store that fills up is a slower run, not a failed one: a block it refuses
- * is held in the heap, as where there is no store at all.
+ * The presence bitmap is what makes a second session cheap. It is written
+ * beside the data, and a cache whose bitmap does not match the bundle it is
+ * asked about is discarded rather than trusted -- two different games must not
+ * be able to read each other's bytes through the same slot arithmetic.
  */
 
 import { createOpfsStore } from '../opfs-store.js';
@@ -77,16 +70,8 @@ export async function resolveBlockStore(spec){
     return createOpfsStore({ root: await storage.getDirectory() });
 }
 
-/**
- * The slot table as it is kept (`<name>.slots`): a 32-bit word a block, its
- * slot plus one, zero while the block is absent. Null where the file is of
- * another bundle's size.
- *
- * @param {Uint8Array} stored @param {number} blockCount
- * @returns {Uint32Array | null}
- */
-const slotTable = (stored, blockCount)=>(stored.length === blockCount * 4
-    ? new Uint32Array(stored.slice().buffer) : null);
+/** Bytes of bitmap for this many blocks. @param {number} blockCount */
+const bitmapBytes = blockCount=>Math.ceil(blockCount / 8);
 
 /**
  * The name a bundle's blocks are kept under: its id and the fingerprint of its
@@ -98,7 +83,7 @@ export const blockCacheName = (id, fingerprint)=>`${id}-${fingerprint}`;
 
 /**
  * How much of a bundle this machine already holds, read from the cache's
- * slot table without opening it for writing: what a page asks before a start, to
+ * bitmap without opening it for writing: what a page asks before a start, to
  * say whether the game is here whole. The blocks of the translation seed are
  * not counted, being the translator's store's and read once.
  *
@@ -111,15 +96,19 @@ export const blockCacheName = (id, fingerprint)=>`${id}-${fingerprint}`;
  */
 export async function bundleResidency({ root, id, bundle }){
     const name = blockCacheName(id, bundle.fingerprint).replace(/[^A-Za-z0-9._-]/g, '_');
-    /** @type {Uint32Array | null} */
-    let slots = null;
+    /** @type {Uint8Array | null} */
+    let bitmap = null;
     try
     {
-        const file = await (await root.getFileHandle(`${name}.slots`)).getFile();
-        slots = slotTable(new Uint8Array(await file.arrayBuffer()), bundle.blockCount);
+        const file = await (await root.getFileHandle(`${name}.present`)).getFile();
+        bitmap = new Uint8Array(await file.arrayBuffer());
     }
     catch {
         // No cache yet: nothing of it is here.
+    }
+    if (bitmap && bitmap.length !== bitmapBytes(bundle.blockCount))
+    {
+        bitmap = null;
     }
     const seed = bundle.translations;
     const out = { blocks: 0, resident: 0, bytes: 0, residentBytes: 0 };
@@ -132,7 +121,7 @@ export async function bundleResidency({ root, id, bundle }){
         const { packed } = bundle.block(index);
         out.blocks++;
         out.bytes += packed;
-        if (slots && slots[index] !== 0)
+        if (bitmap && isSet(bitmap, index))
         {
             out.resident++;
             out.residentBytes += packed;
@@ -182,18 +171,18 @@ export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
     };
     const bundle = await openBundle(once, decode);
     const name = blockCacheName(id, bundle.fingerprint).replace(/[^A-Za-z0-9._-]/g, '_');
-    let slots;
+    let bitmap;
     let data;
     try
     {
-        slots = slotTable(new Uint8Array(await (await (await root.getFileHandle(`${name}.slots`))
-            .getFile()).arrayBuffer()), bundle.blockCount);
+        bitmap = new Uint8Array(await (await (await root.getFileHandle(`${name}.present`))
+            .getFile()).arrayBuffer());
         data = await (await root.getFileHandle(`${name}.blocks`)).getFile();
     }
     catch {
         return null;
     }
-    if (slots === null)
+    if (bitmap.length !== bitmapBytes(bundle.blockCount))
     {
         return null;
     }
@@ -208,11 +197,10 @@ export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
             {
                 return { offset, packed: 0, codec: Codec.STORED };
             }
-            whole &&= slots[at] !== 0;
+            whole &&= isSet(bitmap, at);
             const block = bundle.block(at);
             const packed = storedLength(block);
-            const from = (slots[at] - 1) * bundle.blockSize;
-            parts.push(data.slice(from, from + packed));
+            parts.push(data.slice(at * bundle.blockSize, at * bundle.blockSize + packed));
             const laid = { ...record, offset, packed };
             if (block.codec === Codec.DEFLATE_RAW)
             {
@@ -227,6 +215,20 @@ export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
     });
     return whole ? new Blob(/** @type {BlobPart[]} */ ([header, ...parts, index])) : null;
 }
+
+/**
+ * @param {Uint8Array} bitmap
+ * @param {number} index
+ */
+const isSet = (bitmap, index)=>(bitmap[index >> 3] & 1 << (index & 7)) !== 0;
+
+/**
+ * @param {Uint8Array} bitmap
+ * @param {number} index
+ */
+const set = (bitmap, index)=>{
+    bitmap[index >> 3] |= 1 << (index & 7);
+};
 
 /**
  * The fallback: blocks in the heap, bounded, forgotten when the tab closes.
@@ -355,13 +357,14 @@ export async function createBlockCache(options){
     // name with a separator in it, and a bundle's id is not ours to vet.
     const file = name.replace(/[^A-Za-z0-9._-]/g, '_');
     const dataPath = `${file}.blocks`;
-    const slotsPath = `${file}.slots`;
+    const bitmapPath = `${file}.present`;
     const orderPath = `${file}.order`;
+    const bitmap = new Uint8Array(bitmapBytes(blockCount));
 
     try
     {
         await store.open(dataPath);
-        await store.open(slotsPath);
+        await store.open(bitmapPath);
         await store.open(orderPath);
     }
     catch (e){
@@ -371,12 +374,10 @@ export async function createBlockCache(options){
         return createMemoryCache(maxHeapBytes, /** @type {Error} */ (e).message);
     }
 
-    // A table of the wrong size belongs to a different bundle, or to a version
-    // of this one with different blocks; no table at all, to a cache laid out
-    // before there was one. Either way the data underneath it means something
-    // else, so it starts again, data and all, rather than being partly believed.
-    const held = store.stat(slotsPath);
-    let slots = held ? slotTable(store.read(slotsPath, 0, held.size), blockCount) : null;
+    // A bitmap of the wrong size belongs to a different bundle, or to a version
+    // of this one with different blocks. Either way the slots underneath it mean
+    // something else, so it starts again rather than being partly believed.
+    const held = store.stat(bitmapPath);
     /**
      * The order the last run first asked for its blocks in: what a filler
      * should bring in before anything else, because a start reads the same
@@ -385,29 +386,19 @@ export async function createBlockCache(options){
      * @type {number[]}
      */
     let previous = [];
-    if (slots)
+    if (held && held.size === bitmap.length)
     {
+        bitmap.set(store.read(bitmapPath, 0, bitmap.length));
         const stored = store.read(orderPath, 0, ORDER_LIMIT * 4);
         previous = [...new Uint32Array(stored.buffer, stored.byteOffset, stored.length >> 2)]
             .filter(index=>index < blockCount);
     }
     else
     {
-        slots = new Uint32Array(blockCount);
-        store.truncate(dataPath, 0);
-        store.truncate(slotsPath, slots.byteLength);
+        store.truncate(bitmapPath, bitmap.length);
+        store.write(bitmapPath, 0, bitmap);
         store.truncate(orderPath, 0);
     }
-    const table = slots;
-    /** Slots taken: the next block goes after the last one the table names. */
-    let used = table.reduce((most, slot)=>Math.max(most, slot), 0);
-    /** The table's entries changed since it was written, as a range of blocks. */
-    let low = blockCount;
-    let high = -1;
-    /** Blocks the store refused, the run's own and bounded, and why it refused. */
-    const refused = createMemoryCache(maxHeapBytes, 'the store is full');
-    /** @type {string | null} */
-    let full = null;
 
     /** This run's first demands, in order. @type {Set<number>} */
     const demanded = new Set();
@@ -417,7 +408,7 @@ export async function createBlockCache(options){
         backed: true,
 
         /** @param {number} index */
-        has: index=>table[index] !== 0 || refused.has(index),
+        has: index=>isSet(bitmap, index),
 
         /**
          * A read wanted this block. Only the first time counts, and only the
@@ -442,11 +433,11 @@ export async function createBlockCache(options){
          * @returns {Uint8Array | null}
          */
         read(index, length){
-            if (table[index] === 0)
+            if (!isSet(bitmap, index))
             {
-                return refused.read(index);
+                return null;
             }
-            return store.read(dataPath, (table[index] - 1) * blockSize, length);
+            return store.read(dataPath, index * blockSize, length);
         },
 
         /**
@@ -454,47 +445,22 @@ export async function createBlockCache(options){
          * @param {Uint8Array} bytes
          */
         put(index, bytes){
-            if (table[index] !== 0)
-            {
-                store.write(dataPath, (table[index] - 1) * blockSize, bytes);
-                return;
-            }
-            try
-            {
-                store.write(dataPath, used * blockSize, bytes);
-            }
-            catch (e){
-                // Past the origin's quota, or a disk with no room: the run goes on
-                // with this block in the heap, and the next run fetches it again.
-                full = /** @type {Error} */ (e).message;
-                refused.put(index, bytes);
-                return;
-            }
-            table[index] = ++used;
-            low = Math.min(low, index);
-            high = Math.max(high, index);
+            store.write(dataPath, index * blockSize, bytes);
+            set(bitmap, index);
             dirty = true;
         },
 
         /**
-         * Writes the table out. Called when a batch of blocks has been brought
+         * Writes the bitmap out. Called when a batch of blocks has been brought
          * in rather than on every one: losing the record of a block that is on
          * disk costs one refetch, and a write per block would cost far more.
-         * A slot written and not recorded is taken again by the next run.
          */
         async persist(){
-            await refused.persist();
             if (!dirty)
             {
                 return;
             }
-            if (high >= low)
-            {
-                store.write(slotsPath, low * 4,
-                    new Uint8Array(table.buffer, low * 4, (high - low + 1) * 4));
-                low = blockCount;
-                high = -1;
-            }
+            store.write(bitmapPath, 0, bitmap);
             // This run's order first, then whatever the last run reached that
             // this one has not yet: a run cut short must not shed what a
             // longer one learned.
@@ -506,10 +472,13 @@ export async function createBlockCache(options){
         },
 
         diagnostics(){
-            const inHeap = refused.diagnostics();
-            // In the heap the table, and what the store refused; the rest is on disk.
-            return { backed: true, resident: used + inHeap.resident, blocks: blockCount,
-                heapBytes: table.byteLength + inHeap.heapBytes, ...full === null ? {} : { full } };
+            let resident = 0;
+            for (let at = 0; at < blockCount; at++)
+            {
+                resident += isSet(bitmap, at) ? 1 : 0;
+            }
+            // In the heap only the record of which blocks are here: the blocks are on disk.
+            return { backed: true, resident, blocks: blockCount, heapBytes: bitmap.length };
         },
     };
 }

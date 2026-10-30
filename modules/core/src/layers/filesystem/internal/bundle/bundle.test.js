@@ -482,12 +482,10 @@ test('a description written into a bundle opens with it, its files as they were'
 
 test('a bundle held whole in the block cache is written out from it alone', async()=>{
     // A game played or downloaded here is saved without fetching it again:
-    // the slots the engine filled, laid back to back under a new index. The
-    // blocks arrived last first, so a slot is not its block's index.
+    // the slots the engine filled, laid back to back under a new index.
     const bundle = await open();
     const name = blockCacheName('game', bundle.fingerprint);
     const blocks = new Uint8Array(bundle.blockCount * bundle.blockSize);
-    const whole = Uint32Array.from({ length: bundle.blockCount }, (_, at)=>bundle.blockCount - at);
     for (let at = 0; at < bundle.blockCount; at++)
     {
         const block = bundle.block(at);
@@ -495,19 +493,23 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
         // As the engine puts it: a deflate block inflated, any other as it came.
         const kept = block.codec === Codec.DEFLATE_RAW ? decodeBlock(block.codec, packed) : packed;
         assert.equal(kept.length, storedLength(block));
-        blocks.set(kept, (whole[at] - 1) * bundle.blockSize);
+        blocks.set(kept, at * bundle.blockSize);
     }
     const codecs = new Set(Array.from({ length: bundle.blockCount },
         (_, at)=>bundle.block(at).codec));
     assert.ok(codecs.has(Codec.STORED) && codecs.size > 1, 'the fixture has blocks kept both ways');
-    /** @param {Uint32Array} slots */
-    const root = slots=>({
+    /** @param {Uint8Array} present */
+    const root = present=>({
         getFileHandle: async(/** @type {string} */ file)=>({
-            getFile: async()=>new Blob(/** @type {BlobPart[]} */ ([file === `${name}.slots`
-                ? new Uint8Array(slots.buffer)
+            getFile: async()=>new Blob(/** @type {BlobPart[]} */ ([file === `${name}.present` ? present
                 : file === `${name}.blocks` ? blocks : assert.fail(file)])),
         }),
     });
+    const whole = new Uint8Array(Math.ceil(bundle.blockCount / 8));
+    for (let at = 0; at < bundle.blockCount; at++)
+    {
+        whole[at >> 3] |= 1 << (at & 7);
+    }
     const fetchRange = async(/** @type {number} */ at, /** @type {number} */ count)=>
         at === 0 || at >= bundle.block(bundle.blockCount - 1).offset
             ? bundleBytes.subarray(at, at + count)
@@ -530,7 +532,7 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
     }
 
     const short = whole.slice();
-    short[0] = 0;
+    short[0] &= ~1;
     assert.equal(await cachedBundle({ root: root(short), id: 'game', fetchRange,
         decode: decodeBlock, manifest }), null, 'a block missing from the cache: nothing to write');
 });

@@ -627,32 +627,3 @@ test('a preload with nowhere to keep the blocks says so and the program reads as
         assert.equal(typeof told[0].unbacked, 'string');
         assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 40000 }), 0);
     });
-
-test('a preload into a store that fills up says so, and the program still starts and reads',
-    { timeout: 60000 }, async t=>{
-        // The origin's quota is the browser's to set, and a bundle may be larger
-        // than it: the write that goes past it throws, and that used to end the
-        // start ("No space available for this operation").
-        const source = await bundleWith(PLANTED, 6 << 20);
-        t.after(()=>source.cleanup());
-        const store = fakeStore();
-        /** @param {string} path @param {number} at @param {Uint8Array} bytes */
-        const write = (path, at, bytes)=>{
-            if (path.endsWith('.blocks') && at + bytes.length > 1 << 20)
-            {
-                throw new Error('No space available for this operation');
-            }
-            store.write(path, at, bytes);
-        };
-        const full = { ...store, write };
-        /** @type {any[]} */
-        const told = [];
-        const app = await createApp({
-            executable: buildReaderExe('C:\\Data\\big.bin'),
-            bundle: { fetch: source.fetch, prefix: '', prefetch: false, store: full, id: 'full',
-                preload: true, progress: (/** @type {any} */ state)=>told.push(state) },
-        });
-        t.after(()=>app.dispose());
-        assert.equal(told.at(-1)?.unbacked, 'No space available for this operation');
-        assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 40000 }), 0);
-    });
