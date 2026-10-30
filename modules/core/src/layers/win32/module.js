@@ -495,6 +495,27 @@ export function createWin32Module(){
              */
             const endTasks = [];
             const processEnded = ()=>endTasks.splice(0).forEach(task=>task());
+            // This process in the run's directory of processes, as a child its
+            // parent started is there: a process it starts opens it by the id
+            // it was told -- a helper watching the client that started it --
+            // and its exit sets the event a wait on it waits for.
+            const processDirectory = /** @type {Map<number, any> | undefined} */ (
+                /** @type {any} */ (config?.system)?.processDirectory);
+            if (processDirectory && !processDirectory.has(processId))
+            {
+                const self = { kind: 'process', id: processId, threadId: processId + 1,
+                    imagePath: config?.imagePath ?? '', commandLine: config?.commandLine ?? '',
+                    suspended: false, completed: false, exitCode: kernel.processes.STILL_ACTIVE,
+                    started: true,
+                    exited: kernel.createEvent({ manualReset: true, signalled: false,
+                        name: `process ${processId}` }) };
+                processDirectory.set(processId, self);
+                endTasks.push(()=>{
+                    self.completed = true;
+                    self.exitCode = (exitCode ?? 0) >>> 0;
+                    kernel.setEvent(self.exited);
+                });
+            }
             /** @type {{ list: () => any[], clientRect: (hwnd: number) => any,
              *     place: (hwnd: number, x: number, y: number, width: number,
              *     height: number, how?: { announce?: boolean }) => boolean,
