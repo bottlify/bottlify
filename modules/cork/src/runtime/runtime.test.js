@@ -12,6 +12,7 @@ import { createCorkRuntime } from './runtime.js';
 import { eflagsOf } from '../emit/flags.js';
 import { CallStack } from '../emit/region.js';
 import { features as probeFeatures } from '../wasm/features.js';
+import { threadCpuMs } from '../../../../tools/cpu-time.mjs';
 
 const CODE = 0x1000;
 
@@ -1960,7 +1961,9 @@ test('exits to a flood of distinct addresses stay cheap and a hot one keeps its 
     // exits by target evicts the colder half at once when full, where a scan for
     // the single coldest on every insertion past the cap was a third of the phase.
     const m = machine();
-    const began = performance.now();
+    // This thread's processor time: other processes on a busy machine stretch
+    // the wall time, not this.
+    const began = threadCpuMs();
     for (let i = 0; i < 200_000; i++)
     {
         m.runtime.missAt(0x100000 + i * 16, 0);
@@ -1969,8 +1972,8 @@ test('exits to a flood of distinct addresses stay cheap and a hot one keeps its 
             m.runtime.missAt(0x8000, 0);
         }
     }
-    const ms = performance.now() - began;
-    assert.ok(ms < 2000, `200 000 exits took ${ms.toFixed(0)} ms`);
+    const ms = threadCpuMs() - began;
+    assert.ok(ms < 2000, `200 000 exits took ${ms.toFixed(0)} ms of processor time`);
     const hot = m.runtime.diagnostics().exitsByTarget.find(one=>one.address === 0x8000);
     assert.ok(hot && hot.count >= 1000, `the hot target kept ${hot?.count} exits`);
 });

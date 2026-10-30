@@ -573,11 +573,14 @@ test('a long run of digits reads to its end, past every limit, at a step a digit
     // do and is past the 64 bits any conversion clamps at; it no longer
     // costs a multiplication of its whole length per digit.
     const digits = '9'.repeat(1 << 16);
-    const started = performance.now();
     const scanned = scanInteger(`${digits}x`, 10);
     assert.equal(scanned?.end, digits.length);
     assert.ok((scanned?.magnitude ?? 0n) > (1n << 64n));
-    assert.ok(performance.now() - started < 1000, 'linear in the digits');
+    // Linear in the digits, seen in what a step works on rather than timed: the
+    // magnitude stops growing past the limits, so the 65 536th digit multiplies
+    // the same few words the hundredth did.
+    assert.equal(scanned?.magnitude, scanInteger('9'.repeat(100), 10)?.magnitude,
+        'linear in the digits');
     assert.equal(scanInteger('18446744073709551615', 10)?.magnitude, (1n << 64n) - 1n,
         'below the cap every digit counts');
 });

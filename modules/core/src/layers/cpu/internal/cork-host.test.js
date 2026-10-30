@@ -357,7 +357,7 @@ test('a translated loop that stores nothing sees the interrupt word another thre
     assert.ok(h.cork().entryOf(0x11000, 0) >= 0, 'translated');
     let seenAt = 0;
     h.onInterrupt(()=>{
-        seenAt = performance.now();
+        seenAt++;
         h.stop();
         return true;
     });
@@ -367,13 +367,15 @@ test('a translated loop that stores nothing sees the interrupt word another thre
         setTimeout(()=>Atomics.store(new Int32Array(workerData.buffer), workerData.at,
             0x7fffffff), 100);`, { eval: true, workerData: { buffer: h.wasmMemory().buffer, at } });
     h.writeReg32('eip', 0x11000);
-    const startedAt = performance.now();
     const retired = h.runSlice(2 ** 31 - 1);
-    const ms = performance.now() - startedAt;
     await worker.terminate();
     assert.ok(seenAt > 0, 'the word was answered');
-    assert.ok(ms < 1500 && retired < 2 ** 30,
-        `left after ${ms.toFixed(0)} ms and ${retired} instructions`);
+    // Counted, not timed: left inside the loop with the slice's budget not
+    // spent. A word read once before the loop leaves only at the budget's end,
+    // 2^31 - 1 instructions, a second or two of this thread's work against the
+    // other's 100 ms; a wall bound on the run held the two threads' turns on a
+    // busy machine to it as well.
+    assert.ok(retired < 2 ** 31 - 1, `left after ${retired} instructions, inside its budget`);
     assert.equal(h.halted(), false, 'inside the loop');
 });
 

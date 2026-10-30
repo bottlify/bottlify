@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { Access, RegionKind, createRegionMap } from './regions.js';
 import { createAccessors } from './accessors.js';
 import { GUEST_ACCESS, UNTERMINATED } from './faults.js';
+import { threadCpuMs } from '../../../../../../tools/cpu-time.mjs';
 
 function setup(){
     const bytes = new Uint8Array(0x4000);
@@ -74,8 +75,10 @@ test('a string longer than the limit is unterminated; one cut by its region is a
 
 test('a fill of a span that is not there is refused before a buffer is made of it', ()=>{
     const { accessors } = setup();
-    const started = performance.now();
+    // This thread's processor time, which other processes on the machine do
+    // not stretch: filling 3.7 GB takes seconds of it.
+    const started = threadCpuMs();
     const refused = caught(()=>accessors.fillBytes(0xdeadbeef, 0, 0xdeadbeef));
     assert.deepEqual([refused.code, refused.mode], [GUEST_ACCESS, 'write']);
-    assert.ok(performance.now() - started < 100, 'no 3.7 GB buffer on the way');
+    assert.ok(threadCpuMs() - started < 100, 'no 3.7 GB buffer on the way');
 });
