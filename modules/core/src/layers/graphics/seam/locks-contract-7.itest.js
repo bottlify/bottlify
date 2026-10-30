@@ -156,7 +156,7 @@ function generate(seed, count){
 function machine(){
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
     let heap = HEAP;

@@ -43,7 +43,7 @@ test('Sleep(0) with no thread waiting to run returns in the guest; every other c
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
     host.writePhysical(SLEEP, sleepCode(SLEEP, TRAP, WORD));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));

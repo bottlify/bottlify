@@ -71,7 +71,7 @@ function program(turns){
 /** @param {Record<string, unknown>} cork */
 const hostOf = cork=>createCorkHost({
     engine, memorySize: 1 << 20, trapPort: 0x1234, entryVector: ENTRY_VECTOR,
-    initialStack: 0x80000, cork,
+    initialStack: 0x80000, cork: { sliceMs: Infinity, ...cork },
 });
 
 /**

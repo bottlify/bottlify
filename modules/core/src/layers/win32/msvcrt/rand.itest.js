@@ -60,7 +60,7 @@ function random(seed){
 test('srand and rand in the guest draw what their handlers draw, from any seed', ()=>{
     const host = createCorkHost({
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(RAND, placed(RAND_CODE));
     host.writePhysical(SRAND, placed(SRAND_CODE));

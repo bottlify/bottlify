@@ -20,16 +20,23 @@ import * as engine from '../../../../../cork/src/index.js';
 const MEMORY = 4 << 20;
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 
-/** @param {Record<string, unknown>} [config] */
+/**
+ * A host whose slices end by their instruction count alone, whatever cork
+ * config a test adds: an interpreted slice otherwise ends once it has taken
+ * its time (`sliceMs`), and how long that is a busy machine decides.
+ *
+ * @param {Record<string, any>} [config]
+ */
 function host(config = {}){
+    const { cork = {}, ...rest } = config;
     return createCorkHost({
         engine,
         memorySize: MEMORY,
         trapPort: 0x1234,
         entryVector: 0x7000,
         initialStack: 0x300000,
-        cork: {},
-        ...config,
+        ...rest,
+        cork: { sliceMs: Infinity, ...cork },
     });
 }
 
@@ -183,8 +190,9 @@ test('the interpreter\'s retired instructions read back through instructionCount
 test('a slice that interprets ends once it has taken its time, and the next goes on from there',
     ()=>{
         // Nothing translated: mov ecx, 1500000; dec ecx; jnz -3; hlt -- three million
-        // instructions, interpreted, under one slice's budget of all of them.
-        const h = host({ cork: { translate: false } });
+        // instructions, interpreted, under one slice's budget of all of them, on
+        // the host's own time slice.
+        const h = host({ cork: { translate: false, sliceMs: undefined } });
         load(h, 0x12000, [0xb9, 0x60, 0xe3, 0x16, 0, 0x49, 0x75, 0xfd, 0xf4]);
         const total = 1 + 1_500_000 * 2 + 1;
         const first = h.runSlice(total);
@@ -691,7 +699,8 @@ test('a slow slice accounts for itself only when the translator\'s timings are a
     // its 20 ms floor, as a host call the program waits on does.
     for (const timings of [false, true])
     {
-        const h = host({ cork: { translate: false, timings } });
+        // The host's own time slice: what ends this one is its time.
+        const h = host({ cork: { translate: false, timings, sliceMs: undefined } });
         h.onTrap(()=>{
             const until = performance.now() + 25;
             while (performance.now() < until)

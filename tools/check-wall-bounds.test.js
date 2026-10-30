@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findWallBounds } from './check-wall-bounds.mjs';
+import { findWallBounds, untimedHosts } from './check-wall-bounds.mjs';
 
 test('a wall time kept under a figure is found, read straight off the clock or worked out', ()=>{
     const source = [
@@ -41,4 +41,14 @@ test('what load cannot break passes: a wait kept above a figure, an instant belo
         `assert.ok(count < 10, \`${'$'}{performance.now() - before} ms\`);`,
     ].join('\n');
     assert.deepEqual(findWallBounds(source), []);
+});
+
+test('a test\'s cork host says how its slices end', ()=>{
+    assert.equal(untimedHosts('const h = createCorkHost({ engine, cork: {} });'), true);
+    assert.equal(untimedHosts('// sliceMs\nconst h = createCorkHost({ cork: {} });'), true,
+        'a comment is no answer');
+    assert.equal(untimedHosts('createCorkHost({ cork: { sliceMs: Infinity } });'), false);
+    assert.equal(untimedHosts('const config = { sliceMs: undefined };\ncreateCorkHost(config);'),
+        false);
+    assert.equal(untimedHosts('createApp({ engine: \'cork\' });'), false);
 });

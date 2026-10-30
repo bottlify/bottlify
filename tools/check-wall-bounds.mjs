@@ -427,6 +427,23 @@ export function findWallBounds(source){
     return found;
 }
 
+/**
+ * Whether a test's source makes a cork host (`createCorkHost`) without saying
+ * how its slices end: an interpreted slice ends once it has taken its time
+ * (`sliceMs`, 8 ms by default), so a test that runs one slice and reads what
+ * the code left reads what a busy machine let the slice reach -- a trap
+ * reached the call channel and the hlt after it did not, with eight busy loops
+ * beside the suite. A test names `sliceMs`: Infinity for slices ended by their
+ * instruction count, or the host's own (`undefined`) where its time is what
+ * the test is about.
+ *
+ * @param {string} source
+ */
+export function untimedHosts(source){
+    const code = codeOnly(source);
+    return /\bcreateCorkHost\s*\(/.test(code) && !/\bsliceMs\b/.test(code);
+}
+
 const isMain = process.argv[1] !== undefined
     && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain)
@@ -441,6 +458,10 @@ if (isMain)
         {
             files++;
             const at = relative(ROOT, path);
+            if (untimedHosts(readFileSync(path, 'utf8')))
+            {
+                problems.push(`${at}: makes a cork host and does not name its sliceMs`);
+            }
             for (const bound of checkFile(path))
             {
                 const key = `${at}: ${bound}`;
@@ -464,12 +485,14 @@ if (isMain)
     {
         console.error(`check-wall-bounds: ${problems.length} wall time(s) held from above`
             + ' in a test; hold what was asked for, a count, or processor time instead'
-            + ' (tools/cpu-time.mjs):');
+            + ' (tools/cpu-time.mjs), and end a test cork host\'s slices by their count'
+            + ' (sliceMs: Infinity):');
         for (const problem of problems)
         {
             console.error(`  ${problem}`);
         }
         process.exit(1);
     }
-    console.log(`check-wall-bounds: ${files} test files, no wall time held from above`);
+    console.log(`check-wall-bounds: ${files} test files, no wall time held from above,`
+        + ' every cork host\'s slices named');
 }

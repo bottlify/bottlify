@@ -29,7 +29,10 @@ import * as engine from '../../../../../cork/src/index.js';
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 const CONFIG = {
     memorySize: 4 << 20, trapPort: 0xb077, entryVector: 0x7000, initialStack: 0x300000,
-    closedBelow: 0x10000, cork: { hotThreshold: 4, wasmInterpreter: true },
+    closedBelow: 0x10000, cork: { hotThreshold: 4, wasmInterpreter: true,
+        // Slices end by their instruction count alone, not by the time a busy
+        // machine let them take.
+        sliceMs: Infinity },
 };
 const CODE = 0x20000;
 const DATA = 0x100000;

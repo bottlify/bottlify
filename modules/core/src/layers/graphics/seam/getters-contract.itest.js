@@ -151,7 +151,7 @@ const D3D8 = {
 function machine(version, options){
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: ENTRY,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(ENTRY, new Uint8Array(u32(PROGRAM)));
     /** @param {number} at @param {number} value */

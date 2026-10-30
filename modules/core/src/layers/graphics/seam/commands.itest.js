@@ -78,7 +78,7 @@ const shape = (name, more = {})=>({ ...COMMANDS[name], slot: commandSlot(name), 
 test('a command routine writes the call into the ring and leaves the rest to the trap', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     /** @type {[number, Uint8Array][]} */
     const routines = [
@@ -242,7 +242,7 @@ test('a command routine writes the call into the ring and leaves the rest to the
 test('a draw from the program\'s memory copies the vertices its primitives span', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(DRAW, commandCode(DRAW, TRAP, shape('DrawPrimitiveUP')));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
@@ -329,7 +329,7 @@ test('the viewport and the sampler states a program sets in the guest are what i
     ()=>{
         const host = createCorkHost({
             memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-            initialStack: STACK, engine: cork, cork: {},
+            initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
         });
         const SET_VIEWPORT = VIEWPORT;
         const GET_VIEWPORT = VIEWPORT + BESIDE;
@@ -406,7 +406,7 @@ test('the viewport and the sampler states a program sets in the guest are what i
 test('a state block\'s Apply in the ring names the block and sends the getters to the host', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     const APPLY = VIEWPORT;
     const CAPTURE = VIEWPORT + BESIDE;
@@ -471,7 +471,7 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
 test('a clear copies its rectangles, or none for the whole target', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     const CLEAR = VIEWPORT;
     host.writePhysical(CLEAR, commandCode(CLEAR, TRAP, shape('Clear')));
@@ -538,7 +538,7 @@ test('a clear copies its rectangles, or none for the whole target', ()=>{
 test('a surface\'s GetDesc copies the description out of its block', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(VIEWPORT, getSurfaceDescCode(VIEWPORT, TRAP));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
