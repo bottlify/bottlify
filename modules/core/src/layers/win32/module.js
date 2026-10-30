@@ -349,6 +349,12 @@ export function createWin32Module(){
     let current = null;
     /** Takes this process's windows out of the run's when it ends. */
     let leaveWindows = ()=>{};
+    /**
+     * Takes this process's handle table out of the run's when it ends: the
+     * table reaches the whole machine, which the run would otherwise hold for
+     * as long as it lasts, a gigabyte of guest memory a process.
+     */
+    let leaveTable = ()=>{};
 
     return {
         name: 'win32',
@@ -461,7 +467,7 @@ export function createWin32Module(){
             const processId = (config?.processId ?? 0x1000) >>> 0;
             // This process's handle table, where another process of the run
             // duplicates a handle into it (DuplicateHandle).
-            system?.processTables?.set(processId, {
+            const table = {
                 typeOf: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
                 resolve: (/** @type {number} */ handle)=>{
                     try
@@ -475,7 +481,15 @@ export function createWin32Module(){
                 open: (/** @type {string} */ type, /** @type {any} */ object)=>
                     kernel.handles.open(type, object),
                 close: (/** @type {number} */ handle)=>kernel.handles.close(handle),
-            });
+            };
+            system?.processTables?.set(processId, table);
+            // Only its own: a later process may have been given the same id.
+            leaveTable = ()=>{
+                if (system?.processTables?.get(processId) === table)
+                {
+                    system.processTables.delete(processId);
+                }
+            };
 
             /** @type {Record<string, Record<string, any>>} */
             let libraries = {};
@@ -774,8 +788,9 @@ export function createWin32Module(){
                 system.windows = windowDirectory;
             }
             leaveWindows = ()=>windowDirectory.detach(processId);
-            // A process's windows end with it, for every other process too.
-            endTasks.push(()=>leaveWindows());
+            // A process's windows end with it, for every other process too,
+            // and so does the table a handle is duplicated into.
+            endTasks.push(()=>leaveWindows(), ()=>leaveTable());
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
             // hot key fires on a combination and only the layer that sees the
@@ -4947,6 +4962,8 @@ export function createWin32Module(){
         async dispose(){
             leaveWindows();
             leaveWindows = ()=>{};
+            leaveTable();
+            leaveTable = ()=>{};
             current = null;
         },
     };
