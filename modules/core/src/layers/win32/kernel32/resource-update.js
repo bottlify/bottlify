@@ -750,7 +750,7 @@ export function createResourceUpdates(host){
                 let resource;
                 try
                 {
-                    const image = parsePe(file);
+                    const image = parsePe(file, { wide: true });
                     resource = readResources(file, image).find(found=>found.type === 'MUI'
                         && found.name === 1)?.data ?? null;
                 }

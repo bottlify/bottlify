@@ -1468,7 +1468,7 @@ export function createAutomationFunctions(host){
      * @returns {Uint8Array}
      */
     const typeLibResource = (file, index)=>{
-        const image = parsePe(file);
+        const image = parsePe(file, { wide: true });
         const found = findResource(file, image, 'TYPELIB', index);
         if (!found)
         {

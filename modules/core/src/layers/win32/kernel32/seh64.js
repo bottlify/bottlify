@@ -1028,6 +1028,26 @@ export function createSeh64(host){
             },
 
             /**
+             * PVOID RtlPcToFileHeader(PVOID PcValue, PVOID *BaseOfImage)
+             *
+             * The base of the image holding an address, written and answered;
+             * NULL for one in no image. A 64-bit C++ runtime asks it when it
+             * throws, to read its throw information's image-relative fields.
+             */
+            RtlPcToFileHeader: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([pc, baseOut])=>{
+                    const base = unwinder.imageBase(pc >>> 0);
+                    if ((baseOut >>> 0) !== 0)
+                    {
+                        writeQuad(baseOut >>> 0, base);
+                    }
+                    return BigInt(base >>> 0);
+                },
+            },
+
+            /**
              * PRUNTIME_FUNCTION RtlLookupFunctionEntry(DWORD64 ControlPc,
              *     PDWORD64 ImageBase, PUNWIND_HISTORY_TABLE HistoryTable)
              */

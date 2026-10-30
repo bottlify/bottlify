@@ -72,11 +72,31 @@ const SECTION_MEM_WRITE = 0x80000000;
  * (PE32+, x86-64) one too. Without it a 64-bit image is refused as before, so
  * nothing that loads into a 32-bit process takes one.
  *
+ * `bits` is the machine of the process the image is for, and only that one is
+ * taken: an image of the other is refused with `code` 'BAD_EXE_FORMAT', which
+ * is what LoadLibrary answers for it on Windows (ERROR_BAD_EXE_FORMAT). Every
+ * image mapped into a process is parsed this way; `wide` is for reading one
+ * that is not mapped (its resources, its version, its imports).
+ *
  * @param {Uint8Array} bytes
- * @param {{ wide?: boolean }} [options]
+ * @param {{ wide?: boolean, bits?: 32 | 64 }} [options]
  * @returns {PeImage}
  */
-export function parsePe(bytes, { wide = false } = {}){
+export function parsePe(bytes, { wide = false, bits: processBits } = {}){
+    const image = parseHeaders(bytes, wide || processBits !== undefined);
+    if (processBits !== undefined && image.bits !== processBits)
+    {
+        throw Object.assign(new Error(`${image.bits === 64 ? 'an x86-64' : 'an i386'} image`
+            + ` does not load into a ${processBits}-bit process`), { code: 'BAD_EXE_FORMAT' });
+    }
+    return image;
+}
+
+/**
+ * @param {Uint8Array} bytes @param {boolean} wide
+ * @returns {PeImage}
+ */
+function parseHeaders(bytes, wide){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
     if (bytes.length < 0x40 || view.getUint16(0, true) !== DOS_MAGIC)
@@ -93,8 +113,8 @@ export function parsePe(bytes, { wide = false } = {}){
     const machine = view.getUint16(coff, true);
     if (machine !== MACHINE_I386 && !(wide && machine === MACHINE_AMD64))
     {
-        throw new Error(`unsupported machine 0x${machine.toString(16)}: only i386`
-            + `${wide ? ' and x86-64 are' : ' is'} supported`);
+        throw Object.assign(new Error(`unsupported machine 0x${machine.toString(16)}: only i386`
+            + `${wide ? ' and x86-64 are' : ' is'} supported`), { code: 'BAD_EXE_FORMAT' });
     }
     const bits = machine === MACHINE_AMD64 ? 64 : 32;
     const sectionCount = view.getUint16(coff + 2, true);

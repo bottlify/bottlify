@@ -487,6 +487,12 @@ export function createUnwinder(host){
 
     return {
         lookup,
+        /**
+         * The base of the image an address lies in, zero outside every image.
+         *
+         * @param {number} pc
+         */
+        imageBase: pc=>host.imageOf(pc >>> 0)?.base ?? 0,
         virtualUnwind,
         unwindLeaf,
         known,

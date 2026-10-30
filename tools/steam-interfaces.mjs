@@ -20,7 +20,10 @@
  * them. Returns: `v` void, `i` four bytes in EAX, `q` eight in EDX:EAX, `f`
  * float on the x87 stack, `s8` an eight-byte class (CSteamID, CGameID)
  * through a hidden pointer the caller pushes first, `sN` an N-byte struct
- * likewise.
+ * likewise. A fourth field, where a method has any, names the arguments an
+ * x86-64 caller passes otherwise than as a dword in a slot of its own: each
+ * by its first dword after `this` and its kind, `q` eight bytes in one slot,
+ * `d` a double and `f` a float in an XMM register (`3q.5f`).
  */
 
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -88,12 +91,18 @@ function returnKind(type){
     return WIDE.test(t) ? 'q' : 'i';
 }
 
-/** @param {string} parameters @returns {number} */
+/**
+ * @param {string} parameters
+ * @returns {{ bytes: number, kinds: string[] }} the bytes on an x86 stack, and the
+ *     arguments that are not one dword to an x86-64 caller (`3q`, `5f`)
+ */
 function argumentBytes(parameters){
     const list = parameters.trim();
+    /** @type {string[]} */
+    const kinds = [];
     if (list === '' || list === 'void')
     {
-        return 0;
+        return { bytes: 0, kinds };
     }
     let bytes = 0;
     // Split at the commas outside parentheses: a function pointer's own
@@ -107,9 +116,14 @@ function argumentBytes(parameters){
             continue;
         }
         const type = bare(declaration.replace(/\s*\w+\s*$/, ''));
-        bytes += WIDE.test(type) ? 8 : type === 'double' ? 8 : 4;
+        const kind = type === 'double' ? 'd' : type === 'float' ? 'f' : WIDE.test(type) ? 'q' : '';
+        if (kind !== '')
+        {
+            kinds.push(`${bytes / 4}${kind}`);
+        }
+        bytes += kind === 'q' || kind === 'd' ? 8 : 4;
     }
-    return bytes;
+    return { bytes, kinds };
 }
 
 /** What a 32-bit Windows client build defines; anything else is not defined. */
@@ -204,9 +218,15 @@ for (const file of readdirSync(directory).filter(name=>/^isteam[a-z]+\d*\.h$/.te
         const declaration = new RegExp(String.raw`virtual\s+(?:~\w+\s*\(\s*\)|`
             + String.raw`([\w\s:*&<>]+?)\s*\b(\w+)\s*\(((?:[^()]|\([^()]*\))*)\)\s*`
             + String.raw`(?:const\s*)?=\s*0\s*;)`, 'g');
-        const methods = [...body.matchAll(declaration)].map(([, type, name, parameters])=>(
-            name === undefined ? '~:4:i'
-                : `${name}:${argumentBytes(parameters)}:${returnKind(type)}`));
+        const methods = [...body.matchAll(declaration)].map(([, type, name, parameters])=>{
+            if (name === undefined)
+            {
+                return '~:4:i';
+            }
+            const { bytes, kinds } = argumentBytes(parameters);
+            const wide = kinds.length > 0 ? `:${kinds.join('.')}` : '';
+            return `${name}:${bytes}:${returnKind(type)}${wide}`;
+        });
         if (methods.length > 0)
         {
             interfaces[version] = methods.join(',');
@@ -238,9 +258,12 @@ writeFileSync(out, `/*
 /**
  * The Steamworks interfaces' layouts by version string, as the SDK's headers
  * declare them (written by tools/steam-interfaces.mjs, not by hand): each a
- * list of \`name:bytes:return\`, in vtable order -- the bytes of arguments
- * after \`this\` on an x86 stack, and how the method returns (\`v\` void, \`i\`
- * EAX, \`q\` EDX:EAX, \`f\` x87, \`sN\` an N-byte class through a hidden pointer).
+ * list of \`name:bytes:return[:wide]\`, in vtable order -- the bytes of
+ * arguments after \`this\` on an x86 stack, how the method returns (\`v\` void,
+ * \`i\` EAX, \`q\` EDX:EAX, \`f\` x87, \`sN\` an N-byte class through a hidden
+ * pointer), and the arguments an x86-64 caller passes otherwise than as a dword
+ * in a slot of their own, by first dword and kind (\`q\` eight bytes in one
+ * slot, \`d\` a double, \`f\` a float).
  */
 
 /* eslint-disable max-len */

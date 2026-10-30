@@ -185,11 +185,12 @@ export function createLoaderModule(){
                  * @param {ImportResolver}
                  *     [options.missing]  Where a call to an import nothing claims should land.
                  * @param {string} [options.name]  Region name, for diagnostics.
-                 * @param {boolean} [options.wide]  A 64-bit (PE32+) image is taken.
+                 * @param {32 | 64} [options.bits]  The process's machine; an image
+                 *     of the other is refused (`parsePe`). i386 when not given.
                  * @returns {{ base: number, entryPoint: number, unresolved: string[] }}
                  */
-                load(file, { resolveImport, base, missing, name = 'image', wide = false }){
-                    const image = buildImage(file, { resolveImport, base, missing, wide });
+                load(file, { resolveImport, base, missing, name = 'image', bits = 32 }){
+                    const image = buildImage(file, { resolveImport, base, missing, bits });
                     // Both tables. A delay-load slot left as the linker wrote it is
                     // resolved by the program's own helper, which walks an export
                     // directory by hand and refuses an address it does not believe;
@@ -231,10 +232,11 @@ export function createLoaderModule(){
                  * @param {Object} options
                  * @param {number} [options.base]
                  * @param {string} [options.name]
+                 * @param {32 | 64} [options.bits]  The process's machine, as `load`'s.
                  * @returns {any} the mapped image, to be handed back to `bind`
                  */
-                map(file, { base, name = 'image' }){
-                    const image = mapImage(file, base);
+                map(file, { base, name = 'image', bits = 32 }){
+                    const image = mapImage(file, base, { bits });
 
                     memory.register({
                         name,
