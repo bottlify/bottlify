@@ -81,20 +81,23 @@ test('a block goes to storage and comes back, and nothing is held in the heap', 
     assert.equal(cache.diagnostics().resident, 1);
 });
 
-test('a block is written at its own slot, not after the last one', async()=>{
-    // The property the read arithmetic depends on: a slot is a function of the
-    // index alone, so blocks may arrive in any order and over any number of
-    // sessions without an index to consult.
+test('a block is appended, so the data is as long as what is kept, not as the bundle', async()=>{
+    // A bundle whose program was packed last asks for its last block first. At
+    // `index * blockSize` that one block made the file the whole bundle long,
+    // which the browser counts against the origin's quota: a 19 GB file for a
+    // start that had fetched a few megabytes, and the start failed on it.
     const store = fakeStore();
     const cache = await createBlockCache({ store, ...OPTIONS });
 
-    cache.put(7, new Uint8Array(16).fill(0x11));
+    cache.put(19, new Uint8Array(16).fill(0x11));
     cache.put(2, new Uint8Array(16).fill(0x22));
 
-    const data = store.files.get('war.blocks');
-    assert.equal(data?.[2 * 16], 0x22);
-    assert.equal(data?.[7 * 16], 0x11);
+    assert.equal(store.files.get('war.blocks')?.length, 2 * 16, 'two blocks, two slots');
+    assert.deepEqual(cache.read(19, 16), new Uint8Array(16).fill(0x11));
     assert.deepEqual(cache.read(2, 16), new Uint8Array(16).fill(0x22));
+    cache.put(19, new Uint8Array(16).fill(0x33));
+    assert.equal(store.files.get('war.blocks')?.length, 2 * 16, 'a block put again keeps its slot');
+    assert.deepEqual(cache.read(19, 16), new Uint8Array(16).fill(0x33));
 });
 
 test('a shorter block occupies only what it uses', async()=>{
@@ -111,17 +114,70 @@ test('a second session already has what the first fetched', async()=>{
     const store = fakeStore();
     const first = await createBlockCache({ store, ...OPTIONS });
     first.put(5, new Uint8Array(16).fill(0xab));
+    first.put(1, new Uint8Array(16).fill(0xcd));
     await first.persist();
 
     const second = await createBlockCache({ store, ...OPTIONS });
     assert.equal(second.has(5), true, 'the record of it survived');
     assert.deepEqual(second.read(5, 16), new Uint8Array(16).fill(0xab));
+    assert.deepEqual(second.read(1, 16), new Uint8Array(16).fill(0xcd));
     assert.equal(second.has(4), false);
+
+    // The next block goes after the ones kept, not over them.
+    second.put(4, new Uint8Array(16).fill(0xef));
+    await second.persist();
+    const third = await createBlockCache({ store, ...OPTIONS });
+    assert.deepEqual([5, 1, 4].map(index=>third.read(index, 16)?.[0]), [0xab, 0xcd, 0xef]);
+    assert.equal(third.diagnostics().resident, 3);
+});
+
+test('a cache laid out before the slot table is let go with its data', async()=>{
+    // Blocks at `index * blockSize` with a bitmap beside them: read through a
+    // table they would be other blocks' bytes, and their length is what the
+    // origin's quota was spent on.
+    const store = fakeStore();
+    await store.open('war.blocks');
+    store.write('war.blocks', 19 * 16, new Uint8Array(16).fill(0x77));
+    await store.open('war.present');
+    store.write('war.present', 0, Uint8Array.of(0, 0, 0b1000));
+
+    const cache = await createBlockCache({ store, ...OPTIONS });
+    assert.equal(cache.has(19), false);
+    assert.equal(store.files.get('war.blocks')?.length, 0, 'its bytes no longer held');
+});
+
+test('a block the store refuses is held in the heap, and the run goes on', async()=>{
+    // A store past the origin's quota throws on the write that would grow it.
+    // The read that wanted the block must still be served.
+    const store = fakeStore();
+    /** @param {string} path @param {number} at @param {Uint8Array} bytes */
+    const write = (path, at, bytes)=>{
+        if (path === 'war.blocks' && at + bytes.length > 2 * 16)
+        {
+            throw new Error('No space available for this operation');
+        }
+        store.write(path, at, bytes);
+    };
+    const limited = { ...store, write };
+    const cache = await createBlockCache({ store: limited, ...OPTIONS });
+    cache.put(3, new Uint8Array(16).fill(1));
+    cache.put(4, new Uint8Array(16).fill(2));
+    cache.put(5, new Uint8Array(16).fill(3));
+
+    assert.equal(cache.has(5), true);
+    assert.deepEqual(cache.read(5, 16), new Uint8Array(16).fill(3));
+    await cache.persist();
+    assert.equal(cache.diagnostics().resident, 3);
+    assert.equal(cache.diagnostics().full, 'No space available for this operation');
+
+    const next = await createBlockCache({ store: limited, ...OPTIONS });
+    assert.deepEqual([3, 4, 5].map(index=>next.has(index)), [true, true, false],
+        'what the store kept is kept; the refused block is fetched again');
 });
 
 test('a cache belonging to a different bundle is discarded, not believed', async()=>{
-    // Slots are index arithmetic, so trusting another bundle's bitmap would
-    // hand a game bytes from a different one with no error anywhere.
+    // Trusting another bundle's slot table would hand a game bytes from a
+    // different one with no error anywhere.
     const store = fakeStore();
     const first = await createBlockCache({ store, ...OPTIONS });
     first.put(5, new Uint8Array(16).fill(0xab));
@@ -192,7 +248,7 @@ test('without storage the heap holds no more than its ceiling between reads, and
 test('a cache on storage holds only its record of blocks in the heap', async()=>{
     const cache = await createBlockCache({ store: fakeStore(), ...OPTIONS, blockCount: 1000 });
     cache.put(3, new Uint8Array(16));
-    assert.equal(cache.diagnostics().heapBytes, 125, 'a bit a block');
+    assert.equal(cache.diagnostics().heapBytes, 4000, 'a word a block');
 });
 
 test('the cache is backed by the store it was given, under a name the store allows', async()=>{
@@ -202,7 +258,7 @@ test('the cache is backed by the store it was given, under a name the store allo
     assert.equal(cache.backed, true);
     assert.deepEqual([...store.files.keys()].sort(),
         ['a_game_with_odd_chars.blocks', 'a_game_with_odd_chars.order',
-            'a_game_with_odd_chars.present']);
+            'a_game_with_odd_chars.slots']);
 });
 
 test('a store that will not open says why, rather than only falling back', async()=>{
@@ -239,7 +295,7 @@ test('the order a run first asked for its blocks in is there for the next run', 
     assert.deepEqual(third.order(), [9, 4, 7, 2]);
 });
 
-test('the order belongs to the bundle, and is discarded with its bitmap', async()=>{
+test('the order belongs to the bundle, and is discarded with its slot table', async()=>{
     const store = fakeStore();
     const first = await createBlockCache({ store, ...OPTIONS });
     first.demanded(5);
@@ -263,8 +319,8 @@ test('the order is bounded', async()=>{
     assert.equal(again.order()[0], 0, 'the earliest demands are the ones kept');
 });
 
-test('what of a bundle is here is read off its bitmap, the translation seed aside', async()=>{
-    // Ten blocks of 100 bytes, the last two the translation seed; the bitmap
+test('what of a bundle is here is read off its slot table, the translation seed aside', async()=>{
+    // Ten blocks of 100 bytes, the last two the translation seed; the table
     // says blocks 0, 1, 2 and 9 are here.
     const bundle = {
         fingerprint: 'abc',
@@ -272,23 +328,24 @@ test('what of a bundle is here is read off its bitmap, the translation seed asid
         block: ()=>({ packed: 100 }),
         translations: { firstBlock: 8, blocks: 2 },
     };
-    /** @param {Uint8Array | null} bitmap */
-    const rootWith = bitmap=>({
+    /** @param {Uint32Array | null} slots */
+    const rootWith = slots=>({
         /** @param {string} name */
         getFileHandle: async name=>{
-            if (bitmap === null || name !== `${blockCacheName('game', 'abc')}.present`)
+            if (slots === null || name !== `${blockCacheName('game', 'abc')}.slots`)
             {
                 throw new Error('NotFoundError');
             }
-            return { getFile: async()=>new Blob([new Uint8Array(bitmap)]) };
+            const bytes = /** @type {BlobPart} */ (new Uint8Array(slots.buffer));
+            return { getFile: async()=>new Blob([bytes]) };
         },
     });
-    /** @param {Uint8Array | null} bitmap */
-    const residency = bitmap=>bundleResidency({ root: rootWith(bitmap), id: 'game', bundle });
-    assert.deepEqual(await residency(Uint8Array.of(0b111, 0b10)),
+    /** @param {Uint32Array | null} slots */
+    const residency = slots=>bundleResidency({ root: rootWith(slots), id: 'game', bundle });
+    assert.deepEqual(await residency(Uint32Array.of(4, 1, 2, 0, 0, 0, 0, 0, 0, 3)),
         { blocks: 8, resident: 3, bytes: 800, residentBytes: 300 });
     assert.deepEqual(await residency(null),
         { blocks: 8, resident: 0, bytes: 800, residentBytes: 0 }, 'no cache yet');
-    assert.equal((await residency(Uint8Array.of(0xff))).resident, 0,
-        'a bitmap of another size is another bundle\'s');
+    assert.equal((await residency(Uint32Array.of(1, 2))).resident, 0,
+        'a table of another size is another bundle\'s');
 });

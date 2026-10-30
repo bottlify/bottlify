@@ -9,7 +9,7 @@
  * (`navigator.storage.estimate()`, its quota, which each browser sets by the
  * system it runs on and the disk it has), less a share left for the run that
  * starts to write into. Past it, the caches go, the least recently written
- * first: a bundle's fetched blocks (`<name>.blocks`, `.present`, `.order` at
+ * first: a bundle's fetched blocks (`<name>.blocks`, `.slots`, `.order` at
  * the root) and a bundle's translations (`cork/<name>.v<n>`). Both are made
  * again by the next run that needs them; a session -- the files a program
  * wrote, its saved games -- is never touched. Neither are the caches of the
@@ -19,8 +19,11 @@
 /** The quota's share the site keeps itself to: room for what the run writes next. */
 export const STORAGE_SHARE = 0.8;
 
-/** A bundle's block cache's files, by the name the cache gives them. */
-const BLOCK_FILE = /^(.+)\.(blocks|present|order)$/;
+/**
+ * A bundle's block cache's files, by the name the cache gives them; `.present`
+ * is the bitmap a cache kept before its slot table, let go with the rest.
+ */
+const BLOCK_FILE = /^(.+)\.(blocks|slots|present|order)$/;
 
 /** The lock a running bundle's translations hold, by its name (`resolveTranslationStore`). */
 const STORE_LOCK = 'bottlify-cork:';
