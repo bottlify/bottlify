@@ -322,8 +322,9 @@ entry point calls a routine of the engine's own library (`bottlify.dll`) and exi
 answer. Each routine drives only the process's own exports (msi.dll's install calls,
 LoadLibrary/GetProcAddress, MessageBox), so what it does is what those exports do. Such a program
 starts in the directory its parent asked for, or else in the parent's current directory, as
-Windows starts every child, since the paths on its command line are the parent's to mean; other
-children keep starting in their own image's directory. The volume reports no file at those paths
+Windows starts every child, since the paths on its command line are the parent's to mean; since
+2026-10-30 every other child starts there too (a client that set its own directory and started
+its helper with none had the helper look for its libraries in the wrong place). The volume reports no file at those paths
 (`GetFileAttributes`, `FindFirstFile`, `SearchPath`, `GetFileVersionInfo` and `CreateFile` on
 `system32\msiexec.exe` fail) because an entry would need bytes to read and a version resource
 to answer, and no measured program has needed either. Revisit if a bootstrapper is found that

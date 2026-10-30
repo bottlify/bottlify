@@ -463,16 +463,12 @@ export function createSpawner(host){
             // WaitForDebugEvent.
             made.debugEvents = (flags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS)) !== 0
                 ? ['create', 'exit'] : null;
-            // A child starts in its own image's directory here; a system
-            // program has nothing of its own there, and the paths on its
-            // command line are its parent's to mean -- `msiexec /i setup.msi`
-            // -- so it starts where Windows starts every child: in the
-            // directory asked for, else in its parent's current one.
-            if (!isFile(path) && systemProgramAt(path) !== null)
-            {
-                made.startDirectory = directory.trim() !== '' ? qualify(directory.trim())
-                    : host.currentDirectory?.();
-            }
+            // A child starts where Windows starts it: in the directory asked
+            // for, else in its parent's current one -- which is where the
+            // paths on its command line, and the libraries it loads by bare
+            // name, are found.
+            made.startDirectory = directory.trim() !== '' ? qualify(directory.trim())
+                : host.currentDirectory?.();
             // What the caller hands the child -- its STARTUPINFO, environment
             // and parent -- is on the record before anyone is told of it: the
             // child is built from it the moment it is.

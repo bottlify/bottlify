@@ -904,7 +904,9 @@ test('a file the volume has wins over the program the engine provides, and start
         const spawner = createSpawner({ ...host, currentDirectory: ()=>'C:\\App' });
         const made = spawner.launch('', 'msiexec /i x.msi', 0);
         assert.equal(made.imagePath, 'C:\\WINDOWS\\system32\\msiexec.exe');
-        assert.equal(made.startDirectory, undefined, 'its own directory, as for any child');
+        assert.equal(made.startDirectory, 'C:\\App', 'its parent\'s directory, as for any child');
+        assert.equal(spawner.launch('C:\\WINDOWS\\system32\\tool.exe', '', 0).startDirectory,
+            'C:\\App', 'a program of its own, too: a library it loads by bare name is found there');
         assert.equal(spawner.imageOf('tool'), 'C:\\WINDOWS\\system32\\tool.exe',
             'and any bare name is looked for in the system folder too');
         assert.equal(spawner.imageOf('sub\\tool.exe'), null,
