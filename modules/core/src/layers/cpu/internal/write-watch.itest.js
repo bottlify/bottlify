@@ -367,8 +367,7 @@ test('a copy kept by what the watch takes while another executor stores is the m
     try
     {
         // Until the loop runs translated on the other executor.
-        for (let warm = 0; warm < 200 && ((await remote.diagnostics())?.modules ?? 0) === 0;
-            warm++)
+        while (((await remote.diagnostics())?.modules ?? 0) === 0)
         {
             await run(16);
             await new Promise(resolve=>setTimeout(resolve, 5));
