@@ -1323,7 +1323,7 @@ const IDLE_SPINS_BEFORE_TIMER = 4;
  * the guest's own deadlines and the sound ring go unattended: the ring holds
  * two hundred milliseconds and the pump runs on every look.
  */
-const IDLE_LOOK_MS = 4;
+export const IDLE_LOOK_MS = 4;
 
 /**
  * How often the run loop pumps the sound at most: what the pump does --
