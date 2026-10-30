@@ -91,6 +91,7 @@
     "src/layers/win32/shell32/icons.js",
     "src/layers/win32/user32/cursors.js",
     "src/layers/win32/version/functions.js",
+    "src/storage-budget.js",
     "src/storage.js",
     "src/zstd.js"
   ],
