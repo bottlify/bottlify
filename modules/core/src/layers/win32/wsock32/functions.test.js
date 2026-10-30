@@ -1179,6 +1179,98 @@ test('an overlapped send completes at once, its event signalled as Windows does'
     assert.equal(fx.dword(OUT2), 3);
 });
 
+/** A fixture whose completed operations are recorded as the port would be told them. */
+function withPort(){
+    /** @type {[number, number, number, number, boolean][]} */
+    const packets = [];
+    const fx = fixture({
+        completed: (/** @type {[number, number, number, number, boolean]} */ ...packet)=>
+            packets.push(packet),
+    });
+    return { fx, packets };
+}
+
+test('an operation on a socket tells its completion port, also one finished at once', async()=>{
+    // A pool of threads in GetQueuedCompletionStatus waits for the packet, not
+    // for the event: Windows posts it for an operation that completed in its
+    // own call too, and leaves it out when hEvent's low bit asks.
+    const { fx, packets } = withPort();
+    const { client, accepted } = connected(fx);
+    fx.put(TEXT, 'abc');
+    fx.setDword(WSABUF, 3);
+    fx.setDword(WSABUF + 4, TEXT);
+    assert.equal(fx.call('WSASend', [client, WSABUF, 1, OUT, 0, overlapped(fx), 0]), 0);
+    assert.deepEqual(packets, [[client, 3, OVERLAPPED, 0, true]]);
+    assert.equal(fx.call('WSASend', [client, WSABUF, 1, OUT, 0, overlapped(fx, EVENT | 1), 0]), 0);
+    assert.equal(packets.length, 1, 'the low bit of hEvent: no packet');
+
+    fx.setDword(WSABUF + 8, 16);
+    fx.setDword(WSABUF + 12, BUFFER);
+    assert.equal(fx.call('WSARecv', [accepted, WSABUF + 8, 1, OUT, OUT2, overlapped(fx), 0]), 0,
+        'six bytes waiting: done at once');
+    assert.deepEqual(packets[1], [accepted, 6, OVERLAPPED, 0, true]);
+    assert.equal(fx.call('WSARecv', [accepted, WSABUF + 8, 1, OUT, OUT2, overlapped(fx), 0]),
+        SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSA_IO_PENDING);
+    assert.equal(packets.length, 2, 'nothing for a pending one yet');
+    assert.equal(fx.call('send', [client, TEXT, 3, 0]), 3);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(packets[2], [accepted, 3, OVERLAPPED, 0, false], 'when it completes');
+});
+
+test('ConnectEx connects, sends its first bytes and completes on the socket\'s port', async()=>{
+    const { fx, packets } = withPort();
+    const server = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+    fx.call('bind', [server, NAME, SOCKADDR_IN_SIZE]);
+    fx.call('listen', [server, 5]);
+    const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    fx.put(TEXT, 'hey');
+    assert.equal(fx.extension('ConnectEx', [client, NAME, SOCKADDR_IN_SIZE, TEXT, 3, OUT,
+        overlapped(fx)]), 1);
+    assert.equal(fx.dword(OUT), 3, 'the bytes sent');
+    assert.deepEqual([fx.dword(OVERLAPPED), fx.dword(OVERLAPPED + 4)], [0, 3]);
+    assert.deepEqual(packets, [[client, 3, OVERLAPPED, 0, true]]);
+    assert.deepEqual(fx.signalled, [EVENT]);
+    const accepted = fx.call('accept', [server, 0, 0]);
+    assert.equal(await fx.call('recv', [accepted, BUFFER, 16, 0]), 3);
+    assert.equal(fx.read(BUFFER, 3), 'hey');
+    writeSockaddr(fx.host.writeMemory, NAME2, { host: 0, port: PORT + 1 });
+    assert.equal(fx.extension('ConnectEx', [fx.call('socket', [AF_INET, SOCK_STREAM, 0]), NAME2,
+        SOCKADDR_IN_SIZE, 0, 0, 0, overlapped(fx)]), 0, 'nobody listening');
+    assert.equal(packets.length, 1, 'a call that fails in itself posts nothing');
+});
+
+test('AcceptEx with no connection waiting completes on the listener\'s port when one comes',
+    async()=>{
+        const ACCEPT_BUFFER = 0xa00;
+        const { fx, packets } = withPort();
+        const server = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+        fx.call('bind', [server, NAME, SOCKADDR_IN_SIZE]);
+        fx.call('listen', [server, 5]);
+        const target = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        assert.equal(fx.extension('AcceptEx', [server, target, ACCEPT_BUFFER, 0, 32, 32, OUT,
+            overlapped(fx)]), 0);
+        assert.equal(fx.call('WSAGetLastError'), WSA_IO_PENDING);
+        assert.equal(fx.dword(OVERLAPPED), STATUS_PENDING);
+
+        const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        assert.equal(fx.call('connect', [client, NAME, SOCKADDR_IN_SIZE]), 0);
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.deepEqual(packets, [[server, 0, OVERLAPPED, 0, false]]);
+        assert.equal(fx.registry.get(target).peer, fx.registry.get(client));
+
+        assert.equal(fx.extension('GetAcceptExSockaddrs', [ACCEPT_BUFFER, 0, 32, 32, OUT, OUT + 4,
+            OUT2, OUT2 + 4]), 0);
+        assert.deepEqual([fx.dword(OUT), fx.dword(OUT + 4), fx.dword(OUT2), fx.dword(OUT2 + 4)],
+            [ACCEPT_BUFFER, SOCKADDR_IN_SIZE, ACCEPT_BUFFER + 32, SOCKADDR_IN_SIZE]);
+        const view = new DataView(fx.bytes.buffer);
+        assert.equal(view.getUint16(ACCEPT_BUFFER + 2), PORT, 'the local address, the listener\'s');
+        assert.equal(view.getUint16(ACCEPT_BUFFER + 34), fx.registry.get(client).local.port,
+            'the remote, the client\'s');
+    });
+
 test('a socket closed under a pending receive aborts it', async()=>{
     const fx = fixture();
     const { accepted } = connected(fx);

@@ -344,6 +344,8 @@ test('overlapped: a connect and a read pend, then complete through the event and
         p.write(client, 'again');
         assert.equal(p.read(server, 10, OVERLAPPED), 1);
         assert.equal(p.packets.length, 3, 'FILE_SKIP_COMPLETION_PORT_ON_SUCCESS');
+        assert.equal(p.pipes.skipsPortOnSuccess(server), true, 'which winsock asks too');
+        assert.equal(p.pipes.skipsPortOnSuccess(client), false);
     });
 
 test('an overlapped part of a message completes with STATUS_BUFFER_OVERFLOW', ()=>{

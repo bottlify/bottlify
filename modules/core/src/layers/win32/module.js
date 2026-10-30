@@ -1171,6 +1171,21 @@ export function createWin32Module(){
             // call behaves, and nothing reaches anywhere.
             const sockets = createSocketRegistry({
                 adapter: config?.network ?? createLoopbackAdapter(),
+                numbers: {
+                    open: (/** @type {any} */ socket)=>kernel.handles.open('socket', socket),
+                    // Unless the program closed the number itself (CloseHandle).
+                    // ponytail: the port association goes with it at once, so
+                    // an operation aborted by the close posts no packet; keep
+                    // it until those drain if a program waits for them.
+                    close: (/** @type {number} */ handle)=>{
+                        if (kernel.handles.typeOf(handle) === 'socket')
+                        {
+                            const socket = kernel.handles.close(handle);
+                            ports.closed(handle, socket);
+                            pipes.closed(handle, socket);
+                        }
+                    },
+                },
             });
             const winsock = createWinsockFunctions({
                 readMemory,
@@ -1197,6 +1212,15 @@ export function createWin32Module(){
                 heap,
                 currentThread: ()=>kernel.currentThread(),
                 registry: sockets,
+                // The socket's completion port, as a file's: the WSAOVERLAPPED
+                // and its event are winsock's to write, the packet kernel32's.
+                /**
+                 * @param {number} socket @param {number} bytes @param {number} overlapped
+                 * @param {number} status @param {boolean} atOnce
+                 */
+                completed: (socket, bytes, overlapped, status, atOnce)=>ports.completed(socket,
+                    bytes, overlapped, status, { event: true,
+                        port: atOnce && status === 0 && pipes.skipsPortOnSuccess(socket) }),
                 // Readiness as a window message, over the same queue PostMessage
                 // uses -- built below, but a function reaching for it now only
                 // ever runs once the machine is up and the queue exists.

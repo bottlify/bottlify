@@ -77,9 +77,14 @@ const count = (/** @type {number} */ value)=>({ value });
  * @param {Object} deps
  * @param {import('./loopback.js').Adapter
  *         | import('./transport.js').NetworkTransport} [deps.adapter]
+ * @param {{ open: (socket: any) => number, close: (handle: number) => void }} [deps.numbers]
+ *        Where a socket's number comes from: on Windows a SOCKET is a kernel
+ *        handle, numbered with the files and events, which is how a completion
+ *        port and SetFileCompletionNotificationModes take it. Counted from 1
+ *        when nothing hands one out.
  * @returns {any}
  */
-export function createSocketRegistry({ adapter: supplied } = {}){
+export function createSocketRegistry({ adapter: supplied, numbers } = {}){
     const { adapter, transport } = asNetwork(supplied);
 
     /** @type {Map<number, any>} */
@@ -307,9 +312,8 @@ export function createSocketRegistry({ adapter: supplied } = {}){
             {
                 return failure(WSAEOPNOTSUPP);
             }
-            const handle = nextHandle++;
-            sockets.set(handle, {
-                handle,
+            const socket = {
+                handle: 0,
                 family,
                 type,
                 local: { host: INADDR_ANY, port: 0 },
@@ -338,8 +342,10 @@ export function createSocketRegistry({ adapter: supplied } = {}){
                 error: 0,
                 /** Overlapped operations with nowhere to report completion yet. */
                 pending: [],
-            });
-            return count(handle);
+            };
+            socket.handle = numbers ? numbers.open(socket) : nextHandle++;
+            sockets.set(socket.handle, socket);
+            return count(socket.handle);
         },
 
         /** @param {any} socket @param {{ host: number, port: number }} address */
@@ -622,6 +628,7 @@ export function createSocketRegistry({ adapter: supplied } = {}){
             finish(socket);
             wake(socket);
             sockets.delete(socket.handle);
+            numbers?.close(socket.handle);
             return count(0);
         },
 

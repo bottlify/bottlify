@@ -1211,6 +1211,16 @@ export function createNamedPipes(host){
         closed,
 
         /**
+         * Whether an operation that finished in its own call skips the port,
+         * as SetFileCompletionNotificationModes set it for the handle -- kept
+         * here for every handle, a socket's as well as a pipe end's.
+         *
+         * @param {number} handle
+         */
+        skipsPortOnSuccess: (/** @type {number} */ handle)=>
+            ((ctx.modes.get(handle >>> 0) ?? 0) & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0,
+
+        /**
          * CreatePipe's pair, made as Windows makes it: a one-instance inbound
          * byte pipe under a name nobody else knows (Win32Pipes.<process>.<n>),
          * its server end the read handle and a client end opened for writing

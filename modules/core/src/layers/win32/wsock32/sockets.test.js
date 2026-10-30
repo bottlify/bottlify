@@ -315,3 +315,25 @@ test('a socket closed twice is a return code, not a fault', ()=>{
     assert.deepEqual(registry.close(socket), { value: 0 });
     assert.ok(registry.close(socket).error, 'programs do close a socket twice');
 });
+
+test('a socket is numbered by the handle table it is given, and gives the number back', ()=>{
+    // On Windows a SOCKET is a kernel handle: numbered among the files and
+    // events, never one of theirs, which is how a completion port takes it.
+    /** @type {Map<number, any>} */
+    const table = new Map();
+    let next = 0x100;
+    const registry = createSocketRegistry({ adapter: createLoopbackAdapter(), numbers: {
+        open: socket=>{
+            next += 4;
+            table.set(next, socket);
+            return next;
+        },
+        close: handle=>table.delete(handle),
+    } });
+    const made = registry.create(AF_INET, SOCK_STREAM);
+    assert.equal(made.value, 0x104);
+    assert.equal(table.get(0x104), registry.get(0x104), 'the table holds the socket itself');
+    registry.close(registry.get(0x104));
+    assert.equal(table.size, 0);
+    assert.equal(registry.get(0x104), null);
+});

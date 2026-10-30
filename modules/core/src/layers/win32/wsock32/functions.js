@@ -160,6 +160,12 @@ const TRANSMIT_CHUNK = 0x10000;
  *           Where mswsock's export of this name is, mswsock loaded first if
  *           it is not yet, as ws2_32 loads it for its provider; zero for one
  *           it does not export. Absent, the extension lookup is refused.
+ * @property {(socket: number, bytes: number, overlapped: number, status: number,
+ *     atOnce: boolean) => void} [completed]
+ *           An overlapped operation on a socket finished: the packet the
+ *           completion port the socket is bound to owes (kernel32's), left out
+ *           for one that finished in its own call when the socket's completion
+ *           modes skip those. Its WSAOVERLAPPED and event are written here.
  */
 
 /**
@@ -885,12 +891,17 @@ export function createWinsockFunctions(host){
      * Completes an operation: its status and byte count where the system keeps
      * them, then its event -- signalled also for one that completed at once,
      * which Windows signals too, so a program that waits on it either way
-     * never waits for nothing.
+     * never waits for nothing -- then the packet of the completion port the
+     * socket is bound to, which is what a pool of threads in
+     * GetQueuedCompletionStatus waits for, for one that completed at once as
+     * well. An hEvent with its low bit set asks for no packet.
      *
      * @param {number} overlapped @param {number} event
      * @param {{ error: number, bytes: number }} outcome
+     * @param {any} [socket] @param {boolean} [atOnce]  Finished in its own call.
      */
-    const complete = (overlapped, event, { error, bytes })=>{
+    const complete = (overlapped, event, { error, bytes }, socket = null, atOnce = true)=>{
+        const quiet = (readDword(overlapped + WSAOVERLAPPED.hEvent) & 1) !== 0;
         inFlight.delete(overlapped);
         if (error === 0)
         {
@@ -905,6 +916,10 @@ export function createWinsockFunctions(host){
         if (event !== 0)
         {
             signalEvent(event);
+        }
+        if (socket && !quiet)
+        {
+            host.completed?.(socket.handle, bytes, overlapped, statusOf(error), atOnce);
         }
     };
 
@@ -987,7 +1002,7 @@ export function createWinsockFunctions(host){
             }
             if (overlapped !== 0)
             {
-                complete(overlapped, event, result);
+                complete(overlapped, event, result, socket);
             }
             if ((call.received >>> 0) !== 0)
             {
@@ -1022,7 +1037,7 @@ export function createWinsockFunctions(host){
                 }
                 const result = deliver(outcome);
                 complete(overlapped, event, result.error === WSAENOTSOCK
-                    ? { error: WSA_OPERATION_ABORTED, bytes: 0 } : result);
+                    ? { error: WSA_OPERATION_ABORTED, bytes: 0 } : result, socket, false);
             }));
             return fail(WSA_IO_PENDING);
         }
@@ -1072,7 +1087,7 @@ export function createWinsockFunctions(host){
         }
         if (overlapped !== 0)
         {
-            complete(overlapped, event, { error: 0, bytes: outcome.value });
+            complete(overlapped, event, { error: 0, bytes: outcome.value }, socket);
         }
         if ((call.sent >>> 0) !== 0)
         {
@@ -3018,7 +3033,8 @@ export function createWinsockFunctions(host){
                     }
                     if ((overlapped >>> 0) !== 0)
                     {
-                        complete(overlapped >>> 0, event, { error: 0, bytes: outcome.value });
+                        complete(overlapped >>> 0, event, { error: 0, bytes: outcome.value },
+                            socket, (file >>> 0) === 0);
                     }
                     return 1;
                 };
@@ -3069,67 +3085,143 @@ export function createWinsockFunctions(host){
 
     /** The extensions, which a program reaches by name through GetProcAddress. */
     const extensions = {
+        /**
+         * BOOL AcceptEx(SOCKET sListenSocket, SOCKET sAcceptSocket,
+         *   PVOID lpOutputBuffer, DWORD dwReceiveDataLength,
+         *   DWORD dwLocalAddressLength, DWORD dwRemoteAddressLength,
+         *   LPDWORD lpdwBytesReceived, LPOVERLAPPED lpOverlapped)
+         *
+         * A connection waiting is taken at once; otherwise the call is pending
+         * and completes when one arrives, on the listening socket's port. The
+         * two addresses go into the buffer after the receive area, where
+         * GetAcceptExSockaddrs finds them.
+         */
         AcceptEx: {
             argBytes: 32,
             /** @param {number[]} args */
-            handler: ([listenHandle, acceptHandle])=>{
+            handler: ([listenHandle, acceptHandle, buffer, receiveLength, localLength, , received,
+                overlapped])=>{
                 const listener = socketOf(listenHandle);
                 const accepting = socketOf(acceptHandle);
                 if (!listener || !accepting)
                 {
                     return fail(WSAENOTSOCK, 0);
                 }
+                const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
+                /** @param {number} handle  What accept produced. */
+                const fold = handle=>{
+                    // The caller supplied the socket the connection is to arrive
+                    // on, so what accept produced is folded onto it rather than
+                    // handed back: AcceptEx has no return value for a handle.
+                    const ready = registry.get(handle);
+                    accepting.local = ready.local;
+                    accepting.remote = ready.remote;
+                    accepting.connected = true;
+                    accepting.peer = ready.peer;
+                    if (ready.peer)
+                    {
+                        ready.peer.peer = accepting;
+                    }
+                    accepting.rx = ready.rx;
+                    // Detached before it is closed. Closing a stream socket tells
+                    // its peer the connection is finished, and this one still
+                    // names the client -- so leaving it attached would greet a
+                    // client with its own connection hanging up at once.
+                    ready.peer = null;
+                    registry.close(ready);
+                    if ((buffer >>> 0) !== 0)
+                    {
+                        const at = (buffer >>> 0) + (receiveLength >>> 0);
+                        writeSockaddr(host.writeMemory, at, accepting.local);
+                        if (accepting.remote)
+                        {
+                            writeSockaddr(host.writeMemory, at + (localLength >>> 0),
+                                accepting.remote);
+                        }
+                    }
+                };
                 const outcome = registry.accept(listener);
-                if (outcome.error)
+                // ponytail: completes with no bytes even when a receive area was
+                // given; Windows waits for the first data then.
+                if (!outcome.error)
+                {
+                    fold(outcome.value);
+                    if ((received >>> 0) !== 0)
+                    {
+                        writeDword(received >>> 0, 0);
+                    }
+                    if ((overlapped >>> 0) !== 0)
+                    {
+                        complete(overlapped >>> 0, event, { error: 0, bytes: 0 }, listener);
+                    }
+                    return 1;
+                }
+                if (outcome.error !== WSAEWOULDBLOCK || (overlapped >>> 0) === 0)
                 {
                     return fail(outcome.error === WSAEWOULDBLOCK
                         ? WSA_IO_PENDING : outcome.error, 0);
                 }
-                // The caller supplied the socket the connection is to arrive on,
-                // so what accept produced is folded onto it rather than handed
-                // back: AcceptEx has no return value that could carry a handle.
-                const ready = registry.get(outcome.value);
-                accepting.local = ready.local;
-                accepting.remote = ready.remote;
-                accepting.connected = true;
-                accepting.peer = ready.peer;
-                if (ready.peer)
-                {
-                    ready.peer.peer = accepting;
-                }
-                accepting.rx = ready.rx;
-                // Detached before it is closed. Closing a stream socket tells
-                // its peer the connection is finished, and this one still names
-                // the client -- so leaving it attached would greet a client with
-                // its own connection hanging up the instant it was accepted.
-                ready.peer = null;
-                registry.close(ready);
-                return 1;
+                begin(overlapped >>> 0);
+                inFlight.set(overlapped >>> 0, until(listener, ()=>registry.accept(listener))
+                    .then(arrived=>{
+                        if (arrived.error)
+                        {
+                            complete(overlapped >>> 0, event,
+                                { error: WSA_OPERATION_ABORTED, bytes: 0 }, listener, false);
+                            return;
+                        }
+                        fold(arrived.value);
+                        complete(overlapped >>> 0, event, { error: 0, bytes: 0 }, listener,
+                            false);
+                    }));
+                return fail(WSA_IO_PENDING, 0);
             },
         },
 
+        /**
+         * void GetAcceptExSockaddrs(PVOID lpOutputBuffer, DWORD dwReceiveDataLength,
+         *   DWORD dwLocalAddressLength, DWORD dwRemoteAddressLength,
+         *   LPSOCKADDR *LocalSockaddr, LPINT LocalSockaddrLength,
+         *   LPSOCKADDR *RemoteSockaddr, LPINT RemoteSockaddrLength)
+         *
+         * Where AcceptEx put the two addresses in the buffer.
+         */
         GetAcceptExSockaddrs: {
             argBytes: 32,
             /** @param {number[]} args */
-            handler: ([, , , , , , localOut, remoteOut])=>{
-                // The addresses live in the buffer AcceptEx was given, which we
-                // never wrote into, so there is nothing honest to report here.
-                if (localOut !== 0)
+            handler: ([buffer, receiveLength, localLength, , localOut, localLengthOut, remoteOut,
+                remoteLengthOut])=>{
+                const at = (buffer >>> 0) + (receiveLength >>> 0);
+                for (const [out, lengthOut, address] of [[localOut, localLengthOut, at],
+                    [remoteOut, remoteLengthOut, at + (localLength >>> 0)]])
                 {
-                    writeDword(localOut, 0);
-                }
-                if (remoteOut !== 0)
-                {
-                    writeDword(remoteOut, 0);
+                    if ((out >>> 0) !== 0)
+                    {
+                        writeDword(out >>> 0, address);
+                    }
+                    if ((lengthOut >>> 0) !== 0)
+                    {
+                        writeDword(lengthOut >>> 0, SOCKADDR_IN_SIZE);
+                    }
                 }
                 return 0;
             },
         },
 
+        /**
+         * BOOL ConnectEx(SOCKET s, const sockaddr *name, int namelen,
+         *   PVOID lpSendBuffer, DWORD dwSendDataLength, LPDWORD lpdwBytesSent,
+         *   LPOVERLAPPED lpOverlapped)
+         *
+         * Overlapped, the call is pending while the connection is made and
+         * completes in its OVERLAPPED, its event and the socket's port, the
+         * bytes to send sent first; a connection made in the call completes at
+         * once, the port told all the same.
+         */
         ConnectEx: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([handle, name, length])=>{
+            handler: ([handle, name, length, data, dataLength, sent, overlapped])=>{
                 const socket = socketOf(handle);
                 if (!socket)
                 {
@@ -3144,12 +3236,49 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const settle = (/** @type {any} */ outcome)=>{
+                const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
+                const payload = (data >>> 0) === 0 || (dataLength >>> 0) === 0 ? null
+                    : host.readMemory(data >>> 0, dataLength >>> 0).slice();
+                /** @param {any} outcome @returns {{ error: number, bytes: number }} */
+                const connected = outcome=>{
                     notifyConnect(socket, outcome);
-                    return outcome.error ? fail(outcome.error, 0) : 1;
+                    if (outcome.error)
+                    {
+                        return { error: outcome.error, bytes: 0 };
+                    }
+                    const delivery = payload ? registry.send(socket, payload) : { value: 0 };
+                    return { error: delivery.error ?? 0, bytes: delivery.value ?? 0 };
+                };
+                /** @param {{ error: number, bytes: number }} result */
+                const answer = result=>{
+                    if (result.error)
+                    {
+                        return fail(result.error, 0);
+                    }
+                    if ((sent >>> 0) !== 0)
+                    {
+                        writeDword(sent >>> 0, result.bytes);
+                    }
+                    if ((overlapped >>> 0) !== 0)
+                    {
+                        complete(overlapped >>> 0, event, result, socket);
+                    }
+                    return 1;
                 };
                 const outcome = registry.connect(socket, address);
-                return outcome instanceof Promise ? outcome.then(settle) : settle(outcome);
+                if (!(outcome instanceof Promise))
+                {
+                    return answer(connected(outcome));
+                }
+                if ((overlapped >>> 0) === 0)
+                {
+                    return outcome.then(made=>answer(connected(made)));
+                }
+                begin(overlapped >>> 0);
+                inFlight.set(overlapped >>> 0, outcome.then(made=>{
+                    complete(overlapped >>> 0, event, connected(made), socket, false);
+                }));
+                return fail(WSA_IO_PENDING, 0);
             },
         },
 
