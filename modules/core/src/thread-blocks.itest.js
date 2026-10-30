@@ -212,20 +212,25 @@ for (const cores of [1, 2])
         // the other executor had not yet told the process it left that thread
         // when the last was made -- which a busy machine decides, and which
         // made the account after many threads one thread's blocks more than
-        // after one, now and then, with the code the same. So the account is
-        // held to a whole number of threads' blocks over none, one or two.
+        // after one, now and then, with the code the same. So the account
+        // after them all is held to the one after a single thread's, and at
+        // most what that single thread's run held over a run of none more: a
+        // thread's blocks kept for every thread would be thousands of them.
         const none = await run(0, cores);
         const once = await run(1, cores);
         assert.ok(heap !== null && once.heap !== null && none.heap !== null,
             'the process heap gives its account');
-        /** @param {{ blocks: number, used: number }} account */
-        const over = account=>[account.blocks - none.heap.blocks, account.used - none.heap.used];
-        const [blocks, used] = over(once.heap);
-        assert.ok(blocks > 0 && used > 0, `a thread's blocks: ${blocks}, ${used} bytes`);
-        assert.ok([1, 2].some(held=>over(heap).every((value, at)=>value === held * [blocks,
-            used][at])), `the heap after ${THREADS} threads, ${JSON.stringify(heap)}, against`
-            + ` after none, ${JSON.stringify(none.heap)}: one or two threads' blocks, each`
-            + ` ${blocks} blocks of ${used} bytes`);
+        /**
+         * @param {{ blocks: number, used: number }} account
+         * @param {{ blocks: number, used: number }} from
+         */
+        const over = (account, from)=>[account.blocks - from.blocks, account.used - from.used];
+        const one = over(once.heap, none.heap);
+        assert.ok(one[0] > 0 && one[1] > 0,
+            `a thread's run holds ${one[0]} blocks, ${one[1]} bytes`);
+        assert.ok(over(heap, once.heap).every((value, at)=>value >= 0 && value <= one[at]),
+            `the heap after ${THREADS} threads, ${JSON.stringify(heap)}, against after one,`
+            + ` ${JSON.stringify(once.heap)}: at most ${one[0]} blocks of ${one[1]} bytes more`);
         if (cores > 1)
         {
             // Each pinned to the processor the other executor plays: every one
