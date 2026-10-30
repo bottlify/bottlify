@@ -2007,6 +2007,7 @@ export function createWin32Module(){
                 allocateCode: bytes=>heap.allocateCode(bytes),
                 free: address=>heap.free(address),
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                architecture: pointerSize === 8 ? 'amd64' : 'x86',
                 readFile: async path=>{
                     const entry = volume.stat(path);
                     const node = entry && !entry.isDirectory

@@ -571,3 +571,28 @@ test('an image\'s manifest is resource 1 unless named; a module\'s names its fil
     assert.equal(await t.create('C:\\app\\exe.manifest'), 0xffffffff, 'not beside the program');
     assert.notEqual(await t.create('C:\\lang\\exe.manifest'), 0xffffffff, 'in fr-FR\\');
 });
+
+test('a 64-bit process binds to the store\'s amd64 Common Controls, a 32-bit one to its x86',
+    async()=>{
+        // An x86-64 game's manifest names processorArchitecture="amd64"; a
+        // store that kept only x86 copies failed its start as Windows fails a
+        // missing assembly.
+        /** @param {string} architecture */
+        const app = architecture=>`${HEAD}<dependency><dependentAssembly><assemblyIdentity `
+            + 'type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" '
+            + `processorArchitecture="${architecture}" publicKeyToken="6595b64144ccf1df" `
+            + 'language="*"/></dependentAssembly></dependency></assembly>';
+        const long = setup({ 'C:\\app\\test.exe.manifest': app('amd64') },
+            { architecture: 'amd64' });
+        assert.equal(await long.loaderApi.processDefaultFrom(null, 'C:\\app\\test.exe'), null);
+        assert.match(String(long.loaderApi.redirect('comctl32.dll')?.path),
+            /^C:\\WINDOWS\\WinSxS\\amd64_Microsoft\.Windows\.Common-Controls_/);
+        const short = setup({ 'C:\\app\\test.exe.manifest': app('x86') });
+        assert.equal(await short.loaderApi.processDefaultFrom(null, 'C:\\app\\test.exe'), null);
+        assert.match(String(short.loaderApi.redirect('comctl32.dll')?.path),
+            /^C:\\WINDOWS\\WinSxS\\x86_Microsoft\.Windows\.Common-Controls_/);
+        const crossed = setup({ 'C:\\app\\test.exe.manifest': app('amd64') });
+        assert.match(String(await crossed.loaderApi.processDefaultFrom(null,
+            'C:\\app\\test.exe')), /Common-Controls/, 'an amd64 assembly is none of a 32-bit '
+            + 'process\'s');
+    });
