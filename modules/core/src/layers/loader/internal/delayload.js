@@ -123,6 +123,13 @@ export function readDelayImports(bytes, image){
  * `FreeLibrary` or `GetProcAddress` would be handed the invention. Zero, which
  * is what the linker wrote, at least means "not loaded".
  *
+ * A library of which nothing at all resolves is not here yet, and is left to
+ * the program: its slots keep the linker's thunks, so the first call goes
+ * through the program's own helper, which loads it as Windows would at that
+ * moment -- from the path its notification hook names, the directories set
+ * by then -- through LoadLibrary and GetProcAddress, or fails as the program
+ * expects. It is reported as unresolved all the same.
+ *
  * @param {{ bytes: Uint8Array, file: Uint8Array, image: import('./pe.js').PeImage }} mapped
  * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
  *        resolveImport
@@ -142,9 +149,15 @@ export function bindDelayImports({ bytes, file, image }, resolveImport, missing)
 
     for (const { dll, entries } of readDelayImports(file, image))
     {
-        for (const entry of entries)
+        const addresses = entries.map(entry=>resolveImport(dll, entry.name, entry.ordinal));
+        if (addresses.every(address=>address === null))
         {
-            const address = resolveImport(dll, entry.name, entry.ordinal);
+            unresolved.push(...entries.map(entry=>`${dll}!${entry.name ?? `#${entry.ordinal}`}`));
+            continue;
+        }
+        for (const [index, entry] of entries.entries())
+        {
+            const address = addresses[index];
             if (address === null)
             {
                 unresolved.push(`${dll}!${entry.name ?? `#${entry.ordinal}`}`);

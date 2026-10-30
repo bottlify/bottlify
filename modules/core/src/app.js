@@ -2117,12 +2117,14 @@ export function pathDirectories(value){
  * @param {(name: string, wanted: any[]) => boolean} [ours]  Whether the engine
  *     answers the name -- told what the importer takes from it, which a table
  *     lacking some of it does not answer.
+ * @param {{ currentDirectory?: string, path?: string[] }} [where]  The process's
+ *     current directory and PATH, searched after the system directories.
  * @returns {(name: string, wanted?: any[]) => Promise<Uint8Array | null>}
  */
-export function shippedLibraryReader(filesystem, blocks, imagePath, ours = ()=>false){
+export function shippedLibraryReader(filesystem, blocks, imagePath, ours = ()=>false, where = {}){
     return async(/** @type {string} */ name, /** @type {any[]} */ wanted = [])=>{
-        for (const candidate of libraryCandidates(name, imagePath, undefined,
-            { ours: ours(name, wanted) }))
+        for (const candidate of libraryCandidates(name, imagePath, where.currentDirectory,
+            { ours: ours(name, wanted), path: where.path }))
         {
             const file = await readWholeFile(filesystem, blocks, candidate);
             if (file)
@@ -2697,7 +2699,11 @@ export function placeLibrary(image, { next, floor, limit, holder, claim }){
  * address yet.
  *
  * A library is looked for beside the executable, which is where a program's own
- * libraries live and where its loader would look.
+ * libraries live and where its loader would look, then in the system
+ * directories, the current directory (`options.currentDirectory`) and the
+ * directories PATH names (`options.path`), as Windows looks for a program's
+ * imports -- a delay-loaded one among them, which Windows resolves on its
+ * first call from the same places and this loader binds at the start.
  *
  * @param {any} options
  * @returns {Promise<any[]>}
@@ -2724,8 +2730,8 @@ export async function mapShippedLibraries(options){
      * @param {string} name
      * @returns {string}
      */
-    const placeOf = name=>redirect(name)?.path ?? libraryCandidates(name, imagePath, undefined,
-        { ours: isSystem(name) }).find(candidate=>{
+    const placeOf = name=>redirect(name)?.path ?? libraryCandidates(name, imagePath,
+        options.currentDirectory, { ours: isSystem(name), path: options.path }).find(candidate=>{
         try
         {
             const entry = filesystem.stat(candidate);
@@ -2737,7 +2743,8 @@ export async function mapShippedLibraries(options){
     }) ?? `${directory}${name}`;
 
     const shipped = shippedLibraryReader(filesystem, blocks, imagePath,
-        (name, wanted)=>isSystem(name) && (options.covers?.(name, wanted) ?? true));
+        (name, wanted)=>isSystem(name) && (options.covers?.(name, wanted) ?? true),
+        { currentDirectory: options.currentDirectory, path: options.path });
     const { order, missing } = await planDependencies({
         entry: executable,
         entryName: imagePath.slice(
@@ -6684,6 +6691,11 @@ async function buildApp(options){
         },
         isKnownDll,
         redirect: (/** @type {string} */ name)=>activation?.redirect(name) ?? null,
+        // Where else Windows looks for a program's imports: its current
+        // directory and, for a child, the PATH its parent handed it.
+        currentDirectory: filesystem.currentDirectory(),
+        path: pathDirectories(Object.entries(options.environment ?? {})
+            .find(([variable])=>variable.toUpperCase() === 'PATH')?.[1]),
         byName, byBase,
         // Straight after the system modules, which is the first address nothing
         // else has claimed, and up to the pool of thread stacks.

@@ -292,12 +292,25 @@ test('an unclaimed delay import is reported and its slot left as the file wrote 
 });
 
 test('the missing hook decides where a call to an unclaimed delay import lands', ()=>{
-    const mapped = mapImage(withDelayImports({ rvaBased: false, imports: ['Alpha'] }).bytes);
+    const mapped = mapImage(withDelayImports({ rvaBased: false, imports: ['Alpha', 'Beta'] })
+        .bytes);
 
-    const unresolved = bindDelayImports(mapped, ()=>null, ()=>0xdead0000);
+    const unresolved = bindDelayImports(mapped, (dll, name)=>(name === 'Beta' ? 0x5000 : null),
+        ()=>0xdead0000);
 
     assert.deepEqual(unresolved, ['thing.dll!Alpha']);
     assert.equal(slotAt(mapped, slotRva(0, 0)), 0xdead0000);
+    assert.equal(slotAt(mapped, slotRva(0, 1)), 0x5000);
+});
+
+test('a delay-loaded library of which nothing resolves is left to its program', ()=>{
+    // Its first call goes through the linker's thunk to the program's own
+    // helper, which loads it from where its hook says, as Windows would then.
+    const mapped = mapImage(withDelayImports({ rvaBased: false, imports: ['Alpha'] }).bytes);
+    const before = slotAt(mapped, slotRva(0, 0));
+
+    assert.deepEqual(bindDelayImports(mapped, ()=>null, ()=>0xdead0000), ['thing.dll!Alpha']);
+    assert.equal(slotAt(mapped, slotRva(0, 0)), before, 'the thunk the linker wrote');
 });
 
 test('a descriptor carrying a bound and an unload table binds like one without', ()=>{
