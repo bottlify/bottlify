@@ -176,3 +176,48 @@ test('the first controller interface is answered by its macro\'s own name', ()=>
     // none, SteamAPI_Init gives up.
     assert.equal(INTERFACES.STEAMCONTROLLER_INTERFACE_VERSION, INTERFACES.SteamController001);
 });
+
+test('CheckFileSignature is an API call that completes, its result fetched by id', ()=>{
+    // Source's engine waits for the call before it loads a map, calling
+    // IsAPICallCompleted until it says yes; a call that is never issued
+    // (handle 0) holds it on "Loading..." for ever.
+    const { fns, put, method, view, highs } = fixture();
+    const client = fns.CreateInterface.handler([put('SteamClient020'), 0]);
+    const generic = method(client, INTERFACES.SteamClient020.split(',')
+        .findIndex(entry=>entry.startsWith('GetISteamGenericInterface:')));
+    const utils = generic.fn.handler([client, 1, 1, put('SteamUtils010')]);
+    const slots = INTERFACES.SteamUtils010.split(',').map(entry=>entry.split(':')[0]);
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        method(utils, slots.indexOf(name)).fn.handler([utils, ...args]);
+    const low = call('CheckFileSignature', [put('bin\\server.dll')]);
+    const high = /** @type {number} */ (highs.at(-1));
+    assert.notEqual(low + high, 0, 'a call, not k_uAPICallInvalid');
+
+    const failed = 0xc000;
+    view.setUint8(failed, 1);
+    assert.equal(call('IsAPICallCompleted', [low, high, failed]), 1);
+    assert.equal(view.getUint8(failed), 0);
+    assert.equal(call('GetAPICallFailureReason', [low, high]), -1, 'k_ESteamAPICallFailureNone');
+
+    const out = 0xc100;
+    assert.equal(call('GetAPICallResult', [low, high, out, 4, 704, failed]), 0, 'another callback');
+    assert.equal(view.getUint8(failed), 1);
+    assert.equal(call('GetAPICallResult', [low, high, out, 4, 705, failed]), 1);
+    assert.equal(view.getUint8(failed), 0);
+    assert.equal(view.getUint32(out, true), 3, 'k_ECheckFileSignatureNoSignaturesFoundForThisApp');
+
+    // steam_api's call results learn of it from SteamAPICallCompleted_t on the user's pipe.
+    const message = 0xc200;
+    assert.equal(fns.Steam_BGetCallback.handler([1, message, 0]), 1);
+    assert.equal(view.getInt32(message + 4, true), 703);
+    const data = view.getUint32(message + 8, true);
+    assert.equal(view.getUint32(data, true), low);
+    assert.equal(view.getUint32(data + 4, true), high);
+    assert.equal(view.getInt32(data + 8, true), 705);
+    assert.equal(view.getUint32(data + 12, true), 4);
+    assert.equal(fns.Steam_GetAPICallResult.handler([1, low, high, out, 4, 705, failed]), 1);
+
+    assert.equal(call('IsAPICallCompleted', [0, 0, failed]), 0, 'no such call');
+    assert.equal(view.getUint8(failed), 1);
+    assert.equal(call('GetAPICallFailureReason', [0, 0]), 2, 'k_ESteamAPICallFailureInvalidHandle');
+});
