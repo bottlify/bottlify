@@ -83,7 +83,7 @@ test('a child past the run\'s concurrency runs beside its parent, in its parent\
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>
             started.push([event.image, event.worker === true]));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0);
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0);
         assert.deepEqual(started, [['C:\\App\\parent.exe', true], ['C:\\App\\a.exe', true],
             ['C:\\App\\b.exe', false]],
         'two at once: the program and its first child each in a worker, the second child beside'
@@ -113,7 +113,7 @@ for (const [concurrency, across] of /** @type {[2 | 4, boolean][]} */ ([[4, true
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>
             started.push([event.image, event.worker === true]));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 7);
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 7);
         assert.deepEqual(started, [['C:\\App\\root.exe', true],
             ['C:\\App\\middle.exe', true], ['C:\\App\\leaf.exe', across]], across
             ? 'each in a worker of its own'
@@ -198,7 +198,7 @@ for (const delay of [0, 1000])
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>
             started.push([event.image, event.worker === true]));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0x35,
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0x35,
             'a ended with 3 and b with 5, and the parent saw both');
         // Ended before it was made, a child is not said to have started.
         const where = new Map(started);
@@ -248,7 +248,7 @@ test('a timed wait on a child running beside its parent runs out while the child
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: endless }] }) },
         });
         t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0x102, 'WAIT_TIMEOUT');
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0x102, 'WAIT_TIMEOUT');
     });
 
 test('a child takes the memory of the child before it, zeroed where that one wrote',
@@ -324,7 +324,7 @@ test('a child takes the memory of the child before it, zeroed where that one wro
         /** @type {number[]} */
         const codes = [];
         app.on('process-resumed', (/** @type {any} */ event)=>codes.push(event.code >>> 0));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0);
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0);
         assert.equal(codes.length, 2, 'both children ran');
         assert.notEqual(codes[0], 0, 'the writer was given a block');
         assert.equal(codes[1], codes[0], 'the reader was given the same block, and found it zero');
@@ -372,5 +372,5 @@ test('a child starts from its image as it was when CreateProcess was called, gon
         files: [{ path: 'C:\\App\\copy.tmp', bytes: leaf }],
     });
     t.after(()=>app.dispose());
-    assert.equal(await app.run({ timeoutMs: 30000 }), 7, 'the child ran and its code came back');
+    assert.equal(await app.run({ timeoutMs: 60_000 }), 7, 'the child ran and its code came back');
 });

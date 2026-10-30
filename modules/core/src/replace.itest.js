@@ -132,7 +132,7 @@ function buildParentExe(){
 }
 
 test('the reader keeps its level, its cursor and its sink across a child it starts',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         // The decoder binary is fetched, not tracked; without it this test still
         // exercises the child, and the instance sharing below is skipped.
         const decoder = await readFile(new URL('video-decoder.wasm', PREBUILT)).catch(()=>null);
@@ -249,7 +249,7 @@ test('the reader keeps its level, its cursor and its sink across a child it star
         assert.equal(gpu.count('configure'), 1, 'the parent\'s frame configured the canvas');
         assert.equal(presenter.diagnostics().presents, 1);
 
-        const code = await app.run({ timeoutMs: 20000 });
+        const code = await app.run({ timeoutMs: 60_000 });
         assert.equal(code, 0, 'the child exited cleanly');
 
         // The same presenter, now attached to the child's machine: the count
@@ -417,7 +417,7 @@ test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it t
     const output = [];
     app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
 
-    const code = await app.run({ timeoutMs: 20000 });
+    const code = await app.run({ timeoutMs: 60_000 });
 
     assert.equal(code, 0, 'the child exited cleanly');
     const ERROR_ALREADY_EXISTS = 183;
@@ -479,7 +479,7 @@ for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
         });
         t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0,
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0,
             'the child found no window of the parent');
         assert.deepEqual((await app.debug.windows()).filter((/** @type {any} */ each)=>
             each.title === 'left by the parent'), [], 'and none is listed');

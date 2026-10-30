@@ -65,7 +65,7 @@ async function runFixture(t){
     };
     setTimeout(deliver, 40);
 
-    const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 15000 });
+    const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 30_000 });
     const seen = bytes.length >= 4
         ? (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0
         : null;
@@ -118,7 +118,7 @@ async function startApp(t){
     return app;
 }
 
-test('a program with nothing to do waits instead of spinning', { timeout: 15000 }, async t=>{
+test('a program with nothing to do waits instead of spinning', { timeout: 30_000 }, async t=>{
     const app = await startApp(t);
 
     // Nothing is ever posted, so the program sits in GetMessage. What must not

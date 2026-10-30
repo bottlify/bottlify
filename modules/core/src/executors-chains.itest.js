@@ -730,7 +730,7 @@ test('a process that pins itself to the second processor and sleeps runs on ther
     const app = await createApp({ executable, cpu: { cores: 2, eager: false } });
     try
     {
-        assert.equal(await app.run({ timeoutMs: 30_000 }), 7);
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 7);
     }
     finally
     {

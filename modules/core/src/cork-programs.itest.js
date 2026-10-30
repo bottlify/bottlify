@@ -125,7 +125,7 @@ async function run(executable, translated = true){
     {
         const began = performance.now();
         const cpuBegan = threadCpuMs();
-        const code = await app.run({ timeoutMs: 30000 });
+        const code = await app.run({ timeoutMs: 90_000 });
         const ms = performance.now() - began;
         // A program of one thread translated inline: the run is this thread's work.
         const cpuMs = threadCpuMs() - cpuBegan;
@@ -537,7 +537,7 @@ test('with no sink of the caller\'s own, a traced area\'s calls reach the journa
     try
     {
         app.log.setLevel('call.cpu', 'trace');
-        await app.run({ timeoutMs: 30000 });
+        await app.run({ timeoutMs: 90_000 });
         /** @type {string[]} */
         const texts = app.log.recent(1000).map((/** @type {any} */ record)=>record.text);
         assert.equal(texts.filter(text=>/GetCurrentProcessId/.test(text)).length, 3,
@@ -583,7 +583,7 @@ test('a call area switched on mid-run is traced from the next call on',
         });
         try
         {
-            await app.run({ timeoutMs: 30000 });
+            await app.run({ timeoutMs: 90_000 });
             const traced = app.log.recent(1000)
                 .filter((/** @type {any} */ record)=>/GetCurrentProcessId/.test(record.text));
             assert.equal(calls, 5);

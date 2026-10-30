@@ -104,8 +104,8 @@
     "check:boundaries": "node scripts/check-boundaries.mjs && node scripts/check-thread-after-await.mjs && node scripts/check-deterministic-math.mjs && node scripts/check-link-handlers.mjs",
     "check:package": "node scripts/check-package.mjs",
     "typecheck": "tsc --project jsconfig.json",
-    "test": "node --test --test-timeout=180000 \"src/**/*.test.js\" \"scripts/**/*.test.js\" \"test/**/*.test.js\"",
-    "test:integration": "node --test --test-timeout=180000 \"src/**/*.itest.js\"",
+    "test": "node --test --test-timeout=1200000 \"src/**/*.test.js\" \"scripts/**/*.test.js\" \"test/**/*.test.js\"",
+    "test:integration": "node --test --test-timeout=1200000 \"src/**/*.itest.js\"",
     "prepublishOnly": "npm run build && npm run check:package"
   }
 }

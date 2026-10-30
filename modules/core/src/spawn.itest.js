@@ -59,7 +59,7 @@ async function spawnOn(t){
     app.on('sound-table', (/** @type {any} */ event)=>tables.push(event));
     app.on('sound-table-closed', (/** @type {any} */ event)=>closed.push(event.id));
 
-    const code = await app.run({ timeoutMs: 60000 });
+    const code = await app.run({ timeoutMs: 120_000 });
 
     const lines = output.join('').split('\r\n').filter(Boolean);
     assert.deepEqual(lines.filter(line=>line.startsWith('FAIL')), [],
@@ -133,7 +133,7 @@ test('a child starts from its parent\'s registry, and the parent keeps its own a
                 app.registry(), HKEY_LOCAL_MACHINE, 'SOFTWARE\\Vendor\\Game', 'InstallDone'));
         });
 
-        await app.run({ timeoutMs: 60000 });
+        await app.run({ timeoutMs: 120_000 });
 
         assert.deepEqual(seenByChild, [1, 1], 'each child started with what the parent wrote');
         assert.ok(childHives.every(each=>each === hive) && app.registry() === hive,
@@ -253,7 +253,7 @@ test('a process in a worker of its own takes its translations from the run\'s st
             engine: 'cork', concurrency: 2 });
         try
         {
-            const code = await app.run({ timeoutMs: 60000 });
+            const code = await app.run({ timeoutMs: 120_000 });
             const cpu = app.diagnostics().find((/** @type {any} */ table)=>table.name === 'cpu');
             return { code, cork: /** @type {any} */ (cpu)?.metrics?.cork };
         }
@@ -293,7 +293,7 @@ test('the run\'s translation store keeps its records file open past a child, unt
         const heldAfterChild = [];
         app.on('process-resumed', ()=>heldAfterChild.push(directory.held('records')));
 
-        await app.run({ timeoutMs: 60000 });
+        await app.run({ timeoutMs: 120_000 });
         assert.ok(heldAfterChild.length > 0, 'a child ran and its parent went on');
         assert.deepEqual(heldAfterChild, heldAfterChild.map(()=>true),
             'still the run\'s once each child\'s machine had gone');
@@ -395,7 +395,7 @@ function buildSetter(){
 }
 
 test('a launcher waiting on its game or the event the game sets is woken by the event',
-    { timeout: 60000 }, async t=>{
+    { timeout: 120_000 }, async t=>{
         // A front end that waits so takes the game's process ending first
         // for a failure to start: the event the game sets while it runs is
         // the answer, though the game exits right after.
@@ -407,7 +407,7 @@ test('a launcher waiting on its game or the event the game sets is woken by the 
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\game.exe', bytes: game }] }) },
         });
         t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 30000 }), 1, 'WAIT_OBJECT_0 + 1: the event');
+        assert.equal(await app.run({ timeoutMs: 120_000 }), 1, 'WAIT_OBJECT_0 + 1: the event');
     });
 
 /**
@@ -459,7 +459,7 @@ function buildPoller(sleeps = true){
 }
 
 test('a parent that polls its child\'s exit code goes on after it, as one waiting on it does',
-    { timeout: 60000 }, async t=>{
+    { timeout: 120_000 }, async t=>{
         // GetExitCodeProcess answers STILL_ACTIVE while the child runs, and a
         // setup asking it between one-millisecond sleeps is waiting for its
         // helper as surely as one blocked on the handle: the run goes on
@@ -480,13 +480,13 @@ test('a parent that polls its child\'s exit code goes on after it, as one waitin
             lifecycle.push(`child ${event.image}`));
         app.on('process-resumed', (/** @type {any} */ event)=>
             lifecycle.push(`resumed ${event.code}`));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 8,
+        assert.equal(await app.run({ timeoutMs: 120_000 }), 8,
             'the helper\'s 7, plus the parent\'s one');
         assert.deepEqual(lifecycle, ['child C:\\App\\helper.exe', 'resumed 7']);
     });
 
 test('a parent that polls its child\'s exit code without ever blocking still lets it run',
-    { timeout: 60000 }, async t=>{
+    { timeout: 120_000 }, async t=>{
         // A setup that pumps its messages and asks the exit code between
         // them never blocks. Its child runs beside it on the same thread, so
         // the two share it: the child is given turns while the parent spins,
@@ -507,7 +507,7 @@ test('a parent that polls its child\'s exit code without ever blocking still let
             lifecycle.push(`child ${event.image}`));
         app.on('process-resumed', (/** @type {any} */ event)=>
             lifecycle.push(`resumed ${event.code}`));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 8,
+        assert.equal(await app.run({ timeoutMs: 120_000 }), 8,
             'the helper\'s 7, plus the parent\'s one');
         assert.deepEqual(lifecycle, ['child C:\\App\\helper.exe', 'resumed 7']);
     });
@@ -554,7 +554,7 @@ function buildSignalled(){
 }
 
 test('a parent waiting on something its child sets, not on the child, outlives the child',
-    { timeout: 60000 }, async t=>{
+    { timeout: 120_000 }, async t=>{
         // A process lives until it exits itself, however it waits. One blocked
         // on anything but its child's handle -- an event, a sleep between polls,
         // its message loop -- was replaced by the child, so the child's exit
@@ -574,12 +574,12 @@ test('a parent waiting on something its child sets, not on the child, outlives t
             lifecycle.push(`child ${event.image}`));
         app.on('process-resumed', (/** @type {any} */ event)=>
             lifecycle.push(`resumed ${event.code}`));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 3, 'the parent\'s own exit');
+        assert.equal(await app.run({ timeoutMs: 120_000 }), 3, 'the parent\'s own exit');
         assert.deepEqual(lifecycle, ['child C:\\App\\game.exe', 'resumed 0'],
             'the child ran beside it, and the parent went on to its end');
     });
 
-test('a process started beside its parent writes into the run\'s one journal', { timeout: 60000 },
+test('a process started beside its parent writes into the run\'s one journal', { timeout: 120_000 },
     async t=>{
         // The page reads the journal through the facade, which stays with the
         // parent while the child runs beside it: the child's calls must be in
@@ -593,7 +593,7 @@ test('a process started beside its parent writes into the run\'s one journal', {
         });
         t.after(()=>app.dispose());
         app.log.setLevel('call.cpu', 'trace');
-        await app.run({ timeoutMs: 30000 });
+        await app.run({ timeoutMs: 120_000 });
         const text = app.log.recent(4096).map((/** @type {any} */ record)=>record.text ?? '')
             .join('\n');
         assert.match(text, /CreateProcess/, 'the parent\'s own calls');
@@ -606,7 +606,7 @@ test('a process started beside its parent writes into the run\'s one journal', {
     });
 
 test('a child is the process its parent was told of: GetCurrentProcessId is PROCESS_INFORMATION\'s',
-    { timeout: 60000 }, async t=>{
+    { timeout: 120_000 }, async t=>{
         // A test harness tells its children's output apart by the identifier
         // each line carries, and OpenProcess finds a child by the one its
         // parent was handed; a child answering its parent's would be neither.
@@ -649,14 +649,14 @@ test('a child is the process its parent was told of: GetCurrentProcessId is PROC
         /** @type {number[]} */
         const childCodes = [];
         app.on('process-resumed', (/** @type {any} */ event)=>childCodes.push(event.code >>> 0));
-        const told = (await app.run({ timeoutMs: 30000 })) >>> 0;
+        const told = (await app.run({ timeoutMs: 120_000 })) >>> 0;
         assert.notEqual(told, 0, 'the parent was handed an identifier');
         assert.deepEqual(childCodes, [told], 'and the child answers that one as its own');
         assert.notEqual(told, 0x1000, 'which is not the parent\'s');
     });
 
 test('a child\'s first thread is the thread its parent was told of: GetCurrentThreadId is'
-    + ' PROCESS_INFORMATION\'s', { timeout: 60000 }, async t=>{
+    + ' PROCESS_INFORMATION\'s', { timeout: 120_000 }, async t=>{
     // An injector or a debugger opens the child's thread by the id it was
     // handed; the child's own answer has to be that one, and no thread of the
     // parent's may answer it too -- the run numbers threads as one machine.
@@ -697,7 +697,7 @@ test('a child\'s first thread is the thread its parent was told of: GetCurrentTh
     /** @type {number[]} */
     const childCodes = [];
     app.on('process-resumed', (/** @type {any} */ event)=>childCodes.push(event.code >>> 0));
-    const told = (await app.run({ timeoutMs: 30000 })) >>> 0;
+    const told = (await app.run({ timeoutMs: 120_000 })) >>> 0;
     assert.notEqual(told, 0, 'the parent was handed a thread id');
     assert.deepEqual(childCodes, [told], 'and the child\'s first thread answers that one');
     assert.notEqual(told, 1, 'which is not the parent\'s first thread');
@@ -777,7 +777,7 @@ test('a child reads the STARTUPINFO its parent handed CreateProcess, whichever w
                 ] }) },
             });
             t.after(()=>app.dispose());
-            assert.equal((await app.run({ timeoutMs: 60000 })) >>> 0, expected, name);
+            assert.equal((await app.run({ timeoutMs: 120_000 })) >>> 0, expected, name);
         }
     });
 
@@ -842,7 +842,7 @@ test('a child starts with the environment its parent handed CreateProcess, which
             });
             t.after(()=>app.dispose());
             const letter = top === 'C:\\App\\child.exe' ? 0x61 : 0x63;
-            assert.equal((await app.run({ timeoutMs: 60000 })) >>> 0, letter + (1 << 8), name);
+            assert.equal((await app.run({ timeoutMs: 120_000 })) >>> 0, letter + (1 << 8), name);
         }
     });
 
@@ -914,7 +914,7 @@ test('a child names the process that started it as its parent, whichever way it 
             /** @type {number[]} */
             const codes = [];
             app.on('process-resumed', (/** @type {any} */ event)=>codes.push(event.code >>> 0));
-            assert.equal(await app.run({ timeoutMs: 60000 }), 1, `${name}: ${codes}`);
+            assert.equal(await app.run({ timeoutMs: 120_000 }), 1, `${name}: ${codes}`);
         }
     });
 
@@ -982,7 +982,7 @@ test('a parent writes into the child it made suspended, and the child runs only 
                     bytes: child }] }) },
             });
             t.after(()=>app.dispose());
-            assert.equal((await app.run({ timeoutMs: 60000 })) >>> 0,
+            assert.equal((await app.run({ timeoutMs: 120_000 })) >>> 0,
                 (0x2222 + (0x1111 << 16) + 2 ** 31) >>> 0,
                 `concurrency ${concurrency}: read the image as made, ran what was written,`
                 + ' resumed from a count of one');

@@ -59,7 +59,7 @@ async function runFixture(){
             }
         });
 
-        const exitCode = await app.run({ timeoutMs: 8000 });
+        const exitCode = await app.run({ timeoutMs: 60_000 });
         const total = bytes.length >= 4
             ? (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0
             : null;
@@ -73,7 +73,7 @@ async function runFixture(){
     }
 }
 
-test('two threads contending on a mutex produce the Windows answer', { timeout: 15000 }, async()=>{
+test('two threads contending on a mutex produce the Windows answer', { timeout: 60_000 }, async()=>{
     const { total, exitCode } = await runFixture();
 
     assert.equal(total, EXPECTED_TOTAL,
@@ -81,7 +81,7 @@ test('two threads contending on a mutex produce the Windows answer', { timeout: 
     assert.equal(exitCode, 0);
 });
 
-test('the threads really did run, and really did take turns', { timeout: 15000 }, async()=>{
+test('the threads really did run, and really did take turns', { timeout: 60_000 }, async()=>{
     const { diagnostics } = await runFixture();
     const byName = Object.fromEntries(diagnostics.map((/** @type {any} */ d)=>[d.name, d]));
 

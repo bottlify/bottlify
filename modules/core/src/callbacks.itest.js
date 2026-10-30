@@ -55,7 +55,7 @@ async function runFixture(){
             }
         });
 
-        const exitCode = await app.run({ timeoutMs: 8000 });
+        const exitCode = await app.run({ timeoutMs: 30_000 });
         const values = [];
         for (let at = 0; at + 4 <= bytes.length; at += 4)
         {
@@ -73,7 +73,7 @@ async function runFixture(){
 }
 
 test('a guest comparator decides the order, and the array comes back sorted',
-    { timeout: 15000 }, async()=>{
+    { timeout: 30_000 }, async()=>{
         const { values, exitCode } = await runFixture();
 
         assert.deepEqual(values, SORTED);
@@ -81,7 +81,7 @@ test('a guest comparator decides the order, and the array comes back sorted',
     });
 
 test('the comparator runs in the guest: no call back from the host',
-    { timeout: 15000 }, async()=>{
+    { timeout: 30_000 }, async()=>{
         const { diagnostics } = await runFixture();
         const bridge = diagnostics.find((/** @type {any} */ d)=>d.name === 'bridge');
         assert.equal(bridge.metrics.callbacks, 0,

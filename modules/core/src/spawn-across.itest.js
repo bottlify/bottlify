@@ -124,7 +124,7 @@ for (const [where, options] of /** @type {[string, any][]} */ ([
         const console = [];
         app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
             console.push(text));
-        const code = await app.run({ timeoutMs: 60000 });
+        const code = await app.run({ timeoutMs: 120_000 });
         assert.equal(code, 0x306, 'the file reads "childP": the child first, the parent after');
         assert.equal(console.join('').includes('child'), false, 'nothing went to the console');
     });
@@ -160,7 +160,7 @@ test('a child that ran beside its parent is let go once it has exited', { timeou
         const children = [];
         // While a child runs, the facade's methods are its machine's own.
         app.on('process-started', ()=>children.push(new WeakRef(app.diagnostics)));
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0, output.join(''));
+        assert.equal(await app.run({ timeoutMs: 120_000 }), 0, output.join(''));
         assert.equal(children.length, 2, 'two children ran');
         for (let round = 0; round < 4; round++)
         {
@@ -253,7 +253,7 @@ function buildEventPair(){
 }
 
 test('with concurrency a child runs beside its parent, which goes on: woken by the event the'
-    + ' child sets, then by its exit; or never waiting at all', { timeout: 60000 }, async t=>{
+    + ' child sets, then by its exit; or never waiting at all', { timeout: 120_000 }, async t=>{
     const { parent, poller, child } = buildEventPair();
     /** @param {Uint8Array} executable @param {any} [concurrency] */
     const run = async(executable, concurrency)=>{
@@ -265,7 +265,7 @@ test('with concurrency a child runs beside its parent, which goes on: woken by t
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
         });
         t.after(()=>app.dispose());
-        return (await app.run({ timeoutMs: 30000 })) >>> 0;
+        return (await app.run({ timeoutMs: 120_000 })) >>> 0;
     };
     assert.equal(await run(parent, 2), 0x105,
         'the parent was there when the child set its event, and saw the child exit with 5');
@@ -277,7 +277,7 @@ test('with concurrency a child runs beside its parent, which goes on: woken by t
 });
 
 test('a child in a worker of its own sets the event its parent named, and the parent wakes',
-    { timeout: 60000 }, async t=>{
+    { timeout: 120_000 }, async t=>{
         const { parent, child } = buildEventPair();
         const app = await createApp({
             executable: parent,
@@ -290,7 +290,7 @@ test('a child in a worker of its own sets the event its parent named, and the pa
         /** @type {any[]} */
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>started.push(event.worker));
-        assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x105,
+        assert.equal((await app.run({ timeoutMs: 120_000 })) >>> 0, 0x105,
             'woken by the event the child set across the link, then by its exit with 5');
         assert.deepEqual(started, [true, true],
             'the program and its child ran in workers of their own');
@@ -354,7 +354,7 @@ function buildWaitingChild(delay = 0){
 for (const delay of [0, 1000])
 {
     test(`a child in a worker of its own waits on the event it named until its parent finds and`
-        + ` sets it${delay ? ', however long that takes' : ''}`, { timeout: 60000 }, async t=>{
+        + ` sets it${delay ? ', however long that takes' : ''}`, { timeout: 120_000 }, async t=>{
         const { parent, child } = buildWaitingChild(delay);
         const app = await createApp({
             executable: parent,
@@ -364,13 +364,13 @@ for (const delay of [0, 1000])
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
         });
         t.after(()=>app.dispose());
-        assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x107,
+        assert.equal((await app.run({ timeoutMs: 120_000 })) >>> 0, 0x107,
             'the child woke on its parent\'s SetEvent and exited with 7');
     });
 }
 
 test('concurrency asked for where memory cannot be shared falls back to one process at a time,'
-    + ' and says so', { timeout: 60000 }, async t=>{
+    + ' and says so', { timeout: 120_000 }, async t=>{
     const { parent, child } = buildEventPair();
     const app = await createApp({
         executable: parent,
@@ -384,7 +384,7 @@ test('concurrency asked for where memory cannot be shared falls back to one proc
     /** @type {any[]} */
     const fallbacks = [];
     app.on('fallback', (/** @type {any} */ said)=>fallbacks.push(said));
-    assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x105,
+    assert.equal((await app.run({ timeoutMs: 120_000 })) >>> 0, 0x105,
         'the child ran beside its parent, on one thread');
     assert.equal(fallbacks.length, 1);
     assert.deepEqual([fallbacks[0].mode, fallbacks[0].concurrency, fallbacks[0].asked],

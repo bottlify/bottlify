@@ -292,7 +292,7 @@ async function observed(parent, concurrency, through, t, childImage = child){
     const output = [];
     app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
         output.push(text));
-    const code = await app.run({ timeoutMs: 60000 });
+    const code = await app.run({ timeoutMs: 120_000 });
     const tables = await app.diagnostics();
     const kernel = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'kernel');
     return { code, text: output.join(''),

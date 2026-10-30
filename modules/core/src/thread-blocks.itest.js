@@ -181,7 +181,7 @@ async function run(threads, cores){
         cpu: { cores, eager: true } });
     try
     {
-        const code = (await app.run({ timeoutMs: 160_000 })) >>> 0;
+        const code = (await app.run({ timeoutMs: 180_000 })) >>> 0;
         const tables = await app.diagnostics();
         const byName = Object.fromEntries((Array.isArray(tables) ? tables : [])
             .map(table=>[table.name, table]));

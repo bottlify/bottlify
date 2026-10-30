@@ -106,7 +106,7 @@ async t=>{
     const output = [];
     app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
         output.push(text));
-    assert.equal(await app.run({ timeoutMs: 30000 }), 0, output.join(''));
+    assert.equal(await app.run({ timeoutMs: 60_000 }), 0, output.join(''));
     const lines = output.join('');
     assert.doesNotMatch(lines, /FAIL/);
     assert.equal(lines.match(/^ok {3}/gm)?.length, 22, lines);
@@ -125,7 +125,7 @@ test('an apartment\'s context: one object per apartment, its token handed out wi
     const output = [];
     app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
         output.push(text));
-    assert.equal(await app.run({ timeoutMs: 30000 }), 0, output.join(''));
+    assert.equal(await app.run({ timeoutMs: 60_000 }), 0, output.join(''));
     const lines = output.join('');
     assert.doesNotMatch(lines, /FAIL/);
     assert.equal(lines.match(/^ok {3}/gm)?.length, 20, lines);

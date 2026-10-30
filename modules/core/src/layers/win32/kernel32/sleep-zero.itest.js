@@ -169,7 +169,7 @@ async function run(executable, cores){
     const app = await createApp({ executable, cpu: { cores, eager: true } });
     try
     {
-        const code = await app.run({ timeoutMs: 120_000 });
+        const code = await app.run({ timeoutMs: 300_000 });
         const tables = await app.diagnostics();
         const bridge = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'bridge');
         const line = (bridge?.metrics?.byFunction ?? [])

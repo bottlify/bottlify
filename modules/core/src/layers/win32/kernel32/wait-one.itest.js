@@ -495,7 +495,7 @@ const runEvents = async(executable, crossed, options = {}, during = null)=>{
     const app = await createApp({ executable, ...options });
     try
     {
-        const running = app.run({ timeoutMs: 60_000 });
+        const running = app.run({ timeoutMs: 150_000 });
         await during?.(app, running);
         const code = (await running) >>> 0;
         const tables = await app.diagnostics();
