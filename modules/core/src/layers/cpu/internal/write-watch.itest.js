@@ -373,7 +373,13 @@ test('a copy kept by what the watch takes while another executor stores is the m
             await new Promise(resolve=>setTimeout(resolve, 5));
         }
         assert.ok(((await remote.diagnostics())?.modules ?? 0) > 0, 'translated there');
-        for (let index = 0; index < 8; index++)
+        // Eight runs, and on until a look has fallen inside a slice that
+        // stored: whether one does is how the machine interleaves the two
+        // threads, and a busy one let none of eight do so (eight busy loops
+        // beside the suite). Every run is held to a copy with no stale page; a
+        // clock that never holds a page runs on to the test's timeout.
+        const heldOnce = ()=>held > 0;
+        for (let index = 0; index < 8 || !heldOnce(); index++)
         {
             assert.deepEqual(await run(WIDE - 3), [], `run ${index}: no page of the copy is stale`);
         }
