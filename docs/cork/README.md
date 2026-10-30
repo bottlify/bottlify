@@ -344,7 +344,7 @@ for (;;)
 await machine.dispose();
 ```
 
-`createMachine({ ramSize, config, trapPort })` gives memory, registers and `run`. `run` goes on
+`createMachine({ ramSize, config, trapPort, now })` gives memory, registers and `run`. `run` goes on
 until the program needs something from outside:
 
 | `stop.reason` | What happened | Where `eip` is |
@@ -357,6 +357,9 @@ until the program needs something from outside:
 | `limit` | `run({ maxInstructions })` ran out (translated code may go a little past) | where it stopped |
 
 `stop.retired` is how many instructions ran, `stop.translated` how many of them in translated code.
+The machine's clock is its program's, a millisecond a million instructions retired: what it
+translates (a page rewritten too often is left to the interpreter, `volatileWindowMs`) follows the
+program alone, not how busy the host is; `createMachine({ now })` gives it another.
 The machine also has `load`, `read`, `reg` and `setReg` (the eight general registers, `eip`,
 `eflags`), `memory` (the `WebAssembly.Memory`), `layout` (where each register is in it), `runtime`
 (the translator behind it), `diagnostics()` and `dispose()`. `regionModule({ code, at, entry })`
