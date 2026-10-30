@@ -27,7 +27,8 @@
  *                                  [--command-line STRING] [--args STRING] [--windows NAME]
  *                                  [--gpu sm1|sm2|sm3|sm4|host]
  *                                  [--file HOST=GUEST] [--save-files]
- *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
+ *                                  [--user-data-dir DIR] [--port N] [--store local] [--quota MB]
+ *                                  [--prefetch]
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
  *                                  [--watch SECONDS] [--press LABEL|LABEL... [--press-settle MS]]
@@ -316,6 +317,10 @@ function parse(argv){
         // in the browser profile named by `--user-data-dir`. Unset keeps the
         // old behaviour -- nothing durable, thrown away with the browser.
         store: argv.includes('--store') ? argv[argv.indexOf('--store') + 1] : null,
+        // `--quota MB`: the origin's storage quota as a browser on a small disk
+        // sets it (`Storage.overrideQuotaForOrigin`): a write past it is refused
+        // as it is there, though `estimate()` goes on saying the browser's own.
+        quotaMb: number('--quota', 0),
         // Fills the rest of the cache from the bundle in the background,
         // beyond whatever the run itself reads -- a fuller warm-up between
         // runs, at the cost of the bandwidth to do it.
@@ -1123,6 +1128,9 @@ function describe(result, context, calls, symbols){
     say(`  adapter: ${JSON.stringify(result.adapter)}`);
     say(`  ran for ${result.elapsedMs}ms, ${result.instructions} guest instructions`);
     say(`stopped: ${result.stopped ?? result.error ?? 'no answer'}`);
+    say(`  origin storage: ${typeof result.storage === 'object'
+        ? `${(result.storage.usage / 1048576).toFixed(1)} MB used of a quota of ${
+            (result.storage.quota / 1048576).toFixed(0)} MB` : result.storage ?? 'not measured'}`);
     if (result.answeredAfterMs !== undefined && result.elapsedMs !== undefined)
     {
         say(`  answered ${(result.answeredAfterMs / 1000).toFixed(1)} s after the start, the run`
@@ -1864,6 +1872,13 @@ export async function game(options){
         cdp = new CdpEndpoint(browser.browserWs);
         await cdp.open();
         const { sessionId } = await openPage(cdp, pageUrl);
+        // A page's session takes it, the browser's does not; the engine first
+        // writes once the page has a device, well after this.
+        if (options.quotaMb > 0)
+        {
+            await cdp.send('Storage.overrideQuotaForOrigin', { origin: `http://127.0.0.1:${
+                server.port}`, quotaSize: options.quotaMb * 1048576 }, sessionId);
+        }
         await cdp.send('Runtime.enable', {}, sessionId);
         await cdp.send('Page.enable', {}, sessionId);
 
@@ -2328,6 +2343,14 @@ export async function game(options){
         {
             result = await readResult(cdp, sessionId, options.waitMs + RESULT_GRACE_MS);
             result.answeredAfterMs = Date.now() - startedAt;
+            // What the origin holds once the run is over: the block cache, the
+            // translations, the session (`navigator.storage.estimate()`).
+            const estimate = await cdp.send('Runtime.evaluate', {
+                expression: 'navigator.storage.estimate().then(function(e){'
+                    + ' return JSON.stringify({ usage: e.usage, quota: e.quota }); })',
+                returnByValue: true, awaitPromise: true }, sessionId).catch(()=>null);
+            result.storage = estimate?.result?.value ? JSON.parse(estimate.result.value)
+                : 'not measured';
             if (options.graphicsCapture && result.graphicsCapture)
             {
                 const capture = result.graphicsCapture;

@@ -3171,7 +3171,7 @@ async function mountBundle({ options, events, translationStore }){
             // Inflated here, once, rather than on every read: this is the only
             // place a deflate block can be decoded at all, since the read side
             // is synchronous and the browser's inflate is not.
-            cache.put(block.index,
+            await cache.put(block.index,
                 bundle.block(block.index).codec === 1 ? await inflateRaw(raw) : raw);
         }
     };
@@ -3290,7 +3290,9 @@ async function mountBundle({ options, events, translationStore }){
         {
             while (true)
             {
-                if (stopped)
+                // A store that is full keeps no more: filling it would fetch
+                // the rest of the bundle into the heap and let it go again.
+                if (stopped || cache.diagnostics().full)
                 {
                     return false;
                 }
@@ -3410,11 +3412,22 @@ async function mountBundle({ options, events, translationStore }){
         let bytes = total - missing.reduce((sum, block)=>sum + block.packed, 0);
         progress({ bytes, total });
         await inParallel(groupBlocks(missing), MAX_CONCURRENT_REQUESTS, async group=>{
+            if (cache.diagnostics().full)
+            {
+                return;
+            }
             await fetchGroup(group);
             await cache.persist();
             bytes += group.blocks.reduce((sum, block)=>sum + block.packed, 0);
             progress({ bytes, total });
         });
+        // Past the origin's quota the rest is not kept: the game loads as it
+        // plays, which the page says in the words it has for that.
+        const full = cache.diagnostics().full;
+        if (full)
+        {
+            progress({ unbacked: full });
+        }
     };
     if (options.bundle.preload === true)
     {

@@ -9,10 +9,11 @@
  * (`navigator.storage.estimate()`, its quota, which each browser sets by the
  * system it runs on and the disk it has), less a share left for the run that
  * starts to write into. Past it, the caches go, the least recently written
- * first: a bundle's fetched blocks (`<name>.blocks`, `.present`, `.order` at
- * the root) and a bundle's translations (`cork/<name>.v<n>`). Both are made
- * again by the next run that needs them; a session -- the files a program
- * wrote, its saved games -- is never touched. Neither are the caches of the
+ * first: a bundle's fetched blocks (`<name>.held`, `.order` and its segments
+ * `.blocks.<k>` at the root, `cacheFiles` in `cache.js`) and a bundle's
+ * translations (`cork/<name>.v<n>`). Both are made again by the next run
+ * that needs them; a session -- the files a program wrote, its saved games --
+ * is never touched. Neither are the caches of the
  * run asking, nor those of a bundle a run in another tab holds the lock of.
  */
 
@@ -20,11 +21,12 @@
 export const STORAGE_SHARE = 0.8;
 
 /**
- * A bundle's block cache's files, by the name the cache gives them -- its data
- * in one `.blocks` file or in segments after it (`.blocks.<k>`), and the table
- * a reverted appended layout left beside some (`cache.js`), which goes with them.
+ * A bundle's block cache's files, by the name the cache gives them -- its
+ * bitmap (`.held`), its order and its segments (`.blocks.<k>`), and those of
+ * the layouts it replaced, which go with them: the one-file `.blocks` with its
+ * `.present` bitmap, and the reverted appended layout's `.slots` (`cache.js`).
  */
-const BLOCK_FILE = /^(.+)\.(blocks(?:\.[0-9A-Za-z]+)?|present|order|slots)$/;
+const BLOCK_FILE = /^(.+)\.(blocks(?:\.[0-9A-Za-z]+)?|held|present|order|slots)$/;
 
 /** A session's folder and its earlier one-file form (`opfsSession`). */
 const SESSION_ENTRY = /^(.+)\.(files|session)$/;
@@ -143,7 +145,10 @@ async function scanStorage(root){
     {
         out.push({ kind: 'blocks', name: base, bottle: base.replace(FINGERPRINT, ''), bytes,
             modified, remove: async()=>{
-                for (const file of files)
+                // The bitmap first: a removal cut short leaves segments nothing
+                // believes, never a bitmap naming blocks no longer there.
+                for (const file of files.sort((one, other)=>Number(other.endsWith('.held'))
+                    - Number(one.endsWith('.held'))))
                 {
                     await root.removeEntry(file);
                 }
