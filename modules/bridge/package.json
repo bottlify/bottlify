@@ -1,0 +1,17 @@
+{
+  "name": "@bottlify/bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MPL-2.0",
+  "description": "A Chrome extension that lets a Bottlify page talk to game platforms directly: Steam's connection managers and content servers, the session kept out of the page",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test --test-timeout=60000 \"src/**/*.test.js\" \"scripts/**/*.test.js\"",
+    "test:integration": "node --test --test-timeout=300000 \"src/**/*.itest.js\"",
+    "typecheck": "tsc -p jsconfig.json"
+  }
+}

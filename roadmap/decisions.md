@@ -625,6 +625,17 @@ answers as on the machines it was written for, the ones of its era. The file sys
 registry are not redirected (no `System32` to `SysWOW64`, no `Wow6432Node`, no
 `Program Files (x86)`). *2026-10-29.*
 
+**A65. A game platform's own servers are reached from the page only while the platform lets us,
+and its first request to stop is honoured for everyone at once.** The bridge extension
+(`modules/bridge`) carries a page's requests to a platform -- Steam's connection managers, which
+admit only their own and localhost origins, and its content servers, which send no CORS headers
+-- by rewriting their headers with one ruleset a platform. Each ruleset is switched by the site's
+own configuration (`config.json`'s `bridge`, `"steam": false`), read by the extension on every
+page of the site, so turning one off needs no new release of the extension and reaches every
+browser on its next page. On a platform's first request, by whatever channel, its ruleset is
+switched off and we cooperate fully -- no workaround, no appeal first; the server-side path a
+launcher already has stays its fallback. *2026-10-30.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

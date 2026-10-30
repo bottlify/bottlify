@@ -6,7 +6,7 @@
 
 export { connectCm, ANONYMOUS_INDIVIDUAL } from './connection.js';
 export { signInWithQr } from './auth.js';
-export { logOn, library, productInfo, steamIdOfToken } from './session.js';
+export { logOn, logOnAnonymously, library, productInfo, steamIdOfToken } from './session.js';
 export { encodeQr, qrToSvg } from './qr.js';
 export { parseText, parseBinary } from './keyvalues.js';
 export {

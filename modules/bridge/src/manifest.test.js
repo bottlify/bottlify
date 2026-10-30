@@ -1,0 +1,45 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { manifestFor } from './manifest.js';
+
+test('the public build reaches Bottlify\'s own sites and the platforms, nothing local', ()=>{
+    const manifest = manifestFor('public', '1.2.3');
+    const pages = ['https://bottlify.app/*', 'https://play.bottlify.app/*'];
+    assert.deepEqual(manifest.content_scripts[0].matches, pages);
+    assert.deepEqual(manifest.web_accessible_resources[0].matches, pages);
+    assert.doesNotMatch(JSON.stringify(manifest), /localhost|127\.0\.0\.1/);
+    assert.equal(manifest.version, '1.2.3');
+});
+
+test('the dev build adds local pages, to the permissions too', ()=>{
+    const manifest = manifestFor('dev', '1.2.3');
+    for (const page of ['*://*.localhost/*', 'http://127.0.0.1/*'])
+    {
+        assert.ok(manifest.content_scripts[0].matches.includes(page));
+        // A page the extension may not reach is a page the rules leave alone.
+        assert.ok(manifest.host_permissions.includes(page));
+    }
+});
+
+test('every page is a host permission, and the CM socket is listed as wss', ()=>{
+    for (const build of /** @type {const} */ (['public', 'dev']))
+    {
+        const manifest = manifestFor(build, '1.0.0');
+        for (const page of manifest.content_scripts[0].matches)
+        {
+            assert.ok(manifest.host_permissions.includes(page), page);
+        }
+        assert.ok(manifest.host_permissions.includes('wss://*.steamserver.net/*'));
+        for (const ruleset of manifest.declarative_net_request.rule_resources)
+        {
+            assert.ok(existsSync(new URL(`../${ruleset.path}`, import.meta.url)), ruleset.path);
+        }
+    }
+});

@@ -272,6 +272,6 @@ export async function shutdown(handle){
             { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
     catch (e){
-        console.error(`left ${handle.profileRoot} behind: ${e.message}`);
+        console.error(`left ${handle.profileRoot} behind: ${/** @type {Error} */ (e).message}`);
     }
 }
