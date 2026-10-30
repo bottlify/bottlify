@@ -177,6 +177,7 @@ ones need the graphics worker.
 | `maxDraws(n)` | keeps the first n draws of every frame (-1 all): bisects which draw paints a region |
 | `skipTexture('t12,t40')` | drops every draw sampling those textures (names as a dump gives them) |
 | `skipShader('vs12,ps40')` | drops every draw made with those shaders |
+| `srgb(false)` | reads and writes every texel as stored, D3DSAMP_SRGBTEXTURE and D3DRS_SRGBWRITEENABLE ignored; `srgb()` back |
 | `stageLimit(n)` | keeps the first n texture stages of fixed-function draws |
 | `textureStats('t642')` | adds to each dump what that texture's top level holds in guest memory |
 | `occlusion(mode)` | how occlusion counts are answered from now on ('' as measured) |

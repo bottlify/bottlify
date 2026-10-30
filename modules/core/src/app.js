@@ -9398,6 +9398,20 @@ export function liveDumpOf(worker, control){
             worker.postMessage({ type: 'debug', dumpDigits: digits });
             return digits;
         },
+        /**
+         * Does sRGB reads and writes (D3DSAMP_SRGBTEXTURE, D3DRS_SRGBWRITEENABLE),
+         * or with false reads and writes every texel as stored from the next draw.
+         *
+         * @param {boolean} [on]
+         */
+        srgb: (on = true)=>{
+            if (!worker)
+            {
+                throw new Error('srgb: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', srgb: on });
+            return on;
+        },
         skipShader: (ids = '')=>{
             if (!worker)
             {
