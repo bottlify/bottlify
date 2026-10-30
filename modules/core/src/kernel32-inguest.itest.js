@@ -226,6 +226,7 @@ function buildTlsExe(){
             const worker = context.code(0x300);
             /** cmp eax, value; jne fail @param {number} value */
             const expect = value=>[[0x3d, ...u32(value)], { jump: JNE, to: 'fail' }];
+            const slotOf = [0x64, 0x8b, 0x04, 0x85, ...u32(0xe10)];     // mov eax, fs:[0xe10+eax*4]
             /** @param {number} code */
             const errorIs = code=>[call('GetLastError'), ...expect(code)];
             const main = assemble([
@@ -236,10 +237,9 @@ function buildTlsExe(){
                 check(3), ...errorIs(5),
                 check(4), pushFrom('index'), call('TlsGetValue'), ...expect(0x1234),
                 check(5), ...errorIs(0),
-                // __declspec(thread) as the compiler reads it.
-                check(6), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],             // mov ecx, fs:[0x2c]
-                [0xa1, ...u32(context.at('index'))],                     // mov eax, [index]
-                [0x8b, 0x04, 0x81], ...expect(0x1234),                   // mov eax, [ecx+eax*4]
+                // TlsSlots in the thread's block, where a program may read them.
+                check(6), [0xa1, ...u32(context.at('index'))],          // mov eax, [index]
+                slotOf, ...expect(0x1234),
                 spawn(worker, 'handles', 0),
                 [0x6a, 0xff], pushFrom('handles'), call('WaitForSingleObject'),
                 check(7), compare('seen', 0), { jump: JNE, to: 'fail' },
@@ -260,8 +260,7 @@ function buildTlsExe(){
                 check(14), pushValue(1), pushValue(5000), call('TlsSetValue'), ...expect(0),
                 check(15), ...errorIs(ERROR_INVALID_PARAMETER),
                 check(16), pushFrom('index'), call('TlsFree'), ...expect(1),
-                check(17), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],
-                [0xa1, ...u32(context.at('index'))], [0x8b, 0x04, 0x81], ...expect(0),
+                check(17), [0xa1, ...u32(context.at('index'))], slotOf, ...expect(0),
                 // A freed slot is still written, as on Windows, and its next
                 // owner reads zero all the same.
                 check(18), pushValue(0x4321), pushFrom('index'), call('TlsSetValue'), ...expect(1),
@@ -269,8 +268,7 @@ function buildTlsExe(){
                 [0x3b, 0x05, ...u32(context.at('index'))],               // cmp eax, [index]
                 { jump: JNE, to: 'fail' },
                 check(20), pushFrom('index'), call('TlsGetValue'), ...expect(0),
-                check(21), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],
-                [0xa1, ...u32(context.at('index'))], [0x8b, 0x04, 0x81], ...expect(0),
+                check(21), [0xa1, ...u32(context.at('index'))], slotOf, ...expect(0),
                 exit(),
                 ...fail(),
             ]);

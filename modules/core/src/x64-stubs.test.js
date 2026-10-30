@@ -34,6 +34,8 @@ const RDI = 7;
 const R8 = 8;
 const R9 = 9;
 const MASK64 = (1n << 64n) - 1n;
+/** The decoder's number for GS, a memory operand's `segment`. */
+const SEGMENT_GS = 5;
 
 /**
  * A routine the stepped code calls, answered here: what it saw on entry,
@@ -87,12 +89,15 @@ class Memory {
  * @param {bigint[]} options.r  sixteen registers, changed in place
  * @param {Map<number, Routine>} options.routines
  * @param {Set<number>} options.stops
+ * @param {number} [options.gsBase]  where GS points: the thread's block
  * @returns {number} where it stopped
  */
-function step({ memory, rip, r, routines, stops }){
+function step({ memory, rip, r, routines, stops, gsBase = 0 }){
     let zero = false;
     /** @param {any} operand */
-    const address = operand=>Number(r[operand.base] + BigInt(operand.disp ?? 0));
+    const address = operand=>Number((operand.base >= 0 ? r[operand.base] : 0n)
+        + (operand.index >= 0 ? r[operand.index] * BigInt(operand.scale) : 0n)
+        + BigInt(operand.disp ?? 0) + BigInt(operand.segment === SEGMENT_GS ? gsBase : 0));
     /** @param {any} operand @returns {bigint} */
     const read = operand=>{
         if (operand.kind === 'reg')
@@ -209,12 +214,15 @@ test('a 64-bit process starts up in the x64 convention, and enters the program a
     const memory = new Memory();
     const at = 0x10000;
     const lock = { address: 0x600000, enter: 0x2000030, leave: 0x2000040 };
-    const tlsApi = { alloc: 0x2000010, set: 0x2000020 };
     const library = { name: 'one.dll', base: 0x3000000, entryPoint: 0x3001000,
-        tls: { indexAddress: 0x3002000, blockAddress: 0x500000, callbacks: [0x3001200] } };
+        tls: { index: 3, blockAddress: 0x500000, callbacks: [0x3001200] } };
     const { bytes, attached, tlsImages } = synthesiseProcessInit({
-        long: true, libraries: [library], entryPoint: 0x401234, tlsApi, loaderLock: lock,
+        long: true, libraries: [library], entryPoint: 0x401234, loaderLock: lock,
     });
+    // The thread's block, and the thread-local array it points at.
+    const teb = 0x700000;
+    const array = 0x710000;
+    memory.write(teb + 0x58, 8, BigInt(array));
     assert.deepEqual(attached, ['one.dll']);
     assert.equal(tlsImages, 1);
     memory.place(at, bytes);
@@ -235,28 +243,24 @@ test('a 64-bit process starts up in the x64 convention, and enters the program a
     const routines = new Map([
         [lock.enter, ({ rcx })=>(calls.push(`enter 0x${rcx.toString(16)}`), 0)],
         [lock.leave, ({ rcx })=>(calls.push(`leave 0x${rcx.toString(16)}`), 0)],
-        [tlsApi.alloc, ()=>(calls.push('TlsAlloc'), 5)],
-        [tlsApi.set, ({ rcx, rdx })=>(calls.push(`TlsSetValue ${rcx} 0x${rdx.toString(16)}`), 1)],
         [0x3001200, told('callback', 0)],
         [0x3001000, told('DllMain', 1)],
     ]);
     const r = registers();
     const start = 0x80008;
     r[RSP] = BigInt(start);
-    const stopped = step({ memory, rip: at, r, routines, stops: new Set([0x401234]) });
+    const stopped = step({ memory, rip: at, r, routines, stops: new Set([0x401234]), gsBase: teb });
 
     assert.equal(stopped, 0x401234, 'the program is entered last');
     assert.equal(Number(r[RSP]), start, 'with the stack as the thread began, as though there');
     assert.deepEqual(calls, [
         'enter 0x600000',
-        'TlsAlloc',
-        'TlsSetValue 5 0x500000',
         'callback 0x3000000 1 1',
         'DllMain 0x3000000 1 1',
         'leave 0x600000',
     ]);
-    assert.equal(Number(memory.read(library.tls.indexAddress, 4)), 5,
-        'the slot TlsAlloc gave is the image\'s index');
+    assert.equal(Number(memory.read(array + 3 * 8, 8)), 0x500000,
+        'the image\'s block is in the thread\'s array at the image\'s index');
 });
 
 test('a 64-bit thread tells the libraries of its start, then runs as it was made', ()=>{

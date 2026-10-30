@@ -50,6 +50,14 @@ export const DLL_PROCESS_DETACH = 0;
  */
 const LOADED_STATICALLY = 1;
 
+/**
+ * Where the thread block keeps the pointer to its thread-local array,
+ * ThreadLocalStoragePointer: FS:[0x2c] in a 32-bit process, GS:[0x58] in a
+ * 64-bit one. Fixed by the layout every program was compiled against.
+ */
+const TLS_POINTER = 0x2c;
+const TLS_POINTER_LONG = 0x58;
+
 /** @param {number} value */
 const u32 = value=>[
     value & 0xff,
@@ -60,7 +68,8 @@ const u32 = value=>[
 
 /**
  * @typedef {Object} TlsSetup
- * @property {number} indexAddress  The dword to write the slot number into.
+ * @property {number} index         The image's index in the thread-local array,
+ *                                  already in its _tls_index: the program's 0.
  * @property {number} blockAddress  This image's thread-local block, already filled.
  * @property {number[]} callbacks   Addresses to call, in order, before DllMain.
  */
@@ -72,10 +81,6 @@ const u32 = value=>[
  *        In dependency order. One with no entry point is skipped: a library
  *        without DllMain is ordinary, not an error.
  * @param {number} options.entryPoint  Where the program itself starts.
- * @param {{ alloc: number, set: number }} [options.tlsApi]
- *        Guest addresses of TlsAlloc and TlsSetValue. Required if any image
- *        carries thread-local storage; the slot has to come from the same pool
- *        the program's own calls draw on, and only the guest can ask for one.
  * @param {{ address: number, enter: number, leave: number }} [options.loaderLock]
  *        The loader lock -- a CRITICAL_SECTION, and the guest addresses of
  *        EnterCriticalSection and LeaveCriticalSection -- held from the first
@@ -88,10 +93,10 @@ const u32 = value=>[
  *        calls in x86-64 code and the x64 convention (`longProcessInit`).
  * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
  */
-export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLock, long = false }){
+export function synthesiseProcessInit({ libraries, entryPoint, loaderLock, long = false }){
     if (long)
     {
-        return longProcessInit({ libraries, entryPoint, tlsApi, loaderLock });
+        return longProcessInit({ libraries, entryPoint, loaderLock });
     }
     /** @type {number[]} */
     const code = [];
@@ -111,19 +116,15 @@ export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLoc
     for (const library of libraries)
     {
         // Thread-local storage first: a library's initialisers and its DllMain
-        // both expect to be able to reach it, and a runtime whose slot was
-        // never written reads slot zero -- a wrong answer rather than a
-        // missing one, and one that surfaces far from here.
-        if (library.tls && tlsApi)
+        // both expect to be able to reach it. The first thread's array holds
+        // the block at the image's index, which the image's _tls_index
+        // already names; a later thread is given its own copy as it is made.
+        if (library.tls)
         {
             code.push(
-                0xb8, ...u32(tlsApi.alloc), // mov eax, TlsAlloc
-                0xff, 0xd0, //                 call eax        -> eax = slot
-                0xa3, ...u32(library.tls.indexAddress), // mov [index], eax
-                0x68, ...u32(library.tls.blockAddress), // push block
-                0x50, //                                   push eax  (the slot)
-                0xb8, ...u32(tlsApi.set), // mov eax, TlsSetValue
-                0xff, 0xd0, //               call eax
+                0x64, 0xa1, ...u32(TLS_POINTER), // mov eax, fs:[0x2c]
+                // mov dword [eax+index*4], block
+                0xc7, 0x80, ...u32(library.tls.index * 4), ...u32(library.tls.blockAddress),
             );
             for (const callback of library.tls.callbacks)
             {
@@ -181,11 +182,10 @@ export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLoc
  * @param {{ base: number, entryPoint: number, name: string, tls?: TlsSetup }[]}
  *        options.libraries
  * @param {number} options.entryPoint
- * @param {{ alloc: number, set: number }} [options.tlsApi]
  * @param {{ address: number, enter: number, leave: number }} [options.loaderLock]
  * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
  */
-function longProcessInit({ libraries, entryPoint, tlsApi, loaderLock }){
+function longProcessInit({ libraries, entryPoint, loaderLock }){
     /** @type {number[]} */
     const code = [0x48, 0x83, 0xec, 0x28]; //  sub rsp, 40
     /** @type {string[]} */
@@ -211,15 +211,12 @@ function longProcessInit({ libraries, entryPoint, tlsApi, loaderLock }){
 
     for (const library of libraries)
     {
-        if (library.tls && tlsApi)
+        if (library.tls)
         {
             code.push(
-                ...call(tlsApi.alloc), //                    eax = slot
-                0xb9, ...u32(library.tls.indexAddress), //   mov ecx, index
-                0x89, 0x01, //                               mov [rcx], eax
-                0x89, 0xc1, //                               mov ecx, eax
-                0xba, ...u32(library.tls.blockAddress), //   mov edx, block
-                ...call(tlsApi.set),
+                0x65, 0x48, 0x8b, 0x04, 0x25, ...u32(TLS_POINTER_LONG), // mov rax, gs:[0x58]
+                0xba, ...u32(library.tls.blockAddress), //              mov edx, block
+                0x48, 0x89, 0x90, ...u32(library.tls.index * 8), //     mov [rax+index*8], rdx
             );
             for (const callback of library.tls.callbacks)
             {

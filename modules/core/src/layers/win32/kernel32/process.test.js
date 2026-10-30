@@ -640,15 +640,13 @@ test('freeing a slot zeroes it in the block of every thread', ()=>{
     // The guest-side TlsGetValue reads the block and has no generation to
     // compare against, so a freed slot has to read as zero everywhere at once.
     const host = fakeHost();
-    const blocks = { first: 0x1100, second: 0x1300 };
-    host.threads.first.tebAddress = 0x1000;
-    host.threads.second.tebAddress = 0x1200;
-    host.view.setUint32(0x1000 + TEB.TLS_POINTER, blocks.first, true);
-    host.view.setUint32(0x1200 + TEB.TLS_POINTER, blocks.second, true);
+    const blocks = { first: 0x100 + TEB.TLS_SLOTS, second: 0x300 + TEB.TLS_SLOTS };
+    host.threads.first.tebAddress = 0x100;
+    host.threads.second.tebAddress = 0x300;
     const fns = createProcessFunctions({
         ...host,
         allThreads: ()=>[host.threads.first, host.threads.second],
-        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB.TLS_SLOTS,
     });
     const slot = fns.TlsAlloc.handler();
     assert.equal(fns.TlsSetValue.handler([slot, 0x11]), 1);
@@ -661,22 +659,19 @@ test('freeing a slot zeroes it in the block of every thread', ()=>{
     assert.equal(host.view.getUint32(blocks.second + slot * 4, true), 0, 'and for the second');
 });
 
-test('a 64-bit thread\'s slots are quadwords, behind GS:[0x58], its last error at 0x68', ()=>{
-    // A thread-local variable is `mov rax, gs:[0x58]` and an index times eight:
-    // a slot four bytes wide puts every value but the first in another's high half.
+test('a 64-bit thread\'s slots are quadwords, at 0x1480 in its block, its last error at 0x68', ()=>{
+    // The guest-side routines read `gs:[0x1480+rcx*8]`: a slot four bytes wide
+    // puts every value but the first in another's high half.
     const host = fakeHost();
-    const blocks = { first: 0x1100, second: 0x1300 };
-    host.threads.first.tebAddress = 0x1000;
-    host.threads.second.tebAddress = 0x1200;
+    const blocks = { first: 0x100 + TEB64.TLS_SLOTS, second: 0x300 + TEB64.TLS_SLOTS };
+    host.threads.first.tebAddress = 0x100;
+    host.threads.second.tebAddress = 0x300;
     host.bytes.fill(0xcc, blocks.first, blocks.first + 0x100);
-    host.view.setUint32(0x1000 + TEB64.TLS_POINTER, blocks.first, true);
-    host.view.setUint32(0x1200 + TEB64.TLS_POINTER, blocks.second, true);
     const fns = createProcessFunctions({
         ...host,
         pointerSize: 8,
         allThreads: ()=>[host.threads.first, host.threads.second],
-        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB64.TLS_POINTER,
-            true),
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB64.TLS_SLOTS,
     });
     const slot = fns.TlsAlloc.handler();
     assert.equal(host.view.getBigUint64(blocks.first + slot * 8, true), 0n,
@@ -684,10 +679,10 @@ test('a 64-bit thread\'s slots are quadwords, behind GS:[0x58], its last error a
     assert.equal(fns.TlsSetValue.handler([slot, 0x0c001230]), 1);
     assert.equal(host.view.getBigUint64(blocks.first + slot * 8, true), 0x0c001230n);
     assert.equal(fns.TlsGetValue.handler([slot]), 0x0c001230);
-    assert.equal(host.view.getUint32(0x1000 + TEB64.LAST_ERROR, true), 0,
+    assert.equal(host.view.getUint32(0x100 + TEB64.LAST_ERROR, true), 0,
         'success clears the error, at the 64-bit block\'s offset');
     assert.equal(fns.TlsGetValue.handler([TLS_SLOTS]), 0);
-    assert.equal(host.view.getUint32(0x1000 + TEB64.LAST_ERROR, true), 87,
+    assert.equal(host.view.getUint32(0x100 + TEB64.LAST_ERROR, true), 87,
         'ERROR_INVALID_PARAMETER where GetLastError reads it');
     assert.equal(fns.TlsFree.handler([slot]), 1);
     assert.equal(host.view.getBigUint64(blocks.first + slot * 8, true), 0n);
@@ -702,24 +697,22 @@ test('GetTickCount64 answers the milliseconds whole, past the dword GetTickCount
 });
 
 test('a slot handed out again reads zero in every block, whatever was set in it while free', ()=>{
-    // The guest-side TlsSetValue writes a slot of the array without asking
+    // The guest-side TlsSetValue writes a slot of the block without asking
     // whether it is allocated, as Windows does, so between TlsFree and the
     // next TlsAlloc a thread can put a value back into the freed slot; the
     // slot's next owner must not find it.
     const host = fakeHost();
-    const blocks = { first: 0x1100, second: 0x1300 };
-    host.threads.first.tebAddress = 0x1000;
-    host.threads.second.tebAddress = 0x1200;
-    host.view.setUint32(0x1000 + TEB.TLS_POINTER, blocks.first, true);
-    host.view.setUint32(0x1200 + TEB.TLS_POINTER, blocks.second, true);
+    const blocks = { first: 0x100 + TEB.TLS_SLOTS, second: 0x300 + TEB.TLS_SLOTS };
+    host.threads.first.tebAddress = 0x100;
+    host.threads.second.tebAddress = 0x300;
     const fns = createProcessFunctions({
         ...host,
         allThreads: ()=>[host.threads.first, host.threads.second],
-        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB.TLS_SLOTS,
     });
     const slot = fns.TlsAlloc.handler();
     assert.equal(fns.TlsFree.handler([slot]), 1);
-    // As the guest-side routine writes them, in each thread's array.
+    // As the guest-side routine writes them, in each thread's block.
     host.view.setUint32(blocks.first + slot * 4, 0x1234, true);
     host.view.setUint32(blocks.second + slot * 4, 0x5678, true);
     assert.equal(fns.TlsAlloc.handler(), slot, 'the freed index is the one handed out');
@@ -732,12 +725,11 @@ test('a slot handed out again reads zero in every block, whatever was set in it 
 
 test('without a list of threads, a slot handed out again is zero in the caller\'s block', ()=>{
     const host = fakeHost();
-    const block = 0x1100;
-    host.threads.first.tebAddress = 0x1000;
-    host.view.setUint32(0x1000 + TEB.TLS_POINTER, block, true);
+    const block = 0x100 + TEB.TLS_SLOTS;
+    host.threads.first.tebAddress = 0x100;
     const fns = createProcessFunctions({
         ...host,
-        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB.TLS_SLOTS,
     });
     const slot = fns.TlsAlloc.handler();
     assert.equal(fns.TlsFree.handler([slot]), 1);
@@ -772,40 +764,38 @@ test('TlsSetValue in the guest writes the block and leaves the host the rest', (
     assert.deepEqual([...code.slice(4, 7)], [0x83, 0xf8, 64], 'cmp eax, 64');
     assert.equal(code[7], 0x73, 'jae');
     const slow = 9 + code[8];
-    assert.deepEqual([...code.slice(9, 16)], [0x64, 0x8b, 0x0d, TEB.TLS_POINTER, 0, 0, 0],
-        'mov ecx, fs:[0x2c]: the array the compiler reads');
-    assert.deepEqual([...code.slice(20, 23)], [0x89, 0x14, 0x81], 'mov [ecx+eax*4], edx');
+    assert.deepEqual([...code.slice(9, 13)], [0x8b, 0x54, 0x24, 0x08], 'mov edx, [esp+8]');
+    assert.deepEqual([...code.slice(13, 21)], [0x64, 0x89, 0x14, 0x85, 0x10, 0x0e, 0, 0],
+        'mov fs:[0xe10+eax*4], edx: TlsSlots, not the array behind fs:[0x2c]');
     assert.deepEqual([...code.slice(slow - 8, slow)], [0xb8, 1, 0, 0, 0, 0xc2, 0x08, 0x00],
         'TRUE, and both arguments popped');
     assert.equal(code[slow], 0xe9);
     assert.equal((at + slow + 5 + view.getInt32(slow + 1, true)) >>> 0, trap,
-        'past the array, the host');
+        'past the block\'s slots, the host');
     assert.equal(code.length, slow + 5);
     // Windows leaves the last error alone on a successful set; the get is
     // the one that clears it.
     assert.equal(code.join(',').includes([0x64, 0xc7, 0x05, TEB.LAST_ERROR].join(',')), false);
 });
 
-test('a slot in a thread\'s array has one record, which the guest and the host share', ()=>{
-    // The guest-side TlsSetValue writes the array and nothing else, so the
+test('a slot in a thread\'s block has one record, which the guest and the host share', ()=>{
+    // The guest-side TlsSetValue writes the block and nothing else, so the
     // host reads a slot there too; a value the host sets is the one the
-    // guest-side TlsGetValue and the compiler's fs:[0x2c] sequence read.
+    // guest-side TlsGetValue reads.
     const host = fakeHost();
-    const blocks = { first: 0x1100, second: 0x1300 };
-    host.threads.first.tebAddress = 0x1000;
-    host.threads.second.tebAddress = 0x1200;
-    host.view.setUint32(0x1000 + TEB.TLS_POINTER, blocks.first, true);
-    host.view.setUint32(0x1200 + TEB.TLS_POINTER, blocks.second, true);
+    const blocks = { first: 0x100 + TEB.TLS_SLOTS, second: 0x300 + TEB.TLS_SLOTS };
+    host.threads.first.tebAddress = 0x100;
+    host.threads.second.tebAddress = 0x300;
     const fns = createProcessFunctions({
         ...host,
-        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB.TLS_SLOTS,
     });
     const slot = fns.TlsAlloc.handler();
     host.view.setUint32(blocks.first + slot * 4, 0xabcd, true);   // as the guest writes it
     assert.equal(fns.TlsGetValue.handler([slot]), 0xabcd, 'what the guest set');
     assert.equal(fns.TlsSetValue.handler([slot, 0x5150]), 1);
     assert.equal(host.view.getUint32(blocks.first + slot * 4, true), 0x5150,
-        'what the host sets is in the array');
+        'what the host sets is in the block');
     host.run(host.threads.second);
     assert.equal(fns.TlsGetValue.handler([slot]), 0, 'and in no other thread\'s');
 });
