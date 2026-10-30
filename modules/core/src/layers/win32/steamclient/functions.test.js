@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { announceSteamClient, createSteamclientFunctions } from './functions.js';
+import { announceSteamClient, createSteamclientFunctions, steamClientDll } from './functions.js';
 import { INTERFACES } from './interfaces.js';
 import { createHive } from '../advapi32/registry.js';
 import { createRegistryService } from '../advapi32/registry-service.js';
@@ -15,7 +15,7 @@ const ACCOUNT = { steamId: '76561197960287930', accountName: 'someone', apps: [4
     appId: 620 };
 
 /** A guest of plain memory, and a Steam client over it whose placed methods are kept by address. */
-function fixture(account = /** @type {any} */ (ACCOUNT)){
+function fixture(account = /** @type {any} */ (ACCOUNT), pointerSize = 4){
     const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
     let next = 0x1000;
@@ -48,6 +48,7 @@ function fixture(account = /** @type {any} */ (ACCOUNT)){
         answerHigh: high=>highs.push(high),
         environment: ()=>null,
         account,
+        pointerSize: /** @type {4 | 8} */ (pointerSize),
     });
     /** @param {string} text */
     const put = text=>{
@@ -60,7 +61,7 @@ function fixture(account = /** @type {any} */ (ACCOUNT)){
     const method = (object, index)=>{
         const table = view.getUint32(object, true);
         return /** @type {{ name: string, fn: any }} */ (
-            placed.get(view.getUint32(table + index * 4, true)));
+            placed.get(view.getUint32(table + index * pointerSize, true)));
     };
     return { fns, view, put, method, highs };
 }
@@ -220,4 +221,45 @@ test('CheckFileSignature is an API call that completes, its result fetched by id
     assert.equal(call('IsAPICallCompleted', [0, 0, failed]), 0, 'no such call');
     assert.equal(view.getUint8(failed), 1);
     assert.equal(call('GetAPICallFailureReason', [0, 0]), 2, 'k_ESteamAPICallFailureInvalidHandle');
+});
+
+test('steamclient64.dll: eight-byte slots, eight-byte arguments in one slot, a wider message', ()=>{
+    // A 64-bit steam_api loads the library ActiveProcess names SteamClientDll64,
+    // calls through vtables of eight-byte slots, passes a CSteamID or an API
+    // call's handle whole in one register, and reads CallbackMsg_t with its
+    // data pointer eight bytes wide.
+    assert.equal(steamClientDll(8), 'steamclient64.dll');
+    assert.equal(steamClientDll(4), 'steamclient.dll');
+    const { fns, put, method, view } = fixture(ACCOUNT, 8);
+    const client = fns.CreateInterface.handler([put('SteamClient020'), 0]);
+    assert.equal(view.getUint32(client + 4, true), 0, 'the high half of the vtable pointer');
+    const user = method(client, 5).fn.handler([client, 1, 1, put('SteamUser021')]);
+    const slots = INTERFACES.SteamUser021.split(',');
+    const license = method(user, slots.findIndex(entry=>entry.startsWith('UserHasLicenseForApp:')));
+    assert.deepEqual(license.fn.quadwords, [1], 'the CSteamID after this');
+    assert.equal(license.fn.handler([user, 0x1234, 0x01100001, 620]), 0,
+        'k_EUserHasLicenseResultHasLicense');
+    assert.deepEqual(fns.Steam_GetAPICallResult.quadwords, [1],
+        'the handle of the call, after the pipe');
+
+    const stats = method(client, 13).fn.handler([client, 1, 1,
+        put('STEAMUSERSTATS_INTERFACE_VERSION012')]);
+    method(stats, 0).fn.handler([stats]);
+    const out = 0xb000;
+    assert.equal(fns.Steam_BGetCallback.handler([1, out, 0]), 1);
+    assert.equal(view.getInt32(out + 4, true), 1101);
+    assert.equal(view.getInt32(out + 16, true), 24, 'the size past the eight-byte pointer');
+    assert.equal(view.getBigUint64(view.getUint32(out + 8, true), true), 620n);
+});
+
+test('the eight-byte and floating-point arguments of a method are named for an x86-64 caller', ()=>{
+    // What the SDK's headers declare: SetStat(const char*, float) passes its
+    // float in XMM1, UserHasLicenseForApp(CSteamID, AppId_t) its ID whole.
+    const entry = (/** @type {string} */ version, /** @type {string} */ name)=>
+        INTERFACES[version].split(',').find(one=>one.startsWith(`${name}:`));
+    assert.equal(entry('SteamUser021', 'UserHasLicenseForApp'), 'UserHasLicenseForApp:12:i:0q');
+    // The int32 overload first, as the header declares the two.
+    assert.deepEqual(INTERFACES.STEAMUSERSTATS_INTERFACE_VERSION012.split(',')
+        .filter(one=>one.startsWith('SetStat:')), ['SetStat:8:i', 'SetStat:8:i:1f']);
+    assert.equal(entry('SteamUser021', 'GetSteamID'), 'GetSteamID:0:s8');
 });

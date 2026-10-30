@@ -590,7 +590,7 @@ export function createInterfaceCatalog(host){
             }
             if (bytes[0] === 0x4d && bytes[1] === 0x5a)
             {
-                const image = parsePe(bytes);
+                const image = parsePe(bytes, { wide: true });
                 const found = findResource(bytes, image, 'TYPELIB', index);
                 if (!found)
                 {

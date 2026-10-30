@@ -2286,6 +2286,8 @@ const LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE = 0x40;
 const LOAD_WITH_ALTERED_SEARCH_PATH = 0x8;
 const LOAD_AS_DATA = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
     | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE;
+/** LoadLibrary's error for a file that is no image for the process. */
+const ERROR_BAD_EXE_FORMAT = 193;
 /** A page: a view of a file is mapped in whole ones. */
 const PAGE_SIZE = 0x1000;
 
@@ -2714,6 +2716,9 @@ export function placeLibrary(image, { next, floor, limit, holder, claim }){
  * imports -- a delay-loaded one among them, which Windows resolves on its
  * first call from the same places and this loader binds at the start.
  *
+ * `options.bits` is the process's machine (32 when not given): a library of the
+ * other is refused, said with the reason, as Windows refuses to map it.
+ *
  * @param {any} options
  * @returns {Promise<any[]>}
  */
@@ -2721,6 +2726,7 @@ export async function mapShippedLibraries(options){
     const { executable, imagePath, filesystem, loader, blocks, events, isSystem,
         isKnownDll, byName, byBase } = options;
     const directory = imagePath.slice(0, imagePath.lastIndexOf('\\') + 1);
+    const bits = options.bits ?? 32;
     /**
      * Where the process's activation context puts a library, when it does:
      * the program's manifest names the assembly it is in.
@@ -2790,7 +2796,16 @@ export async function mapShippedLibraries(options){
     const mapped = [];
     for (const { name, file } of order)
     {
-        const image = parsePe(file);
+        let image;
+        try
+        {
+            image = parsePe(file, { bits });
+        }
+        catch (e){
+            events.emit('libraries-missing',
+                { names: [name], reason: /** @type {Error} */ (e).message });
+            continue;
+        }
         const place = placeLibrary(image, { next, floor: options.floor, limit: options.limit,
             holder: options.holder, claim: options.claim });
         if ('refused' in place)
@@ -2803,7 +2818,7 @@ export async function mapShippedLibraries(options){
             continue;
         }
         const base = place.base;
-        const record = loader.map(file, { base, name });
+        const record = loader.map(file, { base, name, bits });
         const { exports } = readExports(file, image);
 
         const addresses = new Map(exports
@@ -3870,6 +3885,8 @@ async function buildApp(options){
     // An x86-64 program (`roadmap/x64.md`): long mode on cork, one executor,
     // its image in the window below 4 GiB.
     const long = mainImage.bits === 64;
+    /** The machine every image mapped into the process must be (`parsePe`). */
+    const processBits = long ? 64 : 32;
     const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_START, heapBase: HEAP_BASE }
         = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage, mainImage.imageBase);
     /** The program's image lies in the heap's span, which gives that part up (`spaceAbove`). */
@@ -4412,7 +4429,7 @@ async function buildApp(options){
             noExecuteBelow: 0x10000,
             engine: options.engine ?? DEFAULT_ENGINE,
             executors: long ? 1 : options.executors ?? 1,
-            bits: long ? 64 : 32,
+            bits: processBits,
             eagerExecutors: options.cpu?.eager === true,
             // The threads holding the guest's memory bring JavaScriptCore's
             // collections forward (`gc-nudge.js`): by default there only.
@@ -4888,7 +4905,7 @@ async function buildApp(options){
         },
         win32: {
             // A 64-bit process's structures hold 8-byte pointers.
-            bits: long ? 64 : 32,
+            bits: processBits,
             // And the machine it runs on (`AppOptions.machine`).
             machine: long ? 'amd64' : options.machine ?? 'x86',
             // The Windows the machine is, and what the program says it knows,
@@ -5196,6 +5213,9 @@ async function buildApp(options){
                 /** @param {string} name */
                 /** @param {string} name @param {number} [flags] */
                 load: (name, flags)=>loadLibraryAtRuntime(name, flags),
+                /** @param {string} name */
+                loadError: name=>(badFormat.has(withLibraryExtension(name).toLowerCase()
+                    .replace(/\.dll$/, '')) ? ERROR_BAD_EXE_FORMAT : null),
                 /** @param {number} handle */
                 dataFile: handle=>dataFiles.get(handle >>> 0) ?? null,
                 /**
@@ -5901,6 +5921,14 @@ async function buildApp(options){
      * @type {Set<string>}
      */
     const absentLibraries = new Set();
+    /**
+     * Libraries whose last look found a file that is no image for this process
+     * (not a PE, or the other machine's): LoadLibrary's error is then
+     * ERROR_BAD_EXE_FORMAT rather than ERROR_MOD_NOT_FOUND.
+     *
+     * @type {Set<string>}
+     */
+    const badFormat = new Set();
     /** Where the next runtime library goes. Set once the shipped ones are placed. */
     let nextLibraryBase = 0;
 
@@ -6109,6 +6137,7 @@ async function buildApp(options){
         const asked = thread ?? kernel.currentThread();
         const unresolved = (flags & DONT_RESOLVE_DLL_REFERENCES) !== 0;
         const key = name.toLowerCase().replace(/\.dll$/, '');
+        badFormat.delete(key);
         if (isKnownDll(name) && /[\\/]/.test(name))
         {
             broughtCopies.set(moduleKeyOf(name), name);
@@ -6187,16 +6216,18 @@ async function buildApp(options){
                     let image;
                     try
                     {
-                        image = parsePe(file);
+                        image = parsePe(file, { bits: processBits });
                     }
                     catch (e){
                         // A file that is not an image -- a program does load
-                        // one, by mistake or to find out -- is a library it
-                        // cannot have, not a fault in the machine: the load
-                        // fails and the program is told, as Windows tells it.
+                        // one, by mistake or to find out -- or one of the other
+                        // machine is a library it cannot have, not a fault in
+                        // the machine: the load fails with ERROR_BAD_EXE_FORMAT,
+                        // as Windows fails it.
                         events.emit('library-missing', {
                             name, path: wanted, reason: /** @type {Error} */ (e).message,
                         });
+                        badFormat.add(key);
                         return 0;
                     }
                     const place = placeLibrary(image, { next: nextLibraryBase, ...librarySpace });
@@ -6208,7 +6239,7 @@ async function buildApp(options){
                     }
 
                     const base = place.base;
-                    const mapped = loader.map(file, { base, name });
+                    const mapped = loader.map(file, { base, name, bits: processBits });
                     const { exports } = readExports(file, image);
                     const addresses = new Map(exports
                         .filter(entry=>entry.name !== null && entry.forwards === null)
@@ -6537,7 +6568,8 @@ async function buildApp(options){
             let image;
             try
             {
-                image = file ? parsePe(file) : null;
+                // Any machine: a library loaded for its data is never run.
+                image = file ? parsePe(file, { wide: true }) : null;
             }
             catch {
                 image = null;
@@ -6547,7 +6579,8 @@ async function buildApp(options){
                 events.emit('library-missing', { name, path: wanted, reason: 'not an image' });
                 return 0;
             }
-            const bytes = layout === 1 ? file : mapImage(file, image.imageBase).bytes;
+            const bytes = layout === 1 ? file
+                : mapImage(file, image.imageBase, { wide: true }).bytes;
             const size = Math.ceil(bytes.length / PAGE_SIZE) * PAGE_SIZE;
             const place = placeLibrary({ relocatable: true, imageBase: 0, sizeOfImage: size },
                 { next: nextLibraryBase, ...librarySpace });
@@ -6691,6 +6724,7 @@ async function buildApp(options){
     // because a library may import from the program that loads it.
     const shipped = await mapShippedLibraries({
         executable: options.executable,
+        bits: processBits,
         imagePath: options.imagePath ?? 'C:\\app.exe',
         filesystem, loader, blocks, events,
         isSystem: (/** @type {string} */ name)=>findModule(name) !== null,
@@ -6723,7 +6757,7 @@ async function buildApp(options){
         (highest, library)=>Math.max(highest, library.base + library.size), systemModulesEnd);
 
     const image = loader.load(options.executable, { resolveImport, missing: missingImport,
-        ...long ? { wide: true, base: mainImage.imageBase } : {} });
+        bits: processBits, ...long ? { base: mainImage.imageBase } : {} });
 
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
@@ -7002,7 +7036,8 @@ async function buildApp(options){
     // stub puts it in the first thread's array.
     let nextLocal = 0;
     const withTls = [mainModule, ...shipped].map(held=>{
-        const directory = held.file ? readTls(held.file, held.image ?? parsePe(held.file)) : null;
+        const directory = held.file
+            ? readTls(held.file, held.image ?? parsePe(held.file, { wide: true })) : null;
         if (!directory)
         {
             return held;
