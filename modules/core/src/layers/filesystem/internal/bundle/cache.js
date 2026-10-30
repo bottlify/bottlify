@@ -35,7 +35,7 @@
 import { createOpfsStore } from '../opfs-store.js';
 import { Codec, HEADER_SIZE, openBundle, withManifest } from './format.js';
 
-/** @typedef {{ read: Function, write: Function, truncate: Function, stat: Function, open: Function }} BlockStore */
+/** @typedef {{ read: Function, write: Function, truncate: Function, stat: Function, open: Function, remove: Function }} BlockStore */
 
 /**
  * Turns what a caller asked for into somewhere to put blocks.
