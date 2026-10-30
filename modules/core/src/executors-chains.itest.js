@@ -184,10 +184,16 @@ test('a thread started while the first still ran, left alone when the first wait
     const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
     const here = shared.hereRetired ?? 0;
     const total = here + (shared.elsewhereRetired ?? 0);
-    // Three hundred million instructions; a few milliseconds' worth elsewhere,
-    // not a chain of a quarter of a second, before it comes.
-    assert.ok(total >= LOOPS * 10 && here > total * 0.75,
-        `${here} of ${total} instructions on the process's own executor`);
+    assert.ok(total >= LOOPS * 10, `${total} instructions`);
+    // Three hundred million instructions: at most the one run elsewhere it was
+    // placed in as it started, ended by this executor calling it back, and the
+    // rest here -- not a chain of runs there. How far that run got before the
+    // call back is the machine's to say: a busy one keeps this thread off its
+    // core while the other runs on.
+    const recalled = JSON.parse(scheduler?.recalls ?? '{}')['thread-2']?.recalled ?? 0;
+    assert.ok(scheduler?.executorSlices <= 1 && recalled === scheduler?.executorSlices,
+        `${scheduler?.executorSlices} runs on the other executor, ${recalled} called back;`
+        + ` ${here} of ${total} instructions here`);
 });
 
 test('a program of one thread on a machine of four opens no executor past the process\'s own',
