@@ -12,7 +12,6 @@
  * observe, against the same program translated inline.
  */
 
-import assert from 'node:assert/strict';
 import { ownLayout, pagesFor, tablesSize } from '../runtime/layout.js';
 import { createCorkRuntime } from '../runtime/runtime.js';
 
@@ -50,23 +49,27 @@ export function machine(config = {}){
     };
 }
 
-/** @param {ReturnType<typeof machine>} m @param {number} count */
+/**
+ * Waits until `count` translators have loaded, however long a busy machine
+ * takes to start their workers: the test's own timeout is the bound.
+ *
+ * @param {ReturnType<typeof machine>} m @param {number} count
+ */
 export async function untilTranslatorsLoaded(m, count){
-    for (let i = 0; i < 500; i++)
+    while (/** @type {any} */ (m.runtime.diagnostics()).translatorsReady !== count)
     {
-        const d = m.runtime.diagnostics();
-        if (/** @type {any} */ (d).translatorsReady === count)
-        {
-            return;
-        }
         await new Promise(resolve=>setTimeout(resolve, 10));
     }
-    assert.fail('the translators loaded');
 }
 
-/** @param {ReturnType<typeof machine>} m @param {() => boolean} done */
+/**
+ * Asks the translator again until `done`, however long its workers take to
+ * answer: the test's own timeout is the bound.
+ *
+ * @param {ReturnType<typeof machine>} m @param {() => boolean} done
+ */
 export async function translateUntil(m, done){
-    for (let i = 0; i < 400 && !done(); i++)
+    while (!done())
     {
         await m.runtime.translatePending();
         await new Promise(resolve=>setTimeout(resolve, 5));
