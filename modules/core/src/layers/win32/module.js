@@ -4324,6 +4324,15 @@ export function createWin32Module(){
                 libraries: ()=>libraries,
 
                 /**
+                 * The process's variables as they are now, as SetEnvironmentVariable
+                 * left them: what the loader reads PATH from.
+                 *
+                 * @returns {Record<string, string>}
+                 */
+                environment: ()=>/** @type {any} */ (libraries['KERNEL32.dll'])?.[ENVIRONMENT_NOW]?.()
+                    ?? {},
+
+                /**
                  * The names Windows always maps out of the system directory.
                  *
                  * Whoever assembles the process needs this to decide whether a

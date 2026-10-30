@@ -15,6 +15,7 @@ import {
     createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden,
     withReadAhead, withWindow, refetchedIn, windowFor, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES,
     resolveLibraryPath, startDirectoryOf, libraryCandidates, withLibraryExtension, timedWait,
+    pathDirectories,
     pagePacing,
     PAGE_YIELD_MS,
     PENDING_YIELD_MS,
@@ -553,6 +554,21 @@ test('a bare name is looked for beside the executable, then where the system kee
     // wins, the system's is the engine's.
     assert.deepEqual(libraryCandidates('d3dx9_24.dll', IMAGE, undefined, { ours: true }),
         ['C:\\App\\d3dx9_24.dll']);
+});
+
+test('a library loaded with an altered search finds its imports beside it, then on PATH', ()=>{
+    // LOAD_WITH_ALTERED_SEARCH_PATH: the loaded library's directory replaces
+    // the program's for its own imports; the directories PATH names come last.
+    assert.deepEqual(libraryCandidates('tier0.dll', IMAGE, 'C:\\App', {
+        from: 'C:\\App\\bin\\', path: ['C:\\WINDOWS\\system32', 'C:\\App\\bin', 'D:\\Tools'],
+    }), [
+        'C:\\App\\bin\\tier0.dll', 'C:\\WINDOWS\\system32\\tier0.dll', 'C:\\WINDOWS\\tier0.dll',
+        'C:\\App\\tier0.dll', 'D:\\Tools\\tier0.dll',
+    ], 'each place once, case aside');
+    assert.deepEqual(pathDirectories(' C:\\WINDOWS;;"C:\\Program Files\\X";bin;D:/y '),
+        ['C:\\WINDOWS', 'C:\\Program Files\\X', 'D:/y'],
+        'quotes off, empty and relative entries out');
+    assert.deepEqual(pathDirectories(undefined), []);
 });
 
 test('a library name without an extension is looked for as a .dll', ()=>{

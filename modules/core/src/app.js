@@ -2052,10 +2052,14 @@ const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
  * -- the installed D3DX compiling an effect our D3DX is then asked to read --
  * is a format neither side shares.
  *
+ * `from` replaces the program's directory with a library's own, as
+ * LOAD_WITH_ALTERED_SEARCH_PATH has Windows search for that library's imports;
+ * `path` is the directories of the process's PATH, searched last.
+ *
  * @param {string} name
  * @param {string} imagePath
  * @param {string} [currentDirectory]
- * @param {{ ours?: boolean }} [how]
+ * @param {{ ours?: boolean, from?: string, path?: string[] }} [how]
  * @returns {string[]}
  */
 export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
@@ -2065,17 +2069,31 @@ export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
     {
         return [first];
     }
-    const places = [first,
+    /** @param {string} directory */
+    const inside = directory=>`${directory.replace(/[\\/]+$/, '')}\\${name}`;
+    const places = [how.from ? inside(how.from) : first,
         ...how.ours ? [] : SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
-    if (currentDirectory)
+    for (const directory of [currentDirectory, ...how.path ?? []])
     {
-        const inCurrent = `${currentDirectory.replace(/\\$/, '')}\\${name}`;
-        if (!places.some(place=>place.toLowerCase() === inCurrent.toLowerCase()))
+        const place = directory ? inside(directory) : null;
+        if (place && !places.some(known=>known.toLowerCase() === place.toLowerCase()))
         {
-            places.push(inCurrent);
+            places.push(place);
         }
     }
     return places;
+}
+
+/**
+ * The directories of a PATH value: separated by semicolons, quotes taken off,
+ * the empty ones and those not on a drive (a relative entry) left out.
+ *
+ * @param {string | undefined} value
+ * @returns {string[]}
+ */
+export function pathDirectories(value){
+    return (value ?? '').split(';').map(entry=>entry.trim().replace(/^"(.*)"$/, '$1'))
+        .filter(entry=>/^[a-z]:[\\/]/i.test(entry));
 }
 
 /**
@@ -2253,6 +2271,8 @@ const DONT_RESOLVE_DLL_REFERENCES = 0x1;
 const LOAD_LIBRARY_AS_DATAFILE = 0x2;
 const LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x20;
 const LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE = 0x40;
+/** A library named by its path has its imports looked for in its own directory first. */
+const LOAD_WITH_ALTERED_SEARCH_PATH = 0x8;
 const LOAD_AS_DATA = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
     | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE;
 /** A page: a view of a file is mapped in whole ones. */
@@ -6100,10 +6120,21 @@ async function buildApp(options){
         // looked for nowhere else.
         const redirected = searched && !/[\\/]/.test(name)
             ? activation?.redirect(name, activation.moduleContext(importer)) ?? null : null;
+        // The importer's directory, where it was loaded with
+        // LOAD_WITH_ALTERED_SEARCH_PATH (or brought in by one that was), and
+        // the directories PATH names now: a program that puts its own folder
+        // of libraries on PATH and loads one of them by its path has that
+        // library's imports found there.
+        const importing = importer ? byBase.get(importer) : null;
+        const pathValue = Object.entries(win32.environment?.() ?? {})
+            .find(([variable])=>variable.toUpperCase() === 'PATH')?.[1];
         const candidates = !searched ? []
             : redirected ? (redirected.source === null ? [] : [redirected.source])
                 : libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-                    filesystem.currentDirectory(), { ours: loaded !== null });
+                    filesystem.currentDirectory(), {
+                        ours: loaded !== null, from: importing?.searchFrom,
+                        path: pathDirectories(pathValue),
+                    });
         if (candidates.length > 0)
         {
             // Looked for before anything is awaited: a title probes for
@@ -6200,6 +6231,9 @@ async function buildApp(options){
                         file,
                         image,
                         path,
+                        searchFrom: (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0
+                            && /[\\/]/.test(name) ? path.slice(0, path.lastIndexOf('\\'))
+                            : importing?.searchFrom,
                     };
                     // Registered before its own imports are bound, so a library
                     // that imports back into itself -- or into one still being

@@ -90,6 +90,10 @@ export function defaultEnvironment(windows, folders, processors = 1, process = {
         APPDATA: folders.AppData,
         ...shared === null ? {} : { LOCALAPPDATA: folders['Local AppData'] },
         NUMBER_OF_PROCESSORS: String(processors),
+        // The system directories, the Windows directory and its Wbem, as a
+        // fresh install sets it; a program puts its own in front.
+        Path: [`${WINDOWS_DIRECTORY}\\system32`, WINDOWS_DIRECTORY,
+            `${WINDOWS_DIRECTORY}\\System32\\Wbem`].join(';'),
         PROCESSOR_ARCHITECTURE: process.long ? 'AMD64' : 'x86',
         ...process.wow64 ? { PROCESSOR_ARCHITEW6432: 'AMD64' } : {},
         PROCESSOR_IDENTIFIER: `${PROCESSOR_IDENTIFIER}, ${PROCESSOR.vendor}`,
