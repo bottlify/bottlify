@@ -753,9 +753,23 @@ export function listen(app, collected){
  *
  * @param {any} app
  * @param {{ keyTimes?: { code: string, atMs: number, holdMs?: number }[],
- *     clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[] }} request
+ *     clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[],
+ *     moveTimes?: { x: number, y: number, atMs: number }[],
+ *     pointer?: { x: number, y: number } | null }} request
  */
 export function scheduleKeyTimes(app, request){
+    for (const move of request.moveTimes ?? [])
+    {
+        setTimeout(()=>{
+            // A held pointer is put where it was moved to, frame after frame.
+            if (request.pointer)
+            {
+                request.pointer.x = move.x;
+                request.pointer.y = move.y;
+            }
+            app.input.send({ kind: 'pointerMove', x: move.x, y: move.y, dx: 0, dy: 0 });
+        }, move.atMs);
+    }
     for (const click of request.clickTimes ?? [])
     {
         setTimeout(()=>{
@@ -1456,7 +1470,7 @@ export function createHarness(canvas, how = {}){
      *           gpuProfile?: 'sm1' | 'sm2' | 'sm3' | 'sm4' | 'host',
      *           sidecarHooks?: { spec: any, source: string },
      *           logCategories?: Record<string, string>,
-     *           logCapacity?: number, logBytes?: number,
+     *           logCapacity?: number, logBytes?: number, journalLines?: number,
      *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
@@ -1467,6 +1481,7 @@ export function createHarness(canvas, how = {}){
      *           network?: { module: string, url: string, room: string },
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
      *           clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[],
+     *           moveTimes?: { x: number, y: number, atMs: number }[],
      *           files?: { path: string, base64: string }[],
      *           wholeFiles?: boolean,
      *           sampling?: boolean,
@@ -2133,7 +2148,7 @@ export function createHarness(canvas, how = {}){
         // The journal's tail, taken before the layer is disposed with the
         // rest of the machine: a category a run switched on has its last
         // records here and nowhere else once the run is over.
-        result.journal = app.log.recent(200);
+        result.journal = app.log.recent(request.journalLines ?? 200);
         result.missing = [...new Set(collected.missing)];
         result.output = collected.output;
         result.events = collected.events;

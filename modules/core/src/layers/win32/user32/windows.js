@@ -690,6 +690,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           What a program does on a message is decided in its procedure,
  *           and its calls into this library say what it asked, never what
  *           it was told.
+ * @property {(text: string) => void} [traceActivation]
+ *           Told each activation this layer decides: the window asked for,
+ *           the one active before, and whether its thread answers here --
+ *           what the messages it then sends cannot say when none is sent.
  * @property {(wndProc: number, message: DispatchedMessage, thread?: unknown) => number} dispatch
  *           Runs a window procedure. One line from being the bridge's callback.
  *           A caller that has awaited names the thread whose call it answers.
@@ -2387,6 +2391,9 @@ export function createWindowFunctions(host){
         const runBefore = directory.foreground?.() ?? 0;
         const focusBefore = focusWindow();
         active = record ? topLevelOf(record).hwnd : 0;
+        host.traceActivation?.(`hwnd=0x${(hwnd >>> 0).toString(16)} active=0x${active.toString(16)}`
+            + ` previous=0x${previous.toString(16)} focus=0x${focusBefore.toString(16)}`
+            + ` here=${active !== 0 && answeredHere(active, thread)}`);
         if (record)
         {
             rootOwnerOf(record).lastActivePopup = active;

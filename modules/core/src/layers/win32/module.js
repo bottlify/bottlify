@@ -3613,6 +3613,12 @@ export function createWin32Module(){
                             message.hwnd.toString(16), message.message.toString(16),
                             message.wParam.toString(16), message.lParam.toString(16));
                     },
+                    traceActivation: text=>{
+                        if (journal.enabled('input.activate', journal.Level.TRACE))
+                        {
+                            journal.write('trace', 'input.activate', '{0}', text);
+                        }
+                    },
                     dispatch: (wndProc, message, thread)=>bridge.callGuest({
                         entry: wndProc,
                         // The four arguments a window procedure declares, in

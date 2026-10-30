@@ -494,6 +494,18 @@ function parse(argv){
             const [x, y, atMs] = argv[index + 1].split(',').map(Number);
             return [{ x, y, atMs }];
         }),
+        // The pointer moved at a wall-clock moment and left there, as `x,y,ms`:
+        // a program that finds the control under the cursor once a frame sees
+        // it over a button before a click lands on it, as a person's mouse is.
+        // With `--pointer` the position held from then on is this one.
+        moveTimes: argv.flatMap((flag, index)=>{
+            if (flag !== '--move-at')
+            {
+                return [];
+            }
+            const [x, y, atMs] = argv[index + 1].split(',').map(Number);
+            return [{ x, y, atMs }];
+        }),
         // The buttons a wizard shows, pressed by label as each screen
         // settles, as `next >|install|finish`: the first label an enabled
         // button on the screen carries. An installer's pages come when its
@@ -651,6 +663,14 @@ function parse(argv){
         // The call areas a person's report is taken with, traced from the
         // first instruction: what tracing costs a run is part of what it measures.
         journalCalls: argv.includes('--journal-calls'),
+        // Journal categories on from the first instruction, each at its level
+        // (`input.message=trace,call.net=debug`), their records written out
+        // beside the report: what a program was told, where its calls say only
+        // what it asked.
+        journal: argv.includes('--journal')
+            ? Object.fromEntries(argv[argv.indexOf('--journal') + 1].split(',')
+                .map(spec=>spec.split('=')).map(([name, level])=>[name, level ?? 'trace']))
+            : null,
         // The engine in a worker, with the page's canvas transferred to it;
         // otherwise on the page's own thread.
         worker: argv.includes('--worker'),
@@ -1909,6 +1929,9 @@ export async function game(options){
             fakePipelineMs: options.fakePipelineMs,
             ...options.journalCalls ? { logCapacity: 100000, logCategories: {
                 'call.cpu': 'trace', 'call.gpu': 'trace', 'call.net': 'trace' } } : {},
+            ...options.journal ? { logCapacity: 1000000, logBytes: 256 * 2 ** 20,
+                journalLines: 1000000,
+                logCategories: options.journal } : {},
             log: Boolean(options.log),
             logLines: options.logLines,
             video: options.video,
@@ -1938,6 +1961,7 @@ export async function game(options){
             snapEvery: options.snapEvery,
             clicks: options.clicks,
             clickTimes: options.clickTimes,
+            moveTimes: options.moveTimes,
             presses: options.presses,
             pressSettleMs: options.pressSettleMs,
             keyTimes: options.keyTimes,
@@ -2471,6 +2495,14 @@ the run as it stands: ${path}`;
             writeFileSync(join(REPORTS_DIR, `game-${stamp}-frame.png`), toPng(result.frame.width,
                 result.frame.height, toBgra(Buffer.from(result.frameRgba, 'base64'))));
             delete result.frameRgba;
+        }
+        if (options.journal && Array.isArray(result.journal))
+        {
+            const file = join(REPORTS_DIR, `game-${stamp}-journal.txt`);
+            writeFileSync(file, result.journal.map((/** @type {any} */ record)=>
+                `${record.time.toFixed(1)} ${record.levelName} ${record.category} ${record.text}`)
+                .join(String.fromCharCode(10)));
+            console.log(`journal: ${file}`);
         }
 
         await drainLog();
