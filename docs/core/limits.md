@@ -48,10 +48,6 @@ differently raises a `divergence` event naming the API.
 - HeapLock and HeapUnlock check the handle and exclude nothing: other threads' heap calls go on
   meanwhile, each one whole, so a HeapWalk between them can meet a block another thread allocated
   or freed.
-- An image's thread-local slot is one of the first 64 that TlsAlloc hands out, the ones the
-  thread-local array holds; Windows keeps the images' slots apart from TlsAlloc's. A library
-  loaded at run time after the program has taken all 64 is refused (LoadLibrary answers NULL),
-  where Windows loads it.
 - A thread's environment block, its thread-local array and its copies of the images'
   thread-local blocks come from the arena the heap is carved from, and go back to it once the
   thread has ended and runs on no executor (checked when the next thread is made). With no room

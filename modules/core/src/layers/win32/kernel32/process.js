@@ -47,14 +47,14 @@ const TLS_OUT_OF_INDEXES = 0xffffffff;
 export const TLS_SLOTS = 1088;
 
 /**
- * How many of those live in the block a program can reach through FS.
+ * How many of those live in the thread's block, TlsSlots (`TEB.TLS_SLOTS`),
+ * where the guest's own TlsGetValue and TlsSetValue reach them through FS; the
+ * rest are the host's, as Windows keeps them in an expansion block apart.
  *
- * The compiler does not call TlsGetValue. `__declspec(thread) x` becomes
- * `mov eax, _tls_index / mov ecx, fs:[0x2c] / mov eax, [ecx+eax*4]` -- it
- * reads the array directly. So a slot in this range has two readers, the API
- * and that sequence, and they have to see the same value; a slot above it has
- * only the API, which is why Windows keeps the rest in an expansion block
- * reached another way.
+ * They are not the array behind FS:[0x2c], which holds each image's
+ * thread-local block at the index the loader gave the image: a compiler's
+ * `__declspec(thread)` reads that one directly, and an image built to assume
+ * index 0 for the program's own reads `[fs:[0x2c]]` whatever TlsAlloc gave out.
  */
 const TLS_SLOTS_IN_BLOCK = 64;
 
@@ -336,8 +336,8 @@ export function setLastErrorCode(){
 }
 
 /**
- * TlsGetValue as guest code: a slot of the block's array, and success clears
- * the error, as the host does. An index past the array goes to the host,
+ * TlsGetValue as guest code: a slot of the block's TlsSlots, and success clears
+ * the error, as the host does. An index past them goes to the host,
  * which answers for it; a slot nobody allocated reads as whatever it holds,
  * as it does on Windows.
  *
@@ -345,14 +345,13 @@ export function setLastErrorCode(){
  * @param {number} trap  The host's TlsGetValue.
  */
 export function tlsGetValueCode(at, trap){
-    const slow = 33;
+    const slow = 31;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
         0x83, 0xf8, TLS_SLOTS_IN_BLOCK,                              // cmp eax, 64
         0x73, slow - 9,                                              // jae slow
         0x64, 0xc7, 0x05, ...dword(TEB.LAST_ERROR), ...dword(0),     // mov dword fs:[0x34], 0
-        0x64, 0x8b, 0x0d, ...dword(TEB.TLS_POINTER),                 // mov ecx, fs:[0x2c]
-        0x8b, 0x04, 0x81,                                            // mov eax, [ecx+eax*4]
+        0x64, 0x8b, 0x04, 0x85, ...dword(TEB.TLS_SLOTS),             // mov eax, fs:[0xe10+eax*4]
         0xc2, 0x04, 0x00,                                            // ret 4
         // slow:
         0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
@@ -361,26 +360,25 @@ export function tlsGetValueCode(at, trap){
 
 /**
  * TlsSetValue as guest code: the value into a slot of the block. An index past
- * the array goes to the host, which keeps the rest.
+ * its TlsSlots goes to the host, which keeps the rest.
  *
- * A slot in the array is written whether or not anybody allocated it, and
- * success leaves the last error alone, as on Windows: the array is the
+ * A slot in the block is written whether or not anybody allocated it, and
+ * success leaves the last error alone, as on Windows: the slots are the
  * thread's own, and what keeps a freed slot's old value -- or one set in it
  * while it was free -- from its next tenant is TlsFree and TlsAlloc clearing
- * that slot in every thread's array.
+ * that slot in every thread's block.
  *
  * @param {number} at    Where the code lands, for the jump to the trap.
  * @param {number} trap  The host's TlsSetValue.
  */
 export function tlsSetValueCode(at, trap){
-    const slow = 31;
+    const slow = 29;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
         0x83, 0xf8, TLS_SLOTS_IN_BLOCK,                              // cmp eax, 64
         0x73, slow - 9,                                              // jae slow
-        0x64, 0x8b, 0x0d, ...dword(TEB.TLS_POINTER),                 // mov ecx, fs:[0x2c]
         0x8b, 0x54, 0x24, 0x08,                                      // mov edx, [esp+8]
-        0x89, 0x14, 0x81,                                            // mov [ecx+eax*4], edx
+        0x64, 0x89, 0x14, 0x85, ...dword(TEB.TLS_SLOTS),             // mov fs:[0xe10+eax*4], edx
         0xb8, ...dword(1),                                           // mov eax, 1
         0xc2, 0x08, 0x00,                                            // ret 8
         // slow:
@@ -391,8 +389,8 @@ export function tlsSetValueCode(at, trap){
 /**
  * The same five at 64 bits, where a 64-bit process runs no i386: the fields of
  * the 64-bit block through GS, the argument in ECX (and the value in RDX), the
- * array's slots a quadword each. A routine that hands an index past the
- * block's array to the host jumps to its trap, whose rel32 is at `jump`.
+ * slots a quadword each. A routine that hands an index past the block's
+ * TlsSlots to the host jumps to its trap, whose rel32 is at `jump`.
  */
 const gs = (/** @type {number} */ offset)=>[0x04, 0x25, ...dword(offset)];
 
@@ -410,19 +408,18 @@ export const getCurrentThreadIdLongCode = ()=>Uint8Array.of(
 
 /**
  * TlsGetValue at 64 bits: the slot's quadword, the error cleared; past the
- * block's array, the host's.
+ * block's TlsSlots, the host's.
  *
  *     mov ecx, ecx; cmp ecx, 64; jae slow
- *     mov dword gs:[0x68], 0; mov rax, gs:[0x58]; mov rax, [rax+rcx*8]; ret
+ *     mov dword gs:[0x68], 0; mov rax, gs:[0x1480+rcx*8]; ret
  *     slow: jmp trap
  */
 export function tlsGetValueLongCode(){
-    const slow = 33;
+    const slow = 29;
     const code = Uint8Array.of(
         0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,
         0x65, 0xc7, ...gs(TEB64.LAST_ERROR), ...dword(0),
-        0x65, 0x48, 0x8b, ...gs(TEB64.TLS_POINTER),
-        0x48, 0x8b, 0x04, 0xc8,
+        0x65, 0x48, 0x8b, 0x04, 0xcd, ...dword(TEB64.TLS_SLOTS),
         0xc3,
         0xe9, ...dword(0));
     return { code, jump: slow + 1 };
@@ -430,18 +427,17 @@ export function tlsGetValueLongCode(){
 
 /**
  * TlsSetValue at 64 bits: the value into the slot, the error left alone; past
- * the block's array, the host's.
+ * the block's TlsSlots, the host's.
  *
  *     mov ecx, ecx; cmp ecx, 64; jae slow
- *     mov rax, gs:[0x58]; mov [rax+rcx*8], rdx; mov eax, 1; ret
+ *     mov gs:[0x1480+rcx*8], rdx; mov eax, 1; ret
  *     slow: jmp trap
  */
 export function tlsSetValueLongCode(){
-    const slow = 26;
+    const slow = 22;
     const code = Uint8Array.of(
         0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,
-        0x65, 0x48, 0x8b, ...gs(TEB64.TLS_POINTER),
-        0x48, 0x89, 0x14, 0xc8,
+        0x65, 0x48, 0x89, 0x14, 0xcd, ...dword(TEB64.TLS_SLOTS),
         0xb8, ...dword(1),
         0xc3,
         0xe9, ...dword(0));
@@ -666,8 +662,7 @@ export function createProcessFunctions(host){
     const slots = new Array(TLS_SLOTS).fill(null);
     // Index 0 is taken before the program runs and never handed out, so it
     // reads as zero in every thread until a program writes it, as Windows
-    // answers TlsGetValue(0); without it the loader's own first TlsAlloc, for
-    // an image's implicit TLS, would put that image's block there.
+    // answers TlsGetValue(0): the system's own libraries hold it there.
     slots[0] = 0;
     let generation = 0;
 
@@ -681,7 +676,7 @@ export function createProcessFunctions(host){
         writeU32: (address, value)=>host.writeMemory(address, new Uint8Array(dword(value))),
     };
     // The thread block at the process's width: the last error's offset, and
-    // the thread-local array's, whose slots are a pointer each.
+    // TlsSlots', a pointer each.
     const blocks = blockLayouts(host.pointerSize);
     const { stateOf, setError, lastErrorOf } = host.threadState
         ?? createThreadState(host.currentThread, memory, blocks.teb);
@@ -1013,12 +1008,11 @@ export function createProcessFunctions(host){
         : {});
 
     /**
-     * The running thread's array, when `slot` is one of the slots it holds:
-     * there the array is the value's one record, which the guest-side paths
-     * and the compiler's own `fs:[0x2c]` sequence read and write without
-     * asking. Zero past the array, or for a thread with no block -- a build
-     * with no process blocks assembled keeps every value here, which is what
-     * the tests drive.
+     * The running thread's TlsSlots, when `slot` is one of those its block
+     * holds: there the block is the value's one record, which the guest-side
+     * paths read and write without asking. Zero past them, or for a thread
+     * with no block -- a build with no process blocks assembled keeps every
+     * value here, which is what the tests drive.
      *
      * @param {number} slot
      */
@@ -1028,7 +1022,7 @@ export function createProcessFunctions(host){
     const validSlot = index=>index >= 0 && index < TLS_SLOTS && slots[index] !== null;
 
     /**
-     * Clears a slot of the array in every thread's block, or in the running
+     * Clears a slot in every thread's block, or in the running
      * thread's alone where the host cannot name the others.
      *
      * @param {number} index  Below TLS_SLOTS_IN_BLOCK.
@@ -1046,7 +1040,7 @@ export function createProcessFunctions(host){
         for (const thread of host.allThreads())
         {
             const teb = thread.tebAddress ?? 0;
-            const block = teb === 0 ? 0 : memory.readU32(teb + blocks.teb.TLS_POINTER);
+            const block = teb === 0 ? 0 : teb + blocks.teb.TLS_SLOTS;
             if (block !== 0)
             {
                 host.writeMemory(block + index * width.size, width.bytes(0));

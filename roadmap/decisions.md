@@ -496,10 +496,10 @@ test also notes that Windows "doesn't consistently call tls init functions on dl
 points". Here the callbacks are called for such a library, as the startup stub calls them for one
 the program imports: the image asked for them, and a callback that runs is the case no runtime is
 broken by. A library loaded with `DONT_RESOLVE_DLL_REFERENCES`, or a program loaded by name, gets no
-TLS, as the test expects. The slot comes from the pool `TlsAlloc` draws on, as for a startup image,
-and must be within the 64 the thread-local array holds; a library given none, or for whose block
-not every thread has room, is refused as one whose import is missing is (`LoadLibrary` answers
-NULL), as Windows fails a load it cannot give TLS to. *2026-10-18.*
+TLS, as the test expects. Its index is the loader's own numbering, not one of `TlsAlloc`'s slots
+(A65): the lowest one no loaded image holds. A library for whose block not every thread has room
+is refused as one whose import is missing is (`LoadLibrary` answers NULL), as Windows fails a load
+it cannot give TLS to. *2026-10-18; the index narrowed by A65, 2026-10-30.*
 
 **A52. A dynamic buffer the guest's DISCARD moves onto another storage takes along what it held
 outside the range locked.** Direct3D 9 documents a DISCARD of a vertex or index buffer as giving
@@ -625,7 +625,20 @@ answers as on the machines it was written for, the ones of its era. The file sys
 registry are not redirected (no `System32` to `SysWOW64`, no `Wow6432Node`, no
 `Program Files (x86)`). *2026-10-29.*
 
-**A65. A game platform's own servers are reached from the page only while the platform lets us,
+**A65. An image's thread-local index is the loader's, apart from TlsAlloc's slots, and slot 0 of
+TlsAlloc's is taken before the program runs.** A thread has two arrays on Windows: the one
+ThreadLocalStoragePointer names (`fs:[0x2c]`, `gs:[0x58]`), indexed by the number the loader
+writes into each image's `_tls_index`, and `TlsSlots` in the thread's own block (`TEB+0xE10` at 32
+bits, `TEB+0x1480` at 64), the 64 values `TlsGetValue` and `TlsSetValue` keep. Here, as there, the
+program's own image is index 0 and the libraries with thread-local storage follow in the order they
+are loaded, one loaded at run time taking the lowest index no loaded image holds; a compiler may
+reach the program's own variables as `[fs:[0x2c]]` without reading `_tls_index`, as Call of Duty
+4's executable does in its thread start. `TlsAlloc` never hands out slot 0, so `TlsGetValue(0)`
+reads zero in a thread until the program writes it, as Wine's kernel32 thread test expects of
+Windows, whose own libraries hold that slot. When the two arrays were one, reserving slot 0 moved
+the program's block to index 1 and that executable found a null at index 0. *2026-10-30.*
+
+**A66. A game platform's own servers are reached from the page only while the platform lets us,
 and its first request to stop is honoured for everyone at once.** The bridge extension
 (`modules/bridge`) carries a page's requests to a platform -- Steam's connection managers, which
 admit only their own and localhost origins, and its content servers, which send no CORS headers

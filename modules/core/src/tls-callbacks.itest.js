@@ -454,14 +454,15 @@ for (const cores of [1, 2])
 }
 
 /** What the crowded program finds wrong, as bits of its exit code. */
-const CROWDED = Object.freeze({ LOAD: 1, LOW: 2, BLOCK: 4, TEMPLATE: 8 });
+const CROWDED = Object.freeze({ LOAD: 1, INDEX: 2, BLOCK: 4, TEMPLATE: 8 });
 
 /**
  * Takes TlsAlloc slots until one past the first 64 comes back, as a program
  * with many threads of its own does, then loads runtime.dll: it must load,
- * its slot must be one of the high ones, and this thread's copy of its block
- * must be there through the compiler's fs:[0x2c] sequence, starting as the
- * template.
+ * at the loader's own index -- 0, no other image holding thread-local
+ * storage, whatever TlsAlloc has handed out -- and this thread's copy of its
+ * block must be there through the compiler's fs:[0x2c] sequence, starting as
+ * the template.
  */
 function crowdedProgram(){
     return buildExe({
@@ -489,8 +490,8 @@ function crowdedProgram(){
                 { label: 'loaded' },
                 0x68, ...u32(at('slotName')), 0x50, ...callApi('GetProcAddress'),
                 0xff, 0xd0, //                                          call eax
-                0x83, 0xf8, 0x40, { jump: 'jae', to: 'high' }, ...fail(CROWDED.LOW),
-                { label: 'high' },
+                0x85, 0xc0, { jump: 'jz', to: 'first' }, ...fail(CROWDED.INDEX),
+                { label: 'first' },
                 0x68, ...u32(at('blockName')), 0xff, 0x35, ...u32(at('handle')),
                 ...callApi('GetProcAddress'),
                 0xff, 0xd0, //                                          call eax
@@ -506,11 +507,12 @@ function crowdedProgram(){
     });
 }
 
-test('a library loaded at run time when the program holds the first 64 TlsAlloc slots takes a'
-    + ' slot past them, its block reached through fs:[0x2c]', { timeout: 120_000 }, async()=>{
+test('a library loaded at run time when the program holds the first 64 TlsAlloc slots loads'
+    + ' at the loader\'s own index, reached through fs:[0x2c]', { timeout: 120_000 }, async()=>{
     // The Steam client's own libraries take more than 64 slots before it
-    // loads one with thread-local storage of its own; the array behind
-    // fs:[0x2c] held 64, and the library would not load.
+    // loads one with thread-local storage of its own. The image's index is
+    // the loader's numbering, not one of TlsAlloc's slots, so how many of
+    // those are held does not move it.
     const { code, entries } = await run(crowdedProgram(), {
         'runtime.dll': library({ imageBase: 0x13000000, tag: TAG.RUNTIME,
             tlsTag: TAG.RUNTIME_TLS, marker: 'runtime', accessors: true }),

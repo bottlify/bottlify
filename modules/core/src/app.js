@@ -3958,13 +3958,30 @@ async function buildApp(options){
     let startupImages = [];
     /**
      * Every image with a thread-local directory, by base, those loaded at
-     * run time among them: the dword its slot is written in, the block each
-     * thread is given a copy of, and its TLS callbacks.
+     * run time among them: its index in each thread's thread-local array, the
+     * block each thread is given a copy of, and its TLS callbacks.
      *
-     * @type {Map<number, { indexAddress: number, template: Uint8Array, size: number,
+     * @type {Map<number, { index: number, template: Uint8Array, size: number,
      *     callbacks: number[] }>}
      */
     const threadLocalImages = new Map();
+    /**
+     * The lowest index in the thread-local array no image holds: the loader's
+     * own numbering, as Windows gives it -- the program's image 0, the
+     * libraries after it in the order they are loaded, an unloaded one's index
+     * free again. Not TlsAlloc's: a program compiled to reach its own image's
+     * variables at index 0 without reading _tls_index finds them there
+     * whatever slots it has allocated.
+     */
+    const freeLocalIndex = ()=>{
+        const taken = new Set([...threadLocalImages.values()].map(local=>local.index));
+        let index = 0;
+        while (taken.has(index))
+        {
+            index++;
+        }
+        return index;
+    };
     /**
      * Libraries that asked not to be told of threads (DisableThreadLibraryCalls), by base.
      *
@@ -4087,17 +4104,13 @@ async function buildApp(options){
     let threadBlocks = null;
     /**
      * What a thread made after the process's first is given a copy of: every
-     * image's thread-local block, in the slot the image was given, as the
-     * loader does for each thread. The slot is read as each thread is made:
-     * a startup image's is the startup stub's TlsAlloc's, which has not run
-     * when the image is mapped.
+     * image's thread-local block, at the image's index, as the loader does
+     * for each thread.
      *
      * @returns {import('./layers/win32/kernel32/teb.js').ThreadLocal[]}
      */
     const threadLocals = ()=>[...threadLocalImages.values()]
-        .map(({ indexAddress, template, size })=>({
-            slot: core.api('memory').readU32(indexAddress), template, size,
-        }));
+        .map(({ index, template, size })=>({ slot: index, template, size }));
     /**
      * Every thread holding blocks, and its environment block. Each is given
      * back at the next thread's making once its thread is gone, as a stack is:
@@ -5893,37 +5906,30 @@ async function buildApp(options){
 
     /**
      * A library loaded at run time is given what the startup stub gives one
-     * the program imports: a slot from the pool TlsAlloc draws on, written
-     * into the dword its directory names, and a copy of its block in that
-     * slot of every thread -- those there are now, the one loading it among
-     * them, and every one made after (`threadLocals`).
+     * the program imports: the lowest free index in the thread-local array
+     * (`freeLocalIndex`), written into the dword its directory names, and a
+     * copy of its block at that index of every thread -- those there are now,
+     * the one loading it among them, and every one made after (`threadLocals`).
      *
      * @param {number} base
      * @param {import('./layers/loader/internal/tls.js').TlsDirectory} directory
-     * @returns {boolean} false, with nothing kept, when the slot is past the
+     * @returns {boolean} false, with nothing kept, when the index is past the
      *     thread-local array or there is no room for every thread's copy
      */
     const giveThreadLocals = (base, directory)=>{
-        const kernel32 = allLibraries['KERNEL32.dll'];
-        const slot = kernel32.TlsAlloc.handler([]) >>> 0;
         const local = {
-            slot, template: directory.template,
+            slot: freeLocalIndex(), template: directory.template,
             size: directory.templateSize + directory.zeroFillSize,
         };
         // Threads that are gone take no copy.
         giveBackBlocks();
         if (!threadBlocks?.addThreadLocal(local))
         {
-            // All ones is TLS_OUT_OF_INDEXES: no slot was taken.
-            if (slot !== 0xffffffff)
-            {
-                kernel32.TlsFree.handler([slot]);
-            }
             return false;
         }
-        memory.writeU32(base + directory.indexRva, slot);
+        memory.writeU32(base + directory.indexRva, local.slot);
         threadLocalImages.set(base, {
-            indexAddress: base + directory.indexRva, template: local.template, size: local.size,
+            index: local.slot, template: local.template, size: local.size,
             callbacks: directory.callbackRvas.map(rva=>base + rva),
         });
         return true;
@@ -5955,11 +5961,8 @@ async function buildApp(options){
             const local = threadLocalImages.get(held.base);
             if (local)
             {
-                // Read before the image goes, which it is a dword of.
-                const slot = memory.readU32(local.indexAddress);
                 threadLocalImages.delete(held.base);
-                threadBlocks?.removeThreadLocal(slot);
-                allLibraries['KERNEL32.dll'].TlsFree.handler([slot]);
+                threadBlocks?.removeThreadLocal(local.index);
             }
             threadBlocks?.removeModule(held.base);
             const at = attachOrder.indexOf(held);
@@ -6992,10 +6995,12 @@ async function buildApp(options){
 
     // Thread-local storage, for every image that declares any.
     //
-    // The block is filled here, on the host, because it is only bytes; the slot
-    // number has to come from the guest's own TlsAlloc, because a runtime later
-    // reads it with TlsGetValue and the two have to be talking about the same
-    // pool. So the stub does the asking and this does the filling.
+    // Each image is given its index in the thread-local array here, in load
+    // order with the program's own first, so the program's is 0 as on Windows
+    // -- an image may be compiled to reach its variables at index 0 without
+    // reading the _tls_index written for it. The block is filled here too; the
+    // stub puts it in the first thread's array.
+    let nextLocal = 0;
     const withTls = [mainModule, ...shipped].map(held=>{
         const directory = held.file ? readTls(held.file, held.image ?? parsePe(held.file)) : null;
         if (!directory)
@@ -7006,11 +7011,13 @@ async function buildApp(options){
         const blockAddress = allocateFromHeap(size);
         memory.writeBytes(blockAddress, new Uint8Array(size));
         memory.writeBytes(blockAddress, directory.template);
+        const index = nextLocal++;
+        memory.writeU32(held.base + directory.indexRva, index);
 
         return {
             ...held,
             tls: {
-                indexAddress: held.base + directory.indexRva,
+                index,
                 blockAddress,
                 callbacks: directory.callbackRvas.map(rva=>held.base + rva),
                 template: directory.template,
@@ -7018,8 +7025,8 @@ async function buildApp(options){
             },
         };
     });
-    // Every later thread's blocks are copies of the same templates, in the
-    // slots the first thread's were given (`threadLocals`). Without them a
+    // Every later thread's blocks are copies of the same templates, at the
+    // indices the first thread's were given (`threadLocals`). Without them a
     // thread's thread-local variables were at linear address zero and up, the
     // same bytes for every thread but the first: Call of Duty 4's renderer and
     // its two workers kept their scratch buffers' pointers there, and a worker
@@ -7028,8 +7035,8 @@ async function buildApp(options){
     {
         if (held.tls)
         {
-            const { indexAddress, template, size, callbacks } = held.tls;
-            threadLocalImages.set(held.base, { indexAddress, template, size, callbacks });
+            const { index, template, size, callbacks } = held.tls;
+            threadLocalImages.set(held.base, { index, template, size, callbacks });
         }
     }
 
@@ -7051,10 +7058,6 @@ async function buildApp(options){
     const startup = synthesiseProcessInit({
         libraries: withTls.filter(held=>held !== mainModule || held.tls),
         entryPoint: image.entryPoint,
-        tlsApi: kernel32 && {
-            alloc: kernel32.addressOf('TlsAlloc') ?? 0,
-            set: kernel32.addressOf('TlsSetValue') ?? 0,
-        },
         ...enter !== 0 && leave !== 0 ? { loaderLock: { address: loaderLock, enter, leave } } : {},
         long,
     });

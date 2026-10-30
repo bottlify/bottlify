@@ -43,6 +43,8 @@ export const TEB = Object.freeze({
     TLS_POINTER: 0x2c,
     PEB: 0x30,
     LAST_ERROR: 0x34,
+    /** TlsSlots: the 64 values TlsGetValue and TlsSetValue keep, a pointer each. */
+    TLS_SLOTS: 0xe10,
     /** The thread's error mode, in ntdll's bits (RTL_SEM_*). */
     HARD_ERROR_MODE: 0xf28,
     SIZE: 0x1000,
@@ -173,6 +175,7 @@ export const TEB64 = Object.freeze({
     TLS_POINTER: 0x58,
     PEB: 0x60,
     LAST_ERROR: 0x68,
+    TLS_SLOTS: 0x1480,
     HARD_ERROR_MODE: 0x16b0,
     // Past TlsSlots (0x1480) and TlsLinks, the fields a program reads.
     SIZE: 0x1840,
@@ -254,12 +257,13 @@ export function blockLayouts(size = 4){
 export const END_OF_EXCEPTION_LIST = 0xffffffff;
 
 /**
- * How many thread-local slots the array behind FS:[0x2c] (GS:[0x58]) holds:
- * every index TlsAlloc can give (`kernel32/process.js`), since a library
- * loaded at run time takes its thread-local index from that pool and a
- * program that holds the first 64 for itself, as a client with many threads
- * of its own does, leaves the library one past them. Only the first 64 are
- * also TlsGetValue's; the rest of the array is the loader's alone.
+ * How many images' blocks the array behind FS:[0x2c] (GS:[0x58]) holds:
+ * ThreadLocalStoragePointer, the loader's, indexed by the number it writes
+ * into each image's _tls_index -- the program's own image 0, then the
+ * libraries with thread-local storage in the order they are loaded. It is
+ * not where TlsAlloc's slots are (`TEB.TLS_SLOTS`): a program compiled to
+ * reach its own image's variables as `fs:[0x2c]` then `[eax]`, index 0
+ * assumed, finds its block there whatever TlsAlloc has handed out.
  */
 export const TLS_SLOTS = 1088;
 
@@ -599,10 +603,9 @@ export function createProcessBlocks(options){
          * copy of each image's thread-local block.
          *
          * The array is separate from the block because a program indexes it by
-         * a slot number the loader chose, and the block has no room reserved
-         * for one -- on Windows it is allocated apart and pointed at, and a
-         * program that reads the pointer and indexes it must find the same
-         * values TlsGetValue reports.
+         * the number the loader gave each image, and the block has no room
+         * reserved for one -- on Windows it is allocated apart and pointed at.
+         * TlsGetValue's slots are the block's own (`TLS_SLOTS`), zero here.
          *
          * Each is written in full, because the memory may be what an ended
          * thread was given: its block naming that thread, its locals as that

@@ -2261,13 +2261,11 @@ export function createWin32Module(){
                                 result: 0 });
                             return true;
                         },
-                        // Where the running thread keeps its TLS slots, read out of
-                        // its own block rather than tracked here: the block is the
-                        // loader's to place, and reading it back cannot drift from
-                        // what the guest reaches through FS.
+                        // Where the running thread keeps its TLS slots: TlsSlots in
+                        // its own block, where the guest reaches them through FS.
                         tlsBlock: ()=>{
                             const teb = kernel.currentThread()?.tebAddress ?? 0;
-                            return teb === 0 ? 0 : memory.readU32(teb + blocks.teb.TLS_POINTER);
+                            return teb === 0 ? 0 : teb + blocks.teb.TLS_SLOTS;
                         },
                         allThreads: ()=>kernel.threads(),
                         /** @param {number} bytes */
