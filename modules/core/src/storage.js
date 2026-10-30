@@ -724,7 +724,10 @@ export function opfsSession(key, directory){
  * time packing and the save took minutes. Changes are noted and the save
  * waits for them to settle; a change that arrives while a save is under way
  * is saved once that one is done, never alongside it, so the store sees one
- * session at a time and always the latest.
+ * session at a time and always the latest. A save names each file once, by
+ * its last change: the filesystem announces once per file only within a turn
+ * of the machine, a save spans as many turns as the writes took, and the store
+ * puts a named file whole for every time it is named.
  *
  * @param {Object} options
  * @param {() => Session} options.snapshot  The session as it is now; called once per save.
@@ -735,8 +738,8 @@ export function opfsSession(key, directory){
  */
 export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
     const later = schedule ?? ((fn, ms)=>setTimeout(fn, ms));
-    /** @type {SessionChange[]} */
-    let pending = [];
+    /** @type {Map<string, SessionChange>} by path, or by kind for a change without one */
+    let pending = new Map();
     /** @type {unknown} */
     let timer = null;
     /** @type {Promise<unknown> | null} */
@@ -748,15 +751,15 @@ export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
         {
             return inFlight;
         }
-        if (pending.length === 0)
+        if (pending.size === 0)
         {
             return Promise.resolve();
         }
-        const changes = pending;
-        pending = [];
+        const changes = [...pending.values()];
+        pending = new Map();
         inFlight = Promise.resolve(persist(snapshot(), changes)).finally(()=>{
             inFlight = null;
-            if (pending.length > 0 && timer === null)
+            if (pending.size > 0 && timer === null)
             {
                 timer = later(flush, settleMs);
             }
@@ -767,7 +770,12 @@ export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
     return {
         /** @param {SessionChange[]} changes */
         note(changes){
-            pending.push(...changes);
+            for (const change of changes)
+            {
+                const key = change.path ?? `:${change.kind}`;
+                pending.delete(key);
+                pending.set(key, change);
+            }
             if (timer === null && !inFlight)
             {
                 timer = later(flush, settleMs);
@@ -775,9 +783,9 @@ export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
         },
         /** Saves what is pending now rather than after it settles. */
         flush,
-        /** Changes noted and not yet handed to the store. */
+        /** Changes noted and not yet handed to the store, each file once. */
         get pending(){
-            return pending.length;
+            return pending.size;
         },
     };
 }
