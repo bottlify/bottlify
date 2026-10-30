@@ -1077,6 +1077,17 @@ export function createScheduler(options){
      * @type {string[]}
      */
     const recentPlacements = [];
+    /**
+     * The runs elsewhere this executor called back, each with what its thread
+     * retired there, what this one retired meanwhile, and whether the two were
+     * counted as taking turns (`COUPLED_WORK`): what the coupling was reckoned
+     * from, which a busy machine changes, beside what it decided.
+     *
+     * @type {string[]}
+     */
+    const recentRecalls = [];
+    /** Runs elsewhere called back, and of them counted as taking turns, by thread name. */
+    const recalls = new Map();
     /** Set while they are answered: an answer's own trap does not answer again. */
     let answering = false;
     /** Set while this executor's thread runs a long turn with the others free (`runHere`). */
@@ -1782,6 +1793,19 @@ export function createScheduler(options){
                 const beside = sharedTime.hereRetired - on.hereFrom;
                 const tookTurns = on.recalled === true
                     && (beside === 0 || ended.instructions < COUPLED_WORK * beside);
+                if (on.recalled === true)
+                {
+                    const counted = recalls.get(on.thread.name) ?? { recalled: 0, turns: 0 };
+                    counted.recalled++;
+                    counted.turns += tookTurns ? 1 : 0;
+                    recalls.set(on.thread.name, counted);
+                    recentRecalls.push(`${on.thread.name} ${ended.instructions}/${beside}`
+                        + ` ${tookTurns ? 'turns' : 'beside'}`);
+                    if (recentRecalls.length > 1024)
+                    {
+                        recentRecalls.shift();
+                    }
+                }
                 on.thread.coupled = coupledNow(on.thread) * 0.75 + (tookTurns ? 0.25 : 0);
                 on.thread.coupledAt = wall();
                 sharedTime.elsewhereRetired += ended.instructions;
@@ -3086,6 +3110,11 @@ export function createScheduler(options){
                 // The last gaps past LATE_GAP_MS a short-period thread went
                 // without the processor, and what held the machine meanwhile.
                 lateGaps: lateGaps.join(' | '),
+                // The runs elsewhere called back, by thread: how many, how many
+                // counted as taking turns (`COUPLED_WORK`), and the last thousand
+                // with what each side retired meanwhile.
+                recalls: JSON.stringify(Object.fromEntries(recalls)),
+                recentRecalls: recentRecalls.join(' | '),
                 // Empty in a healthy run: a thread's stack pointer belongs
                 // inside the stack it was given, and anywhere else is memory
                 // somebody else owns. Strings rather than a list, because a

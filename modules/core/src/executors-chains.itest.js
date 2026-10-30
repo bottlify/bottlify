@@ -326,7 +326,7 @@ test('a run keeps in its store how many executors its threads opened, and the ne
 });
 
 test('a worker its main thread waits on each round, both computing as much between, runs on its'
-    + ' own executor and is not kept on the process\'s', async()=>{
+    + ' own executor and is not kept on the process\'s', async t=>{
     // A frame and its render thread: the main thread sets `go`, computes,
     // waits for `done`; the worker waits for `go`, computes, sets `done`. Each
     // wait leaves the process's executor idle and calls the worker back from
@@ -357,28 +357,47 @@ test('a worker its main thread waits on each round, both computing as much betwe
                 worker: [...work, 0xe9, ...u32(-(work.length + 5) >>> 0)], // jmp work
             };
         });
-    // The worker's half on the other executor; kept here, a hundredth. On a
-    // machine busy with other runs the other executor's thread gets less of a
-    // processor, does less beside this one than it is called back after, and
-    // is rightly counted as taking turns: one run in a full suite kept it, so
-    // the best of three.
-    /** @type {string[]} */
-    const seen = [];
-    for (let attempt = 0; attempt < 3; attempt++)
+    const { code, scheduler } = await run(executable, 2);
+    assert.equal(code, 7);
+    const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
+    const elsewhere = shared.elsewhereRetired ?? 0;
+    const total = (shared.hereRetired ?? 0) + elsewhere;
+    assert.ok(total >= ROUNDS * WORK * 2, `${total} instructions`);
+    // Whether the two ran at once is the machine's to say: on one busy with
+    // other runs the other executor's thread gets less of a processor, does
+    // less beside this one than it is called back after, and is rightly
+    // counted as taking turns. So each call back is held to what the two sides
+    // retired meanwhile (`COUPLED_WORK`), as measured, and the worker's share
+    // elsewhere to what those counts allow: where they could not have raised
+    // its coupling past `COUPLED` -- reckoned without the share's halving over
+    // time and the runs that ended without a call back, which only lower it --
+    // it was never kept here. Its work then ran there but for what its call
+    // backs brought here, and those that counted as running beside had done
+    // half a round's work there first: past a tenth of the run's instructions
+    // even with as many taking turns as keep the coupling under a half (kept,
+    // a hundredth; on its own executor, near a half).
+    const recalled = String(scheduler?.recentRecalls ?? '').split(' | ').filter(Boolean)
+        .map(record=>/^(\S+) (\d+)\/(\d+) (turns|beside)$/.exec(record) ?? [record]);
+    let coupled = 0;
+    let most = 0;
+    for (const [record, name, there, beside, verdict] of recalled)
     {
-        const { code, scheduler } = await run(executable, 2);
-        assert.equal(code, 7);
-        const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
-        const elsewhere = shared.elsewhereRetired ?? 0;
-        const total = (shared.hereRetired ?? 0) + elsewhere;
-        assert.ok(total >= ROUNDS * WORK * 2, `${total} instructions`);
-        seen.push(`${elsewhere} of ${total}`);
-        if (elsewhere > total * 0.15)
+        assert.equal(verdict, Number(beside) === 0 || Number(there) < Number(beside) / 2
+            ? 'turns' : 'beside', `counted by what each side did: ${record}`);
+        if (name !== 'main')
         {
-            return;
+            coupled = coupled * 0.75 + (verdict === 'turns' ? 0.25 : 0);
+            most = Math.max(most, coupled);
         }
     }
-    assert.fail(`instructions on the other executor: ${seen.join(', ')}`);
+    assert.ok(recalled.length < 1024, 'every call back in the record');
+    t.diagnostic(`${elsewhere} of ${total} elsewhere; calls back ${scheduler?.recalls},`
+        + ` coupled at most ${most.toFixed(3)}`);
+    if (most <= 0.5)
+    {
+        assert.ok(elsewhere > total * 0.1, `never coupled past a half, yet ${elsewhere} of`
+            + ` ${total} instructions on the other executor`);
+    }
 });
 
 test('a thread reads one time-stamp counter on every executor: never back, whichever it last'
