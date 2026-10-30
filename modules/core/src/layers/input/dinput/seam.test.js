@@ -2244,3 +2244,32 @@ test('a format built against DirectX 3\'s headers names any instance 0xff, under
             f.memory.bytes[AT.state + 12]], [5, 7, 0x80], 'the axes and the first button');
     }
 });
+
+test('CoCreateInstance reaches DirectInput 8 through its class object, which waits for'
+    + ' Initialize', ()=>{
+    // HKCR\CLSID\{25E609E4-...}\InprocServer32 names dinput8.dll; COM asks its
+    // DllGetClassObject for the factory and the factory for the object.
+    const f = fixture();
+    const CLSID_DirectInput8 = '{25E609E4-B259-11CF-BFC7-444553540000}';
+    const IID_IClassFactory = '{00000001-0000-0000-C000-000000000046}';
+    const library = f.dinput.libraries['DINPUT8.dll'];
+    writeGuid(f.memory, AT.guid, CLSID_DirectInput8);
+    writeGuid(f.memory, AT.iid, IID_IClassFactory);
+    assert.equal(library.DllGetClassObject.handler([AT.guid, AT.iid, AT.out]), DI_OK);
+    const factory = f.memory.u32(AT.out);
+    assert.equal(f.bridge.recordAt(factory).id, IID_IClassFactory);
+
+    writeGuid(f.memory, AT.iid, IID_IDirectInput8A);
+    assert.equal(f.bridge.call(factory, 'CreateInstance', [0, AT.iid, AT.out]), DI_OK);
+    const root = f.memory.u32(AT.out);
+    assert.equal(f.bridge.recordAt(root).id, IID_IDirectInput8A);
+    assert.equal(f.bridge.call(root, 'Initialize', [INSTANCE, 0x0800]), DI_OK);
+
+    assert.equal(f.bridge.call(factory, 'CreateInstance', [0x1234, AT.iid, AT.out]),
+        0x80040110 | 0, 'no aggregation');
+    writeGuid(f.memory, AT.guid, '{25E609E0-B259-11CF-BFC7-444553540000}');
+    writeGuid(f.memory, AT.iid, IID_IClassFactory);
+    assert.equal(library.DllGetClassObject.handler([AT.guid, AT.iid, AT.out]),
+        0x80040111 | 0, 'DirectInput 7 is dinput.dll\'s class, not this library\'s');
+    assert.equal(f.memory.u32(AT.out), 0);
+});

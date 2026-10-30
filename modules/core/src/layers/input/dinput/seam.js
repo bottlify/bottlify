@@ -50,6 +50,18 @@ const DIERR_NOTBUFFERED = 0x80040207 | 0;
 const E_POINTER = 0x80004003 | 0;
 const E_HANDLE = 0x80070006 | 0;
 const DIERR_NOINTERFACE = 0x80004002 | 0;
+const CLASS_E_NOAGGREGATION = 0x80040110 | 0;
+const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
+
+/** The classes the two libraries' DllGetClassObject make: a DirectInput object each. */
+const CLSID_DirectInput = '{25E609E0-B259-11CF-BFC7-444553540000}';
+const CLSID_DirectInput8 = '{25E609E4-B259-11CF-BFC7-444553540000}';
+const IID_IClassFactory = '{00000001-0000-0000-C000-000000000046}';
+/** IClassFactory, after IUnknown's three. */
+const ICLASSFACTORY_SLOTS = /** @type {[string, number][]} */ ([
+    ['CreateInstance', 3],
+    ['LockServer', 1],
+]);
 /** ERROR_NOT_READY: an object no version was given to. */
 const DIERR_NOTINITIALIZED = 0x80070015 | 0;
 /** ERROR_RMODE_APP: a version no DirectInput was released as. */
@@ -2141,8 +2153,10 @@ export function createDirectInput(
      * @param {number} request.out
      * @param {number} request.outer
      * @param {boolean} request.eight  DirectInput8Create's rather than an earlier call's.
+     * @param {boolean} [request.initialized]  False for one a class factory makes,
+     *        which takes its version from Initialize, so none is checked now.
      */
-    const create = ({ instance, version, id, out, outer, eight })=>{
+    const create = ({ instance, version, id, out, outer, eight, initialized = true })=>{
         if ((out >>> 0) === 0)
         {
             return E_POINTER;
@@ -2159,7 +2173,7 @@ export function createDirectInput(
             writeU32(out, 0);
             return DI_OK;
         }
-        const refused = versionRefusal(instance, version, eight);
+        const refused = initialized ? versionRefusal(instance, version, eight) : DI_OK;
         if (refused !== DI_OK)
         {
             writeU32(out, 0);
@@ -2180,6 +2194,74 @@ export function createDirectInput(
         writeU32(out, pointer);
         return pointer === 0 ? DIERR_NOINTERFACE : DI_OK;
     };
+
+    /**
+     * The class object CoCreateInstance reaches through a DirectInput class's
+     * InprocServer32 key: its objects are made as the creation calls make
+     * them, without a version, and wait for Initialize.
+     */
+    const factoryInterfaces = [describe(IID_IClassFactory, ICLASSFACTORY_SLOTS, {
+        /** HRESULT CreateInstance(IUnknown *outer, REFIID, void **ppv) */
+        CreateInstance(factory, [outer, iid, out]){
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writeU32(out, 0);
+            if ((outer >>> 0) !== 0)
+            {
+                return CLASS_E_NOAGGREGATION;
+            }
+            const asked = (iid >>> 0) === 0 ? '' : guidAt(iid);
+            // IUnknown is the first interface of the object's generation.
+            const id = asked === IID_IUNKNOWN
+                ? (factory.eight ? IID_IDirectInput8A : IID_IDirectInputA) : asked;
+            return create({ instance: 0, version: 0, id, out, outer: 0, eight: factory.eight,
+                initialized: false });
+        },
+        /** HRESULT LockServer(BOOL): nothing here is unloaded to be kept. */
+        LockServer: ()=>DI_OK,
+    })];
+
+    /**
+     * HRESULT DllGetClassObject(REFCLSID, REFIID, LPVOID *ppv), for the one
+     * class a library makes.
+     *
+     * @param {string} served  The library's class.
+     * @param {boolean} eight
+     */
+    const classObject = (served, eight)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([clsid, iid, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writeU32(out, 0);
+            if ((clsid >>> 0) === 0 || guidAt(clsid) !== served)
+            {
+                return CLASS_E_CLASSNOTAVAILABLE;
+            }
+            const wanted = (iid >>> 0) === 0 ? '' : guidAt(iid);
+            if (wanted !== IID_IClassFactory && wanted !== IID_IUNKNOWN)
+            {
+                return DIERR_NOINTERFACE;
+            }
+            let references = 1;
+            const factory = {
+                eight,
+                addRef: ()=>++references,
+                release: ()=>(references = Math.max(0, references - 1)),
+                get destroyed(){
+                    return references === 0;
+                },
+            };
+            writeU32(out, publisher.publish(factory, factoryInterfaces,
+                wanted === IID_IUNKNOWN ? IID_IClassFactory : wanted));
+            return DI_OK;
+        },
+    });
 
     return {
         publisher,
@@ -2282,6 +2364,7 @@ export function createDirectInput(
                             : DIERR_NOINTERFACE;
                     },
                 },
+                DllGetClassObject: classObject(CLSID_DirectInput, false),
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },
             'DINPUT8.dll': {
@@ -2297,6 +2380,7 @@ export function createDirectInput(
                         eight: true,
                     }),
                 },
+                DllGetClassObject: classObject(CLSID_DirectInput8, true),
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },
         },

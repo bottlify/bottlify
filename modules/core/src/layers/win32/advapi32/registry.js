@@ -478,6 +478,8 @@ const IN_PROCESS_CLASSES = Object.freeze([
     { clsid: '{FEA4300C-7959-4147-B26A-2377B9E7A91D}', library: 'dsound.dll' }, // FullDuplex
     { clsid: '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}', library: 'ddraw.dll' }, // DirectDraw
     { clsid: '{3C305196-50DB-11D3-9CFE-00C04FD930C5}', library: 'ddraw.dll' }, // DirectDraw7
+    { clsid: '{25E609E0-B259-11CF-BFC7-444553540000}', library: 'dinput.dll' }, // DirectInput
+    { clsid: '{25E609E4-B259-11CF-BFC7-444553540000}', library: 'dinput8.dll' }, // DirectInput8
 ]);
 
 /** The Active Scripting engines Windows Script installs, and the names each answers to. */
