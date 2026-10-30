@@ -170,3 +170,9 @@ test('a method a PlayStation 3 build alone has is no slot of the Windows vtable'
     assert.equal(slots.includes('GetISteamPS3OverlayRender'), false);
     assert.equal(slots.indexOf('GetISteamHTTP'), slots.indexOf('BShutdownIfAllPipesClosed') + 1);
 });
+
+test('the first controller interface is answered by its macro\'s own name', ()=>{
+    // An SDK of 2014 asks for "STEAMCONTROLLER_INTERFACE_VERSION"; answered
+    // none, SteamAPI_Init gives up.
+    assert.equal(INTERFACES.STEAMCONTROLLER_INTERFACE_VERSION, INTERFACES.SteamController001);
+});

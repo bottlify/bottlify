@@ -214,6 +214,20 @@ for (const file of readdirSync(directory).filter(name=>/^isteam[a-z]+\d*\.h$/.te
     }
 }
 
+/**
+ * Version strings that are not the family's prefix and a number: the first
+ * controller interface was asked for by its macro's own name, which a game
+ * built with that SDK still asks for.
+ */
+const ALIASES = { STEAMCONTROLLER_INTERFACE_VERSION: 'SteamController001' };
+for (const [alias, version] of Object.entries(ALIASES))
+{
+    if (interfaces[version])
+    {
+        interfaces[alias] = interfaces[version];
+    }
+}
+
 const out = new URL('../modules/core/src/layers/win32/steamclient/interfaces.js', import.meta.url);
 writeFileSync(out, `/*
  * Copyright © 2026 Bottlify Project
