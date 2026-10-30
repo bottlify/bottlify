@@ -29,7 +29,7 @@ import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
-import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
+import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
     windowAddress,
@@ -341,11 +341,19 @@ function callAndReturn(e, next, target, mechanism){
     // What the block wrote so far: the stores wait for the whole body, and a
     // local no way to this call wrote since the state block last held it is
     // left out (`fillDeferred`).
+    /** @type {import('./region.js').CallSite | undefined} */
     const call = e.b.written === null ? undefined
         : { block: e.blockIndex, written: new Set(e.b.written), empty: site };
     if (call !== undefined)
     {
         e.callSites.set(e.blockIndex, call);
+        if (e.pathStores)
+        {
+            call.must = new Set(e.segment?.must ?? []);
+            call.segment = e.segment;
+            call.after = new Set();
+            e.sites.push(call);
+        }
     }
     e.storeMemoryState(call);
     e.storeUncarriedState(call);
@@ -374,7 +382,13 @@ function callAndReturn(e, next, target, mechanism){
     e.close();
     atState(context, b).load('i32', { offset: layout.regs + CallStack.BUDGET })
         .localSet(Local.budget);
-    e.loadState(false, true);
+    e.loadState(false, true, call);
+    if (call?.after !== undefined)
+    {
+        // What follows the return, the way the call does nothing too, reads
+        // what the return reloads (`planPaths`).
+        e.openSegment(e.blockIndex, call);
+    }
     if (e.x87.active)
     {
         x87AfterCall(e, next, top);
@@ -422,36 +436,66 @@ function linkedCall(e, target){
     // any top, as a function that does something -- its top and empty code
     // read as one halfword, which is `ANY_TOP` only then. An empty slot's
     // halfword is 0 and a removed one's has the top 0xff (`entries.js`), so
-    // neither passes for a call to address 0 or all ones. The index, the
-    // label and that halfword come in one load: a direct call's slot is a
-    // constant address past what an arm64 load's offset holds, which V8 moves
-    // into a register, two instructions, for each load from it. On an arm64
-    // host the two tests are one condition, which V8 makes a compare and a
-    // conditional compare before one branch; an x64 host has no conditional
-    // compare, and V8 makes a flag of each comparison it ors, so there they
-    // are two branches, another key straight to the transfer.
+    // neither passes for a call to address 0 or all ones. On an arm64 host
+    // the index, the label and that halfword come in one load: a direct
+    // call's slot is a constant address past what an arm64 load's offset
+    // holds, which V8 moves into a register, two instructions, for each load
+    // from it. And there the two tests are one condition, which V8 makes a
+    // compare and a conditional compare before one branch. An x64 load takes
+    // the address as its offset for nothing, and the fields taken out of one
+    // quadword cost more than their own loads (cork-bench calls512-scatter
+    // +1.3 % at 64 bits, calls512-order +0.3 % at 32); an x64 host has no
+    // conditional compare either, and V8 makes a flag of each comparison it
+    // ors, so there the two are two branches, another key straight to the
+    // transfer.
     const key = ()=>(target === null ? b.localGet(Local.eip) : b.i32const(target | 0));
     const oneTest = context.features?.armHost === true;
     e.open('linked', ValType.i32);
     e.open('through', EMPTY);
     e.open('anyTop', EMPTY);
-    b.localGet(Local.t2).load('i64', { offset: 4, align: 2 }).localTee(Local.t64);
+    if (oneTest)
+    {
+        b.localGet(Local.t2).load('i64', { offset: 4, align: 2 }).localTee(Local.t64);
+    }
     b.localGet(Local.t2).load('i32');
     key();
     b.op(I32.ne);
     if (!oneTest)
     {
         b.unlikely().brIf(e.depthOf('through'));
+        b.localGet(Local.t2).load('i32_16u', { offset: 10 });
     }
-    b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap).i32const(ANY_TOP).op(I32.ne);
+    else
+    {
+        b.localGet(Local.t64).i64const(48n).op(I64.shrU).op(I64.wrap);
+    }
+    b.i32const(ANY_TOP).op(I32.ne);
     if (oneTest)
     {
         b.op(I32.or);
     }
     b.unlikely().brIf(e.depthOf('anyTop'));
-    linkedCallOf(e);
+    if (oneTest)
+    {
+        linkedCallOf(e);
+    }
+    else
+    {
+        countLinked(e);
+        b.localGet(Local.t2).load('i32_16u', { offset: 8 });
+        for (let local = Local.budget; local < STATE_PARAMS; local++)
+        {
+            b.localGet(local);
+        }
+        b.localGet(Local.t2).load('i32', { offset: 4 });
+        b.callIndirect(context.regionType, 0);
+    }
     b.br(e.depthOf('linked'));
     e.close();
+    if (!oneTest)
+    {
+        b.localGet(Local.t2).load('i64', { offset: 4, align: 2 }).localSet(Local.t64);
+    }
     // Out of the way: a slot holding the target compiled for the top the
     // machine has is called the same way, the rest goes through the
     // transfer. Under one test the key is read again, as the low half of a
@@ -1191,6 +1235,16 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 return true; // the block's exit does the jump
             }
+            if (casesByEntry(e))
+            {
+                // The way out of the cases: the target read as before.
+                prepare(e, dst);
+                readOp(e, dst);
+                b.localSet(Local.eip);
+                e.exitDynamic(Exit.UNTRANSLATED);
+                e.dead = true;
+                return true;
+            }
             prepare(e, dst);
             readOp(e, dst);
             if (isLong(e) && e.region.blocks[e.blockIndex].exit.table !== undefined)
@@ -1224,7 +1278,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 if (farPastPrediction(e))
                 {
                     b.localTee(LONG_WIDE).op(I64.wrap);
-                    if (e.blockRetired === 1)
+                    if (e.blockRetired - e.blockCarried === 1)
                     {
                         // Its far exit leaves at the block's start, which then
                         // must not be an entry (`exitBefore`).
@@ -1615,6 +1669,23 @@ export function emitInstruction(e, instruction, flagsLive){
                     prepare(e, src);
                     readOp(e, src);
                     b.localSet(Local.t1);
+                    if (src.kind === 'mem')
+                    {
+                        // A select of what the read loaded anyway: the host makes
+                        // a conditional move of it, where a branch over the write
+                        // left two paths whose register merges a loop paid on
+                        // both (cork-bench tree -1.7 %). From a register it stays
+                        // a branch: the host holds the source live for its move
+                        // across the loop, a clamp's constant too, and spilled
+                        // others for it (game +4.3 %).
+                        writeOp(e, dst, ()=>{
+                            b.localGet(Local.t1);
+                            readOp(e, dst);
+                            e.pushCondition(/** @type {number} */ (instruction.cc));
+                            b.select();
+                        });
+                        return true;
+                    }
                     e.pushCondition(/** @type {number} */ (instruction.cc));
                     e.openIf('move', EMPTY);
                     writeOp(e, dst, ()=>b.localGet(Local.t1));
@@ -1830,7 +1901,8 @@ export function prepare(e, operand, options){
     if (operand.kind === 'mem')
     {
         e.folded = null;
-        if (wrappedFirst(e, operand, options?.store === true))
+        if (wrappedFirst(e, operand, options?.store === true)
+            || boundedRead(e, operand, options?.store === true))
         {
             return;
         }
@@ -1896,6 +1968,150 @@ function wrappedFirst(e, operand, store){
     }
     b.localSet(Local.addr);
     e.folded = { operand, local, offset: disp - low };
+    return true;
+}
+
+/** By block, the registers' bounds before each of its instructions (`registerBounds`). @type {WeakMap<object, number[][]>} */
+const boundsByBlock = new WeakMap();
+
+/** Operations that write no general register, the flags and memory aside. */
+const WRITE_NO_REGISTER = new Set(['cmp', 'test', 'nop', 'bt', 'clc', 'stc', 'cmc', 'cld', 'std']);
+
+/**
+ * The largest value each general register can hold before each instruction of
+ * a block, from what the block itself wrote: a zero extension of a byte or a
+ * word, an `and` with a constant, a shift right by one, a constant moved in,
+ * a register cleared, a copy of one already bounded. -1 where nothing bounds
+ * it -- every register at the block's start, any write not followed here, and
+ * all of them after an operation that may write registers it does not name.
+ *
+ * @param {import('../region.js').Block} block
+ * @returns {number[][]}  by instruction, the eight registers' bounds before it
+ */
+function registerBounds(block){
+    let found = boundsByBlock.get(block);
+    if (found !== undefined)
+    {
+        return found;
+    }
+    found = [];
+    let bounds = new Array(8).fill(-1);
+    for (const instruction of block.instructions)
+    {
+        found.push(bounds);
+        bounds = bounds.slice();
+        const { op, operands, prefixes } = instruction;
+        const [dst, src] = operands;
+        const reg = dst?.kind === 'reg' ? /** @type {number} */ (dst.reg) : -1;
+        const whole = reg >= 0 && dst.size === 4;
+        const value = src?.kind === 'imm' ? /** @type {number} */ (src.value) >>> 0
+            : src?.kind === 'reg' && src.size === 4 ? bounds[/** @type {number} */ (src.reg)] : -1;
+        if (prefixes.lock || prefixes.rep || prefixes.repne)
+        {
+            bounds.fill(-1);
+            continue;
+        }
+        if (WRITE_NO_REGISTER.has(op) || op.startsWith('j') || dst?.kind === 'mem'
+            && (op === 'mov' || INT_RMW.has(op)))
+        {
+            continue;
+        }
+        if (!whole || !BOUND_WRITES.has(op) || operands.length > 2)
+        {
+            if (reg >= 0 && dst.size === 1 && !dst.high && op === 'mov' && bounds[reg] >= 0)
+            {
+                // A low byte written over a bounded register.
+                bounds[reg] = (bounds[reg] | 0xff) >>> 0;
+                continue;
+            }
+            if (reg >= 0 && (dst.size < 4 || BOUND_WRITES.has(op)) && SINGLE_WRITES.has(op))
+            {
+                bounds[reg] = -1;
+                continue;
+            }
+            bounds.fill(-1);
+            continue;
+        }
+        const known = (/** @type {number} */ bound)=>(bound < 0 ? 0xffffffff : bound);
+        switch (op)
+        {
+            case 'movzx':
+                bounds[reg] = src.size === 1 ? 0xff : 0xffff;
+                break;
+            case 'mov':
+                bounds[reg] = value;
+                break;
+            case 'and':
+                bounds[reg] = Math.min(known(bounds[reg]), known(value)) >>> 0;
+                bounds[reg] = bounds[reg] === 0xffffffff ? -1 : bounds[reg];
+                break;
+            case 'shr':
+                bounds[reg] = src?.kind === 'imm'
+                    ? Math.floor(known(bounds[reg]) / 2 ** (/** @type {number} */ (src.value) & 31))
+                    : -1;
+                break;
+            case 'xor': case 'sub':
+                bounds[reg] = src?.kind === 'reg' && src.reg === reg ? 0 : -1;
+                break;
+            default:
+                bounds[reg] = -1;
+        }
+    }
+    boundsByBlock.set(block, found);
+    return found;
+}
+
+/** Writes of a whole register `registerBounds` follows. */
+const BOUND_WRITES = new Set(['movzx', 'mov', 'and', 'shr', 'xor', 'sub']);
+/** Integer operations whose memory destination is read and written. */
+const INT_RMW = new Set(['add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'inc', 'dec', 'not',
+    'neg', 'shl', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr']);
+/** Operations that write their first operand, a register, and no other. */
+const SINGLE_WRITES = new Set([...INT_RMW, 'mov', 'movzx', 'movsx', 'lea', 'imul', 'bsf', 'bsr',
+    'bswap', 'shld', 'shrd']);
+
+/**
+ * A read left untested (`wrapsRead`) whose registers the block bounded
+ * (`registerBounds`) so that every byte it can reach lies in RAM: its address
+ * is then the one the wrap into RAM leaves as it is, so none is made, and the
+ * displacement becomes the load's own offset -- a table read through a zero
+ * extended byte (a CRC's, a decoder's), one index masked. Only a scaled index
+ * and a base the block bounded, a displacement not negative.
+ *
+ * @param {E} e @param {Operand} operand @param {boolean} store
+ * @returns {boolean}  whether the address is in `addr`, the read's test made
+ */
+function boundedRead(e, operand, store){
+    const index = operand.index ?? -1;
+    const base = operand.base ?? -1;
+    if (isLong(e) || index < 0 && base < 0 || operand.addressSize === 16 || operand.segment === 4
+        || operand.segment === 5 || e.memPlan?.access != null || !wrapsRead(e, store))
+    {
+        return false;
+    }
+    const block = e.region.blocks[e.blockIndex];
+    if (block.instructions[e.at] !== e.current)
+    {
+        // Emitted outside the block's own walk (a copy loop's element).
+        return false;
+    }
+    const bounds = registerBounds(block)[e.at];
+    const disp = operand.disp ?? 0;
+    if (disp < 0 || base >= 0 && bounds[base] < 0 || index >= 0 && bounds[index] < 0)
+    {
+        return false;
+    }
+    const reach = disp + (base >= 0 ? bounds[base] : 0)
+        + (index >= 0 ? bounds[index] * (operand.scale ?? 1) : 0) + Math.max(operand.size, 1);
+    if (reach > e.layout.ramSize)
+    {
+        return false;
+    }
+    const { b } = e;
+    const local = e.foldedSumLocal();
+    emitAddress(e, { ...operand, disp: 0 }, false);
+    b.localTee(local).i32const(disp).op(I32.add).localSet(Local.addr);
+    e.folded = { operand, local, offset: disp };
     return true;
 }
 
@@ -2209,11 +2425,13 @@ function fieldsRead(e){
     if (fields === undefined)
     {
         fields = new Map();
-        /** Registers some access other than a plain read goes through. */
-        const written = new Set();
         for (const instruction of block.instructions)
         {
-            const reads = readsOnly(instruction);
+            if (!readsOnly(instruction))
+            {
+                // Tested whole, whatever else goes through its registers.
+                continue;
+            }
             for (const operand of instruction.operands)
             {
                 if (operand.kind !== 'mem')
@@ -2221,19 +2439,10 @@ function fieldsRead(e){
                     continue;
                 }
                 const key = /** @type {string} */ (fieldKey(e, instruction, operand));
-                if (!reads)
-                {
-                    written.add(key);
-                    continue;
-                }
                 const disps = fields.get(key) ?? new Set();
                 disps.add(operand.disp ?? 0);
                 fields.set(key, disps);
             }
-        }
-        for (const key of written)
-        {
-            fields.delete(key);
         }
         fieldsByBlock.set(block, fields);
     }
@@ -3999,7 +4208,14 @@ function bitTest(e, instruction, flagsLive){
     }
     readOp(e, dst);
     b.localSet(Local.t1);
-    if (flagsLive)
+    const carry = fusedCarry(e, op, flagsLive);
+    if (carry >= 0)
+    {
+        b.localGet(Local.t1).localGet(Local.count).op(I32.shrU).i32const(1).op(I32.and)
+            .localSet(carry);
+        e.carryBit = carry;
+    }
+    else if (flagsLive)
     {
         e.eagerWrite(CF);
         b.localGet(Local.t1).localGet(Local.count).op(I32.shrU).i32const(1).op(I32.and);
@@ -4025,6 +4241,21 @@ function bitTest(e, instruction, flagsLive){
         });
     }
     return true;
+}
+
+/**
+ * The local a `bt` leaves its bit in when the block's final branch alone
+ * reads its carry (`fuseBitTest`): compilers test a bit with `bt` and a `jb`
+ * or `jae`, an x86-64 gcc with work scheduled between. -1 otherwise.
+ *
+ * @param {E} e @param {string} op @param {boolean} flagsLive
+ */
+function fusedCarry(e, op, flagsLive){
+    if (op !== 'bt' || !flagsLive)
+    {
+        return -1;
+    }
+    return e.fuseBitTest(e.region.blocks[e.blockIndex].instructions.indexOf(e.current), keepsFlags);
 }
 
 /**
@@ -4090,9 +4321,13 @@ function bitTestLong(e, instruction, flagsLive){
             b.i32const(1).localGet(Local.count).op(I32.shl);
         }
     };
-    if (flagsLive)
+    const carry = fusedCarry(e, op, flagsLive);
+    if (carry >= 0 || flagsLive)
     {
-        e.eagerWrite(CF);
+        if (carry < 0)
+        {
+            e.eagerWrite(CF);
+        }
         b.localGet(value);
         pushBit();
         b.op(ops.and);
@@ -4104,7 +4339,15 @@ function bitTestLong(e, instruction, flagsLive){
         {
             b.i32const(0).op(I32.ne);
         }
-        e.orFlag(CF);
+        if (carry >= 0)
+        {
+            b.localSet(carry);
+            e.carryBit = carry;
+        }
+        else
+        {
+            e.orFlag(CF);
+        }
     }
     if (op !== 'bt')
     {
@@ -4844,6 +5087,62 @@ function stringInstruction(e, instruction){
 }
 
 /**
+ * A switch's jump at 32 bits whose table read goes untested (`wrapsRead`) and
+ * lies in RAM: the index picks its table entry by a `br_table` before any
+ * read, and each entry that named a case when the region was formed is read
+ * at its own address, a constant, and compared with that case -- where the
+ * target read first took the index's sum, its wrap into RAM and a load, and
+ * then the `br_table`. The read is the processor's: an entry inside the
+ * table is the address the wrapped one reads. An index past the table, an
+ * entry written since, or one naming no case leaves the cases for the jump's
+ * own read and exit, which the caller emits after. False, and nothing
+ * emitted, for any other jump.
+ *
+ * @param {E} e
+ */
+function casesByEntry(e){
+    const { b } = e;
+    const table = e.region.blocks[e.blockIndex].exit.table;
+    if (table === undefined || isLong(e) || !wrapsRead(e, false)
+        || table.address + 4 * table.entries.length > e.layout.ramSize)
+    {
+        return false;
+    }
+    const taken = table.entries.map(target=>e.labels.has(target));
+    if (!taken.some(Boolean))
+    {
+        return false;
+    }
+    // Charged once, at the block's depth, for every way out below.
+    e.charge();
+    e.open('switchOut', EMPTY);
+    const arms = table.entries.map((_, i)=>i).filter(i=>taken[i]);
+    for (let k = arms.length - 1; k >= 0; k--)
+    {
+        e.open(`entry${k}`, EMPTY);
+    }
+    b.localGet(registerLocal(e, table.index));
+    b.brTable(table.entries.map((_, i)=>{
+        const k = arms.indexOf(i);
+        return k < 0 ? e.depthOf('switchOut') : e.depthOf(`entry${k}`);
+    }), e.depthOf('switchOut'));
+    for (let k = 0; k < arms.length; k++)
+    {
+        e.close();
+        e.markArm();
+        const target = table.entries[arms[k]];
+        b.i32const(table.address + 4 * arms[k]).load('i32', { offset: e.layout.ramBase })
+            .i32const(target | 0).op(I32.eq);
+        e.openIf('case');
+        e.jumpTo(target);
+        e.close();
+        b.br(e.depthOf('switchOut'));
+    }
+    e.close();
+    return true;
+}
+
+/**
  * A switch's jump (`SwitchTable`, the target already in `eip`, long mode's whole
  * in `LONG_WIDE`): the index picks its case by a `br_table`, and a case whose
  * table entry still names the target it was formed with is a jump inside the
@@ -4886,6 +5185,7 @@ function switchCases(e){
     for (let k = 0; k < cases.length; k++)
     {
         e.close();
+        e.markArm();
         if (isLong(e))
         {
             b.localGet(LONG_WIDE).i64const(BigInt(cases[k])).op(I64.eq);

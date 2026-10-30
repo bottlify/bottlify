@@ -24,6 +24,7 @@ import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions, decodeAnsi, encodeAnsi } from './kernel32/locale.js';
 import {
     ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
+    machineArchitecture,
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { serveCall } from './kernel32/cross-process.js';
@@ -402,9 +403,11 @@ export function createWin32Module(){
                 config?.threadBlock?.(thread);
             };
             /** The variables the process starts with: its parent's, or the machine's. */
-            const startingEnvironment = ()=>config?.environment
-                ?? defaultEnvironment(windows, folders, processors.count(), {
-                    long: pointerSize === 8, wow64: machine64 && pointerSize === 4 });
+            const ownWidth = { long: pointerSize === 8, wow64: machine64 && pointerSize === 4 };
+            const startingEnvironment = ()=>(config?.environment === undefined
+                ? defaultEnvironment(windows, folders, processors.count(), ownWidth)
+                : machine64 ? machineArchitecture(config.environment, ownWidth)
+                    : config.environment);
 
             // What the run's processes share, as one Windows does: handed in
             // from outside when there is a process beside or after this one

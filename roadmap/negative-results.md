@@ -2069,3 +2069,283 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** As above.
 - **Decision.** Not taken: off a pointer in the top 64 KiB the sum, not wrapped at 4 GiB, would
   trap where a wrapped sum reads the null page, for 0.02 %.
+
+### 2026-10-29: a cmovcc from a register as a select
+
+- **Idea.** Every 32-bit cmovcc as a `select` of the source and the destination under the
+  condition, where it was a branch over the write: V8 makes a conditional move of a select,
+  and the branch left two paths whose register merges a loop paid on both.
+- **Workload.** cork-bench, x87 images; `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64, `--predictable --no-liftoff
+  --no-wasm-dynamic-tiering`; machine instructions an iteration in V8's printed wasm code, one
+  run an arm (the base ran twice: the same count on every workload but vcall, 1,701,852 and
+  1,710,564). Base 3078203.
+- **Values.** Base, then every cmovcc a select: tree 2,848,928 -> 2,800,184 (-1.7 %), game
+  1,091,219 -> 1,138,179 (+4.3 %); vm, sort, fmath, str, crc, switch unchanged; vcall 1,699,241.
+- **Why.** game's clamp (`cmp eax, ecx; cmovg eax, ecx`, ecx 31) as a select had V8 hold the
+  constant in a register of its own across its loop and spill others for it: in the main
+  region's executed code (tools/wasm-grind.mjs listing, warm 1000 + 300 iterations) stack-slot
+  loads and stores rose from 129 M to 154 M and register moves from 109 M to 128 M. tree's
+  gain is a cmov from memory (`cmovae edi, [eax+4]`), whose read happens anyway.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Taken from memory only (4f54a94: tree -1.71 %, game unchanged); a cmovcc from a
+  register stays a branch.
+
+### 2026-10-29: an x87 integer store through the quadword saturating conversion
+
+- **Idea.** fist/fistp of a dword or a word without `precise`: the rounded value through
+  `i64.trunc_sat_f64_s`, its low half stored and its range tested as one unsigned compare of the
+  quadword, where `i32.trunc_sat_f64_s` and two compares of the double were.
+- **Workload.** The machine code V8 14.6 (node 26.12.1, x64) makes of `fldcw; fistp dword;
+  fldcw` (`tools/cork-asm.mjs --hex`), counted by hand. Not measured under valgrind.
+- **Values.** The quadword conversion is 8 instructions (a rounding, cvttsd2siq, its
+  conversion back, a compare into a mask, a move out of it, an and, a test, a branch) where the
+  dword one is 6; with the integer range test and the NaN's own compare, 19 for the store
+  against 17.
+- **Why.** V8 tests a quadword conversion for saturation by converting back, as it does the
+  dword one, and adds a mask's move out of the vector register.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU).
+- **Decision.** Not taken: the value plus 1.5 * 2^52 went in instead (1a635af, 11 instructions,
+  no branch; game -2.64 %).
+
+### 2026-10-29: a self-loop that only reads, hoisted as a loop with stores is
+
+- **Idea.** A self-loop whose streams only read, where reads go untested, hoisted as
+  `emitHoistedLoop` hoists one with a store stream: the window tested, a copy whose reads go
+  unwrapped for the turns it cleared, back to the test when they are spent, the checked copy
+  when it fails. Left unhoisted since bcd3a03a, before the unchecked copy counted its turns on
+  the budget (3441019).
+- **Workload.** As the entry above (`ir.sh`, one run an arm). Arms: on 4f54a94's cmov change
+  (unpublished then) with and without the hoisting; and on 1a635af with read streams tested
+  against RAM alone (ab41509's window, then still over a movs copy's source too), with and
+  without it.
+- **Values.** With the pages' flags as the window: crc 1,721,137 -> 1,659,826 (-3.6 %), str
+  2,959,943 -> 2,751,410 (-7.0 %), sort 2,639,133 -> 2,759,666 (+4.6 %). With the window a
+  compare against RAM: crc 1,716,203 -> 1,654,826 (-3.6 %), str 2,952,739 -> 2,708,935
+  (-8.3 %), sort 2,606,244 -> 2,679,031 (+2.8 %). The other workloads unchanged.
+- **Why.** sort's partition scans (`while (v[i] < p) i++`) run a few turns an entry, and an
+  entry paid the window, the turns' setup and two wasm loop heads, each V8's stack check and
+  the alignment padding before it, which the counts include (nops run 2.5 M times in qs).
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken in this shape; a loop that only reads is hoisted as one, with no
+  loop around the test (`emitReadLoop`, the change after this entry's).
+
+### 2026-10-29: a single read off a register through the register's wrapped sum
+
+- **Idea.** `wrappedFirst` shares the sum of a read's registers, wrapped into RAM, among the
+  block's reads of fields off them, each displacement the load's offset; a read alone in its
+  spread had its whole address wrapped. Taking a lone read with a small displacement (0 up to
+  64 KiB) through the wrapped sum too costs the same where it stands (an `and` of the register,
+  the displacement in the load, against a `lea` and an `and`), and the host may share that sum
+  with another block's reads off the register -- tree's lookup reads `[eax+8]` in one block
+  and `[eax]`, `[eax+4]` in the next.
+- **Workload.** cork-bench, x87 images, `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64; one run an arm. Arms: on the read-stream window (then
+  unpublished, a stream of string reads still under it) every small displacement; and on
+  8513591 with the copy run's peel and the read loops in place, any displacement but 0.
+- **Values.** Every small displacement: crc 1,716,203 -> 1,744,169 (+1.6 %), str 2,952,739 ->
+  2,958,363 (+0.2 %), tree 2,800,184 -> 2,747,558 (-1.9 %), switch 471,331 -> 468,593
+  (-0.6 %), vcall 1,701,852 -> 1,714,252 (+0.7 %), game +0.1 %; vm, sort, fmath unchanged.
+  Any but 0: crc 1,630,190 -> 1,658,177 (+1.7 %), str 2,630,056 -> 2,658,590 (+1.1 %), tree
+  -1.9 %, switch -0.6 %, vcall +0.7 %, game +0.1 %.
+- **Why.** Where the sum is shared the host has one more value live across the code between,
+  and its register allocation moved and spilled others for it (crc's literal loop: the same
+  instructions, other registers, a spill more a turn).
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken: a lone read keeps its address wrapped whole.
+
+### 2026-10-29: a loop of several blocks paired up to 64 instructions
+
+- **Idea.** A small loop of several blocks runs two turns a wasm turn (`emitPairedRange`)
+  when its blocks hold at most `PAIRED_MAX` (32) instructions; twice that takes in more loops.
+- **Workload.** cork-bench, x87 images, `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64; one run an arm, on 30c1205.
+- **Values.** The loops it adds: one in switch, one in vcall, none in the others. switch
+  447,918 -> 447,918, fmath 623,156 -> 623,156, tree 2,756,671 -> 2,756,671, vcall 1,701,852
+  -> 1,713,971 (+0.7 %).
+- **Why.** Not measured; the larger body did not take V8's turn test off enough turns to pay
+  for its size.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken: the limit stays 32.
+
+### 2026-10-29: entry-test locals for jumps forward, and locals cleared in shallower loops
+
+- **Idea.** The local that lets a jump pass a block's entry test it passed before
+  (`planTestedOnce`) given also (a) to blocks only a jump forward reaches past their test, and
+  (b) to blocks whose way back to such a jump runs through a block that changes the test's
+  registers or reaches the host, that block clearing it, where every such block lay in fewer
+  of the program's loops (jumps to an address no higher, calls and returns aside) than the
+  block itself.
+- **Workload.** cork-bench, x87 images, `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300, node 26.12.1 (V8 14.6) x64; one run an arm, on 30c1205.
+- **Values.** Taken (jumps back, nothing cleared): game 1,062,421 -> 1,030,109, the others
+  unchanged. With (a): game the same, sort 2,605,293 -> 2,661,731 (+2.2 %), crc 1,630,190 ->
+  1,628,053 (-0.1 %). With (a) and (b): crc 1,550,288 (-4.9 %), game 1,021,043 (-3.9 %), sort
+  2,724,988 (+4.6 %); with every clearing block allowed, sort +5.2 %. Other workloads
+  unchanged in every arm.
+- **Why.** Sort: one more local live across a large function, and V8 spilled and moved others
+  for it, the jumps forward rarely passing a test; with (b) the locals of its partition's
+  blocks cleared by the recursive call's pushes and pops. Not measured which of crc's locals
+  gave its 4.9 %; its one cleared local sits on a cold path, so it may be the same
+  allocation's luck the other way.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Neither taken: a jump back only, nothing on its way clearing the local.
+
+### 2026-10-29 -- invalidated: arm64 executed counts of `tools/cork-asm.mjs` read before ab02ac9
+
+- **What.** On arm64 V8 prints x27 as `cp`, and a block mark built in it (`movz cp, #...;
+  movk cp, #0x6b5a, lsl #16`) was not read: where that mark was the end mark, the epilogue and
+  every cold path after it were weighed as the code of the block before; where it was a block's,
+  that block's code was weighed as the block before it. A block ending in a switch formed in was
+  weighed with all its case arms, and a switch fused with its bound test with its arms in the
+  bound-test block. Fixed in 0b6ac60 and ab02ac9.
+- **Size.** On the cork-bench lua image (40 hottest regions, node 26.13.0 arm64 under
+  qemu-aarch64 8.2.2, `--no-wasm-bounds-checks --atomic`): 11.10 machine instructions an
+  executed guest instruction, 29.6 % of them stack-slot accesses, read as 3.25 and 1.6 % once
+  fixed; one 7-instruction block had been weighed as 13,840.
+- **Invalidated.** The arm64 table in 0b6ac60's message (measured with the end-mark misreading
+  still in); the switch rows of it (+107 % read for the fused switch) already by 0b6ac60 itself.
+  The arm64 executed figures of the 2026-10-28 and 2026-10-29 entries above that used
+  `cork-asm --blocks` on the Crysis timedemo may carry the same misreading: not re-measured (the
+  profile and images are not in this container), so not to be cited until they are.
+- **Still approximate.** The executed weighing keeps a block's cheapest copy and attributes a
+  loop's preheader and V8's stack check to the block whose mark precedes them: sort's partition
+  read loop weighs 38 instructions a turn of 3 x86 instructions, most of them the spills around
+  the stack guard's call that run once an entry. Compare arms on it, not absolute shares.
+
+### 2026-10-29: a guest call's ways out storing what a way to them wrote, through a chain of stores
+
+- **Idea.** The first form of `planPaths` (region.js): a way out of a region stores only the
+  registers, record fields and flags word some way to it wrote since the state block last held
+  them, so a call's return reloads only what is read after it. The ways out share one epilogue,
+  so the stores were one chain there, each link the locals the same ways out need, and a way out
+  entered the chain at the first link holding a local it needs: one more block around `$out` a
+  link, no store repeated.
+- **Workload.** cork-bench (x87 images), `tools/cork-bench/ir.sh` with WASM=1, CLOCK=0.001,
+  ITERS=300 (lua ITERS=100, WARM=50), node 26.12.1 (V8 14.6) x64, the "in wasm" column; base
+  a9c1412, one run an arm.
+- **Values** (machine instructions an iteration in wasm, base -> chain): lua 33,683,014 ->
+  33,181,426 (-1.49 %); calls512-scatter 5,251,383 -> 5,035,611 (-4.11 %); calls8-order
+  3,905,189 -> 3,774,075 (-3.36 %); tree 2,723,213 -> 2,710,818 (-0.46 %); vcall 1,673,846 ->
+  1,690,999 (+1.02 %); str 2,556,224 -> 2,606,042 (+1.95 %); game, vm, sort, switch within
+  0.25 %.
+- **Why.** str's hottest way out (710,862 runs in the profile, `ir-hot.sh`) ran 158 machine
+  instructions against 117: at every link's join V8 reconciled the registers of the locals still
+  to store, forty-one moves more on that way alone.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken in this form: the epilogue stores a few kinds of set instead
+  (`EXIT_KINDS`), each in a block of its own, joining once after its stores. Measured the same
+  way: four kinds, lua 33,482,101 (-0.60 %), str 2,559,255 (+0.12 %), calls512-scatter
+  4,976,283 (-5.24 %); eight kinds, lua 33,062,735 (-1.84 %), str 2,555,104 (-0.04 %), taken.
+
+### 2026-10-29: callees of a few instructions formed in past the region's caps
+
+- **Idea.** A direct call to a callee of at most 2 blocks and 32 bytes that makes no call (a
+  getter, a setter), left a wasm call because its region was full (`APART_FULL`), formed in all
+  the same, such callees sharing 16 blocks and 256 bytes past the caps (past the room the
+  entry's own function may take).
+- **Workload.** cork-bench, x87 images, the runtime's mechanism counts over 10 iterations after
+  50 (`blockProfile`, CLOCK 0.001), node 22.22.0; on top of the path stores above.
+- **Values.** lua: `APART_FULL` 2,587.5 an iteration with it and without, every other count the
+  same; tree, str, game, sort, vm, crc, switch: no count changed. 201 to 300 callees met in lua's
+  forming were that small; every one was formed in already.
+- **Why.** A callee that small is a leaf, and a leaf is formed in at any depth within the leaf
+  caps; the calls a full region leaves out in lua are to larger functions. Crysis's 107.5 M
+  region-full calls (the entry of 2026-10-23) were not measured for size.
+- **Machine.** As the entry above.
+- **Decision.** Not taken.
+
+### 2026-10-29: a `ret` back to its call without the empty stack's test
+
+- **Idea.** A `ret` that may answer the wasm call waiting for it (`returnToCall`) tests the
+  depth before it reads the stack's top; with a word below the stack no return address can
+  equal, the read alone would do, one compare and branch less a `ret`.
+- **Workload.** As the entries above; measured as a hack on the chain form of the path
+  stores (the depth not tested, the word below the stack the state block's zero, which no
+  run of these workloads returns to), against that form.
+- **Values** (in wasm, without -> with): lua 33,181,426 -> 33,078,109 (-0.31 %);
+  calls512-scatter 5,035,611 -> 4,970,089 (-1.30 %); tree 2,710,818 -> 2,714,033 (+0.12 %).
+- **Why not now.** No 32-bit word is one a `ret` cannot pop: the word below the stack needs
+  a form no address takes (eight-byte entries, a tag in the upper half, the stack twice its
+  1 KiB in a state page whose room past it is not mapped out here), or a way back for the
+  `ret` that matched it with no call waiting, exact for the host, with a gate. A third of a
+  per cent of lua does not pay for either in this change.
+- **Machine.** As the entries above.
+- **Decision.** Not taken.
+
+### 2026-10-29: a predicted call to a callee not formed in made as a wasm call
+
+- **Idea.** An indirect call whose callees the runtime predicted (`callTargets`) compares its
+  target with the callees formed in and jumps to the one it matches; any other target leaves
+  the region (`CALL_LEFT`), its `ret` coming back through the entry hash too (`RET_LEFT`).
+  Made a wasm call instead (`callAndReturn` after `predictCall`, linked or through the
+  transfer), as a call with none predicted is, in 32-bit regions without x87 (whose stack
+  planning does not follow the extra return), with the path stores' analyses carrying the
+  block's writes into the callees it jumps to before the call.
+- **Workload.** As the entries above, on top of the path stores (eight kinds), against them.
+  Gated: the path-stores gate with a call through a table of eight functions by a turning
+  index under `callTargets` and `predictAfter: 1`, misses as wasm calls counted (passed, and
+  its two mutations failed it).
+- **Values** (in wasm): calls8-order 3,819,114 -> 3,117,581 (-18.4 %; through the transfer
+  rather than linked, 3,310,493); vcall 1,690,942 -> 2,047,372 (+21.1 %; through the transfer
+  2,050,118); game 1,025,967 and tree 2,702,055, unchanged; lua unchanged (its regions hold
+  x87). Mechanisms, calls8-order an iteration: transfers 32,763 -> 1, `CALL_LEFT` 16,381 -> 0.
+  Bytes of the runtime's modules after 50 iterations: vcall 87,045 -> 99,759 (+14.6 %),
+  calls8-order +5.6 %, the twelve workloads +0.11 %.
+- **Why.** vcall's predictions always hit: no call runs, but the call on the cold way of each
+  site puts a wasm call inside its hot loop, and V8 kept the loop's values in stack slots
+  and moved them around it -- ten machine instructions more in each of its hottest blocks,
+  frame stores and loads from 9.4 % to 15 % of its main region (`ir-hot.sh`). A prediction
+  is made where a few callees take most of a site's calls, so its sites hit far more often
+  than calls8-order's.
+- **Machine.** As the entries above.
+- **Decision.** Not taken. Worth measuring again only for sites whose samples show many
+  calls to other targets, the call kept out of the hot code's function.
+
+### 2026-10-29: long mode's owed compare result answered for je/jne by an i64 compare
+
+- **Idea.** With a `cmp` whose result its block's final branch leaves unmade at 64 bits too
+  (`oweResult`, `owesTo`), a `je` or `jne` compares the record's two operands: as i64, the
+  record holding a narrower compare's operands zero-extended, so one compare serves every width.
+- **Workload.** cork-bench x86-64 images, `tools/cork-bench/ir.sh` with `WASM=1 CLOCK=0.001
+  ITERS=1000`, node 26.13.0 (V8 14.6) x64, machine instructions an iteration in V8's printed wasm
+  code; one run an arm (the column repeats to the instruction run to run). Arms: the tree at
+  8740b9eb with the float-compare fusion over instructions between (this branch's first change),
+  without and with the owed result at 64 bits.
+- **Values.** Without, then with the i64 compare: tree 3,117,594 -> 3,160,406 (+1.4 %); sort
+  4,029,716 -> 3,793,562 (-5.9 %); crc 1,991,978 -> 1,991,020; vm 2,434,503 -> 2,434,503.
+- **Why.** tree's hot `cmp r32, r32; je`: V8 extends the dword operand into a register of its own
+  before a 64-bit compare (`movl r12, r11; cmpq rsi, r12`) where the made result's
+  `i32.eqz` had been one `cmpl`.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded.
+- **Decision.** Not taken as such: a narrower compare's operands are wrapped and compared as i32,
+  a quadword's as i64 (tree 3,117,594, its base; sort 3,791,850).
+
+### 2026-10-29: a linked call's slot read in one quadword load on an x64 host
+
+- **Idea.** fe40382e read a linked call's slot (the index, the label and the top-and-empty
+  halfword) in one i64 load, taking each field out with shifts and masks, where it had been
+  three loads: on arm64 a constant address past a load's offset costs two instructions a load
+  (4da46ec1 kept the one load on both hosts when it took the one condition back to arm64).
+- **Workload.** cork-bench, both widths, `tools/cork-bench/ir.sh` with `WASM=1 CLOCK=0.001
+  ITERS=1000`, node 26.13.0 (V8 14.6) x64, machine instructions an iteration in V8's printed wasm
+  code, two runs an arm (identical to the instruction; load and lua one). Arms: cork2-x64-speed
+  at 35c25a0 (the one load on both hosts), and the same with three loads on an x64 host.
+- **Values.** One load, then three: calls512-order 5,242,588 -> 5,128,910 (x32), 5,998,645 ->
+  5,843,891 (x64); calls512-scatter 5,251,383 -> 5,139,761, 4,989,406 -> 4,825,586; load
+  2,501,119 -> 2,478,182, 2,974,678 -> 2,949,159; lua 33,891,535 -> 33,757,597, 36,667,831 ->
+  36,366,200; the other workloads within 0.1 %, none higher. Per commit of the base's history
+  (x64): fe40382e calls512-scatter +3.18 %, calls512-order +3.00 % (x32 +3.50 %); 4da46ec1 -1.80,
+  -1.99 (x32 -3.10 %).
+- **Why.** An x64 load takes the constant address as its offset for nothing; the fields out of one
+  quadword are shifts and masks the separate loads did not need.
+- **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
+  recorded. arm64: not measured here (the one load stays there).
+- **Decision.** On an x64 host three loads again; arm64 keeps the one load.

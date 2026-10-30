@@ -37,3 +37,81 @@ test('without a listener nothing is told and the module is the same', ()=>{
     assert.equal(told, 3);
     assert.deepEqual(listened, plain, 'listening changes no byte emitted');
 });
+
+/**
+ * The minimum of the memory a module imports, in pages, from its import section.
+ *
+ * @param {Uint8Array} wasm
+ */
+function importedMemoryMinimum(wasm){
+    let at = 8;
+    const leb = ()=>{
+        let result = 0;
+        let shift = 0;
+        for (;;)
+        {
+            const byte = wasm[at++];
+            result += (byte & 0x7f) * 2 ** shift;
+            shift += 7;
+            if ((byte & 0x80) === 0)
+            {
+                return result;
+            }
+        }
+    };
+    const name = ()=>{
+        const length = leb();
+        at += length;
+    };
+    while (at < wasm.length)
+    {
+        const id = wasm[at++];
+        const size = leb();
+        const end = at + size;
+        if (id === 2)
+        {
+            for (let count = leb(); count > 0; count--)
+            {
+                name();
+                name();
+                const kind = wasm[at++];
+                if (kind === 2)
+                {
+                    leb();
+                    return leb();
+                }
+                if (kind === 0)
+                {
+                    leb();
+                }
+                else if (kind === 1)
+                {
+                    at++;
+                    const flags = leb();
+                    leb();
+                    if (flags & 1)
+                    {
+                        leb();
+                    }
+                }
+                else
+                {
+                    at += 2;
+                }
+            }
+        }
+        at = end;
+    }
+    return -1;
+}
+
+test('a region\'s module asks for a memory that holds the guest\'s RAM', ()=>{
+    // mov eax, [0x402044]; ret: a constant address the compiler can take as in bounds.
+    for (const [ramSize, ramBase] of [[16 << 20, 0x10000], [1 << 30, 0], [3 << 20, 0x10000]])
+    {
+        const { wasm } = regionModule({ code: [0xa1, 0x44, 0x20, 0x40, 0x00, 0xc3], at: 0x400000,
+            ramSize, ramBase });
+        assert.equal(importedMemoryMinimum(wasm), Math.ceil((ramBase + ramSize) / 65536),
+            `RAM ${ramSize} at ${ramBase}`);
+    }
+});

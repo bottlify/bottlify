@@ -21,7 +21,7 @@
 import { varargsSlots } from '../msvcrt/format.js';
 import { formatWsprintf } from './wsprintf.js';
 import {
-    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, decodeAnsi, decodeOem, encodeAnsi, encodeOem, mapCaseAnsi,
+    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, charToOem, decodeAnsi, decodeOem, encodeAnsi, mapCaseAnsi,
     transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
@@ -3691,8 +3691,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /**
          * BOOL CharToOemBuffW(LPCWSTR lpszSrc, LPSTR lpszDst, DWORD cchDstLength)
          *
-         * Exactly that many characters, each to its OEM byte, or to the
-         * default character where the page has none.
+         * Exactly that many characters, each to its OEM byte, its best fit,
+         * or '_' where the page has nothing close.
          */
         CharToOemBuffW: {
             argBytes: 12,
@@ -3708,7 +3708,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 {
                     text += String.fromCharCode(units[at] | units[at + 1] << 8);
                 }
-                host.writeMemory(target >>> 0, encodeOem(text));
+                host.writeMemory(target >>> 0, charToOem(text));
                 return 1;
             },
         },
@@ -3724,7 +3724,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 }
                 const text = readWideString(source >>> 0);
                 const bytes = new Uint8Array(text.length + 1);
-                bytes.set(encodeOem(text));
+                bytes.set(charToOem(text));
                 host.writeMemory(target >>> 0, bytes);
                 return 1;
             },

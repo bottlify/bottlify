@@ -80,7 +80,8 @@ const F64 = Object.freeze({
     reinterpretI64: 0xbf,
 });
 const I64 = Object.freeze({
-    eqz: 0x50, eq: 0x51, ne: 0x52, ltS: 0x53, gtS: 0x55, gtU: 0x56, add: 0x7c, sub: 0x7d,
+    eqz: 0x50, eq: 0x51, ne: 0x52, ltS: 0x53, ltU: 0x54, gtS: 0x55, gtU: 0x56, add: 0x7c,
+    sub: 0x7d,
     mul: 0x7e, divU: 0x80, and: 0x83, or: 0x84, shl: 0x86, shrU: 0x88, clz: 0x79, wrap: 0xa7,
     extendS: 0xac, extendU: 0xad, reinterpretF64: 0xbd,
 });
@@ -93,6 +94,9 @@ const F32 = Object.freeze({
 /** i32.trunc_sat_f64_s / i64.trunc_sat_f64_s */
 const TRUNC_SAT_I32 = [0xfc, 0x02];
 const TRUNC_SAT_I64 = [0xfc, 0x06];
+/** 1.5 * 2^52, whose sum with an integer below 2^51 is exact, the integer in its low bits. */
+const MAGIC = 6755399441055744;
+const MAGIC_BITS = 0x4338000000000000n;
 
 /** Status word bits. */
 const Status = Object.freeze({
@@ -4494,13 +4498,19 @@ function roundSingle(e){
  * registers around every such conversion.
  *
  * @param {E} e @param {number} local
+ * @param {boolean} [nearest]  false where what is pushed is added to `MAGIC`
+ *     next, which rounds to nearest (even) itself: the value as it is then
  */
-function roundLocal(e, local){
+function roundLocal(e, local, nearest = true){
     const { b } = e;
     const rc = ()=>b.localGet(Local.x87Control).i32const(0xc00).op(I32.and);
     rc().op(I32.eqz);
     e.openIf('nearest', ValType.f64);
-    b.localGet(local).op(F64.nearest);
+    b.localGet(local);
+    if (nearest)
+    {
+        b.op(F64.nearest);
+    }
     b.else();
     rc().i32const(0xc00).op(I32.eq);
     e.openIf('chop', ValType.f64);
@@ -4533,7 +4543,7 @@ function storeInt(e, operand, local, truncate){
     }
     else
     {
-        roundLocal(e, local);
+        roundLocal(e, local, e.context.precise === true || operand.size === 8);
     }
     b.localSet(e.x87.temp);
     const rounded = e.x87.temp;
@@ -4546,6 +4556,28 @@ function storeInt(e, operand, local, truncate){
         b.localGet(rounded).f64const(limit).op(F64.lt);
         b.op(I32.and);
     };
+    if (e.context.precise !== true && !wide)
+    {
+        // No IE: the integer indefinite chosen by a select, with no branch.
+        // The integral value plus 1.5 * 2^52 is exact below 2^51 and holds
+        // the value in its low bits, and its bits lie within `limit` of the
+        // constant's exactly when the value is in range: anything else -- a
+        // NaN, an infinity, a value of 2^51 or more either way -- has bits of
+        // another exponent. Where the host's conversion of a double was a
+        // rounding, a conversion back, a compare and two branches, and the
+        // range two compares that each took their constant into a register.
+        // Under round to nearest the value comes unrounded (`roundLocal`): the
+        // sum rounds it to nearest even, as the rounding would have, and a
+        // value of 2^51 or more either way is out of range rounded or not.
+        b.localGet(Local.addr);
+        b.localGet(rounded).f64const(MAGIC).op(F64.add).op(I64.reinterpretF64)
+            .localTee(Local.t64).op(I64.wrap).i32const(operand.size === 2 ? 0x8000 : -0x80000000);
+        b.localGet(Local.t64).i64const(MAGIC_BITS - BigInt(limit)).op(I64.sub)
+            .i64const(BigInt(2 * limit)).op(I64.ltU);
+        b.select();
+        b.store(operand.size === 2 ? 'i32_16' : 'i32', { offset: e.layout.ramBase });
+        return;
+    }
     if (e.context.precise !== true)
     {
         // No IE: the integer indefinite chosen by a select, with no branch.

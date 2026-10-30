@@ -71,7 +71,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { regionModule } from '../modules/cork/src/region-module.js';
-import { BLOCK_MARK_END, CallStack } from '../modules/cork/src/emit/region.js';
+import { BLOCK_MARK_ARM, BLOCK_MARK_END, CallStack } from '../modules/cork/src/emit/region.js';
 import { ownLayout } from '../modules/cork/src/runtime/layout.js';
 
 const args = process.argv.slice(2);
@@ -256,7 +256,9 @@ const markOffset = ownLayout({ ramSize, ramBase, ...bits === 64 ? { bits: 64 } :
  * their starts (`blockMark`): x86-64 holds the mark as an immediate, arm64 builds
  * it in a register with `mov`/`movk` before the store. A block emitted twice (a
  * hoisted loop's two copies), or whose code the compiler made twice (a loop it
- * unrolled), keeps its cheapest copy, the one its turns mostly run; the code
+ * unrolled), keeps its cheapest copy, the one its turns mostly run; a block
+ * ending in a switch is its code before the case arms and its cheapest arm (each
+ * arm marked with `BLOCK_MARK_ARM`), as a run takes one; the code
  * before the first mark (the prologue and the dispatch) and past the end mark
  * (the epilogue, the cold paths moved there) belongs to no block.
  *
@@ -273,7 +275,8 @@ function blockCode(lines){
     {
         const line = lines[i];
         let mark = -1;
-        const arm = /(movk|movz)\s+[wx](\d+), #0x6b5a(0000)?(, lsl #16)?$/.exec(line);
+        // V8 prints x27 as `cp` where it is free for other values.
+        const arm = /(movk|movz)\s+([wx]\d+|cp), #0x6b5a(0000)?(, lsl #16)?$/.exec(line);
         const x64 = arm === null ? /0x6b5a([0-9a-f]{4})\b/.exec(line) : null;
         if (x64)
         {
@@ -286,7 +289,8 @@ function blockCode(lines){
             // of the whole when the low half is zero.
             mark = 0;
             marks.add(line);
-            const low = new RegExp(`movz?\\s+[wx]${arm[2]}, #(0x[0-9a-f]+|\\d+)$`)
+            const reg = arm[2] === 'cp' ? 'cp' : `[wx]${arm[2].slice(1)}`;
+            const low = new RegExp(`movz?\\s+${reg}, #(0x[0-9a-f]+|\\d+)$`)
                 .exec(lines[i - 1] ?? '');
             if (arm[1] === 'movk' && low)
             {
@@ -294,7 +298,8 @@ function blockCode(lines){
                 marks.add(lines[i - 1]);
             }
             // The store of the value made, where it follows close.
-            const stored = new RegExp(`str\\s+w${arm[2]}, \\[x\\d+, #${markOffset}\\]`);
+            const stored = new RegExp(`str\\s+${arm[2] === 'cp' ? 'w27'
+                : `w${arm[2].slice(1)}`}, \\[x\\d+, #${markOffset}\\]`);
             const store = lines.slice(i + 1, i + 4).find(next=>stored.test(next));
             if (store)
             {
@@ -320,18 +325,26 @@ function blockCode(lines){
     }
     /** @type {Map<number, string[]>} */
     const byIndex = new Map();
+    /** @type {Map<number, string[]>} by block, its cheapest switch arm */
+    const arms = new Map();
     for (const [key, instances] of segments)
     {
-        const index = Number(key.split(':')[0]);
+        const [index, copy] = key.split(':').map(Number);
+        const kept = copy === BLOCK_MARK_ARM ? arms : byIndex;
         for (const segment of instances)
         {
             const real = segment.filter(line=>!marks.has(line));
-            const known = byIndex.get(index);
+            const known = kept.get(index);
             if (known === undefined || real.length < known.length)
             {
-                byIndex.set(index, real);
+                kept.set(index, real);
             }
         }
+    }
+    // A run of a block that ends in a switch runs its code before the arms and one arm.
+    for (const [index, arm] of arms)
+    {
+        byIndex.set(index, [...byIndex.get(index) ?? [], ...arm]);
     }
     return { code: byIndex, marks };
 }
