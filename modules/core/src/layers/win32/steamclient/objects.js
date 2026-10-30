@@ -66,7 +66,9 @@ export function createSteamObjects(host, behaviours){
                 const behaviour = behaviours[name];
                 const given = throughPointer ? args.slice(2) : args.slice(1);
                 const answer = behaviour ? behaviour(given, version) : undefined;
-                if (!behaviour && !said.has(`${version}.${name}`))
+                // A void method -- a setter, a notification -- has nothing to
+                // answer; only one whose answer is our zero is said.
+                if (!behaviour && kind !== 'v' && !said.has(`${version}.${name}`))
                 {
                     said.add(`${version}.${name}`);
                     host.divergence?.(`${version}.${name}`, 'not answered yet: zero');

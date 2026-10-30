@@ -397,6 +397,11 @@ function parse(argv){
                     rootsFromArgv(argv)).map(root=>Buffer.from(root).toString('base64')) } : {},
             }
             : undefined,
+        // `--steam FILE`: the signed-in Steam account (tools/steam-account.mjs)
+        // the engine's Steam client answers for; the app is the manifest's
+        // `steam.appId`.
+        steamAccount: argv.includes('--steam')
+            ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
         // createApp's `cpu` as JSON ('{"playPinned":false}'): a run whose threads
         // are placed one fixed way, beside another placed the same way.
         cpuConfig: argv.includes('--cpu-config')
@@ -1918,7 +1923,10 @@ export async function game(options){
             // A harness run is a diagnostic one: the translator's timings and its
             // record of long holds are on unless the run turns them off.
             cork: { config: { timings: true, ...options.corkConfig } },
-            win32: options.win32Config,
+            win32: options.steamAccount
+                ? { ...options.win32Config, steam: { ...options.steamAccount,
+                    ...manifest.steam?.appId ? { appId: manifest.steam.appId } : {} } }
+                : options.win32Config,
             screen: options.screen,
             quantum: options.quantum,
             executors: options.executors,
