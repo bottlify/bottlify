@@ -24,7 +24,8 @@
  * code. `--journal S` prints, S seconds in, the last cross-process COM calls and
  * message waits from the call journal (every call area on); `--trace S` prints
  * the last three thousand calls of every kind instead (`--trace-lines N`), with their first
- * arguments -- what a process that loops without waiting keeps calling. A run
+ * arguments -- what a process that loops without waiting keeps calling;
+ * `--trace-match REGEX` keeps only the lines that match. A run
  * that ends sooner prints either when it ends. `--strings` peeks every pointer
  * argument for a string, so those lines name the paths and texts themselves.
  *
@@ -54,7 +55,8 @@
  *
  * `--bundle ID` runs an installed program instead (its blocks kept in
  * `bundles/ID/blocks`, or the folder `--blocks DIR` names, between runs), `--file HOST=GUEST` putting
- * a file of this disk on its volume first: the bundle in
+ * a file of this disk on its volume first (and `--reg 'HKCU\path\name=value'` a
+ * registry value, a string or `dword:N`): the bundle in
  * `bundles/ID`, mounted where its installation put it, started at its entry
  * or at `--which`, a path in the bundle -- a launcher's dialog driven by the
  * same keys, clicks and pictures as a wizard's. `--attended` leaves a message
@@ -649,8 +651,13 @@ const printJournal = ()=>{
     journalPrinted = true;
     const crossing = /OleMainThread|CoWait|MsgWait|PostMessage|PostThread|SendMessage|WaitFor/;
     const whole = traceAt > 0 || traceOnBox || traceOnFault;
-    const trail = app.log.recent(100000).filter((/** @type {any} */ entry)=>whole
-        || entry.category === 'call.com' || crossing.test(entry.text));
+    // `--trace-match REGEX`: only the calls whose line matches -- one family
+    // (`WS2_32|WSA|GetQueuedCompletion`) across a run far longer than the lines kept.
+    const match = argv.includes('--trace-match')
+        ? new RegExp(argv[argv.indexOf('--trace-match') + 1]) : null;
+    const trail = app.log.recent(100000).filter((/** @type {any} */ entry)=>(whole
+        || entry.category === 'call.com' || crossing.test(entry.text))
+        && (!match || match.test(entry.text)));
     for (const entry of trail.slice(whole ? -number('--trace-lines', 3000) : -150))
     {
         console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 400));
@@ -681,6 +688,25 @@ if (traceOnBox)
         }
     });
     app.on('message-box', printJournal);
+}
+
+// `--reg 'HKCU\Software\Vendor\Name=value'`: a registry value set before the
+// program starts, a string or `dword:N` -- a setting a person's machine has and
+// a bottle must not carry, laid in for this run alone.
+const ROOTS = { HKCU: 0x80000001, HKLM: 0x80000002 };
+for (const entry of all('--reg'))
+{
+    const [, root, path, name, value] = /^(HKCU|HKLM)\\(.*)\\([^\\=]*)=(.*)$/s.exec(entry) ?? [];
+    if (!root)
+    {
+        throw new Error(`--reg ${entry}: not ROOT\\path\\name=value`);
+    }
+    const hive = app.registry();
+    const { key } = hive.create(hive.root(ROOTS[/** @type {'HKCU' | 'HKLM'} */ (root)]), path);
+    const dword = /^dword:(\d+)$/.exec(value);
+    hive.setValue(key, name, dword ? 4 : 1, dword
+        ? new Uint8Array(Uint32Array.of(Number(dword[1])).buffer)
+        : new Uint8Array(Uint16Array.from(value, character=>character.charCodeAt(0)).buffer));
 }
 
 try
