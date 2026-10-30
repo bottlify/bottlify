@@ -6,7 +6,7 @@
 
 /**
  * The extension's manifest, one source for its two builds: `public` runs on
- * Bottlify's own sites alone, `dev` on a local launcher too.
+ * Bottlify's own sites alone, `dev` on any page, a local launcher's too.
  *
  * A host permission is the page's as well as the platform's: Chrome applies a
  * ruleset's header changes only to a request whose URL and whose initiator
@@ -17,8 +17,10 @@
 /** The pages the bridge serves, by build. */
 export const PAGES = Object.freeze({
     public: Object.freeze(['https://bottlify.app/*', 'https://play.bottlify.app/*']),
-    dev: Object.freeze(['https://bottlify.app/*', 'https://play.bottlify.app/*',
-        '*://*.localhost/*', 'http://127.0.0.1/*']),
+    // Any page: a launcher is reached as localhost, 127.0.0.1 or a machine's
+    // address on its network, and a match pattern takes no wildcard inside an
+    // address. The dev build is loaded by hand, never published.
+    dev: Object.freeze(['<all_urls>']),
 });
 
 /**

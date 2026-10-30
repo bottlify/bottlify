@@ -18,14 +18,13 @@ test('the public build reaches Bottlify\'s own sites and the platforms, nothing 
     assert.equal(manifest.version, '1.2.3');
 });
 
-test('the dev build adds local pages, to the permissions too', ()=>{
+test('the dev build runs on any page, to the permissions too', ()=>{
+    // A launcher on localhost, 127.0.0.1 or a LAN address: patterns take no
+    // wildcard inside an address, so the dev build takes every page.
     const manifest = manifestFor('dev', '1.2.3');
-    for (const page of ['*://*.localhost/*', 'http://127.0.0.1/*'])
-    {
-        assert.ok(manifest.content_scripts[0].matches.includes(page));
-        // A page the extension may not reach is a page the rules leave alone.
-        assert.ok(manifest.host_permissions.includes(page));
-    }
+    assert.deepEqual(manifest.content_scripts[0].matches, ['<all_urls>']);
+    // A page the extension may not reach is a page the rules leave alone.
+    assert.ok(manifest.host_permissions.includes('<all_urls>'));
 });
 
 test('every page is a host permission, and the CM socket is listed as wss', ()=>{
