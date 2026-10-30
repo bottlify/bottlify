@@ -90,7 +90,7 @@ const reused = ()=>{
     }
     shared = createCorkHost({
         memorySize: MEMORY, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     return shared;
 };

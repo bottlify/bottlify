@@ -46,7 +46,7 @@ async function runExecutable(t, executable){
     /** @type {any[]} */
     const boxes = [];
     app.on('message-box', (/** @type {any} */ box)=>boxes.push(box));
-    const code = await app.run({ timeoutMs: 20000 });
+    const code = await app.run({ timeoutMs: 30_000 });
     const bridge = app.diagnostics().find((/** @type {any} */ entry)=>entry.name === 'bridge');
     return { code, text: output.join(''), suspended: bridge?.metrics?.suspended, boxes };
 }

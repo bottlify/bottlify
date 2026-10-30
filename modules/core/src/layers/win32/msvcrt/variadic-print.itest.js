@@ -112,7 +112,7 @@ function caseOf(rng){
 test('sprintf and _snprintf in the guest write and answer as their handlers', ()=>{
     const machine = createCorkHost({
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     machine.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
     /** @param {number} at @param {number} length */

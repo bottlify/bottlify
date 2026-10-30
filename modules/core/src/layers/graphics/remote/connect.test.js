@@ -12,6 +12,19 @@ import { WAIT } from './wire.js';
 import { openGraphicsWorker } from '../../../host/graphics-worker.js';
 
 /** A worker's end as `connectGraphicsWorker` and `openGraphicsWorker` see it. */
+/**
+ * Every message posted on this thread's ports delivered: turns of the event
+ * loop, each delivering what the turn before posted -- not a 10 ms timer, which
+ * a thread kept off its core can find due in the turn that delivers them, and
+ * run first.
+ */
+async function delivered(){
+    for (let turn = 0; turn < 20; turn++)
+    {
+        await new Promise(resolve=>setImmediate(resolve));
+    }
+}
+
 function fakeWorker(){
     const target = new EventTarget();
     /** @type {any[]} */
@@ -350,7 +363,7 @@ test('the worker\'s phase totals are summed over the roots that said them', asyn
     ports[1].postMessage({ type: 'diagnostics', diagnostics: {}, phases: phases(6, 1) });
     // The third root's played side times nothing: it is left out of the sum.
     ports[2].postMessage({ type: 'diagnostics', diagnostics: {} });
-    await new Promise(resolve=>setTimeout(resolve, 10));
+    await delivered();
 
     assert.deepEqual(end.diagnostics().phases, {
         'batch-read': { count: 4, ms: 16, selfMs: 11 },
@@ -384,7 +397,7 @@ test('each root goes with the run\'s frame bound, and the roots\' holds are summ
         ports[0].postMessage({ type: 'diagnostics', diagnostics: {}, latency: bound(300, 12, 7) });
         ports[1].postMessage({ type: 'diagnostics', diagnostics: {}, latency: bound(40, 1, 3) });
         // The third root has said nothing: it is left out.
-        await new Promise(resolve=>setTimeout(resolve, 10));
+        await delivered();
 
         assert.deepEqual(end.diagnostics().latency, { limit: 6, counting: true, inFlight: 1,
             peak: 7, frames: 340, held: 13, heldMs: 104, waiting: 0 });

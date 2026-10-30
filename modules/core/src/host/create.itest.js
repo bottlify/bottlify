@@ -18,7 +18,7 @@ import { buildExe } from '../../../../tools/make-pe.mjs';
 const FIXTURE = new URL('../../test/fixtures/hello.exe', import.meta.url);
 
 test('hello.exe runs through the package entry, headless, on this thread',
-    { timeout: 15000 }, async t=>{
+    { timeout: 30_000 }, async t=>{
         const exe = await readFile(FIXTURE);
         const app = await createApp({
             host: 'thread',
@@ -44,7 +44,7 @@ test('hello.exe runs through the package entry, headless, on this thread',
         const output = [];
         app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
             output.push(text));
-        const code = await app.run({ maxTurns: 200000, timeoutMs: 8000 });
+        const code = await app.run({ maxTurns: 200000, timeoutMs: 30_000 });
         assert.equal(code, 0);
         assert.equal(output.join(''), 'Hello from Bottlify\r\n');
 
@@ -55,7 +55,7 @@ test('hello.exe runs through the package entry, headless, on this thread',
     });
 
 test('hello.exe runs the same with concurrency, its engine fed through the inbound ring',
-    { timeout: 15000 }, async t=>{
+    { timeout: 30_000 }, async t=>{
         const exe = await readFile(FIXTURE);
         const app = await createApp({
             host: 'thread',
@@ -67,7 +67,7 @@ test('hello.exe runs the same with concurrency, its engine fed through the inbou
         const output = [];
         app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
             output.push(text));
-        const code = await app.run({ maxTurns: 200000, timeoutMs: 8000 });
+        const code = await app.run({ maxTurns: 200000, timeoutMs: 30_000 });
         assert.equal(code, 0);
         assert.equal(output.join(''), 'Hello from Bottlify\r\n');
         const layers = await app.diagnostics();

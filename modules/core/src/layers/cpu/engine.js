@@ -124,6 +124,10 @@ export function engineContractProblem(engineModule, url){
  *     answers for `[start, end)`, copied at once: what the engine keeps of a region's code
  *     to find it rewritten, taken a byte at a time through `read` where this is absent.
  * @property {EngineImports} imports
+ * @property {() => number} [now]  Cork's own: the clock, in milliseconds, a page's rewrites
+ *     are timed by (`volatileWindowMs`, `volatileHoldMs`): the host's by default. A host whose
+ *     program has a clock of its own (cork's machine: the instructions it retired) passes
+ *     that, so what is translated follows the program and not how busy the machine is.
  * @property {{ simd: boolean, tailCalls: boolean, sharedMemory: boolean,
  *     defaultNaNNegative: boolean, armHost?: boolean }} [features]  Cork's own: the host
  *     features its translator makes code for, in place of the ones it finds here -- a test's

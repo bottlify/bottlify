@@ -71,7 +71,7 @@ const setters = (commands, slotOf, mirrors, hostMirrors)=>Object.entries(command
 function gate(version, list){
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(TRAP, Uint8Array.of(0xf4));
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));

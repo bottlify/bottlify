@@ -19,7 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { createApp } from './app.js';
+import { IDLE_LOOK_MS, createApp } from './app.js';
 
 const FIXTURE = new URL('../test/fixtures/window.exe', import.meta.url);
 
@@ -65,7 +65,7 @@ async function runFixture(t){
     };
     setTimeout(deliver, 40);
 
-    const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 15000 });
+    const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 30_000 });
     const seen = bytes.length >= 4
         ? (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0
         : null;
@@ -118,7 +118,7 @@ async function startApp(t){
     return app;
 }
 
-test('a program with nothing to do waits instead of spinning', { timeout: 15000 }, async t=>{
+test('a program with nothing to do waits instead of spinning', { timeout: 30_000 }, async t=>{
     const app = await startApp(t);
 
     // Nothing is ever posted, so the program sits in GetMessage. What must not
@@ -130,11 +130,18 @@ test('a program with nothing to do waits instead of spinning', { timeout: 15000 
     // of turns never runs out on it. That is the contract, not a defect -- a
     // wait of seconds is tens of thousands of idle turns -- and a caller who
     // needs such a program back asks for a time.
-    const startedAt = Date.now();
+    //
+    // The bound is a bound: the loop looks again every few milliseconds, never
+    // waiting on anything longer -- read off the timers it set rather than off
+    // the run's wall time, which a busy machine stretches past any figure.
+    const timers = t.mock.method(globalThis, 'setTimeout');
     const finished = app.run({ timeoutMs: 500 });
     await assert.rejects(finished, /did not finish within 500 ms/);
-    const took = Date.now() - startedAt;
-    assert.ok(took < 2500, `the bound is a bound: back after ${took}ms, not whenever`);
+    const waits = timers.mock.calls.map(call=>Number(call.arguments[1] ?? 0));
+    timers.mock.restore();
+    assert.ok(waits.length > 0 && waits.every(ms=>ms <= IDLE_LOOK_MS),
+        `the bound is a bound: back at a look past it, not whenever (waits of ${
+            [...new Set(waits)].join(', ')} ms)`);
 
     const kernel = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'kernel');
     assert.ok(kernel.metrics.turns < 100,

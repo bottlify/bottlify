@@ -51,7 +51,7 @@ function random(seed){
 test('setjmp and _setjmp3 in the guest leave the buffer their handlers leave', ()=>{
     const host = createCorkHost({
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(SETJMP, SETJMP_CODE.setjmp);
     host.writePhysical(SETJMP3, SETJMP_CODE.setjmp3);

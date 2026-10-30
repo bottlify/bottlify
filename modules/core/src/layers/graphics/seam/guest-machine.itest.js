@@ -296,7 +296,7 @@ export function machine(version, guestCode, options = {}){
     const gpu = options.gpu ? createFakeDevice() : null;
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
     /** @param {number} at @param {number} length */

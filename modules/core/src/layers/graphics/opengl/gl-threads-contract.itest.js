@@ -137,7 +137,7 @@ const random = seed=>{
 const machine = ()=>{
     const host = createCorkHost({
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: ENTRY,
-        initialStack: STACKS[0], engine: cork, cork: {},
+        initialStack: STACKS[0], engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(ENTRY, new Uint8Array(u32(PROGRAMS[0])));

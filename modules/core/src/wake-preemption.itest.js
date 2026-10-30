@@ -94,7 +94,7 @@ async function flagAfterSetEvent(priority){
         cork: { config: { sliceMs: Infinity } } });
     try
     {
-        return await app.run({ timeoutMs: 8000 });
+        return await app.run({ timeoutMs: 30_000 });
     }
     finally
     {
@@ -193,7 +193,7 @@ test('a watched routine returns each thread to its own caller when threads inter
             const answers = [];
             app.on('guest-return', (/** @type {any} */ back)=>answers.push(back));
             app.debug.hook(0x401000 + F_OFFSET, { label: 'F', argBytes: 4, lengths: [4, 2] });
-            assert.equal(await app.run({ timeoutMs: 8000 }), 111,
+            assert.equal(await app.run({ timeoutMs: 30_000 }), 111,
                 'F(0) answered 1 to the main thread, F(10) 11 to the worker');
             assert.deepEqual(answers.map(back=>back.result).sort((a, b)=>a - b), [1, 11]);
         }
@@ -259,7 +259,7 @@ test('a worker woken inside a critical section takes it the moment it is left', 
     const app = await createApp({ executable: buildSectionExe(), ...ONE_PROCESSOR });
     try
     {
-        assert.equal(await app.run({ timeoutMs: 8000 }), 8,
+        assert.equal(await app.run({ timeoutMs: 30_000 }), 8,
             'the worker read what was written inside the section, before the waker ran on');
     }
     finally
@@ -318,7 +318,7 @@ test('a worker waiting on any of its events is handed over to the same way', asy
     const app = await createApp({ executable: buildSectionAnyExe(), ...ONE_PROCESSOR });
     try
     {
-        assert.equal(await app.run({ timeoutMs: 8000 }), 8);
+        assert.equal(await app.run({ timeoutMs: 30_000 }), 8);
     }
     finally
     {
@@ -377,7 +377,7 @@ test('a set made inside a procedure a host function called back hands over at on
     const app = await createApp({ executable: buildCallbackExe(), ...ONE_PROCESSOR });
     try
     {
-        assert.equal(await app.run({ timeoutMs: 8000 }), 1);
+        assert.equal(await app.run({ timeoutMs: 30_000 }), 1);
     }
     finally
     {

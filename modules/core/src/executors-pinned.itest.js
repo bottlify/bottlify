@@ -27,7 +27,14 @@ const u32 = value=>[
 ];
 
 const WORKER_AT = 0x200;
-const ROUNDS = 3_000_000;
+/**
+ * The worker's calls, two each. A tenth of the three million it made: every
+ * one crossing between two threads that a busy machine schedules in turn, the
+ * fixed run took past two minutes with four busy processes beside the suite.
+ * The trade, on windows of 25 ms (`placementTiming`), comes once the main
+ * thread's computing is done, a few tens of thousands of crossings in.
+ */
+const ROUNDS = 300_000;
 const OUTER = 100;
 const INNER = 400_000;
 
@@ -106,7 +113,8 @@ function buildProgram(workerProcessor = 1){
  */
 async function run(executable, playPinned, cpu = {}){
     const app = await createApp({ executable,
-        cpu: { cores: 2, eager: true, placement: 'spread', playPinned, freeHost: false, ...cpu } });
+        cpu: { cores: 2, eager: true, placement: 'spread', playPinned, freeHost: false,
+            placementTiming: { windowMs: 25, threshold: 30 }, ...cpu } });
     try
     {
         const code = await app.run({ timeoutMs: 120_000 });

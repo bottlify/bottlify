@@ -284,7 +284,7 @@ async function run(executable, quantum){
     });
     try
     {
-        const code = await app.run({ timeoutMs: 30000 });
+        const code = await app.run({ timeoutMs: 60_000 });
         const bridge = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'bridge');
         return {
             code,

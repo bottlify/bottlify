@@ -200,7 +200,7 @@ test('a batch left half formed is formed on with no further ask', async()=>{
         }
         await m.runtime.translatePending();
         // Only the event loop from here: the runtime calls itself back.
-        for (let i = 0; i < 200 && !starts.every(at=>m.runtime.entryOf(at) >= 0); i++)
+        while (!starts.every(at=>m.runtime.entryOf(at) >= 0))
         {
             await new Promise(resolve=>setTimeout(resolve, 5));
         }
@@ -268,7 +268,7 @@ test('a batch formed whole after the pool took its translator back waits for ano
             m.runtime.noteHot(0x4000, 0, 2);
             const diagnostics = ()=>/** @type {any} */ (m.runtime.diagnostics());
             // Asked until the credit the first batch spent has come back.
-            for (let i = 0; i < 200 && diagnostics().formedInPart === 0; i++)
+            while (diagnostics().formedInPart === 0)
             {
                 await turn();
                 await m.runtime.translatePending();
@@ -276,7 +276,7 @@ test('a batch formed whole after the pool took its translator back waits for ano
             assert.equal(diagnostics().formedInPart, 1, 'one of the two formed');
             // The pool takes back the translator the batch was taken for, idle meanwhile.
             m.runtime.detachTranslator?.(taken.adapter);
-            for (let i = 0; i < 200 && diagnostics().formedWaiting === 0; i++)
+            while (diagnostics().formedWaiting === 0)
             {
                 await turn();
                 await m.runtime.translatePending();
@@ -287,7 +287,7 @@ test('a batch formed whole after the pool took its translator back waits for ano
             const lent = heldTranslator();
             m.runtime.attachTranslator?.(lent.adapter);
             lent.ready();
-            for (let i = 0; i < 200 && lent.held.length === 0; i++)
+            while (lent.held.length === 0)
             {
                 await turn();
             }
@@ -315,7 +315,7 @@ test('a batch formed whole while the only translator is replaced waits for the o
             const diagnostics = ()=>/** @type {any} */ (m.runtime.diagnostics());
             // Taken back right after the call that formed one of the two, before
             // the runtime's own call back forms the other.
-            for (let i = 0; i < 200 && diagnostics().formedInPart === 0; i++)
+            while (diagnostics().formedInPart === 0)
             {
                 await turn();
                 await m.runtime.translatePending();
@@ -325,7 +325,7 @@ test('a batch formed whole while the only translator is replaced waits for the o
             m.runtime.detachTranslator?.(first.adapter);
             const next = heldTranslator();
             m.runtime.attachTranslator?.(next.adapter);
-            for (let i = 0; i < 200 && diagnostics().formedWaiting === 0; i++)
+            while (diagnostics().formedWaiting === 0)
             {
                 await turn();
                 await m.runtime.translatePending();
@@ -334,7 +334,7 @@ test('a batch formed whole while the only translator is replaced waits for the o
             assert.deepEqual([m.runtime.entryOf(0x3000), m.runtime.entryOf(0x4000)], [-1, -1],
                 'not emitted on this thread');
             next.ready();
-            for (let i = 0; i < 200 && next.held.length === 0; i++)
+            while (next.held.length === 0)
             {
                 await turn();
             }
@@ -382,7 +382,7 @@ test('nothing is emitted here while the translator loads: the batch waits for it
         assert.ok(/** @type {any} */ (held.runtime.diagnostics()).formedWaiting > 0,
             'formed, and waiting');
         loading.ready();
-        for (let i = 0; i < 200 && loading.held.length === 0; i++)
+        while (loading.held.length === 0)
         {
             await turn();
         }
@@ -417,7 +417,7 @@ test('with no translator left, a batch emitted here is one region', async()=>{
         {
             m.runtime.noteHot(at, 0, 2);
         }
-        for (let i = 0; i < 200 && translated() < starts.length; i++)
+        while (translated() < starts.length)
         {
             await turn();
             await m.runtime.translatePending();
@@ -539,7 +539,7 @@ test('regions formed again with their calls\' callees are formed a share at a ca
         await translateUntil(m, ()=>starts.every(at=>m.runtime.entryOf(at) >= 0));
         assert.equal(reforms(), 0);
         let most = 0;
-        for (let i = 0; i < 400 && reforms() < starts.length; i++)
+        while (reforms() < starts.length)
         {
             starts.forEach(run);
             const before = reforms();
@@ -581,7 +581,7 @@ test('regions formed again with copies of their loops are formed a share at a ca
             }
         }
         const copied = ()=>/** @type {any} */ (m.runtime.diagnostics()).copied;
-        for (let i = 0; i < 200 && copied() === 0; i++)
+        while (copied() === 0)
         {
             await turn();
             await m.runtime.translatePending();

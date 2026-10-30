@@ -132,7 +132,7 @@ function buildParentExe(){
 }
 
 test('the reader keeps its level, its cursor and its sink across a child it starts',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         // The decoder binary is fetched, not tracked; without it this test still
         // exercises the child, and the instance sharing below is skipped.
         const decoder = await readFile(new URL('video-decoder.wasm', PREBUILT)).catch(()=>null);
@@ -249,7 +249,7 @@ test('the reader keeps its level, its cursor and its sink across a child it star
         assert.equal(gpu.count('configure'), 1, 'the parent\'s frame configured the canvas');
         assert.equal(presenter.diagnostics().presents, 1);
 
-        const code = await app.run({ timeoutMs: 20000 });
+        const code = await app.run({ timeoutMs: 60_000 });
         assert.equal(code, 0, 'the child exited cleanly');
 
         // The same presenter, now attached to the child's machine: the count
@@ -417,7 +417,7 @@ test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it t
     const output = [];
     app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
 
-    const code = await app.run({ timeoutMs: 20000 });
+    const code = await app.run({ timeoutMs: 60_000 });
 
     assert.equal(code, 0, 'the child exited cleanly');
     const ERROR_ALREADY_EXISTS = 183;
@@ -428,7 +428,7 @@ test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it t
 for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
 {
     test(`a process's windows go when it exits, and the one started in its place finds none of`
-        + ` them (concurrency ${concurrency})`, { timeout: 60000 }, async t=>{
+        + ` them (concurrency ${concurrency})`, { timeout: 120_000 }, async t=>{
         // InstallShield's setup shows a window, starts a copy of itself and
         // exits; the copy shows its wizard. On Windows the first process's
         // windows are destroyed with it. Carried into the copy, its window
@@ -460,15 +460,25 @@ for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
                 0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
-        // Exits with FindWindowA(NULL, title): zero when the parent's window is gone.
+        // Looks with FindWindowA(NULL, title) until the parent's window is
+        // gone, then exits. Started before the parent's ExitProcess, the child
+        // may look while the parent still stands, on Windows too: which of
+        // the two runs first is the machine's to decide, and a busy one ran
+        // the child's look first (concurrency 1, eight busy loops beside the
+        // suite). A window carried into the copy is never gone: the run then
+        // ends at its bound, not with the child's exit.
         const child = buildExe({
-            imports: { 'USER32.dll': ['FindWindowA'], 'KERNEL32.dll': ['ExitProcess'] },
+            imports: { 'USER32.dll': ['FindWindowA'], 'KERNEL32.dll': ['Sleep', 'ExitProcess'] },
             codeSize: 0x40,
             data: { title: ascii('left by the parent') },
             code: ({ iat, at })=>[
-                0x68, ...u32(at('title')), 0x6a, 0,
+                0x68, ...u32(at('title')), 0x6a, 0, //   L: push title; push NULL
                 0xff, 0x15, ...u32(iat('FindWindowA')),
-                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+                0x85, 0xc0, //                            test eax, eax
+                0x74, 0x0a, //                            jz gone
+                0x6a, 0x01, 0xff, 0x15, ...u32(iat('Sleep')),
+                0xeb, 0xe5, //                            jmp L
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')), // gone: ExitProcess(0)
             ],
         });
         const app = await createApp({
@@ -479,7 +489,7 @@ for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
         });
         t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0,
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0,
             'the child found no window of the parent');
         assert.deepEqual((await app.debug.windows()).filter((/** @type {any} */ each)=>
             each.title === 'left by the parent'), [], 'and none is listed');

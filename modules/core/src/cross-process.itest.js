@@ -292,8 +292,11 @@ async function observed(parent, concurrency, through, t, childImage = child){
     const output = [];
     app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
         output.push(text));
-    const code = await app.run({ timeoutMs: 60000 });
-    return { code, text: output.join('') };
+    const code = await app.run({ timeoutMs: 120_000 });
+    const tables = await app.diagnostics();
+    const kernel = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'kernel');
+    return { code, text: output.join(''),
+        scheduler: kernel?.metrics?.scheduler ?? kernel?.metrics ?? null };
 }
 
 for (const seed of [1, 2, 3, 4, 5, 6])
@@ -543,11 +546,11 @@ test('a thread waiting on its child\'s answers does not hold the processor from 
                 return a.done();
             },
         });
-        const started = performance.now();
         const run = await observed(parent, 1, false, t, sleeper);
-        const seconds = (performance.now() - started) / 1000;
         assert.equal(run.code, ROUNDS, 'every round saw the event');
         // A round each starvation bound was 800 s; now a round is the asking
-        // thread's quantum or two.
-        assert.ok(seconds < 30, `${ROUNDS} rounds in ${seconds.toFixed(1)} s`);
+        // thread's quantum or two. Counted, not timed: no thread is ever
+        // passed over for the bound, which a busy machine's clock would blur.
+        assert.deepEqual([run.scheduler?.boosts, run.scheduler?.hostTurns?.starved], [0, 0],
+            'no turn handed out to a thread starved of one');
     });

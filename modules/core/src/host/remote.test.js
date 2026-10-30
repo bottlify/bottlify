@@ -26,8 +26,24 @@ import {
  * are the application behind the worker and the GPU it would open.
  */
 
-/** A wait for everything queued on the ports to be delivered. */
-const settled = ()=>new Promise(resolve=>setTimeout(resolve, 20));
+/** Hops a message and the answers it sets off take, with room to spare. */
+const SETTLE_TURNS = 20;
+
+/**
+ * A wait for everything queued on the ports to be delivered: past every timer
+ * of 20 ms or less (the keeper's poll among them), then turns of the event
+ * loop, each delivering the messages the last one posted. Both ends share this
+ * thread, so the turns, not the clock, carry a message and its answers over: a
+ * timer alone may come due in the turn that delivers them, on a machine that
+ * kept this thread off its core, and run before them.
+ */
+const settled = async()=>{
+    await new Promise(resolve=>setTimeout(resolve, 20));
+    for (let turn = 0; turn < SETTLE_TURNS; turn++)
+    {
+        await new Promise(resolve=>setImmediate(resolve));
+    }
+};
 
 /** Waits for a condition to hold, so no test depends on a keeper poll landing in time. */
 /** @param {() => Promise<boolean> | boolean} check @param {number} [timeoutMs] */
@@ -972,7 +988,10 @@ test('a worker runs turns back to back and yields for something pending or on it
     assert.equal(pacing.yield(nothing), null, 'and the clock was reset');
 });
 
-test('an idle worker sleeps to the deadline, or until the page or the host speaks', async()=>{
+test('an idle worker sleeps to the deadline, or until the page or the host speaks', async t=>{
+    // On the timers' own clock, moved by hand: what ends each wait is read off
+    // what had happened when it ended, not off how long a busy machine took.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     /** @type {(() => void) | null} */
     let wake = null;
     const pacing = workerPacing({
@@ -981,26 +1000,49 @@ test('an idle worker sleeps to the deadline, or until the page or the host speak
             wake = resolve;
         }),
         signalled: ()=>false,
-        now: ()=>performance.now(),
+        now: ()=>0,
     });
-    let before = performance.now();
-    await pacing.wait({ timer: true, sleep: true, deadlineMs: 20, wakes: [] });
-    assert.ok(performance.now() - before >= 15, 'nothing else spoke: the deadline is the wake');
+    /** @param {Promise<void>} wait */
+    const watched = wait=>{
+        const one = { ended: false };
+        wait.then(()=>{
+            one.ended = true;
+        });
+        return one;
+    };
+    const settle = ()=>new Promise(resolve=>setImmediate(resolve));
 
-    before = performance.now();
-    const waiting = pacing.wait({ timer: true, sleep: true, deadlineMs: 5000, wakes: [] });
-    setTimeout(()=>wake?.(), 5);
-    await waiting;
-    assert.ok(performance.now() - before < 1000, 'a message from the page ends the wait');
+    let waiting = watched(pacing.wait({ timer: true, sleep: true, deadlineMs: 20, wakes: [] }));
+    t.mock.timers.tick(19);
+    await settle();
+    assert.equal(waiting.ended, false, 'asleep until the deadline');
+    t.mock.timers.tick(1);
+    await settle();
+    assert.equal(waiting.ended, true, 'nothing else spoke: the deadline is the wake');
 
-    before = performance.now();
-    await pacing.wait({ timer: true, sleep: true, deadlineMs: null,
-        wakes: [new Promise(resolve=>setTimeout(resolve, 5))] });
-    assert.ok(performance.now() - before < 1000, 'a host answer ends a wait with no deadline');
+    waiting = watched(pacing.wait({ timer: true, sleep: true, deadlineMs: 5000, wakes: [] }));
+    await settle();
+    assert.equal(waiting.ended, false, 'asleep while nothing speaks');
+    /** @type {() => void} */ (/** @type {unknown} */ (wake))();
+    await settle();
+    assert.equal(waiting.ended, true, 'a message from the page ends the wait');
 
-    before = performance.now();
-    await pacing.wait({ timer: false, sleep: false, deadlineMs: 5000, wakes: [] });
-    assert.ok(performance.now() - before < 100,
+    /** @type {(value?: void) => void} */
+    let answer = ()=>{};
+    waiting = watched(pacing.wait({ timer: true, sleep: true, deadlineMs: null,
+        wakes: [new Promise(resolve=>{
+            answer = resolve;
+        })] }));
+    t.mock.timers.tick(60_000);
+    await settle();
+    assert.equal(waiting.ended, false, 'no deadline: no timer ends it');
+    answer();
+    await settle();
+    assert.equal(waiting.ended, true, 'a host answer ends a wait with no deadline');
+
+    waiting = watched(pacing.wait({ timer: false, sleep: false, deadlineMs: 5000, wakes: [] }));
+    await settle();
+    assert.equal(waiting.ended, true,
         'a thread still getting work done is not put to sleep, whatever the deadline');
 });
 

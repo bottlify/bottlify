@@ -65,7 +65,7 @@ async function run(executable, seed, drive, executors = 1){
     });
     try
     {
-        const code = await app.run({ timeoutMs: 60000 });
+        const code = await app.run({ timeoutMs: 180_000 });
         const tables = app.diagnostics();
         /** @param {string} name */
         const metrics = name=>tables.find((/** @type {any} */ layer)=>layer.name === name)

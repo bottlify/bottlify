@@ -42,7 +42,7 @@ test('the guest poll times out an unsignalled event and leaves every other wait 
             trapPort: 0xb077,
             entryVector: 0x7000,
             initialStack: STACK,
-            cork: {},
+            cork: { sliceMs: Infinity },
         });
         host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
         host.writePhysical(TRAP, new Uint8Array([0xf4]));
@@ -110,7 +110,7 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
     host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
     host.writePhysical(RELEASE, releaseMutexCode(RELEASE, TRAP, TABLE, VALUES));
@@ -206,7 +206,7 @@ test('the guest answers SetEvent of a signalled event and ResetEvent of a clear 
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
     host.writePhysical(SET, eventStateCode(SET, TRAP, TABLE, VALUES, true));
     host.writePhysical(RESET, eventStateCode(RESET, TRAP, TABLE, VALUES, false));
@@ -274,7 +274,7 @@ test('the guest takes, sets and resets an event by its own word, and answers wha
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
     host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
     host.writePhysical(SET, eventStateCode(SET, TRAP, TABLE, VALUES, true));
@@ -495,7 +495,7 @@ const runEvents = async(executable, crossed, options = {}, during = null)=>{
     const app = await createApp({ executable, ...options });
     try
     {
-        const running = app.run({ timeoutMs: 60_000 });
+        const running = app.run({ timeoutMs: 150_000 });
         await during?.(app, running);
         const code = (await running) >>> 0;
         const tables = await app.diagnostics();

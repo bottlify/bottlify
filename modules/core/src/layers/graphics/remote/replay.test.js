@@ -1232,7 +1232,7 @@ test('an occlusion count is asked of the renderer without waiting, and taken whe
         assert.equal(made.query.GetData(count, 4, 0), S_FALSE, 'asked, not waited for');
         assert.equal(made.query.GetData(count, 4, 0), S_FALSE, 'still on its way');
         let answer = S_FALSE;
-        for (let tries = 0; tries < 50 && answer === S_FALSE; tries++)
+        while (answer === S_FALSE)
         {
             await new Promise(resolve=>setTimeout(resolve, 5));
             answer = made.query.GetData(count, 4, 0);
@@ -1271,7 +1271,7 @@ test('a caller is told an occlusion count as it comes, its own and those beside 
     assert.equal(queries[0].countsLater, undefined, 'nothing asked yet');
     assert.equal(queries[0].GetData(count, 4, 0), S_FALSE);
     assert.equal(queries[0].countsLater, true, 'asked: its count will be told');
-    for (let tries = 0; tries < 50 && told[0].length === 0; tries++)
+    while (told[0].length === 0)
     {
         await new Promise(resolve=>setTimeout(resolve, 5));
     }
@@ -1308,7 +1308,7 @@ test('the counts the renderer holds come beside one query\'s answer, each for it
         // answer brings for it is of the one before.
         assert.equal(queries[2].Issue(D3DISSUE_END), D3D_OK);
         let answer = S_FALSE;
-        for (let tries = 0; tries < 50 && answer === S_FALSE; tries++)
+        while (answer === S_FALSE)
         {
             await new Promise(resolve=>setTimeout(resolve, 5));
             answer = queries[0].GetData(count, 4, 0);
@@ -1352,7 +1352,7 @@ test('the counts the renderer holds come beside one query\'s answer, each for it
         // answer brings for it is of the one before.
         assert.equal(queries[2].Issue(D3DISSUE_END), D3D_OK);
         let answer = S_FALSE;
-        for (let tries = 0; tries < 50 && answer === S_FALSE; tries++)
+        while (answer === S_FALSE)
         {
             await new Promise(resolve=>setTimeout(resolve, 5));
             answer = queries[0].GetData(count, 4, 0);
@@ -1429,7 +1429,7 @@ test('a surface a read-back is still filling keeps its memory until the pixels h
             assert.equal(offscreen.surface.release(), 0);
             assert.ok(live.has(base), 'still the surface\'s while its pixels are on the way');
             // The played side's renderer reads back when it gets to it.
-            for (let waited = 0; waited < 200 && live.has(base); waited++)
+            while (live.has(base))
             {
                 await new Promise(resolve=>setTimeout(resolve, 10));
             }

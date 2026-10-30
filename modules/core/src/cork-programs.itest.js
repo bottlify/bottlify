@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+import { threadCpuMs } from '../../../tools/cpu-time.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
 
 /**
@@ -33,7 +34,12 @@ const layerOf = (app, name)=>app.diagnostics()
 
 /** @param {string} name */
 const FIXTURE = name=>new URL(`../test/fixtures/${name}`, import.meta.url);
-const ITERATIONS = 2_000_000;
+/**
+ * Calls the loop makes into the host: enough that the warm-up is a small part
+ * of the run and the longer run four times the shorter, a quarter million --
+ * at two million the test took 68 s of an otherwise quiet machine.
+ */
+const ITERATIONS = 250_000;
 /** Cork with nothing translated and no wasm tier: the reference a run is judged against. */
 const MODEL = { translate: false, wasmInterpreter: false };
 
@@ -118,10 +124,13 @@ async function run(executable, translated = true){
     try
     {
         const began = performance.now();
-        const code = await app.run({ timeoutMs: 30000 });
+        const cpuBegan = threadCpuMs();
+        const code = await app.run({ timeoutMs: 90_000 });
         const ms = performance.now() - began;
+        // A program of one thread translated inline: the run is this thread's work.
+        const cpuMs = threadCpuMs() - cpuBegan;
         const { metrics } = layerOf(app, 'cpu');
-        return { code, output: output.join(''), diagnostics: layerOf(app, 'cpu'), ms,
+        return { code, output: output.join(''), diagnostics: layerOf(app, 'cpu'), ms, cpuMs,
             instructions: /** @type {any} */ (metrics).instructions,
             trapsHot: /** @type {[string, number][]} */ (
                 /** @type {any} */ (layerOf(app, 'bridge').metrics).hot ?? []),
@@ -224,11 +233,11 @@ test('a loop calling an import runs and translates under cork',
         // The loop traps an import every iteration, so its rate is the trap
         // channel's cost as much as the executor's; the compute loop below is
         // where the executor shows.
-        const corkRate = cork.instructions / cork.ms / 1000;
-        const modelRate = reference.instructions / reference.ms / 1000;
+        const corkRate = cork.instructions / cork.cpuMs / 1000;
+        const modelRate = reference.instructions / reference.cpuMs / 1000;
         console.log(`cork loop: share ${cork.cork.translatedShare.toFixed(2)},`
             + ` regions ${cork.cork.regions},`
-            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s`);
+            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s of processor time`);
         // E: the translator's cost is a fixed warm-up, not a per-slice toll.
         // The two runs below leave the same regions, so whatever the longer
         // one pays more is the engine thread translating on the slice path
@@ -236,17 +245,22 @@ test('a loop calling an import runs and translates under cork',
         const warm = await run(buildLoopExe(ITERATIONS / 2));
         const twice = await run(buildLoopExe(ITERATIONS * 2));
         // Same regions and modules on four times the iterations: the
-        // translator does nothing on the slice path after warm-up. Its time is
-        // held to a share of the run's rather than to a figure of milliseconds:
-        // the warm-up is a percent or two of the run, and a machine others load
-        // stretches both, where a per-slice toll would be a large part of it.
+        // translator does nothing on the slice path after warm-up. Held by
+        // every count the translator keeps, not by its time against the run's:
+        // a machine others load stretches the two unevenly, the warm-up's
+        // moments by more than the run's or less.
         assert.equal(twice.cork.regions, warm.cork.regions,
             'the longer run forms no further regions: the translator is done at warm-up');
         assert.equal(twice.cork.modules, warm.cork.modules,
             'no further module is emitted or instantiated after warm-up');
-        assert.ok(twice.cork.translateMs < 0.05 * twice.ms,
-            `translateMs ${twice.cork.translateMs.toFixed(2)} ms for ${ITERATIONS * 2} iterations`
-            + ` of a ${twice.ms.toFixed(0)} ms run`);
+        /**
+         * The translator's counts: what it did, not how long it took or what ran.
+         * @param {any} counts
+         */
+        const work = counts=>Object.fromEntries(Object.entries(counts).filter(([name, value])=>
+            typeof value === 'number' && !/Ms$|Share$|^retired$/.test(name)));
+        assert.deepEqual(work(twice.cork), work(warm.cork),
+            'nothing the translator counts grows with the iterations');
         console.log(`cork translateMs: ${warm.cork.translateMs.toFixed(2)} ms at`
             + ` ${ITERATIONS / 2} iterations, ${twice.cork.translateMs.toFixed(2)} ms at`
             + ` ${ITERATIONS * 2} (runs of ${warm.ms.toFixed(0)} and ${twice.ms.toFixed(0)} ms),`
@@ -350,14 +364,17 @@ test('a compute loop runs translated, and faster than the model',
         assert.equal(cork.code, reference.code);
         assert.ok(cork.cork.translatedShare > 0.9,
             `the loop translated: share ${cork.cork.translatedShare}`);
-        const corkRate = cork.instructions / cork.ms / 1000;
-        const modelRate = reference.instructions / reference.ms / 1000;
+        // Rates of this thread's processor time: two wall times taken a run
+        // apart compare the machine's load at the two moments as much as the
+        // code.
+        const corkRate = cork.instructions / cork.cpuMs / 1000;
+        const modelRate = reference.instructions / reference.cpuMs / 1000;
         console.log(`cork compute: share ${cork.cork.translatedShare.toFixed(2)},`
             + ` regions ${cork.cork.regions},`
-            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s`);
+            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s of processor time`);
         assert.ok(corkRate > modelRate,
             `translated code ran the compute loop at ${corkRate.toFixed(1)} M/s against the`
-            + ` model's ${modelRate.toFixed(1)} M/s`);
+            + ` model's ${modelRate.toFixed(1)} M/s, of this thread's processor time`);
     });
 
 test('the trap count and the trap log agree with the model\'s run of the loop',
@@ -520,7 +537,7 @@ test('with no sink of the caller\'s own, a traced area\'s calls reach the journa
     try
     {
         app.log.setLevel('call.cpu', 'trace');
-        await app.run({ timeoutMs: 30000 });
+        await app.run({ timeoutMs: 90_000 });
         /** @type {string[]} */
         const texts = app.log.recent(1000).map((/** @type {any} */ record)=>record.text);
         assert.equal(texts.filter(text=>/GetCurrentProcessId/.test(text)).length, 3,
@@ -566,7 +583,7 @@ test('a call area switched on mid-run is traced from the next call on',
         });
         try
         {
-            await app.run({ timeoutMs: 30000 });
+            await app.run({ timeoutMs: 90_000 });
             const traced = app.log.recent(1000)
                 .filter((/** @type {any} */ record)=>/GetCurrentProcessId/.test(record.text));
             assert.equal(calls, 5);

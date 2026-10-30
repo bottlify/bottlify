@@ -122,7 +122,7 @@ const strangerFields = step=>(step === 'taken' ? [0, 1, STRANGER] : [-1, 0, 0]);
 function throughGuest(steps){
     const host = createCorkHost({
         engine: cork, memorySize: 64 * 1024 * 1024, trapPort: 0xb077,
-        entryVector: 0x7000, initialStack: 0x300000, cork: {},
+        entryVector: 0x7000, initialStack: 0x300000, cork: { sliceMs: Infinity },
     });
     try
     {

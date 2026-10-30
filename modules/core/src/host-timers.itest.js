@@ -15,33 +15,38 @@
  * a translation coming back from its worker. The run loop gives the host a turn between scheduler
  * turns; this holds it to one the host's timers and I/O get too.
  *
- * The program only counts, for ever. While it runs for a second and a half,
- * the test sets a 5 ms timer again each time one fires and reads a file again
- * each time a read answers.
+ * The program only counts, for ever. While it runs two thousand turns, the
+ * test sets a 5 ms timer again each time one fires and reads a file again each
+ * time a read answers, and counts how many of the loop's trips to the event
+ * loop each timer waited past its time.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { open } from 'node:fs/promises';
-import { createApp } from './app.js';
+import { createApp, createMacrotask, pagePacing } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
-/** How long the program runs, in wall milliseconds. */
-const RUN_MS = 1500;
+/**
+ * How long the program runs: its turns, each a slice of a million or so
+ * instructions -- a second or so on an idle machine, however long a busy one
+ * takes.
+ */
+const TURNS = 2000;
 
 /** What each timer asks for. */
 const TIMER_MS = 5;
 
 /**
- * Late past this is a timer that waited for something other than a turn: a
- * turn of this program is a fraction of a millisecond, and
- * the loop gives the host a turn at least every few, so this is room for a
- * loaded machine.
+ * How many of the loop's trips to the event loop may end after a timer came
+ * due and before it fired: the trip under way when it came due, and the next
+ * if that one's turn of the event loop had begun before it -- late by trips,
+ * not by milliseconds, which a busy machine stretches past any figure.
  */
-const LATE_MS = 250;
+const LATE_TRIPS = 2;
 
 /**
  * `inc dword [counter]; jmp` to the inc. The counter is a page past the code:
@@ -58,17 +63,26 @@ function buildCountingExe(){
 }
 
 async function runCounting(){
-    const app = await createApp({ executable: buildCountingExe() });
+    // The page's pacing, as a run without one of its own gets, with each of
+    // its trips to the event loop marked when it came back.
+    /** @type {number[]} */
+    const trips = [];
+    const breathe = createMacrotask();
+    const pacing = pagePacing({ hidden: ()=>false, macrotask: ()=>breathe().then(()=>{
+        trips.push(performance.now());
+    }) });
+    const app = await createApp({ executable: buildCountingExe(), pacing });
     const file = await open(new URL(import.meta.url), 'r');
     try
     {
         const state = { running: true };
-        /** @type {number[]} */
-        const late = [];
+        /** When each timer came due and fired; the last may not have. @type {[number, number][]} */
+        const timers = [];
         const arm = ()=>{
-            const set = performance.now();
+            const timer = /** @type {[number, number]} */ ([performance.now() + TIMER_MS, NaN]);
+            timers.push(timer);
             setTimeout(()=>{
-                late.push(performance.now() - set - TIMER_MS);
+                timer[1] = performance.now();
                 if (state.running)
                 {
                     arm();
@@ -85,35 +99,45 @@ async function runCounting(){
             }
         })();
         arm();
-        await assert.rejects(app.run({ timeoutMs: RUN_MS, maxTurns: 1e12 }),
-            /did not finish within/, 'the program counts until it is stopped');
+        await assert.rejects(app.run({ maxTurns: TURNS }),
+            new RegExp(`did not finish within ${TURNS} turns`),
+            'the program counts until it is stopped');
+        const ended = performance.now();
         state.running = false;
         await reading;
+        // The trips each timer waited past its time: ended before it fired,
+        // or before the run did for one that never fired.
+        const late = timers.map(([due, fired])=>trips.filter(at=>at > due
+            && at < (Number.isNaN(fired) ? ended : fired)).length);
         const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
-        return { late, reads, translatedShare: cpu?.metrics?.cork?.translatedShare ?? null };
+        return { late, fired: timers.filter(([, fired])=>!Number.isNaN(fired)).length,
+            trips: trips.length, reads,
+            translatedShare: cpu?.metrics?.cork?.translatedShare ?? null };
     }
     finally
     {
+        breathe.close();
         await file.close();
         await app.dispose();
     }
 }
 
 test('a host timer comes due on time while a program runs',
-    { timeout: 30000 }, async t=>{
-        const { late, reads } = await runCounting();
+    { timeout: 300_000 }, async t=>{
+        const { late, fired, trips, reads } = await runCounting();
         const worst = Math.max(...late);
-        t.diagnostic(`${late.length} timers, the latest ${worst.toFixed(1)} ms late;`
-            + ` ${reads} reads`);
-        // A timer that came due only when the run ended fired once, and
-        // RUN_MS late.
-        assert.ok(late.length >= 30,
-            `${late.length} ${TIMER_MS} ms timers in ${RUN_MS} ms of running`);
-        assert.ok(worst < LATE_MS, `a ${TIMER_MS} ms timer came ${worst.toFixed(1)} ms late`);
-        assert.ok(reads >= 30, `${reads} file reads answered in ${RUN_MS} ms of running`);
+        t.diagnostic(`${fired} timers fired over ${trips} trips to the event loop, the latest`
+            + ` ${worst} trips late; ${reads} reads`);
+        // A timer that came due only when the run ended waited every trip
+        // the loop made after its time.
+        assert.ok(trips > LATE_TRIPS && fired > 0, `${fired} timers fired over ${trips} trips`);
+        assert.ok(worst <= LATE_TRIPS, `a ${TIMER_MS} ms timer came ${worst} trips late`);
+        // The reads go to the host's own threads; one answered is the loop
+        // having given its I/O a turn.
+        assert.ok(reads > 0, `${reads} file reads answered over ${trips} trips`);
     });
 
-test('translated code arrives while the program runs', { timeout: 30000 }, async()=>{
+test('translated code arrives while the program runs', { timeout: 300_000 }, async()=>{
     // The translator's worker answers with a region, and installing it is a
     // task of the host's; until then the loop is interpreted.
     const { translatedShare } = await runCounting();

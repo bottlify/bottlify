@@ -1128,6 +1128,9 @@ export function timedWait({ hidden, macrotask, timer }){
  *     How many machines take turns on the thread now, told whenever it
  *     changes: a pacing that may block the thread to wait must not while
  *     another machine has turns to run.
+ * @property {() => number} [now]
+ *     The clock, in milliseconds, the pacing keeps its interval by; the sound
+ *     is pumped by it too (`SOUND_PUMP_MS`). The host's own where absent.
  */
 
 /**
@@ -1257,6 +1260,7 @@ export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs =
             ? new Int32Array(new SharedArrayBuffer(4)) : null;
     return {
         counts: ()=>({ ...counts }),
+        now,
         yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, pendingMs, counts }),
         wait({ timer, sleep, deadlineMs, wakes }){
             if (!timer)
@@ -1333,7 +1337,7 @@ const IDLE_SPINS_BEFORE_TIMER = 4;
  * the guest's own deadlines and the sound ring go unattended: the ring holds
  * two hundred milliseconds and the pump runs on every look.
  */
-const IDLE_LOOK_MS = 4;
+export const IDLE_LOOK_MS = 4;
 
 /**
  * How often the run loop pumps the sound at most: what the pump does --
@@ -7594,7 +7598,7 @@ async function buildApp(options){
                     const turnYield = pacing.yield({
                         suspended: onHost, fetching, idlers: queued, spun,
                     });
-                    const pumpAt = performance.now();
+                    const pumpAt = pacing.now?.() ?? performance.now();
                     if (sound && pumpAt - pumpedAt >= SOUND_PUMP_MS)
                     {
                         pumpedAt = pumpAt;

@@ -74,7 +74,7 @@ const diagnostics = m=>/** @type {any} */ (m.runtime.diagnostics());
  * @param {ReturnType<typeof machine>} m @param {() => boolean} done
  */
 async function until(m, done){
-    for (let i = 0; i < 400 && !done(); i++)
+    while (!done())
     {
         await m.runtime.translatePending();
         await turn();
@@ -84,7 +84,7 @@ async function until(m, done){
 
 /** @param {ReturnType<typeof machine>} m */
 async function untilWorkerLoaded(m){
-    for (let i = 0; i < 300 && diagnostics(m).worker !== 'ready'; i++)
+    while (diagnostics(m).worker !== 'ready')
     {
         await turn();
     }

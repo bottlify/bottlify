@@ -1647,8 +1647,11 @@ test('CoIsOle1Class, CoFileTimeNow and CLSIDFromProgIDEx answer as their documen
         const OUT = 0x1600;
         const before = (BigInt(Date.now()) + 11644473600000n) * 10000n;
         assert.equal(fns.CoFileTimeNow.handler([OUT]), S_OK);
+        const after = (BigInt(Date.now()) + 11644473600000n + 1n) * 10000n;
         const stamp = BigInt(host.u32(OUT)) | (BigInt(host.u32(OUT + 4)) << 32n);
-        assert.ok(stamp >= before && stamp - before < 100000000n, 'now, in 100ns from 1601');
+        // Between the clock's readings either side of the call: however long a
+        // busy machine took over it, never more nor less than it did.
+        assert.ok(stamp >= before && stamp < after, 'now, in 100ns from 1601');
         assert.equal(fns.CoFileTimeNow.handler([0]) >>> 0, E_INVALIDARG);
         host.putWide(STRING_BUFFER, 'No.Such.Class');
         assert.equal(fns.CLSIDFromProgIDEx.handler([STRING_BUFFER, GUID_OUT]) >>> 0,

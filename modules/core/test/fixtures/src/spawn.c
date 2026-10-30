@@ -63,15 +63,23 @@ static int start(char *commandLine, PROCESS_INFORMATION *information)
 
 int mainCRTStartup(void)
 {
+    /*
+     * A child runs from CreateProcess on, beside its parent, and writes to the
+     * same output: what the parent finds while a child runs is said once the
+     * child is gone, so no line of the parent's is cut by the child's, wherever
+     * the two are scheduled.
+     */
     PROCESS_INFORMATION child;
     char first[] = "spawn_child.exe first";
-    check("the child is created", start(first, &child));
+    int created = start(first, &child);
     unsigned code = 0;
-    /* A child runs from CreateProcess on, so it may already have finished. */
-    check("its exit code can be asked at once",
-        GetExitCodeProcess(child.process, &code) && (code == STILL_ACTIVE || code == 42));
-
-    check("the wait returns when the child exits", WaitForSingleObject(child.process, INFINITE) == 0);
+    /* It may already have finished. */
+    int asked = GetExitCodeProcess(child.process, &code)
+        && (code == STILL_ACTIVE || code == 42);
+    unsigned waited = WaitForSingleObject(child.process, INFINITE);
+    check("the child is created", created);
+    check("its exit code can be asked at once", asked);
+    check("the wait returns when the child exits", waited == 0);
     GetExitCodeProcess(child.process, &code);
     check("with the child's exit code", code == 42);
     check("and the handle stays signalled", WaitForSingleObject(child.process, 0) == 0);
@@ -93,10 +101,11 @@ int mainCRTStartup(void)
         RegQueryValueExA(key, "Stage", 0, &type, &stage, &size) == 0 && stage == 2);
 
     char second[] = "spawn_child.exe second";
-    check("a second child is created", start(second, &child));
+    created = start(second, &child);
     void *set[2] = { CreateEventA(0, 1, 0, 0), child.process };
-    check("a wait for any of a set answers with the child's place in it",
-        WaitForMultipleObjects(2, set, 0, INFINITE) == 1);
+    waited = WaitForMultipleObjects(2, set, 0, INFINITE);
+    check("a second child is created", created);
+    check("a wait for any of a set answers with the child's place in it", waited == 1);
     GetExitCodeProcess(child.process, &code);
     check("and its code", code == 0);
 

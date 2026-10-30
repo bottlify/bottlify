@@ -289,7 +289,7 @@ test('OpenGL frames whose calls cross a port draw as the contexts themselves dre
         // it comes back once the question has crossed the port and the answer
         // crossed back, however long a loaded machine takes to carry them.
         let account = played.opengl.diagnostics();
-        for (let turn = 0; turn < 500 && account.gpu?.frames !== 3; turn++)
+        while (account.gpu?.frames !== 3)
         {
             await new Promise(resolve=>setTimeout(resolve, 2));
             account = played.opengl.diagnostics();

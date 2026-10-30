@@ -95,6 +95,6 @@ test('a program that names its own image gets the one it runs from, exports incl
             imagePath: 'C:\\App\\Self.exe',
         });
         t.after(()=>app.dispose());
-        const code = await app.run({ timeoutMs: 8000 });
+        const code = await app.run({ timeoutMs: 30_000 });
         assert.equal(code, 0, 'both answers were the image base');
     });

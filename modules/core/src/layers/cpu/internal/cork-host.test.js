@@ -20,16 +20,23 @@ import * as engine from '../../../../../cork/src/index.js';
 const MEMORY = 4 << 20;
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 
-/** @param {Record<string, unknown>} [config] */
+/**
+ * A host whose slices end by their instruction count alone, whatever cork
+ * config a test adds: an interpreted slice otherwise ends once it has taken
+ * its time (`sliceMs`), and how long that is a busy machine decides.
+ *
+ * @param {Record<string, any>} [config]
+ */
 function host(config = {}){
+    const { cork = {}, ...rest } = config;
     return createCorkHost({
         engine,
         memorySize: MEMORY,
         trapPort: 0x1234,
         entryVector: 0x7000,
         initialStack: 0x300000,
-        cork: {},
-        ...config,
+        ...rest,
+        cork: { sliceMs: Infinity, ...cork },
     });
 }
 
@@ -183,8 +190,9 @@ test('the interpreter\'s retired instructions read back through instructionCount
 test('a slice that interprets ends once it has taken its time, and the next goes on from there',
     ()=>{
         // Nothing translated: mov ecx, 1500000; dec ecx; jnz -3; hlt -- three million
-        // instructions, interpreted, under one slice's budget of all of them.
-        const h = host({ cork: { translate: false } });
+        // instructions, interpreted, under one slice's budget of all of them, on
+        // the host's own time slice.
+        const h = host({ cork: { translate: false, sliceMs: undefined } });
         load(h, 0x12000, [0xb9, 0x60, 0xe3, 0x16, 0, 0x49, 0x75, 0xfd, 0xf4]);
         const total = 1 + 1_500_000 * 2 + 1;
         const first = h.runSlice(total);
@@ -357,7 +365,7 @@ test('a translated loop that stores nothing sees the interrupt word another thre
     assert.ok(h.cork().entryOf(0x11000, 0) >= 0, 'translated');
     let seenAt = 0;
     h.onInterrupt(()=>{
-        seenAt = performance.now();
+        seenAt++;
         h.stop();
         return true;
     });
@@ -367,13 +375,15 @@ test('a translated loop that stores nothing sees the interrupt word another thre
         setTimeout(()=>Atomics.store(new Int32Array(workerData.buffer), workerData.at,
             0x7fffffff), 100);`, { eval: true, workerData: { buffer: h.wasmMemory().buffer, at } });
     h.writeReg32('eip', 0x11000);
-    const startedAt = performance.now();
     const retired = h.runSlice(2 ** 31 - 1);
-    const ms = performance.now() - startedAt;
     await worker.terminate();
     assert.ok(seenAt > 0, 'the word was answered');
-    assert.ok(ms < 1500 && retired < 2 ** 30,
-        `left after ${ms.toFixed(0)} ms and ${retired} instructions`);
+    // Counted, not timed: left inside the loop with the slice's budget not
+    // spent. A word read once before the loop leaves only at the budget's end,
+    // 2^31 - 1 instructions, a second or two of this thread's work against the
+    // other's 100 ms; a wall bound on the run held the two threads' turns on a
+    // busy machine to it as well.
+    assert.ok(retired < 2 ** 31 - 1, `left after ${retired} instructions, inside its budget`);
     assert.equal(h.halted(), false, 'inside the loop');
 });
 
@@ -689,7 +699,8 @@ test('a slow slice accounts for itself only when the translator\'s timings are a
     // its 20 ms floor, as a host call the program waits on does.
     for (const timings of [false, true])
     {
-        const h = host({ cork: { translate: false, timings } });
+        // The host's own time slice: what ends this one is its time.
+        const h = host({ cork: { translate: false, timings, sliceMs: undefined } });
         h.onTrap(()=>{
             const until = performance.now() + 25;
             while (performance.now() < until)

@@ -24,7 +24,7 @@ test('CreateDevice\'s slot sets the thread\'s x87 as Direct3D does, unless FPU_P
     + ' reaches its trap with the call as it came', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(ROUTINE, fpuSetupCode(ROUTINE, TRAP));
     // At the trap: the control word stored, and a stop.

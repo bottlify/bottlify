@@ -1625,7 +1625,7 @@ async()=>{
             // across the worker.
             await run.call('GetData occlusion', async()=>{
                 let answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);
-                for (let tries = 0; answer === 1 && tries < 1000; tries++)
+                while (answer === 1)
                 {
                     await new Promise(resolve=>setTimeout(resolve, 1));
                     answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);

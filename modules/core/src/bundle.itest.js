@@ -76,7 +76,7 @@ async function bundleWith(contents, filler = 300 * 1024){
 }
 
 test('a program reads a file out of a bundle, fetching only what it touches',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         const source = await bundleWith(PLANTED);
         t.after(()=>source.cleanup());
         const exe = await readFile(FIXTURE);
@@ -99,7 +99,7 @@ test('a program reads a file out of a bundle, fetching only what it touches',
         const waits = [];
         app.on('bundle-fetching', (/** @type {any} */ payload)=>waits.push(payload.fetching));
 
-        const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 20000 });
+        const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 60_000 });
 
         assert.equal(exitCode, 0);
         assert.equal(printed, PLANTED,
@@ -120,7 +120,7 @@ test('a program reads a file out of a bundle, fetching only what it touches',
     });
 
 test('what the bundle holds is visible to the program, and stays read-only',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         const source = await bundleWith(PLANTED);
         t.after(()=>source.cleanup());
         const exe = await readFile(FIXTURE);
@@ -135,7 +135,7 @@ test('what the bundle holds is visible to the program, and stays read-only',
         });
         t.after(()=>app.dispose());
 
-        await app.run({ maxTurns: 20000, timeoutMs: 20000 });
+        await app.run({ maxTurns: 20000, timeoutMs: 60_000 });
 
         // The fixture writes the file after reading it. What it wrote belongs
         // to the session; the bundle underneath is untouched, which is what
@@ -188,7 +188,7 @@ function fakeStore(){
 }
 
 test('a session arriving from outside lands on the volume the bundle is mounted on',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         // The bundle mount puts a fresh writable layer over the bundle. A
         // session laid down before it went with the layer that was replaced: a
         // program's saved profile was written faithfully, kept faithfully, and
@@ -280,7 +280,7 @@ test('what the program never read is fetched anyway, in the gaps', { timeout: 12
 });
 
 test('the registry a bottle carries is the machine\'s from the start, under what the session saved',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         // An installer's keys went into the bottle as a file and no further: a
         // launcher that finds its game installed by the key its setup made
         // offered to install it again.
@@ -369,7 +369,7 @@ function answerLibrary(){
 }
 
 test('what a bottle\'s installation left in system32 is found there, and loaded by bare name',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         // A setup puts the runtime its program links against in system32 --
         // what a DirectX setup installs -- and the program looks nowhere else.
         const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
@@ -413,7 +413,7 @@ test('what a bottle\'s installation left in system32 is found there, and loaded 
         const placed = app.files.list('C:\\Games\\Game')
             .map((/** @type {any} */ entry)=>entry.name);
         assert.deepEqual(placed, ['game.dat'], 'and not where the bottle carried it');
-        assert.equal(await app.run({ timeoutMs: 20000 }), 42,
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 42,
             'the program bound its import to it and called it');
     });
 
@@ -477,7 +477,7 @@ test('a process started from a bundle mounts the run\'s bundle rather than openi
             bundle: { prefix: '', fetch: readCounting },
         });
         t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 30000 }), 7, 'the child ran, from the bundle');
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 7, 'the child ran, from the bundle');
         assert.equal(heads, 1, 'and the bundle\'s head was read once for both processes');
     });
 

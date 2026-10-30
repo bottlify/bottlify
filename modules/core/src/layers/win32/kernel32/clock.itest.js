@@ -88,7 +88,7 @@ test('the clock routines answer out of the block and leave a null pointer alone'
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
 
     host.writePhysical(COUNTER, queryPerformanceCounterCode(COUNTER, TRAP, BLOCK));

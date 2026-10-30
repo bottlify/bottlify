@@ -13,8 +13,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createApp } from './app.js';
+import { createApp, createMacrotask, pagePacing } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+
+/** The loop's clock: a turn's worth of milliseconds. */
+const TURN_MS = 0.1;
 
 test('a program that turns the loop over and over is pumped for sound a few times a'
     + ' millisecond at most, and still is', { timeout: 60000 }, async t=>{
@@ -35,20 +38,28 @@ test('a program that turns the loop over and over is pumped for sound a few time
             ];
         },
     });
+    // The loop's clock is its turns, a tenth of a millisecond each: what the
+    // gate lets through is then the gate's, not how many turns a busy machine
+    // fitted into a millisecond of wall time. The page's pacing, as a run
+    // without one of its own gets, on that clock.
+    let turns = 0;
+    const breathe = createMacrotask();
+    t.after(()=>breathe.close());
+    const paced = pagePacing({ macrotask: breathe, hidden: ()=>false, now: ()=>turns * TURN_MS });
+    const pacing = { ...paced, yield: (/** @type {any} */ pending)=>{
+        turns++;
+        return paced.yield(pending);
+    } };
     const app = await createApp({ executable: program, imagePath: 'C:\\spin.exe',
-        engine: 'cork' });
+        engine: 'cork', pacing });
     t.after(()=>app.dispose());
-    const started = performance.now();
     // It never ends: the run is cut at its time, as a runaway.
     await assert.rejects(app.run({ timeoutMs: 1500 }), /did not finish/);
-    const elapsedMs = performance.now() - started;
     const tables = app.diagnostics();
     const audio = tables.find((/** @type {any} */ table)=>table.name === 'audio')?.metrics;
-    const turns = tables.find((/** @type {any} */ table)=>table.name === 'log')?.metrics
-        .topPhases.find((/** @type {string} */ phase)=>phase.startsWith('turn '))
-        ?.match(/ x(\d+) /)?.[1];
     assert.ok(audio && audio.pumps > 0, 'the sound is pumped');
-    assert.ok(Number(turns) > 4 * audio.pumps, `${audio.pumps} pumps in ${turns} turns`);
+    assert.ok(turns > 4 * audio.pumps, `${audio.pumps} pumps in ${turns} turns`);
     // Once a millisecond at most, whatever the loop does meanwhile.
-    assert.ok(audio.pumps <= elapsedMs + 1, `${audio.pumps} pumps in ${Math.round(elapsedMs)} ms`);
+    const elapsedMs = turns * TURN_MS;
+    assert.ok(audio.pumps <= elapsedMs + 1, `${audio.pumps} pumps in ${elapsedMs} ms of turns`);
 });

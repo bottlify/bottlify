@@ -358,7 +358,8 @@ test('a burst of changes is saved once, after it settles, and never two at a tim
     assert.equal(saved.length, 0, 'nothing saved before it does');
 
     timers.shift()?.();
-    assert.deepEqual(saved, [{ files: 1, changes: 3 }], 'one save carrying every change');
+    assert.deepEqual(saved, [{ files: 1, changes: 2 }],
+        'one save carrying every change, a file written twice named once');
 
     // Changes that arrive while the store is busy wait for it, then go as one.
     saver.note([{ kind: 'written', path: 'g' }]);
@@ -369,7 +370,7 @@ test('a burst of changes is saved once, after it settles, and never two at a tim
     await Promise.resolve();
     assert.equal(timers.length, 1, 'the next save waits its turn once the first is done');
     timers.shift()?.();
-    assert.deepEqual(saved.at(-1), { files: 2, changes: 2 }, 'the snapshot is taken at save time');
+    assert.deepEqual(saved.at(-1), { files: 2, changes: 1 }, 'the snapshot is taken at save time');
     assert.equal(saver.pending, 0);
 
     // A flush saves what is pending now, without the wait.
@@ -382,6 +383,30 @@ test('a burst of changes is saved once, after it settles, and never two at a tim
     assert.equal(saved.at(-1)?.changes, 1);
     stores.shift()?.resolve();
     await flushed;
+});
+
+test('a save names each file once, by its last change, however many turns noted it', async()=>{
+    // The filesystem collapses a file's writes only within one turn of the
+    // machine; a save written over several turns arrives as several notes, and
+    // the store puts every file it is told of whole.
+    /** @type {(() => void)[]} */
+    const timers = [];
+    /** @type {any[][]} */
+    const saved = [];
+    const saver = coalescedSaver({
+        snapshot: ()=>({ files: [], registry: null }),
+        persist: (session, changes)=>saved.push(changes),
+        schedule: fn=>timers.push(fn),
+    });
+    saver.note([{ kind: 'written', path: 'a' }]);
+    saver.note([{ kind: 'registry' }, { kind: 'written', path: 'b' }]);
+    saver.note([{ kind: 'removed', path: 'a' }, { kind: 'registry' }]);
+    saver.note([{ kind: 'written', path: 'b' }]);
+    assert.equal(saver.pending, 3);
+    timers.shift()?.();
+    await Promise.resolve();
+    assert.deepEqual(saved, [[{ kind: 'removed', path: 'a' }, { kind: 'registry' },
+        { kind: 'written', path: 'b' }]]);
 });
 
 test('the origin\'s storage is asked to be kept once, and a refusal keeps the session working',

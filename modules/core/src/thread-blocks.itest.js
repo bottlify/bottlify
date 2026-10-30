@@ -36,6 +36,8 @@ const THREAD_MARK = 0x22220000;
 /** Not a handle: CloseHandle answers ERROR_INVALID_HANDLE through the thread's block. */
 const NOT_A_HANDLE = 0x0dead000;
 const ERROR_INVALID_HANDLE = 6;
+/** CreateThread's flag: the thread made stopped, until ResumeThread. */
+const CREATE_SUSPENDED = 4;
 
 /** Several times as many threads as the startup span held blocks for. */
 const THREADS = 2000;
@@ -51,11 +53,15 @@ const FAULTS = [['the block not naming itself', 1], ['another thread\'s id', 2],
     ['no thread-local block', 16], ['not the template', 32], ['not the template\'s zeroes', 64],
     ['CreateThread refused', 128]];
 
-/** @param {number} threads  made and joined, one after another */
-function program(threads){
+/**
+ * @param {number} threads  made and joined, one after another
+ * @param {boolean} pinned  each made suspended, pinned to the second processor and let go: it
+ *     runs on the executor that plays it and nowhere else
+ */
+function program(threads, pinned){
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateThread', 'WaitForSingleObject', 'GetExitCodeThread',
-            'CloseHandle', 'ExitProcess'] },
+            'CloseHandle', 'SetThreadAffinityMask', 'ResumeThread', 'ExitProcess'] },
         codeSize: WORKER_OFFSET + 0x100,
         data: {
             template: [...u32(TEMPLATE_MARK), ...new Array(28).fill(0)],
@@ -87,14 +93,21 @@ function program(threads){
             })();
             const done = [...checkPrevious,
                 0xff, 0x35, ...u32(at('failures')), ...call('ExitProcess')];
-            // CreateThread(NULL, 0, worker, NULL, 0, &threadId), joined.
+            // CreateThread(NULL, 0, worker, NULL, flags, &threadId), joined.
             const create = [
-                0x68, ...u32(at('threadId')), 0x6a, 0x00, 0x6a, 0x00,
+                0x68, ...u32(at('threadId')), 0x6a, pinned ? CREATE_SUSPENDED : 0x00, 0x6a, 0x00,
                 0x68, ...u32(code(WORKER_OFFSET)), 0x6a, 0x00, 0x6a, 0x00,
                 ...call('CreateThread'),
             ];
+            // SetThreadAffinityMask(handle, 2); ResumeThread(handle)
+            const pin = pinned ? [
+                0x6a, 0x02, 0xff, 0x35, ...u32(at('handle')), ...call('SetThreadAffinityMask'),
+                0xff, 0x35, ...u32(at('handle')), ...call('ResumeThread'),
+                0xa1, ...u32(at('handle')), //                  mov eax, [handle]
+            ] : [];
             const rest = [
                 0xa3, ...u32(at('handle')), //                  mov [handle], eax
+                ...pin,
                 0x6a, 0xff, 0x50, ...call('WaitForSingleObject'),
                 ...checkPrevious,
                 0xa1, ...u32(at('handle')), 0xa3, ...u32(at('previous')),
@@ -102,7 +115,7 @@ function program(threads){
             ];
             const refused = [0x81, 0x0d, ...u32(at('failures')), ...u32(128)]; // or [failures], 128
             const loopLength = create.length + 4 + refused.length + 2 + rest.length + 6;
-            const main = [
+            const main = threads === 0 ? done : [
                 0xbe, ...u32(threads), //                       mov esi, threads
                 ...create,
                 0x85, 0xc0, 0x75, refused.length + 2, //        test eax, eax; jnz made
@@ -164,10 +177,11 @@ function program(threads){
  * @param {number} threads @param {number} cores
  */
 async function run(threads, cores){
-    const app = await createApp({ executable: program(threads), cpu: { cores, eager: true } });
+    const app = await createApp({ executable: program(threads, cores > 1),
+        cpu: { cores, eager: true } });
     try
     {
-        const code = (await app.run({ timeoutMs: 160_000 })) >>> 0;
+        const code = (await app.run({ timeoutMs: 180_000 })) >>> 0;
         const tables = await app.diagnostics();
         const byName = Object.fromEntries((Array.isArray(tables) ? tables : [])
             .map(table=>[table.name, table]));
@@ -192,20 +206,39 @@ for (const cores of [1, 2])
         assert.equal(code, 0, `${FAULTS.filter(([, bit])=>code & /** @type {number} */ (bit))
             .map(([what])=>what).join(', ')} (${code})`);
         // Taken from the process heap, which has room for every thread's
-        // blocks kept: only its account says they were given back. After one
-        // thread it holds what it holds after all of them.
+        // blocks kept: only its account says they were given back. A thread's
+        // are given back at the next thread's making once it runs nowhere: the
+        // last thread's are held at the exit, and the one before's too where
+        // the other executor had not yet told the process it left that thread
+        // when the last was made -- which a busy machine decides, and which
+        // made the account after many threads one thread's blocks more than
+        // after one, now and then, with the code the same. So the account
+        // after them all is held to the one after a single thread's, and at
+        // most what that single thread's run held over a run of none more: a
+        // thread's blocks kept for every thread would be thousands of them.
+        const none = await run(0, cores);
         const once = await run(1, cores);
-        assert.ok(heap !== null && once.heap !== null, 'the process heap gives its account');
-        assert.deepEqual({ blocks: heap.blocks, used: heap.used },
-            { blocks: once.heap.blocks, used: once.heap.used },
-            `the heap after ${THREADS} threads, against after one`);
+        assert.ok(heap !== null && once.heap !== null && none.heap !== null,
+            'the process heap gives its account');
+        /**
+         * @param {{ blocks: number, used: number }} account
+         * @param {{ blocks: number, used: number }} from
+         */
+        const over = (account, from)=>[account.blocks - from.blocks, account.used - from.used];
+        const one = over(once.heap, none.heap);
+        assert.ok(one[0] > 0 && one[1] > 0,
+            `a thread's run holds ${one[0]} blocks, ${one[1]} bytes`);
+        assert.ok(over(heap, once.heap).every((value, at)=>value >= 0 && value <= one[at]),
+            `the heap after ${THREADS} threads, ${JSON.stringify(heap)}, against after one,`
+            + ` ${JSON.stringify(once.heap)}: at most ${one[0]} blocks of ${one[1]} bytes more`);
         if (cores > 1)
         {
-            // Where a thread runs depends on whether the other executor is
-            // free when it is made: alone nearly every one runs there, with
-            // the machine's other cores busy two in five. What the gate needs
-            // is hundreds given back from there, not a share.
-            assert.ok(scheduler?.executorSlices >= THREADS / 10,
+            // Each pinned to the processor the other executor plays: every one
+            // ran there and gave its blocks back from there, wherever a busy
+            // machine had the other executor when it was made -- unpinned,
+            // alone nearly every one ran there, with the machine's other cores
+            // busy two in five.
+            assert.ok(scheduler?.executorSlices >= THREADS,
                 `${scheduler?.executorSlices} slices on the other executor: the threads ran there`);
         }
     });

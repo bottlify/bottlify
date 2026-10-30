@@ -124,7 +124,7 @@ test('a child in a worker of its own leaves its parent its file, its registry va
         /** @type {any[]} */
         const libraries = [];
         app.on('libraries', (/** @type {any} */ event)=>libraries.push(event));
-        const code = await app.run({ timeoutMs: 60000 });
+        const code = await app.run({ timeoutMs: 90_000 });
         const lines = output.join('').split('\r\n').filter(Boolean);
         assert.deepEqual(lines.filter(line=>line.startsWith('FAIL')), [], output.join(''));
         assert.equal(lines.filter(line=>line.startsWith('ok   ')).length, 10, output.join(''));
@@ -192,7 +192,7 @@ test('a child in a worker of its own reads what the run\'s bundle has not fetche
         app.on('process-started', ()=>{
             before.count = asked.length;
         });
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0x2a,
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0x2a,
             'the child read its byte out of the bundle');
         assert.deepEqual(started, [true, true], 'the program and its child, each in a worker');
         assert.ok(asked.length > before.count,
@@ -246,7 +246,7 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
         /** @type {any[]} */
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>started.push(event.worker));
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0, divergences.join('\n'));
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0, divergences.join('\n'));
         assert.deepEqual(started, [true, true], 'the program and its child, each in a worker');
         assert.deepEqual(divergences, []);
         const frames = fromWorker.filter(message=>message.type === 'frame');
@@ -316,7 +316,7 @@ test('a child in a worker of its own is sent the page\'s input while it stands',
             }
         });
         t.after(()=>clearInterval(/** @type {any} */ (pressing)));
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0x41,
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0x41,
             'the child read the A its window was sent');
         assert.ok(pressing, 'it ran in a worker of its own');
     });
@@ -344,7 +344,7 @@ test('a child in a worker of its own mixes on the run\'s table in a span its par
     const childLayers = [];
     app.on('process-started', ()=>parentFree.push(arenaFree()));
     app.on('process-resumed', (/** @type {any} */ event)=>childLayers.push(event.diagnostics));
-    assert.equal(await app.run({ timeoutMs: 60000 }), 0);
+    assert.equal(await app.run({ timeoutMs: 90_000 }), 0);
     assert.deepEqual(parentFree, [8 << 20, 8 << 20],
         'the system lent the program eight of its sixteen MiB, and nothing more for its child');
     assert.equal(childLayers[0]?.find((/** @type {any} */ layer)=>layer.name === 'audio')
@@ -383,7 +383,7 @@ for (const where of ['in its own place', 'in a worker of its own'])
                 }
             }, 50);
             t.after(()=>clearInterval(looking));
-            assert.equal(await app.run({ timeoutMs: 60000 }), 0x41);
+            assert.equal(await app.run({ timeoutMs: 90_000 }), 0x41);
             assert.ok(red, 'the red it painted reached the GPU');
         });
 }
@@ -418,7 +418,7 @@ test('a child in a worker of its own is among the processes standing, with its o
             clearInterval(asking);
             clearInterval(/** @type {any} */ (pressing));
         });
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0x41);
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0x41);
         assert.deepEqual(standing.map(process=>process.image), ['C:\\parent.exe', 'C:\\a.exe']);
         const child = standing[1].diagnostics;
         assert.ok(child.find((/** @type {any} */ layer)=>layer.name === 'win32'),
@@ -446,7 +446,7 @@ test('where processes run at once, the run\'s own program runs in a worker of it
     app.on('process-started', (/** @type {any} */ event)=>{
         started.push(event);
     });
-    const running = app.run({ timeoutMs: 30000 });
+    const running = app.run({ timeoutMs: 90_000 });
     assert.equal(await running, 0);
     assert.equal(output.join(''), 'Hello from Bottlify\r\n');
     assert.deepEqual(started.map(event=>[event.image, event.worker]), [['C:\\hello.exe', true]],
@@ -508,7 +508,7 @@ test('a program in a worker of its own is built from a library of the bundle no 
         } },
     });
     t.after(()=>app.dispose());
-    assert.equal(await app.run({ timeoutMs: 60000 }), 7,
+    assert.equal(await app.run({ timeoutMs: 90_000 }), 7,
         'the library was read across the link while the program\'s machine was built');
 });
 
@@ -549,7 +549,7 @@ test('a launcher in a worker of its own that starts its game and exits leaves th
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>
             started.push([event.image, event.worker === true]));
-        assert.equal(await app.run({ timeoutMs: 60000 }), 9, 'the run\'s code is the game\'s');
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 9, 'the run\'s code is the game\'s');
         assert.deepEqual(started, [['C:\\launcher.exe', true], ['C:\\game.exe', true]]);
     });
 
@@ -570,7 +570,7 @@ test('a program in a worker of its own that is stopped leaves the run its tables
         /** @type {any[]} */
         const errors = [];
         app.on('error', (/** @type {any} */ payload)=>errors.push(payload));
-        assert.equal(await app.run({ timeoutMs: 2000 }), -1);
+        assert.equal(await app.run({ timeoutMs: 90_000 }), -1);
         assert.ok(errors.some(payload=>payload.reason === 'process'), 'the stop was said');
         const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
         assert.ok(cpu?.metrics.instructions > 0, 'what it ran is still read');

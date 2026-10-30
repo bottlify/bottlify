@@ -1157,7 +1157,7 @@ test('the loop yields at once for something pending, otherwise on a clock it res
     assert.ok(signalled(nothing), 'a message known to be waiting yields at once');
 });
 
-test("a page's pacing yields on its own clock and looks again on its timer or on a wake", async()=>{
+test("a page's pacing yields on its own clock and looks again on its timer or on a wake", async t=>{
     // The default the loop runs with when a host does not choose: it cannot
     // block, so a turn boundary is a macrotask when the page's interval is
     // up, and an idle machine looks again on a short timer -- unless a wake
@@ -1190,9 +1190,20 @@ test("a page's pacing yields on its own clock and looks again on its timer or on
             woke = true;
         })] });
     assert.equal(woke, true, 'a wake ends the wait before the timer');
-    const before = performance.now();
-    await pacing.wait({ timer: true, sleep: true, deadlineMs: null, wakes: [] });
-    assert.ok(performance.now() - before < 100, 'the look is short, whatever the deadline');
+    // The look is the page's timer of `lookMs`, whatever the deadline: read off
+    // the timer it sets, not off how soon a busy machine got round to it.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let looked = false;
+    const look = pacing.wait({ timer: true, sleep: true, deadlineMs: null, wakes: [] })
+        .then(()=>{
+            looked = true;
+        });
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(looked, false, 'the look waits for its timer');
+    t.mock.timers.tick(1);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(looked, true, 'the look is short, whatever the deadline');
+    await look;
 });
 
 test("a page's pacing sleeps to a deadline rather than spinning macrotasks to it", async t=>{
@@ -1211,13 +1222,17 @@ test("a page's pacing sleeps to a deadline rather than spinning macrotasks to it
     // An async wait does not hold node's loop open; the page's does.
     const held = setInterval(()=>{}, 1000);
     t.after(()=>clearInterval(held));
-    let before = performance.now();
+    // How long each nap is asked to last, read off the wait itself: a loaded
+    // machine wakes it late, never early.
+    const naps = t.mock.method(Atomics, /** @type {any} */ ('waitAsync'));
+    const before = performance.now();
     await pacing.wait({ timer: false, sleep: true, deadlineMs: 5, wakes: [] });
     assert.equal(laps, 0, 'no macrotask on the way to the deadline');
     assert.ok(performance.now() - before >= 4, 'the deadline is waited out');
-    before = performance.now();
     await pacing.wait({ timer: false, sleep: true, deadlineMs: 10_000, wakes: [] });
-    assert.ok(performance.now() - before < 1000, 'a look at most, whatever the deadline');
+    assert.deepEqual(naps.mock.calls.map((/** @type {any} */ call)=>call.arguments[3]), [5, 20],
+        'to the deadline, and a look at most, whatever the deadline');
+    naps.mock.restore();
     assert.equal(pacing.counts?.().napped, 2);
     await pacing.wait({ timer: false, sleep: false, deadlineMs: 5, wakes: [] });
     await pacing.wait({ timer: false, sleep: true, deadlineMs: null, wakes: [] });

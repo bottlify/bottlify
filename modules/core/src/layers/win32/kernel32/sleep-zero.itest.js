@@ -43,7 +43,7 @@ test('Sleep(0) with no thread waiting to run returns in the guest; every other c
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
     host.writePhysical(SLEEP, sleepCode(SLEEP, TRAP, WORD));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
@@ -169,7 +169,7 @@ async function run(executable, cores){
     const app = await createApp({ executable, cpu: { cores, eager: true } });
     try
     {
-        const code = await app.run({ timeoutMs: 120_000 });
+        const code = await app.run({ timeoutMs: 300_000 });
         const tables = await app.diagnostics();
         const bridge = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'bridge');
         const line = (bridge?.metrics?.byFunction ?? [])

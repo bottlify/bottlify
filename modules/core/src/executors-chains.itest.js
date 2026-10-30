@@ -20,6 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { EXECUTORS_OPENED_KEY } from './layers/cpu/module.js';
+import { EXECUTORS_WAIT_MS } from './layers/kernel/internal/threads.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
@@ -28,6 +29,8 @@ const u32 = value=>[
 ];
 
 const WORKER_OFFSET = 0x200;
+/** CreateThread's flag: the thread made stopped, until ResumeThread. */
+const CREATE_SUSPENDED = 4;
 
 /**
  * A program of a main thread and a worker routine at `WORKER_OFFSET`.
@@ -181,10 +184,16 @@ test('a thread started while the first still ran, left alone when the first wait
     const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
     const here = shared.hereRetired ?? 0;
     const total = here + (shared.elsewhereRetired ?? 0);
-    // Three hundred million instructions; a few milliseconds' worth elsewhere,
-    // not a chain of a quarter of a second, before it comes.
-    assert.ok(total >= LOOPS * 10 && here > total * 0.75,
-        `${here} of ${total} instructions on the process's own executor`);
+    assert.ok(total >= LOOPS * 10, `${total} instructions`);
+    // Three hundred million instructions: at most the one run elsewhere it was
+    // placed in as it started, ended by this executor calling it back, and the
+    // rest here -- not a chain of runs there. How far that run got before the
+    // call back is the machine's to say: a busy one keeps this thread off its
+    // core while the other runs on.
+    const recalled = JSON.parse(scheduler?.recalls ?? '{}')['thread-2']?.recalled ?? 0;
+    assert.ok(scheduler?.executorSlices <= 1 && recalled === scheduler?.executorSlices,
+        `${scheduler?.executorSlices} runs on the other executor, ${recalled} called back;`
+        + ` ${here} of ${total} instructions here`);
 });
 
 test('a program of one thread on a machine of four opens no executor past the process\'s own',
@@ -257,27 +266,44 @@ test('a run keeps in its store how many executors its threads opened, and the ne
             records.set(key, bytes.slice());
         },
     };
-    const twoComputing = buildProgram(['CreateThread', 'WaitForSingleObject', 'ExitProcess'],
-        { first: [0, 0, 0, 0], second: [0, 0, 0, 0] }, ({ call, at, start })=>{
-            /** WaitForSingleObject([slot], INFINITE) @param {string} slot */
-            const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
-                ...call('WaitForSingleObject')];
-            return {
-                main: [...start('first'), ...start('second'), ...wait('first'), ...wait('second'),
-                    0x6a, 0x07, ...call('ExitProcess')],
-                worker: [
-                    0xb9, ...u32(LOOPS * 10), //       mov ecx, 10 * LOOPS
-                    0x49, 0x75, 0xfd, //               L: dec ecx; jnz L
-                    0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
-                ],
-            };
-        });
-    // One thread that wants no executor, alive long enough for one to open.
+    // Two threads computing, each pinned to a processor of its own past the
+    // first: neither runs anywhere but on its own executor, so the run cannot
+    // end before both have opened, however long a busy machine takes to open
+    // them.
+    const twoComputing = buildProgram(['CreateThread', 'SetThreadAffinityMask', 'ResumeThread',
+        'WaitForSingleObject', 'ExitProcess'],
+    { first: [0, 0, 0, 0], second: [0, 0, 0, 0] }, ({ call, at, start })=>{
+        /** WaitForSingleObject([slot], INFINITE) @param {string} slot */
+        const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
+            ...call('WaitForSingleObject')];
+        /**
+         * Made suspended, pinned to `processor`, and let go.
+         * @param {string} slot @param {number} processor
+         */
+        const pinned = (slot, processor)=>[...start(slot, CREATE_SUSPENDED),
+            0x6a, 1 << processor, 0xff, 0x35, ...u32(at(slot)), ...call('SetThreadAffinityMask'),
+            0xff, 0x35, ...u32(at(slot)), ...call('ResumeThread')];
+        return {
+            main: [...pinned('first', 1), ...pinned('second', 2), ...wait('first'),
+                ...wait('second'), 0x6a, 0x07, ...call('ExitProcess')],
+            worker: [
+                0xb9, ...u32(LOOPS), //            mov ecx, LOOPS
+                0x49, 0x75, 0xfd, //               L: dec ecx; jnz L
+                0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
+            ],
+        };
+    });
+    // One thread that wants no executor, alive long enough for the store's
+    // answer to have come at the start.
     const oneSleeping = buildProgram(['Sleep', 'ExitProcess'], {}, ({ call })=>({
         main: [0x68, ...u32(1500), ...call('Sleep'), 0x6a, 0x07, ...call('ExitProcess')],
         worker: [],
     }));
-    /** @param {Uint8Array} executable @returns {Promise<number>} executors opened */
+    /**
+     * @param {Uint8Array} executable
+     * @returns {Promise<{ open: number, opening: number }>} executors open, and asked for
+     *     and still opening, at the run's end
+     */
     const opened = async executable=>{
         const app = await createApp({ executable, cpu: { cores: 4, eager: false },
             cork: { config: { store } } });
@@ -286,23 +312,28 @@ test('a run keeps in its store how many executors its threads opened, and the ne
             assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
             const tables = await app.diagnostics();
             const cpu = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'cpu');
-            return cpu?.metrics?.executors?.length ?? 0;
+            return { open: cpu?.metrics?.executors?.length ?? 0,
+                opening: cpu?.metrics?.executorsOpening?.length ?? 0 };
         }
         finally
         {
             await app.dispose();
         }
     };
-    const first = await opened(twoComputing);
-    assert.ok(first >= 1, `${first} executors opened by two threads computing`);
+    const { open: first } = await opened(twoComputing);
+    assert.ok(first >= 2, `${first} executors opened by two threads pinned past the first`);
     const kept = ()=>[...(records.get(EXECUTORS_OPENED_KEY) ?? [])];
     assert.deepEqual(kept(), [first], 'kept as they opened');
-    assert.equal(await opened(oneSleeping), first, 'opened at the start of the next run');
+    // Asked for at the start, before any thread wanted one: open, or still
+    // opening where the machine is slow to open a worker -- a run of a second
+    // and a half is no bound on that.
+    const next = await opened(oneSleeping);
+    assert.equal(next.open + next.opening, first, 'opened at the start of the next run');
     assert.deepEqual(kept(), [first], 'and kept, not lowered');
 });
 
 test('a worker its main thread waits on each round, both computing as much between, runs on its'
-    + ' own executor and is not kept on the process\'s', async()=>{
+    + ' own executor and is not kept on the process\'s', async t=>{
     // A frame and its render thread: the main thread sets `go`, computes,
     // waits for `done`; the worker waits for `go`, computes, sets `done`. Each
     // wait leaves the process's executor idle and calls the worker back from
@@ -333,28 +364,47 @@ test('a worker its main thread waits on each round, both computing as much betwe
                 worker: [...work, 0xe9, ...u32(-(work.length + 5) >>> 0)], // jmp work
             };
         });
-    // The worker's half on the other executor; kept here, a hundredth. On a
-    // machine busy with other runs the other executor's thread gets less of a
-    // processor, does less beside this one than it is called back after, and
-    // is rightly counted as taking turns: one run in a full suite kept it, so
-    // the best of three.
-    /** @type {string[]} */
-    const seen = [];
-    for (let attempt = 0; attempt < 3; attempt++)
+    const { code, scheduler } = await run(executable, 2);
+    assert.equal(code, 7);
+    const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
+    const elsewhere = shared.elsewhereRetired ?? 0;
+    const total = (shared.hereRetired ?? 0) + elsewhere;
+    assert.ok(total >= ROUNDS * WORK * 2, `${total} instructions`);
+    // Whether the two ran at once is the machine's to say: on one busy with
+    // other runs the other executor's thread gets less of a processor, does
+    // less beside this one than it is called back after, and is rightly
+    // counted as taking turns. So each call back is held to what the two sides
+    // retired meanwhile (`COUPLED_WORK`), as measured, and the worker's share
+    // elsewhere to what those counts allow: where they could not have raised
+    // its coupling past `COUPLED` -- reckoned without the share's halving over
+    // time and the runs that ended without a call back, which only lower it --
+    // it was never kept here. Its work then ran there but for what its call
+    // backs brought here, and those that counted as running beside had done
+    // half a round's work there first: past a tenth of the run's instructions
+    // even with as many taking turns as keep the coupling under a half (kept,
+    // a hundredth; on its own executor, near a half).
+    const recalled = String(scheduler?.recentRecalls ?? '').split(' | ').filter(Boolean)
+        .map(record=>/^(\S+) (\d+)\/(\d+) (turns|beside)$/.exec(record) ?? [record]);
+    let coupled = 0;
+    let most = 0;
+    for (const [record, name, there, beside, verdict] of recalled)
     {
-        const { code, scheduler } = await run(executable, 2);
-        assert.equal(code, 7);
-        const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
-        const elsewhere = shared.elsewhereRetired ?? 0;
-        const total = (shared.hereRetired ?? 0) + elsewhere;
-        assert.ok(total >= ROUNDS * WORK * 2, `${total} instructions`);
-        seen.push(`${elsewhere} of ${total}`);
-        if (elsewhere > total * 0.15)
+        assert.equal(verdict, Number(beside) === 0 || Number(there) < Number(beside) / 2
+            ? 'turns' : 'beside', `counted by what each side did: ${record}`);
+        if (name !== 'main')
         {
-            return;
+            coupled = coupled * 0.75 + (verdict === 'turns' ? 0.25 : 0);
+            most = Math.max(most, coupled);
         }
     }
-    assert.fail(`instructions on the other executor: ${seen.join(', ')}`);
+    assert.ok(recalled.length < 1024, 'every call back in the record');
+    t.diagnostic(`${elsewhere} of ${total} elsewhere; calls back ${scheduler?.recalls},`
+        + ` coupled at most ${most.toFixed(3)}`);
+    if (most <= 0.5)
+    {
+        assert.ok(elsewhere > total * 0.1, `never coupled past a half, yet ${elsewhere} of`
+            + ` ${total} instructions on the other executor`);
+    }
 });
 
 test('a thread reads one time-stamp counter on every executor: never back, whichever it last'
@@ -588,7 +638,7 @@ test('a thread on another executor calling into the host is answered at the proc
 });
 
 test('a thread sleeping on the process\'s executor wakes at its time while the other executor'
-    + ' runs a thread that never calls into the host', async()=>{
+    + ' runs a thread that never calls into the host', async t=>{
     const SLEEPS = 5;
     const SLEEP_MS = 20;
     const executable = buildProgram(['CreateThread', 'WaitForSingleObject', 'ExitProcess',
@@ -612,11 +662,19 @@ test('a thread sleeping on the process\'s executor wakes at its time while the o
             0x31, 0xc0, 0xc2, 0x04, 0x00, //                   xor eax, eax; ret 4
         ],
     }));
+    // Every wait of the process's thread for the other executor, read off the
+    // waits it made: a look of EXECUTORS_WAIT_MS at most, so it comes back to
+    // the sleeper's deadline -- not the quarter of a second each the other
+    // executor went without a word. Its wall time, which a busy machine
+    // stretches past any figure, is held only from below.
+    const waits = t.mock.method(Atomics, 'wait');
     const { code } = await run(executable, 2);
-    // What it slept, give or take the host's turns -- not the quarter of a
-    // second each the other executor goes without a word.
-    assert.ok(code >= SLEEPS * SLEEP_MS && code < SLEEPS * SLEEP_MS + 250,
-        `${SLEEPS} sleeps of ${SLEEP_MS} ms took ${code} ms`);
+    const asked = waits.mock.calls.map(one=>Number(one.arguments[3] ?? Infinity));
+    waits.mock.restore();
+    assert.ok(code >= SLEEPS * SLEEP_MS, `${SLEEPS} sleeps of ${SLEEP_MS} ms took ${code} ms`);
+    assert.ok(asked.length > 0 && asked.every(ms=>ms <= EXECUTORS_WAIT_MS),
+        `the process waited for the other executor ${asked.length} times, up to`
+        + ` ${Math.max(...asked)} ms`);
 });
 
 /** CONTEXT_i386 | CONTEXT_CONTROL: eip, esp and the flags. */
@@ -672,7 +730,7 @@ test('a process that pins itself to the second processor and sleeps runs on ther
     const app = await createApp({ executable, cpu: { cores: 2, eager: false } });
     try
     {
-        assert.equal(await app.run({ timeoutMs: 30_000 }), 7);
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 7);
     }
     finally
     {

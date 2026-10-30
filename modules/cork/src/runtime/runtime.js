@@ -170,7 +170,7 @@ export function translatorWorkerUrl(){
  * @returns {Runtime & { pages: import('./pages.js').PageTable }}
  */
 export function createCorkRuntime({ memory, layout, sharedLayout = undefined, config = {}, read,
-    readBytes, imports, features })
+    readBytes, imports, features, now: nowMs = ()=>performance.now() })
 {
     const settings = {
         maxRegionBlocks: 128, maxRegionBytes: 8192, batchRegions: 32,
@@ -1065,10 +1065,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             return;
         }
-        const now = performance.now();
+        const at = nowMs();
         for (const [page, until] of volatileUntil)
         {
-            if (now >= until)
+            if (at >= until)
             {
                 volatileUntil.delete(page);
                 pages.clear(page, PageFlag.VOLATILE);
@@ -1087,7 +1087,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 if (record !== undefined)
                 {
                     record.times = 0;
-                    record.since = now;
+                    record.since = at;
                 }
             }
         }
@@ -1363,23 +1363,23 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             return going;
         }
-        const now = performance.now();
+        const at = nowMs();
         let record = dropped.get(page);
         if (record === undefined)
         {
-            record = { times: 0, since: now, left: 0 };
+            record = { times: 0, since: at, left: 0 };
             dropped.set(page, record);
         }
-        if (now - record.since > settings.volatileWindowMs)
+        if (at - record.since > settings.volatileWindowMs)
         {
             record.times = 0;
-            record.since = now;
+            record.since = at;
         }
         record.times++;
         if (record.times === settings.volatileAfter && !volatileUntil.has(page))
         {
             pages.set(page, PageFlag.VOLATILE);
-            volatileUntil.set(page, now + settings.volatileHoldMs * 2 ** Math.min(record.left, 5));
+            volatileUntil.set(page, at + settings.volatileHoldMs * 2 ** Math.min(record.left, 5));
             leftEntries.set(page, new Map(going.map(one=>[one.entry, one.entryTop])));
             record.left++;
             counts.volatilePages++;

@@ -27,7 +27,10 @@ const DATA = 0x30000;
 const TRAP_PORT = 0xb077;
 const CONFIG = {
     memorySize: MEMORY, trapPort: TRAP_PORT, entryVector: 0x7000, initialStack: 0x300000,
-    closedBelow: 0x10000, cork: { hotThreshold: 4, wasmInterpreter: true },
+    closedBelow: 0x10000, cork: { hotThreshold: 4, wasmInterpreter: true,
+        // Slices end by their instruction count alone, not by the time a busy
+        // machine let them take.
+        sliceMs: Infinity },
 };
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
