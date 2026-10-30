@@ -159,6 +159,61 @@ export async function contentServers(connection, cell = 0){
 }
 
 /**
+ * @typedef {Object} DepotAccess  What opens one depot at one manifest without a
+ *     logon: the depot's key and a request code for the manifest, both granted to
+ *     an account that owns the app (depotKey, manifestRequestCode). The chunks
+ *     ask for nothing more.
+ * @property {number} depot @property {bigint} gid
+ * @property {Uint8Array} key @property {bigint} code
+ */
+
+/** @param {unknown} value */
+const isU64 = value=>typeof value === 'string' && /^[0-9]{1,20}$/.test(value)
+    && BigInt(value) < 2n ** 64n;
+
+/**
+ * Depots' access as JSON carries it from the account's side to a process that
+ * downloads: `[{ depot, gid, key, code }]`, the gid and the code decimal
+ * strings, the key 64 hex digits.
+ *
+ * @param {DepotAccess[]} list
+ * @returns {Array<{ depot: number, gid: string, key: string, code: string }>}
+ */
+export function writeDepotAccess(list){
+    return list.map(({ depot, gid, key, code })=>({ depot, gid: String(gid), code: String(code),
+        key: Array.from(key, byte=>byte.toString(16).padStart(2, '0')).join('') }));
+}
+
+/**
+ * writeDepotAccess's JSON read back and checked, a depot at most once: it
+ * comes from another process or the network. A refusal names the entry, never
+ * a key or a code.
+ *
+ * @param {unknown} value
+ * @returns {DepotAccess[]}
+ */
+export function readDepotAccess(value){
+    if (!Array.isArray(value) || value.length === 0 || value.length > 1024)
+    {
+        throw new Error('steam: depot access is a list of { depot, gid, key, code }');
+    }
+    /** @type {Set<number>} */
+    const seen = new Set();
+    return value.map((entry, at)=>{
+        const { depot, gid, key, code } = entry ?? {};
+        if (!Number.isInteger(depot) || depot <= 0 || depot > 0xFFFFFFFF || seen.has(depot)
+            || !isU64(gid) || !isU64(code) || code === '0'
+            || typeof key !== 'string' || !/^[0-9a-fA-F]{64}$/.test(key))
+        {
+            throw new Error(`steam: depot access entry ${at} is not { depot, gid, key, code }`);
+        }
+        seen.add(depot);
+        return { depot, gid: BigInt(gid), code: BigInt(code),
+            key: Uint8Array.from(key.match(/../g) ?? [], pair=>parseInt(pair, 16)) };
+    });
+}
+
+/**
  * The code that unlocks a manifest on the content servers for a while.
  *
  * @param {CmConnection} connection
@@ -302,13 +357,14 @@ export async function decompressChunk(data, size){
 
 /**
  * @param {ContentServer} server @param {string} path
+ * @param {string} [shown]  The path as a failure names it: a manifest's without its code.
  * @returns {Promise<Uint8Array>}
  */
-async function fetchFrom(server, path){
+async function fetchFrom(server, path, shown = path){
     const answer = await fetch(`https://${server.vhost}${path}`);
     if (!answer.ok)
     {
-        throw new Error(`steam: ${server.vhost}${path} answered ${answer.status}`);
+        throw new Error(`steam: ${server.vhost}${shown} answered ${answer.status}`);
     }
     return new Uint8Array(await answer.arrayBuffer());
 }
@@ -321,7 +377,8 @@ async function fetchFrom(server, path){
  * @returns {Promise<Manifest>}
  */
 export async function manifest(server, { depot, gid, code, key }){
-    const bytes = await unzipOne(await fetchFrom(server, `/depot/${depot}/manifest/${gid}/5/${code}`));
+    const bytes = await unzipOne(await fetchFrom(server, `/depot/${depot}/manifest/${gid}/5/${code}`,
+        `/depot/${depot}/manifest/${gid}`));
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     /** @type {Record<string, any> | null} */
     let payload = null;
