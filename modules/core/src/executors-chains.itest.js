@@ -20,6 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { EXECUTORS_OPENED_KEY } from './layers/cpu/module.js';
+import { EXECUTORS_WAIT_MS } from './layers/kernel/internal/threads.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
@@ -631,7 +632,7 @@ test('a thread on another executor calling into the host is answered at the proc
 });
 
 test('a thread sleeping on the process\'s executor wakes at its time while the other executor'
-    + ' runs a thread that never calls into the host', async()=>{
+    + ' runs a thread that never calls into the host', async t=>{
     const SLEEPS = 5;
     const SLEEP_MS = 20;
     const executable = buildProgram(['CreateThread', 'WaitForSingleObject', 'ExitProcess',
@@ -655,11 +656,19 @@ test('a thread sleeping on the process\'s executor wakes at its time while the o
             0x31, 0xc0, 0xc2, 0x04, 0x00, //                   xor eax, eax; ret 4
         ],
     }));
+    // Every wait of the process's thread for the other executor, read off the
+    // waits it made: a look of EXECUTORS_WAIT_MS at most, so it comes back to
+    // the sleeper's deadline -- not the quarter of a second each the other
+    // executor went without a word. Its wall time, which a busy machine
+    // stretches past any figure, is held only from below.
+    const waits = t.mock.method(Atomics, 'wait');
     const { code } = await run(executable, 2);
-    // What it slept, give or take the host's turns -- not the quarter of a
-    // second each the other executor goes without a word.
-    assert.ok(code >= SLEEPS * SLEEP_MS && code < SLEEPS * SLEEP_MS + 250,
-        `${SLEEPS} sleeps of ${SLEEP_MS} ms took ${code} ms`);
+    const asked = waits.mock.calls.map(one=>Number(one.arguments[3] ?? Infinity));
+    waits.mock.restore();
+    assert.ok(code >= SLEEPS * SLEEP_MS, `${SLEEPS} sleeps of ${SLEEP_MS} ms took ${code} ms`);
+    assert.ok(asked.length > 0 && asked.every(ms=>ms <= EXECUTORS_WAIT_MS),
+        `the process waited for the other executor ${asked.length} times, up to`
+        + ` ${Math.max(...asked)} ms`);
 });
 
 /** CONTEXT_i386 | CONTEXT_CONTROL: eip, esp and the flags. */

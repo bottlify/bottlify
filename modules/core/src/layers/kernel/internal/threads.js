@@ -174,7 +174,7 @@ const RECENT_TURNS = 256;
  * own to run before its turn ends: they keep their threads while nothing waits for
  * one, and the turn's caller moves the guest's clock and looks at the event loop.
  */
-const EXECUTORS_WAIT_MS = 4;
+export const EXECUTORS_WAIT_MS = 4;
 
 /**
  * Crossings into the host inside one slice between two moves of the guest's
