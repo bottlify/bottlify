@@ -105,11 +105,13 @@ function buildProgram(workerProcessor){
 
 test('the main thread pinned to the first processor runs on another executor, the process\'s'
     + ' own playing a processor nothing is pinned to, and no thread is told of a processor its'
-    + ' mask does not name', { timeout: 300_000 }, async()=>{
+    + ' mask does not name', { timeout: 900_000 }, async()=>{
     const app = await createApp({ executable: buildProgram(2), cpu: { cores: 3 } });
     try
     {
-        const code = await app.run({ timeoutMs: 120_000 }) >>> 0;
+        // Bounded by the test, not the run: alone it takes about 20 s, under the
+        // whole suite and other runs beside it (a load of 12 on four cores) past 120.
+        const code = await app.run({ timeoutMs: 840_000 }) >>> 0;
         assert.equal(code, 0, `${code & 0xffff} wrong answers to main, ${code >>> 16} to the`
             + ' worker');
         const tables = await app.diagnostics();

@@ -1591,6 +1591,7 @@ export function createCpuModule(){
                 status: 'ready',
                 metrics: {
                     // The engine the figures below were measured on, for a report.
+                    engine: 'cork',
                     // Whether guest memory is a SharedArrayBuffer another worker
                     // can read and write in place.
                     sharedMemory: typeof SharedArrayBuffer === 'function'
