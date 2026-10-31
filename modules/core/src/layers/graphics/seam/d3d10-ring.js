@@ -37,8 +37,13 @@ export const BUFFER10 = Object.freeze({
     MOST: 32, SIZE: 28 + 32 * 4,
 });
 
-/** The bytes of storages a buffer may be given in all: past it, its DISCARDs trap. */
-const STORAGE_BYTES = 4 * 1024 * 1024;
+/**
+ * The bytes of storages a buffer may be given in all: past it, its DISCARDs
+ * trap. A buffer needs a storage for each DISCARD between two plays of the
+ * ring; at 4 MiB the Crysis timedemo's maps trapped 177474 times in 20
+ * minutes, every one of them a DISCARD at this cap or the count's.
+ */
+const STORAGE_BYTES = 32 * 1024 * 1024;
 
 /** D3D10_MAP_WRITE_DISCARD and D3D10_MAP_WRITE_NO_OVERWRITE. */
 const MAP_WRITE_DISCARD = 4;
@@ -60,12 +65,14 @@ const HELD_WAIT_MS = 200;
  * What a ring counts: the plays of it on the host's way into its own
  * methods and their time, and why a dynamic buffer's maps reached the host
  * -- a map that is not a write the guest makes, a buffer mapped already, a
- * DISCARD (given one more storage, or at its cap: nearly always one that
- * found none free), or a NO_OVERWRITE otherwise (the ring full, the device
- * held, the host's flag).
+ * DISCARD (given one more storage, or at the count's cap or the bytes', the
+ * largest buffer held at the latter: nearly always one that found none free),
+ * or a NO_OVERWRITE otherwise (the ring full, the device held, the host's
+ * flag).
  *
  * @typedef {{ syncs: number, syncMs: number, maps: { type: number, mapped: number,
- *     added: number, capped: number, otherwise: number } }} RingCounters
+ *     added: number, capped: number, cappedBytes: number, largest: number,
+ *     otherwise: number } }} RingCounters
  */
 
 /**
@@ -184,7 +191,8 @@ export function createDeviceRing(deps){
     const word = value=>new Uint8Array(new Uint32Array([value]).buffer);
     /** @type {RingCounters} */
     const counted = { syncs: 0, syncMs: 0,
-        maps: { type: 0, mapped: 0, added: 0, capped: 0, otherwise: 0 } };
+        maps: { type: 0, mapped: 0, added: 0, capped: 0, cappedBytes: 0, largest: 0,
+            otherwise: 0 } };
     let holds = 0;
     /**
      * The device's lock, taken for the host while it reads the ring: a
@@ -324,10 +332,16 @@ export function createDeviceRing(deps){
             try
             {
                 const count = read(held.block + BUFFER10.COUNT);
-                if (count >= BUFFER10.MOST
-                    || (count + 1) * read(held.block + BUFFER10.LENGTH) > STORAGE_BYTES)
+                const length = read(held.block + BUFFER10.LENGTH);
+                if (count >= BUFFER10.MOST)
                 {
                     counted.maps.capped++;
+                    return;
+                }
+                if ((count + 1) * length > STORAGE_BYTES)
+                {
+                    counted.maps.cappedBytes++;
+                    counted.maps.largest = Math.max(counted.maps.largest, length);
                     return;
                 }
                 counted.maps.added++;
