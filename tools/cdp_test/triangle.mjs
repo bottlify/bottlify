@@ -249,7 +249,10 @@ export async function triangle(){
         // a SharedArrayBuffer, as the product serves it.
         coi: process.argv.includes('--isolated'),
     });
-    const browser = await launchWithGpu();
+    // `--chrome-flag F` (repeatable): `--use-webgpu-adapter=swiftshader` to judge pixels on
+    // the software adapter rather than a driver's.
+    const browser = await launchWithGpu({ extraFlags: process.argv
+        .flatMap((arg, at, all)=>(arg === '--chrome-flag' && all[at + 1] ? [all[at + 1]] : [])) });
     mkdirSync(REPORTS_DIR, { recursive: true });
 
     const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/gpu/index.html`;
