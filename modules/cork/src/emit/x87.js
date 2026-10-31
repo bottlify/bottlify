@@ -247,10 +247,11 @@ export function step(instruction, state){
     if (!isX87(instruction))
     {
         // An MMX instruction puts the stack in the MMX state, as the processor
-        // does: the top at zero and every register held. The hold is the run-time
-        // empty mask the instruction's own emission sets; the top is the tracker's,
-        // so the x87 after it in the region is compiled for a top of zero.
-        if (operands.some(operand=>operand.kind === 'mm'))
+        // does: the top at zero and every register held, and `emms` the top at
+        // zero and every register empty. The hold is the run-time empty mask
+        // the instruction's own emission sets; the top is the tracker's, so the
+        // x87 after it in the region is compiled for a top of zero.
+        if (op === 'emms' || operands.some(operand=>operand.kind === 'mm'))
         {
             return { top: 0, slot: [...state.slot] };
         }
@@ -635,7 +636,10 @@ export function stackUse(instruction, state){
     switch (op)
     {
         case 'fwait': case 'fnop': case 'fnclex': case 'fldcw': case 'fnstsw': case 'fnstcw':
-        case 'fnstenv': case 'fincstp': case 'fdecstp':
+        case 'fnstenv':
+            return use;
+        case 'fincstp': case 'fdecstp':
+            use.c1 = 'clear';
             return use;
         case 'fninit': case 'fnsave':
             use.whole = 'empty';
@@ -667,6 +671,7 @@ export function stackUse(instruction, state){
             return use;
         case 'fxch':
             writes(0, reg(src));
+            use.c1 = 'clear';
             return use;
         case 'fcmovb': case 'fcmove': case 'fcmovbe': case 'fcmovu':
         case 'fcmovnb': case 'fcmovne': case 'fcmovnbe': case 'fcmovnu':
@@ -677,8 +682,11 @@ export function stackUse(instruction, state){
             use.marks.push([at(reg(dst)), 0]);
             pop(op === 'ffreep' ? 1 : 0);
             return use;
-        case 'fchs': case 'fabs': case 'fsqrt': case 'frndint': case 'f2xm1': case 'fsin':
-        case 'fcos':
+        case 'fchs': case 'fabs':
+            writes(0);
+            use.c1 = 'clear';
+            return use;
+        case 'fsqrt': case 'frndint': case 'f2xm1': case 'fsin': case 'fcos':
             writes(0);
             return use;
         case 'fsincos': case 'fptan':
@@ -2751,7 +2759,13 @@ export function emitX87(e, instruction, flagsLive){
                     b.localGet(x.dyn).i32const(from).op(I32.shrU).i32const(1).op(I32.and)
                         .i32const(to).op(I32.shl).op(I32.or);
                 }
-                if (madeExact !== 0)
+                if (madeExact !== 0 && (madeNaN & madeExact) !== 0)
+                {
+                    // A load the guard left to run time: marked only where it
+                    // did not fault, as the indefinite it pushed then is no quadword.
+                    b.i32const(0).i32const(madeExact).localGet(Local.t1).select().op(I32.or);
+                }
+                else if (madeExact !== 0)
                 {
                     b.i32const(madeExact).op(I32.or);
                 }
@@ -2825,6 +2839,17 @@ export function emitX87(e, instruction, flagsLive){
     const indefinite = ()=>b.i64const(-0x0008000000000000n).op(F64.reinterpretI64);
     /** The last guard decided while translating that nothing faults (t1 is 0). */
     let clear = false;
+    /**
+     * C1 cleared, as FXCH, FINCSTP, FDECSTP, FCHS and FABS leave it -- where
+     * C1 is kept (`precise`, as a push's overflow mark is) and not known clear.
+     */
+    const clearC1 = ()=>{
+        if (precise && !x.stack.c1)
+        {
+            b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
+                .localSet(Local.x87Status);
+        }
+    };
     /**
      * The stack-fault check: t1 is set when a source ST(i) is empty or a
      * push finds its register held, and IE and SF are raised. The
@@ -2902,7 +2927,12 @@ export function emitX87(e, instruction, flagsLive){
         });
         if (overflowChecked)
         {
+            // An underflow of a source comes first: C1 says nothing of the push then.
             b.localGet(Local.x87Empty).i32const(into).op(I32.and).op(I32.eqz);
+            if (read !== 0)
+            {
+                b.localGet(Local.x87Empty).i32const(read).op(I32.and).op(I32.eqz).op(I32.and);
+            }
             e.openGuard('overflow', EMPTY);
             setStatus(Status.C1);
             e.close();
@@ -3090,6 +3120,20 @@ export function emitX87(e, instruction, flagsLive){
         if (memory !== null)
         {
             rawSignalling(e, memory);
+            e.openGuard('signalling', EMPTY);
+            setStatus(Status.IE);
+            e.close();
+        }
+        if (invalid)
+        {
+            // A register that held a signalling NaN: the arithmetic quieted it
+            // into the result, and the processor raises IE for it.
+            b.i32const(0);
+            for (const input of inputs)
+            {
+                signallingLocal(b, input);
+                b.op(I32.or);
+            }
             e.openGuard('signalling', EMPTY);
             setStatus(Status.IE);
             e.close();
@@ -3376,6 +3420,7 @@ export function emitX87(e, instruction, flagsLive){
             const c = (state.top + i) & 7;
             // An empty register faults and is made the indefinite first.
             guard(true);
+            clearC1();
             if (!x.compared)
             {
                 b.localGet(Local.x87Dirty).i32const((1 << a) | (1 << c)).op(I32.or)
@@ -3411,9 +3456,11 @@ export function emitX87(e, instruction, flagsLive){
         }
         case 'fincstp': case 'fdecstp':
             b.i32const(next.top).localSet(Local.x87Top);
+            clearC1();
             return finish();
         case 'fchs': case 'fabs':
             guard();
+            clearC1();
             if (viaFloats && clear)
             {
                 const k = localOf(0);
@@ -3647,6 +3694,11 @@ export function emitX87(e, instruction, flagsLive){
             // ST1 = ST1 * log2(ST0) (or of ST0 + 1), then a pop: a zero
             // argument is a zero-divide, a negative one invalid.
             const math = e.context.math;
+            // A NaN's logarithm is the NaN itself: the host's keeps no NaN's bits.
+            const logOfNaN = ()=>{
+                b.localGet(x.temp).localGet(x.temp2).localGet(x.temp).localGet(x.temp).op(F64.ne)
+                    .select().localSet(x.temp2);
+            };
             guard();
             b.localGet(st(0)).localSet(x.temp);
             if (op === 'fyl2x')
@@ -3671,6 +3723,7 @@ export function emitX87(e, instruction, flagsLive){
                 indefinite();
                 b.localGet(x.temp2).localGet(x.temp).f64const(0).op(F64.lt).select()
                     .localSet(x.temp2);
+                logOfNaN();
                 b.localGet(st(1)).localGet(x.temp2).op(F64.mul);
                 noteIfMade(st(1), x.temp);
                 hostNaN([st(1), x.temp2]);
@@ -3689,6 +3742,7 @@ export function emitX87(e, instruction, flagsLive){
                 indefinite();
                 b.localGet(x.temp2).localGet(x.temp).f64const(-1).op(F64.lt).select()
                     .localSet(x.temp2);
+                logOfNaN();
                 b.localGet(st(1)).localGet(x.temp2).op(F64.mul);
                 noteIfMade(st(1), x.temp);
                 hostNaN([st(1), x.temp2]);
@@ -3710,18 +3764,46 @@ export function emitX87(e, instruction, flagsLive){
             guard();
             b.localGet(st(0)).localSet(x.temp);
             b.localGet(st(1)).localSet(x.temp2);
-            // Invalid: a NaN, an infinite dividend, a zero divisor: the
-            // indefinite, IE, and the condition bits left as they were.
+            // No reduction -- a NaN, an infinite dividend, a zero divisor, an
+            // empty operand: C1 and C2 cleared, C0 and C3 as they were. A NaN
+            // operand goes on quiet (of two, the x87's choice), raising IE only
+            // if it signals; anything else is the indefinite and IE.
             b.localGet(x.temp).localGet(x.temp).op(F64.ne);
             b.localGet(x.temp2).localGet(x.temp2).op(F64.ne).op(I32.or);
             b.localGet(x.temp).op(F64.abs).f64const(Infinity).op(F64.eq).op(I32.or);
             b.localGet(x.temp2).f64const(0).op(F64.eq).op(I32.or);
             b.localGet(Local.t1).op(I32.or);
             e.openGuard('invalid', EMPTY);
+            b.localGet(Local.x87Status).i32const(~(Status.C1 | Status.C2)).op(I32.and)
+                .localSet(Local.x87Status);
+            b.localGet(x.temp).localGet(x.temp).op(F64.ne);
+            b.localGet(x.temp2).localGet(x.temp2).op(F64.ne).op(I32.or);
+            b.localGet(Local.t1).op(I32.eqz).op(I32.and);
+            e.openIf('nanOperand', EMPTY);
+            /** A signalling NaN in the local: the all-ones exponent, quiet bit clear, a fraction. */
+            const signals = (/** @type {number} */ local)=>{
+                b.localGet(local).op(I64.reinterpretF64).i64const(0x7ff8000000000000n).op(I64.and)
+                    .i64const(0x7ff0000000000000n).op(I64.eq);
+                b.localGet(local).op(I64.reinterpretF64).i64const(0xfffffffffffffn).op(I64.and)
+                    .i64const(0n).op(I64.ne).op(I32.and);
+            };
+            signals(x.temp);
+            signals(x.temp2);
+            b.op(I32.or);
+            e.openIf('signalling', EMPTY);
+            setStatus(Status.IE);
+            e.close();
+            b.localGet(x.temp).localGet(x.temp2).localGet(x.temp).localGet(x.temp).op(F64.ne)
+                .select().op(I64.reinterpretF64).i64const(0x0008000000000000n).op(I64.or)
+                .op(F64.reinterpretI64).localSet(x.temp3);
+            twoNaN(x.temp, x.temp2);
+            b.localGet(x.temp3).localSet(st(0));
+            b.else();
             setStatus(Status.IE);
             noteMade(x.temp, x.temp2);
             indefinite();
             b.localSet(st(0));
+            e.close();
             b.else();
             b.localGet(x.temp).localGet(x.temp2).i32const(nearest).call(e.context.remainder)
                 .localSet(Local.t0).localSet(st(0));
@@ -4247,6 +4329,19 @@ function readsRelaxed(e, instruction){
 }
 
 /**
+ * Pushes whether the f64 in a local is a signalling NaN: its magnitude's bits
+ * past the infinity's and below the first quiet NaN's, one subtraction and an
+ * unsigned compare. A register's value keeps its bits in a local; only an
+ * arithmetic quiets them.
+ *
+ * @param {Body} b @param {number} local
+ */
+function signallingLocal(b, local){
+    b.localGet(local).op(I64.reinterpretF64).i64const(0x7fffffffffffffffn).op(I64.and)
+        .i64const(0x7ff0000000000001n).op(I64.sub).i64const(0x0007ffffffffffffn).op(I64.ltU);
+}
+
+/**
  * Pushes 1 when the float at `Local.addr` (m32 or m64) is a signalling NaN,
  * from its bits: all-ones exponent, quiet bit clear, fraction not zero.
  *
@@ -4353,16 +4448,9 @@ function loadFloatValue(e, operand, mode = 'checked'){
     }
     // A signalling NaN read from memory is an invalid operand: IE, and the
     // value goes on quiet. The quiet bit is the top fraction bit of each width.
+    // Not in the 80-bit format, which the SDM's FLD loads as it is.
     if (operand.size === 10)
     {
-        b.localGet(Local.addr).load('i32_16u', { offset: e.layout.ramBase + 8 })
-            .i32const(0x7fff).op(I32.and).i32const(0x7fff).op(I32.eq);
-        b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase })
-            .i64const(0x7fffffffffffffffn).op(I64.and).i64const(0x4000000000000000n)
-            .op(I64.gtS).op(I32.and);
-        e.openGuard('signalling', EMPTY);
-        b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
-        e.close();
         b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add)
             .call(/** @type {number} */ (e.context.f80ToF64));
         return;
@@ -4426,6 +4514,24 @@ function storeFloat(e, operand, pushValue){
         b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add);
         b.call(/** @type {number} */ (e.context.f64ToF80));
         return;
+    }
+    if (e.context.precise === true)
+    {
+        // A signalling NaN stored to a single or a double raises IE and goes
+        // out quiet (the SDM's FST); the extended format takes it as it is.
+        const value = e.x87.temp;
+        pushValue();
+        b.localSet(value);
+        b.localGet(value).op(I64.reinterpretF64).i64const(0x7ff8000000000000n).op(I64.and)
+            .i64const(0x7ff0000000000000n).op(I64.eq);
+        b.localGet(value).op(I64.reinterpretF64).i64const(0xfffffffffffffn).op(I64.and)
+            .i64const(0n).op(I64.ne).op(I32.and);
+        e.openGuard('signalling', EMPTY);
+        b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
+        b.localGet(value).op(I64.reinterpretF64).i64const(0x0008000000000000n).op(I64.or)
+            .op(F64.reinterpretI64).localSet(value);
+        e.close();
+        pushValue = ()=>b.localGet(value);
     }
     if (operand.size === 4 && e.context.precise === true)
     {
@@ -4738,8 +4844,9 @@ function noteEvent(e, slot, first){
 /**
  * The invalid-operation helper: `x87Invalid(a, c, address, size) -> IE`, for
  * an arithmetic whose result is a NaN. IE when the NaN was made from operands
- * that were not NaNs, or when the memory operand (`size` 4 or 8 at the wasm
- * address; 0 for none) holds a signalling NaN; 0 otherwise. A NaN made is
+ * that were not NaNs, when `a` or `c` is a signalling NaN, or when the memory
+ * operand (`size` 4 or 8 at the wasm address; 0 for none) holds one; 0
+ * otherwise. A NaN made is
  * noted at `layout.nanFirst`, the asking instruction's address read from
  * past the record, where the region stored it.
  *
@@ -4773,6 +4880,13 @@ export function addInvalidHelper(m, layout){
         b.end();
     }
     b.i32const(Status.IE).op(0x0f); // return
+    b.end();
+    // A register operand that held a signalling NaN, its bits as they were.
+    signallingLocal(b, 0);
+    signallingLocal(b, 1);
+    b.op(I32.or);
+    b.if(EMPTY);
+    b.i32const(Status.IE).op(0x0f);
     b.end();
     b.localGet(3).i32const(4).op(I32.eq);
     b.if(EMPTY);
@@ -4966,7 +5080,10 @@ export function addF80Helpers(m){
         b.if(EMPTY);
         b.f64const(Infinity).localSet(3);
         b.else();
-        b.f64const(NaN).localSet(3);
+        // A NaN keeps its payload's top 52 bits, by its lowest when they are all clear.
+        b.localGet(1).i64const(11n).op(I64.shrU).i64const(0xfffffffffffffn).op(I64.and)
+            .localTee(1).localGet(1).op(I64.eqz).op(I64.extendU).op(I64.or)
+            .i64const(0x7ff0000000000000n).op(I64.or).op(F64.reinterpretI64).localSet(3);
         b.end();
         b.br(1);
         b.end();

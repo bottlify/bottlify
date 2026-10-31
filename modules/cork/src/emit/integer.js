@@ -668,7 +668,7 @@ export function emitInstruction(e, instruction, flagsLive){
     {
         case 'nop': case 'fwait': case 'fnop': case 'prefetch': case 'prefetchw':
         case 'prefetchnta': case 'prefetcht0': case 'prefetcht1': case 'prefetcht2':
-        case 'lfence': case 'mfence': case 'sfence': case 'pause':
+        case 'lfence': case 'mfence': case 'sfence': case 'pause': case 'clflush':
             return true;
         // The emulator's decoder consumes BOUND and neither checks the bounds
         // nor raises #BR, so translated code does the same. A guest that runs

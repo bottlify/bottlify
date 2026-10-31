@@ -28,7 +28,7 @@
  */
 
 import {
-    CONDITIONS, DF, Group, I, ONE_BYTE, Prefixed, SYS, TWO_BYTE, X87, conditionReads,
+    ByMod, CONDITIONS, DF, Group, I, ONE_BYTE, Prefixed, SYS, TWO_BYTE, X87, conditionReads,
 } from './table.js';
 
 /** The longest an instruction may be; the processor faults past it. */
@@ -109,7 +109,15 @@ const INVALID_SLOTS = new Set([
 
 /** Refusals whose encoding a processor rejects with #UD whatever it supports. */
 const INVALID_REASONS = new Set(['no such segment register', 'register form only',
-    'memory form only', 'lock on a register form', 'not in 64-bit mode']);
+    'memory form only', 'lock on a register form', 'lock on no locked operation',
+    'a load of CS', 'not in 64-bit mode']);
+
+/**
+ * The instructions a lock prefix may take, and only with a memory destination
+ * (the SDM's LOCK): any other is #UD.
+ */
+const LOCKABLE = new Set(['add', 'adc', 'and', 'btc', 'btr', 'bts', 'cmpxchg', 'cmpxchg8b',
+    'cmpxchg16b', 'dec', 'inc', 'neg', 'not', 'or', 'sbb', 'sub', 'xor', 'xadd', 'xchg']);
 
 /**
  * The one-byte opcodes long mode dropped: the pushes and pops of ES, CS, SS and
@@ -378,7 +386,7 @@ function decodeAt(eip){
         return refusal(eip, hex(opcode), 'not in 64-bit mode');
     }
 
-    /** @type {import('./table.js').Entry | Group | Prefixed | typeof SYS | null} */
+    /** @type {import('./table.js').Entry | Group | ByMod | Prefixed | typeof SYS | null} */
     let entry;
     let opcodeText;
     // The register an opcode's low three bits name (`inc eax` is 0x40+0),
@@ -435,6 +443,10 @@ function decodeAt(eip){
             GROUP_TEXT.set(opcodeText, texts);
         }
         opcodeText = texts[reg] ??= `${opcodeText} /${reg}`;
+    }
+    if (entry instanceof ByMod)
+    {
+        entry = fetchModrm() >= 0xc0 ? entry.register : entry.memory;
     }
     if (entry === null || entry === undefined)
     {
@@ -629,6 +641,15 @@ function decodeAt(eip){
     if (prefixes.lock && !memory)
     {
         return refusal(eip, opcodeText, 'lock on a register form');
+    }
+    if (prefixes.lock && (!LOCKABLE.has(entry.op) || operands[0]?.kind !== 'mem'))
+    {
+        return refusal(eip, opcodeText, 'lock on no locked operation');
+    }
+    // CS is loaded only by a far transfer: `mov cs` is #UD (the SDM's MOV).
+    if (operands[0]?.kind === 'seg' && operands[0].reg === 1 && entry.op === 'mov')
+    {
+        return refusal(eip, opcodeText, 'a load of CS');
     }
 
     const flags = entry.flags;

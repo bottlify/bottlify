@@ -380,7 +380,7 @@ export function evaluate(instruction, state){
     {
         case 'nop': case 'fwait': case 'prefetch': case 'prefetchw': case 'prefetchnta':
         case 'prefetcht0': case 'prefetcht1': case 'prefetcht2': case 'lfence': case 'mfence':
-        case 'sfence': case 'pause':
+        case 'sfence': case 'pause': case 'clflush':
             return;
         // BOUND is a no-op here because it is one to the emulator: its
         // decoder consumes the instruction and neither reads the memory
@@ -703,11 +703,25 @@ export function evaluate(instruction, state){
             return;
         case 'enter':
         {
+            // The SDM's ENTER: a nesting level past zero copies the frame
+            // pointers of the enclosing levels from the old frame, then pushes
+            // the new frame's own.
             const frame = /** @type {number} */ (operands[0].value);
+            const level = /** @type {number} */ (operands[1].value) & 31;
             const width = instruction.prefixes.operand ? 2 : 4;
             push(state.reg[5], width);
+            const frameTemp = state.reg[4];
+            for (let i = 1; i < level; i++)
+            {
+                state.reg[5] = (state.reg[5] - width) >>> 0;
+                push(state.memory.read(state.reg[5], width), width);
+            }
+            if (level > 0)
+            {
+                push(frameTemp, width);
+            }
             state.reg[5] = width === 2
-                ? (state.reg[5] & 0xffff0000 | state.reg[4] & 0xffff) >>> 0 : state.reg[4];
+                ? (state.reg[5] & 0xffff0000 | frameTemp & 0xffff) >>> 0 : frameTemp;
             state.reg[4] = (state.reg[4] - frame) >>> 0;
             return;
         }
@@ -715,7 +729,10 @@ export function evaluate(instruction, state){
         {
             if (op !== 'jecxz')
             {
-                state.reg[1] = (state.reg[1] - 1) >>> 0;
+                // Under the address-size prefix the count is CX: ECX's high half stays.
+                state.reg[1] = instruction.prefixes.address
+                    ? (state.reg[1] & 0xffff0000 | state.reg[1] - 1 & 0xffff) >>> 0
+                    : (state.reg[1] - 1) >>> 0;
             }
             const count = instruction.prefixes.address ? state.reg[1] & 0xffff : state.reg[1];
             const zf = (state.eflags & ZF) !== 0;
@@ -875,7 +892,9 @@ export function evaluate(instruction, state){
             }
             const result = value & 0xff;
             state.reg[0] = (state.reg[0] & 0xffffff00 | result) >>> 0;
-            state.eflags = logicFlags(result, 1) | (carry ? CF : 0) | (aux ? AF : 0);
+            // The arithmetic flags only: DF, IF and the rest stay.
+            state.eflags = (state.eflags & ~ARITH | logicFlags(result, 1) | (carry ? CF : 0)
+                | (aux ? AF : 0)) >>> 0;
             return;
         }
         case 'aaa': case 'aas':
@@ -890,8 +909,8 @@ export function evaluate(instruction, state){
             }
             value &= 0xff0f;
             state.reg[0] = (state.reg[0] & 0xffff0000 | value) >>> 0;
-            state.eflags = logicFlags(value & 0xff, 1)
-                | (adjusted ? CF | AF : 0);
+            state.eflags = (state.eflags & ~ARITH | logicFlags(value & 0xff, 1)
+                | (adjusted ? CF | AF : 0)) >>> 0;
             return;
         }
         case 'aam': case 'aad':
@@ -915,7 +934,7 @@ export function evaluate(instruction, state){
                 // AH is cleared: the whole low word is the new AL.
                 state.reg[0] = (state.reg[0] & 0xffff0000 | result) >>> 0;
             }
-            state.eflags = logicFlags(result & 0xff, 1);
+            state.eflags = (state.eflags & ~ARITH | logicFlags(result & 0xff, 1)) >>> 0;
             return;
         }
         case 'xlat':

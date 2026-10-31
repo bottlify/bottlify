@@ -305,7 +305,7 @@ export function evaluate64(instruction, state){
     {
         case 'nop': case 'pause': case 'lfence': case 'mfence': case 'sfence': case 'prefetch':
         case 'prefetchw': case 'prefetchnta': case 'prefetcht0': case 'prefetcht1':
-        case 'prefetcht2':
+        case 'prefetcht2': case 'clflush':
             break;
         case 'hlt':
             state.halted = true;

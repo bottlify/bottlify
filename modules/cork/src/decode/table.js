@@ -133,9 +133,21 @@ export function I(op, forms = '', flags = 'none', faults = 'none', cc){
     };
 }
 
+/**
+ * A group's slot whose meaning the ModRM byte's mod picks: one instruction
+ * with a memory operand, another with none.
+ */
+export class ByMod {
+    /** @param {Entry | null} memory @param {Entry | null} register */
+    constructor(memory, register){
+        this.memory = memory;
+        this.register = register;
+    }
+}
+
 /** A `/r` group: eight entries, null where the encoding is invalid. */
 export class Group {
-    /** @param {(Entry | null | typeof SYS)[]} entries */
+    /** @param {(Entry | ByMod | null | typeof SYS)[]} entries */
     constructor(entries){
         if (entries.length !== 8)
         {
@@ -145,7 +157,7 @@ export class Group {
     }
 }
 
-/** @param {(Entry | null | typeof SYS)[]} entries */
+/** @param {(Entry | ByMod | null | typeof SYS)[]} entries */
 export const G = entries=>new Group(entries);
 
 /** A `0F` entry whose meaning the mandatory prefix picks. */
@@ -569,9 +581,13 @@ TWO_BYTE[0xa9] = I('pop', 'GS');
 TWO_BYTE[0xab] = I('bts', 'Ev,Gv', 'bt');
 TWO_BYTE[0xac] = I('shrd', 'Ev,Gv,Ib', 'shiftDouble');
 TWO_BYTE[0xad] = I('shrd', 'Ev,Gv,CL', 'shiftDouble');
+// The fences are the register forms of /5../7; the memory form of /7 is
+// clflush (CPUID's CLFSH), those of /5 and /6 xrstor and xsaveopt, which need
+// an XSAVE CPUID does not report.
 TWO_BYTE[0xae] = G([
     I('fxsave', 'M'), I('fxrstor', 'M'), I('ldmxcsr', 'Md'), I('stmxcsr', 'Md'),
-    SYS, I('lfence'), I('mfence'), I('sfence'),
+    SYS, new ByMod(null, I('lfence')), new ByMod(null, I('mfence')),
+    new ByMod(I('clflush', 'Mb'), I('sfence')),
 ]);
 TWO_BYTE[0xaf] = I('imul', 'Gv,Ev', 'mul');
 TWO_BYTE[0xb0] = I('cmpxchg', 'Eb,Gb', 'cmpxchg');
@@ -785,7 +801,7 @@ run(X87[7].reg, 0xf0, I('fcomip', 'ST0,STi', 'compareFloat'));
  */
 export function formsInUse(){
     const forms = new Set();
-    /** @param {Entry | Group | Prefixed | typeof SYS | null} entry */
+    /** @param {Entry | Group | ByMod | Prefixed | typeof SYS | null} entry */
     const visit = entry=>{
         if (entry === null || entry === SYS)
         {
@@ -794,6 +810,11 @@ export function formsInUse(){
         if (entry instanceof Group)
         {
             entry.entries.forEach(visit);
+        }
+        else if (entry instanceof ByMod)
+        {
+            visit(entry.memory);
+            visit(entry.register);
         }
         else if (entry instanceof Prefixed)
         {
