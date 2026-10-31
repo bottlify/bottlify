@@ -94,9 +94,12 @@ export function signalledNow(object){
  * @param {{ made: (event: any) => void, settle: () => void } | null} [options.eventWords]
  *     The words the guest sets, resets and takes events by (`event-words.js`), as
  *     `mutexWords` for mutexes
+ * @param {{ made: (semaphore: any) => void, settle: () => void } | null}
+ *     [options.semaphoreWords]  The words the guest releases and takes
+ *     semaphores by (`semaphore-words.js`), the same way
  */
 export function createSyncObjects({ scheduler, remote = null, eventChanged, mutexWords = null,
-    eventWords = null })
+    eventWords = null, semaphoreWords = null })
 {
     /** @type {any[]} */
     const objects = [];
@@ -192,6 +195,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         thread.waitSet = null;
         mutexWords?.settle();
         eventWords?.settle();
+        semaphoreWords?.settle();
     };
     scheduler.onTimeout?.(stopWaiting);
 
@@ -475,6 +479,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             objects.push(object);
             made.add(object);
             created[SyncKind.SEMAPHORE]++;
+            semaphoreWords?.made(object);
             return object;
         },
 
@@ -951,10 +956,10 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         },
     };
 
-    // Every call here may have taken a mutex's or an event's word for the host;
-    // each hands back those nobody waits for once it is done (`mutex-words.js`,
-    // `event-words.js`).
-    if (mutexWords !== null || eventWords !== null)
+    // Every call here may have taken a mutex's, an event's or a semaphore's word
+    // for the host; each hands back those nobody waits for once it is done
+    // (`mutex-words.js`, `event-words.js`, `semaphore-words.js`).
+    if (mutexWords !== null || eventWords !== null || semaphoreWords !== null)
     {
         for (const [name, call] of Object.entries(api))
         {
@@ -970,6 +975,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                     {
                         mutexWords?.settle();
                         eventWords?.settle();
+                        semaphoreWords?.settle();
                     }
                 };
             }

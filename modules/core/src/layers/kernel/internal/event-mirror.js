@@ -47,6 +47,13 @@ export const MUTEX_TAG = 2;
  */
 export const EVENT_TAG = 1;
 
+/**
+ * A handle onto a semaphore of this process has the address of the
+ * semaphore's own words (`semaphore-words.js`) with both low bits set: the
+ * guest's WaitForSingleObject and ReleaseSemaphore take and add its counts there.
+ */
+export const SEMAPHORE_TAG = 3;
+
 /** Handles are multiples of four; the two bits below are the program's own. */
 const HANDLE_SHIFT = 2;
 
@@ -90,7 +97,7 @@ export function createEventMirror(write, own = ()=>true){
 
         /**
          * A handle was opened onto an object. Only an event of this process,
-         * and a mutex of it with a word of its own, has a word: one another
+         * and a mutex or a semaphore of it with a word of its own, has a word: one another
          * process holds changes there, unseen here. A handle granted fewer
          * than all rights has none either: what it may do is the host's to
          * check, on every call.
@@ -109,6 +116,12 @@ export function createEventMirror(write, own = ()=>true){
             {
                 byHandle.set(handle, object);
                 write(address, (object.word | MUTEX_TAG) >>> 0);
+                return;
+            }
+            if (type === 'semaphore' && typeof object.word === 'number')
+            {
+                byHandle.set(handle, object);
+                write(address, (object.word | SEMAPHORE_TAG) >>> 0);
                 return;
             }
             if (type !== 'event')
@@ -152,8 +165,8 @@ export function createEventMirror(write, own = ()=>true){
 
         /**
          * Every word says nothing from now on, and none is written until
-         * `reattach`: each wait, SetEvent, ResetEvent and ReleaseMutex the
-         * guest makes crosses, as where there is no table.
+         * `reattach`: each wait, SetEvent, ResetEvent, ReleaseMutex and
+         * ReleaseSemaphore the guest makes crosses, as where there is no table.
          */
         detach(){
             if (slots === 0)

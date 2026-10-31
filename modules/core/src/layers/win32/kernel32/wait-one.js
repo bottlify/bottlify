@@ -68,6 +68,8 @@
  *     xor eax, eax                ; WAIT_OBJECT_0
  *     ret 8
  *   mutex:
+ *     test al, EVENT_TAG          ; both tags: a semaphore's words
+ *     jnz semaphore               ; (`semaphore-guest.js`), as the call was made
  *     lea ecx, [eax-MUTEX_TAG]    ; the mutex's word
  *     mov edx, fs:[0x24]          ; the caller's id
  *     shl edx, 8
@@ -105,9 +107,12 @@ export const MUTEX_SLOTS = 0x4000;
 /** Events with a word of their own (`event-words.js`): 64 KiB of them. */
 export const EVENT_WORD_SLOTS = 0x4000;
 
+/** Semaphores with words of their own (`semaphore-words.js`), two each: 64 KiB of them. */
+export const SEMAPHORE_SLOTS = 0x2000;
+
 /**
  * What the kernel's words say, from the kernel (`kernel.EventMirror`,
- * `kernel.MUTEX_TAG`, `kernel.EVENT_TAG`).
+ * `kernel.MUTEX_TAG`, `kernel.EVENT_TAG`); a semaphore's word has both tags.
  *
  * @typedef {Object} HandleWordValues
  * @property {number} clear     the word of an event with none of its own, not signalled
@@ -142,15 +147,16 @@ const JA = 0x87;
  * @param {number} trap   The host's WaitForSingleObject.
  * @param {number} table  The kernel's words, one a handle.
  * @param {HandleWordValues} values
+ * @param {number} semaphore  The wait on a semaphore (`semaphore-guest.js`), placed.
  * @returns {Uint8Array}
  */
-export function waitOneCode(at, trap, table, { clear, mutexTag, eventTag }){
+export function waitOneCode(at, trap, table, { clear, mutexTag, eventTag }, semaphore){
     const poll = 43;
     const word = 62;
     const taken = 96;
     const mutex = 111;
-    const held = 148;
-    const slow = 179;
+    const held = 156;
+    const slow = 187;
     const bytes = [
         0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
         0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
@@ -185,29 +191,31 @@ export function waitOneCode(at, trap, table, { clear, mutexTag, eventTag }){
         0x31, 0xc0,                                                  // 106: xor eax, eax
         0xc2, 0x08, 0x00,                                            // 108: ret 8
         // mutex: (111)
-        0x8d, 0x48, (-mutexTag) & 0xff,                              // 111: lea ecx, [eax-tag]
-        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 114: mov edx, fs:[0x24]
-        0xc1, 0xe2, 0x08,                                            // 121: shl edx, 8
-        0x8b, 0x01,                                                  // 124: mov eax, [ecx]
-        0x85, 0xc0,                                                  // 126: test eax, eax
-        0x75, held - 130,                                            // 128: jnz held
-        0x83, 0xca, 0x01,                                            // 130: or edx, 1
-        0xf0, 0x0f, 0xb1, 0x11,                                      // 133: lock cmpxchg [ecx], edx
-        ...jcc(JNE, 137, slow),                                      // 137: jne slow
-        0x31, 0xc0,                                                  // 143: xor eax, eax
-        0xc2, 0x08, 0x00,                                            // 145: ret 8
-        // held: (148)
-        0x31, 0xd0,                                                  // 148: xor eax, edx
-        0x83, 0xf8, 0x7f,                                            // 150: cmp eax, 0x7f
-        ...jcc(JAE, 153, slow),                                      // 153: jae slow
-        0x31, 0xd0,                                                  // 159: xor eax, edx
-        0x8d, 0x50, 0x01,                                            // 161: lea edx, [eax+1]
-        0xf0, 0x0f, 0xb1, 0x11,                                      // 164: lock cmpxchg [ecx], edx
-        ...jcc(JNE, 168, slow),                                      // 168: jne slow
-        0x31, 0xc0,                                                  // 174: xor eax, eax
-        0xc2, 0x08, 0x00,                                            // 176: ret 8
-        // slow: (179)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // 179: jmp trap
+        0xa8, eventTag,                                              // 111: test al, EVENT_TAG
+        ...jcc(JNE, 113, semaphore - at),                            // 113: jnz semaphore
+        0x8d, 0x48, (-mutexTag) & 0xff,                              // 119: lea ecx, [eax-tag]
+        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 122: mov edx, fs:[0x24]
+        0xc1, 0xe2, 0x08,                                            // 129: shl edx, 8
+        0x8b, 0x01,                                                  // 132: mov eax, [ecx]
+        0x85, 0xc0,                                                  // 134: test eax, eax
+        0x75, held - 138,                                            // 136: jnz held
+        0x83, 0xca, 0x01,                                            // 138: or edx, 1
+        0xf0, 0x0f, 0xb1, 0x11,                                      // 141: lock cmpxchg [ecx], edx
+        ...jcc(JNE, 145, slow),                                      // 145: jne slow
+        0x31, 0xc0,                                                  // 151: xor eax, eax
+        0xc2, 0x08, 0x00,                                            // 153: ret 8
+        // held: (156)
+        0x31, 0xd0,                                                  // 156: xor eax, edx
+        0x83, 0xf8, 0x7f,                                            // 158: cmp eax, 0x7f
+        ...jcc(JAE, 161, slow),                                      // 161: jae slow
+        0x31, 0xd0,                                                  // 167: xor eax, edx
+        0x8d, 0x50, 0x01,                                            // 169: lea edx, [eax+1]
+        0xf0, 0x0f, 0xb1, 0x11,                                      // 172: lock cmpxchg [ecx], edx
+        ...jcc(JNE, 176, slow),                                      // 176: jne slow
+        0x31, 0xc0,                                                  // 182: xor eax, eax
+        0xc2, 0x08, 0x00,                                            // 184: ret 8
+        // slow: (187)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // 187: jmp trap
     ];
     return new Uint8Array(bytes);
 }
@@ -228,6 +236,8 @@ export function waitOneCode(at, trap, table, { clear, mutexTag, eventTag }){
  *     jb slow                     ; an event's state, or nothing
  *     test al, MUTEX_TAG
  *     jz slow                     ; an event's own word
+ *     test al, EVENT_TAG
+ *     jnz slow                    ; a semaphore's
  *     lea ecx, [eax-MUTEX_TAG]
  *     mov edx, fs:[0x24]
  *     shl edx, 8
@@ -261,9 +271,9 @@ export function waitOneCode(at, trap, table, { clear, mutexTag, eventTag }){
  * @param {HandleWordValues} values
  * @returns {Uint8Array}
  */
-export function releaseMutexCode(at, trap, table, { mutexTag }){
-    const last = 97;
-    const slow = 120;
+export function releaseMutexCode(at, trap, table, { mutexTag, eventTag }){
+    const last = 105;
+    const slow = 128;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
         0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
@@ -274,32 +284,34 @@ export function releaseMutexCode(at, trap, table, { mutexTag }){
         ...jcc(JB, 28, slow),                                        // 28: jb slow
         0xa8, mutexTag,                                              // 34: test al, MUTEX_TAG
         ...jcc(JE, 36, slow),                                        // 36: jz slow
-        0x8d, 0x48, (-mutexTag) & 0xff,                              // 42: lea ecx, [eax-MUTEX_TAG]
-        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 45: mov edx, fs:[0x24]
-        0xc1, 0xe2, 0x08,                                            // 52: shl edx, 8
-        0x8b, 0x01,                                                  // 55: mov eax, [ecx]
-        0x31, 0xd0,                                                  // 57: xor eax, edx
-        0x48,                                                        // 59: dec eax
-        0x83, 0xf8, 0x7e,                                            // 60: cmp eax, 0x7e
-        ...jcc(JA, 63, slow),                                        // 63: ja slow
-        0x85, 0xc0,                                                  // 69: test eax, eax
-        0x74, last - 73,                                             // 71: jz last
-        0x40,                                                        // 73: inc eax
-        0x31, 0xd0,                                                  // 74: xor eax, edx
-        0x8d, 0x50, 0xff,                                            // 76: lea edx, [eax-1]
-        0xf0, 0x0f, 0xb1, 0x11,                                      // 79: lock cmpxchg [ecx], edx
-        ...jcc(JNE, 83, slow),                                       // 83: jne slow
-        0xb8, ...dword(1),                                           // 89: mov eax, 1
-        0xc2, 0x04, 0x00,                                            // 94: ret 4
-        // last: (97)
-        0x8d, 0x42, 0x01,                                            // 97: lea eax, [edx+1]
-        0x31, 0xd2,                                                  // 100: xor edx, edx
-        0xf0, 0x0f, 0xb1, 0x11,                                      // 102: lock cmpxchg [ecx], edx
-        ...jcc(JNE, 106, slow),                                      // 106: jne slow
-        0xb8, ...dword(1),                                           // 112: mov eax, 1
-        0xc2, 0x04, 0x00,                                            // 117: ret 4
-        // slow: (120)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // 120: jmp trap
+        0xa8, eventTag,                                              // 42: test al, EVENT_TAG
+        ...jcc(JNE, 44, slow),                                       // 44: jnz slow
+        0x8d, 0x48, (-mutexTag) & 0xff,                              // 50: lea ecx, [eax-MUTEX_TAG]
+        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 53: mov edx, fs:[0x24]
+        0xc1, 0xe2, 0x08,                                            // 60: shl edx, 8
+        0x8b, 0x01,                                                  // 63: mov eax, [ecx]
+        0x31, 0xd0,                                                  // 65: xor eax, edx
+        0x48,                                                        // 67: dec eax
+        0x83, 0xf8, 0x7e,                                            // 68: cmp eax, 0x7e
+        ...jcc(JA, 71, slow),                                        // 71: ja slow
+        0x85, 0xc0,                                                  // 77: test eax, eax
+        0x74, last - 81,                                             // 79: jz last
+        0x40,                                                        // 81: inc eax
+        0x31, 0xd0,                                                  // 82: xor eax, edx
+        0x8d, 0x50, 0xff,                                            // 84: lea edx, [eax-1]
+        0xf0, 0x0f, 0xb1, 0x11,                                      // 87: lock cmpxchg [ecx], edx
+        ...jcc(JNE, 91, slow),                                       // 91: jne slow
+        0xb8, ...dword(1),                                           // 97: mov eax, 1
+        0xc2, 0x04, 0x00,                                            // 102: ret 4
+        // last: (105)
+        0x8d, 0x42, 0x01,                                            // 105: lea eax, [edx+1]
+        0x31, 0xd2,                                                  // 108: xor edx, edx
+        0xf0, 0x0f, 0xb1, 0x11,                                      // 110: lock cmpxchg [ecx], edx
+        ...jcc(JNE, 114, slow),                                      // 114: jne slow
+        0xb8, ...dword(1),                                           // 120: mov eax, 1
+        0xc2, 0x04, 0x00,                                            // 125: ret 4
+        // slow: (128)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // 128: jmp trap
     ]);
 }
 

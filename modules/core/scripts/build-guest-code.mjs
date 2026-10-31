@@ -190,6 +190,11 @@ export function render(from, functions, refused){
         {
             lines.push(`        leaf: ${fn.leaf},`);
         }
+        if (fn.tables !== undefined)
+        {
+            lines.push(`        tables: { ${Object.entries(fn.tables)
+                .map(([name, at])=>`${name}: ${at}`).join(', ')} },`);
+        }
         lines.push('        code: Uint8Array.of(');
         for (let at = 0; at < fn.code.length; at += 12)
         {
