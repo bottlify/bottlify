@@ -5,11 +5,11 @@
  */
 
 /**
- * Steam, as GameHub's service worker answers a page for it (hub.js): the
- * account and its session, and every message to Steam, built and read here.
- * The CM socket is opened by the page's content script and carries frames as
- * they are (relay.js, pipe.js); the session's refresh token is read only here
- * and leaves only inside a logon.
+ * Steam, as GameHub answers a page for it (hub.js), in the page's content
+ * script (tab.js): every message to Steam built and read here, over a CM
+ * socket the content script opens. The account's session is the service
+ * worker's (`vault`): its refresh token is asked of it for a logon, put into
+ * the logon and not kept here; a sign-in's token is handed to it at once.
  *
  * One connection, logged on with the kept session or anonymously, is held
  * while the page is open, and made again when it closes. A sign-in uses
@@ -28,6 +28,12 @@ import {
 } from './apps.js';
 
 /** @typedef {{ accountName: string, refreshToken: string }} Session */
+/**
+ * The account as the worker tells it without its token: `id` is new with each
+ * sign-in, so a logon made with another session is told from the one kept.
+ *
+ * @typedef {{ accountName: string, id?: string }} Account
+ */
 /** @typedef {import('../../hub.js').Store} Store */
 
 /**
@@ -52,12 +58,13 @@ export const STEAM = Object.freeze({
 
 /**
  * Steam's connection managers, port 443 first: the one a firewall least often
- * closes. Asked from the worker, which the directory answers.
+ * closes. The directory answers the worker, not a page (GameHub's `fetch`).
  *
+ * @param {typeof fetch} [get]
  * @returns {Promise<string[]>}
  */
-export async function steamManagers(){
-    const directory = await (await fetch('https://api.steampowered.com/ISteamDirectory/'
+export async function steamManagers(get = fetch){
+    const directory = await (await get('https://api.steampowered.com/ISteamDirectory/'
         + 'GetCMListForConnect/v1/?cellid=0&cmtype=websockets')).json();
     /** @type {string[]} */
     const list = directory.response.serverlist.map((/** @type {any} */ server)=>server.endpoint);
@@ -68,48 +75,32 @@ export async function steamManagers(){
  * @typedef {Object} Held
  * @property {any} connection
  * @property {bigint} steamId
- * @property {Session | null} session  Null for an anonymous logon.
+ * @property {Account | null} session  Null for an anonymous logon.
  * @property {Array<Record<string, any>>} licenses
  */
 
 /**
- * Valve's client files, kept in the extension's cache: the package's name
- * carries its hash, so a kept one is the one the manifest names.
+ * The session as the store asks it of the worker.
  *
- * @param {string | URL | Request} url
+ * @typedef {Object} Vault
+ * @property {() => Promise<Account | null>} get  Who is signed in, without the token.
+ * @property {() => Promise<(Session & Account) | null>} token  The session, for a logon.
+ * @property {(session: Session | null) => Promise<void>} set  Null signs out.
  */
-async function cachedFetch(url){
-    if (!String(url).endsWith('.zip') || typeof caches === 'undefined')
-    {
-        return fetch(url);
-    }
-    const cache = await caches.open('steam-client');
-    const kept = await cache.match(url);
-    if (kept)
-    {
-        return kept;
-    }
-    const fresh = await fetch(url);
-    if (fresh.ok)
-    {
-        await cache.put(url, fresh.clone());
-    }
-    return fresh;
-}
 
 /**
  * @param {Object} options
- * @param {{ get(): Promise<Session | null>, set(session: Session | null): Promise<void> }}
- *     options.vault  Where the session is kept: the worker's own storage.
- * @param {(url: string) => import('./connection.js').CmSocket} options.socket  A socket the
+ * @param {Vault} options.vault  The worker's.
+ * @param {(url: string) => import('./connection.js').CmSocket} [options.socket]  A socket the
  *     page opens.
+ * @param {typeof fetch} [options.fetch]  Steam's directory and Valve's client files: the
+ *     worker's, which the ruleset does not open to a page.
  * @param {() => Promise<string[]>} [options.managers]
  * @param {Record<string, any>} [options.steam]  Steam's protocol (`STEAM`).
- * @param {typeof fetch} [options.fetch]  For Valve's client files.
  * @returns {Store}
  */
-export function steamStore({ vault, socket, managers = steamManagers, steam = STEAM,
-    fetch: get = cachedFetch })
+export function steamStore({ vault, socket, fetch: get = fetch,
+    managers = ()=>steamManagers(get), steam = STEAM })
 {
     /** @type {Promise<Held> | null} */
     let held = null;
@@ -135,18 +126,22 @@ export function steamStore({ vault, socket, managers = steamManagers, steam = ST
         throw new Error(`steam: no connection manager answered (${failure})`);
     }
 
-    /** @param {Session | null} kept @returns {Promise<Held>} */
-    async function logOn(kept){
+    /** @param {boolean} anonymously @returns {Promise<Held>} */
+    async function logOn(anonymously){
         const link = await connect();
         try
         {
+            // Asked now and dropped with the logon: the token is the worker's.
+            const kept = anonymously ? null : await vault.token();
             if (!kept)
             {
                 const { steamId } = await steam.logOnAnonymously(link);
                 return { connection: link, steamId, session: null, licenses: [] };
             }
-            const { steamId, licenses } = await steam.logOn(link, kept);
-            return { connection: link, steamId, session: kept, licenses };
+            const { steamId, licenses } = await steam.logOn(link,
+                { accountName: kept.accountName, refreshToken: kept.refreshToken });
+            return { connection: link, steamId, licenses,
+                session: { accountName: kept.accountName, id: kept.id } };
         }
         catch (e){
             link.close();
@@ -165,14 +160,14 @@ export function steamStore({ vault, socket, managers = steamManagers, steam = ST
         const last = held ?? Promise.resolve(null);
         held = last.catch(()=>null).then(async now=>{
             const kept = await vault.get();
-            if (now && !now.connection.closed
-                && now.session?.refreshToken === kept?.refreshToken)
+            if (now && !now.connection.closed && Boolean(now.session) === Boolean(kept)
+                && now.session?.id === kept?.id)
             {
                 return now;
             }
             now?.connection.close();
             library = null;
-            return logOn(kept);
+            return logOn(!kept);
         });
         return held;
     }
@@ -193,7 +188,7 @@ export function steamStore({ vault, socket, managers = steamManagers, steam = ST
         }
         const last = anonymous ?? Promise.resolve(null);
         anonymous = last.catch(()=>null).then(kept=>(kept && !kept.connection.closed
-            ? kept : logOn(null)));
+            ? kept : logOn(true)));
         return (await anonymous).connection;
     }
 
@@ -285,6 +280,7 @@ export function steamStore({ vault, socket, managers = steamManagers, steam = ST
                 signal.addEventListener('abort', ()=>link?.close(), { once: true });
                 try
                 {
+                    // The token goes to the worker at once and is not kept here.
                     const { accountName, refreshToken } = await steam.signInWithQr(next, {
                         deviceName: 'Bottlify',
                         signal,

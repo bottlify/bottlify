@@ -5,10 +5,10 @@
  */
 
 /**
- * The content script: the page's end of GameHub, a pipe to the service worker
- * (pipe.js). It is here rather than nowhere because a socket the page opens is
- * one Chrome's request rules give Steam's Origin; the worker's own would keep
- * the extension's, which Steam refuses. Chrome loads a content script as a
+ * The content script: GameHub in the page's tab (tab.js), where the stores'
+ * protocols run at the tab's priority over sockets the page opens -- a socket
+ * the page opens is one Chrome's request rules give Steam's Origin. The
+ * sessions are the service worker's. Chrome loads a content script as a
  * classic script; its modules come in by import().
  */
 
@@ -27,7 +27,6 @@
     document.documentElement.dataset.bottlifyBridge = version;
 
     const TO = 'bottlify-bridge';
-    const FROM = 'bottlify-bridge';
 
     /**
      * What the site switches on (its `config.json`'s `bridge`), for the worker
@@ -43,11 +42,12 @@
         return typeof wanted === 'object' && wanted !== null ? /** @type {any} */ (wanted) : {};
     }
 
-    const pipe = Promise.all([import(chrome.runtime.getURL('bridge/src/pipe.js')), platforms()])
-        .then(([{ startPipe }, switched])=>startPipe({
+    const tab = Promise.all([import(chrome.runtime.getURL('bridge/src/tab.js')), platforms()])
+        .then(([{ startTab }, switched])=>startTab({
+            version,
             connect: ()=>chrome.runtime.connect({ name: 'gamehub' }),
-            socket: (/** @type {string} */ url)=>new WebSocket(url),
-            toPage: (/** @type {Record<string, any>} */ answer)=>window.postMessage({ from: FROM, ...answer }, location.origin),
+            socket: (/** @type {string} */ url)=>/** @type {any} */ (new WebSocket(url)),
+            toPage: (/** @type {Record<string, any>} */ answer)=>window.postMessage(answer, location.origin),
             platforms: switched,
         }));
 
@@ -59,6 +59,6 @@
         {
             return;
         }
-        (await pipe).request({ to: TO, id: data.id, op: data.op, args: data.args });
+        (await tab).request({ to: TO, id: data.id, op: data.op, args: data.args });
     });
 })();
