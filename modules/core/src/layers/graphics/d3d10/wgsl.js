@@ -391,13 +391,23 @@ export function translateShader(container, options = {}){
         }
         if (operand.modifier === MODIFIER.NEG || operand.modifier === MODIFIER.ABSNEG)
         {
-            value = `(-${value})`;
+            // WGSL negates no unsigned value: an unsigned read negated is
+            // its two's complement, zero less it.
+            value = type === 'u' ? `(${REG}(0u) - ${value})` : `(-${value})`;
         }
         return value;
     };
 
     /** @param {import('./sm4.js').Operand} operand */
+    const modifiedRead = operand=>(operand.modifier ?? MODIFIER.NONE) !== MODIFIER.NONE;
+    /** @param {import('./sm4.js').Operand} operand */
     const f = operand=>typed(operand, 'f');
+    /**
+     * A source a move copies: its bits, or the float it is with its modifier.
+     *
+     * @param {import('./sm4.js').Operand} operand
+     */
+    const moved = operand=>(modifiedRead(operand) ? fromFloat(f(operand), false) : u(operand));
     /** @param {import('./sm4.js').Operand} operand */
     const i = operand=>typed(operand, 'i');
     /** @param {import('./sm4.js').Operand} operand */
@@ -844,11 +854,12 @@ export function translateShader(container, options = {}){
                 break;
 
             // --- moves ---
+            // A move copies bits; a source modifier makes it a float's move.
             case OPCODE.MOV:
-                store(dest, sat ? fromFloat(f(a), true) : u(a));
+                store(dest, sat || modifiedRead(a) ? fromFloat(f(a), sat) : u(a));
                 break;
             case OPCODE.MOVC:
-                store(dest, `select(${u(c)}, ${u(b)}, ${u(a)} != ${REG}(0u))`);
+                store(dest, `select(${moved(c)}, ${moved(b)}, ${u(a)} != ${REG}(0u))`);
                 break;
 
             // --- float arithmetic ---
@@ -1616,6 +1627,13 @@ export function linkProgram(vs, ps, options = {}){
     // --- the interface between the stages, numbered by the vertex outputs ---
     /** @type {Map<string, { location: number, scalar: string }>} */
     const varyings = new Map();
+    /**
+     * The varying each output register is passed as: two semantics packed
+     * into one register (TEXCOORD0 in .xy, TEXCOORD1 in .zw) are one varying.
+     *
+     * @type {Map<number, { location: number, scalar: string }>}
+     */
+    const byRegister = new Map();
     /** @type {string[]} */
     const vsOut = [];
     /** @type {string[]} */
@@ -1642,9 +1660,17 @@ export function linkProgram(vs, ps, options = {}){
         {
             continue;
         }
+        const packed = byRegister.get(element.register);
+        if (packed)
+        {
+            varyings.set(key, packed);
+            continue;
+        }
         const scalar = scalarOf(element.componentType);
-        const location = varyings.size;
-        varyings.set(key, { location, scalar });
+        const location = byRegister.size;
+        const varying = { location, scalar };
+        varyings.set(key, varying);
+        byRegister.set(element.register, varying);
         // An integer varying cannot be interpolated and WGSL says so; a
         // float one is interpolated the way the rasteriser always did.
         const interpolate = scalar === 'f32' ? '' : ' @interpolate(flat)';
@@ -1665,6 +1691,8 @@ export function linkProgram(vs, ps, options = {}){
     {
         psLoad.push(`    var v${index}: ${REG} = ${REG}(0u);`);
     }
+    /** The pixel stage's member each location arrives as. @type {Map<number, string>} */
+    const arrived = new Map();
     for (const element of ps.inputs)
     {
         if (element.register >= ps.inputRegisters)
@@ -1698,12 +1726,18 @@ export function linkProgram(vs, ps, options = {}){
             unsupported.push(`pixel input ${semanticKey(element)} has no vertex output`);
             continue;
         }
-        const interpolate = varying.scalar === 'f32' ? '' : ' @interpolate(flat)';
-        psIn.push(`    @location(${varying.location})${interpolate} ${name}: `
-            + `vec4<${varying.scalar}>,`);
+        // A register two semantics share comes in once, as the first named it.
+        const member = arrived.get(varying.location) ?? name;
+        if (!arrived.has(varying.location))
+        {
+            arrived.set(varying.location, name);
+            const interpolate = varying.scalar === 'f32' ? '' : ' @interpolate(flat)';
+            psIn.push(`    @location(${varying.location})${interpolate} ${name}: `
+                + `vec4<${varying.scalar}>,`);
+        }
         psLoad.push(`    ${name} = ${varying.scalar === 'u32'
-            ? `in.${name}`
-            : `bitcast<${REG}>(in.${name})`};`);
+            ? `in.${member}`
+            : `bitcast<${REG}>(in.${member})`};`);
     }
 
     // --- the pixel stage's outputs ---

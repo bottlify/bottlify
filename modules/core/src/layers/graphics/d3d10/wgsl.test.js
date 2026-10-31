@@ -161,8 +161,10 @@ test('sincos writes the sine and the cosine to its two destinations', ()=>{
 test('a modifier negates or takes the absolute value of the typed read', ()=>{
     assert.equal(emitted([add(r(0), modified(r(1), MODIFIER.NEG), modified(r(2), MODIFIER.ABS))]),
         `r0 = ${U}(((-${F}(r1.xyzw)) + abs(${F}(r2.xyzw))));`);
+    // A move with a source modifier is a float's: WGSL negates no unsigned vector.
     assert.equal(emitted([mov(r(0), modified(r(1), MODIFIER.ABSNEG))]),
-        'r0 = (-abs(r1.xyzw));');
+        'r0 = bitcast<vec4<u32>>((-abs(bitcast<vec4<f32>>(r1.xyzw))));');
+    assert.equal(emitted([ineg(r(0), modified(r(1), MODIFIER.NEG))]).includes('(-'), true);
 });
 
 // --- comparisons ---
@@ -816,4 +818,28 @@ test('a pixel output with no system value, COLOR1 of a backwards-compatible shad
     const linked = linkProgram(vs, ps);
     assert.deepEqual(linked.unsupported ?? [], []);
     assert.match(linked.fragment, /@location\(1\) target1: vec4<f32>,/);
+});
+
+test('two semantics packed into one register pass as one varying, which the pixel stage reads'
+    + ' whole', ()=>{
+    const POSITION = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', register: 0 }],
+        outputs: [POSITION, { name: 'TEXCOORD', index: 0, register: 1, mask: 0x3 },
+            { name: 'TEXCOORD', index: 1, register: 1, mask: 0xc }],
+        instructions: [dclInput(v(0)), dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutput(o(1)), mov(o(0), v(0)), mov(o(1), v(0)), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [POSITION, { name: 'TEXCOORD', index: 0, register: 1, mask: 0x3 },
+            { name: 'TEXCOORD', index: 1, register: 1, mask: 0xc }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclInputPs(v(1)), dclOutput(o(0)), mov(o(0), v(1)), ret()],
+    }))));
+    const linked = linkProgram(vs, ps);
+    assert.equal(linked.vertex.match(/@location\(0\) o1: vec4<f32>,/g)?.length, 1);
+    assert.equal(linked.vertex.match(/@location\(1\)/g), null, 'no second varying');
+    assert.equal(linked.fragment.match(/@location\(0\) v1: vec4<f32>,/g)?.length, 1);
 });
