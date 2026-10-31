@@ -5,76 +5,63 @@
  */
 
 /**
- * What a page and the bridge say to each other, over `window.postMessage` on
- * the page's own origin.
+ * What a page and GameHub say to each other, over `window.postMessage` on the
+ * page's own origin; the content script carries both ways (pipe.js), and the
+ * service worker reads the request here.
  *
- * The page asks `{ to: 'bottlify-bridge', id, op, args }`; the bridge answers
+ * The page asks `{ to: 'bottlify-bridge', id, op, args }`; GameHub answers
  * `{ from: 'bottlify-bridge', id, result }` or `{ ..., id, error }`, and an op
  * that goes on for a while (a sign-in) sends `{ ..., id, event, data }` first.
  * `id` is the page's, any number it has not used for a request still open.
- * The bridge is present when the page's root element carries
+ * GameHub is present when the page's root element carries
  * `data-bottlify-bridge` (its version): set before any of the page's scripts
  * runs, so a page that does not find it need not wait for an answer.
  *
- * Ops, those of a platform named `<platform>.<op>`, refused while the site has
- * the platform switched off:
- * - `hello` -> `{ version, platforms: { steam: boolean } }`, the platforms the
- *   site has switched on (its `config.json`'s `bridge`).
+ * No op names a store's protocol: the store is an argument (`steam`).
+ * - `hello` -> `{ version, stores: [{ id, name, on }] }`: the stores GameHub has,
+ *   and which the site has on (its `config.json`'s `bridge`).
  * - `cancel { target }` -> `{}`: stops the request asked as `target` (a sign-in).
- * - `steam.signIn` -> `{ accountName }`; events `challenge` `{ url }` (show it as a
+ * - `account { store, fresh? }` -> `{ name }`, or null for nobody signed in;
+ *   `fresh` logs on again and reads the account's licences anew.
+ * - `signIn { store }` -> `{ name }`; events `challenge` `{ url }` (shown as a
  *   QR code; sent again when the code changes) and `scanned`.
- * - `steam.signOut` -> `{}`.
- * - `steam.account { fresh? }` -> `{ steamId, accountName, apps, licenses }`, or null
- *   when nobody is signed in: every app the account's licences grant (games,
- *   DLC, tools), by id, and how many licences there are. `fresh` logs on again and reads them
- *   anew rather than as they were read a while ago.
- * - `steam.depotKey { app, depot }` -> Uint8Array, the depot's AES key.
- * - `steam.appOwnershipTicket { app }` -> Uint8Array, the signed-in account's app
- *   ownership ticket for the app as Steam signs it (EMsg 857/858), or null
- *   signed out or for an app the account does not own.
- * - `steam.manifestCode { app, depot, gid, branch? }` -> string; `gid` a decimal string.
- * - `steam.contentServers` -> `[{ host, vhost, type }]`, those the page may fetch from.
- * - `steam.productInfo { apps }` -> `{ [appId]: info }`, what Steam tells anyone of
- *   each app (core's `publicAppInfo` of it: type and name, launch options,
- *   install script, depots at their public manifests); an app Steam does not
- *   describe is left out. `apps` is a list of app ids, 1 to 20000 of them.
+ * - `signOut { store }` -> `{}`.
+ * - `list { store, fresh? }` -> `[{ id, name, bytes, exact, installable, covers }]`,
+ *   the account's games; `covers` the URLs `cover` answers, by kind.
+ * - `cover { store, game, kind }` -> the URL of the store's picture of a game;
+ *   `kind` is `header`, `capsule` or `hero`.
+ * - `download { store, game }` -> what an install needs; the store's own shape
+ *   (Steam's: `{ name, launch, installscript, art, servers, depots }`).
+ * - `runData { store, game }` -> what a run hands the engine's emulation of the
+ *   store's client (Steam's: `{ win32: { steam } }`), `{}` signed out.
  *
- * Without a sign-in the bridge logs on anonymously, which is enough for what
- * Steam gives everyone. The session's refresh token never crosses to the page.
+ * The session's token never crosses to the page.
  */
 
 export const TO = 'bottlify-bridge';
 export const FROM = 'bottlify-bridge';
 
-/** @typedef {'uint' | 'uints' | 'id' | 'u64' | 'string?' | 'bool?'} ArgKind */
+/** @typedef {'id' | 'store' | 'game' | 'kind' | 'bool?'} ArgKind */
 
 /** Each op's arguments and what they must be. @type {Record<string, Record<string, ArgKind>>} */
 export const OPS = Object.freeze({
     hello: {},
     cancel: { target: 'id' },
-    'steam.signIn': {},
-    'steam.signOut': {},
-    'steam.account': { fresh: 'bool?' },
-    'steam.depotKey': { app: 'uint', depot: 'uint' },
-    'steam.appOwnershipTicket': { app: 'uint' },
-    'steam.manifestCode': { app: 'uint', depot: 'uint', gid: 'u64', branch: 'string?' },
-    'steam.contentServers': {},
-    'steam.productInfo': { apps: 'uints' },
+    account: { store: 'store', fresh: 'bool?' },
+    signIn: { store: 'store' },
+    signOut: { store: 'store' },
+    list: { store: 'store', fresh: 'bool?' },
+    cover: { store: 'store', game: 'game', kind: 'kind' },
+    download: { store: 'store', game: 'game' },
+    runData: { store: 'store', game: 'game' },
 });
-
-/** @param {unknown} value */
-const isUint = value=>Number.isInteger(value) && /** @type {number} */ (value) >= 0
-    && /** @type {number} */ (value) <= 0xFFFFFFFF;
 
 /** @type {Record<ArgKind, (value: unknown) => boolean>} */
 const VALID = {
-    uint: isUint,
-    uints: value=>Array.isArray(value) && value.length > 0 && value.length <= 20000
-        && value.every(isUint),
     id: value=>Number.isSafeInteger(value),
-    u64: value=>typeof value === 'string' && /^[0-9]{1,20}$/.test(value)
-        && BigInt(value) < 2n ** 64n,
-    'string?': value=>value === undefined || (typeof value === 'string' && value.length <= 256),
+    store: value=>typeof value === 'string' && /^[a-z][a-z0-9]{0,31}$/.test(value),
+    game: value=>typeof value === 'string' && /^[A-Za-z0-9._:-]{1,64}$/.test(value),
+    kind: value=>value === 'header' || value === 'capsule' || value === 'hero',
     'bool?': value=>value === undefined || typeof value === 'boolean',
 };
 
@@ -85,7 +72,7 @@ const VALID = {
 
 /**
  * A message the page posted, read as a request: null for one not meant for
- * the bridge, a refusal for one that is but cannot be answered.
+ * GameHub, a refusal for one that is but cannot be answered.
  *
  * @param {unknown} data
  * @returns {Request | Refusal | null}

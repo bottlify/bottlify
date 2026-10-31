@@ -14,7 +14,7 @@
  * as it was. `*://` does not cover `wss://`, which is listed for itself.
  */
 
-/** The pages the bridge serves, by build. */
+/** The pages GameHub serves, by build. */
 export const PAGES = Object.freeze({
     public: Object.freeze(['https://bottlify.app/*', 'https://play.bottlify.app/*']),
     // Any page: a launcher is reached as localhost, 127.0.0.1 or a machine's
@@ -24,7 +24,7 @@ export const PAGES = Object.freeze({
 });
 
 /**
- * The hosts a build's bridge answers on, by name, where its match patterns
+ * The hosts a build's GameHub answers on, by name, where its match patterns
  * cannot say it: the dev build, matched on every page, answers on a local
  * launcher's alone -- localhost, 127.x, a 192.168.x.x network address -- and
  * on Bottlify's sites. Null: every page the build is matched on.
@@ -37,18 +37,20 @@ export const HOSTS = Object.freeze({
 });
 
 /**
- * Each platform: its ruleset (switched on and off as one) and the hosts the
- * ruleset and the bridge's own requests reach.
+ * Each store: its ruleset (switched on and off as one) and the hosts the
+ * ruleset and the service worker's own requests reach.
  */
 export const PLATFORMS = Object.freeze({
     steam: Object.freeze({
         rules: 'rules/steam.json',
+        // The CM socket the page opens for the worker; the content servers the
+        // page downloads from; Steam's directory and Valve's client
+        // distribution (the client's own DLLs, which a DRM wrapper reads as the
+        // installed client's), asked by the worker alone.
         hosts: Object.freeze(['wss://*.steamserver.net/*', 'https://api.steampowered.com/*',
             '*://*.steamcontent.com/*', '*://*.steampipe.akamaized.net/*',
-            // Valve's client distribution: the client's own DLLs, which a DRM
-            // wrapper reads as the installed client's (core's steam/client.js).
             'https://client-update.akamai.steamstatic.com/*',
-            // The apps' art a library shows (core's steam/apps.js, STEAM_ART),
+            // The apps' art a library shows (stores/steam/apps.js, STEAM_ART),
             // under the hosts Steam has served it from.
             'https://shared.steamstatic.com/*', 'https://shared.akamai.steamstatic.com/*',
             'https://shared.cloudflare.steamstatic.com/*', 'https://cdn.akamai.steamstatic.com/*',
@@ -56,8 +58,16 @@ export const PLATFORMS = Object.freeze({
     }),
 });
 
+/**
+ * The builds' entry points, by path under `modules/` as the build lays them
+ * out: the service worker, the content script, and the modules the content
+ * script imports (which the page may therefore load too).
+ */
+export const ENTRIES = Object.freeze(['bridge/src/worker.js', 'bridge/src/content.js',
+    'bridge/src/pipe.js']);
+
 /** What the content script imports, which the page may therefore load too. */
-export const MODULES = Object.freeze(['bridge.js', 'protocol.js', 'platforms/*', 'steam/*', 'zstd.js']);
+export const MODULES = Object.freeze(['bridge/src/pipe.js', 'bridge/src/wire.js']);
 
 /**
  * @param {keyof typeof PAGES} build
@@ -73,12 +83,12 @@ export function manifestFor(build, version){
         permissions: ['declarativeNetRequest', 'storage'],
         host_permissions: [...pages,
             ...Object.values(PLATFORMS).flatMap(platform=>platform.hosts)],
-        background: { service_worker: 'worker.js', type: 'module' },
-        content_scripts: [{ matches: pages, js: ['content.js'], run_at: 'document_start' }],
+        background: { service_worker: 'bridge/src/worker.js', type: 'module' },
+        content_scripts: [{ matches: pages, js: ['bridge/src/content.js'], run_at: 'document_start' }],
         web_accessible_resources: [{ resources: [...MODULES], matches: pages }],
         declarative_net_request: {
             rule_resources: Object.entries(PLATFORMS).map(([id, platform])=>(
-                { id, enabled: true, path: platform.rules })),
+                { id, enabled: true, path: `bridge/${platform.rules}` })),
         },
     };
 }

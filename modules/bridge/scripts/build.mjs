@@ -6,34 +6,35 @@
 
 /**
  * Builds the extension, unpacked: `dist/public/` for Bottlify's sites,
- * `dist/dev/` for a local launcher as well (src/manifest.js). The Steam
- * modules are core's, copied as they are: one source, no second copy in git --
- * `steam/index.js` and what it imports, each at its path under core's `src`,
- * and nothing else of core's, which the content script never loads.
+ * `dist/dev/` for a local launcher as well (src/manifest.js). Its entry points
+ * and every module they import are copied as they are, each at its path under
+ * `modules/` -- GameHub's own under `bridge/`, the core formats it reads under
+ * `core/` -- so a relative import between the two holds in the build as in the
+ * repository: one source, no second copy in git.
  *
  *   node scripts/build.mjs [out]
  */
 
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, posix, relative, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HOSTS, PAGES, PLATFORMS, manifestFor } from '../src/manifest.js';
+import { ENTRIES, HOSTS, PAGES, PLATFORMS, manifestFor } from '../src/manifest.js';
 
 const HERE = fileURLToPath(new URL('..', import.meta.url));
-// Core beside it in this repository, not the package node_modules names: a
-// worktree's build takes its own core.
-const CORE = resolve(HERE, '../core/src');
+// The modules beside it in this repository, not the packages node_modules
+// names: a worktree's build takes its own core.
+const MODULES = resolve(HERE, '..');
 
 /**
- * A module of core and every module it imports, by path under core's `src`.
+ * Modules and every module they import, by path under `modules/`.
  *
- * @param {string} entry  `steam/index.js`.
+ * @param {string[]} entries  `bridge/src/worker.js`, ...
  * @returns {Promise<string[]>}
  */
-export async function coreClosure(entry){
+export async function closure(entries){
     /** @type {Set<string>} */
     const seen = new Set();
-    const pending = [entry];
+    const pending = [...entries];
     while (pending.length > 0)
     {
         const path = /** @type {string} */ (pending.pop());
@@ -42,7 +43,11 @@ export async function coreClosure(entry){
             continue;
         }
         seen.add(path);
-        const code = (await readFile(join(CORE, path), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
+        if (path.startsWith('..'))
+        {
+            throw new Error(`a module reaches ${path}, outside modules/`);
+        }
+        const code = (await readFile(join(MODULES, path), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
         for (const [, specifier] of code.matchAll(
             /(?:^|[\s;])(?:import|export)\s[^'"`;]*?from\s*['"](\.{1,2}\/[^'"]+)['"]/g))
         {
@@ -59,19 +64,10 @@ export async function coreClosure(entry){
 export async function build(out = join(HERE, 'dist')){
     const { version } = JSON.parse(await readFile(join(HERE, 'package.json'), 'utf8'));
     /** @type {[string, string][]} */
-    const files = ['content.js', 'worker.js', 'bridge.js', 'protocol.js', 'platforms/steam.js']
-        .map(name=>[join(HERE, 'src', name), name]);
+    const files = (await closure([...ENTRIES])).map(path=>[join(MODULES, path), path]);
     for (const platform of Object.values(PLATFORMS))
     {
-        files.push([join(HERE, platform.rules), platform.rules]);
-    }
-    for (const path of await coreClosure('steam/index.js'))
-    {
-        if (relative(CORE, join(CORE, path)).startsWith('..'))
-        {
-            throw new Error(`steam/index.js reaches ${path}, outside core's src`);
-        }
-        files.push([join(CORE, path), path]);
+        files.push([join(HERE, platform.rules), `bridge/${platform.rules}`]);
     }
     /** @type {Record<string, string>} */
     const built = {};
@@ -87,13 +83,13 @@ export async function build(out = join(HERE, 'dist')){
         const hosts = HOSTS[flavour];
         if (hosts)
         {
-            const script = await readFile(join(HERE, 'src', 'content.js'), 'utf8');
+            const script = await readFile(join(MODULES, 'bridge/src/content.js'), 'utf8');
             const blank = 'const HOSTS = /** @type {RegExp | null} */ (null);';
             if (!script.includes(blank))
             {
                 throw new Error('content.js lost the line the build writes its hosts into');
             }
-            await writeFile(join(dir, 'content.js'),
+            await writeFile(join(dir, 'bridge/src/content.js'),
                 script.replace(blank, ()=>`const HOSTS = new RegExp(${JSON.stringify(hosts)});`));
         }
         await writeFile(join(dir, 'manifest.json'),

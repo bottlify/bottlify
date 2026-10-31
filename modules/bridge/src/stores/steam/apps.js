@@ -128,3 +128,59 @@ export function publicAppInfo(info){
         depots,
     };
 }
+
+/** Steam's name for the language an install takes. */
+export const LANGUAGE = 'english';
+
+/**
+ * The depots an install takes -- Windows', the language's and those for every
+ * language, not a DLC's -- their sizes added up, Steam's first Windows launch
+ * option and the app's install script; and those of other apps it names by
+ * the same rule, the redistributables (`shared`), which an install takes too.
+ *
+ * @param {any} info  An app's product info.
+ * @param {string} [language]
+ */
+export function describeApp(info, language = LANGUAGE){
+    let bytes = 0;
+    /** @type {{ id: number, gid: string }[]} */
+    const depots = [];
+    for (const [id, depot] of Object.entries(info?.depots ?? {}))
+    {
+        const one = /** @type {any} */ (depot);
+        const size = Number(one?.manifests?.public?.size ?? 0);
+        const gid = one?.manifests?.public?.gid;
+        if (/^\d+$/.test(id) && wantedDepot(one, language) && size > 0 && gid)
+        {
+            bytes += size;
+            depots.push({ id: Number(id), gid: String(gid) });
+        }
+    }
+    const launch = windowsLaunch(info);
+    return {
+        bytes,
+        depots,
+        launch: launch ? { executable: String(launch.executable),
+            arguments: String(launch.arguments ?? '') } : null,
+        installscript: info?.extended?.installscript ? String(info.extended.installscript) : '',
+    };
+}
+
+/**
+ * A game as the library shows it, or null for an app that is not a game: its
+ * size the depots' added up, installable while it has a Windows launch option.
+ *
+ * @param {number} appId
+ * @param {any} info  Its product info.
+ * @returns {{ id: string, name: string, bytes: number, exact: boolean,
+ *     installable: boolean } | null}
+ */
+export function storeGame(appId, info){
+    if (String(info?.common?.type ?? '').toLowerCase() !== 'game')
+    {
+        return null;
+    }
+    const { bytes, launch } = describeApp(info);
+    return { id: String(appId), name: String(info.common.name ?? appId), bytes, exact: false,
+        installable: launch !== null };
+}

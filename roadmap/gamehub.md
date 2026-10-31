@@ -38,7 +38,7 @@ A store is an argument, never an op name.
 | `account { store, fresh? }` | `{ name }`, or null for nobody signed in |
 | `signIn { store }` | `{ name }`; events `challenge { url }` (shown as a QR code by the page) and `scanned` |
 | `signOut { store }` | `{}` |
-| `list { store, fresh? }` | `[{ id, name, bytes, exact, installable }]`: the account's games |
+| `list { store, fresh? }` | `[{ id, name, bytes, exact, installable, covers }]`: the account's games, with the URLs `cover` answers |
 | `cover { store, game, kind }` | the URL of the store's picture (`header`, `capsule`, `hero`), which GameHub's rules open to the page |
 | `download { store, game }` | what an install needs; Steam's: `{ name, launch, installscript, art, servers, depots: [{ depot, gid, key, code, shared }] }`, the redistributables' depots asked under the app that owns them |
 | `runData { store, game }` | what a run hands the engine's emulation of the store's client; Steam's: `{ win32: { steam: { steamId, accountName, apps, ownershipTickets, clientFiles, appId } } }` |

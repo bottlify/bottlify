@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { encode } from './protobuf.js';
+import { encode } from '../../../../core/src/steam/protobuf.js';
 import { appOwnershipTicket } from './session.js';
 
 /** CMsgClientGetAppOwnershipTicketResponse, as Steam answers. */

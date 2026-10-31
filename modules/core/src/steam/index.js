@@ -4,21 +4,12 @@
  * See LICENSE for details
  */
 
-export { connectCm, ANONYMOUS_INDIVIDUAL } from './connection.js';
-export { signInWithQr } from './auth.js';
-export {
-    appOwnershipTicket, logOn, logOnAnonymously, library, ownedApps, productInfo, steamIdOfToken,
-} from './session.js';
+// The formats of Steam's files, which a page reads where the bytes land: a
+// manifest, a chunk, a KeyValues text, and the QR code a sign-in is shown as.
+// Speaking to Steam -- the account, the keys, the codes -- is GameHub's
+// (`modules/bridge`), and the install is `@bottlify/core/steam/install`.
 export { encodeQr, qrToSvg } from './qr.js';
 export { parseText, parseBinary } from './keyvalues.js';
-export { CLIENT_CDN, CLIENT_FILES, fetchClientFiles, zipEntries } from './client.js';
 export {
-    FILE_FLAG_DIRECTORY, contentServers, depotKey, downloadChunk, manifest, manifestRequestCode,
-    readDepotAccess, writeDepotAccess,
+    FILE_FLAG_DIRECTORY, adler32, decompressChunk, downloadChunk, manifest, symmetricDecrypt,
 } from './depot.js';
-// Not install.js nor redist.js: they reach the engine's layers (the bundle
-// writer, cabinets, installer databases), which the bridge, carrying this
-// module and what it imports, has no use for -- `@bottlify/core/steam/install`.
-export {
-    STEAM_ART, depotOwners, publicAppInfo, sharedDepots, steamArt, wantedDepot, windowsLaunch,
-} from './apps.js';

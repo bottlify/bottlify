@@ -31,6 +31,11 @@ import {
 
 /** @param {number} ms @param {AbortSignal} [signal] */
 const pause = (ms, signal)=>new Promise((resolve, reject)=>{
+    if (signal?.aborted)
+    {
+        reject(signal.reason ?? new Error('aborted'));
+        return;
+    }
     const timer = setTimeout(resolve, ms);
     signal?.addEventListener('abort', ()=>{
         clearTimeout(timer);

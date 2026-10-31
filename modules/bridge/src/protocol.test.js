@@ -24,33 +24,23 @@ test('an unknown op is refused with its id', ()=>{
 });
 
 test('arguments are checked and only those the op takes are passed on', ()=>{
-    assert.deepEqual(readRequest({ to: TO, id: 1, op: 'steam.depotKey',
-        args: { app: 228980, depot: 228990, extra: 'x' } }),
-    { id: 1, op: 'steam.depotKey', args: { app: 228980, depot: 228990 } });
-    assert.match(/** @type {any} */ (readRequest({ to: TO, id: 2, op: 'steam.depotKey',
-        args: { app: -1, depot: 1 } })).error, /app is not a valid uint/);
-    assert.match(/** @type {any} */ (readRequest({ to: TO, id: 2, op: 'steam.depotKey',
-        args: { app: 2 ** 32, depot: 1 } })).error, /app/);
+    assert.deepEqual(readRequest({ to: TO, id: 1, op: 'download',
+        args: { store: 'steam', game: '70', extra: 'x' } }),
+    { id: 1, op: 'download', args: { store: 'steam', game: '70' } });
+    const ask = (/** @type {string} */ op, /** @type {any} */ args)=>
+        /** @type {any} */ (readRequest({ to: TO, id: 2, op, args })).error;
+    assert.match(ask('download', { store: 'Steam', game: '70' }), /store is not a valid store/);
+    assert.match(ask('download', { store: 'steam', game: 70 }), /game is not a valid game/);
+    assert.match(ask('download', { store: 'steam', game: 'a/b' }), /game/);
+    assert.match(ask('cover', { store: 'steam', game: '70', kind: 'logo' }), /kind/);
+    assert.match(ask('list', { store: 'steam', fresh: 'yes' }), /fresh/);
+    assert.equal(ask('list', { store: 'steam' }), undefined, 'fresh is optional');
 });
 
-test('a manifest id is a decimal string within 64 bits; the branch is optional', ()=>{
-    const ask = (/** @type {any} */ args)=>readRequest({ to: TO, id: 9, op: 'steam.manifestCode', args });
-    assert.deepEqual(ask({ app: 1, depot: 2, gid: '18446744073709551615' }),
-        { id: 9, op: 'steam.manifestCode', args: { app: 1, depot: 2, gid: '18446744073709551615',
-            branch: undefined } });
-    assert.match(/** @type {any} */ (ask({ app: 1, depot: 2, gid: '18446744073709551616' })).error, /gid/);
-    assert.match(/** @type {any} */ (ask({ app: 1, depot: 2, gid: 5 })).error, /gid/);
-    assert.match(/** @type {any} */ (ask({ app: 1, depot: 2, gid: '5', branch: 7 })).error, /branch/);
-});
-
-test('product info is asked for a list of app ids, at least one and at most 20000', ()=>{
-    const ask = (/** @type {any} */ apps)=>readRequest({ to: TO, id: 5, op: 'steam.productInfo',
-        args: { apps } });
-    assert.deepEqual(ask([70, 228980]),
-        { id: 5, op: 'steam.productInfo', args: { apps: [70, 228980] } });
-    for (const apps of [[], 70, ['70'], [70, -1], [1.5], Array.from({ length: 20001 }, (_, i)=>i)])
+test('no op names a store\'s protocol', ()=>{
+    for (const op of ['steam.depotKey', 'depotKey', 'manifestCode', 'productInfo', 'contentServers',
+        'appOwnershipTicket'])
     {
-        assert.match(/** @type {any} */ (ask(apps)).error, /apps is not a valid uints/,
-            JSON.stringify(apps).slice(0, 40));
+        assert.match(/** @type {any} */ (readRequest({ to: TO, id: 3, op })).error, /no op/, op);
     }
 });

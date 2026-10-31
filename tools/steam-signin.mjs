@@ -20,7 +20,10 @@
 
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
-import { connectCm, encodeQr, library, logOn, signInWithQr } from '../modules/core/src/steam/index.js';
+import { connectCm } from '../modules/bridge/src/stores/steam/connection.js';
+import { signInWithQr } from '../modules/bridge/src/stores/steam/auth.js';
+import { library, logOn } from '../modules/bridge/src/stores/steam/session.js';
+import { encodeQr } from '../modules/core/src/steam/qr.js';
 
 const argv = process.argv.slice(2);
 /** @param {string} name */

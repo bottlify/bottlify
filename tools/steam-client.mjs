@@ -22,7 +22,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CLIENT_FILES, fetchClientFiles } from '../modules/core/src/steam/client.js';
+import { CLIENT_FILES, fetchClientFiles } from '../modules/bridge/src/stores/steam/client.js';
 
 /** Where the files are kept: one folder per client version. */
 export const CACHE = join(homedir(), '.bottlify', 'steam-client');

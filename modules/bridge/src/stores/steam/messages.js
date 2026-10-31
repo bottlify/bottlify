@@ -10,7 +10,7 @@
  * Valve's .proto definitions give them. A field not listed is not used.
  */
 
-/** @typedef {import('./protobuf.js').Schema} Schema */
+/** @typedef {import('../../../../core/src/steam/protobuf.js').Schema} Schema */
 
 export const EMsg = Object.freeze({
     Multi: 1,

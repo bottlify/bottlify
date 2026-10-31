@@ -16,13 +16,13 @@
  * the header and the answer comes back with the call's job id as its target.
  */
 
-import { decode, encode } from './protobuf.js';
+import { decode, encode } from '../../../../core/src/steam/protobuf.js';
 import {
     ClientHeartBeat, ClientHello, EMsg, EResult, Multi, PROTO_MASK, PROTOCOL_VERSION,
     ProtoBufHeader, REALM_GLOBAL,
 } from './messages.js';
 
-/** @typedef {import('./protobuf.js').Schema} Schema */
+/** @typedef {import('../../../../core/src/steam/protobuf.js').Schema} Schema */
 
 /**
  * What the connection needs of a socket: a browser WebSocket has it.

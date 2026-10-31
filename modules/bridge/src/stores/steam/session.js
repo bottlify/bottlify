@@ -20,11 +20,11 @@ import {
     OS_WINDOWS_10, PICSAccessTokenRequest, PICSAccessTokenResponse, PICSProductInfoRequest,
     PICSProductInfoResponse, PROTOCOL_VERSION,
 } from './messages.js';
-import { decode } from './protobuf.js';
-import { parseBinary, parseText } from './keyvalues.js';
+import { decode } from '../../../../core/src/steam/protobuf.js';
+import { parseBinary, parseText } from '../../../../core/src/steam/keyvalues.js';
 
 /** @typedef {import('./connection.js').CmConnection} CmConnection */
-/** @typedef {import('./keyvalues.js').KeyValues} KeyValues */
+/** @typedef {import('../../../../core/src/steam/keyvalues.js').KeyValues} KeyValues */
 
 /**
  * The Steam ID a refresh token was issued to: the subject of the JWT.
@@ -257,9 +257,9 @@ export async function library(connection, licenses){
 
 /** CMsgClientGetAppOwnershipTicket, and its answer (EMsg 857, 858). */
 const EMSG_GET_APP_OWNERSHIP_TICKET = 857;
-/** @type {import('./protobuf.js').Schema} */
+/** @type {import('../../../../core/src/steam/protobuf.js').Schema} */
 const GetAppOwnershipTicket = { app_id: [1, 'uint32'] };
-/** @type {import('./protobuf.js').Schema} */
+/** @type {import('../../../../core/src/steam/protobuf.js').Schema} */
 const GetAppOwnershipTicketResponse = {
     eresult: [1, 'uint32'], app_id: [2, 'uint32'], ticket: [3, 'bytes'],
 };

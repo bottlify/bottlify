@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { HOSTS, PLATFORMS, manifestFor } from './manifest.js';
-import { STEAM_ART } from '../../core/src/steam/apps.js';
+import { STEAM_ART } from './stores/steam/apps.js';
 
 test('the public build reaches Bottlify\'s own sites and the platforms, nothing local', ()=>{
     const manifest = manifestFor('public', '1.2.3');
@@ -39,7 +39,7 @@ test('every page is a host permission, and the CM socket is listed as wss', ()=>
         assert.ok(manifest.host_permissions.includes('wss://*.steamserver.net/*'));
         for (const ruleset of manifest.declarative_net_request.rule_resources)
         {
-            assert.ok(existsSync(new URL(`../${ruleset.path}`, import.meta.url)), ruleset.path);
+            assert.ok(existsSync(new URL(`../../${ruleset.path}`, import.meta.url)), ruleset.path);
         }
     }
 });
