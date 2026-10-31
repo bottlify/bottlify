@@ -478,11 +478,10 @@ export function createGraphicsModule(){
                 : factory(services));
 
             /**
-             * The draw check's switch (`checkDraws`): how many times it was
-             * turned on, 0 while it is off.
+             * The draw check's live switch (`checkDraws` below): how many times
+             * it was turned on, 0 while it is off.
              */
-            const drawCheck = { turn: config?.checkDraws === true ? 1 : 0, turns: 0 };
-            drawCheck.turns = drawCheck.turn;
+            const drawCheck = { turn: 0, turns: 0 };
 
             /** Everything an API needs from outside itself, in one place. */
             const services = {
@@ -637,8 +636,6 @@ export function createGraphicsModule(){
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
                     ...profileBehaviour(device?.adapter),
-                    keepMemory: config?.keepMemory,
-                    rereadBuffers: config?.rereadBuffers,
                     verifyDynamic: config?.verifyDynamic,
                     onDeviceLost,
                     // Where a full-screen device's gamma ramp is shown.
@@ -695,8 +692,6 @@ export function createGraphicsModule(){
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
                     ...profileBehaviour(device?.adapter),
-                    keepMemory: config?.keepMemory,
-                    rereadBuffers: config?.rereadBuffers,
                     verifyDynamic: config?.verifyDynamic,
                     onDeviceLost,
                     gamma: displayGamma,

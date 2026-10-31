@@ -49,7 +49,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
     [--pointer x,y[,down]] [--click x,y[,after]] [--key Code[,after[,frames]]] [--turn dx,dy,after,frames] [--screen WxH]
     [--run-seconds N] [--command-line STRING] [--args STRING] [--windows NAME] [--gpu PROFILE] [--file HOST=GUEST] [--save-files]
     [--profile-calls] [--no-video] [--no-fog] [--no-mips] [--trace]
-    [--worker [--pacing page|event]] [--coi]
+    [--worker] [--coi]
     [--user-data-dir DIR] [--port N] [--store local] [--prefetch] [--export-translations FILE]
 ```
 
@@ -119,7 +119,6 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--fake-gpu` | off | a GPU that takes every call and draws nothing, the devices played in a graphics worker over it: a run that measures the engine alone. A software adapter (SwiftShader, where the machine has no GPU) takes the same cores as the engine and holds it waiting for frames, which is not what a person's GPU does; nothing is drawn, so nothing about the picture can be asked of such a run |
 | `--fake-pipeline-ms N` | 0 | with `--fake-gpu`: each pipeline takes N ms to build, as a GPU compiling its shaders does, so frames wait in the graphics worker behind their pipelines while the next ones are recorded |
 | `--graphics-capture FILE` | off | everything the graphics worker is sent, from its start, written to FILE (gzip) when the run ends. The frames to measure are marked while it runs with `captureFrames(n)` (below), and the capture ends n presents after the mark. The guest memory the calls carry (vertices, indices, texels: pieces of 4 KB and more) is kept as zeros and everything else whole, so a run of minutes is tens of megabytes. `tools/graphics-replay.mjs` plays it again in node (below) |
-| `--pacing page\|event` | `page` | with `--worker`: how the loop waits: a look every few milliseconds, or sleep until something happens |
 | `--coi` | off | serve with the cross-origin isolation headers, so the page comes up `crossOriginIsolated` and `SharedArrayBuffer` exists, which the shared-table audio backend and its worklet need |
 | `--user-data-dir DIR` | a fresh temp dir, removed on shutdown | a browser profile of your own, kept rather than thrown away when the run ends. Needed for `--store local` to warm anything: OPFS lives in the profile, so a later run only reads it back if it is the same profile. A browser an earlier run left on the same profile (its node process killed outright) is closed before the launch |
 | `--port N` | random | fixes the static server's port, so `http://127.0.0.1:<port>`, the origin OPFS is scoped to, is the same every run. Pair with `--user-data-dir` for a warm store to survive between separate invocations of this tool; without a fixed port each run is a different origin no matter which profile it opens |

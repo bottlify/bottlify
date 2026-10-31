@@ -2349,3 +2349,23 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** A cloud container (Intel Xeon @ 2.10 GHz, 4 vCPU), valgrind 3.22; power plan not
   recorded. arm64: not measured here (the one load stays there).
 - **Decision.** On an x64 host three loads again; arm64 keeps the one load.
+
+### 2026-10-31: a run loop in a worker that sleeps until something happens (`pacing: 'event'`)
+
+- **Idea.** A run loop in a worker of its own needs no short timer: it could sleep until the
+  guest's next deadline, a host answer or a message from the page, and yield to the event loop
+  only when something is pending, where the page's pacing yields on its interval and looks again
+  on a short timer while idle.
+- **Workload.** A real title's menu through the launcher, the same build in the same worker, 30 s
+  an arm. The title, the bundle's hash and the build: not recorded. Recorded here from the
+  comment the option carried in `modules/core/src/host/messages.js` (present on 2026-10-24); the
+  date of the measurement: not recorded.
+- **Values.** `page` (the default): 1.95 G guest instructions, 866 frames presented; `event`:
+  1.07 G, 469 frames. Runs per arm, median, spread and noise floor: not recorded.
+- **Why.** A host call answering woke the loop for a turn that retired nothing, about seventy
+  thousand times in the run; the page's short look batches those answers.
+- **Machine.** Browser, GPU, driver, operating system and power plan: not recorded.
+- **Correctness.** Not judged.
+- **Decision.** Removed: `pacing: 'event'` (the worker pacing that slept on a message from the
+  page) and the harness's `--pacing` flag are gone; a worker runs the page's pacing at the
+  worker's interval.

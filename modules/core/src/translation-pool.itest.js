@@ -31,7 +31,7 @@ for (const concurrency of /** @type {const} */ ([1, 2]))
             executable: new Uint8Array(parent),
             imagePath: 'C:\\App\\spawn.exe',
             concurrency,
-            cork: { pool: true, poolPerProcess: 2, config: { worker: true, hotThreshold: 50 } },
+            cork: { poolPerProcess: 2, config: { worker: true, hotThreshold: 50 } },
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
             }) },

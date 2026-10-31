@@ -680,9 +680,6 @@ function parse(argv){
         // otherwise on the page's own thread.
         worker: argv.includes('--worker'),
         headed: argv.includes('--headed'),
-        // How the loop waits in the worker: `page` (a look every few
-        // milliseconds) or `event` (sleep until something happens).
-        pacing: argv.includes('--pacing') ? argv[argv.indexOf('--pacing') + 1] : 'page',
         // Cross-origin isolation headers, so the page comes up
         // `crossOriginIsolated` with `SharedArrayBuffer` -- what the shared-
         // table audio backend and its worklet need to run at all.
@@ -1856,7 +1853,7 @@ export async function game(options){
     mkdirSync(REPORTS_DIR, { recursive: true });
 
     const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
-        + (options.worker ? `?worker=1&pacing=${options.pacing}` : '');
+        + (options.worker ? '?worker=1' : '');
     /** @type {CdpEndpoint | null} */
     let cdp = null;
     try

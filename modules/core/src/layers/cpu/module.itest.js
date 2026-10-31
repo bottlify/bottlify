@@ -42,7 +42,7 @@ async function booted(code, at, config = {}){
         }),
         provide: ()=>{},
     });
-    const api = await cpuModule.create({ engine: 'cork', engineUrl: CORK, ...config }, moduleHost);
+    const api = await cpuModule.create({ engineUrl: CORK, ...config }, moduleHost);
     await api.boot();
     api.writePhysical(at, code);
     api.writePhysical(0x7000, new Uint8Array(u32(at)));
@@ -56,7 +56,6 @@ test('under cork the jit counters say -1, not a dead compiler', async()=>{
     // zero is never mistaken for a compiler that compiled nothing.
     const metrics = createMetrics({ shared: false });
     const api = await cpuModule.create({
-        engine: 'cork',
         engineUrl: CORK,
     }, /** @type {any} */ ({
         requireApi: ()=>({ metrics, intern: ()=>-1 }), provide: ()=>{},
@@ -125,26 +124,12 @@ test('slices credit the address the guest ran at', async()=>{
     await cpuModule.dispose();
 });
 
-test('sampling: false leaves every slice uncredited', async()=>{
-    const { api } = await booted(
-        new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE, { sampling: false });
-
-    api.runSlice(4096);
-    const status = cpuModule.diagnostics();
-    const metrics = /** @type {any} */ (status.metrics ?? {});
-    assert.equal(metrics.samples.slices, 0);
-    assert.deepEqual(metrics.samples.top, []);
-
-    api.stop();
-    await cpuModule.dispose();
-});
-
 test('a second instance in one realm boots on its own, never seeing the first one\'s machine',
     async()=>{
         const { api: first } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
 
         const metrics = createMetrics({ shared: false });
-        const second = await cpuModule.create({ engine: 'cork', engineUrl: CORK },
+        const second = await cpuModule.create({ engineUrl: CORK },
             /** @type {any} */ ({
                 requireApi: ()=>({ metrics, intern: ()=>-1 }),
                 provide: ()=>{},

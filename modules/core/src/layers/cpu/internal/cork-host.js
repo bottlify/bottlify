@@ -7,8 +7,8 @@
 /**
  * The cork host: the cpu layer's host over cork's own memory, with no emulator.
  *
- * `engine: 'cork'` runs a program with nothing of the emulator loaded -- not
- * its machine, not its wasm. This host is what stands in for it: a
+ * A program runs with nothing of the emulator loaded -- not its machine, not
+ * its wasm. This host is what stands in for it: a
  * `WebAssembly.Memory` of its own, cork's own layout (a 512-byte state block,
  * the guest's RAM after it, cork's tables after that), and the translator's
  * runtime over the two. The slice loop is the translator's entry, or -- where

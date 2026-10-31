@@ -39,15 +39,6 @@ export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
  */
 export const TRANSLATION_ZONE_BYTES = 256 * 1024 * 1024;
 
-/**
- * The execution engines a launch may select (`engine.js` for the contract):
- * `cork`, the translator, alone.
- */
-export const ENGINES = Object.freeze(['cork']);
-
-/** The engine a launch that names none runs: the translator. */
-export const DEFAULT_ENGINE = 'cork';
-
 /** The most executors a process has: an x86 affinity mask has 32 bits, a processor each. */
 export const MAX_EXECUTORS = 32;
 
@@ -65,12 +56,12 @@ export const memoryShareable = sharedMemory=>sharedMemory !== false
 
 /**
  * The processors a process is told the machine has, under `config`: one for
- * each executor under cork, which alone runs more than one, and one where the
- * host cannot share the program's memory with another (`executorsRefused`).
+ * each executor, and one where the host cannot share the program's memory with
+ * another (`executorsRefused`).
  * The cpu layer answers this (`processors`), and whoever describes the machine
  * before a process exists -- the run's registry -- asks it here.
  *
- * @param {{ engine?: string, executors?: number, sharedMemory?: boolean } | undefined} config
+ * @param {{ executors?: number, sharedMemory?: boolean } | undefined} config
  * @returns {number}
  */
 export function processorsFor(config){
@@ -247,16 +238,6 @@ export function createCpuModule(){
         async create(config, moduleHost){
             const log = moduleHost?.requireApi('log');
 
-            // Refused here rather than at boot: a configuration naming an engine
-            // that does not exist is a configuration error, and the assembler
-            // reports those before any module has a machine to lose.
-            /** @type {string} */
-            const engine = config?.engine ?? DEFAULT_ENGINE;
-            if (!ENGINES.includes(engine))
-            {
-                throw new Error(`cpu: unknown engine "${engine}" (${ENGINES.join(', ')})`);
-            }
-
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -272,7 +253,7 @@ export function createCpuModule(){
              * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
              *          worstInterpreted: number, worstInterpretedAt: number,
              *          interpretedBefore: number, lastFault: any, disposed: boolean,
-             *          samples: ReturnType<typeof createSampleTable>, engine: string,
+             *          samples: ReturnType<typeof createSampleTable>,
              *          cork: import('./engine.js').Runtime | null,
              *          corkFrame: { instructions: number, retired: number, translateMs: number,
              *              leaves: number },
@@ -298,7 +279,7 @@ export function createCpuModule(){
                 // The translations' store the run gave, for its figures.
                 store: null,
                 worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
-                lastFault: null, disposed: false, samples: createSampleTable(), engine,
+                lastFault: null, disposed: false, samples: createSampleTable(),
                 cork: null,
                 remotes: [],
                 // How an executor past the process's own is opened, those being
@@ -363,14 +344,6 @@ export function createCpuModule(){
                 // addresses it keeps leaving for) between feeds.
                 cork.translatePending().catch(()=>{});
             };
-
-            // Always on, because the whole point is never having to reproduce a
-            // heavy frame under a second run just to find out where it went --
-            // the cost this pays every slice is a register read and a table
-            // update, measured to leave the guest phase's ms/frame unchanged. A
-            // caller measuring the emulator itself (a JIT budget comparison) can
-            // still turn it off.
-            const samplingEnabled = config?.sampling !== false;
 
             if (typeof log?.metrics?.counters === 'function')
             {
@@ -1141,10 +1114,9 @@ export function createCpuModule(){
                 /**
                  * The processors the program is told the machine has: one for
                  * each of its executors, the process's own among them -- known
-                 * from the start, before the others are made. Only cork runs
-                 * more than one.
+                 * from the start, before the others are made.
                  */
-                processors: ()=>processorsFor({ engine, executors: settings.executors }),
+                processors: ()=>processorsFor({ executors: settings.executors }),
                 /** The word their turns ring: one wait for all of them. */
                 executorBell: ()=>state.bell,
                 /**
@@ -1318,12 +1290,16 @@ export function createCpuModule(){
                     // stopped where the guest asked to -- a wait it parked in, a
                     // halt -- and crediting that place with everything the slice
                     // retired charged a frame's hot loop to the call ending it.
-                    if (samplingEnabled && instructions >= maxInstructions)
+                    // Always on, because the whole point is never having to
+                    // reproduce a heavy frame under a second run just to find out
+                    // where it went: a register read and a table update a slice,
+                    // measured to leave the guest phase's ms/frame unchanged.
+                    if (instructions >= maxInstructions)
                     {
                         creditSample(state.samples, machine.eip(), instructions,
                             settings.cork.hotThreshold ?? 2000);
                     }
-                    if (samplingEnabled && instructions > 0 && settings.cork.feed === 'slice')
+                    if (instructions > 0 && settings.cork.feed === 'slice')
                     {
                         feedTranslator();
                     }
@@ -1592,7 +1568,7 @@ export function createCpuModule(){
             {
                 return {
                     name: 'cpu', version: '0.1.0', status: 'created',
-                    metrics: instance ? { engine: instance.engine } : {},
+                    metrics: instance ? { engine: 'cork' } : {},
                 };
             }
             // The translator's own report, with what its host adds -- the
@@ -1606,9 +1582,7 @@ export function createCpuModule(){
                 version: '0.1.0',
                 status: 'ready',
                 metrics: {
-                    // Which execution engine this launch selected, so a report
-                    // says what the figures below were measured on.
-                    engine: instance.engine,
+                    // The engine the figures below were measured on, for a report.
                     // Whether guest memory is a SharedArrayBuffer another worker
                     // can read and write in place.
                     sharedMemory: typeof SharedArrayBuffer === 'function'
