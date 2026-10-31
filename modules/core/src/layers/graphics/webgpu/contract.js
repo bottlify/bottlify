@@ -49,6 +49,7 @@
  * @property {(desc: any)=>any} createShaderModule
  * @property {(desc: any)=>any} createRenderPipeline
  * @property {(desc: any)=>Promise<any>} createRenderPipelineAsync
+ * @property {(desc: any)=>Promise<any>} [createComputePipelineAsync]
  * @property {(desc?: any)=>GpuCommandEncoderLike} createCommandEncoder
  * @property {(desc: any)=>any} createQuerySet
  * @property {{ has: (name: string) => boolean }} [features]
@@ -67,6 +68,7 @@
 /**
  * @typedef {Object} GpuCommandEncoderLike
  * @property {(desc: any)=>any} beginRenderPass
+ * @property {(desc?: any)=>any} [beginComputePass]
  * @property {(source: any, destination: any, size: any)=>void} copyBufferToTexture
  * @property {(source: any, destination: any, size: any)=>void} copyTextureToBuffer
  * @property {(source: any, sourceOffset: number, destination: any, destinationOffset: number,

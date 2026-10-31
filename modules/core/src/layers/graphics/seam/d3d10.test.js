@@ -1374,7 +1374,7 @@ test('what this build cannot do says so in the slot rather than in a crash', ()=
     assert.equal(h.box.memory.readU32(out), 0);
     const outAndBeyond = h.box.place([0xdeadbeef, 0xfeedface]);
     assert.equal(h.device(device, 'CreateGeometryShaderWithStreamOutput',
-        [0, 0, 0, 0, 32, outAndBeyond, outAndBeyond + 4]), E_NOTIMPL);
+        [0, 0, 0, 0, 32, outAndBeyond, outAndBeyond + 4]), E_INVALIDARG);
     assert.equal(h.box.memory.readU32(outAndBeyond), 0, 'the sixth argument is the out');
     assert.equal(h.box.memory.readU32(outAndBeyond + 4), 0xfeedface,
         'the caller\'s next stack word is not an argument');

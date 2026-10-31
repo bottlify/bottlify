@@ -737,12 +737,15 @@ export function createView(options){
         range: options.range,
         /** An append or counter view's hidden count, as a binding last set it. */
         counter: 0,
+        /** Whether that count is newer than the one the GPU holds. */
+        counterSet: false,
 
         /** @param {number} count  ~0 keeps the count it has */
         setInitialCount(count){
             if (count !== 0xffffffff)
             {
                 this.counter = count >>> 0;
+                this.counterSet = true;
             }
         },
 

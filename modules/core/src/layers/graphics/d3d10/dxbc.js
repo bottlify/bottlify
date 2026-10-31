@@ -73,6 +73,8 @@ export const SYSTEM_VALUE = Object.freeze({
  * @property {number} mask          Which components the element occupies.
  * @property {number} readWriteMask Which of them the program reads (inputs) or
  *                                  leaves unwritten (outputs).
+ * @property {number} [stream]      The vertex stream a geometry shader's output is
+ *                                  on (OSG5, OSG1); 0 where the signature has none.
  */
 
 /**
@@ -111,20 +113,24 @@ function cString(bytes, at){
  * element with the name stored as an offset into the chunk.
  *
  * @param {Uint8Array} chunk
+ * @param {boolean} [streamed]  each row starts with its stream
+ * @param {number} [size]  bytes a row
  * @returns {SignatureElement[]}
  */
-export function parseSignature(chunk){
+export function parseSignature(chunk, streamed = false, size = 24){
     const count = u32(chunk, 0);
     const rows = u32(chunk, 4);
     /** @type {SignatureElement[]} */
     const elements = [];
     for (let index = 0; index < count; index++)
     {
-        const at = rows + index * 24;
-        if (at + 24 > chunk.length)
+        const start = rows + index * size;
+        if (start + size > chunk.length)
         {
             break;
         }
+        // A streamed row begins with its stream; the rest is laid out as ever.
+        const at = streamed ? start + 4 : start;
         const masks = u32(chunk, at + 20);
         elements.push({
             name: cString(chunk, u32(chunk, at)),
@@ -134,9 +140,32 @@ export function parseSignature(chunk){
             register: u32(chunk, at + 16),
             mask: masks & 0xff,
             readWriteMask: (masks >>> 8) & 0xff,
+            ...(streamed ? { stream: u32(chunk, start) } : {}),
         });
     }
     return elements;
+}
+
+/**
+ * A shader's outputs from whichever signature chunk it has: OSGN, or a
+ * geometry shader's OSG5 or OSG1, whose rows name a stream.
+ *
+ * @param {Map<string, Uint8Array>} chunks
+ * @returns {SignatureElement[]}
+ */
+function outputsOf(chunks){
+    const plain = chunks.get('OSGN');
+    if (plain)
+    {
+        return parseSignature(plain);
+    }
+    const five = chunks.get('OSG5');
+    if (five)
+    {
+        return parseSignature(five, true, 28);
+    }
+    const one = chunks.get('OSG1');
+    return one ? parseSignature(one, true, 32) : [];
 }
 
 /**
@@ -205,9 +234,7 @@ export function parseDxbc(bytes){
     return {
         chunks,
         inputs: chunks.has('ISGN') ? parseSignature(/** @type {Uint8Array} */ (chunks.get('ISGN'))) : [],
-        outputs: chunks.has('OSGN')
-            ? parseSignature(/** @type {Uint8Array} */ (chunks.get('OSGN')))
-            : [],
+        outputs: outputsOf(chunks),
         shader: shaderChunk ? parseShader(shaderChunk) : null,
     };
 }

@@ -33,12 +33,17 @@ import {
     D3D10_DEPTH_WRITE_MASK, D3D10_FILL_MODE, D3D10_FILTER, D3D10_FILTER_ANISOTROPIC_BIT,
     D3D10_FILTER_COMPARISON_BIT, D3D10_INPUT_CLASSIFICATION, D3D10_PRIMITIVE_TOPOLOGY,
     D3D10_RESOURCE_DIMENSION, D3D10_STENCIL_OP, D3D10_TEXTURE_ADDRESS, D3D10_USAGE,
-    D3D10_APPEND_ALIGNED_ELEMENT, D3D11_BIND_UNORDERED_ACCESS, DXGI_FORMAT, FORMAT_INFO,
-    formatPitch,
+    D3D10_APPEND_ALIGNED_ELEMENT, D3D11_BIND_UNORDERED_ACCESS, D3D11_BUFFER_UAV_FLAG,
+    D3D11_RESOURCE_MISC, DXGI_FORMAT, FORMAT_INFO, formatPitch,
 } from './constants.js';
+import { clearElement, clearTexel } from './uavclear.js';
+import { SO_NO_RASTERIZED_STREAM } from './streamout.js';
 
 /** The most bytes a constant buffer has: 4096 registers of sixteen. */
 const MOST_CONSTANT_BYTES = 65536;
+
+/** A stage that writes through no views. @type {readonly any[]} */
+const NO_VIEWS = Object.freeze([]);
 
 /**
  * The most bytes an input element reads past its slot's stride: a 32-bit
@@ -53,7 +58,8 @@ import {
 import { levelExtent } from './validity.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
-    BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, STAGE, linkProgram, translateShader,
+    BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, STAGE, STORAGE_TEXTURE_FORMAT, linkCompute,
+    linkProgram, translateShader,
 } from './wgsl.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
@@ -476,6 +482,7 @@ export function createRenderer(services){
         frames: 0,
         draws: 0,
         clears: 0,
+        dispatches: 0,
         skipped: {
             noViewport: 0,
             noTarget: 0,
@@ -678,7 +685,9 @@ export function createRenderer(services){
         const usage = /** @type {any} */ (BufferUsage);
         return usage.VERTEX | usage.INDEX | usage.UNIFORM | usage.COPY_DST | usage.COPY_SRC
             | ((desc.BindFlags & (D3D10_BIND.SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS)) !== 0
-                ? usage.STORAGE : 0);
+                ? usage.STORAGE : 0)
+            | ((desc.MiscFlags11 ?? 0) & D3D11_RESOURCE_MISC.DRAWINDIRECT_ARGS ? usage.INDIRECT
+                : 0);
     };
 
     /** @param {any} resource */
@@ -728,6 +737,14 @@ export function createRenderer(services){
             if ((desc.BindFlags & D3D10_BIND.SHADER_RESOURCE) !== 0)
             {
                 usage |= TextureUsage.TEXTURE_BINDING;
+            }
+            // A view a shader writes through is a storage texture, of a
+            // format WebGPU stores into and of one sample.
+            backing.storable = (desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) !== 0
+                && backing.sampleCount === 1 && storableFormats().has(layout.format);
+            if (backing.storable)
+            {
+                usage |= TextureUsage.STORAGE_BINDING;
             }
             const size = {
                 width: desc.Width,
@@ -892,6 +909,11 @@ export function createRenderer(services){
             {
                 return;
             }
+            if (gpuWritten(resource))
+            {
+                orderedWrite(backing, start, end);
+                return;
+            }
             const lock = backing.gpu.lock(start, end - start, flags);
             lock.data.set(backing.bytes.subarray(start, end));
             backing.gpu.unlock(lock);
@@ -987,8 +1009,40 @@ export function createRenderer(services){
      * @param {any} resource
      */
     const gpuWritten = resource=>(resource.desc.BindFlags
-        & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0
+        & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL | D3D11_BIND_UNORDERED_ACCESS)) !== 0
         || backingOf(resource).gpuDirty === true;
+
+    /**
+     * Bytes the program gave a buffer the GPU writes, sent in their turn
+     * among the GPU's own work: through a buffer of their own and a copy
+     * recorded where the write was made. Written in place before the frame,
+     * as other buffers are, they would land under what earlier dispatches
+     * and copies of the same frame write; renamed, the rename's copy of the
+     * rest would be taken before those ran.
+     *
+     * ponytail: whole words; the bytes around an unaligned range are the
+     * host's, which may be older than the GPU's.
+     *
+     * @param {any} backing @param {number} start @param {number} end
+     */
+    const orderedWrite = (backing, start, end)=>{
+        const from = start & ~3;
+        const size = Math.min(backing.gpu.size, Math.ceil(end / 4) * 4) - from;
+        if (size <= 0)
+        {
+            return;
+        }
+        const staged = backend.createDynamicBuffer({
+            label: 'd3d10:ordered-write', size, usage: BufferUsage.COPY_SRC | BufferUsage.COPY_DST,
+            keep: false,
+        });
+        const lock = staged.lock(0, size, LockFlags.DISCARD);
+        lock.data.set(backing.bytes.subarray(from, from + size));
+        staged.unlock(lock);
+        staged.markRead();
+        record({ kind: 'copyBuffer', source: staged.gpu, sourceOffset: 0,
+            destination: backing.gpu.gpu, destinationOffset: from, size, release: staged });
+    };
 
     /**
      * Whether a level of this texture can be read back as it is: texels the
@@ -1146,6 +1200,15 @@ export function createRenderer(services){
             size: 16,
             usage: BufferUsage.STORAGE | BufferUsage.COPY_DST,
         });
+        // What a dispatch writes through where no view is bound: apart from
+        // the buffer above, which a dispatch may read in the same pass.
+        const writable = backend.createDynamicBuffer({
+            label: 'd3d10:unbound-uav',
+            size: 16,
+            usage: BufferUsage.STORAGE | BufferUsage.COPY_DST,
+        });
+        /** @type {Map<string, any>} */
+        const storageTextures = new Map();
         /** @type {Map<string, any>} */
         const textures = new Map();
         /** @type {Record<string, string>} */
@@ -1156,6 +1219,25 @@ export function createRenderer(services){
         placeholders = {
             buffer,
             storage,
+            writable,
+            /** @param {{ format: string, viewDimension: string }} kind */
+            storageTexture(kind){
+                const key = `${kind.format}:${kind.viewDimension}`;
+                let view = storageTextures.get(key);
+                if (!view)
+                {
+                    view = createTexture({
+                        label: `d3d10:unbound-uav:${key}`,
+                        size: { width: 1, height: 1, depthOrArrayLayers: 1 },
+                        dimension: kind.viewDimension === '3d' ? '3d' : '2d',
+                        format: kind.format,
+                        usage: TextureUsage.STORAGE_BINDING,
+                    }).createView({ label: `d3d10:unbound-uav:${key}`,
+                        dimension: kind.viewDimension });
+                    storageTextures.set(key, view);
+                }
+                return view;
+            },
             /** @param {{ sampleType: string, viewDimension: string }} kind */
             view(kind){
                 const key = `${kind.sampleType}:${kind.viewDimension}`;
@@ -1210,7 +1292,9 @@ export function createRenderer(services){
         const described = {};
         view?.GetDesc(described);
         const format = described.desc?.Format ?? 0;
-        const decodable = backing?.gpu && BUFFER_VIEW_FORMATS.has(format);
+        // A raw or structured view is read by words, whatever its format says.
+        const decodable = backing?.gpu && (BUFFER_VIEW_FORMATS.has(format)
+            || format === DXGI_FORMAT.UNKNOWN || format === DXGI_FORMAT.R32_TYPELESS);
         if (!isView && view && !decodable)
         {
             diverge(backing?.gpu
@@ -1234,6 +1318,17 @@ export function createRenderer(services){
                     size: Math.ceil(held.resource.desc.ByteWidth / 4) * 4 },
             };
         }
+        return { binding: entry.binding,
+            resource: { buffer: viewUniformOf(view, described.desc), offset: 0, size: 16 } };
+    };
+
+    /**
+     * The uniform a shader reads a buffer view through: its format, first
+     * element, element count and element size.
+     *
+     * @param {any} view @param {any} desc
+     */
+    const viewUniformOf = (view, desc)=>{
         let uniform = bufferViews.get(view);
         if (!uniform)
         {
@@ -1244,14 +1339,15 @@ export function createRenderer(services){
             });
             const lock = uniform.lock(0, 16, LockFlags.NONE);
             const words = new DataView(lock.data.buffer, lock.data.byteOffset, 16);
-            words.setUint32(0, format, true);
-            words.setUint32(4, described.desc.ElementOffset ?? 0, true);
-            words.setUint32(8, described.desc.ElementWidth ?? 0, true);
-            words.setUint32(12, FORMAT_INFO[format].bytesPerPixel, true);
+            words.setUint32(0, desc.Format, true);
+            words.setUint32(4, desc.ElementOffset ?? 0, true);
+            words.setUint32(8, desc.ElementWidth ?? 0, true);
+            words.setUint32(12, desc.elementBytes ?? FORMAT_INFO[desc.Format]?.bytesPerPixel ?? 4,
+                true);
             uniform.unlock(lock);
             bufferViews.set(view, uniform);
         }
-        return { binding: entry.binding, resource: { buffer: uniform.gpu, offset: 0, size: 16 } };
+        return uniform.gpu;
     };
 
     /**
@@ -1274,7 +1370,9 @@ export function createRenderer(services){
         {
             return 'sint';
         }
-        return /32float/.test(format ?? '') ? 'unfilterable-float' : 'float';
+        // A 32-bit float is filtered only on a device with the feature for it.
+        return /32float/.test(format ?? '') && backend?.hasFeature?.('float32-filterable') !== true
+            ? 'unfilterable-float' : 'float';
     };
 
     /** @type {Record<string, string[]>} what each layout sample type accepts */
@@ -1734,6 +1832,7 @@ export function createRenderer(services){
         target = {
             key: `${backing.id}:${mip}:${held.resource.dimension
                 === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer}`,
+            layer: held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer,
             backing,
             texture: backing.texture,
             format,
@@ -1768,11 +1867,16 @@ export function createRenderer(services){
      *
      * @param {any} stage  The device's per-stage bindings.
      * @param {import('./wgsl.js').BindGroupLayoutEntry[]} entries
+     * @param {readonly any[]} [uavs]  What the stage writes through, by slot.
      * @returns {object[]}
      */
-    const bindingsFor = (stage, entries)=>{
+    const bindingsFor = (stage, entries, uavs = NO_VIEWS)=>{
         const fallback = placeholdersOf();
         return entries.map(entry=>{
+            if (entry.binding >= BINDING.UAV)
+            {
+                return uavBinding(uavs, entry, fallback);
+            }
             if (entry.buffer && entry.binding >= BINDING.TEXTURE)
             {
                 return bufferViewBinding(stage, entry, fallback);
@@ -1876,6 +1980,10 @@ export function createRenderer(services){
     const gpuCopy = (destination, destinationSubresource, at, source, sourceSubresource, box)=>{
         const from = backingOf(source);
         const to = backingOf(destination);
+        if (source.dimension === D3D10_RESOURCE_DIMENSION.BUFFER)
+        {
+            return gpuBufferCopy(destination, to, at.x, from, box);
+        }
         // A multisampled texture is copied only whole, into another of its
         // sample count: there is no reading one back.
         if (!from.texture || from.layout.storage.depth
@@ -1971,6 +2079,84 @@ export function createRenderer(services){
                 {
                     diverge('a read back that did not arrive leaves the staging resource as it'
                         + ' was');
+                }
+                if (to.guest)
+                {
+                    to.hostNewer = true;
+                }
+                if (to.readback === waiting)
+                {
+                    to.readback = null;
+                }
+                resolve();
+            },
+        });
+        to.readback = waiting;
+        return true;
+    };
+
+    /**
+     * A copy out of a buffer the GPU may have written: into one it keeps,
+     * by the GPU, in whole words; into a staging one, as a read back that
+     * a map of it waits for.
+     *
+     * @param {any} destination @param {any} to @param {number} offset
+     * @param {any} from @param {Box | null} box
+     * @returns {boolean} whether the GPU makes it
+     */
+    const gpuBufferCopy = (destination, to, offset, from, box)=>{
+        const left = box ? box.left : 0;
+        const size = Math.min((box ? box.right : from.bytes.length) - left,
+            to.bytes.length - offset, from.bytes.length - left);
+        if (!from.gpu)
+        {
+            return false;
+        }
+        if (size <= 0)
+        {
+            return true;
+        }
+        if (to.gpu)
+        {
+            if (((left | offset | size) & 3) !== 0)
+            {
+                return false;
+            }
+            from.gpu.markRead();
+            record({ kind: 'copyBuffer', source: from.gpu.gpu, sourceOffset: left,
+                destination: to.gpu.gpu, destinationOffset: offset, size });
+            to.gpuDirty = true;
+            return true;
+        }
+        if (destination.desc.Usage !== D3D10_USAGE.STAGING)
+        {
+            return false;
+        }
+        /** @type {(value?: any) => void} */
+        let resolve = ()=>{};
+        const promise = new Promise(done=>{
+            resolve = done;
+        });
+        const waiting = { promise, sequence: recordedCount + 1 };
+        let delivered = false;
+        from.gpu.markRead();
+        record({
+            kind: 'readbackBuffer',
+            ranges: [{ buffer: from.gpu.gpu, offset: left, size }],
+            /** @param {Uint8Array[] | null} results */
+            deliver(results){
+                if (delivered)
+                {
+                    return;
+                }
+                delivered = true;
+                if (results)
+                {
+                    to.bytes.set(results[0], offset);
+                }
+                else
+                {
+                    diverge('a read back that did not arrive leaves the staging buffer as it was');
                 }
                 if (to.guest)
                 {
@@ -2190,6 +2376,405 @@ export function createRenderer(services){
         return backing.presented;
     };
 
+    // --- targets and depth buffers of different sizes ---
+
+    /** @type {Map<string, any>} format, slot and size -> a colour target's stand-in */
+    const standInTextures = new Map();
+    /** The copies back out of the stand-ins the last draw recorded, which the next may drop. */
+    let lastStandIns = /** @type {{ copies: any[], key: string } | null} */ (null);
+
+    /**
+     * A colour target of the depth buffer's size that a draw renders into in
+     * a target's place.
+     *
+     * @param {any} entry @param {number} slot @param {any} depth
+     */
+    const standInOf = (entry, slot, depth)=>{
+        const key = `${entry.format}:${slot}:${depth.surface.width}x${depth.surface.height}`;
+        let standIn = standInTextures.get(key);
+        if (!standIn)
+        {
+            const texture = createTexture({
+                label: `d3d10:stand-in:${key}`,
+                size: { width: depth.surface.width, height: depth.surface.height,
+                    depthOrArrayLayers: 1 },
+                format: entry.format,
+                usage: TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC
+                    | TextureUsage.COPY_DST,
+            });
+            standIn = {
+                key: `stand-in:${key}`,
+                backing: { id: nextBacking++ },
+                layer: 0,
+                texture,
+                format: entry.format,
+                sampleCount: 1,
+                writeMask: entry.writeMask,
+                surface: {
+                    texture,
+                    view: texture.createView({ label: `d3d10:stand-in:${key}` }),
+                    width: depth.surface.width,
+                    height: depth.surface.height,
+                    format: entry.format,
+                    mipLevel: 0,
+                    label: `d3d10:stand-in:${entry.format}`,
+                },
+            };
+            standInTextures.set(key, standIn);
+        }
+        return standIn;
+    };
+
+    /**
+     * Records the copies of the targets' overlap with the depth buffer into
+     * their stand-ins -- none where the draw before used the same and its
+     * copies back are the last thing recorded, which are dropped instead --
+     * and returns the copies back out, for after the draw.
+     *
+     * @param {any[]} colour @param {any[]} standing @param {any} depth
+     */
+    const standInsIn = (colour, standing, depth)=>{
+        /** @param {any} from @param {any} to @param {any} entry */
+        const copy = (from, to, entry)=>({
+            kind: 'copyTexture',
+            key: `${entry.key}>${standing[colour.indexOf(entry)].key}`,
+            sourceId: from.backing.id,
+            destinationId: to.backing.id,
+            source: { texture: from.texture, mipLevel: from.surface.mipLevel ?? 0,
+                origin: { x: 0, y: 0, z: from.layer ?? 0 } },
+            destination: { texture: to.texture, mipLevel: to.surface.mipLevel ?? 0,
+                origin: { x: 0, y: 0, z: to.layer ?? 0 } },
+            size: { width: Math.min(entry.surface.width, depth.surface.width),
+                height: Math.min(entry.surface.height, depth.surface.height),
+                depthOrArrayLayers: 1 },
+        });
+        const present = colour.filter(entry=>entry);
+        const out = present.map(entry=>copy(standing[colour.indexOf(entry)], entry, entry));
+        const key = out.map(one=>one.key).join('|');
+        const last = lastStandIns;
+        if (last && last.key === key && recording.length >= last.copies.length
+            && last.copies.every((one, index)=>recording[recording.length
+                - last.copies.length + index] === one))
+        {
+            recording.length -= last.copies.length;
+            recordedCount -= last.copies.length;
+        }
+        else
+        {
+            present.forEach(entry=>record(copy(entry, standing[colour.indexOf(entry)], entry)));
+        }
+        return out;
+    };
+
+    // --- compute and unordered access ---
+
+    /** @type {Set<string> | null} */
+    let storable = null;
+    /** The texture formats a storage texture may be made in on this device. */
+    const storableFormats = ()=>{
+        storable ??= new Set(Object.values(STORAGE_TEXTURE_FORMAT).filter(format=>
+            format !== 'bgra8unorm' || backend?.hasFeature?.('bgra8unorm-storage')));
+        return storable;
+    };
+
+    /** @param {any} view @returns {any} the resource a view looks at, no reference kept */
+    const resourceOf = view=>{
+        /** @type {{ resource?: any }} */
+        const held = {};
+        view.GetResource(held);
+        held.resource.release();
+        return held.resource;
+    };
+
+    /** @type {WeakMap<object, Map<string, any>>} compute shader -> translation, by its views' formats */
+    const computeTranslations = new WeakMap();
+    /** @type {WeakMap<object, any>} translation -> its linked module */
+    const linkedComputes = new WeakMap();
+    /** @type {WeakMap<object, Map<string, any>>} unordered-access view -> storage texture views */
+    const storageViews = new WeakMap();
+    /** @type {WeakMap<object, any>} unordered-access view -> its counter's buffer */
+    const counterBuffers = new WeakMap();
+
+    /**
+     * The storage format each typed view over a texture writes in, by slot:
+     * what a compute shader's translation declares its storage textures as.
+     *
+     * @param {readonly any[]} bound
+     * @returns {Record<number, string>}
+     */
+    const uavFormatsOf = bound=>{
+        /** @type {Record<number, string>} */
+        const formats = {};
+        bound.forEach((view, slot)=>{
+            if (view && view.dimensionName !== 'BUFFER')
+            {
+                const format = /** @type {Record<number, string>} */ (STORAGE_TEXTURE_FORMAT)[
+                    stateDesc(view).Format];
+                if (format)
+                {
+                    formats[slot] = format;
+                }
+            }
+        });
+        return formats;
+    };
+
+    /**
+     * @param {any} shader @param {Record<number, string>} formats @param {string} key
+     * @returns {{ translation: any, linked: { code: string, entries: any[],
+     *     unsupported: string[] } }}
+     */
+    const computeOf = (shader, formats, key)=>{
+        let variants = computeTranslations.get(shader);
+        if (!variants)
+        {
+            variants = new Map();
+            computeTranslations.set(shader, variants);
+        }
+        let translation = variants.get(key);
+        if (!translation)
+        {
+            translation = translateShader(shader.container, { uavFormats: formats });
+            variants.set(key, translation);
+        }
+        let linked = linkedComputes.get(translation);
+        if (!linked)
+        {
+            linked = linkCompute(translation);
+            linkedComputes.set(translation, linked);
+        }
+        return { translation, linked };
+    };
+
+    /**
+     * A compute pipeline over one group laid out as `entries` declare.
+     *
+     * @param {string} key @param {string} code @param {any[]} entries @param {string} label
+     * @param {string[]} [unsupported]
+     * @returns {Promise<{ gpu: any, layout: any }>}
+     */
+    const computePipelineFor = (key, code, entries, label, unsupported = [])=>{
+        let promise = pipelines.get(key);
+        if (!promise)
+        {
+            promise = (async()=>{
+                if (unsupported.length > 0)
+                {
+                    throw Object.assign(new Error('the compute shader cannot be translated:'
+                        + ` ${unsupported.join('; ')}`), { untranslatable: true });
+                }
+                const module = await backend.createShaderModule({ code, label });
+                const layout = layoutFor(entries, label);
+                const gpu = await backend.createComputePipelineAsync({
+                    label,
+                    layout: backend.createPipelineLayout({ label, bindGroupLayouts: [layout] }),
+                    compute: { module, entryPoint: 'computeMain' },
+                });
+                return { gpu, layout };
+            })();
+            pipelines.set(key, promise);
+        }
+        return promise;
+    };
+
+    /**
+     * A storage texture view of the level and slices an unordered-access
+     * view names, in the shape the shader declared; null where the texture
+     * is not stored into in that format.
+     *
+     * @param {any} view @param {{ format: string, viewDimension: string }} kind
+     */
+    const storageViewOf = (view, kind)=>{
+        const resource = resourceOf(view);
+        const backing = backingOf(resource);
+        if (!backing.storable || backing.layout.format !== kind.format)
+        {
+            return null;
+        }
+        const key = `${kind.format}:${kind.viewDimension}`;
+        let shapes = storageViews.get(view);
+        if (!shapes)
+        {
+            shapes = new Map();
+            storageViews.set(view, shapes);
+        }
+        let gpu = shapes.get(key);
+        if (!gpu)
+        {
+            const is3D = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
+            gpu = backing.texture.createView({
+                label: `d3d10:uav:${kind.format}`,
+                format: kind.format,
+                dimension: kind.viewDimension,
+                baseMipLevel: view.range.mip,
+                mipLevelCount: 1,
+                ...(is3D ? {} : { baseArrayLayer: view.range.first,
+                    arrayLayerCount: kind.viewDimension === '2d' ? 1 : view.range.count }),
+            });
+            shapes.set(key, gpu);
+        }
+        return { gpu, backing };
+    };
+
+    /**
+     * The buffer an append or counter view's hidden count is kept in on the
+     * GPU, the count a binding gave it written there first. The write
+     * renames the buffer, so dispatches recorded before it count on the
+     * one they were given.
+     *
+     * @param {any} view
+     */
+    const counterOf = view=>{
+        let counter = counterBuffers.get(view);
+        if (!counter)
+        {
+            counter = backend.createDynamicBuffer({
+                label: 'd3d10:uav-counter', size: 4,
+                usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST,
+            });
+            counterBuffers.set(view, counter);
+            view.counterSet = true;
+        }
+        if (view.counterSet)
+        {
+            view.counterSet = false;
+            const lock = counter.lock(0, 4, LockFlags.DISCARD);
+            new DataView(lock.data.buffer, lock.data.byteOffset, 4)
+                .setUint32(0, view.counter >>> 0, true);
+            counter.unlock(lock);
+        }
+        counter.markRead();
+        return counter.gpu;
+    };
+
+    /** The backings the bindings being made write, by id. @type {Set<number>} */
+    let writes = new Set();
+
+    /**
+     * A binding of what a shader writes through: the view's buffer or
+     * storage texture, the uniform describing a buffer view, or its counter.
+     * Nothing bound reads as zeros and drops what is written.
+     *
+     * @param {readonly any[]} bound @param {any} entry @param {any} fallback
+     */
+    const uavBinding = (bound, entry, fallback)=>{
+        if (entry.binding >= BINDING.UAV_COUNTER)
+        {
+            const view = bound[entry.binding - BINDING.UAV_COUNTER];
+            return { binding: entry.binding, resource: view
+                ? { buffer: counterOf(view), offset: 0, size: 4 }
+                : { buffer: fallback.writable.gpu, offset: 0, size: 4 } };
+        }
+        if (entry.binding >= BINDING.UAV_VIEW)
+        {
+            const view = bound[entry.binding - BINDING.UAV_VIEW];
+            return { binding: entry.binding, resource: view?.dimensionName === 'BUFFER'
+                ? { buffer: viewUniformOf(view, stateDesc(view)), offset: 0, size: 16 }
+                : { buffer: fallback.buffer.gpu, offset: 0, size: 16 } };
+        }
+        const view = bound[entry.binding - BINDING.UAV] ?? null;
+        if (entry.storageTexture)
+        {
+            const made = view && view.dimensionName !== 'BUFFER'
+                ? storageViewOf(view, entry.storageTexture)
+                : null;
+            if (view && !made)
+            {
+                diverge('a texture a shader writes in a format WebGPU does not store, or views'
+                    + ' in another, is written into nothing');
+            }
+            if (made)
+            {
+                made.backing.gpuDirty = true;
+                writes.add(made.backing.id);
+            }
+            return { binding: entry.binding,
+                resource: made ? made.gpu : fallback.storageTexture(entry.storageTexture) };
+        }
+        const resource = view?.dimensionName === 'BUFFER' ? resourceOf(view) : null;
+        const backing = resource ? backingOf(resource) : null;
+        if (!backing?.gpu)
+        {
+            if (view)
+            {
+                diverge('a texture bound where the shader writes a buffer is written into'
+                    + ' nothing');
+            }
+            return { binding: entry.binding,
+                resource: { buffer: fallback.writable.gpu, offset: 0, size: 16 } };
+        }
+        backing.gpu.markRead();
+        backing.gpuDirty = true;
+        writes.add(backing.id);
+        return { binding: entry.binding, resource: { buffer: backing.gpu.gpu, offset: 0,
+            size: Math.ceil(resource.desc.ByteWidth / 4) * 4 } };
+    };
+
+    /** The WGSL a storage texture of this format and shape is cleared with. */
+    const CLEAR_SHADER = (/** @type {string} */ format, /** @type {string} */ shape)=>{
+        const scalar = /uint$/.test(format) ? 'u32' : /sint$/.test(format) ? 'i32' : 'f32';
+        const flat = shape === '3d';
+        return [
+            `@group(0) @binding(0) var cleared: texture_storage_${shape.replace('-', '_')}`
+                + `<${format}, write>;`,
+            '@group(0) @binding(1) var<uniform> value: vec4<u32>;',
+            '@compute @workgroup_size(8, 8, 1)',
+            'fn computeMain(@builtin(global_invocation_id) id: vec3<u32>) {',
+            '    let size = textureDimensions(cleared);',
+            `    if (id.x >= size.x || id.y >= size.y${flat ? ' || id.z >= size.z' : ''})`
+                + ' { return; }',
+            `    textureStore(cleared, ${flat ? 'id' : 'id.xy, id.z'},`
+                + ` bitcast<vec4<${scalar}>>(value));`,
+            '}',
+        ].join('\n');
+    };
+
+    /**
+     * A clear of a storage texture's level and slices, as a dispatch over
+     * it in its turn.
+     *
+     * @param {any} view @param {any} resource @param {any} backing
+     * @param {Uint32Array} texel
+     */
+    const clearStorage = (view, resource, backing, texel)=>{
+        const is3D = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
+        const shape = is3D ? '3d' : '2d-array';
+        const format = backing.layout.format;
+        const made = storageViewOf(view, { format, viewDimension: shape });
+        if (!made)
+        {
+            return false;
+        }
+        const entries = [
+            { binding: 0, visibility: STAGE.COMPUTE,
+                storageTexture: { access: 'write-only', format, viewDimension: shape } },
+            { binding: 1, visibility: STAGE.COMPUTE, buffer: { type: 'uniform' } },
+        ];
+        const uniform = backend.createDynamicBuffer({
+            label: 'd3d10:uav-clear', size: 16,
+            usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST, keep: false,
+        });
+        const lock = uniform.lock(0, 16, LockFlags.DISCARD);
+        lock.data.set(new Uint8Array(texel.buffer));
+        uniform.unlock(lock);
+        uniform.markRead();
+        const level = backing.layout.levels[view.range.mip];
+        backing.gpuDirty = true;
+        record({
+            kind: 'dispatch',
+            what: 'an unordered-access view was not cleared',
+            ids: [backing.id],
+            pipeline: computePipelineFor(`clear:${format}:${shape}`, CLEAR_SHADER(format, shape),
+                entries, `d3d10:uav-clear:${format}`),
+            entries: [{ binding: 0, resource: made.gpu },
+                { binding: 1, resource: { buffer: uniform.gpu, offset: 0, size: 16 } }],
+            grid: [Math.ceil(level.width / 8), Math.ceil(level.height / 8),
+                is3D ? level.depth : view.range.count],
+            release: uniform,
+        });
+        return true;
+    };
+
     return {
         /**
          * The program's last reference to a resource is gone: its guest
@@ -2398,8 +2983,8 @@ export function createRenderer(services){
                 {
                     return;
                 }
-                diverge('a copy out of a render target the GPU cannot copy or read back moves'
-                    + ' the bytes the program last wrote, not what the GPU drew');
+                diverge('a copy out of a resource the GPU wrote that the GPU cannot copy or'
+                    + ' read back moves the bytes the program last wrote, not what the GPU made');
             }
             const from = subresourceBytes(source, sourceSubresource);
             const to = subresourceBytes(destination, destinationSubresource);
@@ -2440,8 +3025,7 @@ export function createRenderer(services){
          */
         copyResource(destination, source){
             const count = (source.desc.MipLevels ?? 1) * backingOf(source).layout.slices;
-            if (backend && gpuWritten(source) && source.dimension
-                !== D3D10_RESOURCE_DIMENSION.BUFFER)
+            if (backend && gpuWritten(source))
             {
                 for (let index = 0; index < count; index++)
                 {
@@ -2560,6 +3144,16 @@ export function createRenderer(services){
         },
 
         /**
+         * Whether the GPU may have written a buffer's bytes since the host's:
+         * an indirect call's arguments then come from the GPU's copy.
+         *
+         * @param {any} resource
+         */
+        gpuArguments(resource){
+            return !!backend && gpuWritten(resource) && !!backingOf(resource).gpu;
+        },
+
+        /**
          * The bytes the device keeps of a buffer, as the processor last made
          * them: what an indirect call's arguments are read from.
          *
@@ -2576,41 +3170,119 @@ export function createRenderer(services){
         },
 
         /**
-         * A compute shader's run over a grid of groups.
+         * A compute shader's run over a grid of groups, or over the grid a
+         * buffer holds at an offset, which the GPU reads.
          *
          * @param {PipelineSnapshot} pipeline
-         * @param {{ x: number, y: number, z: number }} groups
+         * @param {{ x: number, y: number, z: number } | { buffer: any, offset: number }} groups
          */
         dispatch(pipeline, groups){
-            void pipeline;
-            void groups;
-            diverge('a compute shader is not run');
+            if (!backend)
+            {
+                return;
+            }
+            const shader = pipeline.stages.cs.shader;
+            if (!shader)
+            {
+                counters.skipped.noShader++;
+                return;
+            }
+            const written = pipeline.computeViews ?? NO_VIEWS;
+            const formats = uavFormatsOf(written);
+            const key = Object.entries(formats).map(entry=>entry.join(':')).join(',');
+            const { linked } = computeOf(shader, formats, key);
+            writes = new Set();
+            const entries = bindingsFor(pipeline.stages.cs, linked.entries, written);
+            const indirect = 'buffer' in groups ? backingOf(groups.buffer) : null;
+            indirect?.gpu.markRead();
+            counters.dispatches++;
+            record({
+                kind: 'dispatch',
+                what: 'a dispatch was skipped',
+                ids: [...writes],
+                pipeline: computePipelineFor(`cs:${idOf(shader)}|${key}`, linked.code,
+                    linked.entries, `d3d10:cs#${idOf(shader)}`, linked.unsupported),
+                entries,
+                grid: indirect
+                    ? { buffer: indirect.gpu.gpu, offset: /** @type {any} */ (groups).offset }
+                    : ['x', 'y', 'z'].map(axis=>/** @type {any} */ (groups)[axis]),
+            });
         },
 
         /**
+         * A clear of everything an unordered-access view reaches, in its
+         * turn: a buffer's elements written as the bytes the clear makes of
+         * the values, a texture's by a dispatch over it.
+         *
          * @param {any} view an unordered-access view
          * @param {number[]} values @param {boolean} float
          */
         clearUnorderedAccessView(view, values, float){
-            void view;
-            void values;
-            void float;
-            diverge('an unordered-access view is not cleared');
+            if (!backend)
+            {
+                return;
+            }
+            const resource = resourceOf(view);
+            const backing = backingOf(resource);
+            const desc = stateDesc(view);
+            if (view.dimensionName === 'BUFFER')
+            {
+                const words = (desc.Flags & D3D11_BUFFER_UAV_FLAG.RAW) !== 0
+                    || desc.Format === DXGI_FORMAT.UNKNOWN;
+                const element = words
+                    ? float ? null : new Uint8Array(new Uint32Array([values[0] >>> 0]).buffer)
+                    : clearElement(desc.Format, values, float);
+                if (!element)
+                {
+                    diverge(`a ${float ? 'Float' : 'Uint'} clear of a buffer view in format`
+                        + ` ${desc.Format} writes nothing`);
+                    return;
+                }
+                const start = desc.FirstElement * desc.elementBytes;
+                const end = start + desc.NumElements * desc.elementBytes;
+                for (let at = start; at < end; at += element.length)
+                {
+                    backing.bytes.set(element.subarray(0, Math.min(element.length, end - at)), at);
+                }
+                upload(resource, 0, LockFlags.NONE, null, { start, end });
+                return;
+            }
+            const texel = clearTexel(desc.Format, values, float);
+            if (!texel || !backing.texture || !clearStorage(view, resource, backing, texel))
+            {
+                diverge(`a ${float ? 'Float' : 'Uint'} clear of a texture view in format`
+                    + ` ${desc.Format} writes nothing`);
+            }
         },
 
-        /** @param {any} destination @param {number} offset @param {any} view */
+        /**
+         * An append or counter view's hidden count, copied by the GPU into a
+         * buffer at an offset.
+         *
+         * @param {any} destination @param {number} offset @param {any} view
+         */
         copyStructureCount(destination, offset, view){
-            void destination;
-            void offset;
-            void view;
-            diverge('a structure count is not copied');
+            if (!backend)
+            {
+                return;
+            }
+            const to = backingOf(destination);
+            if (!to.gpu || (offset & 3) !== 0)
+            {
+                diverge('a structure count copied into a buffer the GPU does not keep, or to an'
+                    + ' unaligned offset, is not copied');
+                return;
+            }
+            record({ kind: 'copyBuffer', source: counterOf(view), sourceOffset: 0,
+                destination: to.gpu.gpu, destinationOffset: offset, size: 4 });
+            to.gpuDirty = true;
         },
 
         /**
          * @param {PipelineSnapshot} pipeline
          * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
          *           indexCount?: number, startIndex?: number, baseVertex?: number,
-         *           startInstance?: number }} draw
+         *           startInstance?: number, indirect?: { buffer: any, offset: number } }} draw
          */
         draw(pipeline, draw){
             if (!backend)
@@ -2620,7 +3292,7 @@ export function createRenderer(services){
             // Every bound render target, by slot, and the depth target: the
             // first of them sizes the pass, and a draw with a depth target and
             // no colour one draws depth alone.
-            const depth = targetOf(pipeline.depthStencilView);
+            let depth = targetOf(pipeline.depthStencilView);
             const bound = pipeline.renderTargets.map(view=>targetOf(view));
             const sizing = bound.find(entry=>entry) ?? depth;
             if (!sizing)
@@ -2642,18 +3314,57 @@ export function createRenderer(services){
             {
                 colour.pop();
             }
-            const target = colour.find(entry=>entry) ?? null;
+            // Direct3D draws where the targets and the depth buffer overlap,
+            // whatever their sizes; WebGPU takes attachments of one size. A
+            // depth buffer the draw neither tests nor writes is left out; one
+            // it does is drawn with stand-ins of the depth buffer's size for
+            // the colour targets, their overlap copied in and back out.
+            /** @type {any[] | null} */
+            let standIns = null;
+            const first = colour.find(entry=>entry) ?? null;
+            if (depth && first && (depth.surface.width !== first.surface.width
+                || depth.surface.height !== first.surface.height))
+            {
+                const tests = pipeline.depthStencilState
+                    ? stateDesc(pipeline.depthStencilState)
+                    : DEFAULT_DEPTH_STENCIL;
+                if (!tests.DepthEnable && !tests.StencilEnable)
+                {
+                    depth = null;
+                }
+                else if (first.sampleCount > 1)
+                {
+                    diverge('a multisampled draw with a depth buffer of another size than its'
+                        + ' targets is skipped');
+                    return;
+                }
+                else
+                {
+                    standIns = colour.map((entry, slot)=>entry && standInOf(entry, slot,
+                        /** @type {any} */ (depth)));
+                }
+            }
+            const target = (standIns ?? colour).find(entry=>entry) ?? null;
             const viewport = pipeline.viewports[0];
             if (!viewport || !(viewport.Width > 0) || !(viewport.Height > 0))
             {
                 counters.skipped.noViewport++;
                 return;
             }
+            // A vertex shader's bytecode made a geometry shader to stream out
+            // is no stage: the draw goes on without it, and rasterizes
+            // nothing where no stream is rasterized.
+            const streaming = pipeline.stages.gs?.shader?.passThrough === true;
+            if (streaming && pipeline.stages.gs.shader.rasterizedStream
+                === SO_NO_RASTERIZED_STREAM)
+            {
+                return;
+            }
             // WebGPU has no geometry stage and no tessellator: a draw through
             // one is skipped, never drawn as if the stage were not there.
             const absent = [['gs', 'geometry'], ['hs', 'hull'], ['ds', 'domain']]
                 .find(([stage])=>pipeline.stages[/** @type {'gs' | 'hs' | 'ds'} */ (stage)]
-                    ?.shader);
+                    ?.shader && !(stage === 'gs' && streaming));
             if (absent)
             {
                 counters.skipped.stage++;
@@ -2698,9 +3409,20 @@ export function createRenderer(services){
             const rasterizer = pipeline.rasterizerState
                 ? stateDesc(pipeline.rasterizerState)
                 : DEFAULT_RASTERIZER;
-            const scissor = rasterizer.ScissorEnable && pipeline.scissorRects[0]
+            let scissor = rasterizer.ScissorEnable && pipeline.scissorRects[0]
                 ? pipeline.scissorRects[0]
                 : null;
+            if (standIns && first && depth)
+            {
+                // Nothing is drawn past the overlap, which is what is copied back.
+                const right = Math.min(first.surface.width, depth.surface.width);
+                const bottom = Math.min(first.surface.height, depth.surface.height);
+                scissor = scissor
+                    ? { left: scissor.left, top: scissor.top,
+                        right: Math.min(scissor.right, right),
+                        bottom: Math.min(scissor.bottom, bottom) }
+                    : { left: 0, top: 0, right, bottom };
+            }
             const program = linkProgram(translationOf(state.vertexShader, state.vsMultisampled),
                 translationOf(state.pixelShader, state.psMultisampled));
             const vertexBuffers = pipeline.vertexBuffers.map((buffer, slot)=>{
@@ -2720,6 +3442,14 @@ export function createRenderer(services){
             {
                 indexBacking.gpu.markRead();
             }
+            // Counts the GPU reads from a buffer it wrote: the instances then
+            // start where the arguments say, which needs the device feature
+            // that lets them.
+            const argumentBuffer = draw.indirect ? backingOf(draw.indirect.buffer) : null;
+            argumentBuffer?.gpu.markRead();
+            const indirect = argumentBuffer
+                ? { gpu: argumentBuffer.gpu.gpu, offset: /** @type {any} */ (draw.indirect).offset }
+                : null;
             counters.draws++;
             for (const counter of occluding)
             {
@@ -2729,15 +3459,18 @@ export function createRenderer(services){
                     counter.outstanding++;
                 }
             }
+            const copiedOut = standIns ? standInsIn(colour, standIns,
+                /** @type {any} */ (depth)) : null;
             record({
                 kind: 'draw',
                 pipeline: pipelineFor(state),
                 target,
-                targets: colour,
+                targets: standIns ?? colour,
                 depth,
                 groups: [
                     bindingsFor(pipeline.stages.vs, program.groups[0]),
-                    bindingsFor(pipeline.stages.ps, program.groups[1]),
+                    bindingsFor(pipeline.stages.ps, program.groups[1],
+                        pipeline.pixelViews ?? NO_VIEWS),
                 ],
                 vertexBuffers,
                 indexBuffer: indexBacking && indexBacking.gpu && indexFormat
@@ -2768,7 +3501,13 @@ export function createRenderer(services){
                 indexCount: draw.indexCount ?? null,
                 startIndex: draw.startIndex ?? 0,
                 baseVertex: draw.baseVertex ?? 0,
+                indirect,
             });
+            if (copiedOut)
+            {
+                copiedOut.forEach(record);
+                lastStandIns = { copies: copiedOut, key: copiedOut.map(copy=>copy.key).join('|') };
+            }
         },
 
         /**
@@ -2991,6 +3730,7 @@ export function createRenderer(services){
                 frames: counters.frames,
                 draws: counters.draws,
                 clears: counters.clears,
+                dispatches: counters.dispatches,
                 skipped: { ...counters.skipped },
                 failures: [...counters.failures],
                 pipelines: pipelines.size,
@@ -3028,7 +3768,7 @@ export function createRenderer(services){
             // were, rather than a map waiting for ever.
             for (const command of recorded)
             {
-                if (command.kind === 'readback')
+                if (command.kind === 'readback' || command.kind === 'readbackBuffer')
                 {
                     command.deliver(null);
                 }
@@ -3176,6 +3916,35 @@ export function createRenderer(services){
                     readers.push({ read: frame.snapshot(command.surface), command });
                     continue;
                 }
+                if (command.kind === 'readbackBuffer')
+                {
+                    closePass();
+                    readers.push({ read: frame.copyOut(command.ranges), command });
+                    continue;
+                }
+                if (command.kind === 'copyBuffer')
+                {
+                    closePass();
+                    frame.copyBuffer(command.source, command.sourceOffset, command.destination,
+                        command.destinationOffset, command.size);
+                    continue;
+                }
+                if (command.kind === 'dispatch')
+                {
+                    command.ids.forEach(settleClears);
+                    const built = pipelinesNeeded[position];
+                    if (built.status === 'rejected')
+                    {
+                        counters.skipped[built.reason?.untranslatable ? 'untranslatable'
+                            : 'pipeline']++;
+                        diverge(`${command.what}: ${built.reason && built.reason.message
+                            || built.reason}`);
+                        continue;
+                    }
+                    frame.dispatch({ pipeline: built.value.gpu, layout: built.value.layout,
+                        entries: command.entries, grid: command.grid, label: 'd3d10:cs' });
+                    continue;
+                }
                 if (command.kind === 'blit')
                 {
                     command.ids.forEach(settleClears);
@@ -3283,7 +4052,12 @@ export function createRenderer(services){
                         command.indexBuffer.offset);
                 }
                 const slot = command.occlusion ? current.beginOcclusionQuery() : null;
-                if (command.indexCount !== null)
+                if (command.indirect)
+                {
+                    current.drawIndirect(command.indirect.gpu, command.indirect.offset,
+                        command.indexCount !== null);
+                }
+                else if (command.indexCount !== null)
                 {
                     current.drawIndexed(command.indexCount, command.instanceCount,
                         command.startIndex, command.baseVertex, 0);
@@ -3339,6 +4113,13 @@ export function createRenderer(services){
             // One object owns the encoder and one call releases it; a throw
             // above must not leave the frame open for every present after.
             frame.end();
+            for (const command of recorded)
+            {
+                if (command.release)
+                {
+                    backend.releaseDynamicBuffer(command.release);
+                }
+            }
         }
         for (const reader of readers)
         {

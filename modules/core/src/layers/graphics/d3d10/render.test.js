@@ -925,6 +925,50 @@ test('a depth stencil view attaches to the pass and shapes the pipeline', async(
     });
 });
 
+test('a depth buffer of another size than the targets is drawn with stand-ins of its size, the'
+    + ' overlap copied in once and back once; one the draw does not test is left out',
+async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ resource?: any }} */
+    const depth = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2X2, Width: 16, Height: 16, Format: DXGI_FORMAT.D24_UNORM_S8_UINT,
+        BindFlags: D3D10_BIND.DEPTH_STENCIL,
+    }, null, depth), S_OK);
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateDepthStencilView(depth.resource, null, view), S_OK);
+    device.OMSetRenderTargets([h.renderTargetView], view.view);
+    device.Draw(3, 0);
+    device.Draw(3, 0);
+    /** @type {{ state?: any }} */
+    const untested = {};
+    assert.equal(device.CreateDepthStencilState({
+        DepthEnable: false, DepthWriteMask: 0, DepthFunc: 1, StencilEnable: false,
+        StencilReadMask: 0, StencilWriteMask: 0,
+        FrontFace: { StencilFailOp: 1, StencilDepthFailOp: 1, StencilPassOp: 1, StencilFunc: 1 },
+        BackFace: { StencilFailOp: 1, StencilDepthFailOp: 1, StencilPassOp: 1, StencilFunc: 1 },
+    }, untested), S_OK);
+    device.OMSetDepthStencilState(untested.state, 0);
+    device.Draw(3, 0);
+    await h.present();
+    assert.deepEqual(h.gpu.errors, []);
+    assert.equal(h.gpu.count('draw'), 3);
+    const copies = h.gpu.of('copyTextureToTexture');
+    assert.equal(copies.length, 2, 'in before the first draw and out after the second');
+    assert.deepEqual(copies[0].size, { width: 8, height: 8, depthOrArrayLayers: 1 });
+    const standIn = copies[0].destination.texture;
+    assert.deepEqual(standIn.descriptor.size, { width: 16, height: 16, depthOrArrayLayers: 1 });
+    assert.equal(copies[1].source.texture, standIn);
+    const [drawn, untestedPass] = h.gpu.of('beginRenderPass').map(call=>call.descriptor);
+    assert.equal(drawn.colorAttachments[0].view.texture, standIn);
+    assert.ok(drawn.depthStencilAttachment);
+    assert.ok(h.gpu.of('setScissorRect').some(call=>call.rect.join() === '0,0,8,8'));
+    assert.equal(untestedPass.depthStencilAttachment, undefined, 'no depth where none is tested');
+});
+
 // --- resource traffic ---
 
 test('UpdateSubresource lands a box at its offset and uploads that box alone', ()=>{
@@ -1857,9 +1901,26 @@ test('the unsupported calls say what they did not do', ()=>{
     assert.ok(h.divergences.some(line=>line.includes('DrawAuto')));
     /** @type {{ shader?: any }} */
     const shader = {};
-    assert.equal(device.CreateGeometryShaderWithStreamOutput(new Uint8Array(0), [], 0, shader),
-        0x80004001);
+    assert.equal(device.CreateGeometryShaderWithStreamOutput(new Uint8Array(0), [], null, 0,
+        shader), 0x80070057);
     assert.equal(shader.shader, null);
+});
+
+test('a vertex shader made a geometry shader to stream out is no stage: the draw goes on,'
+    + ' and says it streams nothing out', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const gs = {};
+    assert.equal(device.CreateGeometryShaderWithStreamOutput(passThroughVertexShader(),
+        [{ Stream: 0, SemanticName: 'SV_POSITION', SemanticIndex: 0, StartComponent: 0,
+            ComponentCount: 4, OutputSlot: 0 }], [16], 0, gs), S_OK);
+    device.GSSetShader(gs.shader);
+    device.Draw(3, 0);
+    await h.present();
+    assert.equal(h.gpu.count('draw'), 1);
+    assert.ok(diverged(h, 'streams nothing out'), h.divergences.join('\n'));
 });
 
 test('a shader with an instruction that has no translation refuses its draws by name',

@@ -740,7 +740,9 @@ always has them, so a program checks nothing before relying on them: refusing th
 bind and release -- Wine's d3d10core and d3d11 tests crash there, hiding every check after. A
 draw through the missing stage would put the program's points and triangles where the stage
 expands, culls or routes them, so it is not drawn at all; the renderer counts it
-(`skipped.stage`) and says so once. *2026-10-31.*
+(`skipped.stage`) and says so once. A geometry shader with stream output is made in the same
+way, its declaration checked as Windows checks it; one made of a vertex shader's bytecode, which
+only streams out, is no stage, so its draws are drawn. *2026-10-31.*
 
 ## B. From measured optimisation work
 

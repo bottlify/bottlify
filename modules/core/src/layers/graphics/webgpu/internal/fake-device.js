@@ -249,6 +249,17 @@ export function createFakeDevice(options = {}){
         // from the one above it is not this.
         const written = [...(descriptor.colorAttachments ?? []), descriptor.depthStencilAttachment]
             .map(attachment=>attachment?.view).filter(view=>view?.texture);
+        // Every attachment one size, as WebGPU refuses the frame otherwise.
+        const sizes = written.filter(view=>view.texture.descriptor?.size).map(view=>{
+            const { width, height } = extentOf(view.texture.descriptor.size);
+            const level = view.viewDescriptor?.baseMipLevel ?? 0;
+            return `${Math.max(1, width >> level)}x${Math.max(1, height >> level)}`;
+        });
+        if (new Set(sizes).size > 1 && !encoder.invalid)
+        {
+            encoder.invalid = true;
+            refuse(`Attachments of different sizes (${sizes.join(', ')}) in one pass.`);
+        }
         for (const attachment of descriptor.colorAttachments ?? [])
         {
             // A location left empty is a null, as WebGPU takes it.
@@ -371,6 +382,16 @@ export function createFakeDevice(options = {}){
             slotsSet();
             record('drawIndexed', { args });
         };
+        pass.drawIndirect = (/** @type {any} */ buffer, /** @type {number} */ offset)=>{
+            stats.draws++;
+            slotsSet();
+            record('drawIndirect', { buffer, offset });
+        };
+        pass.drawIndexedIndirect = (/** @type {any} */ buffer, /** @type {number} */ offset)=>{
+            stats.draws++;
+            slotsSet();
+            record('drawIndexedIndirect', { buffer, offset });
+        };
         pass.end = ()=>record('endPass', {});
         calls.push({ op: 'beginRenderPass', pass, descriptor });
         return pass;
@@ -390,6 +411,31 @@ export function createFakeDevice(options = {}){
         encoder.copyBufferToTexture = (source, destination, size)=>{
             deferred.push(()=>moveTexels(source, destination, size));
             calls.push({ op: 'copyBufferToTexture', encoder, source, destination, size });
+        };
+        /** A compute pass: its pipeline, its group, and its grid, recorded. @param {any} label */
+        encoder.beginComputePass = label=>{
+            const pass = object('computePass', { descriptor: label });
+            /** @type {any} */
+            let pipeline = null;
+            /** @type {any} */
+            let group = null;
+            pass.setPipeline = (/** @type {any} */ next)=>{
+                pipeline = next;
+            };
+            pass.setBindGroup = (/** @type {number} */ index, /** @type {any} */ next)=>{
+                group = next;
+                void index;
+            };
+            pass.dispatchWorkgroups = (/** @type {number[]} */ ...grid)=>{
+                calls.push({ op: 'dispatchWorkgroups', encoder, pipeline, group, grid });
+            };
+            /** @param {any} buffer @param {number} offset */
+            pass.dispatchWorkgroupsIndirect = (buffer, offset)=>{
+                calls.push({ op: 'dispatchWorkgroups', encoder, pipeline, group,
+                    indirect: { buffer, offset } });
+            };
+            pass.end = ()=>{};
+            return pass;
         };
         /**
          * @param {any} source @param {number} sourceOffset @param {any} destination
@@ -528,6 +574,12 @@ export function createFakeDevice(options = {}){
             return group;
         },
         createRenderPipeline: recorder('createRenderPipeline'),
+        /** @param {any} descriptor */
+        createComputePipelineAsync: async descriptor=>{
+            const made = object('createComputePipeline', { descriptor });
+            calls.push({ op: 'createComputePipeline', createComputePipeline: made, descriptor });
+            return made;
+        },
         // Recorded under the same name, so a test counts pipelines one way.
         // `options.refusePipeline` names the validation message a descriptor
         // is refused with, for a test of a build that fails;

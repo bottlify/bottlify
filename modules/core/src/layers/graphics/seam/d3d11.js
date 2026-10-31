@@ -264,6 +264,8 @@ const STAGE_SHADERS = Object.freeze({
  * @property {Record<string, Function>} privateDataMethods
  * @property {(address: number, desc: any, dimension: number) => any} readInitialData
  * @property {(address: number) => any} readTexture2DDesc
+ * @property {(at: number, count: number, streamed: boolean) =>
+ *     import('../d3d10/streamout.js').StreamOutputEntry[] | null} readStreamOutput
  * @property {(address: number) => any} readTexture1DDesc
  * @property {(address: number) => any} readTexture3DDesc
  * @property {(texture: any, out: number) => void} writeTextureDesc
@@ -627,9 +629,19 @@ export function createDirect3D11Seam(describe, kit, guests){
         CreateGeometryShader: shaderCreate('CreateGeometryShader', 'gs',
             IID.ID3D11GeometryShader),
         /** @param {any} device @param {number[]} args */
-        CreateGeometryShaderWithStreamOutput: (device, args)=>{
-            const out = args[8];
-            return failed(out, device.CreateGeometryShaderWithStreamOutput(null, [], 0, {}));
+        CreateGeometryShaderWithStreamOutput: (device,
+            [code, length, declarationAt, count, stridesAt, strideCount, rasterizedStream, ,
+                out])=>
+        {
+            /** @type {{ shader?: any }} */
+            const held = {};
+            const strides = isNull(stridesAt) ? null : Array.from({ length: strideCount >>> 0 },
+                (_, index)=>k().fields.readU32(stridesAt + index * 4));
+            const hr = device.CreateGeometryShaderWithStreamOutput(bytecodeAt(code, length),
+                k().readStreamOutput(declarationAt, count, true), strides, rasterizedStream >>> 0,
+                held);
+            return hr === S_OK ? k().handBack(held.shader, k().lists.gs, IID.ID3D11GeometryShader,
+                out) : failed(out, hr);
         },
         CreatePixelShader: shaderCreate('CreatePixelShader', 'ps', IID.ID3D11PixelShader),
         CreateHullShader: shaderCreate('CreateHullShader', 'hs', IID.ID3D11HullShader),

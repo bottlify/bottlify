@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import { MODIFIER, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE } from './sm4.js';
 import {
-    BINDING, BUFFER_VIEW_FORMATS, HELPERS, STAGE, linkProgram, translateShader,
+    BINDING, BUFFER_VIEW_FORMATS, HELPERS, STAGE, linkCompute, linkProgram, translateShader,
 } from './wgsl.js';
 import { DXGI_FORMAT } from './constants.js';
 import {
@@ -35,6 +35,8 @@ import {
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
     solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
+    atomicIadd, dclThreadGroup, dclTgsmRaw, dclUavRaw, dclUavStructured, g, immAtomicImax, ldRaw,
+    storeRaw, storeStructured, sync, u, vThreadID, vThreadIDInGroupFlattened,
 } from './shader-fixtures.js';
 
 /**
@@ -842,4 +844,47 @@ test('two semantics packed into one register pass as one varying, which the pixe
     assert.equal(linked.vertex.match(/@location\(0\) o1: vec4<f32>,/g)?.length, 1);
     assert.equal(linked.vertex.match(/@location\(1\)/g), null, 'no second varying');
     assert.equal(linked.fragment.match(/@location\(0\) v1: vec4<f32>,/g)?.length, 1);
+});
+
+test('a compute shader is a module of its own: its group\'s size, its thread ids, the views it'
+    + ' writes as storage, shared memory, and an atomic made on what it is made on', ()=>{
+    const cs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.COMPUTE,
+        major: 5,
+        instructions: [
+            dclThreadGroup(8, 4, 1),
+            dclUavRaw(0),
+            dclUavStructured(1, 8),
+            dclTgsmRaw(0, 64),
+            dclTemps(2),
+            ishl(r(0, 'x'), vThreadID('x'), lu(2)),
+            storeRaw(u(0, 'x'), r(0, 'x'), vThreadID('x')),
+            ldRaw(r(1, 'xy'), r(0, 'x'), u(0, 'xy')),
+            storeStructured(u(1, 'xy'), vThreadID('x'), lu(0), r(1, 'xyxx')),
+            storeRaw(g(0, 'x'), lu(0), vThreadIDInGroupFlattened('x')),
+            sync(0x3),
+            atomicIadd(u(0, 'x'), lu(0), lu(1)),
+            immAtomicImax(r(1, 'x'), u(1, 'x'), vThreadID('xy'), lu(5)),
+            ret(),
+        ],
+    }))));
+    assert.deepEqual(cs.unsupported, []);
+    assert.deepEqual(cs.threadGroup, [8, 4, 1]);
+    assert.deepEqual(cs.uavs.map(uav=>[uav.slot, uav.structure, uav.stride, uav.atomic,
+        uav.loaded]), [[0, 'raw', 0, true, true], [1, 'structured', 8, true, false]]);
+    const linked = linkCompute(cs);
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.code, /@compute @workgroup_size\(8, 4, 1\)/);
+    assert.match(linked.code, /var<storage, read_write> u0: array<atomic<u32>>;/);
+    assert.match(linked.code, /var<workgroup> g0: array<u32, 16>;/);
+    assert.match(linked.code, /fn u1_atomic_imax\(i: u32, value: u32, compare: u32\) -> u32/);
+    assert.match(linked.code, /workgroupBarrier\(\);/);
+    // Structure 1 of eight bytes, member at byte 0: dword (index * 8 + 0) / 4.
+    assert.match(linked.code, /\* 8u \+ /);
+    assert.deepEqual(linked.entries.map(entry=>[entry.binding, entry.visibility,
+        entry.buffer?.type]), [
+        [BINDING.UAV, STAGE.COMPUTE, 'storage'], [BINDING.UAV_VIEW, STAGE.COMPUTE, 'uniform'],
+        [BINDING.UAV + 1, STAGE.COMPUTE, 'storage'],
+        [BINDING.UAV_VIEW + 1, STAGE.COMPUTE, 'uniform'],
+    ]);
 });

@@ -39,6 +39,7 @@ import {
  * @property {number} size            How big the entry is, which a too-small caller learns.
  * @property {Uint8Array | null} [data]
  * @property {any} [object]           An interface entry, with a reference taken for the caller.
+ * @property {number} [pointer]        The interface pointer it was stored through, or 0.
  */
 
 /**
@@ -53,7 +54,10 @@ import {
  * reference and reports the size of a pointer.
  */
 export function createPrivateData(){
-    /** @type {Map<string, { data: Uint8Array | null, object: any, isInterface: boolean }>} */
+    /**
+     * @type {Map<string, { data: Uint8Array | null, object: any, isInterface: boolean,
+     *     pointer?: number }>}
+     */
     const entries = new Map();
 
     /** @param {string} guid */
@@ -88,15 +92,18 @@ export function createPrivateData(){
         /**
          * @param {string} guid
          * @param {any} object  Null stores a null interface rather than clearing.
+         * @param {number} [pointer]  the interface pointer the program gave, which a
+         *     get hands back as it was: an object has one per interface
          * @returns {number}
          */
-        SetPrivateDataInterface(guid, object){
+        SetPrivateDataInterface(guid, object, pointer = 0){
             if (object)
             {
                 object.addRef();
             }
             drop(guid);
-            entries.set(guid, { data: null, object: object ?? null, isInterface: true });
+            entries.set(guid, { data: null, object: object ?? null, isInterface: true,
+                pointer });
             return S_OK;
         },
 
@@ -130,7 +137,7 @@ export function createPrivateData(){
                 {
                     held.object.addRef();
                 }
-                return { hr: S_OK, size, object: held.object };
+                return { hr: S_OK, size, object: held.object, pointer: held.pointer ?? 0 };
             }
             return { hr: S_OK, size, data: held.data };
         },

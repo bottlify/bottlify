@@ -746,7 +746,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
 
     /** @param {any} object @param {number[]} args */
     const setPrivateDataInterface = (object, [guid, pointer])=>object.SetPrivateDataInterface(
-        readGuid(memory, guid), publisher.objectAt(pointer));
+        readGuid(memory, guid), publisher.objectAt(pointer), pointer >>> 0);
 
     /**
      * An interface entry is answered as the pointer of a published IUnknown;
@@ -773,8 +773,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         }
         else
         {
+            // The pointer the program stored, through whichever interface it
+            // was; one stored before the pointer was kept, as IUnknown.
             fields.writeU32(data, answer.object
-                ? publisher.publish(answer.object, [], IID.IUnknown)
+                ? answer.pointer || publisher.publish(answer.object, [], IID.IUnknown)
                 : 0);
         }
         return answer.hr;
@@ -1977,6 +1979,36 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         return elements;
     };
 
+    /**
+     * A stream-output declaration: null where the program gave none, and
+     * empty where it gave a list of no entries or a count with no list.
+     * Direct3D 10's entry has no stream; 11's begins with one.
+     *
+     * @param {number} at @param {number} count @param {boolean} streamed
+     * @returns {import('../d3d10/streamout.js').StreamOutputEntry[] | null}
+     */
+    const readStreamOutput = (at, count, streamed)=>{
+        if ((at >>> 0) === 0 || (count >>> 0) === 0)
+        {
+            return (at >>> 0) === 0 && (count >>> 0) === 0 ? null : [];
+        }
+        const size = streamed ? 16 : 12;
+        return Array.from({ length: count >>> 0 }, (_, index)=>{
+            const entry = (at >>> 0) + index * size;
+            const named = streamed ? entry + 4 : entry;
+            const name = fields.readU32(named);
+            const bytes = fields.readU32(named + 8);
+            return {
+                Stream: streamed ? fields.readU32(entry) : 0,
+                SemanticName: name === 0 ? null : readCString(name),
+                SemanticIndex: fields.readU32(named + 4),
+                StartComponent: bytes & 0xff,
+                ComponentCount: (bytes >>> 8) & 0xff,
+                OutputSlot: (bytes >>> 16) & 0xff,
+            };
+        });
+    };
+
     /** @param {number} address */
     const readCString = address=>{
         let text = '';
@@ -2672,12 +2704,25 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             CreateGeometryShader: shaderCreate('CreateGeometryShader', geometryShaderInterfaces,
                 IID.ID3D10GeometryShader),
             /** @param {any} device @param {number[]} args */
-            CreateGeometryShaderWithStreamOutput: (device, [, , , , , out])=>{
-                if ((out >>> 0) !== 0)
+            CreateGeometryShaderWithStreamOutput: (device,
+                [code, length, declarationAt, count, stride, out])=>
+            {
+                /** @type {{ shader?: any }} */
+                const held = {};
+                const hr = device.CreateGeometryShaderWithStreamOutput(
+                    (code >>> 0) === 0 ? null : memory.readMemory(code >>> 0, length >>> 0),
+                    readStreamOutput(declarationAt, count, false),
+                    stride >>> 0 ? [stride >>> 0] : null, 0, held);
+                if (hr !== S_OK)
                 {
-                    fields.writeU32(out, 0);
+                    if ((out >>> 0) !== 0)
+                    {
+                        fields.writeU32(out, 0);
+                    }
+                    return hr;
                 }
-                return device.CreateGeometryShaderWithStreamOutput(null, [], 0, {});
+                return handBack(held.shader, geometryShaderInterfaces, IID.ID3D10GeometryShader,
+                    out);
             },
             CreatePixelShader: shaderCreate('CreatePixelShader', pixelShaderInterfaces,
                 IID.ID3D10PixelShader),
@@ -2917,7 +2962,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     /** @type {import('./d3d11.js').Direct3D11Kit} */
     const kit = {
         publisher, memory, fields, handBack, writeObjects, readObjects, readDwords, readFloats,
-        privateDataMethods, readInitialData, readTexture2DDesc,
+        privateDataMethods, readInitialData, readTexture2DDesc, readStreamOutput,
         readTexture1DDesc: address=>fields.readStruct(address, D3D10_TEXTURE1D_DESC),
         readTexture3DDesc: address=>fields.readStruct(address, D3D10_TEXTURE3D_DESC),
         writeTextureDesc: (texture, out)=>{

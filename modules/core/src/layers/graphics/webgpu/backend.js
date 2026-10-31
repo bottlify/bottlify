@@ -782,6 +782,24 @@ export function createBackend(options){
                 }
             },
 
+            /**
+             * A draw whose counts the GPU reads from a buffer at an offset:
+             * four words, five for an indexed one.
+             *
+             * @param {any} buffer @param {number} offset @param {boolean} indexed
+             */
+            drawIndirect(buffer, offset, indexed){
+                profiler.countDraw();
+                if (indexed)
+                {
+                    raw.drawIndexedIndirect(buffer, offset);
+                }
+                else
+                {
+                    raw.drawIndirect(buffer, offset);
+                }
+            },
+
             end(){
                 raw.end();
             },
@@ -946,6 +964,22 @@ export function createBackend(options){
             return device.createRenderPipelineAsync(descriptor);
         },
 
+        /**
+         * A compute pipeline, resolved once valid and rejected with the
+         * validation message otherwise, on an explicit layout as a render
+         * pipeline is.
+         *
+         * @param {any} descriptor
+         */
+        createComputePipelineAsync(descriptor){
+            if (!descriptor.layout || typeof descriptor.layout !== 'object')
+            {
+                return Promise.reject(
+                    new Error('A compute pipeline needs an explicit pipeline layout'));
+            }
+            return /** @type {any} */ (device).createComputePipelineAsync(descriptor);
+        },
+
         /** @param {{ code: string, label?: string }} request */
         createShaderModule(request){
             return shaders.build(request);
@@ -1046,6 +1080,34 @@ export function createBackend(options){
                 copyTexture(source, destination, size){
                     closeCurrentPass();
                     encoder.copyTextureToTexture(source, destination, size);
+                },
+
+                /**
+                 * A compute shader run over a grid of thread groups, in a
+                 * compute pass of its own between the frame's render passes,
+                 * its one group bound as the shader declared it.
+                 *
+                 * The grid is three numbers, or the buffer and offset the GPU
+                 * reads three words of it from.
+                 *
+                 * @param {{ pipeline: any, layout: any, entries: any[], label?: string,
+                 *     grid: number[] | { buffer: any, offset: number } }} work
+                 */
+                dispatch(work){
+                    closeCurrentPass();
+                    const pass = /** @type {any} */ (encoder)
+                        .beginComputePass({ label: work.label ?? 'dispatch' });
+                    pass.setPipeline(work.pipeline);
+                    pass.setBindGroup(0, cache.get(work.layout, work.entries, work.label));
+                    if (Array.isArray(work.grid))
+                    {
+                        pass.dispatchWorkgroups(work.grid[0], work.grid[1], work.grid[2]);
+                    }
+                    else
+                    {
+                        pass.dispatchWorkgroupsIndirect(work.grid.buffer, work.grid.offset);
+                    }
+                    pass.end();
                 },
 
                 /**

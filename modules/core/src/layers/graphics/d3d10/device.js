@@ -39,9 +39,9 @@ import {
     D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK, D3D10_DRIVER_TYPE,
     D3D10_DRIVER_TYPES, D3D10_LIMITS, D3D10_QUERY,
     D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_1_SDK_VERSION,
-    D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS, D3D11_RESOURCE_MISC, D3D11_TWIN,
+    D3D10_USAGE, D3D11_RESOURCE_MISC, D3D11_TWIN,
     DXGI_ERROR_INVALID_CALL, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
-    E_INVALIDARG, E_NOTIMPL, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
+    E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
 import { createFactory } from './dxgi.js';
@@ -52,6 +52,7 @@ import {
 import { createDrawStatistics, createQueryObject } from './queries.js';
 import { D3D10_COMMANDS } from './commands.js';
 import { createRenderer } from './render.js';
+import { validStreamOutput } from './streamout.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
 } from './resources.js';
@@ -826,12 +827,14 @@ export function createDevice(options = {}){
      * @param {string} iid
      * @param {number} kind  A SHADER_KIND.
      * @param {{ shader?: any }} out
-     * @param {Uint8Array} bytecode
+     * @param {Uint8Array | null} bytecode
+     * @param {any} [made]  the container, parsed already
      * @returns {number}
      */
-    const createShader = (iid, kind, out, bytecode)=>{
+    const createShader = (iid, kind, out, bytecode, made = null)=>{
         out.shader = null;
-        const container = bytecode ? parseShaderOfKind(bytecode, kind, shaderModel) : null;
+        const container = made ?? (bytecode ? parseShaderOfKind(bytecode, kind, shaderModel)
+            : null);
         if (!container || (kind >= SHADER_KIND.HULL
             && /** @type {any} */ (container.shader).major < 5))
         {
@@ -839,6 +842,9 @@ export function createDevice(options = {}){
         }
         out.shader = attachCom({
             container,
+            // A geometry shader made of a vertex shader's bytecode to stream
+            // its vertices out: no stage of its own.
+            passThrough: /** @type {any} */ (container.shader).kind === SHADER_KIND.VERTEX,
             /** @param {{ device?: any }} target */
             GetDevice(target){
                 retainDevice();
@@ -916,7 +922,7 @@ export function createDevice(options = {}){
      *
      * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
      *           indexCount?: number, startIndex?: number, baseVertex?: number,
-     *           startInstance?: number }} request
+     *           startInstance?: number, indirect?: { buffer: any, offset: number } }} request
      */
     const draw = request=>{
         const bound = snapshot();
@@ -964,29 +970,25 @@ export function createDevice(options = {}){
 
     /**
      * The arguments an indirect call reads out of a buffer: `count` words at
-     * `offset`, from the bytes the device keeps of it. A buffer the GPU wrote
-     * them into holds what it held before here: said, and drawn as that.
+     * `offset`, from the bytes the device keeps of it; or, for a buffer the
+     * GPU may have written them into, the buffer and offset the GPU reads
+     * them from in its turn.
      *
-     * @param {any} buffer @param {number} offset @param {number} count @param {string} call
-     * @returns {Uint32Array | null}
+     * @param {any} buffer @param {number} offset @param {number} count
+     * @returns {Uint32Array | { buffer: any, offset: number } | null}
      */
-    const indirectWords = (buffer, offset, count, call)=>{
+    const indirectArguments = (buffer, offset, count)=>{
         if (!buffer || (offset & 3) !== 0
             || offset + count * 4 > (buffer.desc?.ByteWidth ?? 0))
         {
             return null;
         }
+        if (renderer.gpuArguments?.(buffer))
+        {
+            return { buffer, offset };
+        }
         const bytes = renderer.bufferBytes(buffer);
-        if (!bytes)
-        {
-            return null;
-        }
-        if ((buffer.desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) !== 0)
-        {
-            diverge(`${call} reads its arguments as the processor last wrote them, not as a`
-                + ' shader did');
-        }
-        return new Uint32Array(bytes.slice(offset, offset + count * 4).buffer);
+        return bytes ? new Uint32Array(bytes.slice(offset, offset + count * 4).buffer) : null;
     };
 
     self = attachCom({
@@ -1304,22 +1306,47 @@ export function createDevice(options = {}){
         },
 
         /**
-         * Stream output is not something this build can do, and a shader that
-         * promises it is refused rather than made to draw without it.
+         * A geometry shader, or a vertex shader's bytecode made into one,
+         * with a declaration of what it streams out, taken or refused as
+         * Windows does (streamout.js). Nothing is streamed out: the shader is
+         * made so that a program goes on, a draw through a geometry shader is
+         * skipped as any other is, and one through a vertex shader's draws as
+         * if no geometry shader were bound, unless no stream is rasterized.
          *
-         * @param {Uint8Array} bytecode
-         * @param {readonly any[]} declaration
-         * @param {number} outputStride
+         * @param {Uint8Array | null} bytecode
+         * @param {readonly import('./streamout.js').StreamOutputEntry[] | null} declaration
+         *     null where the program gave none
+         * @param {readonly number[] | null} strides  each buffer's, or none
+         * @param {number} rasterizedStream  0 under Direct3D 10
          * @param {{ shader?: any }} out
          */
-        CreateGeometryShaderWithStreamOutput(bytecode, declaration, outputStride, out){
-            void bytecode;
-            void declaration;
-            void outputStride;
+        CreateGeometryShaderWithStreamOutput(bytecode, declaration, strides, rasterizedStream,
+            out)
+        {
             out.shader = null;
-            diverge('a geometry shader with stream output is refused: nothing here writes'
-                + ' a stream-output buffer');
-            return E_NOTIMPL;
+            const container = bytecode ? (parseShaderOfKind(bytecode, SHADER_KIND.GEOMETRY,
+                shaderModel) ?? parseShaderOfKind(bytecode, SHADER_KIND.VERTEX, shaderModel))
+                : null;
+            if (!container || !validStreamOutput({
+                outputs: container.outputs, entries: declaration, strides, rasterizedStream,
+                eleven: featureLevel >= D3D_FEATURE_LEVEL.LEVEL_11_0,
+                vertex: /** @type {any} */ (container.shader).kind === SHADER_KIND.VERTEX,
+            }))
+            {
+                return E_INVALIDARG;
+            }
+            if (declaration)
+            {
+                diverge('a geometry shader streams nothing out: no stream-output buffer is'
+                    + ' written');
+            }
+            const hr = createShader(IID.ID3D10GeometryShader, SHADER_KIND.GEOMETRY, out, null,
+                container);
+            if (out.shader)
+            {
+                out.shader.rasterizedStream = rasterizedStream;
+            }
+            return hr;
         },
 
         /** @param {Uint8Array} bytecode @param {{ shader?: any }} out */
@@ -1558,8 +1585,13 @@ export function createDevice(options = {}){
          * @param {any} buffer @param {number} offset
          */
         DrawInstancedIndirect(buffer, offset){
-            const words = indirectWords(buffer, offset, 4, 'DrawInstancedIndirect');
-            if (words)
+            const words = indirectArguments(buffer, offset, 4);
+            if (words && !(words instanceof Uint32Array))
+            {
+                // Counts the processor never sees: none are counted.
+                draw({ vertexCount: 0, instanceCount: 0, startVertex: 0, indirect: words });
+            }
+            else if (words)
             {
                 draw({ vertexCount: words[0], instanceCount: words[1], startVertex: words[2],
                     startInstance: words[3] });
@@ -1567,8 +1599,13 @@ export function createDevice(options = {}){
         },
         /** @param {any} buffer @param {number} offset */
         DrawIndexedInstancedIndirect(buffer, offset){
-            const words = indirectWords(buffer, offset, 5, 'DrawIndexedInstancedIndirect');
-            if (words)
+            const words = indirectArguments(buffer, offset, 5);
+            if (words && !(words instanceof Uint32Array))
+            {
+                draw({ vertexCount: 0, startVertex: 0, indexCount: 0, instanceCount: 0,
+                    indirect: words });
+            }
+            else if (words)
             {
                 draw({ vertexCount: 0, startVertex: 0, indexCount: words[0],
                     instanceCount: words[1], startIndex: words[2], baseVertex: words[3] | 0,
@@ -1590,8 +1627,12 @@ export function createDevice(options = {}){
         },
         /** @param {any} buffer @param {number} offset */
         DispatchIndirect(buffer, offset){
-            const words = indirectWords(buffer, offset, 3, 'DispatchIndirect');
-            if (words)
+            const words = indirectArguments(buffer, offset, 3);
+            if (words && !(words instanceof Uint32Array))
+            {
+                renderer.dispatch(state.snapshot(), words);
+            }
+            else if (words)
             {
                 this.Dispatch(words[0], words[1], words[2]);
             }

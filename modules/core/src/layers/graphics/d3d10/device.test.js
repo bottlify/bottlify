@@ -1800,7 +1800,7 @@ test('private data is kept per object and an interface entry holds a reference',
 
     assert.equal(device.SetPrivateDataInterface(guid, null), S_OK);
     assert.deepEqual(device.GetPrivateData(guid, { size: 8, wantsData: true }),
-        { hr: S_OK, size: 4, object: null });
+        { hr: S_OK, size: 4, object: null, pointer: 0 });
 
     const other = createDevice();
     const before = other.refCount;
@@ -1817,11 +1817,12 @@ test('private data is kept per object and an interface entry holds a reference',
     assert.equal(device.SetPrivateData(guid, 42, null), S_OK);
     assert.equal(device.SetPrivateData(guid, 42, null), S_FALSE);
 
-    assert.equal(device.SetPrivateDataInterface(guid, other), S_OK);
+    assert.equal(device.SetPrivateDataInterface(guid, other, 0x1234), S_OK);
     const answered = device.GetPrivateData(guid, { size: 8, wantsData: true });
     assert.equal(answered.hr, S_OK);
     assert.equal(answered.size, 4);
     assert.equal(answered.object, other);
+    assert.equal(answered.pointer, 0x1234, 'the pointer it was given, through its interface');
     assert.equal(other.refCount, before + 2, 'reading takes a reference for the caller');
     other.release();
 

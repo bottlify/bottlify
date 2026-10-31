@@ -159,7 +159,11 @@ differently raises a `divergence` event naming the API.
   that asks only for 11.1 or the 9.x levels is refused. Its deferred contexts record calls that
   the immediate context plays (`DriverCommandLists` is false). A context state
   (`CreateDeviceContextState`) swaps the whole pipeline; one made for Direct3D 10 makes Direct3D
-  11's calls on the context do nothing. Compute shaders are made and not run yet; a constant
+  11's calls on the context do nothing. Compute shaders run as WebGPU compute passes; a view a
+  shader writes through over a texture takes the formats WebGPU stores into (32-bit channels, four
+  16- or 8-bit ones), and reads back only those of one 32-bit channel. An indirect draw whose
+  arguments a shader wrote draws nothing if its first instance is not zero, unless the device
+  has `indirect-first-instance`. A constant
   buffer offset (`*SetConstantBuffers1`) is ignored and the whole buffer bound
   (`ConstantBufferOffsetting` is false); a logic operation in a blend state and a forced sample
   count in a rasterizer state are refused; `ClearView` of rectangles is not made.
@@ -179,7 +183,9 @@ differently raises a `divergence` event naming the API.
   samples one does not link.
 - Direct3D 10 and 11 have no geometry, hull or domain stage and no stream output: WebGPU has none
   and none is emulated. The shaders are made, and a draw with one bound is skipped and counted
-  (`roadmap/decisions.md`, A75); `CreateGeometryShaderWithStreamOutput` answers `E_NOTIMPL`.
+  (`roadmap/decisions.md`, A75). `CreateGeometryShaderWithStreamOutput` takes or refuses the
+  declaration as Windows does and streams nothing out; one made of a vertex shader's bytecode is
+  no stage, and its draws go on (or rasterize nothing, with no stream rasterized).
 - Direct3D 10 multisamples at four samples only, the count WebGPU has:
   `CheckMultisampleQualityLevels` answers one quality level at four for the colour and depth
   formats WebGPU multisamples, and none at two, eight or any other count. A multisampled texture
