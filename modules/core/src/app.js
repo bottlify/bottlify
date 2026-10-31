@@ -4611,6 +4611,8 @@ async function buildApp(options){
             // cross-origin isolated) only this thread can ever read the
             // output, and the engine mixer is the only backend built for that.
             shared: options.audio?.shared ?? (typeof SharedArrayBuffer === 'function'),
+            // A 64-bit process's DirectSound structures and out pointers.
+            ...long ? { pointerSize: 8 } : {},
             // Whose call a sound provider is answering, read before it awaits
             // anything: a callback into the guest after an await has to name
             // the thread whose call it continues.

@@ -16,8 +16,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     listen, scheduleKeyTimes, schedulePresses, presentFrame, recordSample, resetSamples, profile,
-    byModule, guestSamples, seedFiles, bundleStoreOptions,
+    byModule, guestSamples, seedFiles, bundleStoreOptions, drainTable,
 } from './harness.js';
+import { createMixer } from '../../../src/layers/audio/output/mixer.js';
 
 /** An `app` that only remembers what was sent and what it was asked to do. */
 function fakeApp(){
@@ -335,4 +336,30 @@ test('timed clicks that come due on the same present go one after the other', ()
     const buttons = (state.inputs ?? []).filter(sent=>sent.kind === 'pointerButton')
         .map(sent=>`${sent.present}:${sent.down ? 'down' : 'up'}`);
     assert.deepEqual(buttons, ['3:down', '4:up', '7:down', '8:up']);
+});
+
+test('the table drain captures each block as mixed, not added onto the one before', t=>{
+    // A worklet zeroes its block before mixing into it; the harness's stand-in
+    // did not, and a steady signal came out of a capture as a ramp to full
+    // scale.
+    const mixer = createMixer({ shared: true });
+    const track = mixer.open({ sampleRate: 48000, channels: 2, bitsPerSample: 16 });
+    const level = 1000;
+    const steady = new Uint8Array(48000 * 4);
+    new Int16Array(steady.buffer).fill(level);
+    track.write(steady);
+    let now = 0;
+    t.mock.method(performance, 'now', ()=>now);
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    const capture = { fromMs: 0, toMs: Infinity, blocks: /** @type {Int16Array[]} */ ([]) };
+    drainTable(mixer.table, 48000, capture);
+    for (let tick = 0; tick < 5; tick++)
+    {
+        now += 20;
+        t.mock.timers.tick(20);
+    }
+    const samples = capture.blocks.flatMap(block=>[...block]);
+    assert.ok(samples.length >= 4 * 960 * 2, `four blocks or more: ${samples.length} samples`);
+    assert.ok(samples.every(value=>Math.abs(value - level) <= 1),
+        `every sample at the level written: ${Math.min(...samples)}..${Math.max(...samples)}`);
 });

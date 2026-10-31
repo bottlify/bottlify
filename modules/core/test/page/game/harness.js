@@ -615,6 +615,11 @@ export function drainTable(table, sampleRate, capture){
         {
             return;
         }
+        // mixBlock adds into the block, as the worklet's does after zeroing
+        // it: left as the last tick made it, every block carried all the
+        // earlier ones, and a capture heard a drifting offset clipped to full
+        // scale where the program wrote clean sound.
+        block.fill(0, 0, blockFrames * 2);
         mixBlock({ global, slots, seams, block, blockFrames, outputRate: sampleRate, arena });
         const at = readAt - started;
         if (capture && at >= capture.fromMs && at < capture.toMs)
