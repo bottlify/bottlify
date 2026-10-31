@@ -407,8 +407,10 @@ export function serveGraphics(scope, deps){
         });
     };
 
-    const open = async()=>{
-        const adapter = await gpu.requestAdapter();
+    /** @param {boolean} software  The browser's software adapter, as the engine's (AppOptions.gpuAdapter). */
+    const open = async software=>{
+        const adapter = await gpu.requestAdapter(software
+            ? { forceFallbackAdapter: true } : undefined);
         if (!adapter)
         {
             throw new Error('no GPU adapter answered requestAdapter in the graphics worker');
@@ -628,7 +630,7 @@ export function serveGraphics(scope, deps){
                     capture = createCapture();
                     capture.open(frames);
                 }
-                opened ??= open();
+                opened ??= open(data.software === true);
                 opened.then(({ adapter })=>scope.postMessage({ type: 'opened', adapter }),
                     e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
                 break;

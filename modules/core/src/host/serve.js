@@ -477,13 +477,15 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      * size. Depth clip control is asked for the same way: without it a
      * Direct3D 10 rasterizer state that turns depth clipping off still clips.
      */
-    const openDevice = async()=>{
+    /** @param {{ gpuAdapter?: 'software' }} options */
+    const openDevice = async options=>{
         if (!adapters)
         {
             throw Object.assign(new Error('this worker exposes no navigator.gpu, so there '
                 + 'is no device to draw on'), { reason: 'no WebGPU' });
         }
-        const adapter = await adapters.requestAdapter();
+        const adapter = await adapters.requestAdapter(options.gpuAdapter === 'software'
+            ? { forceFallbackAdapter: true } : undefined);
         if (!adapter)
         {
             throw Object.assign(new Error('WebGPU is present but no adapter answered '
@@ -561,7 +563,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             presented.length = 0;
             signal = options.signal ? new Int32Array(options.signal) : null;
             signalSeen = signal ? Atomics.load(signal, 0) : 0;
-            const opened = viewport ? await openDevice() : null;
+            const opened = viewport ? await openDevice(options) : null;
             device = opened?.device ?? null;
             const adapter = opened?.adapter ?? { vendor: '', architecture: '', description: '' };
             const screen = viewport ? contextOf(viewport) : null;
@@ -585,6 +587,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 // A worker that opens no device is no worker to draw in: the
                 // devices then draw here, and the journal says why.
                 const answer = await openGraphicsWorker({ frames: returned,
+                    software: rest.gpuAdapter === 'software',
                     gcNudge: gcNudgeOf(rest.cpu?.gcNudge, undefined,
                         rest.memorySize ?? DEFAULT_MEMORY_SIZE) });
                 if (answer.worker)

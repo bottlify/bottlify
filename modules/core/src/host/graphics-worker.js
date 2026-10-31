@@ -12,11 +12,13 @@
 
 /**
  * @param {{ url?: URL | string, timeoutMs?: number, frames?: string, capture?: boolean,
+ *     software?: boolean,
  *     gcNudge?: { everyMs: number, bytes: number } | null,
  *     make?: (url: URL | string) => any }} [options]
  *     `frames` is how the worker sends a presented frame back (`worker.js`);
  *     `capture` has it write down everything it is sent (`remote/capture.js`);
- *     `gcNudge` how it brings its collections forward (`gc-nudge.js`), none when null
+ *     `gcNudge` how it brings its collections forward (`gc-nudge.js`), none when null;
+ *     `software` the browser's software adapter in place of the GPU (AppOptions.gpuAdapter)
  * @returns {Promise<{ worker: any, adapter: any } | { worker: null, reason: string }>}
  */
 export async function openGraphicsWorker(options = {}){
@@ -61,6 +63,7 @@ export async function openGraphicsWorker(options = {}){
         worker.addEventListener('message', listen);
         worker.addEventListener('error', fail);
         worker.postMessage({ type: 'open', frames: options.frames ?? 'bitmap',
+            ...options.software === true ? { software: true } : {},
             ...options.capture === true ? { capture: true } : {},
             ...options.gcNudge ? { gcNudge: options.gcNudge } : {} });
     });

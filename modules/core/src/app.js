@@ -143,6 +143,9 @@ const hashText = (hash, text)=>{
  *     False runs the steps through promises.
  * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
  *                                     report's cost per API; two clock readings a call.
+ * @property {'software'} [gpuAdapter]  The browser's software WebGPU adapter (SwiftShader,
+ *     `forceFallbackAdapter`) in place of the GPU: pictures judged on a renderer a driver
+ *     cannot distort. The browser has to offer one (Chrome: --enable-unsafe-swiftshader).
  * @property {'sm1' | 'sm2' | 'sm3' | 'sm4' | 'host'} [gpuProfile]  The profile the
  *     video adapter is shown with (`GPU_PROFILES` in `layers/graphics/seam/adapter.js`):
  *     a known card of that shader model, by its PCI ids and with its shader versions,
