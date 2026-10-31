@@ -173,7 +173,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     readBytes, imports, features, now: nowMs = ()=>performance.now() })
 {
     const settings = {
-        maxRegionBlocks: 128, maxRegionBytes: 8192, batchRegions: 32,
+        maxRegionBlocks: 128, batchRegions: 32,
         maxQueued: 8192, maxBatchRegions: 256,
         // Writes that drop a page's regions, inside `volatileWindowMs` of each
         // other, before the page is left to the other executor -- for
@@ -226,11 +226,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // The wasm bytes of the modules some running region's function is in,
         // past which those gone longest without running are let go (0: no
         // ceiling): their regions leave the table and the entry hash, stay in
-        // the store, and are brought back from it as any miss is. One brought
-        // back is kept this many translated instructions whatever its mark,
-        // twice as many each time again.
+        // the store, and are brought back from it as any miss is
+        // (`EVICT_HOLD`).
         cacheBytes: 256 << 20,
-        evictHold: 1 << 28,
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
@@ -337,14 +335,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // queued behind its batch. 0 with a worker: none opened here, a host's
         // pool lends them (`attachTranslator`).
         translators: 1,
-        // Bytes of the translation cache arena, the functions emitted here and
-        // by every translator, which each takes again rather than emitting
-        // (0: each keeps a cache of its own). Shared memory is committed as
-        // it fills.
-        arenaBytes: 48 << 20,
-        // The arena itself, made by the host for every executor of a process
-        // (`createArena`), so what one executor's translators emitted the
-        // others take; absent, the runtime makes its own of `arenaBytes`.
+        // The translation cache arena, made by the host for every executor of a
+        // process (`createArena`), so what one executor's translators emitted the
+        // others take; absent, the runtime makes its own.
         arena: /** @type {SharedArrayBuffer | undefined} */ (undefined),
         // Diagnostic: the host clock read around the translator's phases -- the
         // milliseconds of forming, lookups, emitting, encoding, storing,
@@ -353,7 +346,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // it (a batch that never comes back is freed after a time).
         timings: false,
         // The engine thread's time the translator's work may take at a
-        // stretch, and the share of its time over a while, where a worker is
+        // stretch (and `HOLD_SHARE` of its time over a while), where a worker is
         // wanted: a batch goes on forming in the calls after, the store's
         // hits are compiled off the thread, their compiles started and they
         // and a worker's answers published a share's worth a call, and a call
@@ -365,43 +358,20 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // the guest did not run, its sound late -- where the translation is
         // the one to wait.
         holdMs: 4,
-        holdShare: 0.5,
-        // The bounded records the runtime keeps of where translated code left and
-        // what missed: targets of untranslated exits, misses per (address, top)
-        // before a candidate, and indirect call sites tried with predicted callees.
-        exitTargets: 4096,
-        missesKept: 4096,
-        callSitesKept: 16384,
-        // Merging modules a hot transfer crosses (`mergeAfter`): translated
-        // instructions between two readings of the crossings, the fewest between
-        // two merges, a region's share of that, and merges one region may take part in.
-        mergeSample: 1 << 20,
-        mergeEvery: 1 << 23,
-        mergePerRegion: 1 << 19,
-        mergesARegion: 2,
         // Indirect-call prediction (`callTargets`): samples of a call before its
-        // callees are looked at, the share of them a callee formed in must take
-        // (one in this many), callees a call compares with, how often a region is
-        // formed again for its calls, and the window a call's samples are counted in.
+        // callees are looked at, and the window a call's samples are counted in
+        // (`PREDICT_AFTER`, `CALL_WINDOW`).
         predictAfter: 48,
-        predictShare: 8,
-        predictCallees: 4,
-        reforms: 3,
         // At a few hundred readings a second, 64 was a fifth of a second: a
         // site taking one call in a hundred gathered ten samples in it and
         // never came due.
         callWindow: 1024,
-        // The entry hash's load past which a block start is kept in the host's
-        // map alone (its slots are the layout's, `hashSlots`).
-        hashLoad: 0.75,
-        // A callee formed into its caller (`leafCalls`): its blocks and bytes at
-        // most; and the most entries of a switch's jump table followed when forming.
-        leafBlocks: 16,
+        // The bytes a callee formed into its caller (`leafCalls`) may have at
+        // most; its blocks are `formRegion`'s own bound.
         leafBytes: 512,
         // Levels of callees formed in that may keep direct calls of their own,
         // their small callees formed in as well (`formRegion`).
         formDepth: 1,
-        switchEntries: 1024,
         // HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671:
         // false keeps every tail call inside its own instance, a transfer to a
         // region of another module leaving for this loop, which enters it. iOS
@@ -516,11 +486,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const watchable = page=>!(loose
         && (stackPages.has(page) || codeShared?.onStack(page) === true));
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
-    const formOptions = { maxBlocks: settings.maxRegionBlocks,
-        maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
-        leafBlocks: settings.leafBlocks,
-        leafBytes: settings.leafBytes, switchEntries: settings.switchEntries,
-        formDepth: settings.formDepth,
+    const formOptions = { maxBlocks: settings.maxRegionBlocks, leafCalls: settings.leafCalls,
+        leafBytes: settings.leafBytes, formDepth: settings.formDepth,
         // Long mode's code formed as long mode's, the shared emitter's own cuts in it.
         ...layout.bits === 64 ? { mode: MODE_64 } : {} };
     /** The same on this thread, with the host's copy of a span at once where it has one; a
@@ -632,10 +599,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const instanceKeys = new WeakMap();
     /** A module compiled off the thread, by its bytes. @type {WeakMap<WebAssembly.Module, number>} */
     const compiledBytes = new WeakMap();
+    // Past three quarters of the entry hash's slots live, a block start is kept
+    // in the host's map alone (`createEntries`' own share).
     const entries = createEntries(
-        table
-            ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16,
-                load: settings.hashLoad }
+        table ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 }
             : {});
     if (table)
     {
@@ -806,7 +773,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const exitTargets = new Map();
     /** When the runtime was made, for the exits' times. */
     const bornAt = performance.now();
-    const EXIT_TARGETS_CAP = settings.exitTargets;
+    const EXIT_TARGETS_CAP = 4096;
     /**
      * How often the machine stood at an address that has a region for another
      * top (or a block with no entry of its own), per key(eip, top): the heat a
@@ -823,7 +790,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     // straight-line loader never became a candidate. The oldest is evicted
     // instead, and the counts halve every cap insertions so an address hit
     // once does not hold a slot against one hit often.
-    const MISSES_CAP = settings.missesKept;
+    const MISSES_CAP = 4096;
     let missesInserted = 0;
     const decayMisses = ()=>{
         for (const [key, count] of misses)
@@ -977,7 +944,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         return one;
     };
-    const CALL_SITES_CAP = settings.callSitesKept;
+    // Indirect call sites tried with predicted callees, kept for the diagnostics.
+    const CALL_SITES_CAP = 16384;
     /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
     const generation = new Map();
     /**
@@ -1932,13 +1900,15 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * emits here, and has no frames to keep.
      */
     const holding = ()=>settings.holdMs > 0 && workerUrl !== null;
+    /** The share of the engine thread's time over a while the translator's work may take. */
+    const HOLD_SHARE = 0.5;
     /** The engine thread's time forming may take now (`holdMs`), refilled at
-     * `holdShare` of the time that passes, and when it was last brought up to date. */
+     * `HOLD_SHARE` of the time that passes, and when it was last brought up to date. */
     let credit = settings.holdMs;
     let creditAt = performance.now();
     const creditNow = ()=>{
         const now = performance.now();
-        credit = Math.min(settings.holdMs, credit + (now - creditAt) * settings.holdShare);
+        credit = Math.min(settings.holdMs, credit + (now - creditAt) * HOLD_SHARE);
         creditAt = now;
         return credit;
     };
@@ -1972,12 +1942,13 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             {
                 sendNext();
             }
-        }, Math.max(1, (settings.holdMs / 2 - creditNow()) / settings.holdShare));
+        }, Math.max(1, (settings.holdMs / 2 - creditNow()) / HOLD_SHARE));
     };
     /** The process's translation cache arena, shared with every translator it has; none
-     * without a translator or where memory cannot be shared. */
-    const arena = settings.arena ?? (workerUrl !== null && settings.arenaBytes > 0
-        && typeof SharedArrayBuffer === 'function' ? createArena(settings.arenaBytes) : null);
+     * without a translator or where memory cannot be shared. Its size is `createArena`'s:
+     * an arena of 8 MiB rather than 48 bought no memory back (roadmap/negative-results.md). */
+    const arena = settings.arena ?? (workerUrl !== null && typeof SharedArrayBuffer === 'function'
+        ? createArena() : null);
     /** What emitting inline keeps for a relink to take again: the arena the translators
      * share, or a cache of this thread's own. */
     const emitCache = arena !== null ? arenaEmitCache(arena) : createEmitCache();
@@ -2207,6 +2178,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     /** Regions let go past `cacheBytes`, by key(entry, top): how many times, so
      * one brought back is kept the longer the more often it went. @type {Map<number, number>} */
     const evictedKeys = new Map();
+    /** Translated instructions a module brought back is kept whatever its mark, twice as
+     * many each time again. */
+    const EVICT_HOLD = 1 << 28;
 
     /**
      * A record into the module its function is in; a module not held yet is
@@ -2701,7 +2675,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             counts.broughtBack++;
             record.heat = (record.heat ?? 0) + 1;
             record.held.keepUntil = Math.max(record.held.keepUntil,
-                corkRetired + settings.evictHold * 2 ** Math.min(bounced - 1, 6));
+                corkRetired + EVICT_HOLD * 2 ** Math.min(bounced - 1, 6));
         }
         counts.publishMs += clock() - publishAt;
         return 1;
@@ -3278,23 +3252,23 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     };
 
     /** Translated instructions between two readings of the modules' crossings. */
-    const MERGE_SAMPLE = settings.mergeSample;
+    const MERGE_SAMPLE = 1 << 20;
     let sampledAt = 0;
     // At most one merge in this many: its module is instantiated on the
     // engine thread, 23 ms for a whole chunk of `relinkRegions`.
-    const MERGE_EVERY = settings.mergeEvery;
+    const MERGE_EVERY = 1 << 23;
     // And past that, this many for each region the last one built: a merge
     // builds both modules whole again, and with the worker no longer the one
     // that paced them, a module of hundreds gathering a few new regions at a
     // time would have the engine thread instantiate it over and over.
-    const MERGE_PER_REGION = settings.mergePerRegion;
+    const MERGE_PER_REGION = 1 << 19;
     let mergedAt = -MERGE_EVERY;
     let mergeWait = MERGE_EVERY;
     // The merges a region is built again by at most. A merge builds both
     // modules whole, and a module that merged once is crossed into by the
     // next new one: without a bound, every module of new code calling into a
     // hot one could have it built again, for as long as new code arrives.
-    const MERGES_A_REGION = settings.mergesARegion;
+    const MERGES_A_REGION = 2;
     /** Readings of the modules' crossings, and the one the merges last weighed. */
     let modulesRead = 0;
     let mergeRead = 0;
@@ -3455,9 +3429,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const PREDICT_AFTER = settings.predictAfter;
     // A callee formed in takes an eighth of the call's samples, and a call
     // compares its target with four at most.
-    const PREDICT_SHARE = settings.predictShare;
-    const PREDICT_CALLEES = settings.predictCallees;
-    const REFORMS = settings.reforms;
+    const PREDICT_SHARE = 8;
+    const PREDICT_CALLEES = 4;
+    // Times a region is formed again for its indirect calls.
+    const REFORMS = 3;
     // Readings a call's samples are kept for unless it is due by then: a
     // region formed again is built, compiled and run on the baseline tier
     // again, which only a call hot now pays back, not one that gathers its

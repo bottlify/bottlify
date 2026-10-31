@@ -446,7 +446,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  *         copies?: boolean, precision?: import('../emit/region.js').X87Precision,
  *         floats?: boolean, targets?: [number, number[]][] }[],
  *     pages: [number, Uint8Array][], formable?: number[],
- *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean,
+ *     form: { maxBlocks: number, leafCalls?: boolean,
  *         helpers?: boolean } }} relink   `pages` copies of every page forming read,
  *     `formable` the ones a region may span (all of `pages` when absent)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout

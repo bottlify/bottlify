@@ -112,7 +112,7 @@ test('every default SETTINGS.md and SETTINGS.ru.md give for a runtime setting is
             const documented = documentedDefaults(read(doc));
             const compared = [...documented].filter(([name, text])=>runtime.has(name)
                 && valueOf(text) !== undefined);
-            assert.ok(compared.length > 40, `${doc}: ${compared.length} defaults compared`);
+            assert.ok(compared.length > 30, `${doc}: ${compared.length} defaults compared`);
             const wrong = compared.filter(([name, text])=>valueOf(text)
                 !== valueOf(/** @type {string} */ (runtime.get(name))))
                 .map(([name, text])=>`${name}: ${text}, the runtime's ${runtime.get(name)}`);
