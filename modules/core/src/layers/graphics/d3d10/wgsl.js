@@ -1718,15 +1718,20 @@ export function linkProgram(vs, ps, options = {}){
         const value = element.register < ps.outputRegisters
             ? `o${element.register}`
             : `${REG}(0u)`;
-        if (element.systemValue === SYSTEM_VALUE.TARGET)
+        // An output with no system value -- COLOR0 from a shader compiled for
+        // backwards compatibility (fxc /Gec) -- is the target its register names.
+        if (element.systemValue === SYSTEM_VALUE.TARGET
+            || element.systemValue === SYSTEM_VALUE.UNDEFINED)
         {
-            targets.push(element.index);
-            if (options.targets && !options.targets.includes(element.index))
+            const slot = element.systemValue === SYSTEM_VALUE.TARGET
+                ? element.index : element.register;
+            targets.push(slot);
+            if (options.targets && !options.targets.includes(slot))
             {
                 continue;
             }
             const scalar = scalarOf(element.componentType);
-            psOut.push(`    @location(${element.index}) target${element.index}: vec4<${scalar}>,`);
+            psOut.push(`    @location(${slot}) target${slot}: vec4<${scalar}>,`);
             psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
             continue;
         }

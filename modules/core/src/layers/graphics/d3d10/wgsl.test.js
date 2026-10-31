@@ -804,3 +804,16 @@ test('a vertex shader that writes no position cannot be linked', ()=>{
     assert.deepEqual(linkProgram(vs, ps).unsupported,
         ['a vertex shader that writes no SV_Position']);
 });
+
+test('a pixel output with no system value, COLOR1 of a backwards-compatible shader, writes the'
+    + ' target its register names', ()=>{
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'COLOR', index: 1, systemValue: SYSTEM_VALUE.UNDEFINED, register: 1 }],
+        instructions: [dclOutput(o(1)), mov(o(1), l(1, 0, 0, 1)), ret()],
+    }))));
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, ps);
+    assert.deepEqual(linked.unsupported ?? [], []);
+    assert.match(linked.fragment, /@location\(1\) target1: vec4<f32>,/);
+});
