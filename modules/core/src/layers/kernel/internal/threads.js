@@ -2792,6 +2792,16 @@ export function createScheduler(options){
                         + (thread.affinityMask === undefined ? ''
                             : ` a${(thread.affinityMask >>> 0).toString(16)}`))
                     .join(' | '),
+                // Each thread's running totals, for a reader that subtracts two
+                // readings to get a window: [instructions, ms in its slices
+                // (here or on another executor, answers waited for included),
+                // ms ready and waiting for an executor, ms its slices elsewhere
+                // waited for this executor's answers, its host calls' ms here,
+                // its crossings]. Ready time is counted when the thread starts.
+                threadTimes: JSON.stringify(Object.fromEntries(threads.map(thread=>[thread.name,
+                    [thread.instructions, Math.round(thread.cpuMs ?? 0),
+                        Math.round(thread.readyMs ?? 0), Math.round(thread.waitedMs ?? 0),
+                        Math.round(thread.hostTotal ?? 0), thread.crossings ?? 0]]))),
                 current: current ? current.name : null,
                 // A thread that has been waiting on the same thing for a long
                 // time is the shape of a deadlock, so name what each is waiting on.

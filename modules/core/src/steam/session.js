@@ -43,6 +43,53 @@ export function steamIdOfToken(token){
     return BigInt(JSON.parse(json).sub);
 }
 
+/** What every logon says of this client. */
+const CLIENT = {
+    protocol_version: PROTOCOL_VERSION,
+    cell_id: 0,
+    client_package_version: 1771,
+    client_language: 'english',
+    client_os_type: OS_WINDOWS_10,
+    // No private address to tell: zero, obfuscated as the protocol has it.
+    obfuscated_private_ip: { v4: 0xBAADF00D },
+};
+
+/** An anonymous user in the public universe: the Steam ID an anonymous logon asks as. */
+const ANONYMOUS_USER = 0x01A0000000000000n;
+
+/**
+ * Sends a logon and waits for it to be accepted; the session and the
+ * heartbeat are the connection's from then on.
+ *
+ * @param {CmConnection} connection @param {bigint} steamId
+ * @param {Record<string, any>} fields  What this logon says beyond `CLIENT`.
+ */
+async function logOnAs(connection, steamId, fields){
+    const response = connection.next(EMsg.ClientLogOnResponse);
+    const loggedOff = connection.next(EMsg.ClientLoggedOff);
+    // Each is awaited only on the path that needs it. A logon refused, or a
+    // token that is not one, leaves the rest to reject when the connection
+    // closes -- unheard, that rejection ends a Node process.
+    for (const waiting of [response, loggedOff])
+    {
+        waiting.catch(()=>{});
+    }
+    connection.setSession(steamId, 0);
+    connection.send(EMsg.ClientLogon, ClientLogon, { ...CLIENT, ...fields });
+    const answer = await Promise.race([response, loggedOff.then(message=>{
+        const { eresult } = decode(ClientLoggedOff, message.body);
+        throw new Error(`steam: logged off during the logon (EResult ${eresult})`);
+    })]);
+    const body = decode(ClientLogonResponse, answer.body);
+    if (body.eresult !== EResult.OK)
+    {
+        throw new Error(`steam: the logon was refused (EResult ${body.eresult})`);
+    }
+    connection.setSession(answer.header.steamid, answer.header.client_sessionid);
+    connection.startHeartbeat(body.heartbeat_seconds ?? 9);
+    return { steamId: /** @type {bigint} */ (answer.header.steamid), body };
+}
+
 /**
  * Logs on with a refresh token; resolves with the licences once the CM has
  * sent them.
@@ -57,36 +104,28 @@ export function steamIdOfToken(token){
 export async function logOn(connection, { accountName, refreshToken, machineName = 'Bottlify' }){
     // The licence list follows the logon response at once: listened for first.
     const licensesMessage = connection.next(EMsg.ClientLicenseList);
-    const response = connection.next(EMsg.ClientLogOnResponse);
-    const loggedOff = connection.next(EMsg.ClientLoggedOff);
-    connection.setSession(steamIdOfToken(refreshToken), 0);
-    connection.send(EMsg.ClientLogon, ClientLogon, {
-        protocol_version: PROTOCOL_VERSION,
-        cell_id: 0,
-        client_package_version: 1771,
-        client_language: 'english',
-        client_os_type: OS_WINDOWS_10,
+    licensesMessage.catch(()=>{});
+    const { steamId, body } = await logOnAs(connection, steamIdOfToken(refreshToken), {
         should_remember_password: true,
-        // No private address to tell: zero, obfuscated as the protocol has it.
-        obfuscated_private_ip: { v4: 0xBAADF00D },
         account_name: accountName,
         machine_name: machineName,
         supports_rate_limit_response: true,
         access_token: refreshToken,
     });
-    const answer = await Promise.race([response, loggedOff.then(message=>{
-        const { eresult } = decode(ClientLoggedOff, message.body);
-        throw new Error(`steam: logged off during the logon (EResult ${eresult})`);
-    })]);
-    const body = decode(ClientLogonResponse, answer.body);
-    if (body.eresult !== EResult.OK)
-    {
-        throw new Error(`steam: the logon was refused (EResult ${body.eresult})`);
-    }
-    connection.setSession(answer.header.steamid, answer.header.client_sessionid);
-    connection.startHeartbeat(body.heartbeat_seconds ?? 9);
     const list = decode(ClientLicenseList, (await licensesMessage).body);
-    return { steamId: answer.header.steamid, licenses: list.licenses, country: body.user_country };
+    return { steamId, licenses: list.licenses, country: body.user_country };
+}
+
+/**
+ * Logs on as nobody: enough for what Steam gives everyone -- the content
+ * servers, product info of public apps, the keys of depots free to all.
+ *
+ * @param {CmConnection} connection
+ * @returns {Promise<{ steamId: bigint }>}
+ */
+export async function logOnAnonymously(connection){
+    const { steamId } = await logOnAs(connection, ANONYMOUS_USER, {});
+    return { steamId };
 }
 
 /**

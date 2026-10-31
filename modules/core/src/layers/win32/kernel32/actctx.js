@@ -265,6 +265,9 @@ const CONTEXT_MAGIC = 0xc07e3e11;
  * @property {(address: number) => number | null} [moduleAt]  the base of the module holding it
  * @property {(name: string) => boolean} [answers]  whether the engine's own table has a DLL
  * @property {(base: number) => string | null} [modulePath]
+ * @property {'x86' | 'amd64'} [architecture]  the process's: the store's own
+ *     assemblies are of it, as a 64-bit Windows keeps an amd64 and an x86 copy
+ *     of each and a process binds to its own width's.
  * @property {(text: string) => Uint8Array} encodeAnsi
  * @property {(bytes: Uint8Array) => string} decodeAnsi
  * @property {(api: string, detail: string) => void} [divergence]
@@ -539,14 +542,15 @@ const STORE = 'C:\\WINDOWS\\WinSxS\\';
 
 /**
  * A store directory's name, as Windows XP names one:
- * `x86_<name>_<token>_<version>_x-ww_<hash>`.
+ * `<architecture>_<name>_<token>_<version>_x-ww_<hash>`.
  *
  * @param {Identity} identity
  */
 const storeDirectoryName = identity=>{
     const version = (identity.version ?? [0, 0, 0, 0]).join('.');
     const hash = hashKey(`${identity.name}_${version}`).toString(16).padStart(8, '0');
-    return `x86_${identity.name}_${identity.publicKeyToken ?? 'none'}_${version}_x-ww_${hash}`;
+    return `${identity.processorArchitecture ?? 'x86'}_${identity.name}_`
+        + `${identity.publicKeyToken ?? 'none'}_${version}_x-ww_${hash}`;
 };
 
 /**
@@ -732,7 +736,8 @@ export function createActivationContexts(host){
             }
             /** @type {Identity} */
             const identity = { name: provided.name, type: 'win32', version: provided.version,
-                processorArchitecture: 'x86', publicKeyToken: provided.publicKeyToken,
+                processorArchitecture: host.architecture ?? 'x86',
+                publicKeyToken: provided.publicKeyToken,
                 language: null };
             const version = wanted.version;
             if (!identityMatches({ ...wanted, version: null }, identity)

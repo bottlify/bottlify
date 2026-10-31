@@ -101,6 +101,7 @@
     "src/steam/protobuf.js",
     "src/steam/qr.js",
     "src/steam/session.js",
+    "src/storage-budget.js",
     "src/storage.js",
     "src/zstd.js"
   ],

@@ -110,6 +110,10 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  *           Brings a library in if it is not here yet, answering with its base
  *           or zero. Answers synchronously whenever it can -- see LoadLibraryA.
  *           `flags` are LoadLibraryEx's, which say how it is to be loaded.
+ * @property {(name: string) => number | null} [loadError]
+ *           Why `load` answered zero for that name, when it was not that nothing
+ *           was found: ERROR_BAD_EXE_FORMAT for a file that is no image for the
+ *           process. Null: ERROR_MOD_NOT_FOUND.
  * @property {(handle: number) => ModuleRecord | null} [dataFile]
  *           A library LoadLibraryEx mapped as data, by the handle it gave out:
  *           no module, so not among the ones `byBase` knows.
@@ -179,11 +183,11 @@ export function createModuleFunctions(host){
      * @returns {number | Promise<number>}
      */
     const load = (name, flags = 0)=>{
-        /** @param {number} base */
-        const settle = base=>{
+        /** @param {number} base @param {string} [tried] */
+        const settle = (base, tried = name)=>{
             if (base === 0)
             {
-                host.setLastError(ERROR_MOD_NOT_FOUND);
+                host.setLastError(host.loadError?.(tried) ?? ERROR_MOD_NOT_FOUND);
             }
             return base;
         };
@@ -212,7 +216,8 @@ export function createModuleFunctions(host){
                 return base;
             }
             const again = loadOnce(beside, flags);
-            return typeof again === 'number' ? settle(again) : again.then(settle);
+            return typeof again === 'number' ? settle(again, beside)
+                : again.then(found=>settle(found, beside));
         };
         return typeof answer === 'number' ? retry(answer) : answer.then(retry);
     };

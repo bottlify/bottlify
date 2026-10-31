@@ -260,11 +260,12 @@ function paintedHost(fills, presents, clips, scrolls = []){
  *        the run is told.
  * @param {number} [options.processId] The process this user32 is, beside another on the
  *        same directory.
+ * @param {4 | 8} [options.pointerSize] 8: a 64-bit process's user32.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
     caller = { current: THREAD }, queueNow, regionBox, setRegion, later, scrolls = [], directory,
-    processId,
+    processId, pointerSize,
 } = {})
 {
     const memory = fakeMemory();
@@ -370,6 +371,7 @@ function setup({
         later,
         directory,
         processId,
+        ...pointerSize ? { pointerSize } : {},
         ...(paint ? paintedHost(fills, presents, clips, scrolls) : {}),
     });
 
@@ -5787,6 +5789,38 @@ test('a procedure set through SetWindowLongW reads wide text, one set through A 
     assert.equal(fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]), 0x402000);
     fns.SetWindowLongA.handler([hwnd, GWL_WNDPROC, WNDPROC]);
     assert.equal(fns.IsWindowUnicode.handler([hwnd]), 0);
+});
+
+test('GetWindowLongPtrW and GetClassLongPtrW read a procedure as the wide calls do', ()=>{
+    // A 64-bit SDL keeps the procedure GetWindowLongPtrW answers and calls
+    // it through CallWindowProcW for every message its own one does not
+    // take. Read as the ANSI side reads it, its own wide procedure came back
+    // as a handle, which it took for another's, subclassed over, and called
+    // itself through without end.
+    const GWLP_WNDPROC = -4;
+    const GCLP_WNDPROC = -24;
+    const context = setup({ pointerSize: 8 });
+    const { memory } = context;
+    const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        /** @type {unknown} */ (context.fns));
+    // WNDCLASSA at 64 bits: the style, then every pointer and handle eight bytes.
+    memory.putString(CLASS_NAME, 'MainWnd');
+    memory.putU32s(CLASS_STRUCT, [0x0003, 0, WNDPROC, 0, 0, 0, HINSTANCE, 0, 0x11, 0, 0x22, 0,
+        0x33, 0, 0, 0, CLASS_NAME, 0]);
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    const hwnd = createWindow(fns, memory);
+    assert.notEqual(hwnd, 0);
+    assert.equal(fns.GetWindowLongPtrA.handler([hwnd, GWLP_WNDPROC]), BigInt(WNDPROC));
+    assert.equal(Number(fns.GetWindowLongPtrW.handler([hwnd, GWLP_WNDPROC]) & 0xffff0000n),
+        0xffff0000, 'an ANSI procedure, read wide: a handle, as GetWindowLongW answers');
+    fns.SetWindowLongPtrW.handler([hwnd, GWLP_WNDPROC, 0x402000, 0]);
+    assert.equal(fns.GetWindowLongPtrW.handler([hwnd, GWLP_WNDPROC]), 0x402000n,
+        'set wide, read wide: its address');
+    assert.equal(fns.GetWindowLongW.handler([hwnd, GWLP_WNDPROC]), 0x402000);
+
+    fns.SetClassLongPtrW.handler([hwnd, GCLP_WNDPROC, 0x403000, 0]);
+    assert.equal(fns.GetClassLongPtrW.handler([hwnd, GCLP_WNDPROC]), 0x403000n);
+    assert.equal(fns.GetClassLongW.handler([hwnd, GCLP_WNDPROC]), 0x403000);
 });
 
 test('a class is unregistered by its wide name, and not while a window of it is left', ()=>{

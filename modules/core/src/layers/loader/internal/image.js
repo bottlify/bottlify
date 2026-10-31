@@ -40,12 +40,13 @@ const align = (value, to)=>Math.ceil(value / to) * to;
  *   Returns the guest address to write into the IAT, or null if unavailable.
  * @param {number} [options.base]  Load address; defaults to the image's own ImageBase.
  * @param {boolean} [options.wide]  A 64-bit (PE32+) image is taken, not refused.
+ * @param {32 | 64} [options.bits]  The process's machine: only an image of it is taken.
  * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
  *        [options.missing]  Where a call to an import nothing claims should land.
  * @returns {LoadedImage}
  */
-export function buildImage(file, { resolveImport, base, missing, wide = false }){
-    const mapped = mapImage(file, base, { wide });
+export function buildImage(file, { resolveImport, base, missing, wide = false, bits }){
+    const mapped = mapImage(file, base, { wide, bits });
     return { ...mapped, unresolved: bindImports(mapped, resolveImport, missing) };
 }
 
@@ -61,12 +62,13 @@ export function buildImage(file, { resolveImport, base, missing, wide = false })
  *
  * @param {Uint8Array} file
  * @param {number} [base]
- * @param {{ wide?: boolean }} [options]  `wide`: a 64-bit (PE32+) image is taken
+ * @param {{ wide?: boolean, bits?: 32 | 64 }} [options]  `wide`: a 64-bit (PE32+)
+ *     image is taken; `bits`: only an image of the process's machine (`parsePe`)
  * @returns {{ base: number, entryPoint: number, bytes: Uint8Array, file: Uint8Array,
  *             image: import('./pe.js').PeImage }}
  */
-export function mapImage(file, base, { wide = false } = {}){
-    const image = parsePe(file, { wide });
+export function mapImage(file, base, { wide = false, bits } = {}){
+    const image = parsePe(file, { wide, bits });
     const loadBase = base ?? image.imageBase;
 
     if (loadBase !== image.imageBase && !image.relocatable)

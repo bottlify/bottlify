@@ -590,6 +590,13 @@ test('a whole pixel shader reads the varyings the vertex shader wrote and writes
     assertLine(translated.wgsl, 'oC0 = (r0 * in.v1);');
     assertLine(translated.wgsl, 'out.oC0 = oC0;');
     assertLine(translated.wgsl, 'out.oDepth = oDepth.x;');
+
+    // D3DRS_SRGBWRITEENABLE encodes the colours and leaves the depth alone: a
+    // shader writing both once named a colour oC-1, and its WGSL did not compile.
+    const encoded = translateShader(parsed, { srgbWrite: true });
+    assert.equal(encoded.error, null);
+    assert.doesNotMatch(encoded.wgsl, /oC-1/);
+    assert.match(encoded.wgsl, /oC0 = vec4f\(select\(1\.055 \* pow/);
 });
 
 test('a vertex shader below model 3 hands on its colours held to [0, 1]', ()=>{

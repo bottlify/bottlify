@@ -1383,7 +1383,11 @@ export function createDirectSound({
             {
                 return DSERR_INVALIDPARAM;
             }
-            writeU32(out, 0x00000002); // DSSPEAKER_STEREO
+            // DSSPEAKER_COMBINED(DSSPEAKER_STEREO (4), DSSPEAKER_GEOMETRY_WIDE
+            // (20 degrees)), what Windows answers for two speakers and Wine's
+            // dsound answers by default. 2 is DSSPEAKER_MONO: told so, FMOD
+            // mixed every title down to one channel.
+            writeU32(out, 0x00140004);
             return DS_OK;
         },
         /** HRESULT SetSpeakerConfig(DWORD) */

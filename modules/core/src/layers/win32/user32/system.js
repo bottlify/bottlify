@@ -1355,35 +1355,37 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * extra bytes whole, or a field sign-extended from its dword.
      *
      * @param {any} cls @param {number} index
+     * @param {boolean} [unicode]  Read through the wide call, as `readClassLong`.
      * @returns {bigint}
      */
-    const readClassLongPtr = (cls, index)=>{
+    const readClassLongPtr = (cls, index, unicode = false)=>{
         const at = index | 0;
         if (at >= 0)
         {
             cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
             return at + 8 <= cls.extra.byteLength ? cls.extra.getBigUint64(at, true) : 0n;
         }
-        return BigInt.asUintN(64, BigInt(readClassLong(cls, index) | 0));
+        return BigInt.asUintN(64, BigInt(readClassLong(cls, index, unicode) | 0));
     };
 
     /**
      * SetClassLongPtr: answers the long it replaced.
      *
      * @param {number} hwnd @param {number} index @param {number} low @param {number} high
+     * @param {boolean} unicode  Set through the wide call.
      * @returns {bigint}
      */
-    const setClassLongPtr = (hwnd, index, low, high)=>{
+    const setClassLongPtr = (hwnd, index, low, high, unicode)=>{
         const cls = classOfWindow(hwnd);
         if (!cls)
         {
             return 0n;
         }
-        const previous = readClassLongPtr(cls, index);
+        const previous = readClassLongPtr(cls, index, unicode);
         const at = index | 0;
         if (at < 0)
         {
-            writeClassLong(cls, index, low);
+            writeClassLong(cls, index, low, unicode);
         }
         else if (at + 8 <= cls.extra.byteLength)
         {
@@ -5609,7 +5611,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 /** @param {number[]} args */
                 handler: ([hwnd, index])=>{
                     const cls = classOfWindow(hwnd);
-                    return cls ? readClassLongPtr(cls, index) : 0n;
+                    return cls ? readClassLongPtr(cls, index, true) : 0n;
                 },
             },
             /** ULONG_PTR SetClassLongPtrA(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
@@ -5617,14 +5619,16 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 argBytes: 16,
                 quadwords: [2],
                 /** @param {number[]} args */
-                handler: ([hwnd, index, low, high])=>setClassLongPtr(hwnd, index, low, high),
+                handler: ([hwnd, index, low, high])=>setClassLongPtr(hwnd, index, low, high,
+                    false),
             },
             /** ULONG_PTR SetClassLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
             SetClassLongPtrW: {
                 argBytes: 16,
                 quadwords: [2],
                 /** @param {number[]} args */
-                handler: ([hwnd, index, low, high])=>setClassLongPtr(hwnd, index, low, high),
+                handler: ([hwnd, index, low, high])=>setClassLongPtr(hwnd, index, low, high,
+                    true),
             },
         } : {},
 

@@ -9,24 +9,44 @@
  * (`navigator.storage.estimate()`, its quota, which each browser sets by the
  * system it runs on and the disk it has), less a share left for the run that
  * starts to write into. Past it, the caches go, the least recently written
- * first: a bundle's fetched blocks (`<name>.blocks`, `.present`, `.order` at
- * the root) and a bundle's translations (`cork/<name>.v<n>`). Both are made
- * again by the next run that needs them; a session -- the files a program
- * wrote, its saved games -- is never touched. Neither are the caches of the
+ * first: a bundle's fetched blocks (`<name>.held`, `.order` and its segments
+ * `.blocks.<k>` at the root, `cacheFiles` in `cache.js`) and a bundle's
+ * translations (`cork/<name>.v<n>`). Both are made again by the next run
+ * that needs them; a session -- the files a program wrote, its saved games --
+ * is never touched. Neither are the caches of the
  * run asking, nor those of a bundle a run in another tab holds the lock of.
  */
 
 /** The quota's share the site keeps itself to: room for what the run writes next. */
 export const STORAGE_SHARE = 0.8;
 
-/** A bundle's block cache's files, by the name the cache gives them. */
-const BLOCK_FILE = /^(.+)\.(blocks|present|order)$/;
+/**
+ * A bundle's block cache's files, by the name the cache gives them -- its
+ * bitmap (`.held`), its order and its segments (`.blocks.<k>`), and those of
+ * the layouts it replaced, which go with them: the one-file `.blocks` with its
+ * `.present` bitmap, and the reverted appended layout's `.slots` (`cache.js`).
+ */
+const BLOCK_FILE = /^(.+)\.(blocks(?:\.[0-9A-Za-z]+)?|held|present|order|slots)$/;
+
+/** A session's folder and its earlier one-file form (`opfsSession`). */
+const SESSION_ENTRY = /^(.+)\.(files|session)$/;
+
+/** The fingerprint `blockCacheName` puts after a bundle's id: the index's CRC-32 in hex. */
+const FINGERPRINT = /-[0-9a-f]{8}$/;
+
+/** A translations' directory's layout version (`createDirectoryTranslationStore`). */
+const LAYOUT = /\.v\d+$/;
 
 /** The lock a running bundle's translations hold, by its name (`resolveTranslationStore`). */
 const STORE_LOCK = 'bottlify-cork:';
 
-/** @param {string} name */
-const safe = name=>name.replace(/[^A-Za-z0-9._-]/g, '_');
+/**
+ * The name the origin's file system knows a bottle by: its id with anything a
+ * file name may not hold made safe, as every store here names its files.
+ *
+ * @param {string} id
+ */
+export const storageName = id=>id.replace(/[^A-Za-z0-9._-]/g, '_');
 
 /**
  * A file's size and when it was last written, or nothing where it cannot say.
@@ -46,22 +66,50 @@ async function fileFacts(handle){
 }
 
 /**
- * @typedef {{ kind: 'blocks' | 'translations', name: string, bytes: number,
- *     modified: number, remove: () => Promise<void> }} Evictable
+ * A file's facts, or a directory's: every file under it added up, by its newest.
+ *
+ * @param {any} handle
+ * @returns {Promise<{ size: number, modified: number }>}
+ */
+async function entryFacts(handle){
+    if (typeof handle?.getFile === 'function')
+    {
+        return fileFacts(handle);
+    }
+    const total = { size: 0, modified: 0 };
+    if (typeof handle?.entries === 'function')
+    {
+        for await (const [, child] of handle.entries())
+        {
+            const facts = await entryFacts(child);
+            total.size += facts.size;
+            total.modified = Math.max(total.modified, facts.modified);
+        }
+    }
+    return total;
+}
+
+/**
+ * @typedef {'blocks' | 'translations' | 'saves'} StoredKind
+ * @typedef {{ kind: StoredKind, name: string, bottle: string, bytes: number,
+ *     modified: number, remove: () => Promise<void> }} Stored
+ *     One thing the origin holds of a bottle: `name` the cache's or session's
+ *     own, `bottle` the bottle's (`storageName`).
  */
 
 /**
- * The caches on the origin's storage another run could let go: every bundle's
- * block cache and translations but the ones named in `keep` or in `busy`.
+ * Everything the engine keeps on the origin's file system, one record a
+ * cache or session: a bundle's block cache (one per packing of it), its
+ * translations (one directory per layout version) and its session.
  *
  * @param {any} root
- * @param {{ blocks?: string, translations?: string }} keep
- * @param {string[]} busy  the bundles (by safe name) a run holds now
- * @returns {Promise<Evictable[]>}
+ * @returns {Promise<Stored[]>}
  */
-async function evictables(root, keep, busy){
+async function scanStorage(root){
     /** @type {Map<string, { bytes: number, modified: number, files: string[] }>} */
     const caches = new Map();
+    /** @type {Stored[]} */
+    const out = [];
     /** @type {any} */
     let cork = null;
     for await (const [name, handle] of root.entries())
@@ -69,6 +117,15 @@ async function evictables(root, keep, busy){
         if (name === 'cork' && typeof handle?.entries === 'function')
         {
             cork = handle;
+            continue;
+        }
+        const session = SESSION_ENTRY.exec(name);
+        if (session !== null)
+        {
+            const facts = await entryFacts(handle);
+            const bottle = /** @type {string} */ (session[1]);
+            out.push({ kind: 'saves', name, bottle, bytes: facts.size, modified: facts.modified,
+                remove: ()=>root.removeEntry(name, { recursive: true }) });
             continue;
         }
         const found = BLOCK_FILE.exec(name);
@@ -84,49 +141,53 @@ async function evictables(root, keep, busy){
         one.files.push(name);
         caches.set(base, one);
     }
-    /** @param {string} name  a cache's, whose bundle a run may hold */
-    const held = name=>busy.some(bundle=>name === bundle || name.startsWith(`${bundle}-`)
-        || name.startsWith(`${bundle}.v`));
-    /** @type {Evictable[]} */
-    const out = [];
     for (const [base, { bytes, modified, files }] of caches)
     {
-        if (base === keep.blocks || held(base))
-        {
-            continue;
-        }
-        out.push({ kind: 'blocks', name: base, bytes, modified, remove: async()=>{
-            for (const file of files)
-            {
-                await root.removeEntry(file);
-            }
-        } });
+        out.push({ kind: 'blocks', name: base, bottle: base.replace(FINGERPRINT, ''), bytes,
+            modified, remove: async()=>{
+                // The bitmap first: a removal cut short leaves segments nothing
+                // believes, never a bitmap naming blocks no longer there.
+                for (const file of files.sort((one, other)=>Number(other.endsWith('.held'))
+                    - Number(one.endsWith('.held'))))
+                {
+                    await root.removeEntry(file);
+                }
+            } });
     }
     if (cork !== null)
     {
         for await (const [name, handle] of cork.entries())
         {
-            if (typeof handle?.entries !== 'function' || held(name)
-                || (keep.translations !== undefined && name.startsWith(`${keep.translations}.v`)))
+            if (typeof handle?.entries !== 'function')
             {
                 continue;
             }
-            let bytes = 0;
-            let modified = 0;
-            for await (const [, file] of handle.entries())
-            {
-                if (typeof file?.getFile === 'function')
-                {
-                    const facts = await fileFacts(file);
-                    bytes += facts.size;
-                    modified = Math.max(modified, facts.modified);
-                }
-            }
-            out.push({ kind: 'translations', name, bytes, modified,
+            const facts = await entryFacts(handle);
+            out.push({ kind: 'translations', name, bottle: name.replace(LAYOUT, ''),
+                bytes: facts.size, modified: facts.modified,
                 remove: ()=>cork.removeEntry(name, { recursive: true }) });
         }
     }
     return out;
+}
+
+/**
+ * The caches on the origin's storage another run could let go: every bundle's
+ * block cache and translations but the ones named in `keep` or in `busy`.
+ *
+ * @param {any} root
+ * @param {{ blocks?: string, translations?: string }} keep
+ * @param {string[]} busy  the bundles (by safe name) a run holds now
+ * @returns {Promise<Stored[]>}
+ */
+async function evictables(root, keep, busy){
+    /** @param {string} name  a cache's, whose bundle a run may hold */
+    const held = name=>busy.some(bundle=>name === bundle || name.startsWith(`${bundle}-`)
+        || name.startsWith(`${bundle}.v`));
+    return (await scanStorage(root)).filter(one=>!held(one.name)
+        && (one.kind === 'blocks' ? one.name !== keep.blocks
+            : one.kind === 'translations' && !(keep.translations !== undefined
+                && one.name.startsWith(`${keep.translations}.v`))));
 }
 
 /**
@@ -163,12 +224,15 @@ export async function keepStorageWithin({ root, estimate, keep = {}, busy = [],
     if (usage > budget && typeof root?.entries === 'function'
         && typeof root.removeEntry === 'function')
     {
-        const kept = { blocks: keep.blocks === undefined ? undefined : safe(keep.blocks),
-            translations: keep.translations === undefined ? undefined : safe(keep.translations) };
+        const kept = {
+            blocks: keep.blocks === undefined ? undefined : storageName(keep.blocks),
+            translations: keep.translations === undefined ? undefined
+                : storageName(keep.translations),
+        };
         // The asking run holds its own bundle's lock: what it keeps is named in
         // `keep`, and its bundle's caches of an earlier packing may go.
         const bundles = busy.filter(name=>name.startsWith(STORE_LOCK))
-            .map(name=>safe(name.slice(STORE_LOCK.length)))
+            .map(name=>storageName(name.slice(STORE_LOCK.length)))
             .filter(bundle=>bundle !== kept.translations);
         const candidates = (await evictables(root, kept, bundles))
             .sort((a, b)=>a.modified - b.modified);
@@ -212,4 +276,101 @@ export async function keepOriginStorageWithin(keep){
     const busy = (held?.held ?? []).map((/** @type {any} */ lock)=>String(lock.name));
     return keepStorageWithin({ root: await nav.storage.getDirectory(),
         estimate: await nav.storage.estimate(), keep, busy });
+}
+
+/**
+ * @typedef {{ bottle: string, busy: boolean, blocks: number, translations: number,
+ *     saves: number }} BottleStorage
+ *     What the origin holds of one bottle, in bytes, by kind; `busy` while a
+ *     run of it holds its translations' lock, in this tab or another.
+ */
+
+/** The browser's storage and locks, or a test's of the same shape. @param {any} options */
+const browserOf = options=>{
+    const nav = /** @type {any} */ (globalThis).navigator;
+    return { storage: options.storage ?? nav?.storage, locks: options.locks ?? nav?.locks };
+};
+
+/**
+ * Every bottle the origin holds anything of, whether a library lists it or
+ * not, with the origin's usage and quota and whether the browser keeps its
+ * storage rather than clearing it when the disk runs low. What the engine
+ * does not keep -- a launcher's own folders -- is the launcher's to add.
+ *
+ * @param {{ storage?: any, locks?: any }} [options]  the browser's by default
+ * @returns {Promise<{ usage: number | null, quota: number | null, persisted: boolean | null,
+ *     bottles: BottleStorage[] }>}  null: the browser did not say
+ */
+export async function bottleStorage(options = {}){
+    const { storage, locks } = browserOf(options);
+    if (typeof storage?.getDirectory !== 'function')
+    {
+        throw new Error('no origin file system here');
+    }
+    const estimate = await storage.estimate?.().catch(()=>null) ?? null;
+    const persisted = await storage.persisted?.().catch(()=>null) ?? null;
+    const held = typeof locks?.query === 'function' ? await locks.query().catch(()=>null) : null;
+    /** @type {string[]} */
+    const names = (held?.held ?? []).map((/** @type {any} */ lock)=>String(lock.name));
+    const busy = new Set(names
+        .filter(name=>name.startsWith(STORE_LOCK))
+        .map(name=>storageName(name.slice(STORE_LOCK.length))));
+    /** @type {Map<string, BottleStorage>} */
+    const bottles = new Map();
+    for (const one of await scanStorage(await storage.getDirectory()))
+    {
+        const entry = bottles.get(one.bottle) ?? { bottle: one.bottle, busy: busy.has(one.bottle),
+            blocks: 0, translations: 0, saves: 0 };
+        entry[one.kind] += one.bytes;
+        bottles.set(one.bottle, entry);
+    }
+    return {
+        usage: typeof estimate?.usage === 'number' ? estimate.usage : null,
+        quota: typeof estimate?.quota === 'number' ? estimate.quota : null,
+        persisted: typeof persisted === 'boolean' ? persisted : null,
+        bottles: [...bottles.values()],
+    };
+}
+
+/**
+ * Removes what the origin holds of a bottle, of the kinds named: `blocks` and
+ * `translations` are caches the next start makes again, `saves` is what the
+ * program wrote and is gone for good. Holds the bottle's translations' lock
+ * while it does, so a running bottle is refused with an error rather than
+ * having its files taken from under it.
+ *
+ * @param {string} id  the bottle's, or the name `bottleStorage` lists it by
+ * @param {StoredKind[]} kinds
+ * @param {{ storage?: any, locks?: any }} [options]  the browser's by default
+ * @returns {Promise<{ kind: StoredKind, name: string, bytes: number }[]>}  what went
+ */
+export async function clearBottleStorage(id, kinds, options = {}){
+    const { storage, locks } = browserOf(options);
+    if (typeof storage?.getDirectory !== 'function')
+    {
+        throw new Error('no origin file system here');
+    }
+    const sweep = async()=>{
+        const bottle = storageName(id);
+        const mine = (await scanStorage(await storage.getDirectory()))
+            .filter(one=>one.bottle === bottle && kinds.includes(one.kind));
+        for (const one of mine)
+        {
+            await one.remove();
+        }
+        return mine.map(({ kind, name, bytes })=>({ kind, name, bytes }));
+    };
+    if (typeof locks?.request !== 'function')
+    {
+        return sweep();
+    }
+    // The lock is named by the id a run was given; an orphan listed only by its
+    // safe name matches it whenever the id had nothing to make safe.
+    return locks.request(`${STORE_LOCK}${id}`, { ifAvailable: true }, (/** @type {any} */ lock)=>{
+        if (!lock)
+        {
+            throw new Error('it is in use by a running title');
+        }
+        return sweep();
+    });
 }

@@ -14,10 +14,19 @@
  * lot of a large game touches nearly all of it. So the blocks go to storage,
  * and what stays in memory is a fixed-size record of which ones are there.
  *
- * A block occupies a fixed slot, `index * blockSize`, rather than being
- * appended. Two reasons: the read that a guest is waiting on becomes one
- * arithmetic step and one read with no index to consult, and a cache written
- * over several sessions never fragments or needs compacting.
+ * A block occupies a fixed slot computed from its index alone, rather than
+ * being appended. The read that a guest is waiting on becomes one arithmetic
+ * step and one read with no index to consult, a cache written over several
+ * sessions never fragments or needs compacting, and two writers that put the
+ * same block put it in the same place.
+ *
+ * The slots are split over segment files of `SEGMENT_BLOCKS` blocks each
+ * (`cacheFiles.segment`), because a browser counts a file's length against
+ * the origin's quota, and on some file systems allocates it: one file with
+ * block N at `N * blockSize` was as long as the highest block ever read, and
+ * a bundle that keeps its program in its last blocks asked for the whole
+ * bundle's length on its first read. A segment exists once one of its blocks
+ * is written, and is at most one segment long.
  *
  * What is stored is the block exactly as `readBlock` must hand it back -- so a
  * zstd block is stored packed, since the decoder that answers a synchronous
@@ -29,13 +38,22 @@
  * The presence bitmap is what makes a second session cheap. It is written
  * beside the data, and a cache whose bitmap does not match the bundle it is
  * asked about is discarded rather than trusted -- two different games must not
- * be able to read each other's bytes through the same slot arithmetic.
+ * be able to read each other's bytes through the same slot arithmetic. It is
+ * named apart from the one-file layout's `.present`, so that a build of that
+ * layout finds no bitmap beside its `.blocks` and starts afresh, rather than
+ * reading blocks at offsets nothing wrote.
+ *
+ * A store that fills up is a slower run, not a failed one: a block it refuses
+ * is held in the heap, as where there is no store at all.
  */
 
 import { createOpfsStore } from '../opfs-store.js';
 import { Codec, HEADER_SIZE, openBundle, withManifest } from './format.js';
 
-/** @typedef {{ read: Function, write: Function, truncate: Function, stat: Function, open: Function }} BlockStore */
+/**
+ * @typedef {{ read: Function, write: Function, truncate: Function, stat: Function,
+ *     open: Function, remove: Function, flush?: Function }} BlockStore
+ */
 
 /**
  * Turns what a caller asked for into somewhere to put blocks.
@@ -67,8 +85,40 @@ export async function resolveBlockStore(spec){
     {
         return null;
     }
-    return createOpfsStore({ root: await storage.getDirectory() });
+    // Unbounded: every segment the run has written stays open, because a guest
+    // read cannot wait for a handle, and a bounded pool would close one under it.
+    return createOpfsStore({ root: await storage.getDirectory(),
+        maxOpenHandles: Number.MAX_SAFE_INTEGER });
 }
+
+/** Blocks a segment file holds: 256 MiB of 256 KiB blocks. */
+export const SEGMENT_BLOCKS = 1024;
+
+/**
+ * The files of a cache, by its file name (`blockCacheName`, made safe), all at
+ * the root of the origin's file system: the bitmap, the order the last run
+ * read in, and segment `k` of the blocks. `replaced` are the files of layouts
+ * this one replaced -- the one-file `.blocks` with its `.present` bitmap, and
+ * the appended layout's `.slots` table -- which a cache that finds them drops.
+ */
+export const cacheFiles = {
+    /** @param {string} file */
+    bitmap: file=>`${file}.held`,
+    /** @param {string} file */
+    order: file=>`${file}.order`,
+    /** @param {string} file @param {number} k */
+    segment: (file, k)=>`${file}.blocks.${k}`,
+    /** @param {string} file */
+    replaced: file=>[`${file}.blocks`, `${file}.present`, `${file}.slots`],
+};
+
+/**
+ * Where block `index` sits: its segment, and the offset in it.
+ *
+ * @param {number} index @param {number} blockSize
+ */
+const slotOf = (index, blockSize)=>({ segment: Math.floor(index / SEGMENT_BLOCKS),
+    at: (index % SEGMENT_BLOCKS) * blockSize });
 
 /** Bytes of bitmap for this many blocks. @param {number} blockCount */
 const bitmapBytes = blockCount=>Math.ceil(blockCount / 8);
@@ -80,6 +130,52 @@ const bitmapBytes = blockCount=>Math.ceil(blockCount / 8);
  * @param {string} id  @param {string} fingerprint
  */
 export const blockCacheName = (id, fingerprint)=>`${id}-${fingerprint}`;
+
+/**
+ * A bare file name at the store's root: the origin's file system refuses a
+ * name with a separator in it, and a bundle's id is not ours to vet.
+ *
+ * @param {string} name
+ */
+const fileNameOf = name=>name.replace(/[^A-Za-z0-9._-]/g, '_');
+
+/**
+ * A cache's bitmap and the segments it has, read through the origin's file
+ * system without opening anything for writing; null where it holds no bitmap
+ * of this bundle's size. A file that is not there is refused (NotFoundError).
+ *
+ * @param {any} root @param {string} file @param {number} blockCount
+ * @returns {Promise<{ bitmap: Uint8Array, segments: Map<number, Blob> } | null>}
+ */
+async function readCache(root, file, blockCount){
+    /** @param {string} name @returns {Promise<Blob | null>} */
+    const fileOf = async name=>{
+        try
+        {
+            return await (await root.getFileHandle(name)).getFile();
+        }
+        catch {
+            return null;
+        }
+    };
+    const held = await fileOf(cacheFiles.bitmap(file));
+    if (held === null || held.size !== bitmapBytes(blockCount))
+    {
+        return null;
+    }
+    const bitmap = new Uint8Array(await held.arrayBuffer());
+    /** @type {Map<number, Blob>} */
+    const segments = new Map();
+    for (let k = 0; k * SEGMENT_BLOCKS < blockCount; k++)
+    {
+        const segment = await fileOf(cacheFiles.segment(file, k));
+        if (segment !== null)
+        {
+            segments.set(k, segment);
+        }
+    }
+    return { bitmap, segments };
+}
 
 /**
  * How much of a bundle this machine already holds, read from the cache's
@@ -95,21 +191,8 @@ export const blockCacheName = (id, fingerprint)=>`${id}-${fingerprint}`;
  * @returns {Promise<{ blocks: number, resident: number, bytes: number, residentBytes: number }>}
  */
 export async function bundleResidency({ root, id, bundle }){
-    const name = blockCacheName(id, bundle.fingerprint).replace(/[^A-Za-z0-9._-]/g, '_');
-    /** @type {Uint8Array | null} */
-    let bitmap = null;
-    try
-    {
-        const file = await (await root.getFileHandle(`${name}.present`)).getFile();
-        bitmap = new Uint8Array(await file.arrayBuffer());
-    }
-    catch {
-        // No cache yet: nothing of it is here.
-    }
-    if (bitmap && bitmap.length !== bitmapBytes(bundle.blockCount))
-    {
-        bitmap = null;
-    }
+    const cache = await readCache(root, fileNameOf(blockCacheName(id, bundle.fingerprint)),
+        bundle.blockCount);
     const seed = bundle.translations;
     const out = { blocks: 0, resident: 0, bytes: 0, residentBytes: 0 };
     for (let index = 0; index < bundle.blockCount; index++)
@@ -121,7 +204,8 @@ export async function bundleResidency({ root, id, bundle }){
         const { packed } = bundle.block(index);
         out.blocks++;
         out.bytes += packed;
-        if (bitmap && isSet(bitmap, index))
+        if (cache && isSet(cache.bitmap, index)
+            && cache.segments.has(slotOf(index, 0).segment))
         {
             out.resident++;
             out.residentBytes += packed;
@@ -170,19 +254,9 @@ export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
         return /** @type {Promise<Uint8Array>} */ (fetched.get(key));
     };
     const bundle = await openBundle(once, decode);
-    const name = blockCacheName(id, bundle.fingerprint).replace(/[^A-Za-z0-9._-]/g, '_');
-    let bitmap;
-    let data;
-    try
-    {
-        bitmap = new Uint8Array(await (await (await root.getFileHandle(`${name}.present`))
-            .getFile()).arrayBuffer());
-        data = await (await root.getFileHandle(`${name}.blocks`)).getFile();
-    }
-    catch {
-        return null;
-    }
-    if (bitmap.length !== bitmapBytes(bundle.blockCount))
+    const cache = await readCache(root, fileNameOf(blockCacheName(id, bundle.fingerprint)),
+        bundle.blockCount);
+    if (cache === null)
     {
         return null;
     }
@@ -197,10 +271,14 @@ export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
             {
                 return { offset, packed: 0, codec: Codec.STORED };
             }
-            whole &&= isSet(bitmap, at);
             const block = bundle.block(at);
             const packed = storedLength(block);
-            parts.push(data.slice(at * bundle.blockSize, at * bundle.blockSize + packed));
+            const slot = slotOf(at, bundle.blockSize);
+            const data = cache.segments.get(slot.segment);
+            // A slot past its segment's end would come out short, not missing.
+            whole &&= isSet(cache.bitmap, at) && data !== undefined
+                && data.size >= slot.at + packed;
+            parts.push(data?.slice(slot.at, slot.at + packed) ?? new Blob());
             const laid = { ...record, offset, packed };
             if (block.codec === Codec.DEFLATE_RAW)
             {
@@ -228,6 +306,14 @@ const isSet = (bitmap, index)=>(bitmap[index >> 3] & 1 << (index & 7)) !== 0;
  */
 const set = (bitmap, index)=>{
     bitmap[index >> 3] |= 1 << (index & 7);
+};
+
+/**
+ * @param {Uint8Array} bitmap
+ * @param {number} index
+ */
+const clear = (bitmap, index)=>{
+    bitmap[index >> 3] &= ~(1 << (index & 7));
 };
 
 /**
@@ -353,17 +439,16 @@ export async function createBlockCache(options){
         return createMemoryCache(maxHeapBytes, 'no store');
     }
 
-    // A bare file name at the store's root: the origin's file system refuses a
-    // name with a separator in it, and a bundle's id is not ours to vet.
-    const file = name.replace(/[^A-Za-z0-9._-]/g, '_');
-    const dataPath = `${file}.blocks`;
-    const bitmapPath = `${file}.present`;
-    const orderPath = `${file}.order`;
+    const file = fileNameOf(name);
+    const bitmapPath = cacheFiles.bitmap(file);
+    const orderPath = cacheFiles.order(file);
+    /** @param {number} k */
+    const segmentPath = k=>cacheFiles.segment(file, k);
     const bitmap = new Uint8Array(bitmapBytes(blockCount));
+    const segments = Math.ceil(blockCount / SEGMENT_BLOCKS);
 
     try
     {
-        await store.open(dataPath);
         await store.open(bitmapPath);
         await store.open(orderPath);
     }
@@ -374,10 +459,41 @@ export async function createBlockCache(options){
         return createMemoryCache(maxHeapBytes, /** @type {Error} */ (e).message);
     }
 
+    // A layout this one replaced: its blocks are not where a slot here says,
+    // so they go, and so does whatever this bitmap believed beside them.
+    const replaced = cacheFiles.replaced(file).filter(path=>store.stat(path) !== null);
+    for (const path of replaced)
+    {
+        store.remove(path);
+    }
+    if (replaced.length > 0)
+    {
+        // A file another tab's older build holds open stays; the removal's
+        // failure is taken here rather than by the next open.
+        await Promise.resolve().then(()=>store.flush?.()).catch(()=>{});
+    }
+
+    /** The segments open for this run, or being opened. @type {Map<number, Promise<void>>} */
+    const opened = new Map();
+    for (let k = 0; k < segments; k++)
+    {
+        if (store.stat(segmentPath(k)) !== null)
+        {
+            opened.set(k, store.open(segmentPath(k)));
+        }
+    }
+    try
+    {
+        await Promise.all(opened.values());
+    }
+    catch (e){
+        return createMemoryCache(maxHeapBytes, /** @type {Error} */ (e).message);
+    }
+
     // A bitmap of the wrong size belongs to a different bundle, or to a version
     // of this one with different blocks. Either way the slots underneath it mean
     // something else, so it starts again rather than being partly believed.
-    const held = store.stat(bitmapPath);
+    const held = replaced.length > 0 ? null : store.stat(bitmapPath);
     /**
      * The order the last run first asked for its blocks in: what a filler
      * should bring in before anything else, because a start reads the same
@@ -392,6 +508,15 @@ export async function createBlockCache(options){
         const stored = store.read(orderPath, 0, ORDER_LIMIT * 4);
         previous = [...new Uint32Array(stored.buffer, stored.byteOffset, stored.length >> 2)]
             .filter(index=>index < blockCount);
+        // A segment that went (the budget let it go, or a person did) takes
+        // its blocks with it: what the bitmap says of them is not believed.
+        for (let index = 0; index < blockCount; index++)
+        {
+            if (!opened.has(slotOf(index, 0).segment))
+            {
+                clear(bitmap, index);
+            }
+        }
     }
     else
     {
@@ -403,12 +528,16 @@ export async function createBlockCache(options){
     /** This run's first demands, in order. @type {Set<number>} */
     const demanded = new Set();
     let dirty = false;
+    /** Blocks the store refused, held for the run alone and bounded. */
+    const refused = createMemoryCache(maxHeapBytes, 'the store refused a write');
+    /** Why the store last refused a write, while it does. @type {string | null} */
+    let full = null;
 
     return {
         backed: true,
 
         /** @param {number} index */
-        has: index=>isSet(bitmap, index),
+        has: index=>isSet(bitmap, index) || refused.has(index),
 
         /**
          * A read wanted this block. Only the first time counts, and only the
@@ -435,17 +564,57 @@ export async function createBlockCache(options){
         read(index, length){
             if (!isSet(bitmap, index))
             {
+                return refused.read(index);
+            }
+            const { segment, at } = slotOf(index, blockSize);
+            /** @type {Uint8Array | null} */
+            let bytes = null;
+            try
+            {
+                bytes = store.read(segmentPath(segment), at, length);
+            }
+            catch {
+                // A segment gone, or its handle closed by a store of the
+                // caller's with a smaller pool: the block is fetched again.
+            }
+            if (bytes === null || bytes.length !== length)
+            {
+                // Its segment is shorter than the bitmap says: fetched again,
+                // not handed to a guest as a short block.
+                clear(bitmap, index);
+                opened.delete(segment);
+                dirty = true;
                 return null;
             }
-            return store.read(dataPath, index * blockSize, length);
+            return bytes;
         },
 
         /**
+         * Asynchronous because the first block of a segment opens it; a block
+         * the store will not take is held in the heap for this run.
+         *
          * @param {number} index
          * @param {Uint8Array} bytes
          */
-        put(index, bytes){
-            store.write(dataPath, index * blockSize, bytes);
+        async put(index, bytes){
+            const { segment, at } = slotOf(index, blockSize);
+            try
+            {
+                if (!opened.has(segment))
+                {
+                    opened.set(segment, store.open(segmentPath(segment)));
+                }
+                await opened.get(segment);
+                store.write(segmentPath(segment), at, bytes);
+            }
+            catch (e){
+                // Past the origin's quota, or a disk with no room: the run goes
+                // on with this block in the heap, and the next run fetches it.
+                full = /** @type {Error} */ (e).message;
+                opened.delete(segment);
+                refused.put(index, bytes);
+                return;
+            }
             set(bitmap, index);
             dirty = true;
         },
@@ -456,6 +625,7 @@ export async function createBlockCache(options){
          * disk costs one refetch, and a write per block would cost far more.
          */
         async persist(){
+            await refused.persist();
             if (!dirty)
             {
                 return;
@@ -466,8 +636,14 @@ export async function createBlockCache(options){
             // longer one learned.
             const order = new Uint32Array([...demanded,
                 ...previous.filter(index=>!demanded.has(index))].slice(0, ORDER_LIMIT));
-            store.truncate(orderPath, order.byteLength);
-            store.write(orderPath, 0, new Uint8Array(order.buffer));
+            try
+            {
+                store.truncate(orderPath, order.byteLength);
+                store.write(orderPath, 0, new Uint8Array(order.buffer));
+            }
+            catch (e){
+                full = /** @type {Error} */ (e).message;
+            }
             dirty = false;
         },
 
@@ -477,8 +653,11 @@ export async function createBlockCache(options){
             {
                 resident += isSet(bitmap, at) ? 1 : 0;
             }
-            // In the heap only the record of which blocks are here: the blocks are on disk.
-            return { backed: true, resident, blocks: blockCount, heapBytes: bitmap.length };
+            const inHeap = refused.diagnostics();
+            // In the heap the record of which blocks are here, and what the
+            // store refused; the rest is on disk.
+            return { backed: true, resident: resident + inHeap.resident, blocks: blockCount,
+                heapBytes: bitmap.length + inHeap.heapBytes, ...full === null ? {} : { full } };
         },
     };
 }

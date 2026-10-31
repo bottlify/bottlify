@@ -65,7 +65,7 @@
  */
 
 import { createDirect3D8 } from '../d3d8/device.js';
-import { dumpDigits } from '../d3d8/render.js';
+import { dumpDigits, srgbHonoured } from '../d3d8/render.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createOpenglRoot } from '../opengl/root.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -703,6 +703,10 @@ export function serveGraphics(scope, deps){
                 {
                     dumpDigits.value = Math.min(9,
                         Math.max(1, Math.floor(Number(data.dumpDigits)) || 4));
+                }
+                if ('srgb' in data)
+                {
+                    srgbHonoured.value = data.srgb !== false;
                 }
                 if ('skipShader' in data)
                 {

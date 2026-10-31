@@ -2025,6 +2025,13 @@ const lodOf = texture=>texture?.GetLOD?.() ?? 0;
 const SRGB_TEXTURE = SAMPLER_STATE_KEY[D3DSAMP.SRGBTEXTURE];
 
 /**
+ * Whether sRGB reads and writes are done (`app.debug.srgb`): off, every
+ * texel is read and written as stored, as before they were -- a picture that
+ * changed with them told from one that did not, on the running program.
+ */
+export const srgbHonoured = { value: true };
+
+/**
  * Whether a stage samples its texture as sRGB (Direct3D 9's
  * D3DSAMP_SRGBTEXTURE; 8 has no such state): texels decoded to linear before
  * the shader sees them.
@@ -2048,7 +2055,7 @@ const writesSrgb = model=>(model.renderStates.get(D3DRS9.SRGBWRITEENABLE) ?? 0) 
  *
  * @param {RenderModel} model @param {string | undefined} targetFormat  The GPU format.
  */
-const encodesSrgb = (model, targetFormat)=>writesSrgb(model)
+const encodesSrgb = (model, targetFormat)=>srgbHonoured.value && writesSrgb(model)
     && targetFormat !== undefined && srgbViewFormats(targetFormat).length > 0;
 
 /**
@@ -2079,7 +2086,8 @@ const srgbNoteOf = model=>{
  * @param {{ view: any, srgbView?: any }} surface @param {RenderModel} model
  * @param {number} stage
  */
-const sampledView = (surface, model, stage)=>(surface.srgbView && readsSrgb(model, stage)
+const sampledView = (surface, model, stage)=>(srgbHonoured.value && surface.srgbView
+    && readsSrgb(model, stage)
     ? surface.srgbView : surface.view);
 
 /** @param {RenderModel} model @param {boolean} mips */

@@ -682,7 +682,8 @@ function movable(file){
  * @param {Record<string, Uint8Array>} files  Beside the program, by name.
  * @param {Uint8Array} executable
  * @param {{ base: number, limit: number, floor?: number,
- *           held?: { base: number, size: number }[] }} space
+ *           held?: { base: number, size: number }[], bits?: 32 | 64 }} space
+ *        `bits`: the process's machine.
  */
 async function mapBeside(files, executable, space){
     const filesystem = await filesystemModule.create({
@@ -696,14 +697,14 @@ async function mapBeside(files, executable, space){
     const loader = {
         /** @param {Uint8Array} file @param {{ base: number, name: string }} where */
         map: (file, { base, name })=>{
-            placed.push({ name, base, size: parsePe(file).sizeOfImage });
+            placed.push({ name, base, size: parsePe(file, { wide: true }).sizeOfImage });
             return { record: { entryPoint: 0 } };
         },
     };
     const kernel32 = (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll';
-    const { held = [], floor = 0x00500000, ...bounds } = space;
+    const { held = [], floor = 0x00500000, bits, ...bounds } = space;
     const mapped = await mapShippedLibraries({
-        executable, imagePath: IMAGE, filesystem, loader, blocks: null,
+        executable, imagePath: IMAGE, filesystem, loader, blocks: null, bits,
         events: { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             emitted.push([name, payload]) },
         isSystem: kernel32, isKnownDll: kernel32,
@@ -716,6 +717,28 @@ async function mapBeside(files, executable, space){
     });
     return { mapped, placed, emitted };
 }
+
+test('a library of the other machine is refused with its reason, as Windows refuses to map it',
+    async()=>{
+        /** @param {32 | 64} bits */
+        const build = bits=>new Uint8Array(buildExe({ bits, dll: true, imageBase: 0x02000000,
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3] }));
+        /** @param {32 | 64} bits */
+        const program = bits=>new Uint8Array(buildExe({ bits,
+            imports: { 'other.dll': ['Anything'] }, code: ()=>[0xc3] }));
+        for (const [bits, other, said] of /** @type {const} */ ([
+            [32, 64, /an x86-64 image does not load into a 32-bit process/],
+            [64, 32, /an i386 image does not load into a 64-bit process/]]))
+        {
+            const space = { base: 0x02000000, limit: 0x08000000, bits };
+            const refused = await mapBeside({ 'other.dll': build(other) }, program(bits), space);
+            assert.deepEqual(refused.placed, [], `a ${other}-bit library in a ${bits}-bit process`);
+            assert.ok(refused.emitted.some(([name, payload])=>name === 'libraries-missing'
+                && payload.names.includes('other.dll') && said.test(payload.reason)));
+            const taken = await mapBeside({ 'other.dll': build(bits) }, program(bits), space);
+            assert.deepEqual(taken.placed.map(one=>one.name), ['other.dll']);
+        }
+    });
 
 test('a library that would reach past the modules\' space is refused, not mapped over the stacks',
     async()=>{

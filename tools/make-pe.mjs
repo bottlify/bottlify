@@ -5,7 +5,8 @@
  */
 
 /**
- * Generates 32-bit console PE executables used as loader and scheduler fixtures.
+ * Generates console PE executables used as loader and scheduler fixtures:
+ * 32-bit ones, and x86-64 ones (PE32+) with `buildExe`'s `bits: 64`.
  *
  * Written by hand rather than produced by a compiler for two reasons: no
  * toolchain is required to reproduce them, and the files stay small enough that
@@ -24,8 +25,13 @@ const SECTION_RVA = 0x1000;
 const FILE_ALIGNMENT = 0x200;
 const SECTION_ALIGNMENT = 0x1000;
 const HEADERS_SIZE = 0x200;
-/** IMAGE_TLS_DIRECTORY32: four addresses, the zero fill and the characteristics. */
-const TLS_DIRECTORY_SIZE = 24;
+/**
+ * IMAGE_TLS_DIRECTORY32 and IMAGE_TLS_DIRECTORY64: four addresses, the zero
+ * fill and the characteristics.
+ *
+ * @param {number} pointer
+ */
+const tlsDirectorySize = pointer=>pointer * 4 + 8;
 
 class Buf {
     constructor(){
@@ -52,6 +58,14 @@ class Buf {
     u32(value){
         return this.push(
             value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+    }
+    /** @param {number} value  Below 2^53. */
+    u64(value){
+        return this.u32(value % 0x100000000).u32(Math.floor(value / 0x100000000));
+    }
+    /** @param {number} value @param {number} size  4 or 8 bytes. */
+    pointer(value, size){
+        return size === 8 ? this.u64(value) : this.u32(value);
     }
     /** @param {string} text */
     ascii(text){
@@ -155,6 +169,8 @@ export function assemble(parts){
  *        library needs a base of its own: it has no relocations, so one that
  *        asks for the program's base cannot be loaded beside it.
  * @param {boolean} [options.dll]  A library: its entry point is DllMain.
+ * @param {32 | 64} [options.bits]  64: an x86-64 image (PE32+), its import
+ *        tables, thread-local directory and callbacks eight bytes a pointer.
  * @param {{ id: number, text: string }} [options.manifest]
  *        An RT_MANIFEST resource: 1 is a program's own, 2 a library's.
  * @param {{ template: string, index: string, callbacks?: number[] }} [options.tls]
@@ -169,8 +185,10 @@ export function assemble(parts){
  * @returns {Uint8Array}
  */
 export function buildExe(options){
-    const { imports, data = {}, exports = [], codeSize = 0x40, code } = options;
+    const { imports, data = {}, exports = [], codeSize = 0x40, code, bits = 32 } = options;
     const imageBase = options.imageBase ?? IMAGE_BASE;
+    const pointer = bits === 64 ? 8 : 4;
+    const TLS_DIRECTORY_SIZE = tlsDirectorySize(pointer);
     const text = new Buf();
     const rva = (/** @type {number} */ offset)=>SECTION_RVA + offset;
     const va = (/** @type {number} */ offset)=>imageBase + rva(offset);
@@ -201,7 +219,7 @@ export function buildExe(options){
     // ended by a zero dword.
     const tls = options.tls ?? null;
     const callbacks = tls?.callbacks ?? [];
-    const tlsOffset = tls === null ? 0 : (cursor + 3) & ~3;
+    const tlsOffset = tls === null ? 0 : (cursor + pointer - 1) & ~(pointer - 1);
     if (tls !== null)
     {
         for (const name of [tls.template, tls.index])
@@ -211,7 +229,7 @@ export function buildExe(options){
                 throw new Error(`no data named "${name}" for the thread-local directory`);
             }
         }
-        cursor = tlsOffset + TLS_DIRECTORY_SIZE + 4 * (callbacks.length + 1);
+        cursor = tlsOffset + TLS_DIRECTORY_SIZE + pointer * (callbacks.length + 1);
     }
 
     // Import name blocks: WORD hint + zero-terminated name, WORD-aligned.
@@ -241,11 +259,11 @@ export function buildExe(options){
     // Import lookup table and import address table: parallel arrays of RVAs.
     for (const module of modules)
     {
-        cursor = (cursor + 3) & ~3;
+        cursor = (cursor + pointer - 1) & ~(pointer - 1);
         module.iltOffset = cursor;
-        cursor += (module.names.length + 1) * 4;
+        cursor += (module.names.length + 1) * pointer;
         module.iatOffset = cursor;
-        cursor += (module.names.length + 1) * 4;
+        cursor += (module.names.length + 1) * pointer;
     }
     cursor = (cursor + 3) & ~3;
     const descriptorOffset = cursor;
@@ -290,7 +308,7 @@ export function buildExe(options){
             const index = module.names.indexOf(name);
             if (index !== -1)
             {
-                return va(module.iatOffset + index * 4);
+                return va(module.iatOffset + index * pointer);
             }
         }
         throw new Error(`${name} is called but not imported`);
@@ -323,15 +341,16 @@ export function buildExe(options){
     {
         const start = va(dataOffsets[tls.template]);
         text.pad(tlsOffset)
-            .u32(start).u32(start + data[tls.template].length) // the template's bounds
-            .u32(va(dataOffsets[tls.index])) // where the loader writes the slot
-            .u32(va(tlsOffset + TLS_DIRECTORY_SIZE)) // the callbacks
+            .pointer(start, pointer) // the template's bounds
+            .pointer(start + data[tls.template].length, pointer)
+            .pointer(va(dataOffsets[tls.index]), pointer) // where the loader writes the slot
+            .pointer(va(tlsOffset + TLS_DIRECTORY_SIZE), pointer) // the callbacks
             .u32(0).u32(0); // zero fill, characteristics
         for (const offset of callbacks)
         {
-            text.u32(va(offset));
+            text.pointer(va(offset), pointer);
         }
-        text.u32(0);
+        text.pointer(0, pointer);
     }
     for (const module of modules)
     {
@@ -351,9 +370,9 @@ export function buildExe(options){
             text.pad(offset);
             for (const name of module.names)
             {
-                text.u32(rva(nameOffsets[nameKey(module.dll, name)]));
+                text.pointer(rva(nameOffsets[nameKey(module.dll, name)]), pointer);
             }
-            text.u32(0);
+            text.pointer(0, pointer);
         }
     }
 
@@ -419,20 +438,29 @@ export function buildExe(options){
     head.pad(0x40).ascii('PE').u8(0).u8(0);
 
     // COFF header
-    head.u16(0x014c); // i386
+    head.u16(bits === 64 ? 0x8664 : 0x014c); // x86-64 or i386
     head.u16(1); // one section
     head.u32(0); // timestamp
     head.u32(0).u32(0); // no symbol table
-    head.u16(0xe0); // size of optional header
-    head.u16(options.dll ? 0x2102 : 0x0102); // EXECUTABLE_IMAGE | 32BIT_MACHINE, and DLL
+    head.u16(bits === 64 ? 0xf0 : 0xe0); // size of optional header
+    // EXECUTABLE_IMAGE with 32BIT_MACHINE or LARGE_ADDRESS_AWARE, and DLL
+    head.u16((bits === 64 ? 0x0022 : 0x0102) | (options.dll ? 0x2000 : 0));
 
-    // Optional header (PE32)
-    head.u16(0x010b);
+    // Optional header (PE32, or PE32+: no BaseOfData, the base and the four
+    // stack and heap sizes eight bytes)
+    head.u16(bits === 64 ? 0x020b : 0x010b);
     head.u8(0).u8(0); // linker version
     head.u32(rawSize).u32(0).u32(0); // sizes of code / initialized / uninitialized data
     head.u32(SECTION_RVA); // AddressOfEntryPoint
-    head.u32(SECTION_RVA).u32(0); // BaseOfCode / BaseOfData
-    head.u32(imageBase);
+    head.u32(SECTION_RVA); // BaseOfCode
+    if (bits === 64)
+    {
+        head.u64(imageBase);
+    }
+    else
+    {
+        head.u32(0).u32(imageBase); // BaseOfData, ImageBase
+    }
     head.u32(SECTION_ALIGNMENT).u32(FILE_ALIGNMENT);
     head.u16(4).u16(0); // OS version
     head.u16(0).u16(0); // image version
@@ -442,8 +470,8 @@ export function buildExe(options){
     head.u32(0); // checksum
     head.u16(3); // subsystem: console
     head.u16(0); // dll characteristics
-    head.u32(0x100000).u32(0x1000); // stack reserve / commit
-    head.u32(0x100000).u32(0x1000); // heap reserve / commit
+    head.pointer(0x100000, pointer).pointer(0x1000, pointer); // stack reserve / commit
+    head.pointer(0x100000, pointer).pointer(0x1000, pointer); // heap reserve / commit
     head.u32(0).u32(16); // loader flags, number of data directories
 
     const directories = new Array(16).fill(null).map(()=>[0, 0]);
@@ -456,7 +484,7 @@ export function buildExe(options){
     const last = modules[modules.length - 1];
     directories[12] = modules.length === 0 ? [0, 0] : [
         rva(modules[0].iatOffset),
-        last.iatOffset + (last.names.length + 1) * 4 - modules[0].iatOffset,
+        last.iatOffset + (last.names.length + 1) * pointer - modules[0].iatOffset,
     ];
     for (const [address, size] of directories)
     {

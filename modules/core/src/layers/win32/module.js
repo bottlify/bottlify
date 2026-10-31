@@ -78,7 +78,7 @@ import {
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createLibcefFunctions } from './libcef/functions.js';
-import { STEAM_PATH, announceSteamClient, createSteamclientFunctions }
+import { STEAM_PATH, announceSteamClient, createSteamclientFunctions, steamClientDll }
     from './steamclient/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
 import { createLoopbackAdapter } from './wsock32/loopback.js';
@@ -2022,6 +2022,7 @@ export function createWin32Module(){
                 allocateCode: bytes=>heap.allocateCode(bytes),
                 free: address=>heap.free(address),
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                architecture: pointerSize === 8 ? 'amd64' : 'x86',
                 readFile: async path=>{
                     const entry = volume.stat(path);
                     const node = entry && !entry.isDirectory
@@ -2602,6 +2603,8 @@ export function createWin32Module(){
                         // ships is told the module does not exist.
                         /** @param {string} name @param {number} [flags] */
                         load: (name, flags)=>modules.load?.(name, flags) ?? 0,
+                        /** @param {string} name */
+                        loadError: name=>modules.loadError?.(name) ?? null,
                         /** @param {number} handle */
                         dataFile: handle=>modules.dataFile?.(handle) ?? null,
                         /** @param {any} asked */
@@ -3592,9 +3595,10 @@ export function createWin32Module(){
                 'DWrite.dll': createDwriteFunctions({ ...displayHost,
                     divergence: config?.divergence }),
                 // The Steam client's side of a game's Steamworks calls, for the
-                // account the launcher signed in with (steamclient/).
-                'steamclient.dll': createSteamclientFunctions({ readMemory, writeMemory,
-                    readCString, account: config?.steam ?? null,
+                // account the launcher signed in with (steamclient/): the
+                // library of the process's width, as the client installs both.
+                [steamClientDll(pointerSize)]: createSteamclientFunctions({ readMemory,
+                    writeMemory, readCString, account: config?.steam ?? null, pointerSize,
                     allocate: displayHost.allocate,
                     register: (name, fn)=>bridge.register(name, fn),
                     answerHigh: high=>bridge.answerHigh(high),
@@ -4031,6 +4035,7 @@ export function createWin32Module(){
                 'ole32.dll': createOleFunctions({
                     readMemory,
                     writeMemory,
+                    pointerSize,
                     // Another library's export, as it is when called -- the
                     // clipboard, accelerators and the GDI deletions a medium's
                     // release makes are user32's, gdi32's and kernel32's. The
@@ -4419,7 +4424,8 @@ export function createWin32Module(){
             if (seh64)
             {
                 for (const name of ['RtlLookupFunctionEntry', 'RtlVirtualUnwind', 'RtlUnwindEx',
-                    'RtlCaptureContext', 'RtlAddFunctionTable', 'RtlDeleteFunctionTable'])
+                    'RtlCaptureContext', 'RtlAddFunctionTable', 'RtlDeleteFunctionTable',
+                    'RtlPcToFileHeader'])
                 {
                     libraries['ntdll.dll'][name] = /** @type {any} */ (seh64.table)[name];
                 }
@@ -4469,7 +4475,8 @@ export function createWin32Module(){
                  *
                  * @returns {string[]}
                  */
-                runtimes: ()=>['DSETUP.dll', 'MSVCR80.dll', 'libcef.dll', 'steamclient.dll'],
+                runtimes: ()=>['DSETUP.dll', 'MSVCR80.dll', 'libcef.dll',
+                    steamClientDll(pointerSize)],
 
                 /**
                  * The libraries with a table here that are not Windows' own but a

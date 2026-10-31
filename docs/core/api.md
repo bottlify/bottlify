@@ -90,6 +90,11 @@ is ignored; `executors`, the older name of `cpu.cores`, is refused.
 | `discs` | `{ image, letter? }[]` | none | Disc images mounted as CD-ROM drives, `D:` or the next free letter. `image` is a `Blob` (read a range at a time) or bytes. |
 | `collectOnExit` | boolean | `false` | The run's exit carries the files the program wrote, for `session.export()`. |
 
+What a browser keeps of each bottle is listed and removed from `@bottlify/core/storage`:
+`bottleStorage()` answers the origin's `usage`, `quota`, `persisted` and, per bottle (by
+`storageName(id)`), the bytes of its `blocks`, `translations` and `saves` and whether a run holds
+it (`busy`); `clearBottleStorage(id, kinds)` removes those kinds and refuses a bottle a run holds.
+
 ### Network
 
 | Option | Type | Default | What it does |

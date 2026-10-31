@@ -316,6 +316,19 @@ test('an x86-64 image is refused unless the caller takes 64-bit images', ()=>{
     assert.throws(()=>mapImage(file64), /unsupported machine 0x8664/);
 });
 
+test('an image is taken for a process of its own machine and refused for the other one', ()=>{
+    // What LoadLibrary answers ERROR_BAD_EXE_FORMAT for: a 64-bit library in a
+    // 32-bit process, and a 32-bit one in a 64-bit process.
+    assert.equal(parsePe(file64, { bits: 64 }).bits, 64);
+    assert.equal(parsePe(file, { bits: 32 }).bits, 32);
+    assert.throws(()=>parsePe(file64, { bits: 32 }),
+        { code: 'BAD_EXE_FORMAT', message: /x86-64 image does not load into a 32-bit process/ });
+    assert.throws(()=>parsePe(file, { bits: 64 }),
+        { code: 'BAD_EXE_FORMAT', message: /i386 image does not load into a 64-bit process/ });
+    assert.equal(mapImage(file64, 0x10000000, { bits: 64 }).image.bits, 64);
+    assert.throws(()=>mapImage(file, 0x400000, { bits: 64 }), { code: 'BAD_EXE_FORMAT' });
+});
+
 test('headers of an x86-64 console executable, from its PE32+ fields', ()=>{
     const image = parsePe(file64, { wide: true });
     assert.equal(image.bits, 64);

@@ -92,7 +92,7 @@ export function programInPlaceOf(executable){
     let block;
     try
     {
-        const image = parsePe(executable);
+        const image = parsePe(executable, { wide: true });
         const found = findResource(executable, image, RT_VERSION, 1);
         const at = found ? rvaToFileOffset(image, found.rva) : -1;
         block = found && at >= 0 ? executable.subarray(at, at + found.size) : null;

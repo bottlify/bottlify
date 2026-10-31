@@ -19,7 +19,7 @@ import zlib from 'node:zlib';
 import { packBlock, writeBundle } from '../../../../bundle-node.js';
 import { openBundle, withManifest, Codec, HEADER_SIZE, MAGIC } from './format.js';
 import { createBundleSource, BLOCK_MISS } from './source.js';
-import { blockCacheName, cachedBundle, storedLength } from './cache.js';
+import { blockCacheName, cachedBundle, SEGMENT_BLOCKS, storedLength } from './cache.js';
 
 const BLOCK_SIZE = 1024;
 
@@ -485,7 +485,9 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
     // the slots the engine filled, laid back to back under a new index.
     const bundle = await open();
     const name = blockCacheName('game', bundle.fingerprint);
-    const blocks = new Uint8Array(bundle.blockCount * bundle.blockSize);
+    // Segments as the cache keeps them, each as long as its last block.
+    /** @type {Uint8Array[]} */
+    const segments = [];
     for (let at = 0; at < bundle.blockCount; at++)
     {
         const block = bundle.block(at);
@@ -493,17 +495,29 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
         // As the engine puts it: a deflate block inflated, any other as it came.
         const kept = block.codec === Codec.DEFLATE_RAW ? decodeBlock(block.codec, packed) : packed;
         assert.equal(kept.length, storedLength(block));
-        blocks.set(kept, at * bundle.blockSize);
+        const k = Math.floor(at / SEGMENT_BLOCKS);
+        const from = (at % SEGMENT_BLOCKS) * bundle.blockSize;
+        const grown = new Uint8Array(from + kept.length);
+        grown.set(segments[k] ?? new Uint8Array(0));
+        grown.set(kept, from);
+        segments[k] = grown;
     }
     const codecs = new Set(Array.from({ length: bundle.blockCount },
         (_, at)=>bundle.block(at).codec));
     assert.ok(codecs.has(Codec.STORED) && codecs.size > 1, 'the fixture has blocks kept both ways');
     /** @param {Uint8Array} present */
     const root = present=>({
-        getFileHandle: async(/** @type {string} */ file)=>({
-            getFile: async()=>new Blob(/** @type {BlobPart[]} */ ([file === `${name}.present` ? present
-                : file === `${name}.blocks` ? blocks : assert.fail(file)])),
-        }),
+        // As the origin's file system answers: a file that is not there is refused.
+        getFileHandle: async(/** @type {string} */ file)=>{
+            const k = file.startsWith(`${name}.blocks.`)
+                ? Number(file.slice(`${name}.blocks.`.length)) : -1;
+            const bytes = file === `${name}.held` ? present : segments[k];
+            if (bytes === undefined)
+            {
+                throw new DOMException(`no ${file}`, 'NotFoundError');
+            }
+            return { getFile: async()=>new Blob(/** @type {BlobPart[]} */ ([bytes])) };
+        },
     });
     const whole = new Uint8Array(Math.ceil(bundle.blockCount / 8));
     for (let at = 0; at < bundle.blockCount; at++)
@@ -535,4 +549,10 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
     short[0] &= ~1;
     assert.equal(await cachedBundle({ root: root(short), id: 'game', fetchRange,
         decode: decodeBlock, manifest }), null, 'a block missing from the cache: nothing to write');
+
+    const last = segments.length - 1;
+    const kept = segments[last];
+    segments[last] = kept.subarray(0, kept.length - 1);
+    assert.equal(await cachedBundle({ root: root(whole), id: 'game', fetchRange,
+        decode: decodeBlock, manifest }), null, 'a segment short of its last block: nothing');
 });

@@ -141,7 +141,10 @@ export function watchFrom({ libraries, strings }){
             return { args: 6 };
         }
         const decorated = /@(\d+)$/.exec(name);
-        return decorated ? { args: Number(decorated[1]) / 4 } : null;
+        // A C++ name (`?init@System@FMOD@@QAG...`) says its arguments only in its mangling:
+        // eight dwords are shown, `this` first under __stdcall, as for an ordinal.
+        return decorated ? { args: Number(decorated[1]) / 4 }
+            : name.startsWith('?') ? { args: 8, strings } : null;
     };
 }
 

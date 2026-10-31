@@ -3016,15 +3016,17 @@ export function createWindowFunctions(host){
      * sign-extended from the dword the record keeps, as RAX is.
      *
      * @param {any} record @param {number} index
+     * @param {boolean} [unicode]  Read through GetWindowLongPtrW: a procedure is
+     *     its address to a reader of its own encoding, as `readLong` answers.
      * @returns {bigint}
      */
-    const readLongPtr = (record, index)=>{
+    const readLongPtr = (record, index, unicode = false)=>{
         const at = index | 0;
         if (at >= 0)
         {
             return at + 8 <= record.extra.byteLength ? record.extra.getBigUint64(at, true) : 0n;
         }
-        return BigInt.asUintN(64, BigInt(readLong(record, index) | 0));
+        return BigInt.asUintN(64, BigInt(readLong(record, index, unicode) | 0));
     };
 
     /**
@@ -3041,7 +3043,7 @@ export function createWindowFunctions(host){
         {
             return 0n;
         }
-        const previous = readLongPtr(record, index);
+        const previous = readLongPtr(record, index, unicode);
         const at = index | 0;
         if (at < 0)
         {
@@ -8157,7 +8159,7 @@ export function createWindowFunctions(host){
                 /** @param {number[]} args */
                 handler: ([hwnd, index])=>{
                     const record = live(hwnd);
-                    return record ? readLongPtr(record, index) : 0n;
+                    return record ? readLongPtr(record, index, true) : 0n;
                 },
             },
             /** LONG_PTR SetWindowLongPtrA(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */

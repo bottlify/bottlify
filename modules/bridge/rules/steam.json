@@ -1,0 +1,26 @@
+[
+    {
+        "id": 1,
+        "priority": 1,
+        "action": {
+            "type": "modifyHeaders",
+            "requestHeaders": [{ "header": "Origin", "operation": "set", "value": "http://localhost" }]
+        },
+        "condition": { "requestDomains": ["steamserver.net"], "resourceTypes": ["websocket"] }
+    },
+    {
+        "id": 2,
+        "priority": 1,
+        "action": {
+            "type": "modifyHeaders",
+            "responseHeaders": [
+                { "header": "Access-Control-Allow-Origin", "operation": "set", "value": "*" },
+                { "header": "Cross-Origin-Resource-Policy", "operation": "set", "value": "cross-origin" }
+            ]
+        },
+        "condition": {
+            "requestDomains": ["api.steampowered.com", "steamcontent.com", "steampipe.akamaized.net"],
+            "resourceTypes": ["xmlhttprequest", "other"]
+        }
+    }
+]
