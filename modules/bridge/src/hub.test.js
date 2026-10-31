@@ -83,9 +83,18 @@ function fakeSteam(){
 function hubOver(platforms = {}){
     const steam = fakeSteam();
     const kept = { session: /** @type {any} */ (null) };
-    const vault = { get: async()=>kept.session, set: async(/** @type {any} */ one)=>{
-        kept.session = one;
-    } };
+    const vault = {
+        get: async()=>kept.session
+            && { accountName: kept.session.accountName, id: kept.session.id },
+        token: async()=>kept.session,
+        signIn: async(/** @type {any} */ options)=>{
+            kept.session = await steam.signInWithQr(null, options);
+            return { accountName: kept.session.accountName };
+        },
+        signOut: async()=>{
+            kept.session = null;
+        },
+    };
     const hub = createHub({ version: '0.2.0', platforms, stores: { steam: steamStore({ vault,
         steam, socket: ()=>/** @type {any} */ (null), managers: async()=>['cm:443'] }) } });
     const events = /** @type {any[]} */ ([]);

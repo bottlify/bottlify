@@ -5,22 +5,22 @@
  */
 
 /**
- * GameHub's service worker: the stores' accounts, their sessions and their
- * protocols. Each launcher page connects a port (its content script, pipe.js)
- * and is served on it (serve.js); a store's socket is opened by that page and
- * lives with it. The port's traffic -- the CM heartbeat every few seconds --
- * keeps the worker awake while the page is open; stopped, it closes the
- * page's sockets, and the page's next request connects again and logs on
- * again with the kept session.
+ * GameHub's service worker: the stores' sessions, kept in the extension
+ * origin's IndexedDB, sealed (vault.js), their sign-ins, over HTTPS, and
+ * their rulesets. GameHub in each tab (tab.js) speaks the stores' protocols and
+ * asks the worker here to sign in, who is signed in, what to log on with, and
+ * to fetch what the ruleset does not open to a page (serve.js). Nothing it does
+ * takes long: Chrome keeps an extension's worker at a low priority.
  *
  * It also switches each store's ruleset as the asking site's configuration
  * says, so a store that asks us to stop is stopped for everyone from the site
  * without a new release of the extension (roadmap/decisions.md, A66).
  */
 
-import { servePort } from './serve.js';
+import { serveTab } from './serve.js';
 import { vaultFor } from './vault.js';
-import { steamStore } from './stores/steam/store.js';
+import { signInWithQr } from './stores/steam/auth.js';
+import { webApi } from './stores/steam/webapi.js';
 
 const { chrome } = /** @type {any} */ (globalThis);
 
@@ -41,17 +41,47 @@ async function switchRulesets(wanted){
     return Object.fromEntries(ids.map(id=>[id, enabled.includes(id)]));
 }
 
-const steamVault = vaultFor('steam');
+/**
+ * Valve's client files kept in the extension's cache: a package's name carries
+ * its hash, so a kept one is the one the manifest names.
+ *
+ * @param {string} url
+ */
+async function cachedFetch(url){
+    if (!url.endsWith('.zip'))
+    {
+        return fetch(url);
+    }
+    const cache = await caches.open('steam-client');
+    const kept = await cache.match(url);
+    if (kept)
+    {
+        return kept;
+    }
+    const fresh = await fetch(url);
+    if (fresh.ok)
+    {
+        await cache.put(url, fresh.clone());
+    }
+    return fresh;
+}
+
+const stores = {
+    steam: {
+        vault: vaultFor('steam'),
+        // Over HTTPS, not a CM socket: a socket is a tab's, and the token the
+        // sign-in ends in would cross it.
+        signIn: (/** @type {any} */ options)=>signInWithQr(async()=>/** @type {any} */ (webApi()),
+            options),
+    },
+};
 
 chrome.runtime.onConnect.addListener((/** @type {any} */ port)=>{
+    // Only GameHub's own content script, in a tab: a page cannot connect.
     if (port.name !== 'gamehub' || port.sender?.id !== chrome.runtime.id || !port.sender?.tab)
     {
         port.disconnect();
         return;
     }
-    servePort(port, {
-        version: chrome.runtime.getManifest().version,
-        switch: switchRulesets,
-        stores: socket=>({ steam: steamStore({ vault: steamVault, socket }) }),
-    });
+    serveTab(port, { switch: switchRulesets, stores, fetch: /** @type {any} */ (cachedFetch) });
 });

@@ -60,20 +60,22 @@ export const PLATFORMS = Object.freeze({
 
 /**
  * The builds' entry points, by path under `modules/` as the build lays them
- * out: the service worker, the content script, and the modules the content
- * script imports (which the page may therefore load too).
+ * out: the service worker, the content script, and GameHub in the tab, which
+ * the content script imports -- it and every module it imports are therefore
+ * the page's to load too (the build lists them: `TAB`).
  */
 export const ENTRIES = Object.freeze(['bridge/src/worker.js', 'bridge/src/content.js',
-    'bridge/src/pipe.js']);
+    'bridge/src/tab.js']);
 
-/** What the content script imports, which the page may therefore load too. */
-export const MODULES = Object.freeze(['bridge/src/pipe.js', 'bridge/src/wire.js']);
+/** What the content script imports. */
+export const TAB = 'bridge/src/tab.js';
 
 /**
  * @param {keyof typeof PAGES} build
  * @param {string} version
+ * @param {string[]} [modules]  `TAB` and what it imports.
  */
-export function manifestFor(build, version){
+export function manifestFor(build, version, modules = [TAB]){
     const pages = [...PAGES[build]];
     return {
         manifest_version: 3,
@@ -85,7 +87,7 @@ export function manifestFor(build, version){
             ...Object.values(PLATFORMS).flatMap(platform=>platform.hosts)],
         background: { service_worker: 'bridge/src/worker.js', type: 'module' },
         content_scripts: [{ matches: pages, js: ['bridge/src/content.js'], run_at: 'document_start' }],
-        web_accessible_resources: [{ resources: [...MODULES], matches: pages }],
+        web_accessible_resources: [{ resources: [...modules], matches: pages }],
         declarative_net_request: {
             rule_resources: Object.entries(PLATFORMS).map(([id, platform])=>(
                 { id, enabled: true, path: `bridge/${platform.rules}` })),

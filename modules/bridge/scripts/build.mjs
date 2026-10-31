@@ -18,7 +18,7 @@
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ENTRIES, HOSTS, PAGES, PLATFORMS, manifestFor } from '../src/manifest.js';
+import { ENTRIES, HOSTS, PAGES, PLATFORMS, TAB, manifestFor } from '../src/manifest.js';
 
 const HERE = fileURLToPath(new URL('..', import.meta.url));
 // The modules beside it in this repository, not the packages node_modules
@@ -65,6 +65,7 @@ export async function build(out = join(HERE, 'dist')){
     const { version } = JSON.parse(await readFile(join(HERE, 'package.json'), 'utf8'));
     /** @type {[string, string][]} */
     const files = (await closure([...ENTRIES])).map(path=>[join(MODULES, path), path]);
+    const loadable = await closure([TAB]);
     for (const platform of Object.values(PLATFORMS))
     {
         files.push([join(HERE, platform.rules), `bridge/${platform.rules}`]);
@@ -93,7 +94,7 @@ export async function build(out = join(HERE, 'dist')){
                 script.replace(blank, ()=>`const HOSTS = new RegExp(${JSON.stringify(hosts)});`));
         }
         await writeFile(join(dir, 'manifest.json'),
-            `${JSON.stringify(manifestFor(flavour, version), null, 2)}\n`);
+            `${JSON.stringify(manifestFor(flavour, version, loadable), null, 2)}\n`);
         built[flavour] = dir;
     }
     return built;

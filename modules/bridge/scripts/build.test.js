@@ -46,7 +46,7 @@ test('each build is whole: its imports resolve, and what the page loads it may',
                     }
                 }
             }
-            assert.ok(theirs.size > 0, 'the content script loads its pipe');
+            assert.ok(theirs.size > 0, 'the content script loads GameHub in the tab');
             for (const path of theirs)
             {
                 assert.ok(loadable.includes(path), `${path} is not web-accessible`);
@@ -58,8 +58,9 @@ test('each build is whole: its imports resolve, and what the page loads it may',
                         `${name}, which ${path} imports, is not web-accessible`);
                 }
             }
-            assert.ok(!loadable.some((/** @type {string} */ path)=>/stores\/|worker|vault/.test(path)),
-                'nothing of the worker is the page\'s to load');
+            assert.ok(!loadable.some((/** @type {string} */ path)=>
+                /worker|vault|serve|auth|webapi/.test(path)),
+            'nothing of the worker is the page\'s to load');
             assert.ok(existsSync(join(dir, manifest.background.service_worker)));
             assert.ok(existsSync(join(dir, manifest.content_scripts[0].js[0])));
             for (const ruleset of manifest.declarative_net_request.rule_resources)

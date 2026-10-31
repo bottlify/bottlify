@@ -224,7 +224,7 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
             assert.deepEqual(await page('ask("hello")'), hello(true));
         });
 
-        await t.test('the worker speaks to Steam over the page\'s socket: a download', async()=>{
+        await t.test('GameHub in the tab speaks to Steam over the page\'s socket', async()=>{
             assert.equal(await page(`rawSocket(${JSON.stringify(steam.endpoint)})`), 'open');
             const download = await page(`ask("download", { store: "steam", game: "${APP}" })
                 .then(answer => ({ ...answer, depots: answer.depots.map(one =>
@@ -259,7 +259,7 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
             assert.equal(read.chunk, true);
         });
 
-        await t.test('a sign-in streams the QR challenge from Steam and is cancelled', async()=>{
+        await t.test('a sign-in in the worker, over HTTPS, streams its QR code', async()=>{
             const signIn = await page(`(async () => {
                 const going = outcome(ask('signIn', { store: 'steam' }));
                 const id = n;
@@ -293,6 +293,17 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
                 };
             })`);
             assert.equal(await kept(), 'probe', 'kept in the worker\'s own database');
+            const record = await storage(`new Promise(done => {
+                const request = indexedDB.open('gamehub');
+                request.onsuccess = () => {
+                    const read = request.result.transaction('sessions')
+                        .objectStore('sessions').get('steam');
+                    read.onsuccess = () => done({ fields: Object.keys(read.result).sort(),
+                        sealed: new TextDecoder('latin1').decode(read.result.sealed) });
+                };
+            })`);
+            assert.deepEqual(record.fields, ['accountName', 'iv', 'sealed'], 'its token sealed');
+            assert.doesNotMatch(record.sealed, /not-a-signature|eyJ/);
             assert.doesNotMatch(await page('JSON.stringify(seen)'), /not-a-signature|eyJ/);
             assert.deepEqual(await page('ask("signOut", { store: "steam" })'), {});
             assert.equal(await kept(), null);
