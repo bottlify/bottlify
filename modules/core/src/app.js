@@ -1672,6 +1672,19 @@ export function corkArtifacts(asked, here = import.meta.url){
 }
 
 /**
+ * The translator's version, which the processor is named after: what its
+ * entry module says. The module is the one the machine loads to run, so the
+ * name follows whichever translator the run has, with nothing to keep in step.
+ *
+ * @param {{ moduleUrl?: string } | undefined} cork
+ * @returns {Promise<string | undefined>}
+ */
+async function engineVersion(cork){
+    const engine = await import(corkArtifacts(cork).moduleUrl);
+    return typeof engine.version === 'string' ? engine.version : undefined;
+}
+
+/**
  * The run's pool of translation workers, where every
  * machine's translator would otherwise open a worker of its own: on cork, with
  * shared memory and ports to lend through, and unless the caller set the
@@ -4852,7 +4865,7 @@ async function buildApp(options){
             // The speed the registry reports: the rate the engine's rdtsc
             // advances at.
             processorMhz: CORK_TSC_MHZ,
-            processorName: processorName(SETTINGS),
+            processorName: processorName(SETTINGS, await engineVersion(options.cork)),
             performanceFrequency: SETTINGS.qpc.frequency,
             // What every process of the run shares, as one Windows does: the
             // namespace a named mutex, event, semaphore, timer and file
@@ -8911,7 +8924,7 @@ async function buildSystemHost(deps){
         directx: options.graphicsApi
             ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
         processorMhz: CORK_TSC_MHZ,
-        processorName: processorName(SETTINGS),
+        processorName: processorName(SETTINGS, await engineVersion(options.cork)),
         // The keys a process in a worker reads are these: they name as many
         // processors as its cpu layer will say it has.
         processors: processorsFor({

@@ -21,7 +21,8 @@
 
 /**
  * The version of this contract. An engine package exports the version it
- * implements as `contract`; the layer refuses one that implements another,
+ * implements as `contract` (and its own release as `version`, which the
+ * processor is named after); the layer refuses one that implements another,
  * rather than running a translator built for a different core and failing
  * somewhere inside it. Raised whenever a name here changes its meaning.
  */
