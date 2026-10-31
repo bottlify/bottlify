@@ -13,7 +13,7 @@
  * places it lands.
  */
 
-import { FILE_FLAG_DIRECTORY, downloadChunk, manifest } from './depot.js';
+import { FILE_FLAG_DIRECTORY, adler32, downloadChunk, manifest } from './depot.js';
 import { finishBundle, placeFiles } from '../bundle-in-place.js';
 import { installSteamRedistributables } from './redist.js';
 
@@ -243,6 +243,37 @@ export async function downloadFiles({ files, servers, write, done = ()=>false,
  */
 
 /**
+ * The chunks whose bytes in place are not what the manifest says (length and
+ * Adler-32), by task number as `downloadFiles` counts them, and their files.
+ *
+ * @param {InstalledFile[]} files @param {Map<string, number>} at
+ * @param {RandomAccess} handle
+ */
+export function wrongChunks(files, at, handle){
+    /** @type {number[]} */
+    const tasks = [];
+    /** @type {Set<string>} */
+    const paths = new Set();
+    let task = 0;
+    for (const file of files)
+    {
+        for (const chunk of file.chunks)
+        {
+            const bytes = new Uint8Array(chunk.size);
+            const read = handle.read(bytes, { at: /** @type {number} */ (at.get(file.path))
+                + chunk.offset });
+            if (read !== chunk.size || adler32(bytes) !== chunk.crc)
+            {
+                tasks.push(task);
+                paths.add(file.path);
+            }
+            task++;
+        }
+    }
+    return { tasks, paths: [...paths] };
+}
+
+/**
  * Installs depots into a bundle written in place (bundle-in-place.js) -- a
  * page's install into a file of its origin's storage: every chunk goes
  * straight to where its file lies in the container, the redistributables are
@@ -327,26 +358,56 @@ export async function installBundle({ handle, depots, servers, installscript, ex
     })());
     const at = new Map(placed.files.map(file=>[file.path, file.at]));
     onProgress?.({ stage: 'downloading', done: installed, total });
-    try
+    const fetchMissing = async()=>{
+        try
+        {
+            await downloadFiles({ files, servers, decode, jobs, signal,
+                done: number=>(done[number >> 3] & (1 << (number & 7))) !== 0,
+                write: (file, chunk, bytes)=>handle.write(bytes,
+                    { at: /** @type {number} */ (at.get(file.path)) + chunk.offset }),
+                onChunk: async(bytes, number)=>{
+                    done[number >> 3] |= 1 << (number & 7);
+                    installed += bytes;
+                    onProgress?.({ stage: 'downloading', done: installed, total });
+                    if (saving === null && Date.now() - saved > 2000)
+                    {
+                        await save();
+                    }
+                } });
+        }
+        finally
+        {
+            await saving;
+            await save();
+        }
+    };
+    await fetchMissing();
+    // What a run taken up from an earlier one counts as done is only what that
+    // run wrote down; every chunk is read back against the manifest's
+    // Adler-32, and one that differs is fetched again, once.
+    /** @type {string[]} */
+    const rewritten = [];
+    for (let round = 0; ; round++)
     {
-        await downloadFiles({ files, servers, decode, jobs, signal,
-            done: number=>(done[number >> 3] & (1 << (number & 7))) !== 0,
-            write: (file, chunk, bytes)=>handle.write(bytes,
-                { at: /** @type {number} */ (at.get(file.path)) + chunk.offset }),
-            onChunk: async(bytes, number)=>{
-                done[number >> 3] |= 1 << (number & 7);
-                installed += bytes;
-                onProgress?.({ stage: 'downloading', done: installed, total });
-                if (saving === null && Date.now() - saved > 2000)
-                {
-                    await save();
-                }
-            } });
-    }
-    finally
-    {
-        await saving;
-        await save();
+        signal?.throwIfAborted();
+        const wrong = wrongChunks(files, at, handle);
+        if (wrong.tasks.length === 0)
+        {
+            break;
+        }
+        if (round > 0)
+        {
+            throw new Error(`steam: ${wrong.paths.length} file(s) still differ from the manifest`
+                + ` after being fetched again: ${wrong.paths.slice(0, 5).join(', ')}`);
+        }
+        for (const wrongTask of wrong.tasks)
+        {
+            done[wrongTask >> 3] &= ~(1 << (wrongTask & 7));
+        }
+        rewritten.push(`${wrong.tasks.length} chunk(s) of ${wrong.paths.length} file(s) were not`
+            + ` what the manifest says and were fetched again:`
+            + ` ${wrong.paths.slice(0, 5).join(', ')}`);
+        await fetchMissing();
     }
 
     // The redistributables, over the files in place; what they write goes after them.
@@ -392,5 +453,6 @@ export async function installBundle({ handle, depots, servers, installscript, ex
     const bundle = await finishBundle(handle, bundled, directories, {
         onProgress: (read, all)=>onProgress?.({ stage: 'finishing', done: read, total: all }) });
     const program = executable ? byPath.get(executable.replace(/\//g, '\\').toLowerCase()) : null;
-    return { bundle, entry: program ? await tree.read(program.path) : null, said };
+    return { bundle, entry: program ? await tree.read(program.path) : null,
+        said: [...rewritten, ...said] };
 }

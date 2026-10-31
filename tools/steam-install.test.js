@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-    closeSync, fstatSync, fsyncSync, ftruncateSync, openSync, readSync, writeSync,
+    closeSync, fstatSync, fsyncSync, ftruncateSync, openSync, readSync, statSync, writeSync,
 } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -197,3 +197,48 @@ test('an install into a directory, packed, is the bundle a browser\'s install wr
             await rm(work, { recursive: true, force: true });
         }
     });
+
+test('an install taken up from a run whose chunks are not in its file fetches them', async t=>{
+    // Four chunks: three of the first file, one of the second.
+    const depots = [fakeDepot({ depot: 201, gid: 9n, chunkSize: 30_000, files: [
+        { name: 'game.exe', bytes: noise(70_000, 11) },
+        { name: 'data.pak', bytes: noise(20_000, 12) },
+    ] })];
+    t.mock.method(globalThis, 'fetch', contentServer(depots).fetch);
+    const servers = [{ host: 'a.example', vhost: 'a.example', type: 'CDN' }];
+    const work = await mkdtemp(join(tmpdir(), 'steam-resume-'));
+    /** @param {string} name */
+    const handleOf = name=>{
+        const fd = openSync(join(work, name), 'w+');
+        return { fd, handle: {
+            read: (/** @type {Uint8Array} */ buffer, /** @type {{ at: number }} */ { at })=>
+                readSync(fd, buffer, 0, buffer.length, at),
+            write: (/** @type {Uint8Array} */ buffer, /** @type {{ at: number }} */ { at })=>
+                writeSync(fd, buffer, 0, buffer.length, at),
+            truncate: (/** @type {number} */ size)=>ftruncateSync(fd, size),
+            flush: ()=>fsyncSync(fd),
+            getSize: ()=>fstatSync(fd).size,
+        } };
+    };
+    try
+    {
+        const whole = handleOf('whole.btl');
+        await installBundle({ depots, servers, executable: 'game.exe', handle: whole.handle });
+        closeSync(whole.fd);
+        // A file as large as the bottle, all zeros, which an earlier run's
+        // record says holds every chunk.
+        const cut = handleOf('cut.btl');
+        cut.handle.truncate(statSync(join(work, 'whole.btl')).size);
+        const stamp = JSON.stringify(depots.map(({ depot, gid })=>[depot, String(gid)]));
+        const { said } = await installBundle({ depots, servers, executable: 'game.exe',
+            handle: cut.handle, resume: { stamp, done: Uint8Array.of(0x0f) } });
+        closeSync(cut.fd);
+        assert.match(said[0], /^4 chunk\(s\) of 2 file\(s\) were not what the manifest says/);
+        assert.deepEqual(await readFile(join(work, 'cut.btl')),
+            await readFile(join(work, 'whole.btl')));
+    }
+    finally
+    {
+        await rm(work, { recursive: true, force: true });
+    }
+});
