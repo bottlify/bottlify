@@ -22,7 +22,6 @@
 
 import { signalledNow } from './sync.js';
 import { takeId } from './processes.js';
-import { Placement, createPlacement } from './placement.js';
 
 /** @enum {string} */
 export const ThreadState = {
@@ -135,36 +134,6 @@ const COUPLED_WORK = 0.5;
 
 /** How many turns of `turnMs` a deadline must be beyond for a turn to take one. */
 const TURN_CLEAR = 4;
-
-/**
- * The half-life, in host ms, of the time this executor spends in each
- * thread's calls into the host (`hostTime`): a second, so tens of a game's
- * frames are in it and a load's long past ones are not.
- */
-const HOST_HALF_MS = 1000;
-
-/**
- * A pinned thread's processor is tried played here (`playPinned`) once this
- * executor spends at least this share of its time in the thread's calls, and
- * `PLAY_MARGIN` times what it spends in those of the thread pinned to its
- * own processor: that one's calls would cross from the other executor instead.
- */
-const PLAY_FLOOR = 0.02;
-const PLAY_MARGIN = 2;
-
-/**
- * The share of the process's executor a move must leave free by the scheduler's
- * reckoning (`gains`): what it does not see -- the cost of a turn taken there, a
- * call answered later for the executor's being busier -- is taken from it.
- */
-const ROOM = 0.1;
-
-/** What an answer to another executor's call is taken to cost it, ms, until one is measured. */
-const ANSWER_MS = 0.2;
-
-/** Each kind of move by the kind that takes it back (`placement.js`, `move`). */
-const OPPOSITE = new Map([['in', 'out'], ['out', 'in'], ['trade', 'untrade'],
-    ['untrade', 'trade']]);
 
 /** Turns kept to say what held the processor through a late thread's gap. */
 const RECENT_TURNS = 256;
@@ -298,20 +267,11 @@ const readyNow = thread=>{
  * @param {(text: string) => number} [options.intern]  A name as a dictionary id.
  * @param {{ thread: number }} [options.ids]  The run's next thread id, shared with
  *        the schedulers of the processes beside or after this one.
- * @param {'spread' | 'concentrate' | 'auto' | null} [options.placement]  One way of
- *        placing the threads of a process with executors of its own; none or 'auto':
- *        each moved on its gains (`placement.js`).
- * @param {Partial<import('./placement.js').PlacementOptions>} [options.placementTiming]
- *        The moves' windows, threshold and check, where a test shortens them.
+ * @param {'spread' | 'concentrate' | null} [options.placement]  Where a process with
+ *        executors of its own runs its threads: each on its own executor (`spread`, and
+ *        none), or all taking turns on this one (`concentrate`), a debugging switch.
  * @param {(count: number) => void} [options.readyChanged]  Told how many threads are
  *        ready to run with no executor running them, as that changes (`readyCount`).
- * @param {boolean} [options.playPinned]  Whether this executor may play the processor
- *        of a pinned thread whose calls into the host cost it most, where that saves
- *        the waits it adds (`playPinned`); on unless false.
- * @param {boolean} [options.freeHost]  Whether this executor keeps itself for the host's
- *        answers while a thread is pinned to its processor, playing one nothing is pinned
- *        to (`freeHost`); on unless false, and then the threads spread unless the run names
- *        a placement, and no processor is traded on its gains.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
@@ -440,21 +400,8 @@ export function createScheduler(options){
     // and without them a report of a production run says nothing of which
     // thread the machine was spent on.
     const wall = options.wall ?? (()=>performance.now());
-    /** Whether this executor keeps itself for the host's answers (`freeHost`). */
-    const freeHost = options.freeHost !== false;
-    /** How the threads are placed: as the run names, spread beside a free host, or on gains. */
-    const placementWay = options.placement ?? (freeHost ? Placement.SPREAD : Placement.AUTO);
-    /** Whether this executor may play a pinned thread's processor on its gains (`playPinned`). */
-    const trading = options.playPinned !== false && !freeHost;
-    /**
-     * The moves the threads' gains propose (`gains`), made one at a time
-     * (`placement.js`): a thread taking turns on this executor or not, this
-     * executor playing a pinned thread's processor or its own.
-     */
-    const placement = createPlacement({ now: wall, apply: key=>move(key),
-        opposite: key=>OPPOSITE.get(key.slice(0, key.indexOf(':')))
-            ?.concat(key.slice(key.indexOf(':'))) ?? null,
-        ...options.placementTiming });
+    /** How the threads are placed: spread, unless the run concentrates them. */
+    const concentrated = options.placement === 'concentrate';
     /**
      * Told what a parked thread is about to be resumed with: which wait it
      * was in and the value the call answers. The only record of that answer
@@ -1027,7 +974,7 @@ export function createScheduler(options){
      * it back (`recalled`).
      *
      * @type {Map<any, { thread: any, began: number, from: number, hereFrom: number,
-     *     recalled?: boolean, waitedFrom: number | null }>}
+     *     recalled?: boolean }>}
      */
     const placed = new Map();
     /** Whether `thread` runs on one of the other executors now. @param {any} thread */
@@ -1166,8 +1113,8 @@ export function createScheduler(options){
 
     /**
      * The processor each executor plays, by its index: its own number, or,
-     * while a trade is played (`playPinned`), this executor and the one whose
-     * processor it plays have each other's.
+     * while this executor keeps itself for the host's answers (`playPinned`),
+     * this executor and the one whose processor it plays have each other's.
      *
      * @type {number[]}
      */
@@ -1176,8 +1123,6 @@ export function createScheduler(options){
     const playedBy = index=>played[index] ?? index;
     /** Trades made, either way. */
     let trades = 0;
-    /** The processor this executor is to play (`move`): its own, 0, unless traded. */
-    let tradeTarget = 0;
     /**
      * The executor this one is to trade with, running a thread still: it
      * gives the thread up at its slice's end (`choose`), and the trade is made
@@ -1187,20 +1132,13 @@ export function createScheduler(options){
     let tradeWanted = -1;
 
     /**
-     * The time, in host ms halved every `HOST_HALF_MS`, this executor spent
-     * in a thread's calls into the host (`trapTimed`), wherever the thread
-     * ran: the call alone, not the switch to another executor's state and
-     * back, so a thread weighs the same played here or there.
+     * The time, in host ms, this executor spent in a thread's calls into the
+     * host (`trapTimed`), wherever the thread ran: the call alone, not the
+     * switch to another executor's state and back.
      *
-     * @param {any} thread @param {number} at
+     * @param {any} thread @param {number} ms
      */
-    const hostTime = (thread, at)=>(thread.hostMs === undefined ? 0
-        : thread.hostMs * 0.5 ** ((at - thread.hostAt) / HOST_HALF_MS));
-    /** @param {any} thread @param {number} ms */
     const addHostTime = (thread, ms)=>{
-        const at = wall();
-        thread.hostMs = hostTime(thread, at) + ms;
-        thread.hostAt = at;
         thread.hostTotal = (thread.hostTotal ?? 0) + ms;
     };
 
@@ -1256,253 +1194,23 @@ export function createScheduler(options){
         return true;
     };
 
-    /**
-     * The processor of the thread pinned to one processor whose calls into the
-     * host this executor spends most in (`hostTime`), when that is a share of
-     * its time (`PLAY_FLOOR`) and `PLAY_MARGIN` times what it spends in those
-     * of the thread pinned to its own processor; -1 where there is none.
-     */
-    const proposed = ()=>{
-        const at = wall();
-        let best = -1;
-        let bestTime = 0;
-        let own = 0;
-        for (const thread of threads)
-        {
-            const processor = pinnedTo(thread);
-            if (processor < 0 || thread.state === ThreadState.TERMINATED)
-            {
-                continue;
-            }
-            const spent = hostTime(thread, at);
-            if (processor === 0)
-            {
-                own = Math.max(own, spent);
-            }
-            else if (spent > bestTime)
-            {
-                best = processor;
-                bestTime = spent;
-            }
-        }
-        // The halved sum of a steady share is that share of HOST_HALF_MS / ln 2.
-        return bestTime >= PLAY_FLOOR * HOST_HALF_MS / Math.LN2 && bestTime >= PLAY_MARGIN * own
-            ? best : -1;
-    };
-
-    /**
-     * A thread that starts running: the time it waited ready for a turn is
-     * counted (`readyMs`), what a move off this executor would give back to it.
-     *
-     * @param {any} thread
-     */
+    /** @param {any} thread */
     const startsRunning = thread=>{
-        if (thread.state === ThreadState.READY && thread.readySince !== undefined)
-        {
-            thread.readyMs = (thread.readyMs ?? 0) + Math.max(0, now() - thread.readySince);
-        }
         thread.state = ThreadState.RUNNING;
     };
 
     /**
-     * Makes a move the gains proposed (`gains`): a thread taking turns here
-     * (`in:` its id) or no longer (`out:`), this executor playing a pinned
-     * thread's processor (`trade:` it) or its own again (`untrade:` the one
-     * it played).
-     *
-     * @param {string} key
-     */
-    const move = key=>{
-        const [kind, value] = key.split(':');
-        const target = Number(value);
-        if (kind === 'in' || kind === 'out')
-        {
-            const thread = threads.find(one=>one.id === target);
-            if (thread !== undefined)
-            {
-                thread.placedHere = kind === 'in';
-                note(thread, thread.placedHere ? 'placed here' : 'placed apart');
-            }
-        }
-        else
-        {
-            tradeTarget = kind === 'trade' ? target : 0;
-        }
-    };
-
-    /**
-     * What each thread had done at the last read of the gains (`gains`), and
-     * this executor's own: its slices and answers, what it retired in them.
-     * @type {Map<any, { instructions: number, waited: number, ready: number }>}
-     */
-    const lastRead = new Map();
-    let readAt = wall();
-    let readHere = { ms: 0, answers: 0, retired: 0 };
-    /** Instructions this executor retires a millisecond of its own slices. */
-    let hereRate = 0;
-    /** What an answer costs the thread elsewhere that waits for it, ms, as measured. */
-    let answerCost = ANSWER_MS;
-
-    /**
-     * Each move's gain over the window since the last read, as a share of it:
-     * the scheduler's reckoning of what the program would get done the other
-     * way, from what its threads did in the window. With, for each thread,
-     * its own work `c` (its instructions at this executor's rate), its waits
-     * for answers on another executor `w`, its waits for a turn `r` and its
-     * calls `x`, and this executor's busy share `E`:
-     *
-     *   in (to take turns here):  min(1 - ROOM - (E + c/dt), w/dt)
-     *       here must have room for its work; it gains the waits it no longer makes;
-     *   out (no longer here):     (min(r, c) - x*a)/dt - ROOM*c/dt
-     *       it gains the turns it waited for, less the answers it will wait for;
-     *   trade (play Q's processor, M -- pinned to this one's -- going apart):
-     *       (w_Q - x_M*a)/dt  where E + (c_Q - c_M)/dt < 1 - ROOM, else -1;
-     *
-     * and `untrade` the same with Q and M the other way about. `a` is what an
-     * answer costs, measured: the waits of the threads elsewhere over their calls.
-     *
-     * @returns {Map<string, number>}
-     */
-    const gains = ()=>{
-        const began = performance.now();
-        try
-        {
-            return reckon();
-        }
-        finally
-        {
-            reckonMs += performance.now() - began;
-        }
-    };
-    /** The time spent reckoning the gains, all told: the price of the placement's math. */
-    let reckonMs = 0;
-    /** @returns {Map<string, number>} */
-    const reckon = ()=>{
-        const at = wall();
-        const dt = at - readAt;
-        /** @type {Map<string, number>} */
-        const offered = new Map();
-        const ownMs = sharedTime.hereMs - readHere.ms;
-        const ownRetired = sharedTime.hereRetired - readHere.retired;
-        if (ownMs > 1 && ownRetired > 0)
-        {
-            hereRate = ownRetired / ownMs;
-        }
-        const busy = (ownMs + sharedTime.answerMs - readHere.answers) / Math.max(dt, 1);
-        // A slice elsewhere runs on for as long as nothing else wants its
-        // executor: what its thread has waited and retired in it so far counts now.
-        /** @type {Map<any, number>} */
-        const inFlight = new Map();
-        for (const [remote, on] of placed)
-        {
-            if (on.waitedFrom !== null)
-            {
-                const waited = remote.waitedUs();
-                on.thread.waitedMs = (on.thread.waitedMs ?? 0)
-                    + ((waited - on.waitedFrom) >>> 0) / 1000;
-                on.waitedFrom = waited;
-            }
-            inFlight.set(on.thread, remote.retiredSoFar?.() ?? 0);
-        }
-        /** @type {Map<any, { c: number, w: number, r: number, x: number }>} */
-        const did = new Map();
-        let waits = 0;
-        let calls = 0;
-        for (const thread of threads)
-        {
-            if (thread.state === ThreadState.TERMINATED)
-            {
-                lastRead.delete(thread);
-                continue;
-            }
-            const retired = thread.instructions + (inFlight.get(thread) ?? 0);
-            const was = lastRead.get(thread) ?? { instructions: retired,
-                waited: thread.waitedMs ?? 0, ready: thread.readyMs ?? 0 };
-            const instructions = Math.max(0, retired - was.instructions);
-            const one = { c: hereRate > 0 ? instructions / hereRate : 0,
-                w: (thread.waitedMs ?? 0) - was.waited, r: (thread.readyMs ?? 0) - was.ready,
-                x: thread.crossSeen === true ? thread.crossRate * instructions : 0 };
-            did.set(thread, one);
-            lastRead.set(thread, { instructions: retired,
-                waited: thread.waitedMs ?? 0, ready: thread.readyMs ?? 0 });
-            if (one.w > 0)
-            {
-                waits += one.w;
-                calls += one.x;
-            }
-        }
-        readAt = at;
-        readHere = { ms: sharedTime.hereMs, answers: sharedTime.answerMs,
-            retired: sharedTime.hereRetired };
-        if (calls >= 16)
-        {
-            answerCost = answerCost * 0.8 + 0.2 * (waits / calls);
-        }
-        if (dt < 1 || hereRate === 0)
-        {
-            return offered;
-        }
-        for (const [thread, one] of placementWay === Placement.AUTO ? did : [])
-        {
-            if (!allowedOn(thread, 0) || one.c + one.w + one.r === 0)
-            {
-                continue;
-            }
-            if (thread.placedHere === true)
-            {
-                offered.set(`out:${thread.id}`, (Math.min(one.r, one.c) - one.x * answerCost) / dt
-                    - ROOM * one.c / dt);
-            }
-            else if (!keptHere(thread))
-            {
-                offered.set(`in:${thread.id}`,
-                    Math.min(1 - ROOM - (busy + one.c / dt), one.w / dt));
-            }
-        }
-        if (trading)
-        {
-            const weighed = tradeTarget > 0 ? tradeTarget : proposed();
-            const pinned = (/** @type {number} */ processor)=>[...did].filter(([thread])=>
-                pinnedTo(thread) === processor).map(([, one])=>one);
-            /** @param {{ c: number, w: number, x: number }[]} group */
-            const sum = group=>group.reduce((all, one)=>({ c: all.c + one.c, w: all.w + one.w,
-                x: all.x + one.x }), { c: 0, w: 0, x: 0 });
-            if (weighed > 0)
-            {
-                // Q: the pinned thread whose processor is played or would be; M: those pinned here.
-                const q = sum(pinned(weighed));
-                const m = sum(pinned(0));
-                const [comes, goes] = tradeTarget > 0 ? [m, q] : [q, m];
-                offered.set(tradeTarget > 0 ? `untrade:${weighed}` : `trade:${weighed}`,
-                    busy + (comes.c - goes.c) / dt < 1 - ROOM
-                        ? (comes.w - goes.x * answerCost) / dt : -1);
-            }
-        }
-        return offered;
-    };
-
-    /**
-     * This executor plays the processor of the pinned thread whose calls cost
-     * it most (`proposed`), the executor that played it taking this one's,
-     * once its gains say so (`gains`, `tradeTarget`). A game
-     * pins its render thread to its last processor and its main thread to its
-     * first: the renderer's every Present and Lock, each a few hundred
-     * microseconds of this executor's, crossed to it from the other while the
-     * main thread ran here, and Call of Duty 4's render thread waited on
-     * answers 112 s of its 119 in slices on eight executors. A count of calls
-     * does not say it: the main thread's are many and cheap, the renderer's
-     * few and dear. Played here, the renderer's calls are answered between its
-     * own slices and the main thread computes on the other. Whether that gains
-     * is reckoned as any move is (`gains`): the waits the renderer's calls no
-     * longer make against those the main thread's will, where this executor
-     * has the room. A program asking which processor it is on is told the one
-     * played (`processorOf`), within its mask as before; `cpuid`'s APIC id
-     * stays the executor's own.
+     * This executor keeps itself for the host's answers while a live thread is
+     * pinned to its processor (`freeTarget`): it plays another executor's
+     * processor and that one plays its own, one pair traded at a time. A
+     * program asking which processor it is on is told the one played
+     * (`processorOf`), within its mask as before; `cpuid`'s APIC id stays the
+     * executor's own.
      *
      * @param {any[]} remotes
      */
     const playPinned = (/** @type {any[]} */ remotes)=>{
-        const want = freeHost ? freeTarget(remotes) : tradeTarget;
+        const want = freeTarget(remotes);
         const here = playedBy(0);
         if (here === want)
         {
@@ -1514,8 +1222,8 @@ export function createScheduler(options){
     };
 
     /**
-     * The processor this executor plays to keep itself for the host's answers
-     * (`freeHost`), while a live thread is pinned to its own -- a game's main
+     * The processor this executor plays to keep itself for the host's answers,
+     * while a live thread is pinned to its own -- a game's main
      * thread, pinned to the first processor, whose guest code took four tenths
      * of this executor while the render thread on another waited for its
      * answers half of its time: the one of an open executor that the fewest
@@ -1702,8 +1410,7 @@ export function createScheduler(options){
             bucket(sharedTime.gapsUnder, began - taken);
         }
         startsRunning(next);
-        placed.set(remote, { thread: next, began, from, hereFrom: sharedTime.hereRetired,
-            waitedFrom: remote.waitedUs?.() ?? null });
+        placed.set(remote, { thread: next, began, from, hereFrom: sharedTime.hereRetired });
         recentPlacements.push(`${next.name}>${remote.index} x${(next.crossRate * 100_000)
             .toFixed(1)}${next.crossSeen ? '' : '?'}`);
         if (recentPlacements.length > 16)
@@ -1781,11 +1488,6 @@ export function createScheduler(options){
                     cpu.remoteFault?.(ended.fault);
                 }
                 account(on.thread, ended.instructions, on.began, on.from, at);
-                if (on.waitedFrom !== null)
-                {
-                    on.thread.waitedMs = (on.thread.waitedMs ?? 0)
-                        + ((remote.waitedUs() - on.waitedFrom) >>> 0) / 1000;
-                }
                 // Called back after little beside what this executor did
                 // meanwhile, or nothing: the two take turns. Called back after
                 // as much, the two ran at once and are to go on doing so.
@@ -1989,8 +1691,7 @@ export function createScheduler(options){
      * @param {any} thread
      */
     const keptHere = thread=>allowedOn(thread, 0)
-        && (placementWay === Placement.CONCENTRATE || thread.placedHere === true
-        || coupledNow(thread) > COUPLED
+        && (concentrated || coupledNow(thread) > COUPLED
         || thread.crossSeen === true && thread.crossRate > HOST_BOUND);
 
     /**
@@ -2177,10 +1878,6 @@ export function createScheduler(options){
             sharedTime.betweenMs += turnFrom - sharedTurnEnd;
         }
         sharedTime.turns++;
-        if (placementWay === Placement.AUTO || trading)
-        {
-            placement.tick(gains);
-        }
         playPinned(remotes);
         try
         {
@@ -2321,10 +2018,10 @@ export function createScheduler(options){
             addHostTime(current, ms);
         }
     };
-    // Calls are timed only while the process has other executors: the time is
-    // what a processor trade weighs (`proposed`), and with one executor there
-    // is nothing to trade -- the three clock reads a call cost were a sixth of
-    // a single executor's time in a program that calls the host in a loop.
+    // Calls are timed only while the process has other executors, for the
+    // report's time each thread's calls took this one (`hostTotal`): the three
+    // clock reads a call cost were a sixth of a single executor's time in a
+    // program that calls the host in a loop.
     let callsTimed = false;
     /** @param {boolean} on */
     const timeCalls = on=>{
@@ -3036,10 +2733,7 @@ export function createScheduler(options){
                 recentPlacements: [...recentPlacements],
                 mostAtOnce,
                 sharedTime: JSON.stringify(sharedTime),
-                placement: JSON.stringify({ way: placementWay, ...placement.diagnostics(),
-                    reckonMs: Number(reckonMs.toFixed(1)),
-                    here: threads.filter(thread=>thread.placedHere === true)
-                        .map(thread=>thread.name).join(',') }),
+                placement: JSON.stringify({ way: concentrated ? 'concentrate' : 'spread' }),
                 // The processor each executor plays, where a trade moved one
                 // (`playPinned`), and how many trades.
                 played: trades === 0 ? '' : `${Array.from({ length: Math.max(played.length, 1) },
@@ -3084,7 +2778,7 @@ export function createScheduler(options){
                 // and the thread agree on. Then the absolute priority it runs
                 // at and how often it had to be boosted to run at all, its calls
                 // into the host a hundred thousand instructions (`crossRate`),
-                // the ms this executor spent answering them (`hostTime`, where
+                // the ms this executor spent answering them (`hostTotal`, where
                 // timed), and the processors its affinity mask allows, where it
                 // has one: a thread pinned elsewhere is never kept on this executor.
                 byThread: threads

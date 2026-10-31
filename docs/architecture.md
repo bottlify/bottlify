@@ -427,37 +427,14 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     with them, as a render thread its main thread waits on each frame, and stays on its own
     executor. A thread of either kind waiting for the process's executor takes it from one that
     computes, which goes to another executor in its place.
-  - **Spread, concentrated or moved on gains.** All of the above is one way of placing threads,
-    spread. Concentrated keeps every thread on the process's own executor where its mask allows,
-    taking turns there as on one processor (`cpu.placement`). With `cpu.freeHost` off and no way
-    named (`auto`), no way is tried on the running program: every quarter second the scheduler reckons, from what
-    each thread did (its own work at the process's executor's speed, its waits for that executor's
-    answers on another, its waits for a turn, its calls into the host), what moving it would gain:
-    in, where the process's executor has room for its work and it would stop waiting for answers;
-    out, where it waited for a turn here that another executor could give it. The gains build up,
-    leaking with a half-life of two seconds, and a move is made once its sum reaches 300 ms, one
-    thread at a time. A move is never checked against the frame rate after it: a wrong one shows
-    in the same reckoning, the threads' waits building the gain of the move back, and the move back
-    from one just made needs twice the sum, lowered again with a half-life of 30 seconds, so two
-    moves whose gains answer each other come at ever longer gaps. A game whose threads hand work to each other
-    every frame comes to take turns here thread by thread; a compressor's workers stay spread.
-  - **A free host** (`cpu.freeHost`, on unless `false`). The process's own executor keeps itself
-    for the answers: while a thread is pinned to its processor (a game's main thread, pinned to the
-    first), another executor plays that processor and the process's own plays one no thread is
-    pinned to. The threads spread unless the run names a way, and no processor is traded on its
-    gains. A game's main thread computed four tenths of the process's executor while its render
-    thread, on another, waited half of its time for that executor's answers.
-  - **A pinned thread** (`cpu.playPinned`, with `cpu.freeHost` off). A thread pinned to one processor whose calls into the
-    host take the process's executor the most time may have that processor played by the
-    process's own executor, where its calls are answered, the executor that played it taking the
-    process's. For example, a game's render thread, its Present and Lock a few hundred
-    microseconds each, is pinned to the last processor while its main thread is pinned to the
-    first. The time is that of the calls themselves, wherever the thread runs, halved every
-    second; a trade is weighed once it is 2% of the executor's time and twice what the calls of
-    the thread pinned to the process's own processor take. A count of calls does not say it: a
-    main thread's are many and cheap. The trade is reckoned as any move is: the waits the pinned thread's calls no longer make against
-    those the thread pinned to the process's processor will make, where the process's executor has
-    the room, and given back the same way.
+  - **Spread.** All of the above is how threads are placed. For a debugging run, concentrated
+    (`cpu.placement: 'concentrate'`) keeps every thread on the process's own executor where its
+    mask allows, taking turns there as on one processor.
+  - **A free host.** The process's own executor keeps itself for the answers: while a thread is
+    pinned to its processor (a game's main thread, pinned to the first), another executor plays
+    that processor and the process's own plays one no thread is pinned to. A game's main thread
+    computed four tenths of the process's executor while its render thread, on another, waited
+    half of its time for that executor's answers.
     GetCurrentProcessorNumber answers the processor played, so no thread is told of one its mask
     does not name.
   - **Answering calls.** The process's own thread runs its threads too, and answers the calls the

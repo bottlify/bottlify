@@ -177,11 +177,10 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         }
         return retired;
     };
-    /** A wait for the process's answer, in its own account and the channel's (`Word.WAITED`). */
+    /** A wait for the process's answer, in its own account. */
     const noteWaited = (/** @type {number} */ ms)=>{
         spent.answerWaitMs += ms;
         const us = Math.round(ms * 1000);
-        Atomics.add(words, Word.WAITED, us);
         let bucket = 0;
         while (bucket < ANSWER_BOUNDS_US.length && us > ANSWER_BOUNDS_US[bucket])
         {

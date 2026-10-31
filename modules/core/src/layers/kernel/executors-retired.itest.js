@@ -8,9 +8,9 @@
  * What each thread retired is the same on any number of executors (the
  * scheduler's `byThread`), and the cpu's count is every thread's together.
  *
- * A program of two threads that take turns: the main thread, pinned to the
- * first processor, runs a generator loop and hands a frame to a render thread
- * pinned to the second, which makes calls only the host answers -- each one,
+ * A program of two threads that take turns: the main thread, on the process's
+ * own executor, runs a generator loop and hands a frame to a render thread
+ * pinned to the second processor, which makes calls only the host answers -- each one,
  * from another executor, answered by the process's own between the main
  * thread's instructions -- and hands the frame back. What a thread retires
  * depends on what it finds: a wait on an event already set takes a shorter way
@@ -56,7 +56,7 @@ function checksum(){
 function program(){
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateEventA', 'SignalObjectAndWait', 'CreateThread',
-            'ResumeThread', 'GetCurrentThread', 'SetThreadAffinityMask', 'GetACP',
+            'ResumeThread', 'SetThreadAffinityMask', 'GetACP',
             'ExitThread', 'ExitProcess'] },
         codeSize: 0x400,
         data: { go: u32(0), done: u32(0), spare: u32(0), thread: u32(0), frames: u32(FRAMES),
@@ -72,8 +72,6 @@ function program(){
                 ...event('go'),
                 ...event('done'),
                 ...event('spare'),
-                ...call('GetCurrentThread'), 0x6a, 0x01, 0x50, // the first processor alone
-                ...call('SetThreadAffinityMask'),
                 0x6a, 0, 0x6a, 0x04, 0x6a, 0, 0x68, ...u32(code(RENDER)), 0x6a, 0, 0x6a, 0,
                 ...call('CreateThread'), 0xa3, ...u32(at('thread')), // CREATE_SUSPENDED
                 0x6a, 0x02, ...pushWord('thread'), ...call('SetThreadAffinityMask'),
@@ -135,14 +133,14 @@ function program(){
 }
 
 /**
- * One run on `cores` executors, opened before the program starts, the main
- * thread on the process's own (`freeHost` off), so the render thread's calls
- * cross.
+ * One run on `cores` executors, opened before the program starts: the main
+ * thread, pinned to no processor, stays on the process's own, so the render
+ * thread's calls cross.
  *
  * @param {Uint8Array} executable @param {number} cores
  */
 async function run(executable, cores){
-    const app = await createApp({ executable, cpu: { cores, freeHost: false } });
+    const app = await createApp({ executable, cpu: { cores } });
     try
     {
         const code = await app.run({ timeoutMs: 120_000, maxTurns: Number.MAX_SAFE_INTEGER });

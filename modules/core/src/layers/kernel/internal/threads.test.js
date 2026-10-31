@@ -1399,7 +1399,7 @@ test('another executor\'s ask inside an unbroken routine here is put off until t
     assert.equal(JSON.parse(JSON.stringify(sched.diagnostics())).asksPutOff, 2);
 });
 
-test('by default (freeHost) a thread pinned to the first processor has it played by another'
+test('a thread pinned to the first processor has it played by another'
     + ' executor, this one keeping to the host\'s answers, and is told it is on the first still',
 ()=>{
     // A game's main thread, pinned to the first processor, took four tenths of
@@ -1444,7 +1444,7 @@ test('by default (freeHost) a thread pinned to the first processor has it played
 
     // With no thread pinned to the first processor, every executor plays its own.
     const plain = createScheduler({ cpu: machine, switcher: createSwitcher({ cpu: machine }),
-        quantum: 5000, freeHost: true });
+        quantum: 5000 });
     plain.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'free' });
     plain.create({ entry: 1, stackTop: 2, tebAddress: 0xd000, name: 'other' });
     for (let turn = 0; turn < 4; turn++)
@@ -1471,10 +1471,8 @@ test('a thread this executor keeps calling back from the other one stays here a 
         return { instructions: 1000, fault: null };
     };
     let clock = 0;
-    // Spread, the way this rule keeps a thread from: trials of the other way
-    // (`placement.js`) would begin before the three seconds below are out.
     const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
-        wall: ()=>clock, placement: 'spread' });
+        wall: ()=>clock });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
     // The renderer calls into the host and stays here, computing a whole slice;
@@ -1503,132 +1501,37 @@ test('a thread this executor keeps calling back from the other one stays here a 
     assert.equal(round(), 1, 'three seconds on, it tries the other executor again');
 });
 
-/**
- * A main thread pinned to the first processor beside a render thread pinned
- * to the second, each making a call a round wherever it runs: the renderer's
- * `renderMs` of this executor's, the main thread's 0.2.
- *
- * @param {number} renderMs
- */
-function pinnedRenderer(renderMs){
-    const { cpu, told } = twoExecutors();
-    const [remote] = cpu.executors();
-    let clock = 0;
-    /** @type {(ms: number) => void} */
-    let timed = ()=>{};
-    /** A call of the thread current, timed as the cpu layer times it. */
-    const call = ()=>{
-        const ms = sched.current()?.name === 'render' ? renderMs : 0.2;
-        clock += ms;
-        timed(ms);
-    };
-    // A thread on the other executor waits on its call as long as the call takes here.
-    let waitedUs = 0;
-    /** @type {any} */ (remote).waitedUs = ()=>waitedUs;
-    remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
-        if (remote.started === 0)
-        {
-            return null;
-        }
-        if (told.goOn === false)
-        {
-            remote.started = 0;
-            told.goOn = null;
-            return { instructions: 1000, fault: null };
-        }
-        const asked = clock;
-        around(call);
-        waitedUs += (clock - asked) * 1000;
-        return null;
-    });
-    const sched = createScheduler({
-        cpu: { ...cpu,
-            runSlice: (/** @type {number} */ max)=>{
-                clock += 5;
-                call();
-                return max;
-            },
-            trapTimed: (/** @type {(ms: number) => void} */ hook)=>{
-                timed = hook;
-            } },
-        switcher: createSwitcher({ cpu }), quantum: 5000, wall: ()=>clock, placement: 'spread',
-        freeHost: false });
-    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
-    const render = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'render' });
-    main.affinityMask = 0b01;
-    render.affinityMask = 0b10;
-    let round = 0;
-    /** Runs the clock `ms` on. */
-    const run = (/** @type {number} */ ms)=>{
-        const until = clock + ms;
-        for (;;)
-        {
-            if (clock >= until)
-            {
-                return;
-            }
-            const { ran } = sched.runOnce();
-            if (ran !== null)
-            {
-                assert.equal(sched.processorOf(ran), ran === main ? 0 : 1,
-                    `${ran.name} told of another processor at round ${round}`);
-            }
-            round++;
-        }
-    };
-    /** The processors played, and the moves' account. */
-    const said = ()=>({ ...JSON.parse(sched.diagnostics().placement),
-        processors: sched.diagnostics().played.split(' ')[0] || '0,1' });
-    return { run, said };
-}
-
-test('a pinned thread whose calls take this executor the most time has its processor played'
-    + ' here once its waits for them say it gains, and kept; one whose calls are cheap is not',
-()=>{
-    // Call of Duty 4 pins its main thread to the first processor and its render
-    // thread to the last, every Present and Lock of the renderer a few hundred
-    // microseconds of this executor's while the main thread computed here.
-    const dear = pinnedRenderer(2);
-    dear.run(8000);
-    assert.deepEqual([dear.said().processors, dear.said().moves],
-        ['1,0', 1], `traded on the renderer's waits: ${JSON.stringify(dear.said())}`);
-    dear.run(40_000);
-    assert.deepEqual([dear.said().processors, dear.said().moves], ['1,0', 1],
-        `and kept, no move since: ${JSON.stringify(dear.said())}`);
-
-    // Calls as cheap as the main thread's: nothing to save by playing it here.
-    const cheap = pinnedRenderer(0.2);
-    cheap.run(48_000);
-    assert.deepEqual([cheap.said().processors, cheap.said().moves], ['0,1', 0],
-        `not traded: ${JSON.stringify(cheap.said())}`);
-});
-
 test('a thread that may run only here takes this executor\'s turn from one that may run on'
     + ' another left free, which runs there', ()=>{
-    // Call of Duty 4 pins its main thread to the first processor; a thread of
-    // its own at priority 15, pinned nowhere and made at home here, took this
-    // executor each time both were ready, and the main thread waited for it
-    // while the other executor idled 280 s of a 400 s run.
+    // Call of Duty 4 pinned its main thread to a processor this executor
+    // played; a thread of its own at priority 15, pinned nowhere and made at
+    // home here, took this executor each time both were ready, and the main
+    // thread waited for it while the other executor idled 280 s of a 400 s run.
+    // A thread pinned to the first processor, waiting, has this executor play
+    // the second (`freeTarget`): the main thread, pinned to it, may run only here.
     const { cpu } = twoExecutors();
     const [remote] = cpu.executors();
-    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
-        placement: 'spread', freeHost: false });
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const mixer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'mixer' });
-    main.affinityMask = 0b01;
+    const first = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'first' });
+    first.affinityMask = 0b01;
+    sched.block(first, 'its own wait');
+    main.affinityMask = 0b10;
     // THREAD_PRIORITY_TIME_CRITICAL, at home here as one made before the other executor opened.
     mixer.priority = 15;
     mixer.home = 0;
     assert.equal(sched.runOnce().ran, main, 'the main thread runs here');
-    assert.deepEqual([remote.started, sched.processorOf(mixer)], [1, 1],
-        'and the one that may run anywhere, on the other executor');
+    assert.deepEqual([remote.started, sched.processorOf(mixer), sched.processorOf(main)],
+        [1, 0, 1], 'and the one that may run anywhere, on the other executor');
 });
 
 test('a thread that may run only here, readied in the slice of one that may run on another'
     + ' executor left free, ends that slice, and the two run at once', ()=>{
     // The same game's main thread woke thread-3 and waited for it; thread-3,
     // alone and running here, woke the main thread in turn and went on, and the
-    // main thread waited out its turn, the other executor idle.
+    // main thread waited out its turn, the other executor idle. The main thread
+    // may run only here, as above.
     const { cpu } = twoExecutors();
     const [remote] = cpu.executors();
     let stops = 0;
@@ -1645,17 +1548,19 @@ test('a thread that may run only here, readied in the slice of one that may run 
                 }
                 return max;
             } },
-        switcher: createSwitcher({ cpu }), quantum: 5000, placement: 'spread',
-        freeHost: false });
+        switcher: createSwitcher({ cpu }), quantum: 5000 });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
-    main.affinityMask = 0b01;
+    const first = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'first' });
+    first.affinityMask = 0b01;
+    sched.block(first, 'its own wait');
+    main.affinityMask = 0b10;
     worker.home = 0;
     sched.block(main, 'the worker');
     assert.equal(sched.runOnce().ran, worker, 'the worker alone runs here');
     assert.equal(stops, 1, 'and its slice ends as it wakes the main thread');
     assert.equal(sched.runOnce().ran, main, 'the main thread takes this executor');
-    assert.deepEqual([remote.started, sched.processorOf(worker)], [1, 1],
+    assert.deepEqual([remote.started, sched.processorOf(worker)], [1, 0],
         'and the worker goes on on the other');
 });
 

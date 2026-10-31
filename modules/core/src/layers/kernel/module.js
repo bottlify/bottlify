@@ -194,14 +194,9 @@ export function createKernelModule(){
                 quantum: config?.quantum ?? 100_000,
                 // A quantum asked for is kept to the instruction: a test's, a profile's.
                 turnMs: config?.quantum === undefined ? TURN_MS : undefined,
-                // Where a process of several executors runs its ready threads: the
-                // way the caller names, else spread beside a free host (`freeHost`),
-                // or each thread moved on its gains without one (`placement.js`).
-                placement: ['spread', 'concentrate', 'auto'].includes(config?.placement)
-                    ? config.placement : null,
-                placementTiming: config?.placementTiming,
-                playPinned: config?.playPinned,
-                freeHost: config?.freeHost,
+                // Where a process of several executors runs its ready threads:
+                // spread, unless a debugging run concentrates them.
+                placement: config?.placement === 'concentrate' ? 'concentrate' : null,
                 // The guest's Sleep reads it (`mirrorReady`).
                 readyChanged: (/** @type {number} */ count)=>{
                     if (state.readyWord !== 0)

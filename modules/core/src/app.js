@@ -263,9 +263,7 @@ const hashText = (hash, text)=>{
  *           thread (`thread`).
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
- * @property {{ cores?: number, eager?: boolean, placement?: 'auto' | 'spread' | 'concentrate',
- *           placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions>,
- *           playPinned?: boolean, freeHost?: boolean,
+ * @property {{ cores?: number, eager?: boolean, placement?: 'spread' | 'concentrate',
  *           gcNudge?: boolean | { everyMs?: number, bytes?: number } }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
@@ -273,29 +271,22 @@ const hashText = (hash, text)=>{
  *           the process's own thread; 1 to 32. Unset, in a browser whose page can share
  *           memory one fewer than the host's processors, at most eight
  *           (`automaticCores`); elsewhere, and in node unless `BOTTLIFY_CORES` names
- *           them, one. Under cork, on a page that can share memory; elsewhere the
- *           program runs on one and is told of one.
+ *           them, one. On a page that cannot share memory the program runs on one and
+ *           is told of one.
  *           Named, they all open before the program starts; automatic, each opens
  *           when a thread wants it, some tens of milliseconds before it runs one, so
  *           a program of one thread pays for none. `eager` says which outright.
- *           `placement`: where a process of several cores runs its ready threads --
- *           `spread` (the default beside `freeHost`) each on a core of its own,
- *           `concentrate` all taking turns on the process's own core, `auto` (the
- *           default with `freeHost` false) each moved onto the process's own core or
- *           off it, one at a time, where what it did says it gains.
- *           `placementTiming`: the moves' windows and thresholds, for a test.
- *           `playPinned`: false keeps every processor on its own core; by default a
- *           thread the program pinned to one processor and that calls into the host
- *           often has its processor played by the process's own core, where those
- *           calls are answered. `freeHost` (on unless false) keeps the process's own
- *           core for the host's answers while a thread is pinned to its processor (a
- *           game's main thread, pinned to the first), the processor played by another
- *           core; with it the threads spread unless `placement` is named, and no
- *           processor is traded on its gains, so `playPinned` applies only with it off.
+ *           The process's own core is kept for the host's answers while a thread is
+ *           pinned to its processor (a game's main thread, pinned to the first): that
+ *           processor is played by another core.
+ *           `placement`, a debugging switch: `spread` (the default) runs each ready
+ *           thread on a core of its own, `concentrate` all of them taking turns on
+ *           the process's own core.
  *           `gcNudge`: each thread that holds the guest's memory makes and drops an
- *           untouched buffer (64 MB every 50 ms unless named) so that JavaScriptCore
- *           collects its young garbage before it piles up; on by default where
- *           JavaScriptCore runs and nowhere else, `false` for none.
+ *           untouched buffer (every 20 ms, 64 MB or a quarter of the guest's memory
+ *           past 256 MB, unless named) so that JavaScriptCore collects its young
+ *           garbage before it piles up; on by default where JavaScriptCore runs and
+ *           nowhere else, `false` for none.
  * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
@@ -4325,16 +4316,9 @@ async function buildApp(options){
             // gets a turn. Lowering it is how a sampled profile gets enough
             // points to say anything; raising it costs nothing but resolution.
             quantum: options.quantum,
-            // Spread over the executors, kept on the process's own, or chosen by
-            // what the program gets done each way (the kernel's `placement`).
+            // Spread over the executors, or for a debugging run kept on the
+            // process's own (the kernel's `placement`).
             placement: options.cpu?.placement,
-            placementTiming: options.cpu?.placementTiming,
-            // A host-bound thread pinned to one processor has it played by the
-            // process's own executor (the kernel's `playPinned`) unless false.
-            playPinned: options.cpu?.playPinned,
-            // The process's own executor kept for the host's answers while a
-            // thread is pinned to its processor (the kernel's `freeHost`).
-            freeHost: options.cpu?.freeHost,
             // Every thread gets the stack the image was linked to expect, the
             // way Windows does -- not a fixed small one. A program that recurses
             // in a worker thread, or builds a large structure on its stack,

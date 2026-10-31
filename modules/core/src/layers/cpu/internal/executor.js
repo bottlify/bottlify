@@ -403,8 +403,6 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         epoch: ()=>Atomics.load(channel.words, Word.EPOCH),
         /** What the slice out has retired so far; 0 with none out (`Word.RETIRED`). */
         retiredSoFar: ()=>(running ? Atomics.load(channel.words, Word.RETIRED) >>> 0 : 0),
-        /** Microseconds it has waited for the process's answers since it opened (`Word.WAITED`). */
-        waitedUs: ()=>Atomics.load(channel.words, Word.WAITED) >>> 0,
         /** The process's side of its channel: the turns it ended, and the executor's sleeps they woke. */
         waits: ()=>({ ...channel.counts }),
         /**
