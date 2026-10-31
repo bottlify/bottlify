@@ -256,7 +256,7 @@ test('a 64-bit program of the universal runtime is answered its float maths in X
     /** @type {Record<string, number>} */
     const where = {};
     const names = ['truncf', 'modff', 'whole', 'copysignf', 'fmaxf', 'dclass', 'strtoll', 'line',
-        'locale', 'token', 'table', 'except', 'context'];
+        'locale', 'token', 'table', 'except', 'context', 'vaList', 'printed'];
     const executable = buildExe({
         bits: 64,
         imports: {
@@ -266,12 +266,14 @@ test('a 64-bit program of the universal runtime is answered its float maths in X
                 '_register_onexit_function'],
             [LOCALE]: ['___lc_locale_name_func'],
             [STRING]: ['strtok_s'],
+            [STDIO]: ['__stdio_common_vswprintf'],
             'KERNEL32.dll': ['ExitProcess'],
         },
         data: {
             twoSeven: f32(2.7), threeQuarters: f32(-3.25), minus: f32(-0), nan: f32(NaN),
             one: f32(1), zero: f64(0), big: f64(-1e308), number: cString('-9000000000'),
-            list: cString(' x y'), space: cString(' '),
+            list: cString(' x y'), space: cString(' '), wideFormat: wide('%s.%s'),
+            astro: wide('Astro'), project: wide('uproject'),
             ...Object.fromEntries(names.map(name=>[name, new Array(24).fill(0x55)])),
         },
         codeSize: 0x200,
@@ -342,6 +344,20 @@ test('a 64-bit program of the universal runtime is answered its float maths in X
                 secondArgument('twoSeven'); //                             any address will do
                 call('_register_onexit_function');
             }
+            // __stdio_common_vswprintf(options, printed, 32, L"%s.%s", 0, va_list)
+            // over a va_list of two eight-byte slots
+            rip([0x48, 0x8d, 0x05], at('astro')); //                       lea rax, [astro]
+            rip([0x48, 0x89, 0x05], at('vaList'));
+            rip([0x48, 0x8d, 0x05], at('project'));
+            rip([0x48, 0x89, 0x05], at('vaList') + 8);
+            rip([0x48, 0x8d, 0x05], at('vaList'));
+            bytes.push(0x48, 0x89, 0x44, 0x24, 0x28); //                   mov [rsp+40], rax
+            bytes.push(0x48, 0xc7, 0x44, 0x24, 0x20, ...u32(0)); //        [rsp+32] = 0
+            bytes.push(0xb9, ...u32(0x24)); //                             mov ecx, 0x24
+            secondArgument('printed');
+            bytes.push(0x41, 0xb8, ...u32(32)); //                         mov r8d, 32
+            rip([0x4c, 0x8d, 0x0d], at('wideFormat')); //                  lea r9, [wideFormat]
+            call('__stdio_common_vswprintf');
             bytes.push(0x31, 0xc9); //                                     xor ecx, ecx
             call('ExitProcess');
             return bytes;
@@ -367,6 +383,8 @@ test('a 64-bit program of the universal runtime is answered its float maths in X
         assert.ok(first !== 0n, 'the table has an array');
         assert.equal(table.getBigUint64(8, true) - first, 16n, 'two functions, a quadword each');
         assert.ok(table.getBigUint64(16, true) >= first + 16n, 'and room past them');
+        assert.equal(got.wideAt(where.printed), 'Astro.uproject',
+            'a va_list of eight-byte slots, read a slot an argument');
     });
 });
 

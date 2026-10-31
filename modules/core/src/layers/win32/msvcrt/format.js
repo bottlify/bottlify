@@ -46,6 +46,8 @@ const MAX_STRING = 1 << 20;
  * @property {boolean} familyWide The format belongs to the wprintf family,
  *                                where an unmodified %s is wide and %S is not.
  * @property {boolean} sixtyFour  The argument occupies two stack slots.
+ * @property {boolean} pointerSized  `I`, `z` or `t` before an integer: size_t's
+ *     width, eight bytes in a 64-bit process.
  * @property {string} conversion  Empty when the format ended mid-specifier.
  * @property {number} end         Index just past the specifier.
  */
@@ -160,6 +162,7 @@ function parseSpec(format, start, take){
     let sawL = false;
     let sawW = false;
     let sixtyFour = false;
+    let pointerSized = false;
     for (;;)
     {
         const modifier = format[i];
@@ -203,7 +206,8 @@ function parseSpec(format, start, take){
         else if ((modifier === 'I' || modifier === 'z' || modifier === 't')
             && i + 1 < format.length && INTEGERS.includes(format[i + 1]))
         {
-            // size_t and ptrdiff_t: four bytes here.
+            // size_t and ptrdiff_t: a pointer's bytes, four or eight.
+            pointerSized = true;
         }
         else
         {
@@ -225,6 +229,7 @@ function parseSpec(format, start, take){
         short: sawH,
         familyWide: false,
         sixtyFour,
+        pointerSized,
         conversion: i < format.length ? format[i] : '',
         end: i + 1,
     };
@@ -482,15 +487,18 @@ function convertFloat(argument, spec, least){
  *        An ANSI_STRING's or UNICODE_STRING's text; null for none.
  * @param {(code: number, wide: boolean) => string} source.character  A %c's text.
  * @param {number} source.exponentDigits  The least digits of %e's exponent.
+ * @param {number} [source.slotWords]  Two when the arguments are a 64-bit
+ *     caller's eight-byte slots.
  * @param {number} produced                Characters written so far, for %n.
  * @param {(pointer: number, value: number) => void} writeCount
  * @returns {Rendered | null}   Null when the conversion is not one we know.
  */
 function convert(spec, source, produced, writeCount){
     const { take, takeWide, takeDouble, readText, readCounted, character } = source;
+    const longSlots = source.slotWords === 2;
     /** An integer's value, 64 bits or 32, or `h`'s 16. @param {boolean} signed */
     const integer = signed=>{
-        if (spec.sixtyFour)
+        if (spec.sixtyFour || spec.pointerSized && longSlots)
         {
             return signed ? takeWide() : BigInt.asUintN(64, takeWide());
         }
@@ -560,7 +568,10 @@ function convert(spec, source, produced, writeCount){
             // Eight upper-case digits, always, '#' marking them 0X. This
             // runtime does not pad a pointer to the field width with zeros
             // the way it does a number.
-            const body = (take() >>> 0).toString(16).toUpperCase().padStart(8, '0');
+            // Sixteen in a 64-bit process, the whole slot.
+            const body = longSlots
+                ? BigInt.asUintN(64, takeWide()).toString(16).toUpperCase().padStart(16, '0')
+                : (take() >>> 0).toString(16).toUpperCase().padStart(8, '0');
             return { prefix: spec.alt ? '0X' : '', body, zeroable: false };
         }
         case 'e':
@@ -619,10 +630,13 @@ function pad(spec, { prefix, body, zeroable }){
  *         The region containing an address; null when nothing does, and then
  *         the whole window is read and a genuinely unmapped list faults there.
  * @param {number} list @param {number} slots
+ * @param {number} [slotWords]  Two in a 64-bit process, whose slots are
+ *         eight bytes (`wideSlots`).
  * @returns {number[]}
  */
-export function varargsSlots(read, locate, list, slots){
-    const width = slots * 4;
+export function varargsSlots(read, locate, list, slots, slotWords = 1){
+    const words = slots * slotWords;
+    const width = words * 4;
     const at = list >>> 0;
     const region = locate(at);
     const bytes = new Uint8Array(width);
@@ -630,8 +644,26 @@ export function varargsSlots(read, locate, list, slots){
         ? Math.max(0, Math.min(width, region.base + region.size - at))
         : width));
     const view = new DataView(bytes.buffer);
-    return Array.from({ length: slots }, (unused, slot)=>view.getInt32(slot * 4, true));
+    const values = Array.from({ length: words }, (unused, word)=>view.getInt32(word * 4, true));
+    return slotWords === 1 ? values : wideSlots(values);
 }
+
+/**
+ * The variadic arguments of a 64-bit caller as they lie in its `va_list`:
+ * every one an eight-byte slot, an int and a pointer as much as a double, so
+ * each takes two of these dwords where the 32-bit stack gives an int one.
+ * The array carries that with it, and the printer reads it so
+ * (`formatToString`, `sequentialArguments`).
+ *
+ * @param {number[]} values  Two dwords a slot, low first.
+ * @returns {number[] & { slotWords: 2 }}
+ */
+export function wideSlots(values){
+    return Object.assign(values, { slotWords: /** @type {2} */ (2) });
+}
+
+/** @param {number[]} values @returns {number} the dwords one argument takes, at least */
+const slotWordsOf = values=>(/** @type {{ slotWords?: number }} */ (values).slotWords ?? 1);
 
 /**
  * What a printer over guest memory hands the engine: %Z's counted string read
@@ -694,18 +726,34 @@ export function guestAccess(readMemory, writeMemory){
 export function formatToString(format, varargs, readString, options = {}){
     let out = '';
     let taken = 0;
+    const words = slotWordsOf(varargs);
     // A format string is data the guest may have built at runtime, so it can ask
     // for arguments that were never pushed. Reading those as zero keeps a bad
     // format a wrong string rather than a crash.
-    const take = ()=>(taken < varargs.length ? varargs[taken++] | 0 : 0);
+    const word = ()=>(taken < varargs.length ? varargs[taken++] | 0 : 0);
+    // An argument of a 64-bit slot is its low dword, the slot's whole width
+    // passed over.
+    const take = ()=>{
+        const low = word();
+        taken += words - 1;
+        return low;
+    };
+    // An eight-byte argument is the two dwords of its slot, or two slots of
+    // the 32-bit stack.
+    const takeEight = ()=>{
+        const low = word();
+        const high = word();
+        taken += Math.max(0, words - 2);
+        return [low, high];
+    };
     const takeWide = ()=>{
-        const low = BigInt(take() >>> 0);
-        const high = BigInt(take() | 0);
-        return (high << 32n) | low;
+        const [low, high] = takeEight();
+        return (BigInt(high | 0) << 32n) | BigInt(low >>> 0);
     };
     const takeDouble = ()=>{
-        const low = take() >>> 0;
-        const high = take() >>> 0;
+        const [lowWord, highWord] = takeEight();
+        const low = lowWord >>> 0;
+        const high = highWord >>> 0;
         const bytes = new DataView(new ArrayBuffer(8));
         bytes.setUint32(0, low, true);
         bytes.setUint32(4, high, true);
@@ -772,7 +820,7 @@ export function formatToString(format, varargs, readString, options = {}){
     };
 
     const source = { take, takeWide, takeDouble, readText, readCounted, character,
-        exponentDigits: options.exponentDigits ?? 3 };
+        exponentDigits: options.exponentDigits ?? 3, slotWords: words };
     const writeCount = options.writeCount ?? (()=>{});
 
     for (let i = 0; i < format.length; i++)
@@ -819,6 +867,7 @@ const POSITIONAL = /%(?:(\d+)\$)?([-+ #0]*)(\*(?:(\d+)\$)?|\d*)(?:\.(\*(?:(\d+)\
  * @returns {{ format: string, slots: number[] } | null}
  */
 export function sequentialArguments(format, slots){
+    const words = slotWordsOf(slots);
     /** @type {Map<number, number>} the slots each position takes */
     const widths = new Map();
     /** @type {{ value: number, width: number, precision: number }[]} */
@@ -837,15 +886,15 @@ export function sequentialArguments(format, slots){
         const value = Number(position ?? 0);
         const isDouble = 'aAeEfgG'.includes(conversion);
         const wideInteger = !isDouble && (size === 'll' || size === 'I64');
-        widths.set(value, isDouble || wideInteger ? 2 : 1);
+        widths.set(value, isDouble || wideInteger ? 2 : words);
         const at = (/** @type {string | undefined} */ text)=>(text ? Number(text) : 0);
         if (widthAt)
         {
-            widths.set(at(widthAt), 1);
+            widths.set(at(widthAt), words);
         }
         if (precisionAt)
         {
-            widths.set(at(precisionAt), 1);
+            widths.set(at(precisionAt), words);
         }
         uses.push({ value, width: at(widthAt), precision: at(precisionAt) });
         return `%${flags}${width.startsWith('*') ? '*' : width}${
@@ -863,14 +912,15 @@ export function sequentialArguments(format, slots){
     for (let position = 1, offset = 0; position <= last; position++)
     {
         offsets[position] = offset;
-        offset += widths.get(position) ?? 1;
+        offset += widths.get(position) ?? words;
     }
     /** @param {number} position */
     const argument = position=>slots.slice(offsets[position],
-        offsets[position] + (widths.get(position) ?? 1));
+        offsets[position] + (widths.get(position) ?? words));
+    const reordered = uses.flatMap(use=>[...use.width ? argument(use.width) : [],
+        ...use.precision ? argument(use.precision) : [], ...argument(use.value)]);
     return {
         format: rewritten,
-        slots: uses.flatMap(use=>[...use.width ? argument(use.width) : [],
-            ...use.precision ? argument(use.precision) : [], ...argument(use.value)]),
+        slots: words === 2 ? wideSlots(reordered) : reordered,
     };
 }

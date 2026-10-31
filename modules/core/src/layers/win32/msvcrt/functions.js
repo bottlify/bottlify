@@ -458,7 +458,8 @@ export function createMsvcrtFunctions(host){
      * @param {number} list
      */
     const varargsAt = list=>varargsSlots(
-        host.readMemory, address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS);
+        host.readMemory, address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS,
+        host.pointerSize === 8 ? 2 : 1);
 
     /**
      * The secure printers' shared body. A size of zero leaves nowhere to put
