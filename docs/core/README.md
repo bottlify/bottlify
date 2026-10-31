@@ -127,7 +127,8 @@ await app.dispose();
 | Export | What it is |
 | --- | --- |
 | `@bottlify/core` | `createApp`, `assembleModules` (the layers without a program), `createLogReader` |
-| `@bottlify/core/bundle`, `/bundle/node` | the `.btl` format's constants; reading and writing bundles in Node |
+| `@bottlify/core/bundle`, `/bundle/node` | the `.btl` format's constants, a bundle written in place (`placeFiles`, `finishBundle`); reading and writing bundles in Node |
+| `@bottlify/core/steam` | Steam sign-in, a library, depots, and an app installed into a bundle in place (`installBundle`) |
 | `@bottlify/core/iso` | reading ISO 9660 disc images |
 | `@bottlify/core/worklet.js` | the sound output's `AudioWorklet` |
 

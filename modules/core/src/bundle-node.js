@@ -47,7 +47,8 @@ import { open, stat, readdir, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, relative, sep } from 'node:path';
 import zlib from 'node:zlib';
-import { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, crc32 } from './bundle.js';
+import { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, DEFAULT_BLOCK_SIZE, crc32 }
+    from './bundle.js';
 
 // Re-exported from the reader rather than restated here. A writer and a reader
 // that each carry their own copy of a magic number, a header size or a version
@@ -58,30 +59,8 @@ import { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, crc32 } f
 // is free and the two disagree often enough to matter. A reader must be able to
 // decode whatever it finds; the manifest names the set a bundle actually used,
 // so one that only has deflate can be told before it fetches anything.
-export { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec };
+export { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, DEFAULT_BLOCK_SIZE };
 
-/**
- * A quarter of a mebibyte.
- *
- * The block is not the granularity of a request -- runs of blocks are coalesced
- * up to a separate cap, and the rest of the bundle is filled in while nothing is
- * being read -- so the two numbers are independent knobs and this one answers
- * only one question: how long a guest thread is held.
- *
- * A thread that reads a byte nobody has fetched is parked for one whole block,
- * however few bytes it asked for. That is the cost this is chosen against, and
- * it outranks what a larger block would win. Compression context and index size
- * both improve with size and neither is worth holding a thread: about 21 ms here
- * on a domestic connection, against a third of a second at 4 MiB and five
- * seconds at 64.
- *
- * A measurement once had this size beating 1, 4 and 16 MiB on ratio as well.
- * That part was an artefact of the probe below, which was then capped and so
- * judged a large block on an ever smaller fraction of itself. The probe is an
- * uncapped fraction now, so that comparison would have to be run again -- but
- * its outcome would not move this number, because latency decides it.
- */
-export const DEFAULT_BLOCK_SIZE = 1 << 18;
 
 /**
  * A block is stored uncompressed unless compression saves at least this much.

@@ -45,6 +45,29 @@ export const FORMAT_VERSION = 2;
  */
 export const READABLE_VERSIONS = Object.freeze([1, 2]);
 
+/**
+ * A quarter of a mebibyte.
+ *
+ * The block is not the granularity of a request -- runs of blocks are coalesced
+ * up to a separate cap, and the rest of the bundle is filled in while nothing is
+ * being read -- so the two numbers are independent knobs and this one answers
+ * only one question: how long a guest thread is held.
+ *
+ * A thread that reads a byte nobody has fetched is parked for one whole block,
+ * however few bytes it asked for. That is the cost this is chosen against, and
+ * it outranks what a larger block would win. Compression context and index size
+ * both improve with size and neither is worth holding a thread: about 21 ms here
+ * on a domestic connection, against a third of a second at 4 MiB and five
+ * seconds at 64.
+ *
+ * A measurement once had this size beating 1, 4 and 16 MiB on ratio as well.
+ * That part was an artefact of the Node writer's compression probe, then capped, which
+ * judged a large block on an ever smaller fraction of itself. The probe is an
+ * uncapped fraction now, so that comparison would have to be run again -- but
+ * its outcome would not move this number, because latency decides it.
+ */
+export const DEFAULT_BLOCK_SIZE = 1 << 18;
+
 /** What a block was written with. A reader must handle all three. */
 export const Codec = {
     STORED: 0,
