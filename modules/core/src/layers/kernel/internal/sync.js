@@ -112,6 +112,40 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
      * event's word -- counted before anyone moves them there.
      */
     const unchanged = { sets: 0, setsOfSet: 0, resets: 0, resetsOfClear: 0 };
+    /**
+     * The waits the host answered, by what was waited on and how each ended:
+     * `taken` at once, `blocked` (the thread queued), `timedOut` (a poll of
+     * one not signalled); a set by its kind and the kinds in it. Which of them
+     * guest code could answer, before anyone moves them there.
+     *
+     * @type {Record<string, { taken: number, blocked: number, timedOut: number }>}
+     */
+    const waits = {};
+    /** @param {string} kind @param {'taken' | 'blocked' | 'timedOut'} how */
+    const countWait = (kind, how)=>{
+        if (quiet === 0)
+        {
+            (waits[kind] ??= { taken: 0, blocked: 0, timedOut: 0 })[how]++;
+        }
+    };
+    /** Above zero while a set's objects are taken one by one, the set counted once. */
+    let quiet = 0;
+    /** One object of a set taken, uncounted. @param {any} object @param {any} thread */
+    const takeOfSet = (object, thread)=>{
+        quiet++;
+        try
+        {
+            return api.wait(object, thread);
+        }
+        finally
+        {
+            quiet--;
+        }
+    };
+    /** @param {string} how @param {any[]} set */
+    const setKind = (how, set)=>`${how}:${[...new Set(set.map(one=>one.kind))].sort().join('+')}`;
+    /** ReleaseSemaphore calls, and those that woke a queued thread. */
+    const releases = { semaphoreReleases: 0, semaphoreWakes: 0 };
 
     // A thread whose wait ran out of time has stopped waiting, and a queue that
     // still holds it would hand it the object later -- signalling something
@@ -303,7 +337,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             let result = WaitResult.OBJECT_0;
             for (const one of set.objects)
             {
-                if (api.wait(one, thread) === WaitResult.ABANDONED)
+                if (takeOfSet(one, thread) === WaitResult.ABANDONED)
                 {
                     result = WaitResult.ABANDONED;
                 }
@@ -618,9 +652,11 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
 
             if (isSignalled(object))
             {
+                countWait(object.kind, 'taken');
                 return acquire(object, thread);
             }
 
+            countWait(object.kind, 'blocked');
             thread.waitSet = null;
             thread.queuedOn = [object];
             object.waiters.push(thread);
@@ -653,6 +689,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 object.recursion++;
                 return WaitResult.OBJECT_0;
             }
+            countWait(object.kind, isSignalled(object) ? 'taken' : 'timedOut');
             return isSignalled(object) ? acquire(object, thread) : null;
         },
 
@@ -695,6 +732,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             refuseRemoteSet(objects_);
             const ready = objects_.every(object=>
                 isSignalled(object) || (object.kind === SyncKind.MUTEX && object.owner === thread));
+            countWait(setKind('all', objects_), ready ? 'taken' : 'blocked');
             if (!ready)
             {
                 thread.waitSet = { objects: objects_, all: true };
@@ -715,7 +753,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             let result = WaitResult.OBJECT_0;
             for (const object of objects_)
             {
-                const one = api.wait(object, thread);
+                const one = takeOfSet(object, thread);
                 if (one === WaitResult.ABANDONED)
                 {
                     result = WaitResult.ABANDONED;
@@ -740,9 +778,11 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 const mine = object.kind === SyncKind.MUTEX && object.owner === thread;
                 if (isSignalled(object) || mine)
                 {
-                    return { index: i, result: /** @type {number} */ (api.wait(object, thread)) };
+                    countWait(setKind('any', objects_), 'taken');
+                    return { index: i, result: /** @type {number} */ (takeOfSet(object, thread)) };
                 }
             }
+            countWait(setKind('any', objects_), 'blocked');
             // Kept on the thread, because the answer to a wait on a set is the
             // index of the object that came -- and by the time one does, the
             // call that named the set has long since returned.
@@ -865,16 +905,20 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             }
             const previous = object.count;
             object.count += count;
+            releases.semaphoreReleases++;
             while (object.count > 0 && releaseTo(object))
             {
                 // Each release takes one count and one waiter, so this ends.
+                releases.semaphoreWakes++;
             }
             return previous;
         },
 
         /** The counts alone: what a snapshot taken often can afford. */
         summary(){
-            return { objects: objects.length, ...created, ...unchanged };
+            return { objects: objects.length, ...created, ...unchanged, ...releases,
+                // A string: a report keeps the flat metrics only.
+                waits: JSON.stringify(waits) };
         },
 
         /**

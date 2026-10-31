@@ -981,6 +981,10 @@ export function seriesRow(app, count, at){
         // time, so a window shows which thread ran how fast and what it waited for.
         threadTimes: typeof layers.kernel?.threadTimes === 'string'
             ? JSON.parse(layers.kernel.threadTimes) : null,
+        // The host's waits by what was waited on and how each ended, and the
+        // semaphores' releases and wakes (the kernel's `sync`): which of a
+        // window's waits guest code could answer.
+        sync: layers.kernel?.sync ?? null,
         executors: {
             own: typeof layers.kernel?.sharedTime === 'string'
                 ? JSON.parse(layers.kernel.sharedTime) : null,
