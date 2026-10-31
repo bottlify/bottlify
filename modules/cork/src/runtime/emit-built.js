@@ -444,12 +444,11 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  * into one module: the relink that gathers the regions of many small batch
  * modules into a few big ones. A region whose bytes no longer hash as they did
  * is answered as a failure (`changed`) and keeps the function it has. A job's
- * `targets` are the callees its indirect calls were predicted to (`callTargets`),
- * its `stops` the blocks its forming left to other regions (`entered`).
+ * `targets` are the callees its indirect calls were predicted to (`callTargets`).
  *
  * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean,
  *         copies?: boolean, precision?: import('../emit/region.js').X87Precision,
- *         floats?: boolean, targets?: [number, number[]][], stops?: number[] }[],
+ *         floats?: boolean, targets?: [number, number[]][] }[],
  *     pages: [number, Uint8Array][], formable?: number[],
  *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean,
  *         helpers?: boolean } }} relink   `pages` copies of every page forming read,
@@ -488,9 +487,7 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
     const translatable = address=>formablePages.has(address >>> 12);
     const shared = formShared();
     const formed = jobs.map(job=>{
-        const stopped = new Set(job.stops ?? []);
         const region = formRegion(read, job.entry, { ...form, translatable, shared,
-            entered: address=>stopped.has(address),
             ...(job.targets === undefined ? {} : { callTargets: new Map(job.targets) }) });
         return region.hash === job.hash
             ? { region, entryTop: job.entryTop, checked: job.checked === true,

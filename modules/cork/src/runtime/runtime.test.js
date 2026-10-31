@@ -1035,45 +1035,10 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(store.size(), 5);
     });
 
-test('a region formed beside another one is found by a run that would form it whole', async()=>{
-    const { memoryTranslationStore } = await import('./cache.js');
-    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
-    const store = memoryTranslationStore();
-    const LOOP = CODE + 5;
-    /** @param {number[]} order */
-    const run = async order=>{
-        const m = machine({ store, bundleId: 'test', regionStops: true });
-        m.write(CODE, COUNTDOWN);
-        m.setReg(4, 0x80000);
-        for (const at of order)
-        {
-            m.runtime.noteHot(at);
-            await m.runtime.translatePending();
-            await settle();
-        }
-        const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
-        assert.equal(exit.kind, 'halt');
-        assert.equal(m.reg(1), 0);
-        assert.equal(exit.retired, 1 + 2 * 1000 + 1);
-        return m.runtime.diagnostics();
-    };
-    // The loop first: the function's entry, formed after it, stops at the loop's head and
-    // leaves to its region.
-    const first = await run([LOOP, CODE]);
-    assert.equal(first.cacheMisses, 2);
-    assert.equal(first.regions, 2);
-    // The entry first: formed whole here, formed again as stored, and taken.
-    const second = await run([CODE, LOOP]);
-    assert.equal(second.cacheMisses, 0, 'both from the store');
-    assert.equal(second.cacheHits, 2);
-    assert.equal(second.hitsFormedAgain, 1, 'the entry formed as its record says');
-    assert.equal(store.size(), 4, 'nothing stored again');
-});
-
 test('a region the store answers for at once is formed once, as its record says', async()=>{
-    // The run above's two orders, with a store that answers before forming: at once
-    // (`getNow`, a directory store's records file), or for many names in one wait
-    // (`getManyNow`, a store across a link), whose waits are counted.
+    // A loop, then its function's entry, translated twice over a store that answers
+    // before forming: at once (`getNow`, a directory store's records file), or for many
+    // names in one wait (`getManyNow`, a store across a link), whose waits are counted.
     const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
     const LOOP = CODE + 5;
     for (const linked of [false, true])
@@ -1095,7 +1060,7 @@ test('a region the store answers for at once is formed once, as its record says'
         };
         /** @param {number[]} order */
         const run = async order=>{
-            const m = machine({ store, bundleId: 'test', regionStops: true });
+            const m = machine({ store, bundleId: 'test' });
             m.write(CODE, COUNTDOWN);
             m.setReg(4, 0x80000);
             for (const at of order)
@@ -1114,7 +1079,7 @@ test('a region the store answers for at once is formed once, as its record says'
         assert.equal(first.cacheMisses, 2);
         const stored = records.size;
         waits = 0;
-        const second = await run([CODE, LOOP]);
+        const second = await run([LOOP, CODE]);
         assert.deepEqual([second.cacheHits, second.cacheMisses], [2, 0], 'both from the store');
         assert.equal(second.hitsFormedAgain, 0,
             `nothing formed twice (${linked ? 'linked' : 'at once'})`);

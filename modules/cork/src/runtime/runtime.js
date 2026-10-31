@@ -206,12 +206,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // Diagnostic: every store key put and every one missed, as
         // `entry:hash:top`, in the diagnostics -- what tells two runs' keys apart.
         traceStore: false,
-        // A region stops at a block another region has an entry for, or one formed
-        // and on its way to being published, and leaves to it there (`entered` in
-        // `formRegion`): a function's code translated once, a third less stored in
-        // Far Cry -- and the hot code it cuts crossing between regions, 74% more
-        // transfers in xz. Off until the cut is kept out of hot code.
-        regionStops: false,
         // Diagnostic: the regions still published whose bytes no longer form
         // as they did -- translated code a write left standing -- in the
         // diagnostics (`staleRegions`), formed again when they are asked for.
@@ -558,24 +552,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      */
     const watchable = page=>!(loose
         && (stackPages.has(page) || codeShared?.onStack(page) === true));
-    /**
-     * Whether a block at an address is another region's (`entered` in
-     * `formRegion`): one with an entry at the top the region's own is formed for,
-     * or one indifferent to the x87 stack -- not the region `replaces`, which a
-     * region formed again in its place stands in for.
-     *
-     * @param {number} top @param {RegionRecord | null} replaces
-     * @returns {(address: number) => boolean}
-     */
-    const enteredFor = (top, replaces)=>address=>{
-        const entry = entries.entryOf(address, top);
-        return entry >= 0 && (replaces === null || recordOf.get(entry) !== replaces);
-    };
-    /** Where a running region's forming stopped, to form it again the same. @param {RegionRecord} record */
-    const stoppedAt = record=>{
-        const stops = new Set(record.stops ?? []);
-        return (/** @type {number} */ address)=>stops.has(address);
-    };
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
     const formOptions = { maxBlocks: settings.maxRegionBlocks,
         maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
@@ -938,8 +914,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * @property {number} [merged]  the merges that built it again (`MERGES_A_REGION`)
      * @property {number} [floatMisses]  its float results that were not the processor's
      * @property {number} [shapeMisses]  its entries' tests that failed
-     * @property {number[]} [stops]  the blocks its forming left to other regions (`entered`),
-     *     where forming it again from a copy of its pages stops too
      * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
      * @property {Map<number, number[]>} [unformed]  by indirect call, the callees forming it
      *     again did not take in (the region full): not asked of it again
@@ -2154,7 +2128,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
             jobs.push({ region: formRegion(read, record.entry, { ...formHere, translatable,
-                ...called, entered: stoppedAt(record) }), entryTop: record.entryTop,
+                ...called }), entryTop: record.entryTop,
             checked: record.checked === true,
             copies: record.copies === true, ...precisionJob(record) });
         }
@@ -2604,7 +2578,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             checked: one.checked === true,
             copies: one.copies === true, closed, blocks: built.labels.length,
             anyTop: one.anyTop ?? !usesX87(region),
-            ...(region.stops === undefined ? {} : { stops: region.stops }),
             ...(one.targets === undefined ? {} : { targets: one.targets }),
         };
         if (keepsSources)
@@ -2838,14 +2811,13 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     };
     /**
      * What forming made of a region and what it is compiled as, for its record.
-     * @param {{ region: { entry: number, hash: string, stops?: number[] },
+     * @param {{ region: { entry: number, hash: string },
      *     targets?: [number, number[]][],
      *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean,
      *     copies?: boolean }} one
      * @returns {import('./cache.js').RegionShape}
      */
     const shapeOf = one=>({ hash: one.region.hash,
-        ...(one.region.stops === undefined ? {} : { stops: one.region.stops }),
         ...((precisionAt.get(one.region.entry)?.misses ?? 0) > 0 ? { moved: true } : {}),
         ...(one.targets === undefined ? {} : { targets: one.targets }),
         ...(one.wide === true ? { wide: true } : {}),
@@ -2889,9 +2861,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         if (region.hash !== shape.hash)
         {
-            const stops = new Set(shape.stops ?? []);
             region = formRegion(read, region.entry, { ...formHere, translatable,
-                entered: address=>stops.has(address),
                 ...(shape.targets === undefined ? {} : { callTargets: new Map(shape.targets) }) });
             if (region.hash !== shape.hash)
             {
@@ -3242,7 +3212,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         counts.relinked++;
         if (store !== null)
         {
-            const one = { region: { entry: record.entry, hash: record.hash, stops: record.stops },
+            const one = { region: { entry: record.entry, hash: record.hash },
                 entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
                 floats: record.floats, checked: record.checked, copies: record.copies,
                 loose: record.loose, wrapped: record.wrapped, targets: record.targets,
@@ -3823,9 +3793,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 continue;
             }
             const region = formRegion(read, record.entry,
-                { ...formHere, translatable, callTargets: targets,
-                    ...(settings.regionStops !== true ? {}
-                        : { entered: enteredFor(record.entryTop, record) }) });
+                { ...formHere, translatable, callTargets: targets });
             const starts = new Set(region.blocks.map(block=>block.start));
             // Formed without the profile at a quiet call, the region is worth
             // publishing whether or not a callee was formed in.
@@ -3905,8 +3873,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
             const region = formRegion(read, record.entry, { ...formHere, translatable,
-                ...called, ...(settings.regionStops !== true ? {}
-                    : { entered: enteredFor(record.entryTop, record) }) });
+                ...called });
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
@@ -3944,8 +3911,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
                 hash: record.hash, checked: record.checked === true, copies: record.copies === true,
                 ...precisionJob(record),
-                ...(record.targets === undefined ? {} : { targets: record.targets }),
-                ...(record.stops === undefined ? {} : { stops: record.stops }) })),
+                ...(record.targets === undefined ? {} : { targets: record.targets }) })),
             pages: [...copies],
             formable: chunk.flatMap(record=>[...record.formable ?? record.pages]),
             form: formOptions,
@@ -4677,8 +4643,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                     jobs: unbuilt.map(one=>({ entry: one.region.entry, entryTop: one.entryTop,
                         hash: one.region.hash, checked: one.checked, copies: one.copies === true,
                         ...precisionJob(one),
-                        ...(one.targets === undefined ? {} : { targets: one.targets }),
-                        ...(one.region.stops === undefined ? {} : { stops: one.region.stops }) })),
+                        ...(one.targets === undefined ? {} : { targets: one.targets }) })),
                     pages: [...copies],
                     formable: unbuilt.flatMap(one=>[...one.region.formable ?? one.region.pages]),
                     form: formOptions,
@@ -4932,7 +4897,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             }
             inFlight.set(key, takenAt);
             const entryTop = key % 16;
-            const publishedAt = enteredFor(entryTop, null);
             // A candidate that has an entry by now -- a block of a region
             // published while it waited, the return address of a call the
             // interpreter met before its caller's region came back -- would
@@ -4943,20 +4907,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 inFlight.delete(key);
                 continue;
             }
-            // Another region's blocks are its own once published, as are those of a
-            // region formed before this one in the batch, or on its way to being
-            // published: their entries are there by the time this region runs. One
-            // the store holds is formed as its record says (`recordBefore`).
+            // One the store holds is formed as its record says (`recordBefore`).
             const record = recordBefore(step, store, eip, entryTop);
-            const recordStops = record === null ? null : new Set(record.shape.stops ?? []);
             const region = formRegion(read, eip, { ...formHere, translatable, shared,
-                ...(recordStops !== null ? { entered: (/** @type {number} */ address)=>
-                    recordStops.has(address),
                 ...(record?.shape.targets === undefined ? {}
-                    : { callTargets: new Map(record.shape.targets) }) }
-                    : settings.regionStops !== true ? {} : { entered: address=>
-                        coveredIn(covered, address, entryTop)
-                        || coveredIn(coveredOut, address, entryTop) || publishedAt(address) }) });
+                    : { callTargets: new Map(record.shape.targets) }) });
             // What the region calls directly lands in the same batch, so
             // the call and the return transfer without a miss -- each
             // callee at the top the call site has, which the tracker
@@ -5769,7 +5724,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // longer form as they did: translated code a write did not drop.
                 ...(settings.checkStale ? { staleRegions: [...regions]
                     .filter(record=>formRegion(read, record.entry, { ...formHere, translatable,
-                        entered: stoppedAt(record), ...(record.targets === undefined
+                        ...(record.targets === undefined
                             ? {} : { callTargets: new Map(record.targets) }) }).hash
                         !== record.hash)
                     .map(record=>`0x${record.entry.toString(16)}`) } : {}),
