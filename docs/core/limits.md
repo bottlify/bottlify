@@ -13,7 +13,9 @@ differently raises a `divergence` event naming the API.
   64 bits (`roadmap/x64.md`). A message's WPARAM and LPARAM keep 32 bits there. A run whose
   first program is 64-bit is on a 64-bit Windows, where a 32-bit child runs under WOW64 without
   the file system's and the registry's redirection.
-  A structured exception there passes no `_set_se_translator` translator. A 16-bit (NE) image is
+  A structured exception there passes no `_set_se_translator` translator. The exports that are
+  i386 code alone (`_chkesp`, the __fastcall `Rtl*` calls) are not in a 64-bit process's modules,
+  `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is
   refused when it is loaded.
 - Only user mode. There is no kernel underneath; the engine's layers answer every system call.
 - Reading or writing through a null pointer does not fault: memory from address 0 is readable and
