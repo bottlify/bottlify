@@ -3415,8 +3415,7 @@ async()=>{
         esi = (esi + 1) >>> 0;
         edx = (edx ^ esi) >>> 0;
     }
-    for (const config of [{ callReturn: false }, { callReturn: true },
-        { callReturn: true, emptySites: true }])
+    for (const config of [{ callReturn: false }, { callReturn: true }])
     {
         const m = machine({ leafCalls: false, ...config });
         m.write(CODE, program);

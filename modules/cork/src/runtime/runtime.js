@@ -282,10 +282,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // to it returns from the transfer without entering its region
         // (`finishModule` in emit/region.js; false: entered as any other).
         emptyCalls: true,
-        // With it, a call out of a region reads its target's slot first and
-        // returns from such a function in place, without calling the transfer
-        // (`callAndReturn` in emit/integer.js).
-        emptySites: false,
         // A direct call out of a region reads its target's first slot in the
         // entry hash and, where the entry there is the one the transfer would
         // take at its first look, calls its function itself: the transfer's
@@ -2043,7 +2039,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         place: table !== null && settings.dispatch === true,
         profileCalls: table !== null && settings.callTargets === true,
         callReturn: table !== null && settings.callReturn === true && !settings.undoLog,
-        emptySites: settings.emptySites === true && settings.emptyCalls !== false,
         linkedCalls: settings.linkedCalls !== false,
         crossTailCalls: settings.crossTailCalls !== false,
         ...(settings.callDepth === CallStack.LIMIT ? {} : { callDepth: settings.callDepth }),
@@ -2771,7 +2766,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         + (settings.precise === true ? 'P' : '') + (settings.countTransfers ? 'T' : '')
         + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
         + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
-        + (settings.emptySites === true && settings.emptyCalls !== false ? 'E' : '')
         + (settings.linkedCalls !== false ? 'L' : '')
         + (settings.crossTailCalls === false ? 'X' : '')
         + (settings.callReturn === true && settings.callDepth !== CallStack.LIMIT

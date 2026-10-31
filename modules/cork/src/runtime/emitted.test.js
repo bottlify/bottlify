@@ -124,7 +124,7 @@ const EMITTED = {
     135: '180dd5b5a6ee4c3c',
     136: '70a44ff59debe3e2',
     137: 'b001336f2c642699',
-    138: 'dcf714a47e6c3881',
+    138: 'adee9637a067da7d',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -171,15 +171,6 @@ function digest(){
     finishModule(context, [translation.functionIndex]);
     m.exportFunction('region', translation.functionIndex);
     hash.update('predicted:').update(m.toBytes());
-    // The same unpredicted, its call looking for an empty callee in place (`emptySites`).
-    const plain = formRegion(address=>code[address - 0x1000] ?? 0, 0x1000, {});
-    const sites = new ModuleBuilder();
-    const sitesContext = prepareModule(sites, layout, FEATURES, {}, { hash: true,
-        trapPort: 0xb077, resume: true, callReturn: true, emptySites: true });
-    const atSites = emitRegion(sitesContext, plain, { entryTop: 0, checked: false });
-    finishModule(sitesContext, [atSites.functionIndex]);
-    sites.exportFunction('region', atSites.functionIndex);
-    hash.update('empty sites:').update(sites.toBytes());
     // A call into the host from inside a region (`out dx, eax` to the trap port), the integer
     // registers alone and with x87 ones live: what the handler's answer does to the run --
     // EIP moved, the turn ended -- is emitted after the call. mov ebx, 1; mov dx, 0xb077;

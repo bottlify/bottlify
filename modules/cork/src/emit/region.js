@@ -160,13 +160,12 @@ export const CallStack = Object.freeze({
 
 /**
  * A guest call a block ends with, made as a wasm call (`callAndReturn`): the
- * block, the locals it wrote before the call, and whether the call may go on
- * without the transfer (`emptySites`), the block's writes carried on unstored.
- * Under `planPaths` also the block's code the call is in, what that code wrote
- * on every way to the call (`must`), the locals the code after the call reads
- * before writing (`after`), and what the return reloads (`reloads`).
+ * block and the locals it wrote before the call. Under `planPaths` also the
+ * block's code the call is in, what that code wrote on every way to the call
+ * (`must`), the locals the code after the call reads before writing (`after`),
+ * and what the return reloads (`reloads`).
  *
- * @typedef {{ block: number, written: Set<number>, empty: boolean, must?: Set<number>,
+ * @typedef {{ block: number, written: Set<number>, must?: Set<number>,
  *     segment?: Segment | null, after?: Set<number>, reloads?: Set<number> }} CallSite
  */
 
@@ -318,9 +317,6 @@ const recordFieldsOf = layout=>{
  * @property {number} [undo]           the undo helper's function index, in a differential build
  * @property {boolean} [callReturn] a call out of a region is a wasm call the matching `ret`
  *     returns from (`CallStack`), where the region goes on after it
- * @property {boolean} [emptySites] with `callReturn`, such a call looks its target up in the
- *     entry hash first and does the `ret` of a function that does nothing in place
- *     (`callAndReturn`)
  * @property {boolean} [linkedCalls] with `callReturn`, a direct call reads its target's first
  *     slot of the entry hash and calls the function there itself where the transfer would
  *     at its first look (`linkedCall`); false: through the transfer
@@ -401,7 +397,7 @@ const recordFieldsOf = layout=>{
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
- *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, linkedCalls?: boolean,
+ *     resume?: boolean, callReturn?: boolean, linkedCalls?: boolean,
  *     looseStacks?: boolean, atomic?: boolean, ordered?: boolean, checkReads?: boolean,
  *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean,
  *     callDepth?: number }}
@@ -434,7 +430,7 @@ const recordFieldsOf = layout=>{
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
-        place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
+        place = 0, profileCalls = false, resume = false, callReturn = false,
         linkedCalls = true, looseStacks = false, atomic = false, ordered = false,
         checkReads = false, expansion = null, markBlocks = false, crossTailCalls = true,
         callDepth = CallStack.LIMIT } = {})
@@ -525,12 +521,6 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.callReturn = true;
         context.callDepth = Math.max(1, Math.min(CallStack.LIMIT, Math.trunc(callDepth)));
-        // A long-mode `ret` pops a quadword, which the transfer's empty return
-        // (`emptyReturn`) does not read yet.
-        if (emptySites && width.bits === 32)
-        {
-            context.emptySites = true;
-        }
         if (!linkedCalls)
         {
             context.linkedCalls = false;
@@ -2474,11 +2464,8 @@ export class RegionEmitter {
                         reloads.add(local);
                     }
                 }
-                // Past a call only the way that does nothing goes on with the
-                // block's own locals; a return reloads.
-                const on = sites.length > 0
-                    ? sites.filter(site=>site.empty).flatMap(site=>[...site.reloads ?? []])
-                    : next[i].flatMap(j=>[...live[j]]);
+                // Past a call nothing goes on with the block's own locals: a return reloads.
+                const on = sites.length > 0 ? [] : next[i].flatMap(j=>[...live[j]]);
                 const kill = this.blockKill[i];
                 const before = live[i].size;
                 for (const local of exposed)
@@ -2552,9 +2539,8 @@ export class RegionEmitter {
      * ways in of what each wrote since the state block was last the truth --
      * the run's start, which loads what the region names, or a wasm call's
      * return, after which everything is loaded back. A call that leaves the
-     * region starts what follows anew, as an entry does; a call to a function
-     * that does nothing (`emptySites`) goes on with what was written before
-     * it. A block not emitted in this function runs nothing here.
+     * region starts what follows anew, as an entry does. A block not emitted in
+     * this function runs nothing here.
      *
      * @returns {Set<number>[]}  by block, the locals
      */
@@ -2574,16 +2560,14 @@ export class RegionEmitter {
             const i = /** @type {number} */ (work.pop());
             queued.delete(i);
             const written = this.blockWrites[i];
-            const site = this.callSites.get(i);
-            if (written === undefined || (site === undefined
-                ? callsOut(blocks[i], this.labels) : !site.empty))
+            if (written === undefined || this.callSites.has(i)
+                || callsOut(blocks[i], this.labels))
             {
                 continue;
             }
             // Added from both into each way's set, not joined into a set of
             // their own first: the join was a tenth of what translating made
             // for the collector.
-            const own = site === undefined ? written : site.written;
             for (const j of ways[i])
             {
                 const before = into[j].size;
@@ -2594,7 +2578,7 @@ export class RegionEmitter {
                         into[j].add(local);
                     }
                 }
-                for (const local of own)
+                for (const local of written)
                 {
                     into[j].add(local);
                 }

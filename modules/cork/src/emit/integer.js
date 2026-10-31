@@ -247,13 +247,6 @@ function countApart(e){
  * leaves as any call does: every call waiting below it comes back through the
  * entry hash, and the host's stack holds no more than that many calls' frames.
  *
- * With `emptySites`, outside x87 code, the target's first slot in the entry hash
- * is read first: a function that does nothing there (`emptyCode`, the slot's
- * byte 11) is returned from in place -- the address just pushed popped, with
- * the bytes its `ret` pops, and its instructions charged -- with nothing
- * written back and no transfer called. A target held further along the probe
- * goes through the transfer, which returns from it as well (`finishModule`).
- *
  * Every call reads the first slot of the entry hash its target's address takes
  * -- a direct call's known here (`slotOf`), an indirect one's hashed as the
  * transfer hashes it: where that slot holds the target for the machine's top
@@ -293,25 +286,6 @@ function callAndReturn(e, next, target, mechanism){
         e.exitDynamic(Exit.STALE);
         e.close();
     }
-    const site = e.context.emptySites === true && !e.x87.active;
-    if (site)
-    {
-        const hash = layout.tables + Tables.HASH;
-        b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul)
-            .i32const(layout.hashShift ?? 16).op(I32.shrU).i32const(Tables.HASH_SLOT).op(I32.mul);
-        intoTables(context, b).localTee(Local.t1).load('i32_8u', { offset: hash + 11 });
-        b.i32const(0);
-        b.localGet(Local.t1).load('i32', { offset: hash }).localGet(Local.eip).op(I32.eq);
-        b.select().localTee(Local.t1);
-        e.openIf('empty');
-        e.countMechanism(Mechanism.EMPTY_SITE);
-        // The low six bits are the dwords popped plus one, the top two the jumps before the `ret`.
-        b.localGet(registerLocal(e, 4)).localGet(Local.t1).i32const(63).op(I32.and).i32const(2)
-            .op(I32.shl).op(I32.add).localSet(registerLocal(e, 4));
-        b.localGet(Local.budget).localGet(Local.t1).i32const(6).op(I32.shrU).i32const(1)
-            .op(I32.add).op(I32.sub).localSet(Local.budget);
-        b.else();
-    }
     // Two branches to one way out, not one condition: V8 makes a flag of each
     // comparison it ors.
     e.open('callable', EMPTY);
@@ -343,7 +317,7 @@ function callAndReturn(e, next, target, mechanism){
     // left out (`fillDeferred`).
     /** @type {import('./region.js').CallSite | undefined} */
     const call = e.b.written === null ? undefined
-        : { block: e.blockIndex, written: new Set(e.b.written), empty: site };
+        : { block: e.blockIndex, written: new Set(e.b.written) };
     if (call !== undefined)
     {
         e.callSites.set(e.blockIndex, call);
@@ -385,17 +359,12 @@ function callAndReturn(e, next, target, mechanism){
     e.loadState(false, call);
     if (call?.after !== undefined)
     {
-        // What follows the return, the way the call does nothing too, reads
-        // what the return reloads (`planPaths`).
+        // What follows the return reads what the return reloads (`planPaths`).
         e.openSegment(e.blockIndex, call);
     }
     if (e.x87.active)
     {
         x87AfterCall(e, next, top);
-    }
-    if (site)
-    {
-        e.close();
     }
     b.i32const(next).localSet(Local.eip);
     e.returned = true;

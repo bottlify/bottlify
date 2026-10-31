@@ -139,18 +139,16 @@ export const Mechanism = Object.freeze({
     APART_MISSED: 17,
     /** A call to a function that does nothing, returned from in the transfer (`emptyCalls`). */
     EMPTY_RETURN: 18,
-    /** A call to a function that does nothing, returned from at the call (`emptySites`). */
-    EMPTY_SITE: 19,
     /** A direct call that found its callee in its address's first slot and called it there. */
-    CALL_LINKED: 20,
+    CALL_LINKED: 19,
     // A jump back inside a region, by how it is taken (a jump forward is a branch, never
     // counted): what the layout of the region's blocks costs.
     /** to the head of a loop around it, a wasm loop: the budget test and a branch; */
-    JUMP_LOOP: 21,
+    JUMP_LOOP: 20,
     /** through the function's dispatch: the budget test and a `br_table` on the label; */
-    JUMP_DISPATCH: 22,
+    JUMP_DISPATCH: 21,
     /** to a block inside a loop only the region's copies hold: out of the function. */
-    JUMP_OUT: 23,
+    JUMP_OUT: 22,
 });
 
 /** The names of `Mechanism`'s counts, by index. */
