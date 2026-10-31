@@ -154,9 +154,9 @@ async function run(executable, libraries, executors){
     const app = await createApp({
         executable,
         imagePath: 'C:\\App\\libs.exe',
-        executors,
-        // Open from the start: the gate is threads at once from the first instruction.
-        cpu: { eager: true },
+        // Named, so open from the start: the gate is threads at once from the first
+        // instruction.
+        cpu: { cores: executors },
         bundle: {
             prefix: 'App',
             fetch: async(/** @type {number} */ offset, /** @type {number} */ length)=>{

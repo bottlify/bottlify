@@ -484,7 +484,6 @@ for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\Parent.exe',
-            engine: 'cork',
             concurrency,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
         });

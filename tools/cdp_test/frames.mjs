@@ -466,7 +466,7 @@ try
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
         quantum: options.quantum || undefined,
-        executors: options.cores || undefined,
+        cores: options.cores || undefined,
         profile: options.profile || undefined,
         trace: options.trace,
     })}); null`);

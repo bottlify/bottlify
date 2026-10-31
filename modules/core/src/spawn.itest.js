@@ -250,7 +250,7 @@ test('a process in a worker of its own takes its translations from the run\'s st
     });
     const run = async()=>{
         const app = await createApp({ executable: program, imagePath: 'C:\\App\\loop.exe',
-            engine: 'cork', concurrency: 2 });
+            concurrency: 2 });
         try
         {
             const code = await app.run({ timeoutMs: 120_000 });
@@ -286,7 +286,6 @@ test('the run\'s translation store keeps its records file open past a child, unt
         const app = await createApp({
             executable: new Uint8Array(parent),
             imagePath: 'C:\\App\\spawn.exe',
-            engine: 'cork',
             files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
         });
         /** @type {boolean[]} */
@@ -403,7 +402,6 @@ test('a launcher waiting on its game or the event the game sets is woken by the 
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\launcher.exe',
-            engine: 'cork',
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\game.exe', bytes: game }] }) },
         });
         t.after(()=>app.dispose());
@@ -468,7 +466,6 @@ test('a parent that polls its child\'s exit code goes on after it, as one waitin
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\setup.exe',
-            engine: 'cork',
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\helper.exe', bytes: helper }],
             }) },
@@ -495,7 +492,6 @@ test('a parent that polls its child\'s exit code without ever blocking still let
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\setup.exe',
-            engine: 'cork',
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\helper.exe', bytes: helper }],
             }) },
@@ -564,7 +560,6 @@ test('a parent waiting on something its child sets, not on the child, outlives t
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\setup.exe',
-            engine: 'cork',
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\game.exe', bytes: game }] }) },
         });
         t.after(()=>app.dispose());
@@ -588,7 +583,6 @@ test('a process started beside its parent writes into the run\'s one journal', {
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\launcher.exe',
-            engine: 'cork',
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\game.exe', bytes: game }] }) },
         });
         t.after(()=>app.dispose());
@@ -642,7 +636,6 @@ test('a child is the process its parent was told of: GetCurrentProcessId is PROC
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
         });
         t.after(()=>app.dispose());
@@ -690,7 +683,6 @@ test('a child\'s first thread is the thread its parent was told of: GetCurrentTh
     const app = await createApp({
         executable: parent,
         imagePath: 'C:\\App\\parent.exe',
-        engine: 'cork',
         storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
     });
     t.after(()=>app.dispose());
@@ -767,7 +759,6 @@ test('a child reads the STARTUPINFO its parent handed CreateProcess, whichever w
             const app = await createApp({
                 executable: through ? parent('C:\\App\\middle.exe', 0x1111) : parent(),
                 imagePath: 'C:\\App\\parent.exe',
-                engine: 'cork',
                 concurrency,
                 storage: { load: async()=>({ files: [
                     { path: 'C:\\App\\child.exe', bytes: child },
@@ -836,7 +827,6 @@ test('a child starts with the environment its parent handed CreateProcess, which
             const app = await createApp({
                 executable: parent(top, 0x61),
                 imagePath: 'C:\\App\\parent.exe',
-                engine: 'cork',
                 concurrency,
                 storage: { load: async()=>({ files }) },
             });
@@ -906,7 +896,6 @@ test('a child names the process that started it as its parent, whichever way it 
             const app = await createApp({
                 executable: parent(top, top === 'C:\\App\\child.exe'),
                 imagePath: 'C:\\App\\parent.exe',
-                engine: 'cork',
                 concurrency,
                 storage: { load: async()=>({ files }) },
             });
@@ -976,7 +965,6 @@ test('a parent writes into the child it made suspended, and the child runs only 
             const app = await createApp({
                 executable: parent,
                 imagePath: 'C:\\App\\parent.exe',
-                engine: 'cork',
                 concurrency,
                 storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe',
                     bytes: child }] }) },

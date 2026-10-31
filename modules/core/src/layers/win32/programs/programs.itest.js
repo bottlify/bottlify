@@ -153,7 +153,7 @@ async function startedBy(t, command, options = {}){
 
 for (const [where, options] of /** @type {[string, any][]} */ ([
     ['beside its parent', {}],
-    ['in a worker of its own', { concurrency: 2, engine: 'cork' }],
+    ['in a worker of its own', { concurrency: 2 }],
 ]))
 {
     test(`msiexec ${where} installs a package named relative to its parent's directory, and`

@@ -28,7 +28,7 @@ test('a run given two gigabytes of RAM holds what its program took, and the repo
             codeSize: 0x20,
             code: ({ iat })=>[...loop, 0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
         });
-        const app = await createApp({ executable, engine: 'cork',
+        const app = await createApp({ executable,
             memorySize: 2 * 1024 * 1024 * 1024 });
         t.after(()=>app.dispose());
         assert.equal(await app.run(), 0);

@@ -477,8 +477,6 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
  * @property {boolean} [keepConstantBlocks]  The renderer's (`createRenderer`).
- * @property {boolean} [keepMemory]  Released resources' memory is never given back (debugging).
- * @property {boolean} [rereadBuffers]  The renderer's (`createRenderer`).
  * @property {boolean} [verifyDynamic]  The renderer's (`createRenderer`).
  * @property {boolean} [drawsNothing]  Nothing is drawn on purpose (the graphics
  *     setting `draw: false`): an occlusion query without a renderer counts every
@@ -534,7 +532,7 @@ export function createDirect3D9(options = {}){
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        keepMemory, rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
+        drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
         watchWrites, keepConstantBlocks, verifyDynamic,
         ...caps
     } = options;
@@ -543,14 +541,11 @@ export function createDirect3D9(options = {}){
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
-        // `keepMemory`: what a released resource held is never given back to
-        // the guest's heap -- a debugging aid, for telling memory handed out
-        // twice apart from a defect elsewhere.
-        free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
+        free: giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
+        drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
         watchWrites, keepConstantBlocks, verifyDynamic,
     };
     if (backend && !readMemory)
@@ -966,7 +961,6 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             driverRules: services.driverRules,
             rectangleBump: services.rectangleBump,
             occlusionCounted: services.occlusionCounted,
-            rereadBuffers: services.rereadBuffers,
             verifyDynamic: services.verifyDynamic === true,
             compressedTextures: caps.compressedTextures,
             keepConstantBlocks: services.keepConstantBlocks,

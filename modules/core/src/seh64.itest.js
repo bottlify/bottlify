@@ -22,7 +22,7 @@ const FIXTURE = new URL('../test/fixtures/seh64.exe', import.meta.url);
 test('a 64-bit program dispatches exceptions through its unwind tables',
     { timeout: 120000 }, async t=>{
         const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            commandLine: '"C:\\seh64.exe"', engine: 'cork' });
+            commandLine: '"C:\\seh64.exe"' });
         t.after(()=>app.dispose());
         /** @type {string[]} */
         const output = [];

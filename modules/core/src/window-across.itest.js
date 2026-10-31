@@ -34,7 +34,6 @@ for (const [concurrency, flag, sends] of /** @type {const} */ ([
             executable: program,
             imagePath: 'C:\\App\\windows.exe',
             commandLine: `"C:\\App\\windows.exe" ${flag}`.trim(),
-            engine: 'cork',
             concurrency,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\windows.exe', bytes: program }],

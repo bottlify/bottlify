@@ -1393,10 +1393,8 @@ function filesUnder(app, directory){
 /**
  * @param {any} canvas   Where the last frame is shown: the page's, or an
  *     OffscreenCanvas of it inside a worker.
- * @param {{ pacing?: import('../../../src/app.js').RunPacing,
- *     drainElsewhere?: (table: ArrayBufferLike, sampleRate: number) => void }} [how]
- *     How the run loop waits: a worker hands in the event-driven pacing a
- *     thread of its own allows, a page leaves the default.
+ * @param {{ drainElsewhere?: (table: ArrayBufferLike, sampleRate: number) => void }} [how]
+ *     Where the sound is read, when not on this thread.
  * @returns {Harness}
  */
 export function createHarness(canvas, how = {}){
@@ -1484,7 +1482,6 @@ export function createHarness(canvas, how = {}){
      *           moveTimes?: { x: number, y: number, atMs: number }[],
      *           files?: { path: string, base64: string }[],
      *           wholeFiles?: boolean,
-     *           sampling?: boolean,
      *           store?: string, prefetch?: boolean, bundleId?: string, fakeGpu?: boolean,
      *           fakeFeatures?: string[],
      *           watch?: { libraries: Record<string, number[] | null>,
@@ -1665,7 +1662,6 @@ export function createHarness(canvas, how = {}){
             : null;
         const logMatch = request.logMatch ? new RegExp(request.logMatch) : null;
         const app = await createApp({
-            pacing: how.pacing,
             win32: network || request.win32 ? { ...request.win32, ...network ? { network } : {} }
                 : undefined,
             executable: request.exe ? fromBase64(request.exe)
@@ -1739,18 +1735,13 @@ export function createHarness(canvas, how = {}){
                 : undefined,
             // The translator's own settings for the run.
             cork: request.cork || undefined,
-            // Sampled guest execution, when asked for. A program that decides
-            // something inside its own code makes no host call to record, and the
-            // instruction pointer is then the only account of what it was doing --
-            // which is exactly the situation once a game reaches its own main loop.
-            sampling: request.sampling,
             quantum: request.quantum || undefined,
-            // Executors of the program's process: past one, its threads run at once.
-            executors: request.executors || undefined,
-            // Where they run, when a run names it (the kernel's `placement`), and
-            // the rest of createApp's `cpu` a run passes (`playPinned`, `freeHost`).
-            ...request.placement || request.cpu
-                ? { cpu: { ...request.placement ? { placement: request.placement } : {},
+            // The program's cores (past one, its threads run at once), where they
+            // run when a run names it (the kernel's `placement`), and the rest of
+            // createApp's `cpu` a run passes.
+            ...request.cores || request.placement || request.cpu
+                ? { cpu: { ...request.cores ? { cores: request.cores } : {},
+                    ...request.placement ? { placement: request.placement } : {},
                     ...request.cpu } }
                 : {},
             sample: request.profile || request.quantum ? recordSample : undefined,

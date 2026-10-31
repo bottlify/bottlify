@@ -132,7 +132,6 @@ test('a child writes through the pipe end it inherited, and its parent reads it'
             executable: parent(),
             imagePath: 'C:\\App\\parent.exe',
             files: [{ path: CHILD, bytes: child() }],
-            engine: 'cork',
         });
         t.after(()=>app.dispose());
         /** @type {number[]} */

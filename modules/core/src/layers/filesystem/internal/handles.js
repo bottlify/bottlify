@@ -176,16 +176,18 @@ export function createSharing(){
     };
 }
 
+/** Most files a process holds open at once. */
+const OPEN_FILE_LIMIT = 4096;
+
 /**
  * Builds the table of open files.
  *
  * @param {Object} [options]
- * @param {number} [options.limit]  Most files open at once.
  * @param {Sharing} [options.sharing]
  *     The volume's: every process's opens, which a new one is settled
  *     against. A table with no one to share the volume with keeps its own.
  */
-export function createFileTable({ limit = 4096, sharing = createSharing() } = {}){
+export function createFileTable({ sharing = createSharing() } = {}){
     /** This process's own. @type {Set<FileHandle>} */
     const open = new Set();
     let nextId = 1;
@@ -249,7 +251,7 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
             const { tree, key, components, access } = request;
             const share = request.share ?? { read: true, write: false };
             const disposition = request.disposition ?? Disposition.OPEN_EXISTING;
-            if (open.size >= limit)
+            if (open.size >= OPEN_FILE_LIMIT)
             {
                 throw fsError(ErrorCode.ACCESS_DENIED, 'Too many files open');
             }

@@ -22,7 +22,7 @@
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--mode NAME] [--executors N] [--cork-config JSON]
  *                                  [--win32-config JSON] [--cpu-config JSON]
- *                                  [--placement auto|spread|concentrate]
+ *                                  [--placement spread|concentrate]
  *                                  [--graphics-worker] [--fake-gpu] [--journal-calls]
  *                                  [--command-line STRING] [--args STRING] [--windows NAME]
  *                                  [--gpu sm1|sm2|sm3|sm4|host]
@@ -402,8 +402,8 @@ function parse(argv){
         // `steam.appId`.
         steamAccount: argv.includes('--steam')
             ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
-        // createApp's `cpu` as JSON ('{"playPinned":false}'): a run whose threads
-        // are placed one fixed way, beside another placed the same way.
+        // createApp's `cpu` as JSON ('{"gcNudge":false}'), for a run that sets
+        // what the flags here do not.
         cpuConfig: argv.includes('--cpu-config')
             ? JSON.parse(argv[argv.indexOf('--cpu-config') + 1]) : undefined,
         // The display the program is told it has, as `WxH`. The launcher
@@ -651,11 +651,11 @@ function parse(argv){
         quantum: argv.includes('--profile')
             ? number('--profile', 2000) || 2000
             : 0,
-        // Executors of the program's process (`createApp`'s `executors`): past
+        // Executors of the program's process (`createApp`'s `cpu.cores`): past
         // one, threads that are ready together run at once.
-        executors: number('--executors', mode.executors ?? 0),
+        executors: number('--executors', mode.cores ?? 0),
         // Where the process's ready threads run past one executor (`createApp`'s
-        // `cpu.placement`): auto, spread or concentrate.
+        // `cpu.placement`, a debugging switch): spread or concentrate.
         placement: argv.includes('--placement') ? argv[argv.indexOf('--placement') + 1] : null,
         // Direct3D and OpenGL drawn in a graphics worker, the program's thread
         // keeping only their state, as the player runs them.
@@ -680,9 +680,6 @@ function parse(argv){
         // otherwise on the page's own thread.
         worker: argv.includes('--worker'),
         headed: argv.includes('--headed'),
-        // How the loop waits in the worker: `page` (a look every few
-        // milliseconds) or `event` (sleep until something happens).
-        pacing: argv.includes('--pacing') ? argv[argv.indexOf('--pacing') + 1] : 'page',
         // Cross-origin isolation headers, so the page comes up
         // `crossOriginIsolated` with `SharedArrayBuffer` -- what the shared-
         // table audio backend and its worklet need to run at all.
@@ -1070,9 +1067,7 @@ function describe(result, context, calls, symbols){
         const placement = executors.placement;
         if (placement)
         {
-            say(`    placement: ${placement.way}, ${placement.moves} moves, here by gains:`
-                + ` ${placement.here || 'none'}; last:`
-                + ` ${placement.last || 'none'}; building: ${placement.building || 'nothing'}`);
+            say(`    placement: ${placement.way}`);
         }
         const own = executors.own;
         if (own)
@@ -1856,7 +1851,7 @@ export async function game(options){
     mkdirSync(REPORTS_DIR, { recursive: true });
 
     const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
-        + (options.worker ? `?worker=1&pacing=${options.pacing}` : '');
+        + (options.worker ? '?worker=1' : '');
     /** @type {CdpEndpoint | null} */
     let cdp = null;
     try
@@ -1929,7 +1924,7 @@ export async function game(options){
                 : options.win32Config,
             screen: options.screen,
             quantum: options.quantum,
-            executors: options.executors,
+            cores: options.executors,
             placement: options.placement,
             cpu: options.cpuConfig,
             graphicsWorker: options.graphicsWorker,

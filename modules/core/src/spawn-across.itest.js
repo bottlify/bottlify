@@ -108,7 +108,7 @@ function buildOutputChild(){
 
 for (const [where, options] of /** @type {[string, any][]} */ ([
     ['in its parent\'s place', {}],
-    ['in a worker of its own', { concurrency: 2, engine: 'cork' }],
+    ['in a worker of its own', { concurrency: 2 }],
 ]))
 {
     test(`a child ${where} writes into the file its parent handed it as its output, moving the`
@@ -144,7 +144,6 @@ test('a child that ran beside its parent is let go once it has exited', { timeou
         const app = await createApp({
             executable: new Uint8Array(parent),
             imagePath: 'C:\\App\\spawn.exe',
-            engine: 'cork',
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
             }) },
@@ -260,7 +259,6 @@ test('with concurrency a child runs beside its parent, which goes on: woken by t
         const app = await createApp({
             executable,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             ...concurrency ? { concurrency } : {},
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
         });
@@ -282,7 +280,6 @@ test('a child in a worker of its own sets the event its parent named, and the pa
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
         });
@@ -359,7 +356,6 @@ for (const delay of [0, 1000])
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
         });
@@ -375,7 +371,6 @@ test('concurrency asked for where memory cannot be shared falls back to one proc
     const app = await createApp({
         executable: parent,
         imagePath: 'C:\\App\\parent.exe',
-        engine: 'cork',
         mode: 'compatible',
         concurrency: 4,
         storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },

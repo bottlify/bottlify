@@ -50,7 +50,7 @@ test('an anonymous pipe carries bytes through a duplicate of its write end', { t
                 0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 30000 }), (2 << 8) | 'h'.charCodeAt(0));
     });

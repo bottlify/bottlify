@@ -41,12 +41,10 @@ export const IDLE_SLEEP_MS = 50;
  *     raise after each message, ringing the inbound doorbell with it: a
  *     message is waiting on the event loop, and the next yield is now rather
  *     than when the interval is up.
- * @param {number} [deps.pendingMs]  How often an outstanding host answer is
- *     looked for while threads still run (`pacedYield`).
  * @returns {import('../app.js').RunPacing & { counts: () => Record<string, number> }}
  */
 export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDoorbell,
-    posted = null, pendingMs })
+    posted = null })
 {
     const counts = { drained: 0, yields: 0, slept: 0, sleptMs: 0, woken: 0, heard: 0 };
     const postedWords = posted ? new Int32Array(posted.buffer) : null;
@@ -71,7 +69,7 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
     const yieldNow = pacedYield({ macrotask: ()=>{
         counts.yields++;
         return macrotask();
-    }, now, intervalMs, signalled, pendingMs });
+    }, now, intervalMs, signalled });
     const drain = ()=>{
         const taken = inbound.drain();
         counts.drained += taken;

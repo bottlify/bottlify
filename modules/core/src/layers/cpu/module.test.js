@@ -83,20 +83,15 @@ test('a disposed cpu answers harmlessly rather than throwing', async()=>{
         /cpu: boot\(\) must be called before the guest can run/);
 });
 
-test('an engine a launch may select is named, and one that is not is refused', async()=>{
-    await assert.rejects(cpuModule.create({ engine: 'x' }, /** @type {any} */ ({
-        requireApi: ()=>({}), provide: ()=>{},
-    })), { message: 'cpu: unknown engine "x" (cork)' });
-
-    await cpuModule.create({ engine: 'cork' }, /** @type {any} */ ({
+test('the cpu layer reports its engine before boot and after', async()=>{
+    await cpuModule.create({}, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},
     }));
-    assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork',
-        'cork is built and reports before boot');
+    assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork', 'before boot');
     await cpuModule.dispose();
 
     await open();
-    assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork', 'the default');
+    assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork', 'once open');
     await cpuModule.dispose();
 });
 

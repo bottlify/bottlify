@@ -3028,10 +3028,6 @@ const CLEAR_STRIDE = 20;
  * @property {boolean} [verifyDynamic]
  *     A diagnostic: what each draw reads of a dynamic buffer is compared
  *     with the buffer's copy and the GPU's (`verify-dynamic.js`).
- * @property {boolean} [rereadBuffers]
- *     Every draw reads the bytes it reaches from guest memory again, held
- *     lock or not -- a debugging aid, for a program that writes a buffer
- *     outside its locks.
  * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string,
  *     skipShader?: string, occlusion?: string, stageLimit?: number, textureStats?: string,
  *     maxDraws?: number, written?: (lines: string[], frame: number) => void,
@@ -4958,7 +4954,7 @@ export function createRenderer(options){
      * @param {number} from @param {number} to  the bytes the draw reaches
      */
     const readLoose = (source, gpu, from, to)=>{
-        if (((source.usage ?? 0) & D3DUSAGE_DYNAMIC) === 0 && options.rereadBuffers !== true)
+        if (((source.usage ?? 0) & D3DUSAGE_DYNAMIC) === 0)
         {
             return;
         }

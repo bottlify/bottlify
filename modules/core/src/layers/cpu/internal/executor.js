@@ -64,18 +64,17 @@ async function openWorker(url){
  * The word a process waits on for all its executors: each rings it at the end
  * of every turn of its own, so one wait covers every channel.
  *
- * @param {number} [spinMs]  how long its waits look before they sleep; by default
- *     longer while the host has a core to spare (`lookFor`)
+ * Its waits look longer before they sleep while the host has a core to spare
+ * (`lookFor`).
  */
-export function createBell(spinMs = undefined){
+export function createBell(){
     // The count of turns rung, whether an executor may go on with its thread
     // past a slice (1 on, 0 not, 2 for a turn's length: `goOn`, `hold`), the
     // process's waits asleep on the count, which alone an executor's ring wakes,
     // and the slices out, which the executors count (`Bell.RUNNING`).
     const buffer = new SharedArrayBuffer(BELL_BYTES);
     const word = new Int32Array(buffer);
-    const look = lookFor(word, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency,
-        spinMs);
+    const look = lookFor(word, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency);
     return {
         buffer,
         /** The count now: what a wait is from. */
@@ -111,7 +110,7 @@ export function createBell(spinMs = undefined){
         /**
          * Ready threads wait for an executor, none of them at once: one whose
          * slice ends with its thread still running goes on with it until it has
-         * held it a turn (`executorHoldMs`), as a processor keeps a thread to
+         * held it a turn (`HOLD_MS` in the executor worker), as a processor keeps a thread to
          * its quantum's end -- given back after every slice, a thread past the
          * executors cost a round trip through the process each quantum, and
          * four threads on two executors ran barely faster than on one.
@@ -145,7 +144,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         throw new Error('executor: another executor needs the process\'s memory shared');
     }
     const buffer = new SharedArrayBuffer(CHANNEL_BYTES);
-    const channel = channelOf(buffer, null, config.cork?.spinMs);
+    const channel = channelOf(buffer);
     const worker = await openWorker(workerUrl);
     /** @type {string | null} */
     let failed = null;
@@ -403,8 +402,6 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         epoch: ()=>Atomics.load(channel.words, Word.EPOCH),
         /** What the slice out has retired so far; 0 with none out (`Word.RETIRED`). */
         retiredSoFar: ()=>(running ? Atomics.load(channel.words, Word.RETIRED) >>> 0 : 0),
-        /** Microseconds it has waited for the process's answers since it opened (`Word.WAITED`). */
-        waitedUs: ()=>Atomics.load(channel.words, Word.WAITED) >>> 0,
         /** The process's side of its channel: the turns it ended, and the executor's sleeps they woke. */
         waits: ()=>({ ...channel.counts }),
         /**

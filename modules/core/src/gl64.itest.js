@@ -43,7 +43,7 @@ test('a 64-bit program draws with OpenGL: a clear and a triangle, swapped',
         gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler',
             descriptor });
         const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            commandLine: '"C:\\gl64.exe"', engine: 'cork',
+            commandLine: '"C:\\gl64.exe"',
             device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
                 canvas: gpu.canvas,
                 adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' } } });

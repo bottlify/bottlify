@@ -126,7 +126,7 @@ test('a wake finds no sleeper and notifies nothing; a wait without blocking is c
 
 test('a wait looks long while the slices out leave a core free, briefly when they do not', ()=>{
     const bell = new Int32Array(new SharedArrayBuffer(BELL_BYTES));
-    const look = lookFor(bell, 4, undefined);
+    const look = lookFor(bell, 4);
     // Nothing out: the process's executor and the graphics worker on two of four.
     assert.equal(look(), SPARE_SPIN_MS);
     Atomics.store(bell, Bell.RUNNING, 4 - BUSY_BESIDE - 1);
@@ -134,10 +134,9 @@ test('a wait looks long while the slices out leave a core free, briefly when the
     Atomics.store(bell, Bell.RUNNING, 4 - BUSY_BESIDE);
     assert.equal(look(), SPIN_MS, 'every core taken');
     Atomics.store(bell, Bell.RUNNING, 0);
-    // The run's own figure stands whatever the cores; an unknown host looks briefly.
-    assert.equal(lookFor(bell, 4, 0.3)(), 0.3);
-    assert.equal(lookFor(bell, undefined, undefined)(), SPIN_MS);
-    assert.equal(lookFor(null, 16, undefined)(), SPIN_MS);
+    // An unknown host looks briefly.
+    assert.equal(lookFor(bell, undefined)(), SPIN_MS);
+    assert.equal(lookFor(null, 16)(), SPIN_MS);
     // A machine of two cores has none to spare beside the two threads.
-    assert.equal(lookFor(bell, 2, undefined)(), SPIN_MS);
+    assert.equal(lookFor(bell, 2)(), SPIN_MS);
 });

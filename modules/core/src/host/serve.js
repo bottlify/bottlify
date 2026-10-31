@@ -20,7 +20,7 @@
  * worker at all; `engine.worker.js` is the two lines that bind it to a real one.
  */
 
-import { PAGE_YIELD_MS, createMacrotask, pacedYield, pagePacing } from '../app.js';
+import { PAGE_YIELD_MS, createMacrotask, pagePacing } from '../app.js';
 import { createInboundReader } from './inbound.js';
 import { ringPacing } from './ring-pacing.js';
 import { openGraphicsWorker } from './graphics-worker.js';
@@ -65,52 +65,10 @@ export const WORKER_YIELD_MS = 4;
  *     of its own.
  * @property {boolean} [threaded]
  *     Whether this end has a thread of its own. It does in a worker, where
- *     the loop holds the thread for the worker's interval between yields and
- *     a run may ask for the event-driven pacing; on a page's thread, behind
- *     a MessageChannel, the loop keeps the page's pacing whatever is asked.
+ *     the loop holds the thread for the worker's interval between yields; on
+ *     a page's thread, behind a MessageChannel, it yields at the page's.
  * @property {() => number} [now]
  */
-
-/**
- * The pacing of a thread that is nobody else's: turns run back to back until
- * something is pending, and an idle machine sleeps until the guest's next
- * deadline, a host answer, or a message from the page -- never on a short
- * timer looked at again and again.
- *
- * @param {Object} deps
- * @param {() => Promise<void>} deps.macrotask
- * @param {() => Promise<void>} deps.poke   Settles on the next message from the page.
- * @param {() => boolean} deps.signalled    Whether the page has posted since the last look.
- * @param {() => number} deps.now
- * @param {number} [deps.pendingMs]
- * @returns {import('../app.js').RunPacing}
- */
-export function workerPacing({ macrotask, poke, signalled, now, pendingMs }){
-    return {
-        yield: pacedYield({ macrotask, now, intervalMs: WORKER_YIELD_MS, signalled, pendingMs }),
-        wait({ sleep, deadlineMs, wakes }){
-            if (!sleep)
-            {
-                return macrotask();
-            }
-            /** @type {ReturnType<typeof setTimeout> | null} */
-            let timer = null;
-            const waits = [...wakes, poke()];
-            if (deadlineMs !== null)
-            {
-                waits.push(new Promise(resolve=>{
-                    timer = setTimeout(resolve, deadlineMs);
-                }));
-            }
-            return Promise.race(waits).then(()=>{
-                if (timer !== null)
-                {
-                    clearTimeout(timer);
-                }
-            });
-        },
-    };
-}
 
 /**
  * One byte range of a bundle, by HTTP.
@@ -412,26 +370,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     const adapters = gpu ?? /** @type {any} */ (globalThis.navigator)?.gpu;
     const clock = now ?? (()=>performance.now());
     const breathe = createMacrotask();
-    // Whoever is waiting for the page to say something: every message settles
-    // it, so an idle loop wakes for an input event or a request the moment it
-    // arrives rather than at its next look.
-    /** @type {(() => void) | null} */
-    let poked = null;
-    /** @type {Promise<void> | null} */
-    let poking = null;
-    const poke = ()=>{
-        if (!poking)
-        {
-            poking = new Promise(resolve=>{
-                poked = ()=>{
-                    poking = null;
-                    poked = null;
-                    resolve();
-                };
-            });
-        }
-        return poking;
-    };
     // The page counts what it posts in a shared word, so a loop between
     // turns can tell that a message is waiting without giving up the thread
     // to find out. Absent -- no shared memory on this origin -- the loop
@@ -676,35 +614,27 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             const { port: soundPort, ...soundOptions } = rest.audio ?? {};
             /**
              * With concurrency, ring pacing where the page wrote a ring;
-             * otherwise the page's pacing unless asked, with the signal word
-             * in both: a message the page posted is seen between two turns
-             * rather than at the next timed yield.
+             * otherwise the page's pacing, with the signal word in both: a
+             * message the page posted is seen between two turns rather than at
+             * the next timed yield.
              *
              * @param {import('../system/ring.js').RingMemory | undefined} ring
-             * @param {string | undefined} asked
              */
-            const pacingFor = (ring, asked)=>{
+            const pacingFor = ring=>{
                 if (ring)
                 {
                     inboundReader = createInboundReader(ring, receive);
                     return ringPacing({ inbound: inboundReader, macrotask: breathe, now: clock,
-                        intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS, posted,
-                        pendingMs: options.pendingYieldMs });
-                }
-                if (threaded && asked === 'event')
-                {
-                    return workerPacing({ macrotask: breathe, poke, signalled, now: clock,
-                        pendingMs: options.pendingYieldMs });
+                        intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS, posted });
                 }
                 return pagePacing({ macrotask: breathe, hidden: ()=>hidden, now: clock, signalled,
-                    yieldMs: threaded ? WORKER_YIELD_MS : undefined,
-                    pendingMs: options.pendingYieldMs });
+                    yieldMs: threaded ? WORKER_YIELD_MS : undefined });
             };
             // What the translation worker raises and rings after each batch it
             // posts, where the engine is fed through the ring: the batch is
             // taken at the next turn rather than at the next timed yield.
             const posted = inbound ? { buffer: new SharedArrayBuffer(4), index: 0 } : null;
-            const pacing = pacingFor(inbound, options.pacing);
+            const pacing = pacingFor(inbound);
             const doorbell = posted && inboundReader ? { posted, bell: inboundReader.bell } : null;
             app = await createApp({
                 ...rest,
@@ -982,7 +912,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      * @param {import('./messages.js').ToEngine} message
      */
     const receive = async message=>{
-        poked?.();
         switch (message.type)
         {
             case 'input':

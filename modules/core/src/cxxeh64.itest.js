@@ -47,7 +47,7 @@ const PROPERTIES = [
 async function run(t, name){
     const executable = new Uint8Array(await readFile(
         new URL(`../test/fixtures/${name}.exe`, import.meta.url)));
-    const app = await createApp({ executable, commandLine: `"C:\\${name}.exe"`, engine: 'cork' });
+    const app = await createApp({ executable, commandLine: `"C:\\${name}.exe"` });
     t.after(()=>app.dispose());
     /** @type {string[]} */
     const output = [];

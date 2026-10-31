@@ -21,7 +21,7 @@ const FIXTURE = new URL('../test/fixtures/hook64.exe', import.meta.url);
 test('a 64-bit program\'s CBT, GetMessage, keyboard and mouse hooks are called with its layouts',
     { timeout: 120000 }, async t=>{
         const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            commandLine: '"C:\\hook64.exe"', engine: 'cork' });
+            commandLine: '"C:\\hook64.exe"' });
         t.after(()=>app.dispose());
         /** @type {string[]} */
         const output = [];

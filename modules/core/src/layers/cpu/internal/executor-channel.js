@@ -25,18 +25,14 @@
  * the host. The process's write watch reads it (`write-clock.js`). `RETIRED`
  * is what the slice out has retired so far, zeroed by the process as it starts
  * one: a slice runs on for a quarter of a second while nothing else wants the
- * executor, and the scheduler measures what the program gets done by the
- * millisecond (the kernel's `placement.js`). `WAITED` is the microseconds the
- * executor has waited for the process's answers since it opened, never reset:
- * what a thread placed there loses to calls into the host, which the scheduler
- * weighs against the thread's own work when it places it. `PLAYS` is the
+ * executor, and the process's count of what it retired includes it. `PLAYS` is the
  * processor the executor plays, one more than its number, while it is not its
  * own (the kernel trades them), zero otherwise: the one `cpuid` names from the
  * next slice, set only between slices. `SLEEPING` counts the waits asleep on
  * `STATE` (`sleep`): a side ending its turn wakes the other only when it sleeps.
  */
 export const Word = Object.freeze({ STATE: 0, VALUE: 1, FLAGS: 2, LENGTH: 3, EPOCH: 4,
-    RETIRED: 5, WAITED: 6, PLAYS: 7, SLEEPING: 8 });
+    RETIRED: 5, PLAYS: 6, SLEEPING: 7 });
 
 /** The states, each set by the side whose turn it ends. */
 export const Turn = Object.freeze({
@@ -175,22 +171,16 @@ export const Bell = Object.freeze({ RUNG: 0, GO_ON: 1, SLEEPING: 2, RUNNING: 3 }
 export const BELL_BYTES = 16;
 
 /**
- * How long a wait looks before it sleeps, asked as each wait begins: the run's
- * own `spinMs` when it names one; otherwise `SPARE_SPIN_MS` while the slices
- * out and the threads beside them (`BUSY_BESIDE`) leave one of the host's
- * `processors` free, and `SPIN_MS` when they do not -- or when the host does
- * not say how many it has.
+ * How long a wait looks before it sleeps, asked as each wait begins:
+ * `SPARE_SPIN_MS` while the slices out and the threads beside them
+ * (`BUSY_BESIDE`) leave one of the host's `processors` free, and `SPIN_MS`
+ * when they do not -- or when the host does not say how many it has.
  *
  * @param {Int32Array | null} bell  the process's bell (`Bell.RUNNING`)
  * @param {number | undefined} processors  the host's (`navigator.hardwareConcurrency`)
- * @param {number | undefined} spinMs  the run's
  * @returns {() => number}
  */
-export function lookFor(bell, processors, spinMs){
-    if (spinMs !== undefined)
-    {
-        return ()=>spinMs;
-    }
+export function lookFor(bell, processors){
     if (bell === null || processors === undefined || !(processors > 0))
     {
         return ()=>SPIN_MS;

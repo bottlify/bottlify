@@ -73,7 +73,6 @@ test('a child past the run\'s concurrency runs beside its parent, in its parent\
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: sleeper },
                 { path: 'C:\\App\\b.exe', bytes: quick }] }) },
@@ -102,7 +101,6 @@ for (const [concurrency, across] of /** @type {[2 | 4, boolean][]} */ ([[4, true
         const app = await createApp({
             executable: waitingParent('C:\\App\\middle.exe'),
             imagePath: 'C:\\App\\root.exe',
-            engine: 'cork',
             concurrency,
             storage: { load: async()=>({ files: [
                 { path: 'C:\\App\\middle.exe', bytes: waitingParent('C:\\App\\leaf.exe') },
@@ -188,7 +186,6 @@ for (const delay of [0, 1000])
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: endless },
                 { path: 'C:\\App\\b.exe', bytes: endless }] }) },
@@ -243,7 +240,6 @@ test('a timed wait on a child running beside its parent runs out while the child
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: endless }] }) },
         });
@@ -313,7 +309,6 @@ test('a child takes the memory of the child before it, zeroed where that one wro
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             memorySize,
             storage: { load: async()=>({ files: [
                 { path: 'C:\\App\\writer.exe', bytes: writer },

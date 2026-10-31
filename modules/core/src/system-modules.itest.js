@@ -51,7 +51,7 @@ test('the system modules take their own images\' room in the module window, and 
             codeSize: 0x10,
             code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
         });
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         t.after(()=>app.dispose());
 
         const header = new DataView(executable.buffer, executable.byteOffset);

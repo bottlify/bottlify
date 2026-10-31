@@ -21,7 +21,7 @@ const FIXTURE = new URL('../test/fixtures/window64.exe', import.meta.url);
 test('a 64-bit program registers a class, makes a window, paints it and quits',
     { timeout: 120000 }, async t=>{
         const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            commandLine: '"C:\\window64.exe"', engine: 'cork' });
+            commandLine: '"C:\\window64.exe"' });
         t.after(()=>app.dispose());
         /** @type {string[]} */
         const output = [];

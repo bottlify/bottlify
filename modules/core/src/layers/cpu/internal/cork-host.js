@@ -7,8 +7,8 @@
 /**
  * The cork host: the cpu layer's host over cork's own memory, with no emulator.
  *
- * `engine: 'cork'` runs a program with nothing of the emulator loaded -- not
- * its machine, not its wasm. This host is what stands in for it: a
+ * A program runs with nothing of the emulator loaded -- not its machine, not
+ * its wasm. This host is what stands in for it: a
  * `WebAssembly.Memory` of its own, cork's own layout (a 512-byte state block,
  * the guest's RAM after it, cork's tables after that), and the translator's
  * runtime over the two. The slice loop is the translator's entry, or -- where
@@ -64,13 +64,6 @@ const DEFAULT_MXCSR = 0x1f80;
  * same flags.
  */
 const DEFAULT_EFLAGS = 0x2;
-/**
- * Instructions handed to the translated code at a time while a slice may end
- * early: regions chain inside the wasm, and one call ran a whole slice without
- * coming back to be asked. Not the quantum -- a slice nobody preempts is these
- * run back to back to the same total.
- */
-const YIELD_CHUNK = 10_000;
 /**
  * An interpreted stretch runs a hundred times slower than translated code, so a
  * quantum of it held the engine thread for tens of milliseconds while frames,
@@ -247,11 +240,9 @@ export function createCorkHost(config){
     {
         throw new Error(`cpu: executor ${executor} of ${executors}`);
     }
-    // The host's own pacing, the config's where it names one (`EngineConfig`).
-    const yieldChunk = corkConfig?.yieldChunk ?? YIELD_CHUNK;
-    const interpretChunk = corkConfig?.interpretChunk ?? INTERPRET_CHUNK;
+    // How long an interpreted slice may take: a test's own where it names one
+    // (`EngineConfig`), so its slices are cut by instructions alone.
     const sliceMs = corkConfig?.sliceMs ?? SLICE_MS;
-    const tscDriftMs = corkConfig?.tscDriftMs ?? TSC_DRIFT_MS;
 
     // The guest RAM is the whole memorySize; the tables and the state block are
     // memory of cork's own beside it, not carved out of the guest's. `own` is
@@ -508,16 +499,6 @@ export function createCorkHost(config){
     let wasmRetired = 0;
     let halted = false;
     let stopped = false;
-    /**
-     * Asked between regions whether to end the slice early: a thread of
-     * higher priority has come due (the scheduler's `preemptionDue`). A slice
-     * is guest instructions, and one of cold or heavy code ran 100 ms while a
-     * sound mixer woken every 5 ms waited behind it; ending at a region
-     * boundary is ending where the budget would have.
-     *
-     * @type {(() => boolean) | null}
-     */
-    let yieldCheck = null;
 
     // Set when the interpreter notes a hot start: the slice ends there so the
     // layer's feed forms the candidate before the next slice, instead of the
@@ -678,7 +659,7 @@ export function createCorkHost(config){
                 guestMs = ms;
                 guestMovedAt = now;
             }
-            ticks = (guestMs + Math.min(now - guestMovedAt, tscDriftMs)) * TICKS_PER_MS;
+            ticks = (guestMs + Math.min(now - guestMovedAt, TSC_DRIFT_MS)) * TICKS_PER_MS;
         }
         return later(Math.floor(ticks));
     };
@@ -807,7 +788,6 @@ export function createCorkHost(config){
     // instruction. Once the stretch is spent the tier runs every range, and
     // `wasmSwitch` ends the range it ran out in.
     const wasmAfter = corkConfig?.wasmInterpreterAfter ?? WASM_AFTER;
-    const newTargetWork = corkConfig?.newTargetWork ?? NEW_TARGET_WORK;
     let wasmDue = wasmTier !== null && (wasmAfter <= 0 || wasmTier.started());
     let wasmSwitch = false;
     /** Counts one interpreted start and notes the address once it is hot.
@@ -817,7 +797,7 @@ export function createCorkHost(config){
         const slot = (address >>> 2) & HOT_MASK;
         if (hotCounts[slot] === 0 && !wasmDue && wasmTier !== null)
         {
-            wasmTier.stretch.work += newTargetWork;
+            wasmTier.stretch.work += NEW_TARGET_WORK;
             if (wasmTier.stretch.work >= wasmAfter)
             {
                 wasmDue = true;
@@ -1437,10 +1417,6 @@ export function createCorkHost(config){
                 continue;
             }
             putOff = false;
-            if (yieldCheck !== null && ran > 0 && yieldCheck())
-            {
-                break;
-            }
             if (translateDue)
             {
                 // Form what the interpreter noted and carry on with the rest
@@ -1457,8 +1433,7 @@ export function createCorkHost(config){
             const entry = runtime.entryOf(at, x87Top());
             if (entry >= 0)
             {
-                const exit = runtime.run(entry,
-                    yieldCheck === null ? remaining : Math.min(remaining, yieldChunk));
+                const exit = runtime.run(entry, remaining);
                 jumpedIn = exit.kind === 'untranslated';
                 remaining -= exit.retired;
                 ran += exit.retired;
@@ -1550,7 +1525,7 @@ export function createCorkHost(config){
                 continue;
             }
             const interpretAt = clock();
-            const stepped = interpretRange(at, Math.min(remaining, interpretChunk), false,
+            const stepped = interpretRange(at, Math.min(remaining, INTERPRET_CHUNK), false,
                 jumpedIn);
             interpretMs += clock() - interpretAt;
             interpreted += stepped;
@@ -1705,10 +1680,6 @@ export function createCorkHost(config){
         },
         /** Where executor `index`'s state page begins in the memory. */
         executorBase,
-        /** @param {(() => boolean) | null} check */
-        setYieldCheck(check){
-            yieldCheck = check;
-        },
         /**
          * Whether this executor's translated code leaves at a back edge when
          * another stores its interrupt word: the process's own, with others.

@@ -40,7 +40,7 @@
  *     executable: Uint8Array,
  *     audio?: NonNullable<import('../app.js').AppOptions['audio']> & { port?: MessagePort },
  *     bundle?: { url?: string, file?: Blob, store?: string | null, id?: string, prefix?: string,
- *         prefetch?: boolean, indexSha256?: string,
+ *         prefetch?: boolean, preload?: boolean, revision?: number, indexSha256?: string,
  *         retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } },
  *     storage?: 'opfs' | 'local' | { files: { path: string, bytes: Uint8Array }[] } | null,
  *     device?: { skipTexture?: string | null, probeTexture?: string | null, keepImages?: number[],
@@ -51,8 +51,6 @@
  *     collectOnExit?: boolean,
  *     signal?: SharedArrayBuffer,
  *     inbound?: import('../system/ring.js').RingMemory,
- *     pacing?: 'page' | 'event',
- *     pendingYieldMs?: number,
  *     network?: { module: string, url: string, room: string, token?: string },
  *     files?: { path: string, bytes: Uint8Array }[],
  *     discs?: { image: Blob | Uint8Array, letter?: string }[],
@@ -85,19 +83,6 @@
  * back instead, for an adapter that loses `mapAsync` once a WebGPU canvas
  * context exists anywhere (headless SwiftShader does). `false` draws them on
  * the engine's thread, as every other API draws.
- */
-
-/*
- * `pacing` is how the run loop waits in a worker. `page` -- the default -- is
- * the loop a page's thread runs: a yield every turn and a short look while
- * idle. `event` sleeps until the guest's next deadline, a host answer or a
- * message, and yields only when something is pending. Measured on a real
- * title's menu through the launcher, the same build in the same worker:
- * `page` ran 1.95 G guest instructions and presented 866 frames in thirty
- * seconds, `event` 1.07 G and 469, because a host call answering woke the
- * loop for a turn that retired nothing, seventy thousand times; the page's
- * short look batches those answers. `event` stays for the measurement that
- * changes that, and is not the default until one does.
  */
 
 /*

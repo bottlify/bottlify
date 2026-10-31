@@ -133,11 +133,7 @@ if (inWorker)
         }
     };
     const offscreen = canvas.transferControlToOffscreen();
-    // `?pacing=event`: the loop sleeps for events rather than looking on a
-    // short timer; see the host's messages for what was measured.
-    worker.postMessage({ type: 'canvas', canvas: offscreen,
-        pacing: new URLSearchParams(window.location.search).get('pacing') ?? 'page' },
-    [offscreen]);
+    worker.postMessage({ type: 'canvas', canvas: offscreen }, [offscreen]);
 
     namespace.start = (/** @type {any} */ request)=>{
         namespace.result = null;

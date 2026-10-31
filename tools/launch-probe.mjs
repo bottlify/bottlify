@@ -131,9 +131,9 @@ function parse(argv){
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1] : undefined,
         // Executors of the program's process, so one title compares on one and
-        // on several (`createApp`'s `executors`).
+        // on several (`createApp`'s `cpu.cores`).
         executors: argv.includes('--executors')
-            ? Number(argv[argv.indexOf('--executors') + 1]) : mode.executors,
+            ? Number(argv[argv.indexOf('--executors') + 1]) : mode.cores,
         // Guest RAM in megabytes, as the launcher's setting gives it.
         memory: argv.includes('--memory')
             ? Number(argv[argv.indexOf('--memory') + 1]) : undefined,
@@ -601,7 +601,7 @@ async function main(){
             ...store === null ? {} : { store },
             ...corkConfig } },
         heapSize: heap,
-        ...executors ? { executors } : {},
+        ...executors ? { cpu: { cores: executors } } : {},
         ...memory ? { memorySize: memory * 1024 * 1024 } : {},
         ...concurrency ? { concurrency } : {},
         ...(raster && draw ? {} : { graphics: { ...raster ? {} : { raster: false },

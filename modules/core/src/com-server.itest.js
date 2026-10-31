@@ -30,7 +30,6 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\App\\com.exe',
-            engine: 'cork',
             concurrency,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\com.exe', bytes: program }],
@@ -72,7 +71,6 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\App\\comlife.exe',
-            engine: 'cork',
             concurrency,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\comlife.exe', bytes: program }],
@@ -99,8 +97,7 @@ test('marshaling within a process: a table\'s packet read twice and released, th
 async t=>{
     const program = new Uint8Array(await readFile(new URL('../test/fixtures/marshal.exe',
         import.meta.url)));
-    const app = await createApp({ executable: program, imagePath: 'C:\\App\\marshal.exe',
-        engine: 'cork' });
+    const app = await createApp({ executable: program, imagePath: 'C:\\App\\marshal.exe' });
     t.after(()=>app.dispose());
     /** @type {string[]} */
     const output = [];
@@ -118,8 +115,7 @@ test('an apartment\'s context: one object per apartment, its token handed out wi
 { timeout: 60000 }, async t=>{
     const program = new Uint8Array(await readFile(new URL('../test/fixtures/contexts.exe',
         import.meta.url)));
-    const app = await createApp({ executable: program, imagePath: 'C:\\App\\contexts.exe',
-        engine: 'cork' });
+    const app = await createApp({ executable: program, imagePath: 'C:\\App\\contexts.exe' });
     t.after(()=>app.dispose());
     /** @type {string[]} */
     const output = [];
@@ -141,7 +137,6 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\App\\rot.exe',
-            engine: 'cork',
             concurrency,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\rot.exe', bytes: program }],
