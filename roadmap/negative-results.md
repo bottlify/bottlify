@@ -2369,3 +2369,94 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Decision.** Removed: `pacing: 'event'` (the worker pacing that slept on a message from the
   page) and the harness's `--pacing` flag are gone; a worker runs the page's pacing at the
   worker's interval.
+
+### 2026-10-31: a call to an empty function answered at its own site (`emptySites`)
+
+- **Idea.** With `emptyCalls`, a call to a function that only returns already comes back at the
+  transfer without entering a region. Reading the target's first slot of the entry hash at the
+  call site itself, and returning in place when it names such a function, would save the trip to
+  the transfer for those calls.
+- **Workload.** Not recorded: the values below are what the setting's row in cork's SETTINGS.md
+  said of it, with no workload, build or date beside them.
+- **Values.** A call to an empty method about a third of what the transfer left it; every other
+  call out of a region one more slot read, about a nanosecond. Runs, median, spread: not recorded.
+- **Why it did not pay.** The calls it serves are rare beside the calls out of regions that each
+  pay the extra read, and `linkedCalls` reads the same slot again after it, so with both on the
+  slot was read twice.
+- **Machine.** Not recorded.
+- **Correctness.** The empty-calls gate ran it both ways while it existed.
+- **Decision.** It stayed off by default and nothing turned it on but tests; removed with its
+  emitter path and its block-profile counter. `emptyCalls` (at the transfer) and `linkedCalls`
+  stay.
+
+### 2026-10-31: the hottest regions gathered into one module (`gatherAfter`, `gatherRegions`)
+
+- **Idea.** Where a tail call into another wasm instance faults (WebKit before the fix the iOS
+  path waits for) every transfer out of a module goes through the runtime's loop. After a number
+  of such crossings, build the regions that took nearly all the heat, wherever they lie, into one
+  module, so the hot paths cross less.
+- **Workload.** The Doom 3 demo with the iOS path's settings (`crossTailCalls: false`,
+  `dispatch`), cold store. Crossings: 300 s a run; host and executors not recorded. Memory: the
+  demo's load in WebKit 27.2 (Playwright, the engine's test page, fake GPU), 180 to 240 s, one
+  run each.
+- **Values.** Crossings per thousand million guest instructions, two runs: without the night's
+  change 3.54 M and 3.32 M, with it 1.83 M and 1.33 M; that change also brought region heat and
+  cold relinks, and gathering alone was not separated. The web process at the end of the load:
+  3090 MB gathering, 1110 MB not; an iPhone 13 Pro Max ends a tab at 1720 MB.
+- **Why it did not pay.** Each gathering builds its regions again, and WebKit keeps every module
+  it compiled: the memory a gathering costs outweighs the crossings it saves on the one host it
+  was for.
+- **Machine.** A 4-core x86-64 Linux VM; power plan not recorded.
+- **Correctness.** Not judged beyond the runtime's tests.
+- **Decision.** Off on the iOS path (`gatherAfter: 0`), and needing `crossTailCalls: false` it
+  ran nowhere else; removed with its code.
+
+### 2026-10-31: the cpu layer's guest sampler switched off (`sampling: false`)
+
+- **Idea.** The sampler that credits every slice to where it ran (a register read and a table
+  update a slice) could be switched off to give its cost back.
+- **Workload.** Not recorded: the measurement is the cpu layer's own comment, which says the
+  sampler was measured to leave the guest phase's ms a frame unchanged; title, build, runs and
+  date not recorded.
+- **Values.** Guest phase ms a frame: unchanged on and off (the comment's words; figures not
+  recorded).
+- **Why it did not pay.** Its cost is below what a frame's time can show.
+- **Machine.** Not recorded.
+- **Correctness.** Not concerned.
+- **Decision.** Always on; the option to switch it off is removed.
+
+### 2026-10-31: threads placed by trial and on reckoned gains, and the trade of a pinned processor
+
+- **Idea.** Where several executors run a program's threads, choose between spreading them and
+  keeping them on the process's executor by trying both (ee3a9b4e), later by reckoning each
+  thread's gain from moving (20e4ccec, f0c39d77); and let the process's executor play the
+  processor of a thread pinned to it, so a host-bound thread pinned elsewhere has its calls
+  answered without a round trip (the trade, `playPinned`).
+- **Workload and values, local** (a 4-core x86-64 Linux VM, Chrome headless with the fake GPU or
+  node; one or two runs an arm unless said):
+  - Crysis demo timedemo, warm: one executor 119.2 / 118.9 ms a frame, spread 172 to 188, the
+    trial's choice 119.0 (it chose to keep the threads together); its first version flapped
+    between trials, 170.9.
+  - Call of Duty 4 demo, bog_a, two executors: no trade 77.4 ms a frame, trade held all run 86.7,
+    the trade checked and undone 76.5; rows of 100 frames varied 68 to 97 ms.
+  - Call of Duty 4, three executors, the gains placement against spread: 107.8 and 119.0 ms a
+    frame (one pair; one trade tried and undone in each).
+  - A synthetic pipeline (two threads handing work over, three cores): with the process's
+    executor kept free 3566 to 4153 ms, without (the trial chose the trade) 2561 to 2797 ms.
+- **Workload and values, the owner's M4** (Chrome on an M4 Mac, Call of Duty 4): trials re-run
+  during play showed as dips (windows kept together 64 ms a frame against 28 spread; the trade
+  131 against 30); a session spread with the trade held had a median frame of 34 ms and a 95th
+  percentile of 130 ms, while spread without the trade had no freezes at about 45 frames a
+  second in the heaviest scene (the owner's observation, not a controlled A/B); a gains session
+  of 445 s made three moves and undid all three.
+- **Why it did not pay.** A trial is paid in the frames it is run in, and the gains model never
+  saw what made the trade slow on the M4: per call the waits swapped about one for one, and the
+  harm was elsewhere. On this VM the measured gains were within the run-to-run spread.
+- **Machine.** As above; the M4's browser version and power settings: not recorded beyond Chrome
+  155 and 156.
+- **Correctness.** Not concerned.
+- **Decision.** The owner made a free host the default on 2026-10-21 (threads spread, the
+  process's executor kept for the host's answers); from then on the trials, the gains and the
+  trade ran only under `cpu.freeHost: false`, which nothing in the product set. Removed with
+  `freeHost`, `playPinned` and `placementTiming`; `placement: 'concentrate'` stays as a debugging
+  switch.
