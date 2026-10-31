@@ -602,3 +602,33 @@ for (const seed of [1, 2, 3, 5, 6, 7])
         assert.deepEqual(elsewhere.reads, traps.reads, 'what every draw read, drawn elsewhere');
     });
 }
+
+test('Direct3D 10: a buffer the guest maps with DISCARD faster than the host plays the ring is'
+    + ' given storages until its maps stop trapping', ()=>{
+    const m = machine(true, false);
+    const made = m.run({ on: '#0', kind: 'device', method: 'CreateBuffer', args: [
+        { words: [VERTICES * STRIDE, D3D10_USAGE.DYNAMIC, D3D10_BIND.VERTEX_BUFFER,
+            D3D10_CPU_ACCESS.WRITE, 0] }, 0, 'out'] }, true);
+    const dynamic = /** @type {string} */ (made.out);
+    /** How many of each round's maps trapped. */
+    const trapped = [];
+    for (let round = 0; round < 12; round++)
+    {
+        let traps = 0;
+        // Eight maps in a frame, then a call of the host's, which plays the ring.
+        for (let map = 0; map < 8; map++)
+        {
+            const answer = m.run({ on: dynamic, kind: 'buffer', method: 'Map',
+                args: [D3D10_MAP.WRITE_DISCARD, 0, 'out'] }, false);
+            traps += answer.traps.includes('Map') ? 1 : 0;
+            m.run({ on: dynamic, kind: 'buffer', method: 'Unmap', args: [] }, false);
+        }
+        m.run({ on: '#0', kind: 'device', method: 'IAGetPrimitiveTopology', args: ['out'] },
+            false);
+        trapped.push(traps);
+    }
+    // A buffer of a storage traps every DISCARD it cannot move off; the host
+    // gives it one more each time, and a frame's eight then fit.
+    assert.ok(trapped[0] > 0, `the first maps trapped: ${trapped}`);
+    assert.deepEqual(trapped.slice(-4), [0, 0, 0, 0], `none trapped in the end: ${trapped}`);
+});

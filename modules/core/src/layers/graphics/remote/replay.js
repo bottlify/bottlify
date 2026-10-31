@@ -56,6 +56,10 @@ const PURE_GETTERS = new Set([
     // minutes of one title, each played for nothing -- and a pause the host's
     // entry runs its calls in.
     'ringState', 'whileStill',
+    // Direct3D 10's: which interfaces an object has, asked whenever the seam
+    // hands one out, and whether a map waits for a copy into the resource --
+    // never, on a device with no renderer, whose map is the played one's.
+    'supports', 'pendingReadback',
 ]);
 
 /**

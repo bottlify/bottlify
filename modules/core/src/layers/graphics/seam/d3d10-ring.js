@@ -261,7 +261,11 @@ export function createDeviceRing(deps){
         /**
          * A map the host makes: a DISCARD the guest could not make, for want
          * of a storage let go of, gives the buffer one more, so the next can.
-         * The ring was played first, so the buffer is on the storage it is.
+         * The ring was played first, so the buffer is on the storage it is --
+         * and the storages its unmaps held are free again by now, which is
+         * why their being free says nothing: the guest ran out of them before
+         * the host played the ring, and a buffer of two storages would
+         * otherwise trap every other DISCARD for good.
          *
          * @param {any} buffer @param {number} type
          */
@@ -275,7 +279,7 @@ export function createDeviceRing(deps){
             try
             {
                 const count = read(held.block + BUFFER10.COUNT);
-                if (read(held.block + BUFFER10.FREE) !== 0 || count >= BUFFER10.MOST
+                if (count >= BUFFER10.MOST
                     || (count + 1) * read(held.block + BUFFER10.LENGTH) > STORAGE_BYTES)
                 {
                     return;
@@ -285,7 +289,8 @@ export function createDeviceRing(deps){
                 {
                     write(held.block + BUFFER10.STORAGES + count * 4, base);
                     write(held.block + BUFFER10.COUNT, count + 1);
-                    write(held.block + BUFFER10.FREE, 1 << count);
+                    write(held.block + BUFFER10.FREE,
+                        (read(held.block + BUFFER10.FREE) | (1 << count)) >>> 0);
                 }
             }
             finally
