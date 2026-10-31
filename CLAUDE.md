@@ -107,7 +107,7 @@ build.
 
 | Changed | Run |
 | --- | --- |
-| cork | `npm test -w @bottlify/cork` and `npm run test:integration -w @bottlify/cork` — the x86 corpus with expected results (`npm run fetch:corpus` once) |
+| cork | `npm test -w @bottlify/cork` and `npm run test:integration -w @bottlify/cork` — the x86 corpus a real processor answered, kept in the repository (`modules/cork/src/x86-corpus.json.gz`, made by `tools/x86-corpus.mjs`) |
 | a core layer (gdi32, d3d9, dsound, …) | that layer's unit tests by interface and its gates: `node --test "src/layers/<layer>/**/*.test.js" "src/layers/<layer>/**/*.itest.js"` in `modules/core` |
 | anything, before it goes to main | `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run check:boundaries`, `npm run build` |
 
