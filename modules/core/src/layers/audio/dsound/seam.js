@@ -151,6 +151,19 @@ export const DSBUFFERDESC = Object.freeze({
     SIZE_DX8: 0x24,
 });
 
+/**
+ * DSBUFFERDESC in a 64-bit process: lpwfxFormat is eight bytes and stays at
+ * 0x10, which is already aligned for it, so only the sizes and the GUID
+ * behind it move. A 64-bit caller declares 24 or 40, and a check against the
+ * 32-bit sizes refuses every buffer it asks for.
+ */
+export const DSBUFFERDESC_64 = Object.freeze({
+    ...DSBUFFERDESC,
+    guid3DAlgorithm: 0x18,
+    SIZE: 0x18,
+    SIZE_DX8: 0x28,
+});
+
 /** DSBCAPS, which a program reads back to learn what it actually got. */
 export const DSBCAPS = Object.freeze({
     dwSize: 0x00,
@@ -288,6 +301,12 @@ export const DSBPOSITIONNOTIFY = Object.freeze({
     hEventNotify: 0x04,
     SIZE: 0x08,
 });
+/** DSBPOSITIONNOTIFY in a 64-bit process: the HANDLE is eight bytes, aligned to eight. */
+export const DSBPOSITIONNOTIFY_64 = Object.freeze({
+    dwOffset: 0x00,
+    hEventNotify: 0x08,
+    SIZE: 0x10,
+});
 
 /** IDirectSound, after IUnknown's three. */
 export const IDIRECTSOUND_SLOTS = /** @type {[string, number][]} */ ([
@@ -359,22 +378,26 @@ export const IDIRECTSOUNDNOTIFY_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /**
- * Builds an interface descriptor from `[name, argumentCount]` pairs.
+ * Builds an interface descriptor from `[name, argumentCount, floats?]` slots.
  *
  * The count excludes `this`, because that is how a header reads and
- * transcribing a header is what these lists are.
+ * transcribing a header is what these lists are. `floats` names the
+ * arguments that are a D3DVALUE, counting `this` as 0: a 64-bit caller passes
+ * those among its first four in XMM registers, where the bridge reads them
+ * from only when it is told.
  *
  * @param {string} id
- * @param {[string, number][]} slots
+ * @param {[string, number, number[]?][]} slots
  * @param {Record<string, (target: any, args: number[]) => number>} [implemented]
  */
 export function describe(id, slots, implemented = {}){
     return {
         id,
-        methods: slots.map(([name, args])=>({
+        methods: slots.map(([name, args, floats])=>({
             name,
             argBytes: 4 + args * 4,
             invoke: implemented[name],
+            ...floats ? { floats: Object.fromEntries(floats.map(at=>[at, 'f32'])) } : {},
         })),
     };
 }
@@ -404,6 +427,7 @@ function methodsFor(descriptor){
             ...descriptor.methods.map((/** @type {any} */ method)=>({
                 name: method.name,
                 argBytes: method.argBytes,
+                ...method.floats ? { floats: method.floats } : {},
                 invoke: method.invoke
                     ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
                         method.invoke(adapter.api, args) ?? 0
@@ -593,12 +617,19 @@ export function createPublisher({ publishInterface }){
  *        ole32's hold on the multithreaded apartment. An initialized device
  *        keeps it open while it lives, as Windows' worker threads do, so a
  *        thread that entered no apartment is in it implicitly.
+ * @param {4 | 8} [deps.pointerSize]  8 for a 64-bit process: its descriptors
+ *        and notification arrays in their 64-bit layouts, and every pointer an
+ *        out parameter takes written whole.
  */
 export function createDirectSound({
     memory, allocate, now, publishInterface, signal, callGuest, callerThread, divergence, mtaUsage,
+    pointerSize = 4,
 })
 {
     const publisher = createPublisher({ publishInterface });
+    const long = pointerSize === 8;
+    const descriptorLayout = long ? DSBUFFERDESC_64 : DSBUFFERDESC;
+    const notifyLayout = long ? DSBPOSITIONNOTIFY_64 : DSBPOSITIONNOTIFY;
 
     /** @param {number} address */
     const readU32 = address=>{
@@ -619,6 +650,20 @@ export function createDirectSound({
         memory.writeMemory(address >>> 0, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ]));
+    };
+    /**
+     * An interface or a sample address into a pointer-sized out parameter. A
+     * 64-bit process's every page is below 4 GiB, so the high half is zero,
+     * and it is written: a caller's slot holds whatever its stack held.
+     *
+     * @param {number} address @param {number} value
+     */
+    const writePointer = (address, value)=>{
+        writeU32(address, value);
+        if (long && (address >>> 0) !== 0)
+        {
+            writeU32((address >>> 0) + 4, 0);
+        }
     };
 
     /** @type {any[]} */
@@ -839,10 +884,10 @@ export function createDirectSound({
             const positions = [];
             for (let at = 0; at < wanted; at++)
             {
-                const entry = (array >>> 0) + at * DSBPOSITIONNOTIFY.SIZE;
+                const entry = (array >>> 0) + at * notifyLayout.SIZE;
                 positions.push({
-                    offset: readU32(entry + DSBPOSITIONNOTIFY.dwOffset),
-                    event: readU32(entry + DSBPOSITIONNOTIFY.hEventNotify),
+                    offset: readU32(entry + notifyLayout.dwOffset),
+                    event: readU32(entry + notifyLayout.hEventNotify),
                 });
             }
             buffer.setNotifications(positions);
@@ -943,20 +988,20 @@ export function createDirectSound({
             }
             if ((n1 >>> 0) === 0)
             {
-                writeU32(p1, 0);
+                writePointer(p1, 0);
                 return DSERR_INVALIDPARAM;
             }
             deliver(buffer);
             const ranges = buffer.lockRange(offset, bytes, flags >>> 0);
             const none = { address: 0, bytes: 0 };
             const { first, second } = ranges ?? { first: none, second: none };
-            writeU32(p1, first.address);
+            writePointer(p1, first.address);
             writeU32(n1, first.bytes);
             // The second range is written wherever the caller offered somewhere
             // to put it, zero included: a caller that passed pointers and reads
             // a stale value there splices audio from a previous lock. Either of
             // the two may be missing, even when the lock wraps.
-            writeU32(p2, second.address);
+            writePointer(p2, second.address);
             writeU32(n2, second.bytes);
             return ranges ? DS_OK : DSERR_INVALIDPARAM;
         },
@@ -1169,16 +1214,16 @@ export function createDirectSound({
             }
             // One of the two layouts, or a caller that disagrees with us about
             // where every later field is.
-            const size = readU32(descriptor + DSBUFFERDESC.dwSize);
-            if (size !== DSBUFFERDESC.SIZE && size !== DSBUFFERDESC.SIZE_DX8)
+            const size = readU32(descriptor + descriptorLayout.dwSize);
+            if (size !== descriptorLayout.SIZE && size !== descriptorLayout.SIZE_DX8)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_INVALIDPARAM;
             }
-            const flags = readU32(descriptor + DSBUFFERDESC.dwFlags);
+            const flags = readU32(descriptor + descriptorLayout.dwFlags);
             const primary = (flags & DSBCAPS_PRIMARYBUFFER) !== 0;
-            const wanted = readU32(descriptor + DSBUFFERDESC.dwBufferBytes);
-            const formatAt = readU32(descriptor + DSBUFFERDESC.lpwfxFormat);
+            const wanted = readU32(descriptor + descriptorLayout.dwBufferBytes);
+            const formatAt = readU32(descriptor + descriptorLayout.lpwfxFormat);
             const format = readFormat(formatAt);
             const asked = `CreateSoundBuffer flags=0x${(flags >>> 0).toString(16)} bytes=${wanted}`
                 + ` fmt=${format ? `${format.sampleRate}/${format.bitsPerSample}/${format.channels}` : '-'}`;
@@ -1190,7 +1235,7 @@ export function createDirectSound({
             // is one asking for effects, which only a secondary buffer takes.
             if (primary && (formatAt !== 0 || (flags & DSBCAPS_CTRLFX) !== 0))
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_INVALIDPARAM;
             }
 
@@ -1200,7 +1245,7 @@ export function createDirectSound({
             if (primary && root.primary)
             {
                 root.primary.addRef();
-                writeU32(out, publishBuffer(root.primary));
+                writePointer(out, publishBuffer(root.primary));
                 return DS_OK;
             }
 
@@ -1210,7 +1255,7 @@ export function createDirectSound({
             // mistake.
             if (!primary && (wanted === 0 || !format))
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_INVALIDPARAM;
             }
             // DirectSound 8's rule, not the older interface's, which makes
@@ -1219,7 +1264,7 @@ export function createDirectSound({
             if (root.eight && !primary && (flags & DSBCAPS_CTRL3D) !== 0
                 && ((flags & DSBCAPS_CTRLPAN) !== 0 || format?.channels !== 1))
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_INVALIDPARAM;
             }
 
@@ -1237,7 +1282,7 @@ export function createDirectSound({
             const address = allocate(bytes);
             if (address === 0)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_OUTOFMEMORY;
             }
             // A new buffer holds silence, as DirectSound's does. A program may
@@ -1272,7 +1317,7 @@ export function createDirectSound({
             {
                 root.primary = buffer;
             }
-            writeU32(out, publishBuffer(buffer));
+            writePointer(out, publishBuffer(buffer));
             return DS_OK;
         },
 
@@ -1302,7 +1347,7 @@ export function createDirectSound({
             });
             buffers.push(copy);
             awake.add(copy);
-            writeU32(out, publishBuffer(copy));
+            writePointer(out, publishBuffer(copy));
             return DS_OK;
         },
 
@@ -1498,7 +1543,7 @@ export function createDirectSound({
              */
             primary: null,
         };
-        writeU32(out, eight
+        writePointer(out, eight
             ? publisher.publish(device, sound8Interfaces, IID_IDirectSound8,
                 DEVICE_COUNTED_ON_ITS_OWN)
             : publisher.publish(device, soundInterfaces, IID_IDirectSound,
@@ -1513,7 +1558,7 @@ export function createDirectSound({
             {
                 return DSERR_INVALIDPARAM;
             }
-            writeU32(out, 0);
+            writePointer(out, 0);
             if ((outer >>> 0) !== 0)
             {
                 return DSERR_NOAGGREGATION;
@@ -1536,7 +1581,7 @@ export function createDirectSound({
             // Asked for another of its interfaces: that one is handed back,
             // holding the one reference the object was made with.
             const object = publisher.objectAt(readU32(out >>> 0));
-            writeU32(out, publisher.publish(object, interfaces, wanted));
+            writePointer(out, publisher.publish(object, interfaces, wanted));
             if (wanted === IID_IUNKNOWN)
             {
                 publisher.hand(object, factory.eight ? IID_IDirectSound8 : IID_IDirectSound,
@@ -1590,7 +1635,7 @@ export function createDirectSound({
         {
             return DSERR_INVALIDPARAM;
         }
-        writeU32(out, 0);
+        writePointer(out, 0);
         return DSERR_NODRIVER;
     };
 
@@ -1612,8 +1657,8 @@ export function createDirectSound({
                 {
                     return DSERR_INVALIDPARAM;
                 }
-                writeU32(captureOut, 0);
-                writeU32(renderOut, 0);
+                writePointer(captureOut, 0);
+                writePointer(renderOut, 0);
                 return DSERR_NODRIVER;
             },
         })],
@@ -1643,11 +1688,11 @@ export function createDirectSound({
         publisher.publish(object, interfaces, own, DEVICE_COUNTED_ON_ITS_OWN);
         if (wanted === IID_IUNKNOWN)
         {
-            writeU32(out, publisher.publish(object, interfaces, IID_IUNKNOWN));
+            writePointer(out, publisher.publish(object, interfaces, IID_IUNKNOWN));
             publisher.hand(object, own, IID_IUNKNOWN);
             return DS_OK;
         }
-        writeU32(out, publisher.publish(object, interfaces, own));
+        writePointer(out, publisher.publish(object, interfaces, own));
         return DS_OK;
     };
 
@@ -1884,7 +1929,7 @@ export function createDirectSound({
                         }
                         for (const at of [out, captureOut, renderOut])
                         {
-                            writeU32(at, 0);
+                            writePointer(at, 0);
                         }
                         return DSERR_NODRIVER;
                     },
@@ -1909,7 +1954,7 @@ export function createDirectSound({
                         {
                             return DSERR_INVALIDPARAM;
                         }
-                        writeU32(out, 0);
+                        writePointer(out, 0);
                         const asked = (clsid >>> 0) === 0 ? '' : readGuid(memory, clsid >>> 0);
                         const kind = CLASS_KINDS.get(asked);
                         if (!kind)
@@ -1921,7 +1966,7 @@ export function createDirectSound({
                         {
                             return E_NOINTERFACE;
                         }
-                        writeU32(out,
+                        writePointer(out,
                             publisher.publish(classFactory(kind), factoryInterfaces, wanted));
                         return DS_OK;
                     },
