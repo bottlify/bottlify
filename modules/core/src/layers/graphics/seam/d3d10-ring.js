@@ -40,10 +40,10 @@ export const BUFFER10 = Object.freeze({
 /**
  * The bytes of storages a buffer may be given in all: past it, its DISCARDs
  * trap. A buffer needs a storage for each DISCARD between two plays of the
- * ring; at 4 MiB the Crysis timedemo's maps trapped 177474 times in 20
- * minutes, every one of them a DISCARD at this cap or the count's.
+ * ring; the count's cap (`BUFFER10.MOST`) is what a program that DISCARDs
+ * one buffer more often than that meets first (roadmap/negative-results.md).
  */
-const STORAGE_BYTES = 32 * 1024 * 1024;
+const STORAGE_BYTES = 4 * 1024 * 1024;
 
 /** D3D10_MAP_WRITE_DISCARD and D3D10_MAP_WRITE_NO_OVERWRITE. */
 const MAP_WRITE_DISCARD = 4;
