@@ -9997,7 +9997,12 @@ export async function createApp(options){
             // the run's system from a worker of its own is never the run's only
             // one -- its parent at least stands -- so what it waits on is
             // another's to answer, and the run, not it, says when it is over.
+            // A child beside counts until its parent is told it ended: its
+            // machine stops standing when its run is over and is taken down
+            // after, which awaits, while the parent's turns go on -- a parent
+            // whose every thread waits on it would find nothing to wake it.
             othersRunning: ()=>Boolean(options.system) || starting > 0 || across > 0
+                || besides.size > 0
                 || [...standing].some(other=>other !== self) }));
         self = built;
         standing.add(built);
@@ -11126,19 +11131,29 @@ export async function createApp(options){
             {
                 reachable.delete(request.id);
             }
-            const ended = line.current;
-            await retire(ended);
-            noteLogSequence();
-            mediaInstance = ended.media.instance() ?? mediaInstance;
-            await ended.dispose();
-            keepMemory(ended);
-            sound.giveBack();
-            // The page sees whoever stands in the main line again.
-            replayLogLevels();
-            stand(mainLine.current);
-            bindLogLevels();
-            presenter?.forget?.(request.id);
-            parent.childExited(request, code);
+            // Its parent is told however the teardown goes.
+            try
+            {
+                const ended = line.current;
+                await retire(ended);
+                noteLogSequence();
+                mediaInstance = ended.media.instance() ?? mediaInstance;
+                await ended.dispose();
+                keepMemory(ended);
+                sound.giveBack();
+                // The page sees whoever stands in the main line again.
+                replayLogLevels();
+                stand(mainLine.current);
+                bindLogLevels();
+                presenter?.forget?.(request.id);
+            }
+            catch (e){
+                events.emit('error', { reason: 'process', error: e });
+            }
+            finally
+            {
+                parent.childExited(request, code);
+            }
             lastBesideCode = code;
             events.emit('process-resumed', { image: request.imagePath, code });
             return code;
