@@ -6411,7 +6411,8 @@ async function buildApp(options){
                         // calling thread's copy of the block as soon as
                         // LoadLibrary returns, and a thread made afterwards
                         // finds its own.
-                        const directory = readTls(file, image);
+                        const directory = readTls(file, image,
+                            (rva, length)=>memory.readBytes(base + rva, length));
                         if (directory && !giveThreadLocals(base, directory))
                         {
                             return refuse('no thread-local slot, or no room for every'
@@ -7066,7 +7067,8 @@ async function buildApp(options){
     let nextLocal = 0;
     const withTls = [mainModule, ...shipped].map(held=>{
         const directory = held.file
-            ? readTls(held.file, held.image ?? parsePe(held.file, { wide: true })) : null;
+            ? readTls(held.file, held.image ?? parsePe(held.file, { wide: true }),
+                (rva, length)=>memory.readBytes(held.base + rva, length)) : null;
         if (!directory)
         {
             return held;

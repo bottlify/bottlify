@@ -209,3 +209,54 @@ for (const cores of [1, 2])
         }
     });
 }
+
+/**
+ * A 64-bit program asking for 0x140000000, as a linker places one, whose
+ * template holds the address of one of its globals: the loader moves it below
+ * 4 GiB, and its first thread's block must hold that global's address where
+ * it was mapped -- the template copied out of the relocated image, as Windows
+ * copies it. Copied from the file, the pointer kept the preferred base and the
+ * first read through it faulted (mimalloc's default heap is such a variable).
+ * The exit code: 0, or 1 when the block's pointer is not the global's.
+ */
+test('a moved 64-bit image\'s thread-local block holds its relocated pointers', async t=>{
+    let target = 0;
+    const image = buildExe({
+        bits: 64, imageBase: 0x140000000, codeSize: 0x80,
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        data: { template: new Array(16).fill(0), index: u32(0), target: u32(0) },
+        tls: { template: 'template', index: 'index' },
+        relocations: { template: [0] },
+        code: ({ iat, at, code })=>{
+            target = at('target');
+            /** @type {number[]} */
+            const bytes = [];
+            /** @param {number[]} op @param {number} to  a RIP-relative operand */
+            const rip = (op, to)=>bytes.push(...op,
+                ...u32(to - (code(bytes.length) + op.length + 4)));
+            bytes.push(0x48, 0x83, 0xec, 0x28); //            sub rsp, 40
+            rip([0x8b, 0x0d], at('index')); //                mov ecx, [_tls_index]
+            bytes.push(0x65, 0x48, 0x8b, 0x04, 0x25, ...u32(0x58)); // mov rax, gs:[0x58]
+            bytes.push(0x48, 0x8b, 0x04, 0xc8); //            mov rax, [rax+rcx*8]
+            bytes.push(0x48, 0x8b, 0x00); //                  mov rax, [rax]
+            rip([0x48, 0x8d, 0x15], at('target')); //         lea rdx, [target]
+            bytes.push(0x31, 0xc9, 0x48, 0x39, 0xd0); //      xor ecx, ecx; cmp rax, rdx
+            bytes.push(0x0f, 0x95, 0xc1); //                  setne cl
+            rip([0xff, 0x15], iat('ExitProcess'));
+            return bytes;
+        },
+    });
+    // The template's pointer, as the linker writes it: the global's address
+    // against the preferred base.
+    const view = new DataView(image.buffer);
+    const pe = view.getUint32(0x3c, true);
+    const tlsDirectory = view.getUint32(pe + 24 + 112 + 9 * 8, true);
+    const templateRva = Number(view.getBigUint64(0x200 + tlsDirectory - 0x1000, true)
+        - 0x140000000n);
+    view.setBigUint64(0x200 + templateRva - 0x1000, BigInt(target), true);
+
+    const app = await createApp({ executable: image, engine: 'cork' });
+    t.after(()=>app.dispose());
+    assert.equal((await app.run({ timeoutMs: 30_000 })) >>> 0, 0,
+        'the block\'s pointer is the global\'s address where the image was mapped');
+});

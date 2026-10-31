@@ -177,6 +177,10 @@ export function assemble(parts){
  *        A thread-local directory: the data blob each thread's block is a copy
  *        of, the one the loader writes the block's slot number into, and the
  *        TLS callbacks, as offsets into the code, in the order they are called.
+ * @param {Record<string, number[]>} [options.relocations]  Pointers to fix up
+ *        when the image is moved, as offsets into the named data blobs: the
+ *        image gets a base relocation directory holding them and the
+ *        thread-local directory's own addresses. Without it the image has none.
  * @param {(ctx: {
  *   iat: (name: string) => number,
  *   at: (name: string) => number,
@@ -299,6 +303,41 @@ export function buildExe(options){
         cursor += 88 + manifestBytes.length;
     }
     const resourceSize = cursor - resourceOffset;
+
+    // Base relocations: offsets into the section, one block per page, each
+    // entry DIR64 or HIGHLOW by the image's width, padded to a dword.
+    const relocations = options.relocations ?? null;
+    /** @type {number[]} */
+    const fixups = [];
+    if (relocations !== null)
+    {
+        for (const [name, offsets] of Object.entries(relocations))
+        {
+            fixups.push(...offsets.map(offset=>dataOffsets[name] + offset));
+        }
+        if (tls !== null)
+        {
+            for (let index = 0; index < 4 + callbacks.length; index++)
+            {
+                fixups.push(tlsOffset + (index < 4 ? index * pointer
+                    : TLS_DIRECTORY_SIZE + (index - 4) * pointer));
+            }
+        }
+    }
+    /** @type {Map<number, number[]>} */
+    const pages = new Map();
+    for (const offset of fixups)
+    {
+        const page = rva(offset) & ~0xfff;
+        pages.set(page, [...pages.get(page) ?? [], rva(offset) & 0xfff]);
+    }
+    cursor = (cursor + 3) & ~3;
+    const relocationOffset = cursor;
+    for (const entries of pages.values())
+    {
+        cursor += 8 + Math.ceil(entries.length / 2) * 4;
+    }
+    const relocationSize = cursor - relocationOffset;
     const sectionSize = cursor;
 
     /** @param {string} name */
@@ -426,6 +465,16 @@ export function buildExe(options){
         text.u32(rva(resourceOffset + 88)).u32(manifestBytes.length).u32(0).u32(0);
         text.push(...manifestBytes);
     }
+    text.pad(relocationOffset);
+    for (const [page, entries] of pages)
+    {
+        const padded = entries.length % 2 === 0 ? entries : [...entries, -1];
+        text.u32(page).u32(8 + padded.length * 2);
+        for (const offset of padded)
+        {
+            text.u16(offset < 0 ? 0 : (bits === 64 ? 10 : 3) << 12 | offset);
+        }
+    }
     text.pad(sectionSize);
 
     const rawSize = Math.ceil(sectionSize / FILE_ALIGNMENT) * FILE_ALIGNMENT;
@@ -478,6 +527,7 @@ export function buildExe(options){
     directories[0] = exports.length > 0 ? [rva(exportOffset), exportSize] : [0, 0];
     directories[1] = [rva(descriptorOffset), (modules.length + 1) * 20]; // import table
     directories[2] = manifest === null ? [0, 0] : [rva(resourceOffset), resourceSize];
+    directories[5] = relocationSize === 0 ? [0, 0] : [rva(relocationOffset), relocationSize];
     directories[9] = tls === null ? [0, 0] : [rva(tlsOffset), TLS_DIRECTORY_SIZE];
     // The IAT directory spans every module's address table; they were laid out
     // consecutively, so the first one's start and the last one's end bound it.

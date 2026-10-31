@@ -79,11 +79,21 @@ function mappedBytes(bytes, image, rva, length){
 /**
  * Reads the TLS directory, or answers null when the image declares none.
  *
+ * The template is copied the way Windows copies it: out of the image as it was
+ * mapped, its relocations applied. A template holding a pointer -- a thread's
+ * variable initialised to the address of a global, as mimalloc's default heap
+ * is -- read out of the file keeps the address against the preferred base, and
+ * every thread of an image that was moved starts out pointing there. A 64-bit
+ * image is always moved (it asks for 0x140000000), so the first such read
+ * faulted.
+ *
  * @param {Uint8Array} bytes  The raw file (not the mapped image).
  * @param {import('./pe.js').PeImage} image
+ * @param {(rva: number, length: number) => Uint8Array} [mapped]  The image as
+ *     mapped and relocated, by RVA; without it the template is the file's.
  * @returns {TlsDirectory | null}
  */
-export function readTls(bytes, image){
+export function readTls(bytes, image, mapped){
     const directory = image.directories[DIR_TLS];
     if (!directory || directory.size === 0 || directory.address === 0)
     {
@@ -115,7 +125,8 @@ export function readTls(bytes, image){
     // template may lie in the tail of a section that has no bytes behind it --
     // a .tls of no raw data whatever, its file pointer the next section's --
     // and those bytes are zeroes in a mapped image, not the next section's.
-    const template = mappedBytes(bytes, image, startRva, templateSize);
+    const template = mapped ? mapped(startRva, templateSize)
+        : mappedBytes(bytes, image, startRva, templateSize);
 
     /** @type {number[]} */
     const callbackRvas = [];
