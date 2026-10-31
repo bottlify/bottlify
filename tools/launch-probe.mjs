@@ -21,6 +21,7 @@
  *
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
  *         [--network ws://host:port/] [--steam ACCOUNT.json] [--steam-session FILE|-]
+ *         [--file HOST=GUEST]...
  *
  * `--network` puts the program on a relay's network (tools/relay-option.mjs);
  * without it the machine has the loopback adapter alone.
@@ -141,6 +142,21 @@ function parse(argv){
         // started straight into a level (`+map ...`) loads it and plays.
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1] : undefined,
+        // Files put on the volume before the program starts, as `HOST=GUEST`,
+        // repeatable: game.mjs's `--file`, what one run wrote handed to the next.
+        files: argv.flatMap((flag, index)=>{
+            if (flag !== '--file')
+            {
+                return [];
+            }
+            const at = argv[index + 1].indexOf('=');
+            if (at < 0)
+            {
+                throw new Error(`--file wants HOST=GUEST, got ${argv[index + 1]}`);
+            }
+            return [{ path: argv[index + 1].slice(at + 1),
+                bytes: new Uint8Array(readFileSync(argv[index + 1].slice(0, at))) }];
+        }),
         // Executors of the program's process, so one title compares on one and
         // on several (`createApp`'s `executors`).
         executors: argv.includes('--executors')
@@ -538,7 +554,7 @@ async function cpuProfiler(spec){
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
         corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
-        memory, mode, translationStore, cpuProfile, steam, steamSession }
+        memory, mode, translationStore, cpuProfile, steam, steamSession, files }
         = parse(process.argv.slice(2));
     if (!id)
     {
@@ -585,7 +601,7 @@ async function main(){
 
     const sink = log ? createWriteStream(log) : null;
 
-    const placement = placementOf(manifest);
+    const placement = placementOf({ ...manifest, entry: wanted });
     const store = translationStore === null ? null
         : await createDirectoryTranslationStore(diskDirectory(translationStore), id);
     if (store !== null)
@@ -673,7 +689,7 @@ async function main(){
         // Nothing durable: a probe should not leave a copy of a game behind, and
         // the file is already on this disk.
         bundle: { fetch, store: null, prefetch: false, prefix: placement.prefix },
-        storage: null,
+        storage: files.length > 0 ? ()=>files : null,
     });
 
     // Every image, not just the executable. A library the game ships has its own

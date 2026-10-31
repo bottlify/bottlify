@@ -100,6 +100,20 @@ test('ctime and asctime share one buffer, as documented', ()=>{
     assert.equal(table.asctime.handler([table.localtime.handler([seconds])]), first);
 });
 
+test('_wctime writes the same text wide, into a buffer of its own', ()=>{
+    const { memory, table } = build();
+    const seconds = memory.allocate(4);
+    memory.setU32(seconds, Math.floor(WALL / 1000));
+    const narrow = table.ctime.handler([seconds]);
+    const wide = table._wctime.handler([seconds]);
+    assert.notEqual(wide, narrow);
+    const units = new Uint16Array(memory.bytes.slice(wide, wide + 52).buffer);
+    assert.equal(String.fromCharCode(...units), 'Thu Jul 03 12:34:56 2003\n\0');
+    assert.equal(memory.text(narrow), 'Thu Jul 03 12:34:56 2003\n', 'the narrow text kept');
+    assert.equal(table._wctime.handler([0]), 0);
+    assert.equal(table._wctime64.argBytes, 4);
+});
+
 /** WALL's fields. */
 const WALL_TM = { sec: 56, min: 34, hour: 12, mday: 3, mon: 6, year: 103, wday: 4, yday: 183,
     isdst: 0 };

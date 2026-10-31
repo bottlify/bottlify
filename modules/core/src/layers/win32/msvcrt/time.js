@@ -516,8 +516,11 @@ export function createTimeFunctions(host){
      */
     let tmBlock = 0;
     let textBlock = 0;
+    let wideBlock = 0;
     const staticTm = ()=>(tmBlock === 0 ? (tmBlock = host.allocate(TM.SIZE)) : tmBlock);
     const staticText = ()=>(textBlock === 0 ? (textBlock = host.allocate(64)) : textBlock);
+    /** The wide functions' own buffer, as msvcrt keeps one apart from the narrow. */
+    const staticWide = ()=>(wideBlock === 0 ? (wideBlock = host.allocate(128)) : wideBlock);
 
     /** @param {number} block @param {BrokenDown} tm */
     const writeTm = (block, tm)=>{
@@ -858,11 +861,13 @@ export function createTimeFunctions(host){
 
     /**
      * ctime's text for a time read through a pointer, into the buffer it
-     * shares with asctime; null for a time localtime refuses.
+     * shares with asctime; null for a time localtime refuses. `wide`: _wctime's,
+     * UTF-16 into the buffer it shares with _wasctime.
      *
      * @param {(pointer: number) => number} read
+     * @param {boolean} [wide]
      */
-    const ctime = read=>({
+    const ctime = (read, wide = false)=>({
         convention: 'cdecl',
         argBytes: 4,
         /** @param {number[]} args */
@@ -874,8 +879,8 @@ export function createTimeFunctions(host){
                 fail(EINVAL);
                 return 0;
             }
-            const buffer = staticText();
-            writeString(buffer, text);
+            const buffer = wide ? staticWide() : staticText();
+            (wide ? writeWide : writeString)(buffer, text);
             return buffer;
         },
     });
@@ -1161,6 +1166,10 @@ export function createTimeFunctions(host){
         ctime: ctime(readInt),
         _ctime32: ctime(readInt),
         _ctime64: ctime(readTime64),
+        /** wchar_t *_wctime(const time_t *), and the 32- and 64-bit spellings */
+        _wctime: ctime(readInt, true),
+        _wctime32: ctime(readInt, true),
+        _wctime64: ctime(readTime64, true),
         /** errno_t _ctime32_s(char *, size_t, const __time32_t *), and the 64-bit one */
         _ctime32_s: ctimeInto(readInt),
         _ctime64_s: ctimeInto(readTime64),

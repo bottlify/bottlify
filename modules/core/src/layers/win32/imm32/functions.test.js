@@ -188,3 +188,9 @@ test('ImmIsUIMessage knows the IME messages and hands them to the window it is g
     assert.equal(imm.ImmIsUIMessageA.handler([0x40, 0x100, 3, 4]), 0);
     assert.deepEqual(sent, [[0x40, 0x10d, 3, 4]], 'only the IME message reaches it');
 });
+
+test('ImmGetVirtualKey: no input context took a key, so VK_PROCESSKEY', ()=>{
+    const { imm } = machine();
+    assert.equal(imm.ImmGetVirtualKey.handler([0x10016]), 0xe5);
+    assert.equal(imm.ImmGetVirtualKey.argBytes, 4);
+});

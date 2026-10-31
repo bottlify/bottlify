@@ -726,3 +726,20 @@ test('a status code is still read the old way, now with an index that advances',
     assert.equal(fx.readAnsi(OUT), '200');
     assert.equal(fx.dword(INDEX), 1);
 });
+
+test('InternetCheckConnection reaches a URL host only with a transport', ()=>{
+    const ERROR_NOT_CONNECTED = 2250;
+    const offline = setup();
+    assert.equal(offline.call('InternetCheckConnectionW',
+        [offline.wide(A, 'http://www.example.com/'), 1, 0]), 0);
+    assert.equal(offline.last(), ERROR_NOT_CONNECTED);
+    const fx = setup({ transport: echo().transport });
+    assert.equal(fx.call('InternetCheckConnectionW', [fx.wide(A, 'http://www.example.com/'), 1, 0]), 1);
+    assert.equal(fx.last(), ERROR_SUCCESS);
+    assert.equal(fx.call('InternetCheckConnectionA', [fx.ansi(B, 'http://www.example.com'), 0, 0]), 1);
+    assert.equal(fx.call('InternetCheckConnectionW', [0, 0, 0]), 0, 'no server database');
+    assert.equal(fx.last(), ERROR_NOT_CONNECTED);
+    assert.equal(fx.call('InternetCheckConnectionA', [fx.ansi(B, 'not a url'), 0, 0]), 0);
+    assert.equal(fx.last(), ERROR_NOT_CONNECTED);
+    assert.equal(fx.fns.InternetCheckConnectionW.argBytes, 12);
+});
