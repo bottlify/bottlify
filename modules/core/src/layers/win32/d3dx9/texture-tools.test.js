@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTextureTools, shaderProfile, textureRequirements } from './texture-tools.js';
+import { createTextureTools, formatCandidates, shaderProfile, textureRequirements }
+    from './texture-tools.js';
 import { deviceRig } from './device.fixture.js';
 import { D3DX_DEFAULT } from './texture.js';
 import { FMT } from './pixels.js';
@@ -268,3 +269,89 @@ test('D3DXFillVolumeTexture asks the function for each texel of each slice', asy
         level.data + level.slicePitch + 16)], [191, 191, 191, 255]);
     assert.equal(level.locked, false, 'unlocked again');
 });
+
+const D3DERR_NOTAVAILABLE = 0x8876086a;
+const D3DUSAGE_WRITEONLY = 0x8;
+const R3G3B2 = 27;
+const X4R4G4B4 = 30;
+const P8 = 41;
+const V8U8 = 60;
+
+test('the nearest formats: the one asked first, then what loses no bits, its own kind first', ()=>{
+    assert.deepEqual(formatCandidates(FMT.R8G8B8).slice(0, 2), [FMT.R8G8B8, FMT.X8R8G8B8],
+        'R8G8B8 stands in as X8R8G8B8');
+    assert.equal(formatCandidates(R3G3B2)[1], X4R4G4B4, 'the fewest bits added');
+    assert.equal(formatCandidates(FMT.A8R8G8B8).includes(FMT.R8G8B8), false,
+        'a three-byte format only for a three-byte one');
+    assert.ok(formatCandidates(P8).indexOf(FMT.A8R8G8B8) > 0, 'a palette as eight bits of each');
+    assert.ok(formatCandidates(V8U8).every(format=>[V8U8, 63, 64].includes(format)),
+        'a signed format only for a signed one');
+    assert.deepEqual(formatCandidates(0x32595559), [0x32595559], 'an unknown format alone');
+});
+
+test('D3DXCheckTextureRequirements takes the nearest format the device\'s CheckDeviceFormat takes',
+    async()=>{
+        const r = deviceRig();
+        const tools = /** @type {any} */ (createTextureTools(r.host));
+        const at = r.heap.allocate(16);
+        new Uint32Array(r.memory.buffer, at, 4).set([64, 64, 1, FMT.R8G8B8]);
+        assert.equal(await r.call(tools.D3DXCheckTextureRequirements,
+            [r.device, at, at + 4, at + 8, 0x200, at + 12, 0]), 0);
+        assert.equal(r.view.getUint32(at + 12, true), FMT.X8R8G8B8);
+        // Adapter, device type and display format as the device was made, the
+        // usage, a texture, and each format in turn.
+        assert.deepEqual(r.calls.filter(c=>c[0] === 'CheckDeviceFormat'),
+            [['CheckDeviceFormat', 0, 1, 22, 0x200, 3, FMT.R8G8B8],
+                ['CheckDeviceFormat', 0, 1, 22, 0x200, 3, FMT.X8R8G8B8]]);
+        assert.equal(r.calls.filter(c=>c[0] === 'GetDirect3D').length,
+            r.calls.filter(c=>c[0] === 'Release').length, 'the Direct3D object released');
+        new Uint32Array(r.memory.buffer, at + 12, 1).set([FMT.R5G6B5]);
+        assert.equal(await r.call(tools.D3DXCheckTextureRequirements,
+            [r.device, 0, 0, 0, 0, at + 12, 0]), 0);
+        assert.equal(r.view.getUint32(at + 12, true), FMT.R5G6B5, 'a format it takes is kept');
+        assert.equal(await r.call(tools.D3DXCheckTextureRequirements,
+            [r.device, 0, 0, 0, D3DUSAGE_WRITEONLY, 0, 0]), D3DERR_INVALIDCALL,
+        'a buffer\'s usage');
+        const none = deviceRig({ refused: formatCandidates(FMT.R8G8B8) });
+        const format = none.heap.allocate(4);
+        none.view.setUint32(format, FMT.R8G8B8, true);
+        assert.equal(await none.call(/** @type {any} */ (createTextureTools(none.host))
+            .D3DXCheckTextureRequirements, [none.device, 0, 0, 0, 0, format, 0]),
+        D3DERR_NOTAVAILABLE, 'nothing near');
+        assert.equal(none.view.getUint32(format, true), FMT.R8G8B8, 'and nothing written');
+    });
+
+test('D3DXCreateTexture makes the nearest format the device takes', async()=>{
+    const r = deviceRig();
+    const tools = /** @type {any} */ (createTextureTools(r.host));
+    const out = r.heap.allocate(4);
+    assert.equal(await r.call(tools.D3DXCreateTexture,
+        [r.device, 32, 32, 1, 0, FMT.R8G8B8, 1, out]), 0);
+    assert.deepEqual(r.calls.find(c=>c[0] === 'CreateTexture')?.slice(1, 6),
+        [32, 32, 1, 0, FMT.X8R8G8B8]);
+});
+
+test('the cube and volume checks correct the size, levels and format by their own caps',
+    async()=>{
+        const r = deviceRig({ caps: { textureCaps: 0x20000 | 0x40000, maxVolume: 64 } });
+        const tools = /** @type {any} */ (createTextureTools(r.host));
+        const at = r.heap.allocate(20);
+        new Uint32Array(r.memory.buffer, at, 3).set([100, 0, FMT.R8G8B8]);
+        assert.equal(await r.call(tools.D3DXCheckCubeTextureRequirements,
+            [r.device, at, at + 4, 0, at + 8, 1]), 0);
+        assert.deepEqual([...new Uint32Array(r.memory.buffer, at, 3)],
+            [128, 8, FMT.X8R8G8B8]);
+        assert.equal(r.calls.filter(c=>c[0] === 'CheckDeviceFormat').at(-1)?.[5], 5,
+            'asked of a cube texture');
+        new Uint32Array(r.memory.buffer, at, 5).set([100, 20, 3, D3DX_DEFAULT, FMT.UNKNOWN]);
+        assert.equal(await r.call(tools.D3DXCheckVolumeTextureRequirements,
+            [r.device, at, at + 4, at + 8, at + 12, 0, at + 16, 1]), 0);
+        assert.deepEqual([...new Uint32Array(r.memory.buffer, at, 5)],
+            [64, 32, 4, 7, FMT.A8R8G8B8]);
+        assert.equal(r.calls.filter(c=>c[0] === 'CheckDeviceFormat').at(-1)?.[5], 4,
+            'asked of a volume texture');
+        assert.equal(await r.call(tools.D3DXCheckVolumeTextureRequirements,
+            [r.device, 0, 0, 0, 0, 0, 0, 1]), 0, 'every pointer may be null');
+        assert.equal(r.call(tools.D3DXCheckCubeTextureRequirements, [0, 0, 0, 0, 0, 1]),
+            D3DERR_INVALIDCALL);
+    });

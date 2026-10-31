@@ -50,8 +50,15 @@ import {
     allocateCleared,
     RESOURCE_ALIGNMENT,
     liveDumpOf,
+    readWholeFile,
+    WHOLE_READ_BYTES,
 } from './app.js';
 import { createHeapAllocator } from './layers/win32/kernel32/heap.js';
+import { HEAP_POOLS } from './memory-zones.js';
+import { writeBundle } from './bundle-node.js';
+import { openBundle } from './layers/filesystem/internal/bundle/format.js';
+import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
+import { createBlockCache } from './layers/filesystem/internal/bundle/cache.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
@@ -2020,3 +2027,69 @@ test('an iPhone translates without wasm tail calls; phones and Safari run on one
     assert.equal(withCpuSetup({ cpu: { cores: 3 } }, { ...browser, oneCore: true }).executors, 3,
         'cores asked for by name are given');
 });
+
+test('a whole file larger than the heap\'s pool of fetched blocks is read whole, a piece at a time',
+    async()=>{
+        const BLOCK = 1024;
+        const image = new Uint8Array(40 * BLOCK).map((_, at)=>(at * 7 + (at >> 10)) & 0xff);
+        image.set([0x4d, 0x5a]);
+        const { mkdtemp, writeFile, readFile, rm } = await import('node:fs/promises');
+        const { tmpdir } = await import('node:os');
+        const { join } = await import('node:path');
+        const directory = await mkdtemp(join(tmpdir(), 'bottlify-whole-'));
+        let container;
+        try
+        {
+            await writeFile(join(directory, 'game.exe'), image);
+            await writeBundle({ root: directory, output: join(directory, 'b.btl'),
+                blockSize: BLOCK, pack: (/** @type {Buffer} */ block)=>({ codec: 0,
+                    bytes: block }) });
+            container = new Uint8Array(await readFile(join(directory, 'b.btl')));
+        }
+        finally
+        {
+            await rm(directory, { recursive: true, force: true });
+        }
+        const { inflateRawSync } = await import('node:zlib');
+        const bundle = await openBundle(async(at, length)=>container.subarray(at, at + length),
+            (codec, bytes)=>(codec === 1 ? new Uint8Array(inflateRawSync(bytes)) : bytes));
+        /** A run with no store: eight blocks in the heap, as the pool is to a large image. */
+        const cache = await createBlockCache({ store: null, name: 'b', blockSize: BLOCK,
+            blockCount: bundle.blockCount, maxHeapBytes: 8 * BLOCK });
+        const source = createBundleSource({ bundle, readBlock: index=>cache.read(index),
+            decode: (_, bytes)=>bytes, cacheBlocks: 0, hotBlocks: 0 });
+        // The volume's handle reads, which move only by what they answer.
+        const filesystem = {
+            open: (/** @type {string} */ path)=>({ path, position: 0 }),
+            size: (/** @type {any} */ handle)=>source.stat(handle.path)?.size ?? 0,
+            read(/** @type {any} */ handle, /** @type {number} */ length){
+                const bytes = source.read(handle.path, handle.position, length);
+                handle.position += bytes.length;
+                return bytes;
+            },
+            close(){},
+        };
+        // The run's fetch: the blocks in, then the batch's end, where the
+        // heap's cache lets go of all but its pool.
+        let fetches = 0;
+        const blocks = {
+            fetch: async(/** @type {any[]} */ needed)=>{
+                if (++fetches > 200)
+                {
+                    throw new Error('fetched for ever');
+                }
+                for (const { offset, packed, index } of needed)
+                {
+                    await cache.put(index, container.slice(offset, offset + packed));
+                }
+                await cache.persist();
+            },
+        };
+        const read = await readWholeFile(filesystem, blocks, 'game.exe', 4 * BLOCK);
+        assert.deepEqual(read, image, 'the file arrives whole, MZ first');
+        assert.ok(fetches <= 10, `a fetch a piece (${fetches})`);
+        await assert.rejects(readWholeFile(filesystem, blocks, 'game.exe', Infinity),
+            /fetched for ever/, 'the whole file in one read never fits the pool');
+        assert.ok(WHOLE_READ_BYTES * 2 <= HEAP_POOLS.blockCache,
+            'a piece and the read-ahead beside it fit the pool');
+    });
