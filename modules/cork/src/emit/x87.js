@@ -20,9 +20,8 @@
  *
  * What is dynamic: the empty mask (a push clears a bit, a pop sets one),
  * the status word's condition and exception bits, and a dirty mask of the
- * registers written, which the epilogue stores back -- as f64 in cork's own
- * layout, as the emulator's tagged double in its. A register read at entry
- * that the emulator kept as a true 80-bit value is converted inline.
+ * registers written, which the epilogue stores back as f64, the form the
+ * state block keeps every register in.
  *
  * The stack-fault checks are decided at translation wherever the mask is
  * known there (`planStack`): what a block's predecessors in the region left
@@ -35,7 +34,7 @@
  *
  * Every arithmetic result is the f64 result; where the processor's 80-bit
  * arithmetic would differ the difference is the `x87.precision` class the
- * plan names and counts (the emulator computes in f64 as well). The control
+ * plan names and counts. The control
  * word is honoured at run time: its rounding control rounds the integer
  * stores and `frndint` -- the arithmetic itself rounds to nearest whatever
  * it says, as the host's f64 operations do -- and precision control set to
@@ -43,7 +42,7 @@
  * double); a region compiled for single (`narrow`) or for the others (`wide`)
  * tests the word once a block and rounds, or does not, with no test of its
  * own. Exception masks are not honoured: an exception behaves as masked. The
- * transcendentals go through the host's `Math`, as the emulator's do, so the
+ * transcendentals go through the host's `Math`, as the interpreter's do, so the
  * two agree bit for bit on one engine; the environment forms end a region.
  *
  * Unless the module is `precise`, the sticky exception flags are not
@@ -103,8 +102,6 @@ const Status = Object.freeze({
     IE: 0x1, ZE: 0x4, UE: 0x10, SF: 0x40, C0: 0x100, C1: 0x200, C2: 0x400, C3: 0x4000,
     CONDITION: 0x100 | 0x200 | 0x400 | 0x4000,
 });
-/** The emulator's tag for a register holding a double in its mantissa word. */
-const RELAXED_TAG = 0x7ffe;
 /** The default control word `fninit` leaves. */
 const DEFAULT_CONTROL = 0x37f;
 
@@ -1172,10 +1169,12 @@ export function planCarried(region, states, cut, guarded, shapes){
  * @property {boolean} active            the region has x87 instructions and they are emitted
  * @property {boolean} hasMmx            the region also translates MMX, so the eight registers
  *     are the two views of one set: an MMX register's mantissa in its `i64` local, its x87 value
- *     in the `f64` local, kept equal at every write and told apart at the exit by the form mask
+ *     in the `f64` local, kept equal at every write
  * @property {number} base               the first of the eight f64 locals
- * @property {number} form               the i32 mask of registers an MMX write left in the MMX
- *     form (the exponent and sign all ones), or -1 when the region translates no MMX
+ * @property {number} form               the i32 mask of registers an MMX write wrote last, or -1
+ *     when the region translates no MMX. No exit reads it: the state block keeps a register
+ *     as an f64, the same bits for either view. Its writes stay in the emitted code because
+ *     dropping them changes every MMX region's bytes, which is a new `CACHE_VERSION`.
  * @property {number} temp               an f64 scratch local
  * @property {number} temp2
  * @property {number} temp3
@@ -1659,7 +1658,7 @@ export function prepareX87(e, entryTop, checked = false,
             ? planPrecision(e.region, states, cut, e.callReturn) : null,
         known: unknown(), shapes, needs, stack: NOTHING, guards: 0, relaxedReads: 0,
         tracksExact, exact: 0, exactNaN: 0, shadow, dyn,
-        compared: !hasMmx && e.layout.x87Format !== 'tagged80',
+        compared: !hasMmx,
         carried: hasMmx || e.copyFunction ? null
             : planCarried(e.region, states, cut, guarded, shapes),
         singles: noSingles(), single: new Array(8).fill(-1), floatTemps: [],
@@ -1832,8 +1831,7 @@ export function x87LoadRegisters(e, needed){
         // A region with MMX loads every register, not only the held ones: an
         // MMX instruction holds the whole stack, so the x87 after it may read a
         // register the machine had empty, and its value is then whatever the
-        // mantissa the state block holds decodes to -- the emulator reads the
-        // same bytes, so the two agree.
+        // mantissa the state block holds decodes to, as the interpreter reads it.
         // So does a region that compares at its exits (`compared`): a register it
         // does not write then holds what the block has, an empty one's bytes too.
         if (!x.hasMmx && !x.compared)
@@ -1841,32 +1839,7 @@ export function x87LoadRegisters(e, needed){
             b.localGet(Local.x87Empty).i32const(1 << k).op(I32.and).op(I32.eqz);
             e.openIf(`held${k}`, EMPTY);
         }
-        if (layout.x87Format === 'tagged80')
-        {
-            atState(e.context, b).load('i32_16u', { offset: at + 8 })
-                .i32const(RELAXED_TAG).op(I32.eq);
-            e.openIf('tagged', EMPTY);
-            atState(e.context, b).load('i64', { offset: at }).op(F64.reinterpretI64)
-                .localSet(x.base + k);
-            b.else();
-            b.i32const(at).call(/** @type {number} */ (e.context.f80ToF64)).localSet(x.base + k);
-            e.close();
-            if (x.hasMmx)
-            {
-                // The form the register enters in: an MMX write before this
-                // region left the exponent and sign all ones, which the exit
-                // writes back as it found it rather than as a relaxed double.
-                atState(e.context, b).load('i32_16u', { offset: at + 8 }).i32const(0xffff)
-                    .op(I32.eq);
-                e.openIf(`mmxform${k}`, EMPTY);
-                b.localGet(x.form).i32const(1 << k).op(I32.or).localSet(x.form);
-                e.close();
-            }
-        }
-        else
-        {
-            atState(e.context, b).load('f64', { offset: at }).localSet(x.base + k);
-        }
+        atState(e.context, b).load('f64', { offset: at }).localSet(x.base + k);
         if (!x.hasMmx && !x.compared)
         {
             e.close();
@@ -1895,7 +1868,7 @@ export function x87LoadRegisters(e, needed){
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  */
-const exactPlace = layout=>(layout.x87Format === 'f64' ? layout.x87Exact ?? -1 : -1);
+const exactPlace = layout=>layout.x87Exact ?? -1;
 
 /**
  * The state block lies 4 KiB in (`ownLayout`), past an arm64 byte load's own
@@ -2045,16 +2018,7 @@ function x87CompareRegisters(e, written){
         }
         b.localGet(Local.x87Dirty).i32const(1 << k).op(I32.and);
         e.openIf(`dirty${k}`, EMPTY);
-        if (layout.x87Format === 'tagged80')
-        {
-            atState(e.context, b).localGet(x.base + k).op(I64.reinterpretF64)
-                .store('i64', { offset: at });
-            atState(e.context, b).i32const(RELAXED_TAG).store('i32_16', { offset: at + 8 });
-        }
-        else
-        {
-            atState(e.context, b).localGet(x.base + k).store('f64', { offset: at });
-        }
+        atState(e.context, b).localGet(x.base + k).store('f64', { offset: at });
         e.close();
     }
 }
@@ -2416,14 +2380,9 @@ function x87MoveTo(e, to, floats = false){
 
 /**
  * The x87 view of a physical register an MMX instruction has just written, so
- * the two views of it agree inside the region. On the processor mm<i> is the
- * mantissa of R<i> and an MMX write leaves its exponent and sign all ones, so
- * the value the x87 side reads is what that decodes to: in the emulator's
- * tagged form the negative infinity of a zero mantissa and the positive QNaN
- * indefinite of any other (as `decodeRegister` has it), and in cork's own f64
- * form the mantissa's bits read straight as a double. The form bit is set, so
- * the exit writes the register back in the MMX form -- the mantissa the MMX
- * side holds and the exponent all ones -- and not as a relaxed double.
+ * the two views of it agree inside the region: the state block keeps a
+ * register as an f64, and the MMX side's quadword is its bits, so the x87 side
+ * reads the mantissa's bits straight as a double, as the interpreter does.
  *
  * @param {E} e @param {number} physical  the register mm<i> aliases
  * @param {number} mm  the i64 local holding the mantissa just written
@@ -2436,19 +2395,7 @@ export function x87FromMmx(e, physical, mm){
     }
     const { b } = e;
     const local = x.base + x.current.slot[physical];
-    if (e.layout.x87Format === 'tagged80')
-    {
-        b.localGet(mm).op(I64.eqz);
-        e.openIf('mmxZero', EMPTY);
-        b.f64const(-Infinity).localSet(local);
-        b.else();
-        b.i64const(0x7ff8000000000000n).op(F64.reinterpretI64).localSet(local);
-        e.close();
-    }
-    else
-    {
-        b.localGet(mm).op(F64.reinterpretI64).localSet(local);
-    }
+    b.localGet(mm).op(F64.reinterpretI64).localSet(local);
     b.localGet(x.form).i32const(1 << physical).op(I32.or).localSet(x.form);
 }
 
@@ -3410,11 +3357,9 @@ export function emitX87(e, instruction, flagsLive){
         {
             // The two registers exchange their values: the tracker relabels the
             // x87 locals, which costs no code. In a region that translates MMX
-            // the mantissas and the forms of the two physical registers move with
-            // the values, so the mm locals and the form bits swap -- re-deriving
-            // them from the x87 locals (as a write does) would lose an MMX-form
-            // mantissa, whose x87 local is the indefinite it decodes to. Both
-            // registers count as written.
+            // the mantissas of the two physical registers move with the values,
+            // so the mm locals and the form bits swap. Both registers count as
+            // written.
             const i = /** @type {number} */ (src.reg);
             const a = state.top;
             const c = (state.top + i) & 7;
@@ -3613,8 +3558,7 @@ export function emitX87(e, instruction, flagsLive){
         case 'fsin': case 'fcos': case 'fsincos': case 'fptan':
         {
             // Out of the reduction range (|x| >= 2^63) the register is left
-            // and C2 says so; the emulator has no such limit, and a program
-            // that meets it is past the point of a meaningful answer.
+            // and C2 says so, as on the processor and in the interpreter.
             const math = e.context.math;
             guard();
             b.localGet(Local.x87Status).i32const(~Status.C2).op(I32.and).localSet(Local.x87Status);
@@ -4050,19 +3994,7 @@ export function emitX87(e, instruction, flagsLive){
                 // the local where this region wrote it, else the state block's,
                 // which a region does not load for an empty register.
                 const at = e.layout.x87 + state.top * 16;
-                if (e.layout.x87Format === 'tagged80')
-                {
-                    atState(e.context, b).load('i64', { offset: at }).i64const(0n).op(I64.ltS);
-                    atState(e.context, b).load('i32_16u', { offset: at + 8 }).i32const(15)
-                        .op(I32.shrU);
-                    atState(e.context, b).load('i32_16u', { offset: at + 8 })
-                        .i32const(RELAXED_TAG).op(I32.eq);
-                    b.select();
-                }
-                else
-                {
-                    atState(e.context, b).load('i64', { offset: at }).i64const(0n).op(I64.ltS);
-                }
+                atState(e.context, b).load('i64', { offset: at }).i64const(0n).op(I64.ltS);
                 // select keeps the local's sign unless the register is empty and unwritten.
                 b.localGet(Local.x87Empty).localGet(Local.x87Dirty).i32const(-1).op(I32.xor)
                     .op(I32.and).i32const(1 << state.top).op(I32.and).op(I32.eqz);

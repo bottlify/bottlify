@@ -5,7 +5,7 @@
  */
 
 /**
- * The runtime: what the core's cpu layer composes into its hybrid host.
+ * The runtime: what the core's cpu layer composes into its host.
  *
  * Candidates arrive from the layer's sampler (`noteHot`); `translatePending`
  * forms a region at each, emits them into one wasm module of up to
@@ -299,8 +299,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // Everything the translator relaxes for speed kept exact instead: the x87
         // exception flags and their tests, signalling NaNs, underflow and C1, and
         // the flags an instruction leaves undefined -- off, what the cheapest code
-        // leaves there; on, what the emulator leaves. Off, as games run: the tests and
-        // the hardware corpus turn it on.
+        // leaves there; on, what the instruction model leaves. Off, as games run: the
+        // tests and the hardware corpus turn it on.
         precise: false,
         // Whether an instruction that only reads tests its pages as a store
         // does, so a page the program cannot read -- a reservation not
@@ -546,9 +546,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const table = found.tailCalls
         ? new WebAssembly.Table({ element: 'anyfunc', initial: 256 })
         : null;
-    // Under cork's own layout a miss of the hash may run the interpreter tier
-    // in wasm through the table (`interpretWith`); its slot is no region's.
-    const resumable = table !== null && (layout.flagRecord ?? -1) >= 0;
+    // A miss of the hash may run the interpreter tier in wasm through the
+    // table (`interpretWith`); its slot is no region's.
+    const resumable = table !== null;
     if (resumable)
     {
         table.set(TIER_SLOT, noTierEntry());
@@ -604,10 +604,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const entries = createEntries(
         table ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 }
             : {});
-    if (table)
-    {
-        imports.handoffHash?.(layout.tables + Tables.HASH - layout.ramBase);
-    }
     /** The queue, miss and barren key: one address at one x87 top. Every
      * "has an entry" question is for a top, so a region compiled for another
      * top is no answer. @param {number} eip @param {number} top */
@@ -1199,7 +1195,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             {
                 watched[p] &= ~WATCH_REGIONS;
                 pageExtents.delete(p);
-                imports.handoffPage?.(p, false);
                 continue;
             }
             // The page's range from the extents of the regions still on it.
@@ -1953,12 +1948,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * share, or a cache of this thread's own. */
     const emitCache = arena !== null ? arenaEmitCache(arena) : createEmitCache();
 
-    // The block profile is past cork's own tables, in a memory sized for it;
-    // the hybrid layout's tables are carved from the emulator's RAM.
     /** The last `hotForms` answer and when it was taken. @type {{ at: number, forms: any } | null} */
     let formsTaken = null;
-    const profiling = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.blockProfile === true
-        && (layout.codePages ?? -1) < 0;
+    const profiling = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.blockProfile === true;
     let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
         && settings.blockProfileFrom > 0
         ? performance.now() + settings.blockProfileFrom * 1000 : null;
@@ -2305,7 +2297,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 : new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (module));
             const instance = new WebAssembly.Instance(compiled, {
                 env: {
-                    memory, getEflags: imports.getEflags, trap: imports.trap,
+                    memory, trap: imports.trap,
                     rdtsc: imports.rdtsc ?? (()=>0n),
                     ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                     ...baseGlobals,
@@ -2621,13 +2613,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 || codeShared?.onStack(page) === true))
         {
             stackCodeSeen();
-        }
-        for (const page of region.pages)
-        {
-            if (!byPage.get(page)?.size)
-            {
-                imports.handoffPage?.(page, true);
-            }
         }
         for (const page of region.pages)
         {
@@ -5071,8 +5056,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 pages.clearStale();
                 storedInto(address, size);
                 codeShared?.publish(address, size);
-                // The other executor's compiled page, if that is what was hit.
-                imports.dirtyCode?.(address, size);
             }
             exit.retired = retired;
             exit.kind = kind;
@@ -5605,7 +5588,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // misbehaves only without `precise` is looked for here first.
                 relaxedFlagReads: { ...relaxedFlagReads },
                 forcedSteps,
-                handoffMisses: 0,
                 worker: translatorReady() ? 'ready' : translatorLoading() ? 'loading' : 'none',
                 translators: translators.length,
                 translatorsReady: translators.filter(one=>one.ready).length,

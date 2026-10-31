@@ -262,9 +262,7 @@ test('fcomi sets ZF PF CF as cmp would; fcom sets the condition bits', ()=>{
     assert.equal(com.m.reg('eax') >>> 11 & 7, 6, 'the top in the word');
 });
 
-test('a region entered with top 6 reads the emulator tagged form without the import', ()=>{
-    // The state block in cork's own layout holds f64; the tagged form is the
-    // emulator's. Both are read: here the own form, with two registers held.
+test('a region entered with top 6 reads the two registers it holds, each an f64', ()=>{
     const r = run([
         0xde, 0xc1,                          // faddp st1, st0
         0xdd, 0x1d, 0x00, 0x20, 0, 0,        // fstp qword [DATA]

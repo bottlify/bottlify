@@ -14,8 +14,9 @@
  * wasm's min); a float-to-integer conversion answers the "integer
  * indefinite" 0x80000000 for a NaN or a value out of range (a saturating
  * conversion and a fix-up); `rsqrtps` and `rcpps` are computed exactly, as
- * the emulator does, so results stay bit-identical to what the library's
- * programs already run against. MXCSR is read by the conversions that round
+ * the interpreter computes them (`ir-simd.js`), within the processor's own
+ * estimate's error, and the two tiers agree bit for bit. MXCSR is read by the
+ * conversions that round
  * alone: the arithmetic rounds to nearest, keeps denormals (no FTZ, no DAZ)
  * and raises no flag, as the host's f32 and f64 lanes do. MMX operations run
  * in the low lane of a `v128` and come back as an `i64`; an MMX instruction

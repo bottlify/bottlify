@@ -47,29 +47,23 @@ export function engineContractProblem(engineModule, url){
 /**
  * Where each register lives in the memory a runtime executes over, as byte
  * offsets. Translated code addresses registers by these constants, so the
- * layout is part of every translation's identity (`id`).
- *
- * In hybrid mode the offsets are the emulator's own register file inside its
- * exported memory, read off its typed views at boot; the state block *is* the
- * emulator's, and a switch between the two executors copies nothing. In an
- * engine-alone mode the layout is the engine's own.
+ * layout is part of every translation's identity (`id`). The engine makes it
+ * (cork's `ownLayout`), for the memory it allocates.
  *
  * @typedef {Object} StateLayout
- * @property {32 | 64} bits        The register width; 32 in every mode built so far.
+ * @property {32 | 64} bits        The register width.
  * @property {number} ramBase      Wasm address of guest address 0.
  * @property {number} ramSize
  * @property {number} [hashShift]  The entry hash's slot is `(eip * 0x9e3779b1) >>> hashShift`
- *     (16 when absent, the emulator's handoff lookup).
+ *     (16, a hash of 2^16 slots, when absent).
  * @property {number} regs         8 × i32 (eax ecx edx ebx esp ebp esi edi); 16 × i64 at 64.
  * @property {number} eip
  * @property {number} previousIp
- * @property {number} eflags       The eager word (hybrid: the emulator's `flags`).
+ * @property {number} eflags       The eager word.
  * @property {number} [flagRecord] Cork's own: five i32 (kind, result, op1, op2, carry in) of
  *     the arithmetic record a region leaves instead of folding it into `eflags`; the word
- *     is whole only once `eflagsOf` has folded it. Absent (hybrid): the word is folded at exit.
- * @property {number} flagsChanged Hybrid only, written 0 at every exit; -1 when absent.
- * @property {number} x87          8 × 16 bytes.
- * @property {'f64' | 'tagged80'} x87Format  The engine's own f64, or the emulator's tagged form.
+ *     is whole only once `eflagsOf` has folded it. Absent: the word is folded at exit.
+ * @property {number} x87          8 × 16 bytes: each register's value as an f64.
  * @property {number} x87Top       u8.
  * @property {number} x87Empty     u8 bitmask, bit i set = register i empty.
  * @property {number} x87Control   u16.
@@ -77,12 +71,12 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [x87Exact]   Cork's own, u8: the physical registers a quadword `fild`
  *     loaded and nothing has written since, each register's quadword in the eight bytes past
  *     its double (`x87 + 16 i + 8`), kept for a quadword `fistp` whichever executor runs it;
- *     absent (hybrid), no executor keeps one past its own run.
+ *     absent, no executor keeps one past its own run.
  * @property {number} xmm          8 × 16 bytes.
  * @property {number} mxcsr
  * @property {number} fsBase       The thread block's linear address (32-bit Windows).
  * @property {number} gsBase       The same for 64-bit Windows; -1 when absent.
- * @property {number} counter      u32 retired-instruction word (hybrid: the emulator's).
+ * @property {number} counter      u32 retired-instruction word.
  * @property {number} [callProfile] Cork's own: where translated code notes its indirect calls
  *     while the runtime asks -- a flag, a count, and sixteen pairs of the call's address and
  *     its target, the last calls (`callTargets`); absent, no profile.
@@ -94,9 +88,6 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [pageFlags]  Cork's own: where the page flags lie when not in `tables` --
  *     another executor of a process reads and writes the first's (`executorLayout`).
  * @property {number} [codeRanges] Cork's own: the same for the pages' code granules.
- * @property {number} codePages    Wasm address of the other executor's byte-per-page
- *                                 "has compiled code" table (hybrid), or -1: a store into
- *                                 such a page leaves `stale` so its cache can be dirtied.
  * @property {number} [processors] Cork's own: how many processors `cpuid` says the machine has
  *     -- the process's executors -- where more than one; absent, one.
  * @property {number} [processor]  Cork's own: which of them this layout's executor is, the
@@ -113,7 +104,7 @@ export function engineContractProblem(engineModule, url){
  * What the layer hands an engine factory.
  *
  * @typedef {Object} EngineEnv
- * @property {WebAssembly.Memory} memory  The layer's memory (the emulator's in hybrid).
+ * @property {WebAssembly.Memory} memory  The layer's memory.
  * @property {StateLayout} layout
  * @property {StateLayout} [sharedLayout]  Cork's own: the process's shared layout
  *     (`sharedLayout`), translations are made for where it has several executors -- the same
@@ -143,21 +134,7 @@ export function engineContractProblem(engineModule, url){
  *     The trap port write. Answers 1 when the handler moved EIP, so the region goes on
  *     where it points through the entry hash, and 2 (`TRAP_END_TURN`) when the turn is to
  *     end there and the region leaves for the host.
- * @property {() => number} getEflags   The eager flags word, for a region that reads
- *     flags before writing them.
- * @property {(index: number) => number} x87Read  A physical x87 register the state
- *     block holds in a form the engine cannot read inline, as an f64.
- * @property {() => bigint} rdtsc      The time-stamp counter `rdtsc` reads: the
- *     emulator's own under hybrid, the engine's clock under cork.
- * @property {(page: number, on: boolean) => void} [handoffPage]
- *     Hybrid: flags a page the engine holds code for, so the other executor's slice
- *     returns when the guest arrives there (`handoffPage` on the emulator's host).
- * @property {(address: number, length: number) => void} [dirtyCode]
- *     Hybrid: a store translated code made into a page the other executor compiled;
- *     the host dirties that cache.
- * @property {(physical: number) => void} [handoffHash]
- *     Hybrid: where the engine's entry hash lies in guest memory, so the other executor
- *     returns only at an address the hash holds rather than anywhere in a flagged page.
+ * @property {() => bigint} rdtsc      The time-stamp counter `rdtsc` reads: the host's clock.
  */
 
 /**
@@ -568,7 +545,6 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [crossingsAll]  Crossings out of placed modules since the start,
  *     modules gone included (`crossings` counts the running ones only).
  * @property {number} [gathers]  Gatherings of the hottest regions into one module.
- * @property {number} handoffMisses    Hybrid: slices the emulator ran through translated code.
  */
 
 /**
@@ -627,8 +603,7 @@ export function engineContractProblem(engineModule, url){
  *     share leaves out; false when the runtime has no function table to reach it through.
  * @property {(what: string, since: number, floorMs?: number) => void} [noteStall]
  *     A hold of the engine thread since that `performance.now`, kept when over the floor.
- * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
- *     (the pages the emulator's handoff bit is set for).
+ * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page.
  * @property {(address: number, length: number) => number[]} [takeWrites]  The range's pages
  *     written since they were armed (or never armed, or on a stack whose stores go untested),
  *     each armed from now: a store finds an armed page by the flag its page check reads

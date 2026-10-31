@@ -117,10 +117,9 @@ function wasmModule(shared, long){
 /** @typedef {import('../../core/src/layers/cpu/engine.js').WasmInterpreter} WasmInterpreter */
 
 /**
- * The tier over one memory, or null for a layout it cannot run over: another
- * executor's (the hybrid's code table is a second thing a store is noted
- * against), one without an `fs` base, or a memory without room for its areas.
- * A 64-bit layout (`bits` 64) gets long mode's build.
+ * The tier over one memory, or null for a layout it cannot run over: one
+ * without an `fs` base, or a memory without room for its areas. A 64-bit
+ * layout (`bits` 64) gets long mode's build.
  *
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
@@ -137,7 +136,7 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
     parkBase, precise = false, atomic = false })
 {
     const long = layout.bits === 64;
-    if ((layout.codePages ?? -1) >= 0 || layout.fsBase < 0
+    if (layout.fsBase < 0
         || area + WASM_INTERPRETER_AREA > memory.buffer.byteLength
         || statics + WASM_INTERPRETER_STATICS > memory.buffer.byteLength)
     {
@@ -185,7 +184,7 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
             layout.x87Status, precise ? 1 : 0, layout.xmm, layout.mxcsr);
         exports.configureEntry(layout.counter);
         // Zero is no place: the block's first word is a register, never the marks.
-        exports.configureExact(layout.x87Format === 'f64' ? layout.x87Exact ?? 0 : 0);
+        exports.configureExact(layout.x87Exact ?? 0);
         exports.configureAtomic(atomic ? 1 : 0);
         ({ retired, relaxedReads, exitValue, exitSize, enter } = exports);
         run = /** @type {(budget: number) => number} */ (exports.run);

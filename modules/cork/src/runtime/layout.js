@@ -10,11 +10,10 @@
  * Translated code addresses every register by a constant offset, so the
  * layout is data the emitter takes rather than something it knows: the
  * core's `StateLayout` (its `engine.js`) names the fields, and this module
- * makes the two layouts cork runs with. `ownLayout` is cork's own -- a
- * state block at the start of a memory cork allocates, the guest's RAM
- * after it, cork's tables after that. The hybrid layout, read off the
- * emulator's typed views so the state block *is* the emulator's register
- * file, is built by the core's hybrid host from the same field names.
+ * makes the layouts cork runs with: `ownLayout`, a state page, the guest's
+ * RAM and cork's tables past it (the state page inside RAM's first 64 KiB
+ * where RAM starts at 0), and the layouts made from it for the other
+ * executors of the same process.
  */
 
 /** Bytes the state block takes in cork's own layout. */
@@ -272,9 +271,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         // The lazy flag record a region leaves (kind, result, two operands,
         // carry in), folded by whoever reads the word (`eflagsOf`).
         flagRecord: state + 44,
-        flagsChanged: -1,
         x87: state + 64,
-        x87Format: /** @type {'f64'} */ ('f64'),
         x87Top: state + 192,
         x87Empty: state + 193,
         x87Control: state + 194,
@@ -296,7 +293,6 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         // Past the state block, so a thread switch does not carry it.
         nanFirst: state + 1024,
         tables: ramBase + ramSize,
-        codePages: -1,
         // The entry hash's slot is the top bits of eip times the golden ratio,
         // as many as the hash has slots for.
         hashShift: 32 - Math.log2(hashSlots),
@@ -336,9 +332,7 @@ function longLayout(state, ramBase, ramSize, hashSlots){
         eip: state + 128,
         previousIp: state + 136,
         eflags: state + 144,
-        flagsChanged: -1,
         x87: state + 160,
-        x87Format: /** @type {'f64'} */ ('f64'),
         x87Top: state + 288,
         x87Empty: state + 289,
         x87Control: state + 290,
@@ -356,7 +350,6 @@ function longLayout(state, ramBase, ramSize, hashSlots){
         flagRecord: state + 768,
         nanFirst: state + STATE_BLOCK_SIZE_64,
         tables: ramBase + ramSize,
-        codePages: -1,
         hashShift: 32 - Math.log2(hashSlots),
     };
     return { ...fields, id: layoutId(fields) };
@@ -364,8 +357,8 @@ function longLayout(state, ramBase, ramSize, hashSlots){
 
 /** The fields of a layout that lie in an executor's state page, each its own. */
 const STATE_FIELDS = Object.freeze(['regs', 'eip', 'previousIp', 'eflags', 'flagRecord',
-    'flagsChanged', 'x87', 'x87Top', 'x87Empty', 'x87Control', 'x87Status', 'x87Exact', 'xmm',
-    'mxcsr', 'fsBase', 'gsBase', 'counter', 'callProfile', 'origin', 'nanFirst', 'interrupt']);
+    'x87', 'x87Top', 'x87Empty', 'x87Control', 'x87Status', 'x87Exact', 'xmm', 'mxcsr',
+    'fsBase', 'gsBase', 'counter', 'callProfile', 'origin', 'nanFirst', 'interrupt']);
 
 /**
  * Where the page flags lie: the process's, which every executor of it reads and

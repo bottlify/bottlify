@@ -60,8 +60,6 @@ export function createRuntimeRunner64({ memory, layout, config = {}, defaultNaNN
                 current.trapped.push(value >>> 0);
                 return 0;
             },
-            getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: (/** @type {number} */ index)=>view().getFloat64(layout.x87 + index * 16, true),
             rdtsc: ()=>0n,
         },
     });

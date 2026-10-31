@@ -536,10 +536,9 @@ test('x87 and MMX translate in one region: an x87 write is the mm mantissa', { s
     // so an x87 push leaves the mm view the double's bits and an MMX store of
     // that register reads them. Without the representation the region is cut at
     // the fld1, which retires nothing, and runProgram answers -2 (stuck) -- so
-    // this proves both the crossover and that it is one region. Cork's own f64
-    // layout holds the value as the mantissa's bits, so the crossing is the
-    // identity here; the emulator's tagged form, which the sequence corpus
-    // judges, decodes the MMX form to the indefinite instead.
+    // this proves both the crossover and that it is one region. The state
+    // block holds the value as the mantissa's bits, so the crossing is the
+    // identity.
     const m = createTestMachine();
     const view = new DataView(m.memory.buffer);
     m.write(DATA, new Array(8).fill(0));

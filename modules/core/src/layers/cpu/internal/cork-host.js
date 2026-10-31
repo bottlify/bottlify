@@ -702,9 +702,6 @@ export function createCorkHost(config){
         },
         imports: {
             trap: raiseTrap,
-            getEflags: eflagsWord,
-            x87Read: (/** @type {number} */ index)=>
-                blockView.getFloat64(x87At(index), true),
             rdtsc: readTsc,
         },
     });

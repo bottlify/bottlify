@@ -670,9 +670,9 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'prefetchnta': case 'prefetcht0': case 'prefetcht1': case 'prefetcht2':
         case 'lfence': case 'mfence': case 'sfence': case 'pause': case 'clflush':
             return true;
-        // The emulator's decoder consumes BOUND and neither checks the bounds
-        // nor raises #BR, so translated code does the same. A guest that runs
-        // data (a return into the entry vector) reaches it and must go on.
+        // BOUND neither checks the bounds nor raises #BR, here as in the
+        // interpreter (`ir.js`): a guest that runs data (a return into the
+        // entry vector) reaches it and must go on.
         case 'bound':
             return true;
         case 'hlt':
@@ -706,7 +706,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 // the interpreter answers, with the executor's own layout.
                 return false;
             }
-            // The leaves the pinned emulator answers, as constants -- with the
+            // The leaves `cpuid.js` lists, as constants -- with the
             // processors of the executor the code is translated for, whose
             // layout it is -- and a leaf with no entry answers four zeros. The
             // leaf in eax and the subleaf in ecx are saved before the four
@@ -765,8 +765,7 @@ export function emitInstruction(e, instruction, flagsLive){
         }
         case 'rdtsc':
             // The time-stamp counter, read through the host's import (the
-            // emulator's own under hybrid, cork's clock under cork): the low
-            // word to eax, the high word to edx.
+            // host's clock): the low word to eax, the high word to edx.
             e.countMechanism(Mechanism.RDTSC);
             b.call(e.context.rdtsc).localSet(Local.t64);
             b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
@@ -1601,11 +1600,10 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'daa': case 'das': case 'aaa': case 'aas': case 'aam': case 'aad':
             return decimal(e, instruction);
         case 'int3': case 'int': case 'into':
-            // Left to the other executor, before the instruction: a trap
-            // taken past it would be skipped by a host that re-executes the
-            // instruction to raise it, and the software interrupt goes
-            // through the emulator's own vector table. A trap exit of this
-            // engine's own returns with the engine that delivers it.
+            // Left to the interpreter, before the instruction: a trap taken
+            // past it would be skipped by a host that re-executes the
+            // instruction to raise it, and the interpreter raises the
+            // software interrupt as the fault the host delivers.
             e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
             e.dead = true;
             return true;
@@ -4895,12 +4893,11 @@ function stringInstruction(e, instruction){
         {
             // Element by element.
         }
-        else if ((op === 'movs' || op === 'stos') && e.context.undo === undefined
-            && e.layout.codePages < 0 && !fsSource)
+        else if ((op === 'movs' || op === 'stos') && e.context.undo === undefined && !fsSource)
         {
             bulkString(e, instruction);
         }
-        if (!long && compare && e.layout.codePages < 0 && !fsSource)
+        if (!long && compare && !fsSource)
         {
             bulkScan(e, instruction);
         }

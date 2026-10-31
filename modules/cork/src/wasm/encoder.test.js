@@ -74,7 +74,8 @@ test('an imported memory is read through a load with an offset', ()=>{
 
 test('a store lands in the memory at the offset asked', ()=>{
     // An import that declares a maximum links only against a memory that has
-    // one -- the reason the translator declares none against the emulator's.
+    // one: the translator declares one only for a memory it knows has one
+    // (`maxPages`).
     const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
     const m = new ModuleBuilder();
     m.importMemory('env', 'memory', { min: 1, max: 1 });

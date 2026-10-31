@@ -12,9 +12,10 @@
  * A page beyond RAM is inaccessible from the start. A page holding translated
  * code carries HAS_CODE so a store into it leaves translated code with a
  * `stale` exit and the runtime invalidates what it translated there. The
- * null page is *not* marked: the emulator lets a program read address 0
- * today and hybrid parity keeps it so; marking it, and the memory layer's
- * read-only regions, is the owner's policy switch.
+ * null page is *not* marked inaccessible: a program reads address 0 and finds
+ * the zeroes a page nobody maps would give it, and a fetch there is
+ * NO_EXECUTE's; marking it, and the memory layer's read-only regions, is the
+ * owner's policy switch.
  */
 
 import { Tables, codeRangesAt, pageFlagsAt } from './layout.js';

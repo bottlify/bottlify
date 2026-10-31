@@ -14,7 +14,7 @@ test('the engine factory answers a runtime with every name of the contract', ()=
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const runtime = createEngine({
         memory, layout, config: {}, read: ()=>0xf4,
-        imports: { trap: ()=>0, getEflags: ()=>0, x87Read: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0n },
     });
     for (const name of ['entryOf', 'run', 'noteHot', 'translatePending', 'invalidatePage',
         'diagnostics'])

@@ -382,11 +382,10 @@ export function evaluate(instruction, state){
         case 'prefetcht0': case 'prefetcht1': case 'prefetcht2': case 'lfence': case 'mfence':
         case 'sfence': case 'pause': case 'clflush':
             return;
-        // BOUND is a no-op here because it is one to the emulator: its
-        // decoder consumes the instruction and neither reads the memory
-        // operand nor raises #BR, so a guest that runs data containing 0x62
-        // continues under the emulator and must continue here. A program
-        // returned to the entry vector is the shape that reached it.
+        // BOUND is a no-op: it neither reads the memory operand nor raises
+        // #BR, so a guest that runs data containing 0x62 goes on. A program
+        // returned to the entry vector is the shape that reaches it, and
+        // translated code makes the same no-op of it.
         case 'bound':
             return;
         case 'hlt':
@@ -997,9 +996,8 @@ export function evaluate(instruction, state){
         }
         case 'rdtsc':
         {
-            // The time-stamp counter is the host's (the emulator's own under
-            // hybrid, cork's clock under cork): the low word to eax, the high
-            // word to edx.
+            // The time-stamp counter is the host's clock: the low word to eax,
+            // the high word to edx.
             const value = state.rdtsc ? state.rdtsc() : 0n;
             state.reg[0] = Number(value & 0xffffffffn);
             state.reg[2] = Number((value >> 32n) & 0xffffffffn);

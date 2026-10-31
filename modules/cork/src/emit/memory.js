@@ -94,7 +94,7 @@ export function wrapIntoRam(b, ramSize, addr = Local.addr){
  * @param {E} e @param {boolean} store
  */
 export function wrapsRead(e, store){
-    return !store && readsWrapped(e.context) && e.layout.codePages < 0 && readsOnly(e.current);
+    return !store && readsWrapped(e.context) && readsOnly(e.current);
 }
 
 /**
@@ -170,7 +170,7 @@ export function checkAccess(e, size, { counted = true, store = false, window = f
         return;
     }
     const table = pageFlagsAt(e.layout);
-    const noting = store && e.layout.codePages < 0 && size <= 16;
+    const noting = store && size <= 16;
     const bits = PageFlag.INACCESSIBLE | (noting ? STORE_FLAGS : 0);
     b.localGet(Local.addr).i32const(12).op(I32.shrU);
     loadFlags(e, table, size > 1 ? 'i32_16u' : 'i32_8u')
@@ -239,27 +239,21 @@ export function noteStore(e, size){
         noted.delete(e);
         return;
     }
-    if (e.layout.codePages < 0)
+    // `checkAccess` left both pages' flags in `pflags`, and a store to a page
+    // without code -- nearly every store -- goes on with no call.
+    b.localGet(Local.pflags);
+    if (size > 16)
     {
-        // Only this engine's code to look for: `checkAccess` left both pages'
-        // flags in `pflags`, and a store to a page without code -- nearly
-        // every store -- goes on with no call.
-        b.localGet(Local.pflags);
-        if (size > 16)
-        {
-            // A state save (fsave, fnstenv): its access was checked at the
-            // operand's size, so its last page's flags are read here.
-            b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
-                .load('i32_8u', { offset: pageFlagsAt(e.layout) }).op(I32.or);
-        }
-        // The next page's flag too: a wide access's halfword holds it.
-        b.i32const(STORE_FLAGS * 0x01010101).op(I32.and);
-        e.openGuard('maybeCode', EMPTY);
-        noteCodeStore(e, size);
-        e.close();
-        return;
+        // A state save (fsave, fnstenv): its access was checked at the
+        // operand's size, so its last page's flags are read here.
+        b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
+            .load('i32_8u', { offset: pageFlagsAt(e.layout) }).op(I32.or);
     }
+    // The next page's flag too: a wide access's halfword holds it.
+    b.i32const(STORE_FLAGS * 0x01010101).op(I32.and);
+    e.openGuard('maybeCode', EMPTY);
     noteCodeStore(e, size);
+    e.close();
 }
 
 /**
@@ -269,9 +263,9 @@ export function noteStore(e, size){
  */
 function noteCodeStore(e, size){
     const { b } = e;
-    // This engine's own code, to the granule: the page's flag and then its
-    // range, for the store's first byte, its last, and one byte in every
-    // granule between -- a state save (`fnsave`) spans several.
+    // To the granule: the page's flag and then its range, for the store's
+    // first byte, its last, and one byte in every granule between -- a state
+    // save (`fnsave`) spans several.
     b.localGet(Local.addr).call(e.context.codeHit);
     const granule = 1 << Tables.CODE_GRANULE_SHIFT;
     for (let at = granule; at < size - 1; at += granule)
@@ -281,19 +275,6 @@ function noteCodeStore(e, size){
     if (size > 1)
     {
         b.localGet(Local.addr).i32const(size - 1).op(I32.add).call(e.context.codeHit).op(I32.or);
-    }
-    if (e.layout.codePages >= 0)
-    {
-        // The other executor's own table too, for the store's first page and
-        // its last: its compiled page is as much code as this engine's, and
-        // the runtime dirties its cache.
-        b.localGet(Local.addr).i32const(12).op(I32.shrU)
-            .load('i32_8u', { offset: e.layout.codePages }).op(I32.or);
-        if (size > 1)
-        {
-            b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
-                .load('i32_8u', { offset: e.layout.codePages }).op(I32.or);
-        }
     }
     e.openGuard('code', EMPTY);
     b.i32const(1).localSet(Local.stale);

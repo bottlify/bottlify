@@ -374,8 +374,7 @@ async function translated(code, setup, budget, config, done){
     const runtime = createCorkRuntime({
         memory, layout, config: { leafCalls: false, ...config },
         read: address=>new Uint8Array(memory.buffer)[layout.ramBase + address],
-        imports: { trap: ()=>0, getEflags: ()=>view.getUint32(layout.eflags, true),
-            x87Read: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0n },
     });
     const eip = ()=>view.getUint32(layout.eip, true);
     // As the host runs: after a region left before an operation for the host to run it

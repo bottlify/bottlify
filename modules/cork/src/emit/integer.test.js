@@ -546,7 +546,7 @@ test('rdtsc reads the host\'s counter into edx:eax', ()=>{
     assert.equal(m.reg('edx'), 0x12345678);
 });
 
-test('cpuid answers the pinned emulator\'s leaves and zero for the rest', ()=>{
+test('cpuid answers the leaves cpuid.js lists and zero for the rest', ()=>{
     const one = createTestMachine();
     one.write(CODE, [0xb8, 1, 0, 0, 0, 0x0f, 0xa2, 0xf4]); // mov eax, 1; cpuid; hlt
     assert.equal(one.runProgram(CODE).kind, 3);
@@ -569,7 +569,7 @@ test('cpuid answers the pinned emulator\'s leaves and zero for the rest', ()=>{
     assert.equal(unknown.reg('edx'), 0);
 });
 
-test('cpuid reads its subleaf from ecx where a leaf has them, as the emulator does', ()=>{
+test('cpuid reads its subleaf from ecx where a leaf has them', ()=>{
     /** @param {number} leaf @param {number} subleaf */
     const ask = (leaf, subleaf)=>{
         const m = createTestMachine();
@@ -598,7 +598,7 @@ test('cpuid describes the executors as processors: their count, the asking one\'
         return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
     };
     assert.deepEqual(ask(1, 0, 1), [0x673, 0x00010800, 0xc0800001, 0x0780a979],
-        'one processor: as the pinned emulator answers');
+        'one processor: the table as it stands');
     assert.deepEqual(ask(4, 0, 1), [0x673, 0x00040800, 0xc0800001, 0x1780a979],
         'four: the count in EBX[23:16], HTT in EDX');
     assert.deepEqual(ask(4, 3, 1), [0x673, 0x03040800, 0xc0800001, 0x1780a979],
@@ -617,10 +617,10 @@ test('int3 and int n are left to the other executor, before the instruction', ()
     assert.equal(m.counter(), 1, 'the nop alone');
 });
 
-test('bound is the no-op the emulator makes it, even out of range', ()=>{
+test('bound is a no-op, even out of range', ()=>{
     // mov eax, -1; mov ebx, bounds; bound eax, [ebx]; inc eax; hlt. A real
-    // processor raises #BR for -1 outside the {0, 0} pair; the emulator does
-    // not, so translated code must not either -- the run reaches the `inc`.
+    // processor raises #BR for -1 outside the {0, 0} pair; the interpreter
+    // does not, so translated code must not either -- the run reaches the `inc`.
     const r = both(
         [0xb8, 0xff, 0xff, 0xff, 0xff, 0xbb, 0x00, 0x20, 0x00, 0x00,
             0x62, 0x03, 0x40, 0xf4],
@@ -630,10 +630,9 @@ test('bound is the no-op the emulator makes it, even out of range', ()=>{
     assert.equal(r.m.reg('eax') >>> 0, 0, 'the instruction changed nothing');
     assert.equal(r.exit.unsupported.size, 0, 'bound was translated, not left out');
     agree(r);
-    // The register form (`bound eax, ebx`) is refused by the decoder's
-    // memory-only rule on paper but consumed by the emulator's decoder; a
-    // return into the entry vector's bytes reaches exactly this form, so it
-    // must translate as the same no-op.
+    // The register form (`bound eax, ebx`) is refused by the memory-only
+    // rule on paper; a return into the entry vector's bytes reaches exactly
+    // this form, so it must translate as the same no-op.
     const reg = both([0x62, 0xc3, 0x40, 0xf4]); // bound eax, ebx; inc eax; hlt
     assert.equal(reg.exit.kind, 3, 'the register form halts too');
     assert.equal(reg.exit.eip, CODE + 4);

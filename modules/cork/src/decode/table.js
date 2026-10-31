@@ -242,11 +242,10 @@ for (let reg = 0; reg < 8; reg++)
 }
 ONE_BYTE[0x60] = I('pushad');
 ONE_BYTE[0x61] = I('popad');
-// bound's second operand is a memory pair (`Ma`) on paper, but the emulator's
-// decoder consumes the register form too -- it neither reads the pair nor
-// raises #BR -- and a lost thread running the entry vector's bytes reaches
-// exactly that form (`62 d0`). `Ev` decodes both; the model and the emitter
-// treat the whole instruction as the no-op the emulator makes of it.
+// bound's second operand is a memory pair (`Ma`) on paper, but a lost thread
+// running the entry vector's bytes reaches the register form (`62 d0`) too.
+// `Ev` decodes both; the model and the emitter treat the whole instruction as
+// a no-op, which neither reads the pair nor raises #BR.
 ONE_BYTE[0x62] = I('bound', 'Gv,Ev', 'none', 'trap');
 // arpl: legal at every privilege level, and in the corpus; it adjusts a
 // selector's requested privilege and says whether it did.
@@ -621,7 +620,7 @@ TWO_BYTE[0xc3] = I('movnti', 'Md,Gy');
 TWO_BYTE[0xc4] = S({ '': I('pinsrw', 'Pq,Ew,Ib'), 66: I('pinsrw', 'Vdq,Ew,Ib') });
 TWO_BYTE[0xc5] = S({ '': I('pextrw', 'Gy,Nq,Ib'), 66: I('pextrw', 'Gy,Udq,Ib') });
 TWO_BYTE[0xc6] = S({ '': I('shufps', 'Vps,Wps,Ib'), 66: I('shufpd', 'Vpd,Wpd,Ib') });
-// rdrand: CPUID leaf 1 advertises it (the emulator's answer), so it is decoded;
+// rdrand: CPUID leaf 1 advertises it (`cpuid.js`), so it is decoded;
 // a memory operand is #UD, and it leaves CF set and the other five clear.
 TWO_BYTE[0xc7] = G([
     null, I('cmpxchg8b', 'Mq', 'cmpxchg8b'), null, null, null, null,

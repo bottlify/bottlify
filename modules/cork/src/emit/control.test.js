@@ -155,7 +155,7 @@ test('a block that leaves at once is no entry, so a transfer never spins on it',
 });
 
 test('an indirect call reaches its target with the return address pushed', ()=>{
-    // Found by a whole program under hybrid: the call's target was parked in
+    // Found by a whole program: the call's target was parked in
     // the local the push then used for the value, so every indirect call
     // "returned" to the instruction after itself without calling anything.
     /** @type {[string, number[]][]} */

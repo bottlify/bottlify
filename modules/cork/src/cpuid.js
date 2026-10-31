@@ -6,19 +6,18 @@
 
 /**
  * The four words `cpuid` answers, one entry per leaf that answers anything
- * but zero. The figures are the pinned emulator's own, read from it once, so
- * cork and the emulator agree bit for bit without a crossing: leaf 0 the vendor
+ * but zero: the processor every program run here has been told it runs on,
+ * kept as it is because a change to it changes what each program detects --
+ * its code paths, a game's idea of the machine. Leaf 0 the vendor
  * and the highest standard leaf, 1 the family, model, stepping and features,
  * 2 the cache descriptors, 4 the cache parameters (by subleaf), 5 the monitor
  * line sizes, 7 the extended features (subleaf 0), 0x40000000 the hypervisor's
  * name, 0x80000000 the highest extended leaf -- except the clock leaves, 0x15
  * (a 1 GHz crystal times 3/1) and 0x16 (base and maximum), which state the
- * 3000 MHz cork's host counts rdtsc at (`CORK_TSC_MHZ`; the emulator's counter
- * and its leaves run at 1000). A leaf with no entry, or a subleaf a leaf does
- * not list, answers four zeros.
- * The hypervisor bit in leaf 1 and the VMware name at 0x40000000 are the
- * emulator's too: a real processor of this signature has neither, but the two
- * engines must answer alike, and the emulator's answer is compiled into it.
+ * 3000 MHz cork's host counts rdtsc at (`CORK_TSC_MHZ`). A leaf with no
+ * entry, or a subleaf a leaf does not list, answers four zeros.
+ * The hypervisor bit in leaf 1 and the VMware name at 0x40000000 are part of
+ * that answer, though a real processor of this signature has neither.
  *
  * @typedef {Object} CpuidAnswer
  * @property {number} eax

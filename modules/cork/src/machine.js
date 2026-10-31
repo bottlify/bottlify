@@ -104,8 +104,6 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
                 trapped.push(value);
                 return TRAP_END_TURN;
             },
-            getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: index=>view().getFloat64(layout.x87 + index * 16, true),
             rdtsc,
         },
     });

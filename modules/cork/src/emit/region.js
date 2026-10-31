@@ -8,8 +8,8 @@
  * A region becomes one wasm function.
  *
  * The function takes the label of the block to enter, the slice's
- * instruction budget and -- under cork's own layout -- the machine state a
- * transfer carries (`STATE_PARAMS`), and answers how it left. Its shape:
+ * instruction budget and the machine state a transfer carries
+ * (`STATE_PARAMS`), and answers how it left. Its shape:
  *
  *     prologue      what the parameters do not carry loaded into locals
  *     block $out
@@ -241,8 +241,7 @@ export const Local = Object.freeze({
  * the registers it names and storing the ones it writes; the budget the run
  * started with is there too (`layout.origin`), the instructions retired being
  * what the run took off the budget since, added to the counter word once, when
- * it leaves for the host. A region over a layout with no flag record (the
- * emulator's) takes the parameters and loads its state as before.
+ * it leaves for the host.
  */
 export const STATE_PARAMS = 6;
 
@@ -348,9 +347,10 @@ const recordFieldsOf = layout=>{
  * @property {boolean} [checkReads]  an instruction that only reads tests its pages too
  * @property {boolean} [precise]  every relaxation off (the runtime's `precise`): the x87
  *     exception flags, the signalling-NaN tests, the underflow test and C1 kept as the processor
- *     keeps them, the flags an instruction leaves undefined keeping the values the emulator
- *     gives them, which costs the record before it, and single precision rounded in the
- *     double's bits (`roundSingle` in `x87.js`); without it the x87 bookkeeping is not
+ *     keeps them, the flags an instruction leaves undefined keeping the values the
+ *     instruction model (`ir.js`) gives them, which costs the record before it, and single
+ *     precision rounded in the double's bits (`roundSingle` in `x87.js`); without it the x87
+ *     bookkeeping is not
  *     computed, an undefined flag is as the cheapest code leaves it, which no program can
  *     rely on (real processors differ there), single is rounded by Veltkamp's split, and an
  *     instruction that only reads memory is not tested against the page flags (`checkAccess`)
@@ -359,8 +359,6 @@ const recordFieldsOf = layout=>{
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
  * @property {number} spanHit         whether a store to a span of bytes reaches translated code
  * @property {number} windowHit       an access group's window test (`emitGroupChecks`)
- * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
- *                                     lazy flags (the emulator's `flags_changed`)
  * @property {number} rdtsc            the host's time-stamp counter, imported by every region
  * @property {number} f80ToF64         the extended-precision readers
  * @property {number} f64ToF80
@@ -373,7 +371,7 @@ const recordFieldsOf = layout=>{
  *                                     tail-calls the region found, through the host's table
  * @property {number} [transfer]       with hash, the module's transfer function
  *     (`finishModule`), which an untranslated exit tail-calls with its EIP for the label
- * @property {number} [resume]         with a transfer over cork's own layout, the module's
+ * @property {number} [resume]         with a transfer, the module's
  *     function a miss of the hash tail-calls to run the interpreter tier in wasm through the
  *     table's `TIER_SLOT` (`addResume`)
  * @property {{ base: number, arms: number, crossings: number, crossedTo: number }} [placed]
@@ -421,7 +419,7 @@ const recordFieldsOf = layout=>{
  *     counted (`finishModule`); profileCalls: indirect calls note their targets in the
  *     layout's call profile, when it has one (`callProfile`); structure: a region's loops
  *     as wasm loops (`planStructure`), false for every backward jump through the dispatch;
- *     resume: with hash, under cork's own layout, a miss of the hash runs the interpreter
+ *     resume: with hash, a miss of the hash runs the interpreter
  *     tier in wasm through the table's `TIER_SLOT` (`finishModule`); crossTailCalls: false
  *     for an engine whose tail call into another instance faults, a transfer out of the
  *     module (all of them where it is not placed) leaving for the host's loop
@@ -436,12 +434,17 @@ export function prepareModule(m, layout, features, memory = {},
         callDepth = CallStack.LIMIT } = {})
 {
     const width = widthOf(layout);
-    // Long mode's emitter keeps the record between regions and the vector
-    // scratch before its upper registers: without either it would translate
-    // long-mode code with the record's paths quietly off.
-    if (width.bits === 64 && ((layout.flagRecord ?? -1) < 0 || !features.simd))
+    // A region keeps the record between regions and takes the registers a
+    // transfer carries as parameters: a layout with no place for the record
+    // has none of the state a region leaves in the block.
+    if ((layout.flagRecord ?? -1) < 0)
     {
-        throw new Error('emit: a 64-bit layout needs a flag record and SIMD');
+        throw new Error('emit: a layout needs a flag record');
+    }
+    // Long mode's emitter keeps the vector scratch before its upper registers.
+    if (width.bits === 64 && !features.simd)
+    {
+        throw new Error('emit: a 64-bit layout needs SIMD');
     }
     // At least the guest's RAM, which every memory a module is given holds:
     // the host's compiler then knows a constant address inside it in bounds,
@@ -466,12 +469,9 @@ export function prepareModule(m, layout, features, memory = {},
         ? undefined
         : m.importFunction('env', 'trap',
             m.type({ params: [ValType.i32], results: [ValType.i32] }));
-    // Imports come before the helpers, which are functions.
-    const getEflags = layout.flagsChanged >= 0
-        ? m.importFunction('env', 'getEflags', m.type({ params: [], results: [ValType.i32] }))
-        : undefined;
-    // The time-stamp counter is the host's -- the emulator's own under hybrid,
-    // cork's clock under cork -- so `rdtsc` needs no crossing and the two agree.
+    // Imports come before the helpers, which are functions. The time-stamp
+    // counter is the host's clock, so `rdtsc` needs no crossing and the
+    // interpreter and translated code read one counter.
     const rdtsc = m.importFunction('env', 'rdtsc',
         m.type({ params: [], results: [ValType.i64] }));
     // The transcendentals wasm has no operation for, as the host's Math.
@@ -508,16 +508,12 @@ export function prepareModule(m, layout, features, memory = {},
         context.trapPort = trapPort;
         context.trap = trap;
     }
-    if (getEflags !== undefined)
-    {
-        context.getEflags = getEflags;
-    }
     if (undoLog)
     {
         context.undo = addUndoHelper(m, layout);
     }
     // A production bundle emits no diagnostic count, whatever it is asked.
-    if (callReturn && hashed && !undoLog && (layout.flagRecord ?? -1) >= 0)
+    if (callReturn && hashed && !undoLog)
     {
         context.callReturn = true;
         context.callDepth = Math.max(1, Math.min(CallStack.LIMIT, Math.trunc(callDepth)));
@@ -583,7 +579,7 @@ export function prepareModule(m, layout, features, memory = {},
         // The transfer's index is taken before any region's, which call it;
         // its body waits for the module's last region (`finishModule`).
         context.transfer = m.function(regionType, [], new Uint8Array([0x00, 0x0b]));
-        if (resume && (layout.flagRecord ?? -1) >= 0)
+        if (resume)
         {
             context.resume = addResume(m, layout, bases, materialise, context.transfer, width);
         }
@@ -645,7 +641,6 @@ export function finishModule(context, functions){
     const slotAt = STATE_PARAMS + 1;
     const key = STATE_PARAMS + 2;
     const hashBase = layout.tables + Tables.HASH;
-    const carried = (layout.flagRecord ?? -1) >= 0;
     const b = new Body();
     const pass = ()=>{
         for (let local = 0; local < STATE_PARAMS; local++)
@@ -715,10 +710,6 @@ export function finishModule(context, functions){
     }
     /** The registers, EIP and count written back as the region's epilogue writes them. */
     const writeBack = ()=>{
-        if (!carried)
-        {
-            return;
-        }
         // As the region's epilogue writes it (`storeCarriedState`): the
         // registers the parameters carry -- the rest, the record and the flags
         // word the region left in the block -- EIP and the count, the run's
@@ -729,10 +720,6 @@ export function finishModule(context, functions){
             atState(context, b).localGet(Local.reg + i)
                 .store(width.bits === 64 ? 'i64' : 'i32', { offset: layout.regs + r * width.slot });
         });
-        if (layout.flagsChanged >= 0)
-        {
-            atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
-        }
         storeIp(context, b, ()=>b.localGet(eip));
         atState(context, b);
         atState(context, b).load('i32', { offset: layout.counter });
@@ -773,7 +760,7 @@ export function finishModule(context, functions){
     }
     // Long mode's empty functions are entered as any other: their `ret` pops a
     // quadword, which `emptyReturn` does not read.
-    if (carried && context.callReturn === true && context.width.bits === 32)
+    if (context.callReturn === true && context.width.bits === 32)
     {
         emptyReturn(context, b, slotAt, key);
     }
@@ -813,7 +800,7 @@ export function finishModule(context, functions){
     b.returnCallIndirect(regionType, 0);
     b.end(); // miss
     writeBack();
-    if (context.resume !== undefined && carried)
+    if (context.resume !== undefined)
     {
         b.localGet(Local.budget).returnCall(context.resume);
     }
@@ -1082,8 +1069,8 @@ export class RegionEmitter {
         this.layout = context.layout;
         /** The registers' width (`width.js`). */
         this.width = context.width ?? WIDTH_32;
-        /** Where the layout keeps the flag record between regions, or -1. */
-        this.flagRecord = context.layout.flagRecord ?? -1;
+        /** Where the layout keeps the flag record between regions (`prepareModule` asks one). */
+        this.flagRecord = /** @type {number} */ (context.layout.flagRecord);
         /** The record's fields there. */
         this.recordFields = recordFieldsOf(context.layout);
         /** What the function of the region's copies takes of this one's planning. */
@@ -1177,10 +1164,10 @@ export class RegionEmitter {
         /**
          * Whether the ways out store what a way to them wrote and a call's return
          * reloads what is read after it (`planPaths`): the 32-bit translator's
-         * calls as wasm calls under cork's layout.
+         * calls as wasm calls.
          */
         this.pathStores = context.callReturn === true && context.hash === true
-            && this.flagRecord >= 0 && this.width.bits === 32 && this.callReturn;
+            && this.width.bits === 32 && this.callReturn;
         /** Every call site's record, each copy of a block its own. @type {CallSite[]} */
         this.sites = [];
         /** The ways out and the other stores `planPaths` decides. @type {StorePoint[]} */
@@ -1206,8 +1193,7 @@ export class RegionEmitter {
          */
         this.memPlan = null;
         /**
-         * The region's access groups (`planRegion`), or null where every
-         * access is tested (a hybrid layout).
+         * The region's access groups (`planRegion`), once `emit` has planned them.
          * @type {import('./memory.js').RegionPlan | null}
          */
         this.memoryPlan = null;
@@ -1476,7 +1462,7 @@ export class RegionEmitter {
          * body names (`all`), only the ones the parameters do not carry
          * (`uncarried`), or none. `site`: a guest call's stores, which leave out
          * what the state block already holds (`fillDeferred`). `record`: the flag
-         * record's fields and the flags word too, under cork's layout. Under `planPaths`
+         * record's fields and the flags word too. Under `planPaths`
          * also a way out's branch into the epilogue (`exit`, `depth` its branch to
          * `$out`), the blocks its stores are entered by (`open`) and those stores
          * (`kinds`); a `point`'s stores are what it decides, and `chained` ones
@@ -1647,17 +1633,13 @@ export class RegionEmitter {
         const { planned } = this;
         const flagsOut = planned?.flagsOut
             ?? liveFlagsOut(blocks, this.labels, this.context.precise === true);
-        // The other executor's code table in a hybrid layout is a second
-        // thing a store is noted against: that layout tests each access. A
-        // jump back carries windows only through the flat dispatch; a block
+        // A jump back carries windows only through the flat dispatch; a block
         // the x87 plan cuts runs nothing to take them for.
         const memoryPlan = planned !== null ? planned.memoryPlan
-            : this.layout.codePages < 0
-                ? planRegion(blocks, { entry: this.region.entry, backward: flat,
-                    heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
-                    returns: this.returns, masked: readsWrapped(this.context),
-                    long: this.width.bits === 64 })
-                : null;
+            : planRegion(blocks, { entry: this.region.entry, backward: flat,
+                heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
+                returns: this.returns, masked: readsWrapped(this.context),
+                long: this.width.bits === 64 });
         this.flagsIn = blocks.map((block, i)=>block.instructions.reduceRight((live, instruction)=>
             liveBefore(instruction, live, this.context.precise === true), flagsOut[i]));
         if (this.copies.length > 0 && !this.copyFunction)
@@ -1823,43 +1805,27 @@ export class RegionEmitter {
     }
 
     prologue(){
-        this.loadState(this.flagRecord >= 0);
-        this.resetRun(this.flagRecord >= 0);
+        this.loadState(true);
+        this.resetRun(true);
     }
 
     /**
      * The registers, the flags, the vector registers and the x87 block into the
-     * locals. `fromParams`: eax to ebx came in as parameters (cork's layout,
-     * on entry), so only the other registers are loaded. `site`: back from
-     * that guest call's wasm call, whose return reloads what `planPaths` says.
+     * locals. `fromParams`: eax to ebx came in as parameters (on entry), so
+     * only the other registers are loaded. `site`: back from that guest call's
+     * wasm call, whose return reloads what `planPaths` says.
      *
      * @param {boolean} [fromParams] @param {CallSite} [site]
      */
     loadState(fromParams = false, site = undefined){
         const { b, layout, context } = this;
-        if (this.flagRecord >= 0)
-        {
-            // The record the last region left, as it left it: its kind is not
-            // known here, and a read folds it only when it must. Like the
-            // registers, each field and the flags word only where the body
-            // reads it (`fillDeferred`).
-            this.deferred.push({ at: b.length, kind: 'load', regs: 'none', x87: false,
-                record: true, site });
-            this.pending = null;
-        }
-        else
-        {
-            atState(context, b).load('i32', { offset: layout.eflags }).localSet(Local.flags);
-        }
-        if (layout.flagsChanged >= 0 && this.context.getEflags !== undefined)
-        {
-            // The other executor keeps some flags lazy: when its record says
-            // so, its own fold gives the whole word.
-            atState(context, b).load('i32', { offset: layout.flagsChanged });
-            this.openIf('lazy', EMPTY);
-            b.call(this.context.getEflags).localSet(Local.flags);
-            this.close();
-        }
+        // The record the last region left, as it left it: its kind is not
+        // known here, and a read folds it only when it must. Like the
+        // registers, each field and the flags word only where the body
+        // reads it (`fillDeferred`).
+        this.deferred.push({ at: b.length, kind: 'load', regs: 'none', x87: false,
+            record: true, site });
+        this.pending = null;
         for (const [index, local] of this.xmmLocals)
         {
             atState(context, b).loadV128({ offset: layout.xmm + index * 16 }).localSet(local);
@@ -1873,7 +1839,7 @@ export class RegionEmitter {
             x87Prologue(this);
         }
         // The registers, after the x87 empty mask they are loaded under: on
-        // entry under cork's layout the ones the parameters did not bring.
+        // entry the ones the parameters did not bring.
         this.deferred.push({ at: b.length, kind: 'load', regs: fromParams ? 'uncarried' : 'all',
             x87: true, site });
     }
@@ -1887,29 +1853,21 @@ export class RegionEmitter {
      */
     resetRun(fromParams = false){
         const { b } = this;
-        if (this.flagRecord < 0)
-        {
-            b.i32const(0).localSet(Local.kind);
-        }
         if (!fromParams)
         {
             b.localGet(Local.budget).localSet(Local.origin);
-            if (this.flagRecord >= 0)
-            {
-                atState(this.context, b).localGet(Local.budget)
-                    .store('i32', { offset: /** @type {number} */ (this.layout.origin) });
-            }
+            atState(this.context, b).localGet(Local.budget)
+                .store('i32', { offset: /** @type {number} */ (this.layout.origin) });
         }
         b.i32const(0).localSet(Local.mmxTouched);
         b.i32const(0).localSet(Local.stale);
     }
 
     /**
-     * Writes every local back and returns the kind in `t0`. Under cork's own
-     * layout a transfer to another region passes the registers, the record,
-     * the flags word and the count as its parameters, so only what lives in
-     * the state block alone is written before it, and the rest only when the
-     * run leaves for the host.
+     * Writes every local back and returns the kind in `t0`. A transfer to
+     * another region passes the registers, the record, the flags word and the
+     * count as its parameters, so only what lives in the state block alone is
+     * written before it, and the rest only when the run leaves for the host.
      */
     epilogue(){
         if (this.pendingLows.size > 0)
@@ -1917,7 +1875,7 @@ export class RegionEmitter {
             // Every way here put its lanes back; one put back here would be any way's.
             throw new Error('low lanes owed at the epilogue');
         }
-        if (this.flagRecord >= 0 && this.context.hash)
+        if (this.context.hash)
         {
             // Under `planPaths` the registers, the record and the flags word went
             // in before this, each way out storing what it needs (`kinds`).
@@ -1950,34 +1908,21 @@ export class RegionEmitter {
 
     /**
      * What a transfer carries in its parameters, into the state block: the
-     * registers (all eight under cork's layout, whose unwritten ones came in
-     * as parameters and are not in the block), the record or the folded
-     * flags, EIP and the count. `chained`: the registers the parameters do not
-     * carry, the record and the flags word in already (`kinds`); `point`: a
-     * trap's, which `planPaths` knows stores them all.
+     * registers (all eight, whose unwritten ones came in as parameters and are
+     * not in the block), the record, EIP and the count. `chained`: the
+     * registers the parameters do not carry, the record and the flags word in
+     * already (`kinds`); `point`: a trap's, which `planPaths` knows stores
+     * them all.
      *
      * @param {boolean} [chained] @param {StorePoint} [point]
      */
     storeCarriedState(chained = false, point = undefined){
         const { b, layout, context } = this;
-        if (this.flagRecord >= 0)
-        {
-            // The record goes as it is: the helper at every exit would be a
-            // fifth of a call-heavy loop, and the next region mostly writes the
-            // flags before it reads them. Whoever reads the word folds it.
-            this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false,
-                record: true, chained, ...point === undefined ? {} : { point } });
-        }
-        else
-        {
-            this.materialise();
-            this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
-            atState(context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
-        }
-        if (layout.flagsChanged >= 0)
-        {
-            atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
-        }
+        // The record goes as it is: the helper at every exit would be a
+        // fifth of a call-heavy loop, and the next region mostly writes the
+        // flags before it reads them. Whoever reads the word folds it.
+        this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false,
+            record: true, chained, ...point === undefined ? {} : { point } });
         storeIp(context, b, ()=>b.localGet(Local.eip));
         atState(context, b);
         atState(context, b).load('i32', { offset: layout.counter });
@@ -1995,35 +1940,21 @@ export class RegionEmitter {
      */
     endBudget(){
         const { b, context } = this;
-        if (this.flagRecord >= 0)
-        {
-            atState(context, b);
-            this.pushOrigin();
-            b.localGet(Local.budget).op(I32.sub)
-                .store('i32', { offset: /** @type {number} */ (this.layout.origin) });
-        }
-        else
-        {
-            b.localGet(Local.origin).localGet(Local.budget).op(I32.sub).localSet(Local.origin);
-        }
+        atState(context, b);
+        this.pushOrigin();
+        b.localGet(Local.budget).op(I32.sub)
+            .store('i32', { offset: /** @type {number} */ (this.layout.origin) });
         b.i32const(0).localSet(Local.budget);
     }
 
-    /** The budget the run started with: in the state block under cork's layout. */
+    /** The budget the run started with, which the state block keeps. */
     pushOrigin(){
-        if (this.flagRecord >= 0)
-        {
-            atState(this.context, this.b)
-                .load('i32', { offset: /** @type {number} */ (this.layout.origin) });
-        }
-        else
-        {
-            this.b.localGet(Local.origin);
-        }
+        atState(this.context, this.b)
+            .load('i32', { offset: /** @type {number} */ (this.layout.origin) });
     }
 
     /**
-     * What a transfer under cork's layout leaves in the state block for its
+     * What a transfer leaves in the state block for its
      * callee rather than in its parameters: esp to edi as far as written, the
      * record and the flags word. All three wait for the whole body
      * (`fillDeferred`): what the body never writes is there already, and at a
@@ -2132,17 +2063,6 @@ export class RegionEmitter {
             // took holds what it was given: its bytes go back as they came.
             atState(this.context, b).localGet(this.mmLocal(index))
                 .store('i64', { offset: layout.x87 + index * 16 });
-            if (layout.x87Format === 'tagged80')
-            {
-                // An MMX write leaves the register's exponent all ones, as the
-                // processor does, so the emulator sees it as it would its own.
-                b.localGet(Local.mmxTouched).i32const(1 << MMX_WRITTEN_SHIFT + index)
-                    .op(I32.and);
-                this.openIf(`mmTag${index}`, EMPTY);
-                atState(this.context, b).i32const(0xffff)
-                    .store('i32_16', { offset: layout.x87 + index * 16 + 8 });
-                this.close();
-            }
         }
         if (this.x87.active)
         {
@@ -2179,13 +2099,12 @@ export class RegionEmitter {
     fillDeferred(){
         const main = this.b;
         const { layout } = this;
-        // Under cork's layout the registers the parameters carry are not in
-        // the block between regions: each is stored when the run leaves for
-        // the host, and a reload (after a trap's handler) takes each back --
-        // the next transfer passes them whether the region names them or not.
-        // The others are, as every register is under the emulator's layout.
+        // The registers the parameters carry are not in the block between
+        // regions: each is stored when the run leaves for the host, and a
+        // reload (after a trap's handler) takes each back -- the next transfer
+        // passes them whether the region names them or not. The others are.
         const { width } = this;
-        const carried = this.flagRecord >= 0 ? width.carried : [];
+        const carried = width.carried;
         const kind64 = width.bits === 64 ? 'i64' : 'i32';
         const onEntry = this.pathStores || this.deferred.some(one=>one.site !== undefined)
             ? this.writtenOnEntry() : [];
@@ -2595,15 +2514,12 @@ export class RegionEmitter {
     /**
      * The eight registers of a region that translated both classes, back into
      * the state block from the mantissas the mm locals hold. A register written
-     * by either class is stored; the form mask says which tag it takes, the all
-     * ones an MMX write left or the relaxed double an x87 write left, so the
-     * emulator reads each back as the view that wrote it last. The mantissa is
-     * the mm local's whichever class wrote it: an x87 write kept the mm local
-     * equal to the double's bits, an MMX write to the value it stored.
+     * by either class is stored. The mantissa is the mm local's whichever class
+     * wrote it: an x87 write kept the mm local equal to the double's bits, an
+     * MMX write to the value it stored.
      */
     storeMixedRegisters(){
         const { b, layout } = this;
-        const x = this.x87;
         x87DropExact(this, ()=>b.localGet(Local.x87Dirty).localGet(Local.mmxTouched)
             .i32const(MMX_WRITTEN_SHIFT).op(I32.shrU).op(I32.or));
         for (let p = 0; p < 8; p++)
@@ -2622,15 +2538,6 @@ export class RegionEmitter {
             b.i32const(1 << p).op(I32.and);
             this.openIf(`mixed${p}`, EMPTY);
             atState(this.context, b).localGet(mm).store('i64', { offset: at });
-            if (layout.x87Format === 'tagged80')
-            {
-                atState(this.context, b);
-                b.i32const(0xffff);
-                b.i32const(0x7ffe);
-                b.localGet(x.form).i32const(1 << p).op(I32.and);
-                b.select();
-                b.store('i32_16', { offset: at + 8 });
-            }
             this.close();
         }
     }
@@ -2652,17 +2559,7 @@ export class RegionEmitter {
         b.localGet(Local.budget);
         for (let local = Local.budget + 1; local < STATE_PARAMS; local++)
         {
-            // A region over the emulator's layout loads its state from the
-            // block and takes none: zeros, so a register it never names is
-            // not counted as used and loaded for the call alone.
-            if (this.flagRecord >= 0)
-            {
-                b.localGet(local);
-            }
-            else
-            {
-                b.i32const(0);
-            }
+            b.localGet(local);
         }
         b.returnCall(/** @type {number} */ (this.context.transfer));
         this.close();
@@ -3985,7 +3882,7 @@ export class RegionEmitter {
         // wrapping `and` a read and cost a turn counter and the window's test,
         // which a short loop (a strlen, a hash of a name) never paid back:
         // cork-bench sort -3.1 %, str -1.8 %, crc's long table walk +0.3 %.
-        const planned = this.selfLoop && !x.active && this.layout.codePages < 0
+        const planned = this.selfLoop && !x.active
             ? planLoop(block.instructions, this.width.bits === 64) : null;
         const reads = planned !== null && this.readsOnlyLoop(block, planned);
         const streams = planned !== null && (reads || planned.streams.some(stream=>stream.store)
@@ -4720,7 +4617,7 @@ export class RegionEmitter {
         const [compare, branch] = instructions.slice(-2);
         if (table === undefined || next.instructions.length !== 1 || this.width.bits !== 32
             || this.x87.active || this.context.precise === true || !readsWrapped(this.context)
-            || this.layout.codePages >= 0 || branch?.op !== 'ja' || compare?.op !== 'cmp'
+            || branch?.op !== 'ja' || compare?.op !== 'cmp'
             || table.address + 4 * table.entries.length > this.layout.ramSize)
         {
             return false;
@@ -5297,7 +5194,7 @@ export function keepsFlags(instruction){
  *
  * @param {import('../region.js').Block[]} blocks
  * @param {Map<number, number>} labels  the region's block starts, to their indices
- * @param {boolean} [precise]  undefined flags as the emulator leaves them (`killedBy`)
+ * @param {boolean} [precise]  undefined flags as the instruction model leaves them (`killedBy`)
  * @returns {number[]}
  */
 export function liveFlagsOut(blocks, labels, precise = true){
@@ -5884,7 +5781,7 @@ function comesBackTo(block, index){
  * @param {number} [liveOut]  the flags live after the block: all of them unless the
  *     region's own analysis (`liveFlagsOut`) says fewer
  * @param {number[]} [after]  filled with the flags live after each instruction
- * @param {boolean} [precise]  undefined flags as the emulator leaves them (`killedBy`)
+ * @param {boolean} [precise]  undefined flags as the instruction model leaves them (`killedBy`)
  * @returns {boolean[]}  per instruction: whether its written flags are live
  */
 export function deadFlagPass(block, liveOut = ARITH_FLAGS | DF, after = [], precise = true){
@@ -5937,7 +5834,7 @@ const flagsReadBy = instruction=>(instruction.faults === 'divide'
  * rotate by cl may write none, and so may a repeated compare or scan, which
  * with ecx zero runs no iteration and leaves the flags as they were: the
  * `je` after a `repe cmpsb` of no bytes reads the flags of what came before.
- * Precisely, only a defined write: the emulator
+ * Precisely, only a defined write: the instruction model (`ir.js`)
  * leaves an undefined flag as it was, and the emitter with it, so an earlier
  * record may still be what a later reader sees. Otherwise an undefined flag is
  * killed as well -- whatever the code left there, no program can rely on it,

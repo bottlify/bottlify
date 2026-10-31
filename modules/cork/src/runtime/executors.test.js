@@ -72,7 +72,7 @@ test('an executor\'s layout moves its state and tables, and only those', ()=>{
     assert.equal(moved.nanFirst, base + /** @type {number} */ (own.nanFirst));
     assert.equal(moved.tables, base + PAGE);
     assert.equal(moved.ramBase, own.ramBase, 'guest RAM is the process\'s');
-    assert.equal(moved.flagsChanged, -1, 'an absent field stays absent');
+    assert.equal(moved.gsBase, -1, 'an absent field stays absent');
     assert.notEqual(moved.id, own.id, 'its translations are its own');
     assert.throws(()=>executorLayout(own, own.tables), /not one past the first's/);
 });

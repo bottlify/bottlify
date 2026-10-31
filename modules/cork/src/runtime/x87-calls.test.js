@@ -245,8 +245,7 @@ async function runProgram(code, callReturn, budget, leafCalls = false, more = {}
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0n },
     });
     bytes().set(code, layout.ramBase + CODE);
     DOUBLES.forEach((value, i)=>view().setFloat64(layout.ramBase + CONSTANTS + i * 8, value, true));

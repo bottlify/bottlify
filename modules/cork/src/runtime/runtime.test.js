@@ -29,8 +29,7 @@ function machine(config = {}, ramSize = 4 << 20, imports = {}){
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: ()=>0, rdtsc: ()=>0n, ...imports },
+        imports: { trap: ()=>0, rdtsc: ()=>0n, ...imports },
         // A page's rewrites all at one moment: what makes it volatile is how
         // many there were, never how long a busy machine took between them.
         now: ()=>0,
@@ -748,7 +747,7 @@ test('the runtime refuses a memory that has no room for its tables', ()=>{
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, 0) });
     assert.throws(()=>createCorkRuntime({
         memory, layout, config: {}, read: ()=>0,
-        imports: { trap: ()=>0, getEflags: ()=>0, x87Read: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0n },
     }), /before the tables/);
 });
 
