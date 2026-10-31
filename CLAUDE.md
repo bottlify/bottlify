@@ -76,6 +76,8 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
   entry in the commit that brings it in.
 - **Comments say why**, not what; no changelog comments, no tombstones, no claims about titles we
   did not measure, no earlier projects or local paths in anything committed.
+- **A dash is a single hyphen** (` - `) in comments, commit messages and docs; never a double
+  hyphen (` -- `) or an em dash (`—`). Text written before keeps its own.
 - Lint has zero tolerance: `--max-warnings 0`.
 
 ## Tests
