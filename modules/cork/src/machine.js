@@ -120,7 +120,6 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
     });
     // Its pacing, the config's where it names one.
     const hotJumps = config.hotThreshold ?? HOT_JUMPS;
-    const interpretChunk = config.interpretChunk ?? INTERPRET_CHUNK;
     const regionChunk = config.yieldChunk ?? REGION_CHUNK;
     /** Jumps seen to each start not yet translated. @type {Map<number, number>} */
     const heat = new Map();
@@ -262,7 +261,7 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
                 // The region ran nothing here (cut for another x87 top, or
                 // leaving at its own entry): one instruction interpreted moves on.
             }
-            const { retired: stepped, stop } = interpretFrom(Math.min(remaining, interpretChunk),
+            const { retired: stepped, stop } = interpretFrom(Math.min(remaining, INTERPRET_CHUNK),
                 entry >= 0);
             retired += stepped;
             elapsed += stepped;
