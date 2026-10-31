@@ -67,9 +67,9 @@ export function manifestFor(build, version){
     const pages = [...PAGES[build]];
     return {
         manifest_version: 3,
-        name: build === 'dev' ? 'Bottlify bridge (dev)' : 'Bottlify bridge',
+        name: build === 'dev' ? 'Bottlify GameHub (dev)' : 'Bottlify GameHub',
         version,
-        description: 'Lets a Bottlify page talk to Steam; the session stays in the extension.',
+        description: 'Connects Bottlify to your game libraries; sign-ins stay in the extension.',
         permissions: ['declarativeNetRequest', 'storage'],
         host_permissions: [...pages,
             ...Object.values(PLATFORMS).flatMap(platform=>platform.hosts)],
