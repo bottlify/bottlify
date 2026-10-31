@@ -20,14 +20,14 @@
  * far enough to run at all.
  *
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
- *         [--network ws://host:port/]
+ *         [--network ws://host:port/] [--steam ACCOUNT.json]
  *
  * `--network` puts the program on a relay's network (tools/relay-option.mjs);
  * without it the machine has the loopback adapter alone.
  */
 
 import { ENGINE } from './chromium-v8.mjs';
-import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
+import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
@@ -54,6 +54,11 @@ function parse(argv){
         id,
         turns: turns === -1 ? 200000 : Number(argv[turns + 1]),
         map: argv.includes('--map'),
+        // A signed-in Steam account (`tools/steam-account.mjs` writes one): the
+        // engine's Steam client runs for the manifest's app, as game.mjs's
+        // `--steam` has it, for a game that needs Steam running.
+        steam: argv.includes('--steam')
+            ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
         // Which executable in the bundle to start. `--which launcher` takes the
         // one the manifest names as such, and any other value is a path in the
         // bundle -- a launcher is a different program from the game it starts,
@@ -527,7 +532,7 @@ async function cpuProfiler(spec){
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
         corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
-        memory, mode, translationStore, cpuProfile } = parse(process.argv.slice(2));
+        memory, mode, translationStore, cpuProfile, steam } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -585,6 +590,8 @@ async function main(){
     const roots = rootsFromArgv(process.argv.slice(2));
     const app = await createApp({
         win32: { ...network ? { network } : {},
+            ...steam ? { steam: { ...steam,
+                ...manifest.steam?.appId ? { appId: manifest.steam.appId } : {} } } : {},
             ...roots ? { trustedRoots: roots } : {} },
         executable: new Uint8Array(executable),
         // Where the bundle is mounted and the program started from: where its
