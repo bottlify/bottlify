@@ -137,6 +137,9 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *           bytes, views whose bytes never came.
  * @property {(bytes: number, options?: { alignment?: number }) => number} allocate  Guest
  *     memory, or 0.
+ * @property {(ms: number, tick: () => void) => () => void} [every]
+ *           Calls `tick` every `ms` of the guest's clock until the answer is
+ *           called: how a service watching its section's views looks at them.
  * @property {(address: number, bytes: number) => boolean} [allocateAt]
  *           Guest memory at exactly that address, when all of it is free.
  * @property {(address: number) => void} release
@@ -173,7 +176,8 @@ export function createMappingFunctions(host){
      *
      * @type {Map<number, { mapping: any, offset: number, length: number,
      *                      writable: boolean,
-     *                      shared?: import('./shared-views.js').SharedView }>}
+     *                      shared?: import('./shared-views.js').SharedView,
+     *                      unwatch?: (() => void) | null }>}
      */
     const views = new Map();
 
@@ -688,6 +692,17 @@ export function createMappingFunctions(host){
                             write: host.writeMemory };
                         host.sharedViews.shared.attach(mapping, mapping.size, view.shared);
                     }
+                    // A section a service of the run owns (the Steam client's)
+                    // is watched by it while the view stands.
+                    view.unwatch = mapping.watch?.({
+                        read: (/** @type {number} */ at, /** @type {number} */ count)=>
+                            host.readMemory(address + at, count),
+                        write: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+                            host.writeMemory(address + at, data),
+                        event: (/** @type {number} */ held)=>object(held, 'event'),
+                        every: (/** @type {number} */ ms, /** @type {() => void} */ tick)=>
+                            host.every?.(ms, tick) ?? (()=>{}),
+                    }) ?? null;
                     views.set(address, view);
                     host.viewRegions?.set(address, { length: wanted, writable });
                     if (metrics)
@@ -698,10 +713,12 @@ export function createMappingFunctions(host){
                 };
 
                 // Read through to the file now. An anonymous mapping starts as
-                // zeroes, which is what the allocator already gives.
+                // zeroes, which is what the allocator already gives, or as its
+                // owner says it stands.
                 if (!mapping.node)
                 {
-                    return deliver(new Uint8Array(0));
+                    return deliver(mapping.contents?.().subarray(offset, offset + wanted)
+                        ?? new Uint8Array(0));
                 }
                 // The view holds the file from here to its unmap, so closing the
                 // mapping and the file handle first leaves it a file to be
@@ -789,6 +806,7 @@ export function createMappingFunctions(host){
                 {
                     host.sharedViews?.shared.detach(view.shared);
                 }
+                view.unwatch?.();
                 views.delete(address >>> 0);
                 host.viewRegions?.delete(address >>> 0);
                 host.release(address >>> 0);
