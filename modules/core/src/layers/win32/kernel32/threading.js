@@ -10,8 +10,9 @@ import { TAKEN } from './named-objects.js';
 import { askChild, childThread, threadEnd } from './cross-process.js';
 import { MODIFY_STATE, SYNCHRONIZE, allows, grantedAccess } from './access.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
-import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, eventStateCode, releaseMutexCode,
-    waitOneCode } from './wait-one.js';
+import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
+    releaseMutexCode, waitOneCode } from './wait-one.js';
+import { COMPILED as SEMAPHORE_CODE } from './semaphore-guest.x86.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -886,7 +887,8 @@ export function createThreadingFunctions(host){
     let handleWords;
     /** What the kernel's words say, for the routines that read them. */
     const wordValues = ()=>({ clear: kernel.EventMirror.CLEAR, set: kernel.EventMirror.SET,
-        mutexTag: kernel.MUTEX_TAG, eventTag: kernel.EVENT_TAG });
+        invalid: kernel.EventMirror.INVALID, mutexTag: kernel.MUTEX_TAG,
+        eventTag: kernel.EVENT_TAG });
     const placedTable = ()=>{
         if (handleWords !== undefined)
         {
@@ -904,9 +906,50 @@ export function createThreadingFunctions(host){
         host.writeMemory(mutexes, new Uint8Array(MUTEX_SLOTS * 4));
         const events = host.allocate(EVENT_WORD_SLOTS * 4);
         host.writeMemory(events, new Uint8Array(EVENT_WORD_SLOTS * 4));
-        kernel.mirrorEvents(words, EVENT_SLOTS, mutexes, MUTEX_SLOTS, events, EVENT_WORD_SLOTS);
+        // The semaphores' two words each at the table's end (`wait-one.js`).
+        const eventWords = EVENT_WORD_SLOTS - SEMAPHORE_SLOTS * 2;
+        kernel.mirrorEvents(words, EVENT_SLOTS, mutexes, MUTEX_SLOTS, events, eventWords,
+            events + eventWords * 4, SEMAPHORE_SLOTS);
         handleWords = words;
         return words;
+    };
+
+    /**
+     * A compiled routine (`semaphore-guest.js`) as it runs at `at`: its
+     * hand-over jumping to the trap, its HANDLE_WORDS the table.
+     *
+     * @param {typeof SEMAPHORE_CODE[keyof typeof SEMAPHORE_CODE]} compiled
+     * @param {number} at @param {number} trap @param {number} words
+     */
+    const boundRoutine = (compiled, at, trap, words)=>{
+        const bytes = compiled.code.slice();
+        const view = new DataView(bytes.buffer);
+        // A `jmp rel32`'s displacement, from the end of the instruction.
+        view.setInt32(compiled.host, (trap - (at + compiled.host + 4)) | 0, true);
+        view.setUint32(compiled.tables.HANDLE_WORDS, words >>> 0, true);
+        return bytes;
+    };
+    /** Where the wait on a semaphore went, once placed. @type {number | undefined} */
+    let semaphoreWait;
+    /**
+     * The wait on a semaphore, placed once: WaitForSingleObject's routine goes
+     * there for a semaphore's word, and it hands over to the same trap.
+     *
+     * @param {number} trap @param {number} words
+     */
+    const placedSemaphoreWait = (trap, words)=>{
+        if (semaphoreWait === undefined)
+        {
+            const allocate = host.allocateCode ?? host.allocate;
+            if (!allocate)
+            {
+                return trap;
+            }
+            const at = allocate(SEMAPHORE_CODE.waitSemaphore.code.length);
+            host.writeMemory(at, boundRoutine(SEMAPHORE_CODE.waitSemaphore, at, trap, words));
+            semaphoreWait = at;
+        }
+        return semaphoreWait;
     };
 
     /** Where each routine reading the table went, once placed. @type {Map<string, number>} */
@@ -915,7 +958,8 @@ export function createThreadingFunctions(host){
      * A routine reading the table, or the trap alone where there is no table.
      *
      * @param {PollBuilder} builder
-     * @param {'WaitForSingleObject' | 'ReleaseMutex' | 'SetEvent' | 'ResetEvent'} name
+     * @param {'WaitForSingleObject' | 'ReleaseMutex' | 'SetEvent' | 'ResetEvent'
+     *     | 'ReleaseSemaphore'} name
      * @param {(at: number, trap: number, words: number) => Uint8Array} code
      */
     const placedRoutine = (builder, name, code)=>{
@@ -1094,14 +1138,16 @@ export function createThreadingFunctions(host){
          *
          * Guest code first: a signalled event the host does not keep is
          * taken there, a poll of an event that is not signalled times out
-         * there, and a free mutex or one the caller owns is taken there
-         * (`wait-one.js`); everything else comes here.
+         * there, a free mutex or one the caller owns is taken there
+         * (`wait-one.js`), and a count of a semaphore nobody waits on, or a
+         * poll of one at zero (`semaphore-guest.js`); everything else comes here.
          */
         WaitForSingleObject: {
             argBytes: 8,
             /** @param {PollBuilder} builder */
             guest: builder=>placedRoutine(builder, 'WaitForSingleObject',
-                (at, trap, words)=>waitOneCode(at, trap, words, wordValues())),
+                (at, trap, words)=>waitOneCode(at, trap, words, wordValues(),
+                    placedSemaphoreWait(trap, words))),
             /** @param {number[]} args */
             handler: ([handle, timeout])=>{
                 // A standard stream is always ready to be written, and one
@@ -1235,9 +1281,14 @@ export function createThreadingFunctions(host){
          * and the previous count is written only on success, which is what makes
          * the check meaningful. Each refusal says why: no semaphore, a count
          * that is not positive, or ERROR_TOO_MANY_POSTS past the maximum.
+         * Guest code first: a semaphore nobody waits on is released there
+         * (`semaphore-guest.js`); everything else comes here.
          */
         ReleaseSemaphore: {
             argBytes: 12,
+            /** @param {PollBuilder} builder */
+            guest: builder=>placedRoutine(builder, 'ReleaseSemaphore',
+                (at, trap, words)=>boundRoutine(SEMAPHORE_CODE.ReleaseSemaphore, at, trap, words)),
             /** @param {number[]} args */
             handler: ([handle, count, previous])=>{
                 const semaphore = object(handle >>> 0, 'semaphore');

@@ -990,6 +990,16 @@ export function createSyncFunctions(host){
                     indices.push(at);
                 }
 
+                // A wait for all of a set may not name one object twice, under
+                // one handle or two (NtWaitForMultipleObjects answers
+                // STATUS_INVALID_PARAMETER_MIX): taking it once for each made
+                // the second take of a semaphore with one count block for good.
+                if (waitAll && new Set(objects).size < objects.length)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return WAIT_FAILED;
+                }
+
                 const thread = host.currentThread();
 
                 // Zero is a poll: it asks whether the set is ready now and

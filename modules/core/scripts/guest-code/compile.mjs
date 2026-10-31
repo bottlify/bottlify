@@ -234,6 +234,11 @@ import {
  *                                  before says (0xe9 or 0xb8).
  * @property {boolean} [leaf]       x86-64 code only: it moves no stack and changes
  *                                  no register its caller keeps.
+ * @property {Record<string, number>} [tables]  Where in the code each table it
+ *                                  reads is placed, by name: a binding that
+ *                                  writes a table's word after placing the code
+ *                                  (the address of something placed at run time)
+ *                                  finds it there.
  */
 
 /**
@@ -331,7 +336,7 @@ const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clear
     'mxcsr', 'setMxcsr']);
 
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
-    'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', ...X87_WORDS]);
+    'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS]);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
@@ -659,6 +664,19 @@ function oneReturn(node){
     const body = node.body?.body;
     return Array.isArray(body) && body.length === 1 && body[0].type === 'ReturnStatement'
         && body[0].argument !== null;
+}
+
+/**
+ * The module's tables a function's code holds and where, the constant pools
+ * left out (their names are the compiler's own): `{ tables }` where there is
+ * one, else nothing.
+ *
+ * @param {Map<string, number>} placed
+ * @returns {{ tables?: Record<string, number> }}
+ */
+function placedTables(placed){
+    const named = [...placed].filter(([name])=>name !== POOL && name !== QUADS);
+    return named.length > 0 ? { tables: Object.fromEntries(named) } : {};
 }
 
 /**
@@ -994,6 +1012,11 @@ class FunctionCompiler {
                     this.fail(property, `${property.key.name}: the x87's control and status `
                         + 'words are the 32-bit runtime\'s, refused at 64 bits');
                 }
+                if (this.long && property.key.name === 'compareExchange')
+                {
+                    this.fail(property, 'compareExchange: the 32-bit kernel\'s exchange of a '
+                        + 'word, refused at 64 bits');
+                }
             }
             params.shift();
         }
@@ -1261,6 +1284,7 @@ class FunctionCompiler {
         return {
             name, convention, params: types, returns: this.returns, uses, code,
             ...this.hostUsed ? { host: /** @type {number} */ (out.offsets.get('hostJump')) } : {},
+            ...placedTables(out.placed),
         };
     }
 
@@ -1428,6 +1452,7 @@ class FunctionCompiler {
         return {
             name, convention, params: types, returns: this.returns, uses, code,
             ...this.hostUsed ? { host: /** @type {number} */ (out.offsets.get('hostJump')) } : {},
+            ...placedTables(out.placed),
             // No stack moved and nothing the caller keeps changed: what an
             // unwinder with no unwind data for the code takes it to be.
             leaf: saved.length === 0 && this.locals === 0 && !this.pushedAny && !this.calls,
@@ -4087,6 +4112,10 @@ class FunctionCompiler {
                 this.guestCall(node, name === 'callStd');
                 return { where: 'eax', type: 'i32' };
             }
+            if (name === 'compareExchange')
+            {
+                return this.compareExchange(node);
+            }
             if (name === 'mxcsr')
             {
                 this.arity(node, 0);
@@ -4525,6 +4554,40 @@ class FunctionCompiler {
             }
         }
         return { index, addend };
+    }
+
+    /**
+     * compareExchange(address, expected, value): `lock cmpxchg` of the dword
+     * at the address, answering what it held -- `expected` where the value
+     * was stored. The value and the address are held while the expected
+     * value is made in EAX, where the instruction takes it; EDX, which a
+     * variable may have, carries the value and is put back.
+     *
+     * @param {any} node @returns {Value}
+     */
+    compareExchange(node){
+        const a = this.a;
+        this.arity(node, 3);
+        const [address, expected, value] = node.arguments;
+        for (const argument of [value, address])
+        {
+            const made = this.expr(argument);
+            this.integer(made, argument, 'intish');
+            this.toEax(made, argument);
+            this.hold();                                                   // push eax
+        }
+        const made = this.expr(expected);
+        this.integer(made, expected, 'intish');
+        this.toEax(made, expected);
+        this.unhold(ECX);                                                  // pop ecx: the address
+        a.emit(0x52);                                                      // push edx
+        this.grew(4);
+        a.emit(0x8b, 0x54, 0x24, 0x04);                                    // mov edx, [esp+4]
+        a.emit(0xf0, 0x0f, 0xb1, 0x11);                                    // lock cmpxchg [ecx],edx
+        a.emit(0x5a);                                                      // pop edx
+        this.grew(-4);
+        this.unhold(ECX);                                                  // pop ecx: the value
+        return { where: 'eax', type: 'u32' };
     }
 
     /** @param {any} node @param {string} name */

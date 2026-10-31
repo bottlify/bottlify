@@ -78,6 +78,39 @@ export function threadWindow(before, row, frames = row.frames){
             + ` ${waits.toFixed(1)} ms (${traps} traps), idle ${idle} ms,`
             + ` retired ${(retired / 1e6).toFixed(2)} M, ${rate} M/s computing`);
     }
+    lines.push(...waitWindow(before, row, frames));
+    return lines;
+}
+
+/**
+ * The host's waits a frame by what was waited on (the kernel's `sync.waits`:
+ * taken at once, blocked, a poll timed out) and the semaphores' releases and
+ * the wakes among them: which waits guest code could answer.
+ *
+ * @param {any} before @param {any} row @param {number} frames
+ * @returns {string[]}
+ */
+export function waitWindow(before, row, frames){
+    if (typeof row.sync?.waits !== 'string' || typeof before.sync?.waits !== 'string')
+    {
+        return ['host waits a frame: not measured'];
+    }
+    const per = 1 / Math.max(1, frames);
+    const now = JSON.parse(row.sync.waits);
+    const was = JSON.parse(before.sync.waits);
+    const lines = ['host waits a frame by kind: taken, blocked, polls timed out'];
+    for (const [kind, counts] of Object.entries(now))
+    {
+        /** @param {string} key */
+        const d = key=>((/** @type {any} */ (counts)[key] - (was[kind]?.[key] ?? 0)) * per)
+            .toFixed(1);
+        lines.push(`  ${kind.padEnd(22)} ${d('taken').padStart(7)} ${d('blocked').padStart(7)}`
+            + ` ${d('timedOut').padStart(7)}`);
+    }
+    const releases = ((row.sync.semaphoreReleases ?? 0) - (before.sync.semaphoreReleases ?? 0))
+        * per;
+    const wakes = ((row.sync.semaphoreWakes ?? 0) - (before.sync.semaphoreWakes ?? 0)) * per;
+    lines.push(`  ReleaseSemaphore ${releases.toFixed(1)}, waking a thread ${wakes.toFixed(1)}`);
     return lines;
 }
 

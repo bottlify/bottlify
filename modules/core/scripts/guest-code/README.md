@@ -30,7 +30,12 @@ export function D3DXVec2Normalize({ f32, setF32 }, out, v){ ... }
   caller left on the x87 stack), `i64` (EDX:EAX), `void`.
 - **Guest memory**: through the helpers taken from the first parameter: the loads `u8` `i8`
   `u16` `i16` `u32` `i32` `f32` `f64`, the stores `setU8` `setU16` `setU32` `setF32` `setF64`,
-  `copyUp`/`copyDown`/`fill`, and `call(fn, ...)` for a cdecl function pointer.
+  `copyUp`/`copyDown`/`fill`, `call(fn, ...)` for a cdecl function pointer, and
+  `compareExchange(address, expected, value)`, `lock cmpxchg` answering what the dword held:
+  the kernel's words that several executors change at once (i386 only).
+- **A table placed at run time**: an exported typed array is placed after the code, and the
+  compiled record says where (`tables`); a binding that writes the address of something it
+  placed into that copy of the table (`semaphore-guest.js`'s `HANDLE_WORDS`) finds it there.
 - **The host as a fallback**: `return host()` hands the call, arguments untouched, to the
   host's handler of the same function. Use it for the rare case the guest code does not take,
   such as errno to set or a handle it does not know. Nothing written before the hand-over is
