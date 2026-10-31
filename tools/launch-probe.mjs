@@ -21,7 +21,7 @@
  *
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
  *         [--network ws://host:port/] [--steam ACCOUNT.json] [--steam-session FILE|-]
- *         [--steam-ticket APP=FILE]
+ *         [--steam-ticket APP=FILE] [--log FILE [--log-last N]]
  *
  * `--network` puts the program on a relay's network (tools/relay-option.mjs);
  * without it the machine has the loopback adapter alone.
@@ -96,6 +96,10 @@ function parse(argv){
         // decided is decided early, and by the time it stops the ring that
         // would have shown it has been overwritten many times over.
         log: argv.includes('--log') ? argv[argv.indexOf('--log') + 1] : null,
+        // With --log, only the last N lines, written when the run ends: a
+        // program calling for minutes writes gigabytes of them otherwise.
+        logLast: argv.includes('--log-last')
+            ? Number(argv[argv.indexOf('--log-last') + 1]) : 0,
         // Addresses to read whenever a traced call matches --grep, as
         // `0x37e9610:16`, comma-separated. A program's decisions live in its
         // own globals, and the moment to look at one is the call that acts on
@@ -536,8 +540,31 @@ async function cpuProfiler(spec){
     return { stop };
 }
 
+/**
+ * A log that keeps its last `count` lines and writes them when it ends.
+ *
+ * @param {string} path @param {number} count
+ */
+function lastLines(path, count){
+    /** @type {string[]} */
+    let lines = [];
+    return {
+        /** @param {string} text */
+        write(text){
+            lines.push(text);
+            if (lines.length >= 2 * count)
+            {
+                lines = lines.slice(-count);
+            }
+        },
+        end(){
+            writeFileSync(path, lines.slice(-count).join(''));
+        },
+    };
+}
+
 async function main(){
-    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
+    const { id, turns, map, grep, calls, heap, profile, log, logLast, watch, peek, dump, which,
         corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
         memory, mode, translationStore, cpuProfile, steam, steamSession }
         = parse(process.argv.slice(2));
@@ -584,7 +611,8 @@ async function main(){
     /** Every instruction pointer the sampler saw, in order. @type {number[]} */
     const samples = [];
 
-    const sink = log ? createWriteStream(log) : null;
+    const sink = log === null ? null : logLast > 0 ? lastLines(log, logLast)
+        : createWriteStream(log);
 
     const placement = placementOf(manifest);
     const store = translationStore === null ? null
