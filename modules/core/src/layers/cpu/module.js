@@ -87,6 +87,15 @@ export const DEFAULT_THUNK_CAPACITY = 16384 * 16;
 export const EXECUTORS_OPENED_KEY = 'cpu/executors-opened';
 
 /**
+ * The guest instructions slices that ran their whole budget must have retired
+ * ending in one 64-byte bucket before its address is handed to the translator
+ * as a start (`creditSample`, `takeDue`). Not cork's `hotThreshold`, which
+ * counts the interpreter's visits to a jump target: this counts instructions,
+ * so one slice of a quantum is already past it.
+ */
+const HOT_SAMPLE_INSTRUCTIONS = 2000;
+
+/**
  * cpu — the guest CPU and the channel the guest calls us through.
  *
  * The only layer that knows which engine is underneath. Everything above it
@@ -1297,7 +1306,7 @@ export function createCpuModule(){
                     if (instructions >= maxInstructions)
                     {
                         creditSample(state.samples, machine.eip(), instructions,
-                            settings.cork.hotThreshold ?? 2000);
+                            HOT_SAMPLE_INSTRUCTIONS);
                     }
                     if (instructions > 0 && settings.cork.feed === 'slice')
                     {
