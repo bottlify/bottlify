@@ -2044,7 +2044,8 @@ export function translateShader(parsed, options = {}){
         // encoded values, as Direct3D 9 hardware blended.
         if (options.srgbWrite === true)
         {
-            for (const target of [...pixelOutputs].sort())
+            // Colours only: -1 is the depth the shader writes, not a target.
+            for (const target of [...pixelOutputs].filter(output=>output >= 0).sort())
             {
                 const at = body.indexOf(`    out.oC${target} = oC${target};`);
                 const c = `clamp(oC${target}.rgb, vec3f(0.0), vec3f(1.0))`;
