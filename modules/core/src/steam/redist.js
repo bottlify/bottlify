@@ -330,7 +330,9 @@ export function directxFiles(cabinets, machine){
                 for (const list of lists ? lists.split(',').map(one=>one.trim().toLowerCase()) : [])
                 {
                     const [id, below] = (directories.get(list)
-                        ?? directories.get('defaultdestdir') ?? '').split(',').map(one=>one.trim());
+                        ?? directories.get('defaultdestdir') ?? '').split(',')
+                        // A folder below may be quoted: 10,"Driver Cache\i386".
+                        .map(one=>one.trim().replace(/^"(.*)"$/, '$1'));
                     const directory = DIRECTORY_IDS[id];
                     for (const line of directory ? inf.get(list) ?? [] : [])
                     {

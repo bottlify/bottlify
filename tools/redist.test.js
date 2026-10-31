@@ -382,3 +382,14 @@ test('DirectX setup installs its optional packages alone, not the system it carr
     assert.deepEqual([...files.keys()].filter(path=>path.startsWith('.bottlify')), [],
         said.join('\n'));
 });
+
+test('a DirectX INF\'s folder below a directory id may be quoted', ()=>{
+    const packed = cabinet({
+        'a.dll': peImage(0x14c),
+        'a.inf': latin1(['[Version]', 'Signature = "$Windows NT$"', '[DestinationDirs]',
+            'Cached = 10,"Driver Cache\\i386"', '[DefaultInstall]', 'CopyFiles = Cached',
+            '[Cached]', 'a.dll'].join('\n')),
+    });
+    assert.deepEqual(redist.directxFiles([packed], 'x86').files.map(file=>file.path),
+        ['C:\\WINDOWS\\Driver Cache\\i386\\a.dll']);
+});
