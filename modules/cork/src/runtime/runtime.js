@@ -1968,10 +1968,12 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     {
         settings.store?.prepare?.()?.catch(()=>{});
     }
+    /** Whether translated code counts its transfers through the hash (`countTransfers`). */
+    const transfersCounted = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+        && settings.countTransfers === true;
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
-        countTransfers: import.meta.BOTTLIFY_DIAGNOSTICS !== false
-            && settings.countTransfers === true,
+        countTransfers: transfersCounted,
         blockProfile: profiling,
         hash: table !== null,
         place: table !== null && settings.dispatch === true,
@@ -5448,8 +5450,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                         transferTargets: transferTargets(view(), layout) }
                     : {}),
                 regions: regions.size,
-                // Counted only by a run that asked (`countTransfers`), else 0.
-                transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true),
+                // Counted only by a run that asked (`countTransfers`); absent otherwise,
+                // where a 0 would read as none made.
+                ...(transfersCounted
+                    ? { transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true) }
+                    : {}),
                 relinks: counts.relinks,
                 relinked: counts.relinked,
                 merges: counts.merges,

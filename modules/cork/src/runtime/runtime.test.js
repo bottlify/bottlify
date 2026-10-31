@@ -281,6 +281,12 @@ test('a callee that calls on is formed in, and its callee\'s return comes back i
     assert.ok(transfers <= 2 * 50, `${transfers} transfers through the hash`);
 });
 
+test('a run that does not count its transfers answers none, not 0', ()=>{
+    const m = machine();
+    assert.equal('transfers' in m.runtime.diagnostics(), false);
+    assert.equal(machine({ countTransfers: true }).runtime.diagnostics().transfers, 0);
+});
+
 test('translate: false keeps the translator off for the interpreter alone', async()=>{
     const m = machine({ translate: false });
     m.write(CODE, COUNTDOWN);
