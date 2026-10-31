@@ -10,7 +10,7 @@ import { createFiberFunctions } from './kernel32/fibers.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
-import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
+import { ALIGNMENT_64, createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
 import { blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
@@ -1068,9 +1068,10 @@ export function createWin32Module(){
             // A heap's small blocks are the guest's own (`guest-heap.js`): what
             // every host path is handed is the arena's allocator with those
             // found, sized and freed where they are.
+            const alignment = pointerSize === 8 ? ALIGNMENT_64 : undefined;
             const guestHeap = createGuestHeap({
-                allocator: createHeapAllocator(arena),
-                arena,
+                allocator: createHeapAllocator({ ...arena, alignment }),
+                arena, alignment,
                 memory: {
                     readU16: address=>memory.readU16(address),
                     readU32: address=>memory.readU32(address),

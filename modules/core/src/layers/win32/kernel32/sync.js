@@ -1443,7 +1443,7 @@ export function createSyncFunctions(host){
 
         // SRW locks and condition variables; a sleep on one takes a critical
         // section back through the same guest code EnterCriticalSection is.
-        ...createSlimSync(host, builder=>placed(builder).enter),
+        ...createSlimSync(host, builder=>placed(builder).enter, sectionTraps.enter),
 
         // Interlocked singly linked lists over the header the program owns.
         ...createSListFunctions(host),

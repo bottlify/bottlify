@@ -694,6 +694,16 @@ and kept nowhere; a program that samples a `sampler3D` fails to link and its log
 `glBlitFramebuffer` copies colour alone. A program that only asks for them runs; one that depends
 on their result draws without it. *2026-10-31.*
 
+**A72. A 64-bit process's system modules leave out the exports that are i386 code alone.** An
+export written as i386 guest code with neither an x86-64 form nor a host handler -- `_chkesp` and
+`_EH_prolog` of the C runtimes, the __fastcall `RtlInterlockedPushListSList`,
+`RtlActivateActivationContextUnsafeFast` and `RtlDeactivateActivationContextUnsafeFast` -- is not
+in a 64-bit process's module, so a program that imports one is refused at load by name and
+`GetProcAddress` answers NULL, rather than its i386 running as x86-64. x64 Windows has the first
+three nowhere; it has the two activation-context calls, whose frame is laid out for 64-bit
+pointers there, which this layer does not write. The app's diagnostics list what is left out
+(`leftOutAt64`); revisit the two when a 64-bit program is found that imports them. *2026-10-31.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
