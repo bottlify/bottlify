@@ -102,3 +102,18 @@ test('the art a library shows is opened to the page as an image, under Steam\'s 
     assert.deepEqual(publicBuild.content_scripts[0].matches,
         ['https://bottlify.app/*', 'https://play.bottlify.app/*'], 'pages stay Bottlify\'s own');
 });
+
+test('a store\'s sign-in page may be framed by Bottlify\'s sites alone, publicly', ()=>{
+    for (const build of /** @type {const} */ (['public', 'dev']))
+    {
+        const manifest = manifestFor(build, '1.0.0');
+        const framed = manifest.web_accessible_resources
+            .filter((/** @type {any} */ entry)=>entry.resources.some((/** @type {string} */ path)=>
+                path.endsWith('/signin.html')));
+        assert.equal(framed.length, 1, build);
+        assert.deepEqual(framed[0].resources, Object.keys(PLATFORMS).map(id=>`${id}/signin.html`));
+        assert.deepEqual(framed[0].matches, build === 'public'
+            ? ['https://bottlify.app/*', 'https://play.bottlify.app/*'] : ['<all_urls>'],
+        'the dev build\'s page checks the host that frames it (HOSTS)');
+    }
+});

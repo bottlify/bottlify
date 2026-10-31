@@ -31,9 +31,10 @@ export function webApi({ fetch: get = fetch } = {}){
          *
          * @param {string} method @param {Schema} requestSchema
          * @param {Record<string, any>} request @param {Schema} responseSchema
+         * @param {{ get?: boolean }} [options]  A method Steam takes as a GET.
          * @returns {Promise<{ eresult: number, body: Record<string, any>, message?: string }>}
          */
-        async call(method, requestSchema, request, responseSchema){
+        async call(method, requestSchema, request, responseSchema, { get: asGet = false } = {}){
             const [, service, name, version] = /^(\w+)\.(\w+)#(\d+)$/.exec(method) ?? [];
             if (!service)
             {
@@ -42,8 +43,9 @@ export function webApi({ fetch: get = fetch } = {}){
             const bytes = encode(requestSchema, request);
             const form = new URLSearchParams({ input_protobuf_encoded:
                 btoa(String.fromCharCode(...bytes)) });
-            const answer = await get(`${WEB_API}/I${service}Service/${name}/v${version}/`,
-                { method: 'POST', body: form });
+            const url = `${WEB_API}/I${service}Service/${name}/v${version}/`;
+            const answer = await (asGet ? get(`${url}?${form}`)
+                : get(url, { method: 'POST', body: form }));
             const body = new Uint8Array(await answer.arrayBuffer());
             const eresult = Number(answer.headers.get('x-eresult') ?? (answer.ok ? EResult.OK
                 : EResult.Fail));

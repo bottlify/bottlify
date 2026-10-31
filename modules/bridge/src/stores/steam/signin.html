@@ -1,0 +1,59 @@
+<!doctype html>
+<!--
+  Copyright © 2026 Bottlify Project
+  Licensed under the Mozilla Public License, version 2.0
+  See LICENSE for details
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in to Steam</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1b1b1f; --muted: #5f6368; --line: #c8c8d0;
+    --accent: #1a73e8; --error: #c5221f; --bg: #fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8ec; --muted: #a0a4ab; --line: #44464f; --accent: #8ab4f8;
+      --error: #f28b82; --bg: #1e1f24; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; font: 14px/1.45 system-ui, sans-serif; color: var(--fg);
+    background: var(--bg); }
+  nav { display: flex; gap: 8px; margin-bottom: 16px; }
+  nav button { flex: 1; }
+  button { font: inherit; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--line);
+    background: transparent; color: var(--fg); cursor: pointer; }
+  button[aria-pressed="true"], button.primary { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  label { display: block; margin: 0 0 12px; color: var(--muted); }
+  input { display: block; width: 100%; margin-top: 4px; font: inherit; padding: 8px;
+    border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--fg); }
+  .qr { display: flex; justify-content: center; min-height: 200px; align-items: center; }
+  .qr svg { background: #fff; padding: 8px; border-radius: 6px; }
+  .status { color: var(--muted); text-align: center; margin: 12px 0 0; min-height: 1.45em; }
+  .error { color: var(--error); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <nav>
+    <button type="button" id="by-qr" aria-pressed="true">QR code</button>
+    <button type="button" id="by-password" aria-pressed="false">Account name and password</button>
+  </nav>
+  <section id="qr">
+    <div class="qr" id="qr-code"></div>
+  </section>
+  <form id="password" hidden autocomplete="on">
+    <label>Steam account name<input name="account" autocomplete="username" required></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <button class="primary" type="submit">Sign in</button>
+  </form>
+  <form id="guard" hidden>
+    <p id="guard-asks"></p>
+    <label id="code-label">Code<input name="code" autocomplete="one-time-code" spellcheck="false"></label>
+    <button class="primary" type="submit" id="code-send">Send the code</button>
+  </form>
+  <p class="status" id="status" role="status"></p>
+  <script type="module" src="/bridge/src/stores/steam/signin.js"></script>
+</body>
+</html>

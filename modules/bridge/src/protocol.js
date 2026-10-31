@@ -6,25 +6,24 @@
 
 /**
  * What a page and GameHub say to each other, over `window.postMessage` on the
- * page's own origin; the content script carries both ways (pipe.js), and the
- * service worker reads the request here.
+ * page's own origin; GameHub in the tab (tab.js, run by the content script)
+ * reads the request here.
  *
  * The page asks `{ to: 'bottlify-bridge', id, op, args }`; GameHub answers
- * `{ from: 'bottlify-bridge', id, result }` or `{ ..., id, error }`, and an op
- * that goes on for a while (a sign-in) sends `{ ..., id, event, data }` first.
+ * `{ from: 'bottlify-bridge', id, result }` or `{ ..., id, error }`.
  * `id` is the page's, any number it has not used for a request still open.
  * GameHub is present when the page's root element carries
  * `data-bottlify-bridge` (its version): set before any of the page's scripts
  * runs, so a page that does not find it need not wait for an answer.
  *
  * No op names a store's protocol: the store is an argument (`steam`).
- * - `hello` -> `{ version, stores: [{ id, name, on }] }`: the stores GameHub has,
- *   and which the site has on (its `config.json`'s `bridge`).
- * - `cancel { target }` -> `{}`: stops the request asked as `target` (a sign-in).
+ * - `hello` -> `{ version, origin, stores: [{ id, name, on }] }`: the stores GameHub has,
+ *   and which the site has on (its `config.json`'s `bridge`); `origin` the
+ *   extension's, where a store's sign-in page is: `<origin>/<store>/signin.html`,
+ *   which the page shows in a frame, and which posts the page
+ *   `{ from: 'bottlify-signin', store, signedIn: { name } }` once signed in.
  * - `account { store, fresh? }` -> `{ name }`, or null for nobody signed in;
  *   `fresh` logs on again and reads the account's licences anew.
- * - `signIn { store }` -> `{ name }`; events `challenge` `{ url }` (shown as a
- *   QR code; sent again when the code changes) and `scanned`.
  * - `signOut { store }` -> `{}`.
  * - `list { store, fresh? }` -> `[{ id, name, bytes, exact, installable, covers }]`,
  *   the account's games; `covers` the URLs `cover` answers, by kind.
@@ -35,7 +34,8 @@
  * - `runData { store, game }` -> what a run hands the engine's emulation of the
  *   store's client (Steam's: `{ win32: { steam } }`), `{}` signed out.
  *
- * The session's token never crosses to the page.
+ * Neither the session's token nor a password crosses to the page: a sign-in
+ * is the frame's and the worker's.
  */
 
 export const TO = 'bottlify-bridge';
@@ -46,9 +46,7 @@ export const FROM = 'bottlify-bridge';
 /** Each op's arguments and what they must be. @type {Record<string, Record<string, ArgKind>>} */
 export const OPS = Object.freeze({
     hello: {},
-    cancel: { target: 'id' },
     account: { store: 'store', fresh: 'bool?' },
-    signIn: { store: 'store' },
     signOut: { store: 'store' },
     list: { store: 'store', fresh: 'bool?' },
     cover: { store: 'store', game: 'game', kind: 'kind' },

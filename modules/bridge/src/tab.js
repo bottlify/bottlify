@@ -11,9 +11,9 @@
  * An extension's service worker is kept at a low one, and on a busy machine
  * (a game running) its work waited tens of seconds (roadmap/gamehub.md).
  *
- * The worker keeps the sessions (serve.js): it signs in, over HTTPS, and a
- * store here asks it who is signed in and what to log on with; a sign-in
- * gives this tab its challenge and the account's name, never its token.
+ * The worker keeps the sessions (serve.js) and signs in, from a store's
+ * sign-in page in a frame of the page's, never through this tab; a store here
+ * asks it who is signed in and the session to log on with.
  * The port to the worker is made at the first ask and made again
  * after it drops (the worker stopped); an ask it had not answered fails.
  */
@@ -33,6 +33,7 @@ import { steamStore } from './stores/steam/store.js';
 /**
  * @param {Object} options
  * @param {string} options.version
+ * @param {string} [options.origin]  The extension's.
  * @param {() => Port} options.connect  A new port to the worker.
  * @param {(url: string) => import('./stores/steam/connection.js').CmSocket} options.socket
  *     A socket the page opens.
@@ -40,14 +41,11 @@ import { steamStore } from './stores/steam/store.js';
  * @param {Record<string, unknown>} options.platforms  What the site switches on.
  * @param {Record<string, any>} [options.steam]  Steam's protocol, for a test.
  */
-export function startTab({ version, connect, socket, toPage, platforms, steam }){
+export function startTab({ version, origin, connect, socket, toPage, platforms, steam }){
     /** @type {{ wire: ReturnType<typeof createWire> } | null} */
     let link = null;
     let next = 0;
-    /**
-     * @type {Map<number, { resolve: (value: any) => void, reject: (e: Error) => void,
-     *     onEvent?: (event: string, data: any) => void }>}
-     */
+    /** @type {Map<number, { resolve: (value: any) => void, reject: (e: Error) => void }>} */
     const waiting = new Map();
 
     const open = ()=>{
@@ -61,11 +59,7 @@ export function startTab({ version, connect, socket, toPage, platforms, steam })
         port.onMessage.addListener(raw=>{
             const answer = now.wire.receive(raw)?.answer;
             const asked = answer && waiting.get(answer.id);
-            if (asked && 'event' in answer)
-            {
-                asked.onEvent?.(answer.event, answer.data);
-            }
-            else if (asked)
+            if (asked)
             {
                 waiting.delete(answer.id);
                 if ('error' in answer)
@@ -92,27 +86,17 @@ export function startTab({ version, connect, socket, toPage, platforms, steam })
         return now;
     };
 
-    /**
-     * @param {string} op @param {Record<string, any>} [args]
-     * @param {{ onEvent?: (event: string, data: any) => void, signal?: AbortSignal }} [also]
-     * @returns {Promise<any>}
-     */
-    const ask = (op, args = {}, { onEvent, signal } = {})=>new Promise((resolve, reject)=>{
+    /** @param {string} op @param {Record<string, any>} [args] @returns {Promise<any>} */
+    const ask = (op, args = {})=>new Promise((resolve, reject)=>{
         const id = ++next;
-        waiting.set(id, { resolve, reject, onEvent });
-        const { wire } = open();
-        signal?.addEventListener('abort', ()=>wire.send({ ask: { id: ++next, op: 'cancel',
-            args: { target: id } } }), { once: true });
-        wire.send({ ask: { id, op, args } });
+        waiting.set(id, { resolve, reject });
+        open().wire.send({ ask: { id, op, args } });
     });
 
     /** @param {string} store @returns {import('./stores/steam/store.js').Vault} */
     const vault = store=>({
         get: ()=>ask('session', { store }),
         token: ()=>ask('token', { store }),
-        signIn: ({ onChallenge, onScanned, signal })=>ask('signIn', { store }, { signal,
-            onEvent: (event, data)=>(event === 'challenge'
-                ? onChallenge(data.url) : onScanned()) }),
         signOut: ()=>ask('signOut', { store }).then(()=>{}),
     });
 
@@ -129,7 +113,7 @@ export function startTab({ version, connect, socket, toPage, platforms, steam })
     const hub = ()=>(made ??= ask('switch', { platforms }).catch(()=>({})).then(on=>{
         const stores = { steam: steamStore({ vault: vault('steam'), socket, fetch: fetched,
             ...steam ? { steam } : {} }) };
-        return createHub({ version, stores, platforms: Object.fromEntries(
+        return createHub({ version, origin, stores, platforms: Object.fromEntries(
             Object.keys(stores).map(id=>[id, on?.[id] === true])) });
     }));
 

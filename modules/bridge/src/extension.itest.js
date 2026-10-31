@@ -12,22 +12,17 @@
  *
  * Signed in anonymously -- no account's token is at hand here -- so the QR
  * sign-in and an account's library are not exercised against Steam.
- *
- * A branded Chrome ignores --load-extension: the extension is loaded over the
- * DevTools pipe (Extensions.loadUnpacked), which needs
- * --enable-unsafe-extension-debugging.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from '../scripts/build.mjs';
-import { findBrowser } from '../../../tools/cdp_test/browser.mjs';
+import { chrome } from './chrome.fixture.js';
 import { connectCm } from './stores/steam/connection.js';
 import { logOnAnonymously, productInfo } from './stores/steam/session.js';
 import { STEAM_ART } from './stores/steam/apps.js';
@@ -92,56 +87,13 @@ async function fromSteam(){
     }
 }
 
-/**
- * A Chrome over a DevTools pipe.
- *
- * @param {string} profile
- */
-function chrome(profile){
-    const proc = spawn(findBrowser(), ['--headless=new', '--no-first-run',
-        '--no-default-browser-check', `--user-data-dir=${profile}`, '--remote-debugging-pipe',
-        '--enable-unsafe-extension-debugging', 'about:blank'],
-    { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
-    const out = /** @type {import('node:stream').Writable} */ (proc.stdio[3]);
-    const inp = /** @type {import('node:stream').Readable} */ (proc.stdio[4]);
-    let buffered = '';
-    let next = 0;
-    /** @type {Map<number, (message: any) => void>} */
-    const waiting = new Map();
-    inp.on('data', data=>{
-        buffered += data;
-        for (let end; (end = buffered.indexOf('\0')) >= 0;)
-        {
-            const message = JSON.parse(buffered.slice(0, end));
-            buffered = buffered.slice(end + 1);
-            waiting.get(message.id)?.(message);
-        }
-    });
-    /** @param {string} method @param {object} [params] @param {string} [sessionId] */
-    const send = (method, params = {}, sessionId)=>new Promise((done, fail)=>{
-        const id = ++next;
-        waiting.set(id, message=>{
-            waiting.delete(id);
-            if (message.error)
-            {
-                fail(new Error(`${method}: ${message.error.message}`));
-            }
-            else
-            {
-                done(message.result);
-            }
-        });
-        out.write(`${JSON.stringify({ id, method, params, ...sessionId ? { sessionId } : {} })}\0`);
-    });
-    return { proc, send };
-}
-
 const pause = (/** @type {number} */ ms)=>new Promise(done=>setTimeout(done, ms));
-/** @param {boolean} steam */
-const hello = steam=>({ version: '0.1.0', stores: [{ id: 'steam', name: 'Steam', on: steam }] });
+const hello = (/** @type {boolean} */ steam, /** @type {string} */ extension)=>({
+    version: '0.1.0', origin: `chrome-extension://${extension}`,
+    stores: [{ id: 'steam', name: 'Steam', on: steam }] });
 
 test('the dev build carries a page to Steam and keeps the session from it', async t=>{
-    const scratch = mkdtempSync(join(tmpdir(), 'bridge-itest-'));
+    const scratch = mkdtempSync(join(process.env.LOCALAPPDATA ?? tmpdir(), 'ghi-'));
     const { dev } = await build(join(scratch, 'dist'));
     const steam = await fromSteam();
     let config = {};
@@ -221,7 +173,7 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
             assert.equal(await page('crossOriginIsolated'), true);
             assert.equal(await page('ask("account", { store: "steam" })'), null);
             assert.equal(await page('presence'), '0.1.0');
-            assert.deepEqual(await page('ask("hello")'), hello(true));
+            assert.deepEqual(await page('ask("hello")'), hello(true, extension));
         });
 
         await t.test('GameHub in the tab speaks to Steam over the page\'s socket', async()=>{
@@ -259,18 +211,29 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
             assert.equal(read.chunk, true);
         });
 
-        await t.test('a sign-in in the worker, over HTTPS, streams its QR code', async()=>{
-            const signIn = await page(`(async () => {
-                const going = outcome(ask('signIn', { store: 'steam' }));
-                const id = n;
-                const challenge = () => seen.find(m => m.id === id && m.event === 'challenge');
-                for (let i = 0; i < 300 && !challenge(); i++)
-                    await new Promise(r => setTimeout(r, 100));
-                await ask('cancel', { target: id });
-                return { url: challenge()?.data.url ?? null, ended: await going };
-            })()`);
-            assert.match(signIn.url ?? '', /^https:\/\/s\.team\/q\//);
-            assert.match(signIn.ended.error, /cancelled/);
+        await t.test('Steam\'s sign-in page, framed, shows Steam\'s QR code', async()=>{
+            // The frame the launcher shows; the worker begins a QR sign-in with
+            // Steam itself, which nobody scans, and the frame's going ends it.
+            await page(`new Promise(done => { const frame = document.createElement('iframe');
+                frame.src = ${JSON.stringify(`chrome-extension://${extension}/steam/signin.html`)};
+                frame.onload = () => done(true); document.body.append(frame); })`);
+            const { targetInfos } = await browser.send('Target.getTargets');
+            const found = targetInfos.find((/** @type {any} */ info)=>info.type === 'iframe'
+                && info.url.endsWith('/steam/signin.html'));
+            assert.ok(found, 'the frame loads under the page\'s COEP');
+            const { sessionId: inFrame } = await browser.send('Target.attachToTarget',
+                { targetId: found.targetId, flatten: true });
+            let shown = '';
+            for (let tries = 0; tries < 300 && !shown; tries++)
+            {
+                await pause(100);
+                shown = (await browser.send('Runtime.evaluate', { returnByValue: true,
+                    expression: 'document.getElementById("status").textContent' }, inFrame))
+                    .result.value;
+                shown = /Scan with/.test(shown) ? shown : '';
+            }
+            assert.match(shown, /Scan with the Steam app/);
+            await page('document.querySelector("iframe").remove()');
         });
 
         await t.test('the session is the worker\'s, out of a content script\'s storage', async()=>{
@@ -312,7 +275,7 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
         await t.test('Steam switched off by the site: Steam refuses the page again', async()=>{
             config = { bridge: { steam: false } };
             await open();
-            assert.deepEqual(await page('ask("hello")'), hello(false));
+            assert.deepEqual(await page('ask("hello")'), hello(false, extension));
             assert.equal(await page(`rawSocket(${JSON.stringify(steam.endpoint)})`), 'refused');
             assert.match((await page('outcome(ask("account", { store: "steam" }))')).error, /switched off/);
             const blocked = await page(`fetch('https://api.steampowered.com/ISteamDirectory/`
@@ -322,7 +285,7 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
                 'refused', 'Steam\'s art is not let into the isolated page either');
             config = {};
             await open();
-            assert.deepEqual(await page('ask("hello")'), hello(true));
+            assert.deepEqual(await page('ask("hello")'), hello(true, extension));
         });
     }
     finally

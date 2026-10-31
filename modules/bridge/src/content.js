@@ -45,6 +45,7 @@
     const tab = Promise.all([import(chrome.runtime.getURL('bridge/src/tab.js')), platforms()])
         .then(([{ startTab }, switched])=>startTab({
             version,
+            origin: new URL(chrome.runtime.getURL('')).origin,
             connect: ()=>chrome.runtime.connect({ name: 'gamehub' }),
             socket: (/** @type {string} */ url)=>/** @type {any} */ (new WebSocket(url)),
             toPage: (/** @type {Record<string, any>} */ answer)=>window.postMessage(answer, location.origin),

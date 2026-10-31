@@ -8,7 +8,7 @@
  * Steam, as GameHub answers a page for it (hub.js), in the page's content
  * script (tab.js): every message to Steam built and read here, over a CM
  * socket the content script opens. The account's session is the service
- * worker's (`vault`): it signs in, and is asked what to log on with, which is
+ * worker's (`vault`), which signs in, and is asked what to log on with, which is
  * put into the logon and not kept here.
  *
  * One connection, logged on with the kept session or anonymously, is held
@@ -84,8 +84,6 @@ export async function steamManagers(get = fetch){
  * @typedef {Object} Vault
  * @property {() => Promise<Account | null>} get  Who is signed in, without the token.
  * @property {() => Promise<(Session & Account) | null>} token  The session, for a logon.
- * @property {(options: { onChallenge: (url: string) => void, onScanned: () => void,
- *     signal: AbortSignal }) => Promise<Account>} signIn  By QR code, in the worker.
  * @property {() => Promise<void>} signOut
  */
 
@@ -264,14 +262,6 @@ export function steamStore({ vault, socket, fetch: get = fetch,
             account: async({ fresh })=>{
                 const now = await account(fresh);
                 return now ? { name: now.accountName } : null;
-            },
-
-            signIn: async(_args, emit, signal)=>{
-                const { accountName } = await vault.signIn({ signal,
-                    onChallenge: url=>emit('challenge', { url }),
-                    onScanned: ()=>emit('scanned', {}) });
-                drop();
-                return { name: accountName };
             },
 
             signOut: async()=>{

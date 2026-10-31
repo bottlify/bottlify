@@ -62,6 +62,14 @@ test('each build is whole: its imports resolve, and what the page loads it may',
                 /worker|vault|serve|auth|webapi/.test(path)),
             'nothing of the worker is the page\'s to load');
             assert.ok(existsSync(join(dir, manifest.background.service_worker)));
+            for (const page of manifest.web_accessible_resources[1].resources)
+            {
+                const html = readFileSync(join(dir, page), 'utf8');
+                const script = /<script type="module" src="\/([^"]+)"/.exec(html)?.[1];
+                assert.ok(script && existsSync(join(dir, script)), `${page} loads ${script}`);
+                assert.equal(readFileSync(join(dir, script), 'utf8').includes('new RegExp('),
+                    dir.endsWith('dev'), `${script} checks the page framing it in the dev build`);
+            }
             assert.ok(existsSync(join(dir, manifest.content_scripts[0].js[0])));
             for (const ruleset of manifest.declarative_net_request.rule_resources)
             {
