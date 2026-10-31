@@ -954,6 +954,19 @@ reads the tables past RAM at the same offset, where it read RAM's first 64 KiB: 
 through a null pointer in a block that also reads below that pointer finds the page flags there,
 not the zeroes a null page holds. *2026-10-28.*
 
+**A process's threads spread over its executors, and its own executor keeps itself for the host's
+answers; nothing is moved on reckoned gains.** Each thread runs on an executor of its own, the
+host-bound and called-back threads kept on the process's executor; while a thread is pinned to the
+processor that executor plays (a game's main thread, pinned to the first), another executor plays
+it. The scheduler used to move threads onto the process's executor and off it, and trade a pinned
+thread's processor with it, each time its reckoning of the threads' waits said the move gained: a
+Call of Duty 4 run on an M4 with the trade made and held had frames of 34 ms at the median and
+130 ms at the 95th percentile, and spread with no trade ran without freezes at about 45 frames a
+second in its heaviest scene (the owner's observation, not a controlled A/B). The free host has
+been the default since 2026-10-21; the placement on gains, the trade and `cpu.freeHost: false`,
+the one way into them, are gone. `cpu.placement: 'concentrate'`, every thread taking turns on the
+process's executor, stays as a debugging switch. *2026-10-31.*
+
 ## C. Process model and porting
 
 **Process replacement, not two processes in one address space or two machines.** `CreateProcess`
