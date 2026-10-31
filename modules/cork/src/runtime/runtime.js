@@ -194,7 +194,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // Test-only: a run with the translator off, so the whole program is
         // the interpreter tier's and the corpus can judge it alone.
         translate: true,
-        undoLog: false,
         countTransfers: false,
         // Diagnostic: every block counts its executions in the block profile past
         // the tables -- only in a memory the host sized for it (cork's own layout)
@@ -235,16 +234,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
-        // A direct call to a compiler's runtime helper recognised by its bytes
-        // (MSVC's _ftol2) formed as the instructions it amounts to (false:
-        // every such call runs the helper's own code; helpers.js).
-        runtimeHelpers: true,
-        // A direct call to an import thunk -- `jmp [slot]` alone, as a linker
-        // makes one for each function a module imports -- formed as the call
-        // through the slot it amounts to, the thunk's jump counted with it
-        // (false: the thunk formed in as a callee, its jump and the callee's
-        // return each a transfer through the entry hash; region.js).
-        importThunks: true,
         // Indirect calls sampled while the translator runs, and a region whose
         // indirect call keeps going to a few small leaf callees formed again
         // with them in it: the call compares its target with each and jumps
@@ -516,8 +505,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      */
     let readsChecked = settings.checkReads === true;
     /** Whether regions are made loose (`looseStacks`): until code is translated on a stack. */
-    let loose = settings.looseStacks !== false && settings.precise !== true
-        && settings.undoLog !== true;
+    let loose = settings.looseStacks !== false && settings.precise !== true;
     /** The pages of the threads' stacks the host named (`noteStack`). @type {Set<number>} */
     const stackPages = new Set();
     /**
@@ -530,9 +518,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
     const formOptions = { maxBlocks: settings.maxRegionBlocks,
         maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
-        helpers: settings.runtimeHelpers !== false, leafBlocks: settings.leafBlocks,
+        leafBlocks: settings.leafBlocks,
         leafBytes: settings.leafBytes, switchEntries: settings.switchEntries,
-        formDepth: settings.formDepth, importThunks: settings.importThunks !== false,
+        formDepth: settings.formDepth,
         // Long mode's code formed as long mode's, the shared emitter's own cuts in it.
         ...layout.bits === 64 ? { mode: MODE_64 } : {} };
     /** The same on this thread, with the host's copy of a span at once where it has one; a
@@ -2005,20 +1993,19 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         ? performance.now() + settings.blockProfileFrom * 1000 : null;
     // The store is opened (a directory store reads its index) while the host
     // is still starting, so it can answer the first batch's lookups at once.
-    if (leaveOut.size === 0 && !settings.undoLog && !profiling)
+    if (leaveOut.size === 0 && !profiling)
     {
         settings.store?.prepare?.()?.catch(()=>{});
     }
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
-        undoLog: settings.undoLog,
         countTransfers: import.meta.BOTTLIFY_DIAGNOSTICS !== false
             && settings.countTransfers === true,
         blockProfile: profiling,
         hash: table !== null,
         place: table !== null && settings.dispatch === true,
         profileCalls: table !== null && settings.callTargets === true,
-        callReturn: table !== null && settings.callReturn === true && !settings.undoLog,
+        callReturn: table !== null && settings.callReturn === true,
         linkedCalls: settings.linkedCalls !== false,
         crossTailCalls: settings.crossTailCalls !== false,
         ...(settings.callDepth === CallStack.LIMIT ? {} : { callDepth: settings.callDepth }),
@@ -2894,11 +2881,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         kept: 'blocks' });
     /**
      * The store this runtime keeps its translations in: none for a diagnostic run
-     * with classes left out, or with an undo log the stored modules were built
-     * without.
+     * with classes left out or a block profile.
      * @returns {any}
      */
-    const storeHere = ()=>(leaveOut.size > 0 || settings.undoLog || profiling
+    const storeHere = ()=>(leaveOut.size > 0 || profiling
         ? null : (settings.store ?? null));
     /** `storedBlocks` as a record holds it: a block, an entry and their tops each.
      * @param {Map<number, number>} blocks */
@@ -4688,7 +4674,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // until its own batch comes back. A title's queue is never empty --
         // the cold starts met twice stay -- so the test is the heat, not the
         // length.
-        const keeps = leaveOut.size > 0 || settings.undoLog || profiling
+        const keeps = leaveOut.size > 0 || profiling
             ? null : (settings.store ?? null);
         // The steps that take over running regions go out alone: only with no
         // batch out, and nothing goes beside them until they are back.

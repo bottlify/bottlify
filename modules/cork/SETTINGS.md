@@ -51,8 +51,6 @@ with a measurement beside it.
 | `leafBlocks`, `leafBytes` | 16, 512 | How large such a callee may be. | Larger inlines more and grows regions. |
 | `formDepth` | 1 | How many levels of callees formed in may keep direct calls of their own, their small callees formed in as well (0: leaves alone). | Deeper forms more of a call chain into one region and grows it; the region's limits bound it. |
 | `switchEntries` | 1024 | Entries of a switch's jump table followed when forming. | Larger for giant switches (interpreters); regions grow. |
-| `runtimeHelpers` | `true` | Compiler helpers such as MSVC's `_ftol2` formed as what they do. | Off to rule it out. |
-| `importThunks` | `true` | A direct call to an import thunk (`jmp [slot]` alone, as a linker makes for each imported function) formed as the call through its slot: predicted from the slot and formed in, or made as a wasm call, as `call [slot]` is. | Off to rule it out: the thunk is then formed in as a callee, and its jump and the target's return each go through the entry hash. |
 | `callReturn` | `true` | A call out of a region is a wasm call, and the region goes on after the `ret`. | Off makes every return go through the entry hash. |
 | `emptyCalls` | `true` | A call to a function that does nothing (a `ret` or `ret imm16`, after at most three direct jumps, such as an incremental linker's thunk to an empty virtual method) returns at the transfer, without entering a region. | Off to rule it out. |
 | `linkedCalls` | `true` | A direct call out of a region reads its target's first slot in the entry hash and, where the entry there is the one the transfer would take at its first look, calls its function itself, without the transfer's hashing and probe. | Off to rule it out; every call then goes through the transfer. |
@@ -114,10 +112,9 @@ see [`docs/core/configuration.md`](../../docs/core/configuration.md#cpu).
 | `traceStore` | Translation store keys. |
 | `checkStale` | Regions whose bytes changed. |
 | `countTransfers` | Transfers between regions. |
-| `undoLog` | The store's undo log, for replay. |
 
 They all cost speed, so they belong in an investigation and nowhere else. A run with
-`blockProfile` or `undoLog`, or with classes left out (`leaveOut`), keeps no translation store.
+`blockProfile`, or with classes left out (`leaveOut`), keeps no translation store.
 
 **Store**
 

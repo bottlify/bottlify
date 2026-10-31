@@ -588,7 +588,7 @@ export function formShared(){
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[],
- *     importThunks?: boolean, bytesOf?: (start: number, end: number) => Uint8Array,
+ *     bytesOf?: (start: number, end: number) => Uint8Array,
  *     mode?: { bits: 32 | 64 },
  *     translates?: (instruction: import('./decode/decoder.js').Instruction) => boolean,
  *     baseOf?: (reg: number) => number | null }} [options]
@@ -598,9 +598,8 @@ export function formShared(){
  *     (1: a callee's callees leave; 0: only leaves are formed in); switchEntries: the most
  *     entries a switch's jump table is followed through; helpers: a
  *     call to a compiler's runtime helper is formed as what it amounts to (helpers.js), those
- *     of RUNTIME_HELPERS or of the list given; importThunks: a direct call to an import
- *     thunk is formed as the call through its slot (`thunkCall`; never in long mode);
- *     callTargets:
+ *     of RUNTIME_HELPERS or of the list given, and a direct call to an import thunk as the
+ *     call through its slot (`thunkCall`), neither in long mode; callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
  *     as a direct call's small callee is -- the call compares its target with each; a call
  *     named with none is `quiet`, its calls no longer sampled;
@@ -631,14 +630,13 @@ export function formRegion(read, entry,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
         formDepth = 1, predictedRoom = PREDICTED_ROOM,
         ownRoom = { blocks: maxBlocks, bytes: maxBytes },
-        switchEntries = SWITCH_ENTRIES, bytesOf, mode, translates, baseOf,
-        importThunks = true } = {})
+        switchEntries = SWITCH_ENTRIES, bytesOf, mode, translates, baseOf } = {})
 {
     const wide = mode?.bits === 64;
+    const importThunks = !wide;
     if (wide)
     {
         helpers = false;
-        importThunks = false;
         translates ??= translatesLong;
     }
     // Every page forming reads decides what it forms -- an import slot a call is predicted

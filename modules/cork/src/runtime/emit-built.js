@@ -193,8 +193,7 @@ export function arenaEmitCache(buffer){
  */
 function contextKey(layout, features, options, leaveOut){
     return JSON.stringify([layout.id ?? layout, features.simd, features.tailCalls,
-        features.defaultNaNNegative === true, features.armHost === true, options.undoLog === true,
-        options.hash === true,
+        features.defaultNaNNegative === true, features.armHost === true, options.hash === true,
         options.trapPort ?? null, options.countTransfers === true, options.blockProfile === true,
         options.wide === true, options.narrow === true, options.structure !== false,
         options.precise === true, options.place === true, options.profileCalls === true,
@@ -301,7 +300,7 @@ function sameShape(kept, shape){
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
  *     armHost?: boolean }} features
- * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
+ * @param {{ hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
  *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
@@ -328,7 +327,6 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         : new Set(options.leaveOut ?? []);
     const m = new ModuleBuilder();
     const context = prepareModule(m, layout, features, options.memory ?? {}, {
-        undoLog: options.undoLog === true,
         hash: options.hash === true,
         countTransfers: options.countTransfers === true,
         blockProfile: options.blockProfile === true,
@@ -510,7 +508,7 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
  *     armHost?: boolean }} features
- * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number,
+ * @param {{ hash?: boolean, trapPort?: number,
  *     leaveOut?: Set<string> | string[] }} [options]
  * @returns {BuiltRegion}
  */
