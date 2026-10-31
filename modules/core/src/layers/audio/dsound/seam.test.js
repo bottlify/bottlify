@@ -388,6 +388,21 @@ test('IDirectSound8 has its twelfth slot, VerifyCertification, and answers it', 
     assert.equal(f.bridge.call(root, 'VerifyCertification', [0]), DSERR_INVALIDPARAM);
 });
 
+test('the speakers are stereo, wide, as Windows answers for two', ()=>{
+    // dsound.h: DSSPEAKER_MONO is 2, DSSPEAKER_STEREO 4, and the geometry sits in
+    // the high word. An answer of 2 had FMOD mix every title in mono.
+    const f = fixture();
+    const out = 0x1000;
+    assert.equal(
+        f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]), DS_OK);
+    const root = f.memory.u32(out);
+    const config = 0x1100;
+    assert.equal(f.bridge.call(root, 'GetSpeakerConfig', [config]), DS_OK);
+    assert.equal(f.memory.u32(config) & 0xff, 4, 'DSSPEAKER_STEREO');
+    assert.equal(f.memory.u32(config) >>> 16, 20, 'DSSPEAKER_GEOMETRY_WIDE');
+    assert.equal(f.bridge.call(root, 'GetSpeakerConfig', [0]), DSERR_INVALIDPARAM);
+});
+
 test('CreateSoundBuffer refuses a descriptor with no size or no format', ()=>{
     const f = createRoot();
     const out = 0x1800;
