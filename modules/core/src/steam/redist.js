@@ -55,6 +55,8 @@ import { openCompound, bytesSource } from '../layers/win32/msi/compound.js';
 import { openDatabase } from '../layers/win32/msi/database.js';
 import { evaluateCondition, MSICONDITION } from '../layers/win32/msi/condition.js';
 
+export { depotOwners, sharedDepots, wantedDepot } from './apps.js';
+
 /**
  * An installed app's files, by their backslashed paths in it.
  *
@@ -83,55 +85,6 @@ const REG_MULTI_SZ = 7;
 
 /** msidbComponentAttributes64bit: a component of the 64-bit view. */
 const COMPONENT_64BIT = 0x100;
-
-/**
- * Whether a depot is one an install of the app takes: Windows' (or every
- * system's), the language's or every language's, and not a DLC's.
- *
- * @param {any} depot  Its entry in the app's `depots`.
- * @param {string} language  Steam's name of it: `english`, `german`, ...
- */
-export function wantedDepot(depot, language){
-    const os = String(depot?.config?.oslist ?? '');
-    const lang = String(depot?.config?.language ?? '');
-    return (!os || os.split(',').includes('windows')) && (!lang || lang === language)
-        && !depot?.dlcappid;
-}
-
-/**
- * The depots of other apps an app declares it needs, at those apps' public
- * manifests: `{ id, app, gid }`, `app` the app that owns the depot -- whose
- * id a depot's key and manifest code are asked under.
- *
- * @param {any} info  The app's product info.
- * @param {Map<number, any>} owners  The owning apps' product info, by app id.
- * @param {string} [language]
- * @returns {{ id: number, app: number, gid: bigint }[]}
- */
-export function sharedDepots(info, owners, language = 'english'){
-    /** @type {{ id: number, app: number, gid: bigint }[]} */
-    const found = [];
-    for (const [id, depot] of Object.entries(info?.depots ?? {}))
-    {
-        const app = Number(/** @type {any} */ (depot)?.depotfromapp);
-        if (!/^\d+$/.test(id) || !app || !wantedDepot(depot, language))
-        {
-            continue;
-        }
-        const gid = owners.get(app)?.depots?.[id]?.manifests?.public?.gid;
-        if (gid)
-        {
-            found.push({ id: Number(id), app, gid: BigInt(gid) });
-        }
-    }
-    return found;
-}
-
-/** The apps that own an app's shared depots. @param {any} info @returns {number[]} */
-export function depotOwners(info){
-    return [...new Set(Object.values(info?.depots ?? {})
-        .map(depot=>Number(/** @type {any} */ (depot)?.depotfromapp)).filter(Boolean))];
-}
 
 /**
  * A key looked up whatever its case: Valve's scripts write `Process 1` and

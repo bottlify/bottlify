@@ -28,7 +28,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from '../scripts/build.mjs';
 import { findBrowser } from '../../../tools/cdp_test/browser.mjs';
-import { connectCm, logOnAnonymously, productInfo } from '../../core/src/steam/index.js';
+import { STEAM_ART, connectCm, logOnAnonymously, productInfo } from '../../core/src/steam/index.js';
 
 const CORE = fileURLToPath(new URL('../../core/src/', import.meta.url));
 /** Steamworks Common Redistributables: a depot whose key Steam gives anyone. */
@@ -57,6 +57,12 @@ window.ask = (op, args) => new Promise((resolve, reject) => {
 });
 window.outcome = promise => promise.then(result => ({ result }),
     e => ({ error: String(e.message ?? e) }));
+window.picture = src => new Promise(done => {
+    const image = new Image();
+    image.onload = () => done('shown');
+    image.onerror = () => done('refused');
+    image.src = src;
+});
 window.rawSocket = endpoint => new Promise(done => {
     const socket = new WebSocket('wss://' + endpoint + '/cmsocket/');
     socket.onopen = () => { socket.close(); done('open'); };
@@ -211,26 +217,35 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
 
         await t.test('the bridge is there before the page\'s scripts, and Steam is on', async()=>{
             assert.equal(await page('crossOriginIsolated'), true);
-            assert.equal(await page('ask("account")'), null);
+            assert.equal(await page('ask("steam.account")'), null);
             assert.equal(await page('presence'), '0.1.0');
             assert.deepEqual(await page('ask("hello")'), hello(true));
         });
 
         await t.test('a connection manager takes the page through the rule', async()=>{
             assert.equal(await page(`rawSocket(${JSON.stringify(steam.endpoint)})`), 'open');
-            const servers = await page('ask("contentServers")');
+            const servers = await page('ask("steam.contentServers")');
             assert.ok(servers.length > 0, 'content servers');
-            const keyLength = await page(`ask("depotKey", { app: ${APP}, depot: ${DEPOT} })`
+            const keyLength = await page(`ask("steam.depotKey", { app: ${APP}, depot: ${DEPOT} })`
                 + '.then(key => key.length)');
             assert.equal(keyLength, 32);
+        });
+
+        await t.test('what Steam tells anyone of apps, and their art, isolated', async()=>{
+            const info = await page(`ask("steam.productInfo", { apps: [${APP}, 440] })`);
+            assert.equal(info[APP]?.depots?.[DEPOT]?.manifests?.public?.gid, steam.gid);
+            assert.equal(String(info[440]?.common?.type).toLowerCase(), 'game');
+            assert.ok(Object.keys(info[440]?.config?.launch ?? {}).length > 0, 'launch options');
+            assert.equal(await page(`picture(${JSON.stringify(`${STEAM_ART}/440/header.jpg`)})`),
+                'shown');
         });
 
         await t.test('the page reads a manifest and a chunk from the content servers', async()=>{
             const read = await page(`(async () => {
                 const { manifest, downloadChunk } = await import('/core/steam/depot.js');
-                const [server] = await ask('contentServers');
-                const key = await ask('depotKey', { app: ${APP}, depot: ${DEPOT} });
-                const code = await ask('manifestCode',
+                const [server] = await ask('steam.contentServers');
+                const key = await ask('steam.depotKey', { app: ${APP}, depot: ${DEPOT} });
+                const code = await ask('steam.manifestCode',
                     { app: ${APP}, depot: ${DEPOT}, gid: '${steam.gid}' });
                 const listed = await manifest(server,
                     { depot: ${DEPOT}, gid: ${steam.gid}n, code: BigInt(code), key });
@@ -244,7 +259,7 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
 
         await t.test('a sign-in streams the QR challenge from Steam and is cancelled', async()=>{
             const signIn = await page(`(async () => {
-                const going = outcome(ask('signIn'));
+                const going = outcome(ask('steam.signIn'));
                 const id = n;
                 const challenge = () => seen.find(m => m.id === id && m.event === 'challenge');
                 for (let i = 0; i < 150 && !challenge(); i++)
@@ -261,11 +276,11 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
             assert.equal(await page('typeof chrome?.storage'), 'undefined');
             await storage(`chrome.storage.local.set({ steam: { accountName: 'probe',
                 refreshToken: ${JSON.stringify(FAKE_TOKEN)} } })`);
-            const account = await page('outcome(ask("account"))');
+            const account = await page('outcome(ask("steam.account"))');
             assert.ok(account.error, 'Steam refuses a made-up token');
             t.diagnostic(`account with a made-up token: ${account.error}`);
             assert.doesNotMatch(await page('JSON.stringify(seen)'), /not-a-signature|eyJ/);
-            assert.deepEqual(await page('ask("signOut")'), {});
+            assert.deepEqual(await page('ask("steam.signOut")'), {});
             assert.deepEqual(await storage('chrome.storage.local.get(null)'), {});
         });
 
@@ -274,10 +289,12 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
             await open();
             assert.deepEqual(await page('ask("hello")'), hello(false));
             assert.equal(await page(`rawSocket(${JSON.stringify(steam.endpoint)})`), 'refused');
-            assert.match((await page('outcome(ask("depotKey", { app: 1, depot: 2 }))')).error, /switched off/);
+            assert.match((await page('outcome(ask("steam.depotKey", { app: 1, depot: 2 }))')).error, /switched off/);
             const blocked = await page(`fetch('https://api.steampowered.com/ISteamDirectory/`
                 + `GetCMListForConnect/v1/').then(() => 'read', () => 'refused')`);
             assert.equal(blocked, 'refused');
+            assert.equal(await page(`picture(${JSON.stringify(`${STEAM_ART}/440/header.jpg?off`)})`),
+                'refused', 'Steam\'s art is not let into the isolated page either');
             config = {};
             await open();
             assert.deepEqual(await page('ask("hello")'), hello(true));

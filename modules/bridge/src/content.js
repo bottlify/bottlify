@@ -63,10 +63,13 @@
     };
 
     const protocol = import(url('protocol.js'));
-    const modules = [import(url('bridge.js')), import(url('steam/index.js'))];
+    const modules = [import(url('bridge.js')), import(url('platforms/steam.js')),
+        import(url('steam/index.js'))];
     const ready = Promise.all([...modules, platforms()])
-        .then(([{ createBridge }, steam, switched])=>createBridge(
-            { steam, store, managers, version, platforms: switched }));
+        .then(([{ createBridge }, { steamPlatform }, steam, switched])=>createBridge({
+            version, platforms: switched,
+            ops: { steam: steamPlatform({ steam, store, managers }) },
+        }));
 
     window.addEventListener('message', async event=>{
         if (event.source !== window || event.origin !== location.origin)

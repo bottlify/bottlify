@@ -378,15 +378,3 @@ export async function installBundle({ handle, depots, servers, installscript, ex
     const program = executable ? byPath.get(executable.replace(/\//g, '\\').toLowerCase()) : null;
     return { bundle, entry: program ? await tree.read(program.path) : null, said };
 }
-
-/**
- * Steam's first launch option for Windows that names a program: how the app starts.
- *
- * @param {any} info  The app's product info.
- * @returns {{ executable: string, arguments?: string } | null}
- */
-export function windowsLaunch(info){
-    return /** @type {any} */ (Object.values(info?.config?.launch ?? {}).find(one=>one?.executable
-        && (!one?.config?.oslist || String(one.config.oslist).split(',').includes('windows'))))
-        ?? null;
-}

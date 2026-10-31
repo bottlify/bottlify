@@ -7,13 +7,15 @@
 /**
  * Builds the extension, unpacked: `dist/public/` for Bottlify's sites,
  * `dist/dev/` for a local launcher as well (src/manifest.js). The Steam
- * modules are core's, copied as they are: one source, no second copy in git.
+ * modules are core's, copied as they are: one source, no second copy in git --
+ * `steam/index.js` and what it imports, each at its path under core's `src`,
+ * and nothing else of core's, which the content script never loads.
  *
  *   node scripts/build.mjs [out]
  */
 
-import { copyFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOSTS, PAGES, PLATFORMS, manifestFor } from '../src/manifest.js';
 
@@ -23,26 +25,54 @@ const HERE = fileURLToPath(new URL('..', import.meta.url));
 const CORE = resolve(HERE, '../core/src');
 
 /**
+ * A module of core and every module it imports, by path under core's `src`.
+ *
+ * @param {string} entry  `steam/index.js`.
+ * @returns {Promise<string[]>}
+ */
+export async function coreClosure(entry){
+    /** @type {Set<string>} */
+    const seen = new Set();
+    const pending = [entry];
+    while (pending.length > 0)
+    {
+        const path = /** @type {string} */ (pending.pop());
+        if (seen.has(path))
+        {
+            continue;
+        }
+        seen.add(path);
+        const code = (await readFile(join(CORE, path), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
+        for (const [, specifier] of code.matchAll(
+            /(?:^|[\s;])(?:import|export)\s[^'"`;]*?from\s*['"](\.{1,2}\/[^'"]+)['"]/g))
+        {
+            pending.push(posix.normalize(posix.join(posix.dirname(path), specifier)));
+        }
+    }
+    return [...seen].sort();
+}
+
+/**
  * @param {string} [out]
  * @returns {Promise<Record<string, string>>}  Each build's directory.
  */
 export async function build(out = join(HERE, 'dist')){
     const { version } = JSON.parse(await readFile(join(HERE, 'package.json'), 'utf8'));
     /** @type {[string, string][]} */
-    const files = ['content.js', 'worker.js', 'bridge.js', 'protocol.js']
+    const files = ['content.js', 'worker.js', 'bridge.js', 'protocol.js', 'platforms/steam.js']
         .map(name=>[join(HERE, 'src', name), name]);
     for (const platform of Object.values(PLATFORMS))
     {
         files.push([join(HERE, platform.rules), platform.rules]);
     }
-    for (const name of await readdir(join(CORE, 'steam')))
+    for (const path of await coreClosure('steam/index.js'))
     {
-        if (name.endsWith('.js') && !name.endsWith('.test.js'))
+        if (relative(CORE, join(CORE, path)).startsWith('..'))
         {
-            files.push([join(CORE, 'steam', name), `steam/${name}`]);
+            throw new Error(`steam/index.js reaches ${path}, outside core's src`);
         }
+        files.push([join(CORE, path), path]);
     }
-    files.push([join(CORE, 'zstd.js'), 'zstd.js']);
     /** @type {Record<string, string>} */
     const built = {};
     for (const flavour of /** @type {(keyof typeof PAGES)[]} */ (Object.keys(PAGES)))

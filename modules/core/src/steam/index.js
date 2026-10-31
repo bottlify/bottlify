@@ -16,9 +16,9 @@ export {
     FILE_FLAG_DIRECTORY, contentServers, depotKey, downloadChunk, manifest, manifestRequestCode,
     readDepotAccess, writeDepotAccess,
 } from './depot.js';
+// Not install.js nor redist.js: they reach the engine's layers (the bundle
+// writer, cabinets, installer databases), which the bridge, carrying this
+// module and what it imports, has no use for -- `@bottlify/core/steam/install`.
 export {
-    comparePaths, depotManifest, downloadFiles, installBundle, installedFiles, windowsLaunch,
-} from './install.js';
-export {
-    depotOwners, installSteamRedistributables, sharedDepots, wantedDepot,
-} from './redist.js';
+    STEAM_ART, depotOwners, publicAppInfo, sharedDepots, steamArt, wantedDepot, windowsLaunch,
+} from './apps.js';
