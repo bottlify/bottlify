@@ -155,8 +155,8 @@ under `concurrency` in [api.md](api.md).
 
 ## Sound
 
-Sound is mixed on the browser's audio thread. `openSpeaker` opens the page's side of it -- the
-audio context and the package's worklet -- and must be called inside the click or touch that starts
+Sound is mixed on the browser's audio thread. `openSpeaker` opens the page's side of it (the
+audio context and the package's worklet) and must be called inside the click or touch that starts
 the run, before anything is awaited: a phone's browser starts sound in that handler and nowhere
 else.
 

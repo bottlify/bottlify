@@ -40,7 +40,7 @@
  *     executable: Uint8Array,
  *     audio?: NonNullable<import('../app.js').AppOptions['audio']> & { port?: MessagePort },
  *     bundle?: { url?: string, file?: Blob, store?: string | null, id?: string, prefix?: string,
- *         prefetch?: boolean, indexSha256?: string,
+ *         prefetch?: boolean, preload?: boolean, revision?: number, indexSha256?: string,
  *         retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } },
  *     storage?: 'opfs' | 'local' | { files: { path: string, bytes: Uint8Array }[] } | null,
  *     device?: { skipTexture?: string | null, probeTexture?: string | null, keepImages?: number[],

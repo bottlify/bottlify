@@ -14,7 +14,7 @@ The package also exports `assembleModules` (the layers without a program, see
 `openSpeaker` (the page's audio output, below), and the page's screen while a run plays
 (`requestFullscreen`, `exitFullscreen`, `fullscreenElement`, `watchFullscreen`, `canFullscreen`,
 `keepScreenAwake`, below), and `programIcon(bytes)`: a program's own icon from its executable, for a
-page to show the game by -- the first icon group's largest image, `{ width, height, rgba }` for one
+page to show the game by: the first icon group's largest image, `{ width, height, rgba }` for one
 stored as a bitmap or `{ width, height, png }` for one stored as a PNG, null for none.
 
 ## The speaker
@@ -36,29 +36,32 @@ beside `core.js` by default). It answers a speaker:
 
 ## Options
 
-The options reach the engine's worker by `postMessage`, so every value must be data.
+The options reach the engine's worker by `postMessage`, so every value must be data. Nested
+options are described in [configuration.md](configuration.md). An option the engine does not know
+is ignored; `executors`, the older name of `cpu.cores`, is refused.
 
 ### What runs
 
 | Option | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `executable` | `Uint8Array` | required | The program's PE image: 32-bit x86 (PE32), or x86-64 (PE32+) as far as [limits.md](limits.md) says. |
-| `imagePath` | string | `'C:\app.exe'` | Where the program believes it was loaded from, and its start directory. |
+| `imagePath` | string | `'C:\app.exe'` | Where the program believes it was loaded from. |
 | `commandLine` | string | the quoted `imagePath` | What `GetCommandLine` answers. If you compose it, quote argv[0] yourself. |
-| `engine` | `'cork'` | `'cork'` | What runs the x86 code: cork, the only engine. |
+| `startDirectory` | string | the image's directory | The current directory the program starts in, for a system program whose paths are its starter's to mean (a setup's helper). |
 | `mode` | `'auto'` \| `'compatible'` \| `'isolated'` | `'auto'` | How much uses shared memory. `isolated`: guest memory is a `SharedArrayBuffer`; the graphics worker reads unlocked bytes from it and writes read-backs into it in place. `compatible`: guest memory belongs to the engine thread, and whatever crosses to another thread is copied. `auto`: `isolated` on a cross-origin isolated page, `compatible` elsewhere. `isolated` where memory cannot be shared is refused at `createApp`. The `app` layer's diagnostics show the run's mode. |
 | `concurrency` | `1` \| `2` \| `4` | `1` | How many processes run at once. `1`: the program runs on the engine's thread, and a child runs beside its parent from `CreateProcess` on, the two taking turns on that thread. `2` or `4`: every process, the page's program included, runs in its own worker, and a child runs beside its parent from `CreateProcess` on; a child beyond that count runs beside its parent, taking turns with it in the parent's worker. The engine's thread then runs no program and keeps the run's system (registry, volume, bundle, session, windows, ids, named events, semaphores and mutexes, journal, sound output, presenter), which each process reaches over a link; what a process in a worker shares and draws through the run, and what it cannot have yet, is in [limits.md](limits.md#processes). More than one process needs shared memory and runs `isolated`; asked for in `compatible` mode or where memory cannot be shared, the run is `compatible` with `1` and a `fallback` event says so. With more than one, the page's input and visibility go into a ring in shared memory that the engine reads between turns, and an idle engine sleeps on its doorbell instead of handing its thread back to the browser to look for input. At any concurrency the page's input goes to the process whose window should have it: the pointer to the window holding the mouse or under it, the keyboard to the window with the run's single focus. Where no window has it, it goes to no program, except in a run with no window showing, where the page is the console: the last-started process still running gets it. The `app` layer's diagnostics carry `concurrency`, `fallback` and the pacing counts (`pacing`). |
 | `windows` | `'win2000'` \| `'winxp'` \| `'win7'` \| `'win10'` | `'winxp'` | The Windows the program sees; `GetVersionEx`, `RtlGetVersion`, the registry, system file versions and profile folders agree. Windows 10 reports 6.2 to a program whose manifest does not declare it. |
 | `machine` | `'x86'` \| `'amd64'` | the first program's width | Whether the machine is a 32- or a 64-bit Windows. On a 64-bit one a 32-bit process runs under WOW64: `IsWow64Process`, `GetNativeSystemInfo`, `GetSystemWow64Directory` and the environment's `PROCESSOR_ARCHITEW6432` say so. A 64-bit program always runs on a 64-bit machine. |
 | `graphicsApi` | `'directx7'` \| `'directx8'` \| `'directx9'` \| `'directx10'` \| `'opengl'` | every API | The graphics the program gets. `directxN` keeps every DirectX up to N (DirectDraw, Direct3D 8, 9, then Direct3D 10 with DXGI); `opengl` keeps OpenGL alone. Only those system DLLs exist and only their code is built. The registry, `DirectXSetupGetVersion`, DxDiag and the DLLs' file versions report DirectX 7.0, 8.1 or 9.0c (9.0c for 9 and 10). Absent: every API, DirectX 9.0c. |
+| `gpuProfile` | `'sm1'` \| `'sm2'` \| `'sm3'` \| `'sm4'` \| `'host'` | `'host'` | The card the video adapter is shown as ([configuration.md](configuration.md#graphics)). |
 | `memorySize` | number | 1 GiB | Guest RAM in bytes, a power of two; reserved, not committed. |
-| `heapSize` | number | the rest of RAM | How much the program's heaps may allocate. |
-| `stackSize` | number | the image's stack reserve | The main thread's stack. |
-| `quantum` | number | 100 000 | Guest instructions per scheduler turn. |
-| `preemption` | boolean | `false` | End a turn early when a thread of higher priority is due. |
+| `cpu` | `{ cores? }` | automatic | The program's processors ([configuration.md](configuration.md#cpu)). |
+| `win32` | `{ trustedRoots?, steam? }` | none | The machine's trusted roots and a Steam account ([configuration.md](configuration.md#win32)). |
 | `unattended` | boolean | `false` | Nobody is at the screen: every modal dialog and message box gets its default button, and each answer is reported as a `divergence` event. |
-| `cork` | `{ moduleUrl?, config? }` | the package's | Where cork is loaded from, and its settings ([configuration.md](configuration.md#cpu)). |
+| `cork` | `{ moduleUrl?, config? }` | the package's | Where cork is loaded from, and where its translations are kept ([configuration.md](configuration.md#cpu)). |
 | `media` | `{ wasmBytes }` | none | The video decoder (FFmpeg in wasm). Without it the program is told no clip can be played. |
+| `sidecarHooks` | `{ spec, source }` | none | A bundle's sidecar (`hooks.json` parsed as `spec`, the text of `hooks.mjs` as `source`), next to its `manifest.json` and never inside the bundle: replaces guest functions, or a loop inside one, with the sidecar's own code, through a data pointer it rewrites (`slot`) or a patch at a point inside a function (`site`). `source` runs as an ES module in the engine's worker, with a bounds-checked view of guest memory and nothing else of the engine. |
+| `exitNotice` | boolean | `true` | A program that exits with code 0 raises a `message-box` event saying it finished. |
 
 ### Display, input and sound
 
@@ -71,16 +74,16 @@ The options reach the engine's worker by `postMessage`, so every value must be d
 | `transfer` | `Transferable[]` | none | Buffers in the options to hand over instead of copying (the wasm binaries). |
 | `screen` | `{ width, height, bitsPerPixel }` | 640 × 480, 32 | The display the program is told it has. |
 | `desktop` | `{ picture? }` | none | What the desktop shows where no window is: `picture` is `{ width, height, bits }`, 32 bits a pixel (B, G, R, unused), top row first, scaled to the screen. Absent: the desktop colour. |
-| `maxFps` | number | 60 | Accepted, not applied yet ([limits.md](limits.md#graphics)). |
-| `graphics` | `{ compressedTextures?, maxFrameLatency?, lendMemory?, guestCode?, driverRules?, videoMemory? }` | `false`, 3, `true`, `true`, `'legacy'`, the `graphicsApi` preset's | `compressedTextures`: upload BC-compressed textures where the GPU has `texture-compression-bc`. `maxFrameLatency`: how many frames the GPU may still be drawing when `Present` returns (0: no bound). `lendMemory`, `guestCode`, `driverRules`: see [configuration.md](configuration.md#graphics). `videoMemory`: the card's memory in megabytes, overriding the preset's. |
+| `maxFps` | number | 60 | The display's refresh rate the program is told, which its vertical sync keeps to; 0 for none. |
+| `graphics` | `{ compressedTextures?, maxFrameLatency?, videoMemory?, driverRules? }` | `false`, 3, the `graphicsApi` preset's, `'legacy'` | The device's settings ([configuration.md](configuration.md#graphics)). |
 | `device.graphicsWorker` | `true` \| `'pixels'` \| `false` | `true` | Draw Direct3D 7–9 and OpenGL in a graphics worker that sends each frame back as an `ImageBitmap`; `'pixels'` sends the frame's bytes instead; `false` draws on the engine thread. |
-| `audio` | `{ drained?, sampleRate?, mp3?, port? }` | `false`, none, `true`, none | `drained`: an `AudioWorkletNode` really reads the output, so play cursors follow the sound rather than a clock. `sampleRate`: the `AudioContext`'s rate. `mp3: false`: the program decodes MP3 with the library it ships instead of the engine's provider. `port`: on a page without shared memory, the engine's end of a `MessageChannel` whose other end the worklet holds; the mix is posted down it ([README.md](README.md#sound)). |
+| `audio` | `{ drained?, sampleRate?, port? }` | `false`, none, none | The sound output, as `openSpeaker().audioOptions()` gives it ([configuration.md](configuration.md#audio)). |
 
 ### Storage, bundles and discs
 
 | Option | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `bundle` | `{ url \| file, id?, prefix?, store?, prefetch?, indexSha256?, retry? }` | none | A `.btl` mounted read-only on `C:`, under `prefix` (`App`: `C:\App`). It is read a block at a time, by HTTP `Range` from `url` or as slices of `file` (a `Blob`, such as a bundle kept in OPFS on this device), and fetched blocks are kept in OPFS under `id` (`store: null` keeps none, as a bundle already on the device needs). `prefetch` (on) fills the cache while nothing is being read; `indexSha256` (from the manifest) is checked against the bundle's index; `retry` is `{ attempts: 6, baseDelayMs: 250, maxDelayMs: 10000 }`. |
+| `bundle` | `{ url \| file, id?, prefix?, store?, prefetch?, preload?, revision?, indexSha256?, retry? }` | none | A `.btl` mounted read-only on `C:`, under `prefix` (`App`: `C:\App`). It is read a block at a time, by HTTP `Range` from `url` or as slices of `file` (a `Blob`, such as a bundle kept in OPFS on this device), and fetched blocks are kept in OPFS under `id` (`store: null` keeps none, as a bundle already on the device needs). `prefetch` (on) fills the cache while nothing is being read; `preload` brings every block not kept yet in before the program starts, so nothing it reads waits on the network; `revision`, raised each time the bottle is packed again, lays the bottle's registry over a session saved under an earlier one, as a reinstall would; `indexSha256` (from the manifest) is checked against the bundle's index; `retry` is `{ attempts: 6, baseDelayMs: 250, maxDelayMs: 10000 }`. |
 | `storage` | `'opfs'` \| `'local'` \| `{ files }` \| `null` | `null` | Where the session (the files the program wrote, and its registry) lives: `opfs` in the origin's file system, `local` in `localStorage`; `{ files }` seeds it for this run only; `null` keeps nothing. |
 | `id` | string | none | Names the session, and the bundle cache when `bundle.id` is absent. |
 | `files` | `{ path, bytes }[]` | none | Edits laid over the session at every start; they win over what the program last saved. The bundle never changes. |
@@ -93,22 +96,45 @@ The options reach the engine's worker by `postMessage`, so every value must be d
 | --- | --- | --- | --- |
 | `network` | `{ module, url, room, token? }` | none | The relay Winsock goes through: the URL of a module exporting `connectRelay` (`@bottlify/networking`'s client), the relay's `ws(s)://` address, and the room to join. Without it Winsock has only the loopback adapter. |
 
-### Diagnostics
+### Debugging
 
-| Option | Type | Default | What it does |
-| --- | --- | --- | --- |
-| `log` | `{ categories?, capacity?, bytes? }` | none | Call areas recorded from the first instruction (`{ 'call.gpu': 'trace' }`), and the journal's size: `capacity` records, `bytes` of ring (1 MiB). |
-| `traceStrings` | boolean | `false` | Keep the text an argument points at in the journal. |
-| `profileCalls` | boolean | `false` | Time every host call as a phase of its own. |
-| `sampleJs` | boolean | `false` | Run the browser's JavaScript sampler on the engine's thread in 2 s windows; its top functions are the `js` diagnostics table. Needs `Document-Policy: js-profiling` ([README.md](README.md)) and the engine on a window's thread: Chrome offers the sampler to no worker, so with the engine in one the table says it is not measured. |
-| `record` | number | 0 | How many events at the bridge to keep for a replay. |
-| `hooks` | `HookSpec[]` | none | Watches placed in front of routines inside the program's own modules as they load. |
-| `watch` | `{ libraries, strings }` | none | Watch calls from one guest module into another, by library and ordinal. |
-| `exitNotice` | boolean | `true` | A program that exits with code 0 raises a `message-box` event saying it finished. |
-| `sampling` | boolean | `true` | The cpu layer's guest sampler. |
-| `device.*` | | | `dumpDraws`, `dumpEvery`, `maxDraws`, `skipTexture`, `probeTexture`, `keepImages`, `fog`, `mips`: per-draw dumps and one-variable-off runs of the graphics layer. |
-| `pacing` | `'page'` \| `'event'` | `'page'` | How the run loop waits in a worker: a short look every turn, or sleep until something is due. |
-| `pendingYieldMs` | number | `1` | While other guest threads still have work, how often, in milliseconds, the run loop yields to the event loop to hear an outstanding host answer (a call parked on the device, a range in flight). A turn that ran nothing yields at once. Lower hears answers sooner, at the cost of more event-loop round trips. |
+Switches for finding where a fault or a cost is: each turns a path off, keeps the second path a
+test compares against, or records what a run did. None is a setting to ship with; the defaults are
+what every run uses.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `log` | none | `{ categories?, capacity?, bytes? }`: call areas recorded from the first instruction, each at its level (`off`, `error`, `warn`, `info`, `debug`, `trace`): `call.cpu`, `call.gpu`, `call.audio`, `call.video`, `call.input`, `call.net`, `call.com`, `call.hook`, `input.press`, `input.message`; and the journal's size, `capacity` records and `bytes` of ring (1 MiB). A thread's calls that repeat in a loop of up to 8 are written until the loop has gone round twice, then counted. |
+| `traceStrings` | `false` | Keep the text an argument points at in the journal. |
+| `profileCalls` | `false` | Time every host call as a phase of its own. |
+| `sampleJs` | `false` | Run the browser's JavaScript sampler on the engine's thread in 2 s windows; its top functions are the `js` diagnostics table. Needs `Document-Policy: js-profiling` ([README.md](README.md)) and the engine on a window's thread: Chrome offers the sampler to no worker, so with the engine in one the table says it is not measured. |
+| `record` | 0 | How many events at the bridge to keep for a replay. |
+| `hooks` | none | `HookSpec[]`: watches placed in front of routines inside the program's own modules as they load. |
+| `watch` | none | `{ libraries, strings }`: calls from one guest module into another watched, by library and ordinal. |
+| `quantum` | see [configuration.md](configuration.md#kernel) | Every scheduler turn exactly this many guest instructions, for a profile fine enough to say something. |
+| `heapSize` | the rest of RAM | How much the program's heaps may allocate, to find out what runs out first. |
+| `driveGuestCalls` | `true` | `false` runs the host calls written as steps through promises, each guest call they make a turn of its own, rather than in the slice they came in. |
+| `cpu.eager` | `true` with `cpu.cores` named, else `false` | `true` opens every executor before the program starts, `false` as threads want them. |
+| `cpu.placement` | `'spread'` | `'concentrate'`: every thread takes turns on the process's own executor, as on one processor. |
+| `cpu.gcNudge` | on where JavaScriptCore runs (Safari, every browser on iOS) | The threads that hold the guest's memory, and the graphics worker, make and drop an untouched buffer every 20 ms (64 MB, or a quarter of the guest's memory past 256 MB), which JavaScriptCore counts as allocated and so collects their garbage sooner; the engine's thread makes one between the guest's slices too. `false` turns it off, `true` on in any browser, `{ everyMs, bytes }` sets it. |
+| `cork.config` | | cork's own diagnostics and paths left out ([modules/cork/SETTINGS.md](../../modules/cork/SETTINGS.md)). `sharedMemory: false` keeps guest memory the engine's alone, as `compatible` does. |
+| `cork.poolPerProcess` | the host's cores less the program's and two, at least 1 | The most translation workers of the run's pool one process gets. |
+| `win32.handleWords` | `true` | `false` leaves every WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent to the host, with no answers in the guest. |
+| `graphics.guestCode` | `true` | `false` traps every Direct3D 8 and 9 call to the host: a fault that goes away with it is in the guest code that keeps the program's state, its calls in order and its reference counts in guest memory. |
+| `graphics.guestTraps` | `[]` | With `guestCode` on, the parts of that guest code kept as traps anyway: methods by name, or the groups `getters`, `ring`, `locks`, `levels`, `counts`, and `moves` (a DISCARD under draws comes to the host instead of moving the buffer onto a spare storage in the guest). |
+| `graphics.lendMemory` | `true` | `false`: the graphics worker gets a copy of what a Direct3D 8 or 9 program unlocks, not the bytes in place. |
+| `graphics.draw` | `true` | `false` draws nothing: no API reaches the GPU or the graphics worker, OpenGL is not rasterised, and every API keeps the state a program sets and answers what it asks. A Direct3D 9 occlusion query then counts every pixel of the target, so a program culls nothing it would draw. For measuring a program's own work. |
+| `graphics.raster` | `true` | `false` leaves OpenGL primitives drawn without a GPU unrasterised. |
+| `graphics.verifyDynamic` | `false` | With a graphics worker: every Direct3D draw from a dynamic buffer compares the bytes its indices reach in the worker's copy of guest memory with the buffer's copy as the draw is recorded, and with the GPU buffer it binds once its frame is submitted (4 MB a frame read back); the report's `verifyDynamic` counts the ranges that differ (`copyStale`, `gpuStale`) and the vertices indices reach past a draw's declared range (`beyond`). |
+| `device.*` | | `dumpDraws`, `dumpEvery`, `maxDraws`, `skipTexture`, `probeTexture`, `keepImages`, `fog`, `mips`: per-draw dumps and one-variable-off runs of a device on the engine's thread. |
+| `audio.mp3` | `true` | `false`: the program decodes MP3 with the library it ships rather than the engine's provider for Miles. |
+
+While a program runs, `app.debug` switches more of these from that moment on: `checkDraws(on)`
+(every Direct3D draw from a buffer compared with what the graphics worker was sent),
+`handleWords(on)`, frame dumps, draw and texture cuts, and the rest
+[`tools/cdp_test/README.md`](../../tools/cdp_test/README.md) lists.
+
+### What the diagnostics say
 
 The `log` table's phases show where the engine thread's time goes (`topPhases`; `phasesSelfMs`
 for all of them together). A host call is the phase `trap`, timed one call in about 32 and weighted
@@ -141,7 +167,7 @@ counts the frames that went so.
 | `canFullscreen(element)` | Whether either name exists, so a page can offer the home screen instead of a button that does nothing. |
 | `fullscreenElement()`, `exitFullscreen()` | The element in fullscreen or null, and leaving it, by either name. |
 | `watchFullscreen(handler)` | Calls `handler(element or null)` on every change, by either event name; answers the function that stops. |
-| `keepScreenAwake()` | Holds a screen wake lock while a program runs, so a game watched rather than played -- an intro, a cutscene -- does not dim and lock the screen. Asked for again whenever the page is shown (the browser lets it go when the page is hidden) and at the next gesture after a refusal. Answers `{ held(), pause(), resume(), release(), refusal() }`: `pause` with a paused run, `release` when it ends; `refusal()` is why the browser would not hold it, `unsupported` with no wake lock. |
+| `keepScreenAwake()` | Holds a screen wake lock while a program runs, so a game watched rather than played (an intro, a cutscene) does not dim and lock the screen. Asked for again whenever the page is shown (the browser lets it go when the page is hidden) and at the next gesture after a refusal. Answers `{ held(), pause(), resume(), release(), refusal() }`: `pause` with a paused run, `release` when it ends; `refusal()` is why the browser would not hold it, `unsupported` with no wake lock. |
 
 ## The controller
 
@@ -165,7 +191,7 @@ counts the frames that went so.
 | `attachLog(sink)`, `detachLog(sink)` | What the program writes to its standard handles, as `(handle, text)`. |
 | `diagnostics(layer?)` | Every layer's diagnostics, or one layer's; a request to the engine thread, not for polling. Besides the layers' tables, a `windows` table lists the run's windows as every process reports them: every process's top-level windows, topmost first, each with its process, title, class, visibility and rectangle, and the run's foreground and captured windows. |
 | `report()` | Everything the engine can say about the run in one answer: every layer's diagnostics, the phase profile and recent frames, `trace()`, the threads, guest time by module, and the guest code around its most-sampled addresses (`hotCode`, 4 KiB pages as base64). The app layer's table lists the divergences reported so far (`divergences`, the first 128). Devices drawing in the graphics worker are asked for their counters and awaited for up to a second, so the graphics table includes them. A request, not for polling. |
-| `translationPool()` | The run's pool of translation workers (`cork.pool`) as it stands: how many workers it holds and how many are idle, how many work for each process, how many it opened and lent, the joins and leaves its driver decided, and a journal of the last decisions (`start`, `join`, `leave`, `exit`, each with the process, the time and the workers it had after). `null` where the run has none. |
+| `translationPool()` | The run's pool of translation workers as it stands: how many workers it holds and how many are idle, how many work for each process, how many it opened and lent, the joins and leaves its driver decided, and a journal of the last decisions (`start`, `join`, `leave`, `exit`, each with the process, the time and the workers it had after). `null` where the run has none. |
 | `trace()`, `traffic()` | The last host calls as text; messages counted by kind. |
 | `log.*` | The journal and counters: `recent`, `drain`, `setLevel`, `setDefaultLevel`, `areas`, `profile`, `frames`, `counters`, `table`, `threads`, `guestByModule`, `stats`, `memory`. |
 | `guestProfile.*` | Where the guest ran, by address (`available`, `start`, `read`, `stop`). |

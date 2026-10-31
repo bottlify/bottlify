@@ -74,11 +74,11 @@ differently raises a `divergence` event naming the API.
   starts cold once, and a thread that ran on the process's own executor in one run and on another
   in the next warms up there again.
 - With `concurrency` 1 a child started with `CreateProcess` takes turns with its parent on one
-  thread; with 2 or 4 they run at once (`concurrency` in [api.md](api.md)). A parent reaches into
-  its child -- its memory (`VirtualAllocEx`, `VirtualFreeEx`, `VirtualProtectEx`,
+  thread; with 2 or 4 they run at once (`concurrency` in [api.md](api.md)). Either way a parent
+  reaches into its child: its memory (`VirtualAllocEx`, `VirtualFreeEx`, `VirtualProtectEx`,
   `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory` and ntdll's forms), its first
   thread (`SuspendThread`, `ResumeThread`, `GetThreadContext`), and a thread it makes there with
-  `CreateRemoteThread`, which it waits on and reads the exit code of -- either way. A wait on a
+  `CreateRemoteThread`, which it waits on and reads the exit code of. A wait on a
   child's thread is answered within a few milliseconds of its end, asked of the child until
   then. `NtQueryInformationProcess` on a child's handle is answered by the child; once it has
   ended, its id, parent and exit status remain and its PEB address does not. Not yet:
@@ -102,7 +102,7 @@ differently raises a `divergence` event naming the API.
   transport the page handed in (`win32.network`). The run's diagnostics are the program's tables as
   it last answered (its `log` with phases and frames, and `audio`, as with one process), with the
   engine thread's own journal and sound output beside them as `system-log` and `system-audio`.
-- The run's translation workers are a pool ([`cork.pool`](configuration.md#cpu)). On a machine
+- The run's translation workers are a pool. On a machine
   whose cores a loading game already keeps busy (four cores, measured), a second worker makes
   loading slower, and the pool gives it back after its trial; the gain is for machines with cores
   to spare and has not been measured on one yet. Only translation runs in the pool so far: bundle
@@ -196,8 +196,9 @@ differently raises a `divergence` event naming the API.
 - No DirectX redistributables ship with the engine: a program brings `d3dx9_*`, XAudio2 and the
   rest itself (through its installer's DirectX setup, or as DLLs beside its exe); without them the
   engine's own `d3dx9` table answers.
-- `maxFps` is accepted but not applied: the presenter is given no scheduler, so frames reach the
-  canvas as fast as the program presents them.
+- `maxFps` is the display rate a program's vertical sync keeps to; the presenter is given no
+  scheduler of its own, so a program presenting without vertical sync reaches the canvas as fast
+  as it presents.
 
 ## Sound
 
