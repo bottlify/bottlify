@@ -55,8 +55,6 @@ import { openCompound, bytesSource } from '../layers/win32/msi/compound.js';
 import { openDatabase } from '../layers/win32/msi/database.js';
 import { evaluateCondition, MSICONDITION } from '../layers/win32/msi/condition.js';
 
-export { depotOwners, sharedDepots, wantedDepot } from './apps.js';
-
 /**
  * An installed app's files, by their backslashed paths in it.
  *

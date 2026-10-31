@@ -40,16 +40,17 @@ import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, open } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connectCm, logOn, logOnAnonymously, productInfo } from '../modules/core/src/steam/index.js';
+import { connectCm } from '../modules/bridge/src/stores/steam/connection.js';
+import { logOn, logOnAnonymously, productInfo } from '../modules/bridge/src/stores/steam/session.js';
 import { directoryTree } from './redist.mjs';
 import {
     contentServers, depotKey, manifestRequestCode, readDepotAccess,
-} from '../modules/core/src/steam/depot.js';
+} from '../modules/bridge/src/stores/steam/keys.js';
 import { depotManifest, downloadFiles, installedFiles } from '../modules/core/src/steam/install.js';
 import { installSteamRedistributables } from '../modules/core/src/steam/redist.js';
 import {
     depotOwners, sharedDepots, wantedDepot, windowsLaunch,
-} from '../modules/core/src/steam/apps.js';
+} from '../modules/bridge/src/stores/steam/apps.js';
 
 /** @typedef {import('../modules/core/src/steam/install.js').DepotOpening} DepotOpening */
 /** @typedef {import('../modules/core/src/steam/depot.js').ContentServer} ContentServer */
@@ -214,7 +215,7 @@ async function main(argv){
 
     const directory = await (await fetch('https://api.steampowered.com/ISteamDirectory/'
         + 'GetCMListForConnect/v1/?cellid=0&cmtype=websockets')).json();
-    /** @type {import('../modules/core/src/steam/connection.js').CmConnection | undefined} */
+    /** @type {import('../modules/bridge/src/stores/steam/connection.js').CmConnection | undefined} */
     let connection;
     for (const server of directory.response.serverlist.slice(0, 8))
     {

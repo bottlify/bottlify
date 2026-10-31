@@ -12,7 +12,10 @@
  * directory that lists them does not answer a page from another origin.
  */
 
-import { connectCm, encodeQr, library, logOn, qrToSvg, signInWithQr } from '../index.js';
+import { connectCm } from '../connection.js';
+import { signInWithQr } from '../auth.js';
+import { library, logOn } from '../session.js';
+import { encodeQr, qrToSvg } from '../../../../../core/src/steam/qr.js';
 
 /** @type {string[]} */
 const ENDPOINTS = JSON.parse(document.getElementById('endpoints')?.textContent ?? '[]');
@@ -62,7 +65,7 @@ async function run(){
         {
             const signedIn = await signInWithQr(connect, {
                 deviceName: 'Bottlify',
-                onChallenge: url=>{
+                onChallenge: (/** @type {string} */ url)=>{
                     element('qr').innerHTML = qrToSvg(encodeQr(url), 6);
                     status('Scan with the Steam app: Steam Guard → the QR scanner.');
                 },

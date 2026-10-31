@@ -19,9 +19,9 @@ import { fileURLToPath } from 'node:url';
 import * as redist from '../modules/core/src/steam/redist.js';
 
 export {
-    DRIVE_PATH, INSTALL_DIRECTORY, REGISTRY_PATH, applyPackage, compareVersions, depotOwners,
-    embeddedCabinets, imageMachine, parseInstallScript, registryValue, sharedDepots,
-    unpackRedistributable, wantedDepot, writeRegistry,
+    DRIVE_PATH, INSTALL_DIRECTORY, REGISTRY_PATH, applyPackage, compareVersions,
+    embeddedCabinets, imageMachine, parseInstallScript, registryValue,
+    unpackRedistributable, writeRegistry,
 } from '../modules/core/src/steam/redist.js';
 
 /**

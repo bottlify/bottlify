@@ -19,10 +19,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bootstrapper, cabinet, gameSetup } from '../modules/core/src/steam/redist.fixture.js';
 import {
-    applyPackage, compareVersions, depotOwners, imageMachine, installRedistributables,
-    parseInstallScript, registryValue, sharedDepots, unpackRedistributable, wantedDepot,
-    writeRegistry,
+    applyPackage, compareVersions, imageMachine, installRedistributables,
+    parseInstallScript, registryValue, unpackRedistributable, writeRegistry,
 } from './redist.mjs';
+import { depotOwners, sharedDepots, wantedDepot } from '../modules/bridge/src/stores/steam/apps.js';
 import * as redist from '../modules/core/src/steam/redist.js';
 
 const HKLM = 0x80000002;

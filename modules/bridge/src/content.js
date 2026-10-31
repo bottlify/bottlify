@@ -5,13 +5,10 @@
  */
 
 /**
- * The content script: the page's end of the bridge, in the isolated world.
- *
- * Here and not in the service worker because Chrome's request rules change
- * what a page's requests carry, and this script's requests are the page's --
- * its Origin, rewritten for Steam's connection managers, and its CORS, opened
- * for the content servers -- while the worker's own socket keeps the
- * extension's Origin, which Steam refuses. Chrome loads a content script as a
+ * The content script: the page's end of GameHub, a pipe to the service worker
+ * (pipe.js). It is here rather than nowhere because a socket the page opens is
+ * one Chrome's request rules give Steam's Origin; the worker's own would keep
+ * the extension's, which Steam refuses. Chrome loads a content script as a
  * classic script; its modules come in by import().
  */
 
@@ -24,80 +21,44 @@
         return;
     }
     const { chrome } = /** @type {any} */ (globalThis);
-    const url = (/** @type {string} */ path)=>chrome.runtime.getURL(path);
     const version = chrome.runtime.getManifest().version;
     // Before any of the page's scripts runs: a page that does not find it
-    // knows at once there is no bridge, without waiting for an answer.
+    // knows at once there is no GameHub, without waiting for an answer.
     document.documentElement.dataset.bottlifyBridge = version;
 
+    const TO = 'bottlify-bridge';
+    const FROM = 'bottlify-bridge';
+
     /**
-     * What the site switches on (its `config.json`'s `bridge`), applied to the
-     * rulesets by the worker, which alone may switch them: the platforms on.
+     * What the site switches on (its `config.json`'s `bridge`), for the worker
+     * to apply to its rulesets and its stores.
      *
-     * @returns {Promise<Record<string, boolean>>}
+     * @returns {Promise<Record<string, unknown>>}
      */
     async function platforms(){
         /** @type {{ bridge?: unknown }} */
         const config = await fetch('/config.json', { cache: 'no-store' })
             .then(answer=>(answer.ok ? answer.json() : {})).catch(()=>({}));
         const wanted = config?.bridge;
-        return chrome.runtime.sendMessage(
-            { platforms: typeof wanted === 'object' && wanted !== null ? wanted : {} });
+        return typeof wanted === 'object' && wanted !== null ? /** @type {any} */ (wanted) : {};
     }
 
-    /** Steam's connection managers, port 443 first: the one a firewall least often closes. */
-    async function managers(){
-        const directory = await (await fetch('https://api.steampowered.com/ISteamDirectory/'
-            + 'GetCMListForConnect/v1/?cellid=0&cmtype=websockets')).json();
-        /** @type {string[]} */
-        const list = directory.response.serverlist
-            .map((/** @type {any} */ server)=>server.endpoint);
-        return list.sort((a, b)=>Number(!a.endsWith(':443')) - Number(!b.endsWith(':443')));
-    }
-
-    /** The session, in the extension's storage: no page's code can read it. */
-    const store = {
-        get: async()=>(await chrome.storage.local.get('steam')).steam ?? null,
-        set: async(/** @type {object | null} */ session)=>(session
-            ? chrome.storage.local.set({ steam: session }) : chrome.storage.local.remove('steam')),
-    };
-
-    const protocol = import(url('protocol.js'));
-    const modules = [import(url('bridge.js')), import(url('platforms/steam.js')),
-        import(url('steam/index.js'))];
-    const ready = Promise.all([...modules, platforms()])
-        .then(([{ createBridge }, { steamPlatform }, steam, switched])=>createBridge({
-            version, platforms: switched,
-            ops: { steam: steamPlatform({ steam, store, managers }) },
+    const pipe = Promise.all([import(chrome.runtime.getURL('bridge/src/pipe.js')), platforms()])
+        .then(([{ startPipe }, switched])=>startPipe({
+            connect: ()=>chrome.runtime.connect({ name: 'gamehub' }),
+            socket: (/** @type {string} */ url)=>new WebSocket(url),
+            toPage: (/** @type {Record<string, any>} */ answer)=>window.postMessage({ from: FROM, ...answer }, location.origin),
+            platforms: switched,
         }));
 
     window.addEventListener('message', async event=>{
-        if (event.source !== window || event.origin !== location.origin)
+        const data = event.data;
+        if (event.source !== window || event.origin !== location.origin
+            || typeof data !== 'object' || data === null || data.to !== TO
+            || !Number.isSafeInteger(data.id))
         {
             return;
         }
-        const { readRequest, FROM } = await protocol;
-        const request = readRequest(event.data);
-        if (!request)
-        {
-            return;
-        }
-        const reply = (/** @type {object} */ body)=>window.postMessage(
-            { from: FROM, id: request.id, ...body }, location.origin);
-        if ('error' in request)
-        {
-            reply({ error: request.error });
-            return;
-        }
-        try
-        {
-            const bridge = await ready;
-            const emit = (/** @type {string} */ name, /** @type {object} */ data)=>reply(
-                { event: name, data });
-            reply({ result: await bridge.handle(request, emit) });
-        }
-        catch (e){
-            reply({ error: String(/** @type {Error} */ (e)?.message ?? e) });
-        }
+        (await pipe).request({ to: TO, id: data.id, op: data.op, args: data.args });
     });
 })();

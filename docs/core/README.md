@@ -128,7 +128,7 @@ await app.dispose();
 | --- | --- |
 | `@bottlify/core` | `createApp`, `assembleModules` (the layers without a program), `createLogReader` |
 | `@bottlify/core/bundle`, `/bundle/node` | the `.btl` format's constants, a bundle written in place (`placeFiles`, `finishBundle`); reading and writing bundles in Node |
-| `@bottlify/core/steam` | Steam sign-in, a library, depots, and an app installed into a bundle in place (`installBundle`) |
+| `@bottlify/core/steam`, `/steam/install` | Steam's file formats (a depot's manifest and chunks, KeyValues, the QR code) and an app installed into a bundle in place (`installBundle`) with what GameHub's `download` answers; speaking to Steam is GameHub's (`modules/bridge`) |
 | `@bottlify/core/iso` | reading ISO 9660 disc images |
 | `@bottlify/core/worklet.js` | the sound output's `AudioWorklet` |
 

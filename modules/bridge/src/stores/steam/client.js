@@ -18,7 +18,7 @@
  * runs in a page (the bridge adds the CDN's CORS headers) as in Node.
  */
 
-import { parseText } from './keyvalues.js';
+import { parseText } from '../../../../core/src/steam/keyvalues.js';
 
 /** Valve's client CDN, where the client's manifest and packages are. */
 export const CLIENT_CDN = 'https://client-update.akamai.steamstatic.com';

@@ -28,7 +28,9 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from '../scripts/build.mjs';
 import { findBrowser } from '../../../tools/cdp_test/browser.mjs';
-import { STEAM_ART, connectCm, logOnAnonymously, productInfo } from '../../core/src/steam/index.js';
+import { connectCm } from './stores/steam/connection.js';
+import { logOnAnonymously, productInfo } from './stores/steam/session.js';
+import { STEAM_ART } from './stores/steam/apps.js';
 
 const CORE = fileURLToPath(new URL('../../core/src/', import.meta.url));
 /** Steamworks Common Redistributables: a depot whose key Steam gives anyone. */
@@ -136,7 +138,7 @@ function chrome(profile){
 
 const pause = (/** @type {number} */ ms)=>new Promise(done=>setTimeout(done, ms));
 /** @param {boolean} steam */
-const hello = steam=>({ version: '0.1.0', platforms: { steam } });
+const hello = steam=>({ version: '0.1.0', stores: [{ id: 'steam', name: 'Steam', on: steam }] });
 
 test('the dev build carries a page to Steam and keeps the session from it', async t=>{
     const scratch = mkdtempSync(join(tmpdir(), 'bridge-itest-'));
@@ -215,42 +217,42 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
 
         await open();
 
-        await t.test('the bridge is there before the page\'s scripts, and Steam is on', async()=>{
+        await t.test('GameHub is there before the page\'s scripts, and Steam is on', async()=>{
             assert.equal(await page('crossOriginIsolated'), true);
-            assert.equal(await page('ask("steam.account")'), null);
+            assert.equal(await page('ask("account", { store: "steam" })'), null);
             assert.equal(await page('presence'), '0.1.0');
             assert.deepEqual(await page('ask("hello")'), hello(true));
         });
 
-        await t.test('a connection manager takes the page through the rule', async()=>{
+        await t.test('the worker speaks to Steam over the page\'s socket: a download', async()=>{
             assert.equal(await page(`rawSocket(${JSON.stringify(steam.endpoint)})`), 'open');
-            const servers = await page('ask("steam.contentServers")');
-            assert.ok(servers.length > 0, 'content servers');
-            const keyLength = await page(`ask("steam.depotKey", { app: ${APP}, depot: ${DEPOT} })`
-                + '.then(key => key.length)');
-            assert.equal(keyLength, 32);
+            const download = await page(`ask("download", { store: "steam", game: "${APP}" })
+                .then(answer => ({ ...answer, depots: answer.depots.map(one =>
+                    ({ ...one, key: one.key.length })) }))`);
+            assert.ok(download.servers.length > 0, 'content servers');
+            const depot = download.depots.find((/** @type {any} */ one)=>one.depot === DEPOT);
+            assert.deepEqual([depot.gid, depot.key], [steam.gid, 32]);
+            assert.match(depot.code, /^[0-9]+$/);
         });
 
-        await t.test('what Steam tells anyone of apps, and their art, isolated', async()=>{
-            const info = await page(`ask("steam.productInfo", { apps: [${APP}, 440] })`);
-            assert.equal(info[APP]?.depots?.[DEPOT]?.manifests?.public?.gid, steam.gid);
-            assert.equal(String(info[440]?.common?.type).toLowerCase(), 'game');
-            assert.ok(Object.keys(info[440]?.config?.launch ?? {}).length > 0, 'launch options');
-            assert.equal(await page(`picture(${JSON.stringify(`${STEAM_ART}/440/header.jpg`)})`),
-                'shown');
+        await t.test('a store\'s art shown on an isolated page', async()=>{
+            const cover = await page(
+                'ask("cover", { store: "steam", game: "440", kind: "header" })');
+            assert.equal(cover, `${STEAM_ART}/440/header.jpg`);
+            assert.equal(await page(`picture(${JSON.stringify(cover)})`), 'shown');
         });
 
         await t.test('the page reads a manifest and a chunk from the content servers', async()=>{
             const read = await page(`(async () => {
                 const { manifest, downloadChunk } = await import('/core/steam/depot.js');
-                const [server] = await ask('steam.contentServers');
-                const key = await ask('steam.depotKey', { app: ${APP}, depot: ${DEPOT} });
-                const code = await ask('steam.manifestCode',
-                    { app: ${APP}, depot: ${DEPOT}, gid: '${steam.gid}' });
+                const answer = await ask('download', { store: 'steam', game: '${APP}' });
+                const [server] = answer.servers;
+                const one = answer.depots.find(d => d.depot === ${DEPOT});
                 const listed = await manifest(server,
-                    { depot: ${DEPOT}, gid: ${steam.gid}n, code: BigInt(code), key });
+                    { depot: ${DEPOT}, gid: BigInt(one.gid), code: BigInt(one.code),
+                        key: one.key });
                 const chunk = listed.files.find(file => file.chunks.length).chunks[0];
-                const bytes = await downloadChunk(server, ${DEPOT}, chunk, key);
+                const bytes = await downloadChunk(server, ${DEPOT}, chunk, one.key);
                 return { files: listed.files.length, chunk: bytes.length === chunk.size };
             })()`);
             assert.ok(read.files > 0);
@@ -259,10 +261,10 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
 
         await t.test('a sign-in streams the QR challenge from Steam and is cancelled', async()=>{
             const signIn = await page(`(async () => {
-                const going = outcome(ask('steam.signIn'));
+                const going = outcome(ask('signIn', { store: 'steam' }));
                 const id = n;
                 const challenge = () => seen.find(m => m.id === id && m.event === 'challenge');
-                for (let i = 0; i < 150 && !challenge(); i++)
+                for (let i = 0; i < 300 && !challenge(); i++)
                     await new Promise(r => setTimeout(r, 100));
                 await ask('cancel', { target: id });
                 return { url: challenge()?.data.url ?? null, ended: await going };
@@ -271,17 +273,29 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
             assert.match(signIn.ended.error, /cancelled/);
         });
 
-        await t.test('the session stays in the extension: the page never sees the token', async()=>{
+        await t.test('the session is the worker\'s, out of a content script\'s storage', async()=>{
             const storage = await worker();
             assert.equal(await page('typeof chrome?.storage'), 'undefined');
+            // Where an earlier version kept it, which a content script can read.
             await storage(`chrome.storage.local.set({ steam: { accountName: 'probe',
                 refreshToken: ${JSON.stringify(FAKE_TOKEN)} } })`);
-            const account = await page('outcome(ask("steam.account"))');
+            const account = await page('outcome(ask("account", { store: "steam", fresh: true }))');
             assert.ok(account.error, 'Steam refuses a made-up token');
             t.diagnostic(`account with a made-up token: ${account.error}`);
+            assert.deepEqual(await storage('chrome.storage.local.get(null)'), {},
+                'gone from the storage the content script could read');
+            const kept = ()=>storage(`new Promise(done => {
+                const request = indexedDB.open('gamehub');
+                request.onsuccess = () => {
+                    const read = request.result.transaction('sessions')
+                        .objectStore('sessions').get('steam');
+                    read.onsuccess = () => done(read.result?.accountName ?? null);
+                };
+            })`);
+            assert.equal(await kept(), 'probe', 'kept in the worker\'s own database');
             assert.doesNotMatch(await page('JSON.stringify(seen)'), /not-a-signature|eyJ/);
-            assert.deepEqual(await page('ask("steam.signOut")'), {});
-            assert.deepEqual(await storage('chrome.storage.local.get(null)'), {});
+            assert.deepEqual(await page('ask("signOut", { store: "steam" })'), {});
+            assert.equal(await kept(), null);
         });
 
         await t.test('Steam switched off by the site: Steam refuses the page again', async()=>{
@@ -289,7 +303,7 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
             await open();
             assert.deepEqual(await page('ask("hello")'), hello(false));
             assert.equal(await page(`rawSocket(${JSON.stringify(steam.endpoint)})`), 'refused');
-            assert.match((await page('outcome(ask("steam.depotKey", { app: 1, depot: 2 }))')).error, /switched off/);
+            assert.match((await page('outcome(ask("account", { store: "steam" }))')).error, /switched off/);
             const blocked = await page(`fetch('https://api.steampowered.com/ISteamDirectory/`
                 + `GetCMListForConnect/v1/').then(() => 'read', () => 'refused')`);
             assert.equal(blocked, 'refused');

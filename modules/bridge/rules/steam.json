@@ -19,8 +19,7 @@
             ]
         },
         "condition": {
-            "requestDomains": ["api.steampowered.com", "steamcontent.com", "steampipe.akamaized.net",
-                "client-update.akamai.steamstatic.com"],
+            "requestDomains": ["steamcontent.com", "steampipe.akamaized.net"],
             "resourceTypes": ["xmlhttprequest", "other"]
         }
     },
