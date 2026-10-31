@@ -17,6 +17,7 @@
  */
 
 import { guestEntry } from './guest-code.js';
+import { settle } from './io.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestPrint from './inguest-print.js';
@@ -31,6 +32,7 @@ const TRUNCATE = 0xffffffff;
  * @typedef {Object} Msvcr80Host
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -58,6 +60,102 @@ export function createMsvcr80Functions(crt, host){
         setU32(crt._errno.handler([]), code);
         return code;
     };
+
+    /** @param {number} address */
+    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+        .getUint32(0, true);
+    const pointer = host.pointerSize ?? 4;
+    /** A pointer, every address below 4 GiB. @param {number} address @param {number} value */
+    const setPointer = (address, value)=>{
+        const bytes = new Uint8Array(pointer);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        host.writeMemory(address >>> 0, bytes);
+    };
+
+    /**
+     * `strtok_s` and `wcstok_s`: the next token of `text`, or of where the
+     * last call left off when it is none, as strtok finds it, with where to
+     * go on from kept in `*context` rather than in the runtime. No
+     * delimiters, no context, or nowhere to start is EINVAL and null.
+     *
+     * @param {1 | 2} unit  The bytes of a character.
+     */
+    const tokenize = unit=>({
+        convention: 'cdecl',
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([text, delimiters, context])=>{
+            const start = (context >>> 0) === 0 ? 0 : (text >>> 0) || readU32(context);
+            if ((delimiters >>> 0) === 0 || start === 0)
+            {
+                fail(EINVAL);
+                return 0;
+            }
+            /** @param {number} address */
+            const read = address=>{
+                const bytes = host.readMemory(address, unit);
+                return unit === 1 ? bytes[0] : bytes[0] | bytes[1] << 8;
+            };
+            const set = new Set();
+            for (let at = delimiters >>> 0; read(at) !== 0; at += unit)
+            {
+                set.add(read(at));
+            }
+            let at = start;
+            while (read(at) !== 0 && set.has(read(at)))
+            {
+                at += unit;
+            }
+            if (read(at) === 0)
+            {
+                setPointer(context, at);
+                return 0;
+            }
+            const token = at;
+            while (read(at) !== 0 && !set.has(read(at)))
+            {
+                at += unit;
+            }
+            if (read(at) !== 0)
+            {
+                host.writeMemory(at, new Uint8Array(unit));
+                at += unit;
+            }
+            setPointer(context, at);
+            return token;
+        },
+    });
+
+    /**
+     * `_sopen_s` and `_wsopen_s`: the open `_sopen` makes, the descriptor
+     * into `*fd` (-1 there when it fails) and errno's code the answer.
+     *
+     * @param {string} open  The function that opens: `_sopen` or `_wsopen`.
+     */
+    const openSecure = open=>({
+        convention: 'cdecl',
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([out, path, flags, share, mode])=>{
+            if ((out >>> 0) === 0)
+            {
+                return fail(EINVAL);
+            }
+            setU32(out, -1);
+            if ((path >>> 0) === 0)
+            {
+                return fail(EINVAL);
+            }
+            return settle(crt[open].handler([path, flags, share, mode]), fd=>{
+                if ((fd | 0) < 0)
+                {
+                    return readU32(crt._errno.handler([]));
+                }
+                setU32(out, fd);
+                return 0;
+            });
+        },
+    });
 
     /**
      * The secure library's end for a parameter it cannot live with, and a
@@ -257,6 +355,60 @@ export function createMsvcr80Functions(crt, host){
          * The filter a DLL's start-up wraps its initialisers in: msvcrt's.
          */
         __CppXcptFilter: crt._XcptFilter,
+
+        /** char *strtok_s(char *text, const char *delimiters, char **context) */
+        strtok_s: tokenize(1),
+        /** wchar_t *wcstok_s(wchar_t *text, const wchar_t *delimiters, wchar_t **context) */
+        wcstok_s: tokenize(2),
+
+        /** errno_t _sopen_s(int *fd, const char *path, int flags, int share, int mode) */
+        _sopen_s: openSecure('_sopen'),
+        /** errno_t _wsopen_s(int *fd, const wchar_t *path, int flags, int share, int mode) */
+        _wsopen_s: openSecure('_wsopen'),
+
+        /** int vfprintf_s(FILE *stream, const char *format, va_list args): no format is EINVAL. */
+        vfprintf_s: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([stream, format, list])=>{
+                if ((format >>> 0) === 0)
+                {
+                    fail(EINVAL);
+                    return -1;
+                }
+                return crt.vfprintf.handler([stream, format, list]);
+            },
+        },
+
+        /**
+         * int vswprintf_s(wchar_t *buffer, size_t size, const wchar_t *format, va_list args)
+         *
+         * The text whole and its length; when it does not fit, the buffer
+         * emptied, -1 and ERANGE. No buffer, size or format is EINVAL.
+         */
+        vswprintf_s: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, list])=>{
+                if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (format >>> 0) === 0)
+                {
+                    fail(EINVAL);
+                    return -1;
+                }
+                const length = crt._vsnwprintf.handler([0, 0, format, list]) | 0;
+                if (length < 0 || length + 1 > (size >>> 0))
+                {
+                    host.writeMemory(buffer >>> 0, Uint8Array.of(0, 0));
+                    fail(length < 0 ? EINVAL : ERANGE);
+                    return -1;
+                }
+                crt._vsnwprintf.handler([buffer, size, format, list]);
+                host.writeMemory((buffer >>> 0) + length * 2, Uint8Array.of(0, 0));
+                return length;
+            },
+        },
 
         // std::exception: msvcrt's exception class, which Visual C++ 2005
         // moved into the namespace without changing it.

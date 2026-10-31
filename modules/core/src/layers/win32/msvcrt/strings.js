@@ -39,6 +39,7 @@ import { COMPILED } from './inguest.x86.js';
  *     the largest host cost in an install that scans while it copies.
  * @property {(bytes: number) => number} allocate  Guest memory that outlives a call.
  * @property {(code: number) => void} [errno]  Where a refused parameter says why.
+ * @property {number} [pointerSize]  8 in a 64-bit process, where `_pctype` is a quadword.
  */
 
 /** A string is scanned no further than this, since nothing in C bounds one. */
@@ -475,21 +476,31 @@ export function createStringFunctions(host){
             ctypeTable.byteOffset + ctypeTable.byteLength)),
     };
 
+    /** Where the published table's second element is, 0 until it is published. */
+    let published = 0;
+    const publishedTable = ()=>{
+        if (published === 0)
+        {
+            const address = host.allocate(ctypeTable.byteLength);
+            if (address !== 0)
+            {
+                host.writeMemory(address, new Uint8Array(ctypeTable.buffer, ctypeTable.byteOffset,
+                    ctypeTable.byteLength));
+                published = address + 2;
+            }
+        }
+        return published;
+    };
     table._pctype = {
         data: ()=>{
-            const address = host.allocate(ctypeTable.byteLength);
-            if (address === 0)
-            {
-                return new Uint8Array(4);
-            }
-            const bytes = new Uint8Array(ctypeTable.buffer, ctypeTable.byteOffset,
-                ctypeTable.byteLength);
-            host.writeMemory(address, bytes);
-            const pointer = new Uint8Array(4);
-            new DataView(pointer.buffer).setUint32(0, address + 2, true);
+            const pointer = new Uint8Array(host.pointerSize ?? 4);
+            new DataView(pointer.buffer).setUint32(0, publishedTable(), true);
             return pointer;
         },
     };
+
+    /** const unsigned short *__pctype_func(void): `_pctype`'s value, through a call. */
+    table.__pctype_func = { convention: 'cdecl', argBytes: 0, handler: publishedTable };
 
     return table;
 }

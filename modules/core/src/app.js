@@ -5124,6 +5124,13 @@ async function buildApp(options){
                  * @param {number} index @param {Uint32Array} words
                  */
                 writeXmm: (index, words)=>core.api('cpu').writeXmm(index, words),
+                /**
+                 * An XMM register's lanes, where a 32-bit runtime's SSE2
+                 * entries take their argument.
+                 *
+                 * @param {number} index
+                 */
+                readXmm: index=>core.api('cpu').readXmm(index),
             },
             // A C runtime returns a double on the floating-point stack, not in
             // a register, so the functions that do are exported only when this

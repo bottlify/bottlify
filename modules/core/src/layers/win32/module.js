@@ -4369,7 +4369,7 @@ export function createWin32Module(){
                     files: volume }),
             };
             libraries['MSVCR80.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
-                { readMemory, writeMemory });
+                { readMemory, writeMemory, pointerSize });
             // And its C++ library, over that runtime's operator new and delete.
             libraries['MSVCP80.dll'] = createMsvcp80Functions(libraries['MSVCR80.dll'],
                 { readMemory, writeMemory, fillMemory });
@@ -4381,6 +4381,17 @@ export function createWin32Module(){
                 pointerSize,
                 readMemory,
                 writeMemory,
+                readCString,
+                commandLine: {
+                    narrow: ()=>libraries['KERNEL32.dll'].GetCommandLineA.handler([]),
+                    wide: ()=>libraries['KERNEL32.dll'].GetCommandLineW.handler([]),
+                },
+                // `_except1` puts back the x87 control word the caller had.
+                ...floatResults ? { fpu: { ...floatResults,
+                    ...config?.fpu?.setControlWord
+                        ? { setControlWord: config.fpu.setControlWord } : {} } } : {},
+                ...cpuRegisters.readXmm && cpuRegisters.writeXmm
+                    ? { readXmm: cpuRegisters.readXmm, writeXmm: cpuRegisters.writeXmm } : {},
                 callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 currentThread: ()=>kernel.currentThread(),
             });

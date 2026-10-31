@@ -67,10 +67,26 @@ function setup(texts = {}){
         _invalid_parameter_noinfo: { handler: ()=>called.push('ended') },
         _XcptFilter: { handler: ()=>0 },
         atexit: { handler: ()=>0 },
+        fread: { handler: (/** @type {number[]} */ args)=>{
+            called.push(['fread', ...args]);
+            return args[2];
+        } },
+        exit: { handler: (/** @type {number[]} */ [code])=>called.push(['exit', code]) },
+        _Getdays: { handler: ()=>{
+            writeText(0x3000, ':Sun:Sunday\0');
+            return 0x3000;
+        } },
+        malloc: { handler: (/** @type {number[]} */ [bytes])=>{
+            const block = next;
+            next += bytes;
+            return block;
+        } },
     };
     const ucrt = createUcrtbaseFunctions(crt, {
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readCString: address=>String.fromCharCode(...memory.slice(address,
+            memory.indexOf(0, address))),
         callGuest: (entry, args)=>{
             called.push(['guest', entry, ...args]);
             return 0;
@@ -169,4 +185,42 @@ test('_set_fmode takes the modes there are, and _get_fmode reads the same variab
     assert.equal(ucrt._set_fmode.handler([0x1234]), 22, 'EINVAL');
     assert.equal(readU32(ERRNO), 22);
     assert.equal(ucrt._get_fmode.handler([0]), 22);
+});
+
+test('_get_stream_buffer_pointers names the record\'s base, position and count fields', ()=>{
+    const { ucrt, readU32 } = setup();
+    const stream = 0x2000;
+    assert.equal(ucrt._get_stream_buffer_pointers.handler([stream, 0x500, 0x504, 0x508]), 0);
+    assert.deepEqual([readU32(0x500), readU32(0x504), readU32(0x508)],
+        [stream + 8, stream, stream + 4], '_base, _ptr and _cnt of msvcrt\'s _iobuf');
+    assert.equal(ucrt._get_stream_buffer_pointers.handler([0, 0x500, 0x504, 0x508]), 22,
+        'no stream: EINVAL');
+});
+
+test('fread_s reads as fread does, and refuses a request larger than its buffer', ()=>{
+    const { ucrt, called, readU32, memory } = setup();
+    assert.equal(ucrt.fread_s.handler([0x2000, 16, 4, 4, 0x3000]), 4);
+    assert.deepEqual(called.at(-1), ['fread', 0x2000, 4, 4, 0x3000]);
+    memory.fill(0xff, 0x2000, 0x2010);
+    assert.equal(ucrt.fread_s.handler([0x2000, 15, 4, 4, 0x3000]), 0, 'sixteen bytes into 15');
+    assert.equal(readU32(ERRNO), 34, 'ERANGE');
+    assert.deepEqual([...memory.slice(0x2000, 0x2010)], [...new Array(15).fill(0), 0xff],
+        'the buffer cleared');
+});
+
+test('exit calls the exe\'s thread-local callback first, told the process detaches', async()=>{
+    const { ucrt, called } = setup();
+    ucrt._register_thread_local_exe_atexit_callback.handler([0x7100]);
+    await ucrt.exit.handler([3]);
+    assert.deepEqual(called, [['guest', 0x7100, 0, 0, 0], ['exit', 3]]);
+    await ucrt.exit.handler([4]);
+    assert.deepEqual(called.at(-1), ['exit', 4], 'and once only');
+});
+
+test('_W_Getdays widens the names _Getdays lists, the narrow list freed', ()=>{
+    const { ucrt, called, memory } = setup();
+    const at = ucrt._W_Getdays.handler([]);
+    const units = new Uint16Array(memory.slice(at, at + 24).buffer);
+    assert.equal(String.fromCharCode(...units.slice(0, units.indexOf(0))), ':Sun:Sunday');
+    assert.deepEqual(called.at(-1), ['free', 0x3000]);
 });
