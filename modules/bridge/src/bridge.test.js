@@ -69,7 +69,7 @@ function bridgeOver(platforms = { steam: true }){
 }
 
 test('a sign-in streams its code, keeps the token and answers only the account name', async()=>{
-    const { kept, ask, events } = bridgeOver();
+    const { steam, kept, ask, events } = bridgeOver();
     const answer = await ask('signIn');
     assert.deepEqual(answer, { accountName: 'someone' });
     assert.deepEqual(events, [
@@ -79,7 +79,11 @@ test('a sign-in streams its code, keeps the token and answers only the account n
     assert.equal(kept.session.refreshToken, TOKEN);
     const account = await ask('account');
     assert.deepEqual(account,
-        { steamId: '76561197960265729', accountName: 'someone', apps: [220, 400] });
+        { steamId: '76561197960265729', accountName: 'someone', apps: [220, 400], licenses: 1 });
+    // Fresh logs on again rather than answering from the logon held.
+    await ask('account');
+    await ask('account', { fresh: true });
+    assert.equal(steam.asked.filter((/** @type {string} */ one)=>one.startsWith('logOn')).length, 2);
     // Nothing the page was given carries the token.
     assert.doesNotMatch(JSON.stringify([answer, events, account]), /secret-signature|eyJ/);
 });

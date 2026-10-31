@@ -172,10 +172,16 @@ export function createBridge({ steam, store, managers, version, platforms }){
         },
 
         // Nobody signed in is an answer, not a failure, and needs no logon to give.
-        account: async()=>{
+        // Fresh: the licences as Steam has them now, over a new logon -- one
+        // added since is among them.
+        account: async({ fresh })=>{
             if (!await store.get())
             {
                 return null;
+            }
+            if (fresh)
+            {
+                drop();
             }
             const now = await loggedOn();
             if (!now.session)
@@ -190,7 +196,7 @@ export function createBridge({ steam, store, managers, version, platforms }){
                         .sort((/** @type {number} */ a, /** @type {number} */ b)=>a - b) };
             }
             return { steamId: String(now.steamId), accountName: now.session.accountName,
-                apps: library.apps };
+                apps: library.apps, licenses: now.licenses.length };
         },
 
         depotKey: async({ app, depot })=>steam.depotKey((await loggedOn()).connection, app, depot),
