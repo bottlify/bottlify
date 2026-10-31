@@ -43,7 +43,8 @@
  */
 
 import { GL, WGL } from './constants.js';
-import { EXTENSION_WORDS, GL_EXTENSIONS, WGL_EXTENSIONS } from './extensions.js';
+import { EXTENSION_WORDS, GL_EXTENSIONS, GL_VERSIONS, WGL_EXTENSIONS } from './extensions.js';
+import { laterEntryPoints } from './exports-later.js';
 import {
     choosePixelFormat, decodePixelFormat, encodePixelFormat, PIXEL_FORMATS,
     PIXELFORMATDESCRIPTOR,
@@ -61,6 +62,8 @@ import { readToTerminator } from '../../win32/common/scan-windows.js';
 
 /** A page: the block and the ring each take pages of their own. */
 const RING_PAGE = 4096;
+/** The most of a shader's source string read to its terminator. */
+const SOURCE_LIMIT = 4 * 1024 * 1024;
 /** How many calls into the host one timed call stands for (`ringMs`, `callMs`). */
 const TIMED_EVERY = 16;
 
@@ -201,6 +204,12 @@ const FLOAT_SIGNATURES = Object.freeze({
     glAccum: 'if',
     glAlphaFunc: 'if',
     glBitmap: 'iiffffi',
+    glBlendColor: 'ffff',
+    glBlendColorEXT: 'ffff',
+    glSampleCoverage: 'fi',
+    glPointParameterf: 'if',
+    glFogCoordf: 'f',
+    glFogCoordd: 'd',
     glClearAccum: 'ffff',
     glClearColor: 'ffff',
     glClearDepth: 'd',
@@ -542,7 +551,7 @@ export function createOpengl(services){
         },
         // No way to hand out an address, no extension: the string and the
         // lookup are one promise, and both are kept or neither is.
-        extensions: exportAddress ? { ...GL_EXTENSIONS, ...WGL_EXTENSIONS } : {},
+        extensions: exportAddress ? { ...GL_EXTENSIONS, ...GL_VERSIONS, ...WGL_EXTENSIONS } : {},
         divergence: detail=>services.divergence?.('OpenGL', detail),
         createContext: options=>{
             madeContext = true;
@@ -2091,6 +2100,40 @@ export function createOpengl(services){
             a[0] | 0, a[1] | 0, asFloat(a[2]), asFloat(a[3]), asFloat(a[4]), asFloat(a[5]))),
     };
     Object.assign(implemented, handlers);
+    Object.assign(implemented, laterEntryPoints({
+        current, call, answer, readTyped, writeU32s, writeQuery,
+        writeMemory: services.writeMemory,
+        readMemory: (address, length)=>windowMemory(address >>> 0, length),
+        readName: readCString,
+        readText: address=>{
+            const bytes = readToTerminator(services, address >>> 0, 1, SOURCE_LIMIT).bytes;
+            let text = '';
+            for (let at = 0; at < bytes.length; at += 0x8000)
+            {
+                text += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+            }
+            return text;
+        },
+        pointerSize: services.pointerSize ?? 4,
+    }));
+    family('glWindowPos', [2, 3], SIGNED, false, [0, 0, 0, 1],
+        (context, x, y, z)=>context.glWindowPos3f(x, y, z));
+    // A version's name for what an extension brought, and an extension's
+    // spelling of what has a core one, are the same handler.
+    for (const name of [...Object.values(GL_VERSIONS).flat(),
+        ...Object.values(GL_EXTENSIONS).flat()])
+    {
+        if (implemented[name])
+        {
+            continue;
+        }
+        const same = [`${name}ARB`, `${name}EXT`, name.replace(/(ARB|EXT)$/, '')]
+            .find(candidate=>candidate !== name && implemented[candidate]);
+        if (same)
+        {
+            implemented[name] = implemented[same];
+        }
+    }
 
     /**
      * The two calls here that may wait before they answer: a swap on the

@@ -51,6 +51,12 @@
  *           Copies a rectangle of the framebuffer into a texture level on the
  *           device, as a render pass into a view of that level. Null in a build
  *           that draws on the processor, where the copy reads `framebuffer()`.
+ * @property {((texture: import('./objects.js').TextureObject) => void) | null} [generateMipmap]
+ *           glGenerateMipmap's levels made on the device from the base level
+ * @property {((request: { srcX0: number, srcY0: number, srcX1: number, srcY1: number,
+ *             dstX0: number, dstY0: number, dstX1: number, dstY1: number,
+ *             linear: boolean }) => void) | null} [blit]
+ *           glBlitFramebuffer's colour, from the read framebuffer to the draw one
  * @property {((buffer: import('./objects.js').BufferObject) => void) | null} bufferDeleted
  *           a buffer object deleted, for the renderer to let its copy go
  * @property {() => boolean} gpuBacked   whether the framebuffer's pixels live on

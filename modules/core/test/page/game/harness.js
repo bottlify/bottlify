@@ -981,6 +981,10 @@ export function seriesRow(app, count, at){
         // time, so a window shows which thread ran how fast and what it waited for.
         threadTimes: typeof layers.kernel?.threadTimes === 'string'
             ? JSON.parse(layers.kernel.threadTimes) : null,
+        // The host's waits by what was waited on and how each ended, and the
+        // semaphores' releases and wakes (the kernel's `sync`): which of a
+        // window's waits guest code could answer.
+        sync: layers.kernel?.sync ?? null,
         executors: {
             own: typeof layers.kernel?.sharedTime === 'string'
                 ? JSON.parse(layers.kernel.sharedTime) : null,
@@ -1946,9 +1950,17 @@ export function createHarness(canvas, how = {}){
                 rgba: toBase64(image.pixels) });
         }
         // A frame counted without its picture (the fake GPU's) has none to read back.
-        if (presentState.presented?.surface)
+        // A device lost by now (the GPU process gone) has no last frame to
+        // give, and the run's account -- its series above all -- is not lost
+        // with it: the report says the frame was not read.
+        const image = presentState.presented?.surface
+            ? await readBack(handle.device, presentState.presented.surface).catch(e=>{
+                result.frameError = String(e?.message ?? e);
+                return null;
+            })
+            : null;
+        if (presentState.presented?.surface && image)
         {
-            const image = await readBack(handle.device, presentState.presented.surface);
             // A live canvas is WebGPU's already and has the frame; a 2D context cannot be had.
             if (!request.live)
             {

@@ -20,6 +20,9 @@ import { GL } from './constants.js';
 
 const DATA = 0x2000;
 
+/** Context methods that serve a family of entry points under a name of their own. */
+const ENTRY_METHODS = new Set(['uniform', 'uniformMatrix', 'bindFramebuffer']);
+
 /** @param {unknown} value */
 const plain = value=>(ArrayBuffer.isView(value)
     ? [...(/** @type {any} */ (value))]
@@ -51,7 +54,7 @@ function logged(){
                     get(target, key){
                         const value = /** @type {any} */ (target)[key];
                         if (typeof value !== 'function' || typeof key !== 'string'
-                            || !key.startsWith('gl'))
+                            || !(key.startsWith('gl') || ENTRY_METHODS.has(key)))
                         {
                             return value;
                         }
@@ -81,7 +84,7 @@ const word = i=>WORDS[i % WORDS.length];
 
 test('every call the ring carries is made as its entry point makes it', ()=>{
     const { bytes, log, table, context } = logged();
-    const floats = new Float32Array(16).map((unused, i)=>i * 0.5 + 0.25);
+    const floats = new Float32Array(160).map((unused, i)=>i * 0.5 + 0.25);
     bytes.set(new Uint8Array(floats.buffer), DATA);
     for (const [name, entry] of Object.entries(GL_COMMANDS.COMMANDS))
     {

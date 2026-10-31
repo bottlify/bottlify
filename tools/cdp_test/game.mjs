@@ -1673,6 +1673,10 @@ function describe(result, context, calls, symbols){
         say(`  colours: ${JSON.stringify(result.colours)}`);
         say(`  opacity: ${JSON.stringify(result.opacity)}`);
     }
+    if (result.frameError)
+    {
+        say(`  frame: not read back -- ${result.frameError}`);
+    }
     say('');
 
     for (const failure of (result.failures ?? []).slice(0, 3))

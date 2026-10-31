@@ -249,8 +249,9 @@ const hashText = (hash, text)=>{
  *     chains against, each root as DER bytes or base64; absent, it holds
  *     Microsoft's "Microsoft Root Authority" alone, and an empty list trusts
  *     nothing. `handleWords: false` leaves out the table of handle words that
- *     WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent answer from in
- *     the guest, so every such call is the host's: the second path of their gates.
+ *     WaitForSingleObject, ReleaseMutex, ReleaseSemaphore, SetEvent and ResetEvent
+ *     answer from in the guest, so every such call is the host's: the second path
+ *     of their gates.
  *     `steam` is a signed-in Steam account (its Steam ID, name and the app ids
  *     its licences grant, as the embedder established with the person's own
  *     sign-in): the run then has a Steam client running, which a game's
@@ -2539,6 +2540,13 @@ function readImageNow(filesystem, path){
 }
 
 /**
+ * The most a host-side whole-file read asks of the volume at once: a quarter of
+ * the heap's pool for fetched blocks, so one piece's blocks and the read-ahead
+ * beside them are all still held when the read looks again.
+ */
+export const WHOLE_READ_BYTES = HEAP_POOLS.blockCache / 4;
+
+/**
  * Reads a whole file off the volume, waiting for whatever is not here yet.
  *
  * A read of a block that has not been fetched reports which blocks it needs
@@ -2546,12 +2554,19 @@ function readImageNow(filesystem, path){
  * a host-side reader has to do what the guest's would: fetch, and look again.
  * This runs before the first guest instruction, so it may simply wait.
  *
+ * A piece at a time (`WHOLE_READ_BYTES`), not the whole file in one read: where
+ * the fetched blocks are held in the heap (no store, or one that refused them),
+ * the cache keeps a bounded pool, and a file larger than it -- a program image
+ * of a hundred megabytes -- was fetched, let go down to the pool and missed
+ * again, for ever.
+ *
  * @param {any} filesystem
  * @param {any} blocks
  * @param {string} path
+ * @param {number} [piece]  the most one read asks for
  * @returns {Promise<Uint8Array | null>}
  */
-async function readWholeFile(filesystem, blocks, path){
+export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ_BYTES){
     let handle;
     try
     {
@@ -2571,7 +2586,7 @@ async function readWholeFile(filesystem, blocks, path){
             let chunk;
             try
             {
-                chunk = filesystem.read(handle, size - at);
+                chunk = filesystem.read(handle, Math.min(size - at, piece));
             }
             catch (e){
                 const miss = /** @type {any} */ (e);
@@ -4506,46 +4521,10 @@ async function buildApp(options){
             // loader knows the file's name and not where the volume keeps it,
             // and the layer that answers for the volume is below audio, so
             // the reader is handed down as a thunk the same way the mixer is
-            // handed to win32.
-            readFile: async(/** @type {string} */ path)=>{
-                /** @type {any} */
-                let handle;
-                try
-                {
-                    handle = core.api('filesystem').open(path, { create: false });
-                }
-                catch {
-                    return null;
-                }
-                if (!handle)
-                {
-                    return null;
-                }
-                const filesystem = core.api('filesystem');
-                try
-                {
-                    try
-                    {
-                        return filesystem.read(handle, filesystem.size(handle));
-                    }
-                    catch (e){
-                        // A block of the bundle not fetched yet: fetched, then
-                        // read once more, as the volume's own reader does.
-                        const miss = /** @type {any} */ (e);
-                        if (miss?.code !== 'BLOCK_MISS' || !fetchBundleBlocks)
-                        {
-                            throw miss;
-                        }
-                        await fetchBundleBlocks(miss.blocks);
-                        filesystem.seek(handle, 0);
-                        return filesystem.read(handle, filesystem.size(handle));
-                    }
-                }
-                finally
-                {
-                    core.api('filesystem').close(handle);
-                }
-            },
+            // handed to win32. It waits for the bundle's blocks as a program's
+            // image does.
+            readFile: (/** @type {string} */ path)=>readWholeFile(core.api('filesystem'),
+                fetchBundleBlocks ? { fetch: fetchBundleBlocks } : null, path),
             // Whether anything is reading the other end of the ring. Told from
             // outside because only the assembling caller knows whether it
             // opened a device, and it decides whether a program's play cursor
@@ -5560,6 +5539,16 @@ async function buildApp(options){
     // the libraries a program brings, and a module is a few pages -- a
     // megabyte apart, sixty of them left a third of the window to those.
     let systemModulesEnd = MODULE_BASE;
+    /**
+     * The exports a 64-bit process's modules leave out: i386 alone -- guest
+     * code with neither x86-64 (`long`) nor a host handler to trap into, as
+     * `_chkesp` and the __fastcall entries are. Bound, its i386 would run as
+     * x86-64; left out, a program that imports one is refused at load, by
+     * name. Most have no x64 export on Windows either.
+     *
+     * @type {string[]}
+     */
+    const leftOutAt64 = [];
     Object.entries(allLibraries).forEach(([name, table])=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
@@ -5569,7 +5558,14 @@ async function buildApp(options){
         const declared = new Map(Object.entries(byOrdinal)
             .map(([ordinal, exported])=>[exported, Number(ordinal)]));
 
-        const exports = Object.entries(table).map(([exported, fn])=>({
+        const exports = Object.entries(table).filter(([exported, fn])=>{
+            const runs = !long || fn.long || fn.handler || fn.data;
+            if (!runs)
+            {
+                leftOutAt64.push(`${name}!${exported}`);
+            }
+            return runs;
+        }).map(([exported, fn])=>({
             name: exported,
             ordinal: declared.get(exported),
             // An export is a function that is code of its own, a variable the
@@ -8181,8 +8177,9 @@ async function buildApp(options){
              */
             checkDraws: on=>core.api('graphics').checkDraws?.(on === true) ?? false,
             /**
-             * Whether the guest answers waits on events and mutexes, SetEvent,
-             * ResetEvent and ReleaseMutex by itself (`win32.handleWords`),
+             * Whether the guest answers waits on events, mutexes and semaphores,
+             * SetEvent, ResetEvent, ReleaseMutex and ReleaseSemaphore by itself
+             * (`win32.handleWords`),
              * switched as the program runs: off, every one crosses into the
              * host. Answers whether the guest answers them.
              *
@@ -8626,6 +8623,8 @@ async function buildApp(options){
                     // what this build accepted and did not do, and the journal
                     // has long since let go of a line said once.
                     divergences: [...divergences].slice(0, DIVERGENCES_KEPT),
+                    // The system exports a 64-bit process has no x86-64 of.
+                    leftOutAt64,
                     // The guest-to-guest calls a watch was put in front of, by label.
                     watches: [...watches.keys()],
                     // How many calls a site kernel issued through `frame.gl`,
@@ -9931,7 +9930,12 @@ export async function createApp(options){
             // the run's system from a worker of its own is never the run's only
             // one -- its parent at least stands -- so what it waits on is
             // another's to answer, and the run, not it, says when it is over.
+            // A child beside counts until its parent is told it ended: its
+            // machine stops standing when its run is over and is taken down
+            // after, which awaits, while the parent's turns go on -- a parent
+            // whose every thread waits on it would find nothing to wake it.
             othersRunning: ()=>Boolean(options.system) || starting > 0 || across > 0
+                || besides.size > 0
                 || [...standing].some(other=>other !== self) }));
         self = built;
         standing.add(built);
@@ -11060,19 +11064,29 @@ export async function createApp(options){
             {
                 reachable.delete(request.id);
             }
-            const ended = line.current;
-            await retire(ended);
-            noteLogSequence();
-            mediaInstance = ended.media.instance() ?? mediaInstance;
-            await ended.dispose();
-            keepMemory(ended);
-            sound.giveBack();
-            // The page sees whoever stands in the main line again.
-            replayLogLevels();
-            stand(mainLine.current);
-            bindLogLevels();
-            presenter?.forget?.(request.id);
-            parent.childExited(request, code);
+            // Its parent is told however the teardown goes.
+            try
+            {
+                const ended = line.current;
+                await retire(ended);
+                noteLogSequence();
+                mediaInstance = ended.media.instance() ?? mediaInstance;
+                await ended.dispose();
+                keepMemory(ended);
+                sound.giveBack();
+                // The page sees whoever stands in the main line again.
+                replayLogLevels();
+                stand(mainLine.current);
+                bindLogLevels();
+                presenter?.forget?.(request.id);
+            }
+            catch (e){
+                events.emit('error', { reason: 'process', error: e });
+            }
+            finally
+            {
+                parent.childExited(request, code);
+            }
             lastBesideCode = code;
             events.emit('process-resumed', { image: request.imagePath, code });
             return code;

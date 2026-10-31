@@ -17,7 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../../../../../cork/src/testing/machine.js';
-import { createHeapAllocator } from './heap.js';
+import { ALIGNMENT_64, createHeapAllocator } from './heap.js';
 import {
     CACHE, CONTROL, HEAP_MAGIC, SLAB, SMALL_LIMIT, callocCode, createGuestHeap, freeCode,
     heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode, mallocCode, msizeCode,
@@ -96,10 +96,11 @@ function heapMemory(ram, view){
  * The guest heap over a machine's memory, with the heaps the tests use.
  *
  * @param {ReturnType<typeof heapMemory>} memory
+ * @param {number} [alignment]  16 for a 64-bit process's
  */
-function heapsOver(memory){
-    const backend = createHeapAllocator(ARENA);
-    const guest = createGuestHeap({ allocator: backend, arena: ARENA, memory });
+function heapsOver(memory, alignment){
+    const backend = createHeapAllocator({ ...ARENA, alignment });
+    const guest = createGuestHeap({ allocator: backend, arena: ARENA, memory, alignment });
     const heap = guest.createHeap();
     const other = guest.createHeap();
     const placement = /** @type {import('./guest-heap.js').Placement} */ (guest.placement());
@@ -182,7 +183,7 @@ function world64(){
     const ram = ()=>m.bytes().subarray(0, 4 << 20);
     const view = ()=>new DataView(m.bytes().buffer, 0, 4 << 20);
     const memory = heapMemory(ram, view);
-    const { backend, guest, heap, other, placement, allocator } = heapsOver(memory);
+    const { backend, guest, heap, other, placement, allocator } = heapsOver(memory, ALIGNMENT_64);
     m.write(HALT, [0xf4]);
     /** @type {Record<string, number>} */
     const at = {};
@@ -292,8 +293,8 @@ both('a block allocated in the guest is sized, resized in place and freed in the
     assert.deepEqual(w.call('HeapReAlloc', [w.heap, HEAP_REALLOC_IN_PLACE_ONLY, second.eax, 3]),
         { eax: second.eax, handed: false });
     assert.equal(w.allocator.block(second.eax)?.size, 3);
-    // Past its cell: the host's, which moves it.
-    assert.equal(w.call('HeapReAlloc', [w.heap, 0, second.eax, 25]).handed, true);
+    // Past its cell (24 bytes, 32 where cells are aligned to 16): the host's, which moves it.
+    assert.equal(w.call('HeapReAlloc', [w.heap, 0, second.eax, 33]).handed, true);
     assert.deepEqual(w.call('HeapFree', [w.heap, 0, second.eax]), { eax: 1, handed: false });
     assert.equal(w.allocator.block(second.eax), null, 'free to the host too');
     assert.equal(w.call('HeapFree', [w.heap, 0, second.eax]).handed, true,
@@ -301,6 +302,27 @@ both('a block allocated in the guest is sized, resized in place and freed in the
     assert.equal(w.call('HeapSize', [w.heap, 0, second.eax]).handed, true);
     assert.deepEqual(w.call('HeapFree', [w.heap, 0, 0]), { eax: 1, handed: false },
         'a null pointer is TRUE');
+});
+
+test('at 64 bits every block starts on 16 bytes, the guest\'s and the host\'s, malloc\'s and'
+    + ' HeapAlloc\'s', ()=>{
+    const w = world64();
+    /** @type {number[]} */
+    const seen = [];
+    for (let size = 0; size <= SMALL_LIMIT + 0x200; size += 7)
+    {
+        for (const name of ['HeapAlloc', 'malloc'])
+        {
+            const { eax, handed } = w.call(name, name === 'malloc' ? [size] : [w.heap, 0, size]);
+            // A hand-over answers 0 here: the host's path is the allocator's own.
+            const block = handed ? w.allocator.allocate(size, { owner: w.heap }) : eax;
+            assert.ok(block !== 0);
+            assert.equal(block % 16, 0, `${name}(${size}) at 0x${block.toString(16)}`);
+            seen.push(block);
+        }
+    }
+    assert.equal(w.allocator.allocate(0x510, { owner: w.heap }) % 16, 0, 'a large block too');
+    assert.equal(new Set(seen).size, seen.length, 'each its own');
 });
 
 both('what the guest\'s path does not take goes to the host', w=>{

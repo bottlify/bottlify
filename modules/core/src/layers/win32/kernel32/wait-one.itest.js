@@ -27,7 +27,8 @@ const TRAP = 0x8400;
 const TABLE = 0x100000;
 const STACK = 0x300000;
 /** What the kernel's words say, as the routines are handed it. */
-const VALUES = { clear: MIRROR.CLEAR, set: MIRROR.SET, mutexTag: MUTEX_TAG, eventTag: EVENT_TAG };
+const VALUES = { clear: MIRROR.CLEAR, set: MIRROR.SET, invalid: MIRROR.INVALID,
+    mutexTag: MUTEX_TAG, eventTag: EVENT_TAG };
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -44,7 +45,7 @@ test('the guest poll times out an unsignalled event and leaves every other wait 
             initialStack: STACK,
             cork: { sliceMs: Infinity },
         });
-        host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
+        host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES, TRAP));
         host.writePhysical(TRAP, new Uint8Array([0xf4]));
         /** @param {number} handle @param {number} value */
         const word = (handle, value)=>host.writePhysical(TABLE + (handle >>> 2) * 4,
@@ -95,6 +96,20 @@ test('the guest poll times out an unsignalled event and leaves every other wait 
         assert.equal(poll(0xffffffff, 0), 'host', 'a pseudo-handle');
         assert.equal(poll(0xfffffff6, 0), 'host', 'a standard-handle number');
 
+        // NULL's word: WAIT_FAILED here, ERROR_INVALID_HANDLE in the TEB (FS's
+        // base is zero here: FS:[0x34] is linear 0x34), whatever the timeout.
+        word(0, MIRROR.INVALID);
+        for (const [handle, timeout] of [[0, 0xffffffff], [0, 0], [0, 5]])
+        {
+            host.writePhysical(0x34, new Uint8Array(u32(0)));
+            assert.equal(poll(handle, timeout), 0xffffffff, `NULL (${handle}) fails here`);
+            assert.deepEqual([...host.readPhysical(0x34, 4)], u32(6), 'ERROR_INVALID_HANDLE');
+        }
+        assert.equal(poll(1, 0), 'host', 'a console stream goes to the host');
+        assert.equal(poll(3, 0xffffffff), 'host');
+        word(0, MIRROR.NONE);
+        assert.equal(poll(0, 0xffffffff), 'host', 'NULL with no word goes to the host');
+
         host.stop();
     });
 
@@ -112,9 +127,12 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
         initialStack: STACK,
         cork: { sliceMs: Infinity },
     });
-    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
+    /** Where a semaphore's wait goes (`semaphore-guest.js`): a halt of its own. */
+    const SEMAPHORE = 0x8800;
+    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES, SEMAPHORE));
     host.writePhysical(RELEASE, releaseMutexCode(RELEASE, TRAP, TABLE, VALUES));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    host.writePhysical(SEMAPHORE, new Uint8Array([0xf4]));
     // FS's base is zero here: FS:[0x24], the caller's id, is linear 0x24.
     host.writePhysical(0x24, new Uint8Array(u32(ME)));
     host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32((MUTEX | MUTEX_TAG) >>> 0)));
@@ -144,6 +162,12 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
         host.writeReg32('eax', 0x5a5a5a5a);
         host.wake();
         runToHalt(host, 1000);
+        if (host.readReg32('eip') === SEMAPHORE + 1)
+        {
+            assert.equal(host.readReg32('esp'), STACK - 4 - 4 * args.length,
+                'the semaphore\'s wait is reached with the call as it was made');
+            return 'semaphore';
+        }
         if (host.readReg32('eip') === TRAP + 1)
         {
             assert.equal(host.readReg32('esp'), STACK - 4 - 4 * args.length,
@@ -188,6 +212,15 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
     assert.equal(call(RELEASE, [HANDLE]), 1, 'but it is given back');
     assert.equal(word(), mine(MUTEX_WORD.RECURSION - 1));
 
+    // A semaphore's word, both tags: its wait is the semaphore's routine, and
+    // ReleaseMutex of it the host's to refuse, the word untouched.
+    host.writePhysical(TABLE + (HANDLE >>> 2) * 4,
+        new Uint8Array(u32((MUTEX | MUTEX_TAG | EVENT_TAG) >>> 0)));
+    setWord(0);
+    assert.equal(call(POLL, [HANDLE, 0xffffffff]), 'semaphore', 'a semaphore\'s wait');
+    assert.equal(call(POLL, [HANDLE, 0]), 'semaphore');
+    assert.equal(call(RELEASE, [HANDLE]), 'host', 'a semaphore\'s handle released as a mutex');
+    assert.equal(word(), 0, 'untouched');
     host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32(MIRROR.CLEAR)));
     assert.equal(call(RELEASE, [HANDLE]), 'host', 'an event\'s handle is the host\'s to refuse');
     host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32(MIRROR.NONE)));
@@ -276,7 +309,7 @@ test('the guest takes, sets and resets an event by its own word, and answers wha
         initialStack: STACK,
         cork: { sliceMs: Infinity },
     });
-    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
+    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES, TRAP));
     host.writePhysical(SET, eventStateCode(SET, TRAP, TABLE, VALUES, true));
     host.writePhysical(RESET, eventStateCode(RESET, TRAP, TABLE, VALUES, false));
     host.writePhysical(RELEASE, releaseMutexCode(RELEASE, TRAP, TABLE, VALUES));

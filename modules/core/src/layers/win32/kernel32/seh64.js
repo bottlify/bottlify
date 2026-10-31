@@ -922,6 +922,23 @@ export function createSeh64(host){
      * current RSP and RSP past it. Enough for an unwind, which reads only the
      * stack, RSP, RIP and the non-volatiles.
      */
+    /**
+     * RtlUnwindEx's and RtlUnwind's body: the record the program passed, or
+     * STATUS_UNWIND's of none.
+     *
+     * @param {UnwindContext} context @param {number} targetFrame @param {number} targetIp
+     * @param {number} recordPtr @param {number} returnValue
+     */
+    const unwindCalled = (context, targetFrame, targetIp, recordPtr, returnValue)=>{
+        const record = (recordPtr >>> 0) !== 0
+            ? { code: readU32(recordPtr + RECORD64.CODE),
+                flags: readU32(recordPtr + RECORD64.FLAGS),
+                address: context.rip }
+            : { code: STATUS.UNWIND, flags: EH_UNWINDING, address: context.rip };
+        return unwindEx(context, targetFrame >>> 0, targetIp >>> 0, returnValue >>> 0,
+            record, host.currentThread());
+    };
+
     const callerContext = ()=>{
         const context = captureContext();
         const rsp = stackOf(context);
@@ -1110,13 +1127,25 @@ export function createSeh64(host){
                 handler: ([targetFrame, targetIp, recordPtr, returnValue, contextRecord])=>{
                     const context = (contextRecord >>> 0) !== 0
                         ? readContext(contextRecord >>> 0) : callerContext();
-                    const record = (recordPtr >>> 0) !== 0
-                        ? { code: readU32(recordPtr + RECORD64.CODE),
-                            flags: readU32(recordPtr + RECORD64.FLAGS),
-                            address: context.rip }
-                        : { code: STATUS.UNWIND, flags: EH_UNWINDING, address: context.rip };
-                    return unwindEx(context, targetFrame >>> 0, targetIp >>> 0, returnValue >>> 0,
-                        record, host.currentThread());
+                    return unwindCalled(context, targetFrame, targetIp, recordPtr, returnValue);
+                },
+            },
+
+            /**
+             * VOID RtlUnwind(PVOID TargetFrame, PVOID TargetIp,
+             *     PEXCEPTION_RECORD ExceptionRecord, PVOID ReturnValue)
+             *
+             * At 64 bits, RtlUnwindEx from the caller's own context: it does not
+             * return. The x64 CRT's longjmp calls it with STATUS_LONGJUMP and
+             * loops on it should it come back -- as the chain-based one of a
+             * 32-bit process does, which stood here before.
+             */
+            RtlUnwind: {
+                argBytes: 16,
+                /** @param {number[]} args */
+                handler: ([targetFrame, targetIp, recordPtr, returnValue])=>{
+                    return unwindCalled(callerContext(), targetFrame, targetIp, recordPtr,
+                        returnValue);
                 },
             },
 

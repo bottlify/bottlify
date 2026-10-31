@@ -18,7 +18,8 @@
 
 /** IDirect3DDevice9's slots, after IUnknown's three, in d3d9.h's order. */
 export const DEVICE = Object.freeze({
-    GetDeviceCaps: 7, CreateTexture: 23, CreateVolumeTexture: 24, CreateCubeTexture: 25,
+    GetDirect3D: 6, GetDeviceCaps: 7, GetDisplayMode: 8, GetCreationParameters: 9,
+    CreateTexture: 23, CreateVolumeTexture: 24, CreateCubeTexture: 25,
     CreateVertexBuffer: 26,
     CreateIndexBuffer: 27, CreateRenderTarget: 28,
     CreateDepthStencilSurface: 29, UpdateTexture: 31, SetRenderTarget: 37, GetRenderTarget: 38,
@@ -29,6 +30,9 @@ export const DEVICE = Object.freeze({
     SetVertexDeclaration: 87, SetFVF: 89, SetVertexShader: 92, SetStreamSource: 100,
     SetIndices: 104, SetPixelShader: 107,
 });
+
+/** IDirect3D9's CheckDeviceFormat. */
+export const D3D9_CHECK_DEVICE_FORMAT = 10;
 
 /** IUnknown's AddRef and Release, and IDirect3DStateBlock9's Apply. */
 export const UNKNOWN_ADDREF = 1;

@@ -35,6 +35,7 @@ import { GL } from './constants.js';
 import {
     CLIP_REMAP, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf,
 } from './arb-wgsl.js';
+import { emitStage, interfaceStruct } from './glsl-wgsl.js';
 
 /**
  * @typedef {Object} UnitState
@@ -63,7 +64,7 @@ import {
  * @property {{ mode: number, fromCoordinate: boolean } | null} fog
  * @property {number | null} alphaFunc  null when the alpha test is off
  * @property {boolean} flat
- * @property {{ src: number, dst: number } | null} blend
+ * @property {import('./pipeline.js').SceneBlend | null} blend
  * @property {{ test: boolean, func: number, write: boolean }} depth
  * @property {{ func: number, fail: number, zfail: number, zpass: number,
  *              readMask: number, writeMask: number } | null} stencil
@@ -89,6 +90,13 @@ import {
  *           the enabled user clip planes, in the uniform block's order, and
  *           whether the device clips by the distances a vertex stage writes
  *           (`clip-distances`) or the fragment stage discards what they cut
+ * @property {{ format: string, mask: number }[]} [targets]  the colour targets,
+ *           when there is more than `targetFormat` with `colourMask`: a
+ *           framebuffer object's draw buffers, each with the channels it is
+ *           written in (an RGB attachment's alpha is not)
+ * @property {{ id: number, program: import('./glsl-link.js').LinkedProgram } | null} [glsl]
+ *           the GLSL program in use: its link, by a number unique to it
+ * @property {boolean} [twoSide]  GL_VERTEX_PROGRAM_TWO_SIDE, for a GLSL program
  */
 
 /**
@@ -340,6 +348,22 @@ const BLEND_FACTOR = Object.freeze({
     [GL.DST_COLOR]: 'dst',
     [GL.ONE_MINUS_DST_COLOR]: 'one-minus-dst',
     [GL.SRC_ALPHA_SATURATE]: 'src-alpha-saturated',
+    [GL.CONSTANT_COLOR]: 'constant',
+    [GL.ONE_MINUS_CONSTANT_COLOR]: 'one-minus-constant',
+    // WebGPU has one constant, which a factor takes whole: a constant-alpha
+    // factor is the constant's grey, which `gpu.js` sets it to when the
+    // blend uses no constant colour (`blendConstantOf`).
+    [GL.CONSTANT_ALPHA]: 'constant',
+    [GL.ONE_MINUS_CONSTANT_ALPHA]: 'one-minus-constant',
+});
+
+/** GL blend equation → WebGPU blend operation. */
+const BLEND_OPERATION = Object.freeze({
+    [GL.FUNC_ADD]: 'add',
+    [GL.FUNC_SUBTRACT]: 'subtract',
+    [GL.FUNC_REVERSE_SUBTRACT]: 'reverse-subtract',
+    [GL.MIN]: 'min',
+    [GL.MAX]: 'max',
 });
 
 /** GL stencil operation → WebGPU stencil operation. */
@@ -439,7 +463,7 @@ export function drawKey(state){
         state.fog ? `${state.fog.mode}${state.fog.fromCoordinate ? 'c' : ''}` : '-',
         state.alphaFunc === null ? '-' : state.alphaFunc,
         state.flat ? 1 : 0,
-        state.blend ? `${state.blend.src},${state.blend.dst}` : '-',
+        state.blend ? blendKey(state.blend) : '-',
         `${state.depth.test ? 1 : 0}${state.depth.write ? 1 : 0},${state.depth.func}`,
         stencil,
         stencilBack,
@@ -456,8 +480,32 @@ export function drawKey(state){
             ? `fp${state.fragmentProgram.name}.${state.fragmentProgram.version}.`
                 + `${state.viewportHeight ?? 0}`
             : '-',
+        targetsKey(state.targets),
+        state.glsl ? `g${state.glsl.id}${state.twoSide ? 't' : ''}` : '-',
     ].join('|');
 }
+
+/**
+ * @param {NonNullable<DrawState['blend']>} blend
+ * @returns {string}
+ */
+const blendKey = blend=>`${blend.src},${blend.dst}`
+    + `${blend.srcAlpha === undefined ? '' : `,${blend.srcAlpha},${blend.dstAlpha},`
+        + `${blend.equation},${blend.equationAlpha}`}`;
+
+/** @param {DrawState['targets']} targets */
+const targetsKey = targets=>{
+    if (!targets)
+    {
+        return '-';
+    }
+    let key = '';
+    for (const target of targets)
+    {
+        key += `${target.format}/${target.mask};`;
+    }
+    return key;
+};
 
 /** @param {LightingState | null | undefined} lighting */
 const lightingKey = lighting=>(lighting
@@ -549,7 +597,14 @@ export function sameKeyInputs(a, b){
     }
     const ba = a.blend;
     const bb = b.blend;
-    if (ba !== bb && (!ba || !bb || ba.src !== bb.src || ba.dst !== bb.dst))
+    if (ba !== bb && (!ba || !bb || ba.src !== bb.src || ba.dst !== bb.dst
+        || ba.srcAlpha !== bb.srcAlpha || ba.dstAlpha !== bb.dstAlpha
+        || ba.equation !== bb.equation || ba.equationAlpha !== bb.equationAlpha))
+    {
+        return false;
+    }
+    if (targetsKey(a.targets) !== targetsKey(b.targets) || (a.glsl?.id ?? 0) !== (b.glsl?.id ?? 0)
+        || !a.twoSide !== !b.twoSide)
     {
         return false;
     }
@@ -601,7 +656,7 @@ export function sameKeyInputs(a, b){
  *
  * @param {import('./gpu-layout.js').DrawAttribute} attribute
  */
-function attributeType(attribute){
+export function attributeType(attribute){
     const scalar = attribute.scalar;
     return attribute.components === 1 ? scalar : `vec${attribute.components}<${scalar}>`;
 }
@@ -686,7 +741,7 @@ function textureCoordinates(unit, given){
  *
  * @param {{ mode: number }} fog
  */
-function fogFactorOf(fog){
+export function fogFactorOf(fog){
     switch (fog.mode)
     {
         case GL.LINEAR:
@@ -704,7 +759,7 @@ function fogFactorOf(fog){
  * @param {string} value
  * @param {string} reference
  */
-function compareExpression(func, value, reference){
+export function compareExpression(func, value, reference){
     switch (func)
     {
         case GL.NEVER:
@@ -1101,13 +1156,152 @@ ${fragmentBody.join('\n')}
  *
  * @param {DrawState} state
  * @returns {{ code: string, label: string,
- *             programs: ProgramStages | null }}
+ *             programs: ProgramStages | null, glsl?: GlslStages }}
  */
 export function generateDraw(state){
-    if (state.vertexProgram || state.fragmentProgram)
+    const made = state.glsl ? generateGlslDraw(state)
+        : state.vertexProgram || state.fragmentProgram ? generateProgramDraw(state)
+            : generateFixedDraw(state);
+    const targets = state.targets?.length ?? 1;
+    return targets > 1 && !state.glsl && made.code !== '' ? { ...made,
+        code: broadcast(made.code, targets) } : made;
+}
+
+/**
+ * A fragment stage that writes one colour, made to write it to every
+ * target: what the fixed pipeline and an assembly program do with several
+ * draw buffers.
+ *
+ * @param {string} code @param {number} targets
+ */
+function broadcast(code, targets){
+    const single = '@fragment\nfn fragmentMain(input: VertexOut) -> @location(0) vec4f {';
+    if (!code.includes(single))
     {
-        return generateProgramDraw(state);
+        return code;
     }
+    return `${code.replace(single, 'fn fragmentColour(input: VertexOut) -> vec4f {')}
+struct BroadcastOut {
+${Array.from({ length: targets }, (_, k)=>`    @location(${k}) c${k}: vec4f,`).join('\n')}
+};
+
+@fragment
+fn fragmentMain(input: VertexOut) -> BroadcastOut {
+    let colour = fragmentColour(input);
+    var out: BroadcastOut;
+${Array.from({ length: targets }, (_, k)=>`    out.c${k} = colour;`).join('\n')}
+    return out;
+}
+`;
+}
+
+/**
+ * A draw under a GLSL program: its stages, and the fixed pipeline's for a
+ * stage it has no shader for (OpenGL 2.0, section 2.15), the two meeting in
+ * the fixed varying struct when one of them is fixed.
+ *
+ * @param {DrawState} state
+ * @returns {{ code: string, label: string, programs: ProgramStages | null,
+ *     glsl: GlslStages }}
+ */
+function generateGlslDraw(state){
+    const label = `gl:${drawKey(state)}`;
+    const program = /** @type {NonNullable<DrawState['glsl']>} */ (state.glsl).program;
+    const targets = state.targets?.length ?? 1;
+    /** @type {import('./glsl-wgsl.js').StageOptions} */
+    const options = {
+        attributes: state.attributes, flat: state.flat, twoSide: !!state.twoSide,
+        alphaFunc: state.alphaFunc, targets, compare: compareExpression,
+        fixed: {
+            texcoords: state.units.map(unit=>unit.index),
+            fog: state.fog ? fogFactorOf(state.fog) : null,
+        },
+    };
+    /** @type {GlslStages} */
+    const stages = { vertex: null, fragment: null, samplers: [] };
+    /** @type {string[]} */
+    const parts = [];
+    try
+    {
+        if (program.vertex && program.fragment)
+        {
+            const vertex = emitStage(program, 'vertex', options, null, 'glsl');
+            const fragment = emitStage(program, 'fragment', options, vertex.fields, 'glsl');
+            parts.push(interfaceStruct(vertex.fields), vertex.code, fragment.code);
+            stages.vertex = vertex.plan;
+            stages.fragment = fragment.plan;
+            stages.samplers = [...new Set([...vertex.usedSamplers, ...fragment.usedSamplers])];
+            parts.unshift(...samplerDeclarations(program, stages.samplers));
+        }
+        else if (program.vertex)
+        {
+            const fixedVaryings = { texcoords: state.units.map(unit=>unit.index),
+                fogCoord: false };
+            const vertex = emitStage(program, 'vertex', options, null, 'fixed');
+            const fragment = fixedFragment(state);
+            parts.push(vertexOutStruct(fixedVaryings, state.flat, null), vertex.code,
+                fragment.bindings, fragment.main);
+            stages.vertex = vertex.plan;
+            stages.samplers = vertex.usedSamplers;
+            parts.unshift(...samplerDeclarations(program, stages.samplers));
+        }
+        else
+        {
+            const varyings = {
+                texcoords: Array.from({ length: VARYING_TEXCOORDS }, (unused, set)=>set),
+                fogCoord: true,
+            };
+            const fragment = emitStage(program, 'fragment', options, null, 'fixed');
+            parts.push(fixedVertexIn(state), vertexOutStruct(varyings, state.flat, null),
+                SPHERE_MAP_FN, state.lighting ? lightingFunction(state.lighting) : '',
+                fixedVertexMain({ ...state, clip: null }, varyings), fragment.code);
+            stages.fragment = fragment.plan;
+            stages.samplers = fragment.usedSamplers;
+            parts.unshift(...samplerDeclarations(program, stages.samplers));
+        }
+    }
+    catch (e){
+        return { code: '', label, programs: { vertex: null, fragment: null,
+            error: e instanceof Error ? e.message : String(e) }, glsl: stages };
+    }
+    const vertexIn = program.vertex ? fixedVertexIn(state) : '';
+    const code = `diagnostic(off, derivative_uniformity);
+${UNIFORM_STRUCT}
+${vertexIn}
+${parts.join('\n\n')}
+`;
+    return { code, label, programs: null, glsl: stages };
+}
+
+/**
+ * @typedef {Object} GlslStages
+ * @property {import('./glsl-wgsl.js').BlockPlan | null} vertex
+ * @property {import('./glsl-wgsl.js').BlockPlan | null} fragment
+ * @property {number[]} samplers  the program's samplers the stages sample, by index
+ */
+
+/**
+ * The texture and sampler bindings of the samplers a program's stages read.
+ *
+ * @param {import('./glsl-link.js').LinkedProgram} program @param {number[]} used
+ * @returns {string[]}
+ */
+function samplerDeclarations(program, used){
+    return [...used].sort((a, b)=>a - b).map(index=>{
+        const sampler = program.samplers[index];
+        const kind = sampler.dim === 'Cube' ? 'texture_cube<f32>' : 'texture_2d<f32>';
+        return `@group(0) @binding(${1 + index * 2}) var glt${index}: ${kind};
+@group(0) @binding(${2 + index * 2}) var gls${index}: sampler;`;
+    });
+}
+
+/**
+ * The fixed pipeline's draw: both stages generated from the state.
+ *
+ * @param {DrawState} state
+ * @returns {{ code: string, label: string, programs: ProgramStages | null }}
+ */
+function generateFixedDraw(state){
     const varyings = { texcoords: state.units.map(unit=>unit.index), fogCoord: false };
     const fragment = fixedFragment(state);
     const code = `${state.clip?.distances ? 'enable clip_distances;\n' : ''}${UNIFORM_STRUCT}${
@@ -1238,20 +1432,7 @@ export function drawDescriptor(state){
                 format: attribute.format,
             })),
     }));
-    const blend = state.blend
-        ? {
-            color: {
-                srcFactor: lookUp(BLEND_FACTOR, state.blend.src, 'source blend'),
-                dstFactor: lookUp(BLEND_FACTOR, state.blend.dst, 'destination blend'),
-                operation: 'add',
-            },
-            alpha: {
-                srcFactor: lookUp(BLEND_FACTOR, state.blend.src, 'source blend'),
-                dstFactor: lookUp(BLEND_FACTOR, state.blend.dst, 'destination blend'),
-                operation: 'add',
-            },
-        }
-        : undefined;
+    const blend = state.blend ? blendStateOf(state.blend) : undefined;
     /** @param {DrawState['stencil']} sideState */
     const stencilFace = sideState=>(sideState
         ? {
@@ -1265,19 +1446,19 @@ export function drawDescriptor(state){
     // A one-sided state (`stencilBack` absent) has no back ops of its own:
     // both faces get the front's.
     const backFace = stencilFace(state.stencilBack ?? state.stencil);
+    const targets = (state.targets ?? [{ format: state.targetFormat, mask: state.colourMask }])
+        .map(target=>(target.format === '' ? null
+            : { format: target.format, blend, writeMask: target.mask }));
     return {
         vertexBuffers: buffers,
-        target: {
-            format: state.targetFormat,
-            blend,
-            writeMask: state.colourMask,
-        },
+        target: targets[0],
+        targets,
         primitive: {
             topology: state.topology,
             cullMode: state.cull,
             frontFace: state.frontIsCcw ? 'ccw' : 'cw',
         },
-        depthStencil: {
+        depthStencil: state.depthFormat === '' ? undefined : {
             format: state.depthFormat,
             depthCompare: state.depth.test
                 ? lookUp(COMPARE, state.depth.func, 'depth function')
@@ -1301,6 +1482,30 @@ export function drawDescriptor(state){
 }
 
 /**
+ * A GL blend state as WebGPU's: separate factors and equations, a MIN or MAX
+ * equation taking no factors (WebGPU wants them one).
+ *
+ * @param {NonNullable<DrawState['blend']>} blend
+ */
+function blendStateOf(blend){
+    /** @param {number} src @param {number} dst @param {number} equation */
+    const component = (src, dst, equation)=>{
+        const operation = lookUp(BLEND_OPERATION, equation ?? GL.FUNC_ADD, 'blend equation');
+        const minMax = operation === 'min' || operation === 'max';
+        return {
+            srcFactor: minMax ? 'one' : lookUp(BLEND_FACTOR, src, 'source blend'),
+            dstFactor: minMax ? 'one' : lookUp(BLEND_FACTOR, dst, 'destination blend'),
+            operation,
+        };
+    };
+    return {
+        color: component(blend.src, blend.dst, blend.equation ?? GL.FUNC_ADD),
+        alpha: component(blend.srcAlpha ?? blend.src, blend.dstAlpha ?? blend.dst,
+            blend.equationAlpha ?? GL.FUNC_ADD),
+    };
+}
+
+/**
  * @typedef {Object} ClearState
  *     What a clear draw writes. Every field is in its key.
  * @property {string} targetFormat
@@ -1308,6 +1513,8 @@ export function drawDescriptor(state){
  * @property {number} colourMask   zero when the colour buffer is not cleared
  * @property {boolean} depth
  * @property {number} stencilMask  zero when the stencil buffer is not cleared
+ * @property {{ format: string, mask: number }[]} [targets]  a framebuffer
+ *           object's draw buffers, each cleared in the channels it has
  */
 
 /** The clear's own uniform block, in floats: colour, then depth. */
@@ -1324,11 +1531,31 @@ export const CLEAR_UNIFORM_FLOATS = 8;
  */
 export function clearKey(state){
     return `clear|${state.targetFormat}|${state.depthFormat}|${state.colourMask}|`
-        + `${state.depth ? 1 : 0}|${state.stencilMask}`;
+        + `${state.depth ? 1 : 0}|${state.stencilMask}|${targetsKey(state.targets)}`;
 }
 
-/** @returns {{ code: string, label: string }} */
-export function generateClear(){
+/**
+ * @param {number} [targets]  the colour targets written, each the clear colour
+ * @returns {{ code: string, label: string }}
+ */
+export function generateClear(targets = 1){
+    if (targets > 1)
+    {
+        const single = generateClear(1).code.replace(
+            '@fragment\nfn fragmentMain() -> @location(0) vec4f {', 'fn clearColour() -> vec4f {');
+        return { label: `gl:clear${targets}`, code: `${single}
+struct ClearOut {
+${Array.from({ length: targets }, (_, k)=>`    @location(${k}) c${k}: vec4f,`).join('\n')}
+};
+
+@fragment
+fn fragmentMain() -> ClearOut {
+    var out: ClearOut;
+${Array.from({ length: targets }, (_, k)=>`    out.c${k} = clearColour();`).join('\n')}
+    return out;
+}
+` };
+    }
     const code = `struct ClearUniforms {
     color: vec4f,
     depth: vec4f,
@@ -1410,7 +1637,10 @@ export function copyKey(targetFormat){
     return `copy|${targetFormat}`;
 }
 
-/** The copy's uniform block, in floats: x, y, xoffset, yoffset; then the source size. */
+/**
+ * The copy's uniform block, in floats: x, y, xoffset, yoffset; then the
+ * source's size and row order (1 the window's, -1 a framebuffer object's).
+ */
 export const COPY_UNIFORM_FLOATS = 8;
 
 /** @returns {{ code: string, label: string }} */
@@ -1434,11 +1664,68 @@ fn vertexMain(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
 fn fragmentMain(@builtin(position) position: vec4f) -> @location(0) vec4f {
     let k = position.xy - uniforms.rect.zw;
     let u = (uniforms.rect.x + k.x) / uniforms.size.x;
-    let v = (uniforms.size.y - uniforms.rect.y - k.y) / uniforms.size.y;
+    let row = uniforms.rect.y + k.y;
+    let v = select(row, uniforms.size.y - row, uniforms.size.z > 0.0) / uniforms.size.y;
     return textureSample(sourceTexture, sourceSampler, vec2f(u, v));
 }
 `;
     return { code, label: 'gl:copy' };
+}
+
+/**
+ * glBlitFramebuffer: a rectangle of one target drawn into a rectangle of
+ * another, scaled, each in GL's window coordinates and each target with its
+ * own row order. A pixel of the destination finds its place in the
+ * destination rectangle, the same place in the source rectangle, and the
+ * source texel there; a rectangle given right to left or top to bottom
+ * mirrors.
+ *
+ * @param {string} targetFormat
+ */
+export function blitKey(targetFormat){
+    return `blit|${targetFormat}`;
+}
+
+/**
+ * The blit's uniform block, in floats: the source rectangle's corners, the
+ * destination's; then the source's size and row order, and the
+ * destination's.
+ */
+export const BLIT_UNIFORM_FLOATS = 16;
+
+/** @returns {{ code: string, label: string }} */
+export function generateBlit(){
+    const code = `struct BlitUniforms {
+    source: vec4f,
+    destination: vec4f,
+    sourceSize: vec4f,
+    destinationSize: vec4f,
+};
+@group(0) @binding(0) var<uniform> uniforms: BlitUniforms;
+@group(0) @binding(1) var sourceTexture: texture_2d<f32>;
+@group(0) @binding(2) var sourceSampler: sampler;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+    let x = f32(index & 1u) * 4.0 - 1.0;
+    let y = f32((index >> 1u) & 1u) * 4.0 - 1.0;
+    return vec4f(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain(@builtin(position) position: vec4f) -> @location(0) vec4f {
+    let height = uniforms.destinationSize.y;
+    let window = vec2f(position.x,
+        select(position.y, height - position.y, uniforms.destinationSize.z > 0.0));
+    let span = uniforms.destination.zw - uniforms.destination.xy;
+    let t = (window - uniforms.destination.xy) / span;
+    let at = uniforms.source.xy + t * (uniforms.source.zw - uniforms.source.xy);
+    let size = uniforms.sourceSize.xy;
+    let v = select(at.y, size.y - at.y, uniforms.sourceSize.z > 0.0) / size.y;
+    return textureSampleLevel(sourceTexture, sourceSampler, vec2f(at.x / size.x, v), 0.0);
+}
+`;
+    return { code, label: 'gl:blit' };
 }
 
 /**
@@ -1466,11 +1753,15 @@ export function clearDescriptor(state){
         depthFailOp: 'keep',
         passOp: state.stencilMask !== 0 ? 'replace' : 'keep',
     };
+    const targets = (state.targets ?? [{ format: state.targetFormat, mask: state.colourMask }])
+        .map(target=>(target.format === '' ? null
+            : { format: target.format, blend: undefined, writeMask: target.mask }));
     return {
         vertexBuffers: [],
-        target: { format: state.targetFormat, blend: undefined, writeMask: state.colourMask },
+        target: targets[0],
+        targets,
         primitive: { topology: 'triangle-list', cullMode: 'none', frontFace: 'ccw' },
-        depthStencil: {
+        depthStencil: state.depthFormat === '' ? undefined : {
             format: state.depthFormat,
             depthCompare: 'always',
             depthWriteEnabled: state.depth,

@@ -234,7 +234,7 @@ test('the clip depth is remapped, and an absent attribute is the current value',
     const { code } = generateDraw(state({
         attributes: CANONICAL_LAYOUT.attributes.filter(a=>a.name === 'position'),
     }));
-    assert.ok(code.includes('out.position = vec4f(clip.x, clip.y,'
+    assert.ok(code.includes('out.position = vec4f(clip.x, clip.y * uniforms.misc.z,'
         + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)'));
     assert.match(code, /out\.color = uniforms\.color;/);
     assert.match(code, /out\.secondary = uniforms\.secondary;/);
@@ -432,7 +432,7 @@ test('a position-invariant program emits the fixed stage\'s position lines', ()=
             offset: 0, format: 'float32x3' }],
         strides: [12],
     })).code;
-    const remap = '    out.position = vec4f(clip.x, clip.y,'
+    const remap = '    out.position = vec4f(clip.x, clip.y * uniforms.misc.z,'
         + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w);';
     assert.ok(fixed.includes(remap), 'the fixed stage remaps the depth the way GL does');
     assert.ok(emitted.code.includes(remap), 'the invariant position is the fixed one');
@@ -504,10 +504,13 @@ test('the copy key folds its target format, and the shader reads the source flip
         'a copy into another format is another pipeline');
     const { code } = generateCopy();
     // GL counts framebuffer rows from the bottom and texture rows from the
-    // first one given, so the source is sampled with v measured from the top.
+    // first one given, so the window's back buffer, whose rows run down, is
+    // sampled with v measured from the top, and a framebuffer object's,
+    // drawn upside down, from the bottom (`uniforms.size.z`).
     assert.match(code, /let u = \(uniforms\.rect\.x \+ k\.x\) \/ uniforms\.size\.x/);
+    assert.match(code, /let row = uniforms\.rect\.y \+ k\.y;/);
     assert.match(code,
-        /let v = \(uniforms\.size\.y - uniforms\.rect\.y - k\.y\) \/ uniforms\.size\.y/);
+        /let v = select\(row, uniforms\.size\.y - row, uniforms\.size\.z > 0\.0\) \/ uniforms\.size\.y/);
 });
 
 /**

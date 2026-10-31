@@ -324,6 +324,15 @@ function snapshot(context){
         context.glGetError();
         keep(`buffer ${target} bytes`, context.glGetBufferSubDataARB(target, 0, size));
     }
+    // The program in use's uniforms, location by location.
+    const program = context.glGetIntegerv(GL.CURRENT_PROGRAM)?.[0] ?? 0;
+    if (program !== 0)
+    {
+        for (let location = 0; location < 32; location++)
+        {
+            keep(`uniform ${location}`, context.getUniform(program, location));
+        }
+    }
     keep('colour', context.glReadPixels(0, 0, SIDE, SIDE, GL.RGBA, GL.UNSIGNED_BYTE));
     keep('depth', context.glReadPixels(0, 0, SIDE, SIDE, GL.DEPTH_COMPONENT, GL.FLOAT));
     keep('stencil', context.glReadPixels(0, 0, SIDE, SIDE, GL.STENCIL_INDEX, GL.UNSIGNED_BYTE));
@@ -1057,6 +1066,179 @@ const CASES = {
     glNormal3fv: [{ label: 'a normal', args: ['data'], data: floats([0, 1, 0]),
         error: GL.NO_ERROR }],
 };
+
+/**
+ * A fragment shader with a uniform of every kind the ring's uniform calls
+ * write, at the locations its declarations give them: f1 0, f2 1, f3 2, f4 3,
+ * i1 4, i2 5, i3 6, i4 7, fa 8-11, f2a 12-13, f4a 14-15, ia 16-18, i2a 19-20,
+ * i4a 21-22, m2 23-24, m4 25, m24 26, m42 27, s 28, b 29.
+ */
+const UNIFORMS = `uniform float f1; uniform vec2 f2; uniform vec3 f3; uniform vec4 f4;
+uniform int i1; uniform ivec2 i2; uniform ivec3 i3; uniform ivec4 i4;
+uniform float fa[4]; uniform vec2 f2a[2]; uniform vec4 f4a[2];
+uniform int ia[3]; uniform ivec2 i2a[2]; uniform ivec4 i4a[2];
+uniform mat2 m2[2]; uniform mat4 m4; uniform mat2x4 m24; uniform mat4x2 m42;
+uniform sampler2D s; uniform bool b;
+void main()
+{
+    vec4 v = vec4(f1) + vec4(f2, f3.xy) + f4 + vec4(float(i1)) + vec4(vec2(i2), vec2(i3.xy))
+        + vec4(i4) + vec4(fa[0] + fa[3]) + vec4(f2a[1], f2a[0]) + f4a[1]
+        + vec4(float(ia[2])) + vec4(vec2(i2a[1]), vec2(i2a[0])) + vec4(i4a[1])
+        + vec4(m2[1][0], m2[0][1]) + m4[2] + m24[1] + vec4(m42[3], m42[0])
+        + texture2D(s, vec2(0.5));
+    gl_FragColor = b ? v : -v;
+}
+`;
+
+/** The program of `UNIFORMS` made, linked and put in use. @param {Gl} gl */
+const uniforms = gl=>{
+    const shader = gl('glCreateShader', GL.FRAGMENT_SHADER);
+    const text = gl.put(new TextEncoder().encode(`${UNIFORMS}\0`));
+    gl('glShaderSource', shader, 1, gl.put([text]), 0);
+    gl('glCompileShader', shader);
+    const program = gl('glCreateProgram');
+    gl('glAttachShader', program, shader);
+    gl('glLinkProgram', program);
+    gl('glUseProgram', program);
+};
+
+/**
+ * A uniform call's cases: its own uniform, one of another type, location -1,
+ * and no program in use.
+ *
+ * @param {number} location @param {(number | 'data')[]} rest
+ * @param {number} wrong  a uniform of another type
+ * @param {Partial<Case>} [extra]
+ * @returns {Case[]}
+ */
+const uniformCases = (location, rest, wrong, extra = {})=>[
+    { label: 'its uniform', args: [location, ...rest], before: uniforms, error: GL.NO_ERROR,
+        ...extra },
+    { label: 'a uniform of another type', args: [wrong, ...rest], before: uniforms,
+        error: GL.INVALID_OPERATION, ...extra },
+    { label: 'location -1', args: [-1, ...rest], before: uniforms, error: GL.NO_ERROR,
+        ...extra },
+    { label: 'no program in use', args: [location, ...rest], error: GL.INVALID_OPERATION,
+        ...extra },
+];
+
+const GENERATED_FRAMEBUFFER = (/** @type {Gl} */ gl)=>{
+    gl('glGenFramebuffers', 1, gl.put([0]));
+};
+
+Object.assign(CASES, {
+    glActiveTexture: CASES.glActiveTextureARB,
+    glClientActiveTexture: CASES.glClientActiveTextureARB,
+    glBindBuffer: CASES.glBindBufferARB,
+    glBufferData: CASES.glBufferDataARB,
+    glBufferSubData: CASES.glBufferSubDataARB,
+    glVertexAttribPointer: CASES.glVertexAttribPointerARB,
+    glEnableVertexAttribArray: CASES.glEnableVertexAttribArrayARB,
+    glDisableVertexAttribArray: CASES.glDisableVertexAttribArrayARB,
+    glBlendFuncSeparate: [
+        { label: 'separate factors', args: [GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA, GL.ONE,
+            GL.CONSTANT_ALPHA], error: GL.NO_ERROR },
+        { label: 'saturate as a destination', args: [GL.ONE, GL.SRC_ALPHA_SATURATE, GL.ONE,
+            GL.ONE], error: GL.INVALID_ENUM },
+    ],
+    glBlendEquation: [
+        { label: 'MAX', args: [GL.MAX], error: GL.NO_ERROR },
+        { label: 'an equation there is not', args: [BAD], error: GL.INVALID_ENUM },
+    ],
+    glBlendEquationSeparate: [
+        { label: 'subtract and min', args: [GL.FUNC_SUBTRACT, GL.MIN], error: GL.NO_ERROR },
+        { label: 'an alpha equation there is not', args: [GL.FUNC_ADD, BAD],
+            error: GL.INVALID_ENUM },
+    ],
+    glBlendColor: [
+        { label: 'a colour, clamped', args: floats([2, 0.5, -1, 0.25]), error: GL.NO_ERROR },
+    ],
+    glStencilFuncSeparate: [
+        { label: 'the back face', args: [GL.BACK, GL.LESS, -3, 0xf0f0], error: GL.NO_ERROR },
+        { label: 'both faces', args: [GL.FRONT_AND_BACK, GL.EQUAL, 7, 0xff] },
+        { label: 'a face there is not', args: [BAD, GL.LESS, 0, 0], error: GL.INVALID_ENUM },
+    ],
+    glStencilOpSeparate: [
+        { label: 'the front face', args: [GL.FRONT, GL.KEEP, GL.INCR_WRAP, GL.REPLACE],
+            error: GL.NO_ERROR },
+        { label: 'an operation there is not', args: [GL.BACK, GL.KEEP, BAD, GL.KEEP],
+            error: GL.INVALID_ENUM },
+    ],
+    glStencilMaskSeparate: [
+        { label: 'the back face', args: [GL.BACK, 0x3c], error: GL.NO_ERROR },
+        { label: 'a face there is not', args: [BAD, 0], error: GL.INVALID_ENUM },
+    ],
+    glUseProgram: [
+        { label: 'none, after one', args: [0], before: uniforms, error: GL.NO_ERROR },
+        { label: 'a linked program', args: [2], before: gl=>{
+            uniforms(gl);
+            gl('glUseProgram', 0);
+        }, error: GL.NO_ERROR },
+        { label: 'a shader', args: [1], before: uniforms, error: GL.INVALID_OPERATION },
+        { label: 'a name that is none', args: [9], error: GL.INVALID_VALUE },
+        { label: 'a program not linked', args: [1], before: gl=>gl('glCreateProgram'),
+            error: GL.INVALID_OPERATION },
+    ],
+    glBindFramebuffer: [
+        { label: 'a generated name', args: [GL.FRAMEBUFFER, 1], before: GENERATED_FRAMEBUFFER,
+            error: GL.NO_ERROR },
+        { label: 'for drawing alone', args: [GL.DRAW_FRAMEBUFFER, 1],
+            before: GENERATED_FRAMEBUFFER },
+        { label: 'none', args: [GL.FRAMEBUFFER, 0] },
+        { label: 'a name not generated', args: [GL.FRAMEBUFFER, 5],
+            error: GL.INVALID_OPERATION },
+        { label: 'a target there is not', args: [BAD, 1], before: GENERATED_FRAMEBUFFER,
+            error: GL.INVALID_ENUM },
+    ],
+    glBindFramebufferEXT: [
+        { label: 'a name made on the bind', args: [GL.FRAMEBUFFER, 5], error: GL.NO_ERROR },
+        { label: 'a target of the ARB names', args: [GL.READ_FRAMEBUFFER, 5],
+            error: GL.INVALID_ENUM },
+    ],
+    glUniform1f: uniformCases(0, floats([0.5]), 4),
+    glUniform2f: uniformCases(1, floats([0.5, -2]), 5),
+    glUniform3f: uniformCases(2, floats([0.5, -2, 8]), 6),
+    glUniform4f: [...uniformCases(3, floats([0.5, -2, 8, 1]), 7),
+        { label: 'a float into a bool', args: [29, ...floats([0.25, 0, 0, 0])],
+            before: uniforms, error: GL.INVALID_OPERATION }],
+    glUniform1i: [...uniformCases(4, [-7], 0),
+        { label: 'a sampler\'s unit', args: [28, 3], before: uniforms, error: GL.NO_ERROR },
+        { label: 'a unit past the last', args: [28, 8], before: uniforms,
+            error: GL.INVALID_VALUE },
+        { label: 'a bool', args: [29, 5], before: uniforms, error: GL.NO_ERROR }],
+    glUniform2i: uniformCases(5, [3, -4], 1),
+    glUniform3i: uniformCases(6, [3, -4, 5], 2),
+    glUniform4i: uniformCases(7, [3, -4, 5, -6], 3),
+    glUniform1fv: [...uniformCases(9, [2, 'data'], 16, { data: floats([1.5, -2.5]) }),
+        { label: 'past the array\'s end, cut', args: [10, 4, 'data'], before: uniforms,
+            data: floats([1, 2, 3, 4]), error: GL.NO_ERROR },
+        { label: 'two into a non-array', args: [0, 2, 'data'], before: uniforms,
+            data: floats([1, 2]), error: GL.INVALID_OPERATION },
+        { label: 'none', args: [8, 0, 'data'], before: uniforms, data: [0],
+            error: GL.NO_ERROR },
+        { label: 'a negative count', args: [8, -1, 'data'], before: uniforms, data: [0],
+            error: GL.INVALID_VALUE }],
+    glUniform2fv: uniformCases(12, [2, 'data'], 19, { data: floats([1, 2, 3, 4]) }),
+    glUniform4fv: uniformCases(14, [2, 'data'], 21,
+        { data: floats([1, 2, 3, 4, 5, 6, 7, 8]) }),
+    glUniform1iv: [...uniformCases(16, [3, 'data'], 8, { data: [1, -2, 3] }),
+        { label: 'a sampler', args: [28, 1, 'data'], before: uniforms, data: [2],
+            error: GL.NO_ERROR }],
+    glUniform2iv: uniformCases(19, [2, 'data'], 12, { data: [1, -2, 3, -4] }),
+    glUniform4iv: uniformCases(21, [1, 'data'], 14, { data: [1, -2, 3, -4] }),
+    glUniformMatrix2fv: [...uniformCases(23, [2, 0, 'data'], 26,
+        { data: floats([1, 2, 3, 4, 5, 6, 7, 8]) }),
+    { label: 'transposed', args: [23, 1, 1, 'data'], before: uniforms,
+        data: floats([1, 2, 3, 4]), error: GL.NO_ERROR }],
+    glUniformMatrix4fv: [...uniformCases(25, [1, 0, 'data'], 23,
+        { data: MATRIX }),
+    { label: 'transposed by a word whose low byte is set', args: [25, 1, 0x101, 'data'],
+        before: uniforms, data: MATRIX, error: GL.NO_ERROR }],
+    glUniformMatrix2x4fv: uniformCases(26, [1, 0, 'data'], 27,
+        { data: floats([1, 2, 3, 4, 5, 6, 7, 8]) }),
+    glUniformMatrix4x2fv: uniformCases(27, [1, 1, 'data'], 26,
+        { data: floats([1, 2, 3, 4, 5, 6, 7, 8]) }),
+});
 
 test('every OpenGL call the ring takes leaves the context as the same call made at once',
     { timeout: 300000 }, ()=>{

@@ -781,29 +781,30 @@ test('a call that is accepted and not honoured reports a divergence, once', ()=>
 });
 
 test('GL_EXT_stencil_two_side: the active face routes glStencilFunc/Op/Mask and the '
-    + 'unsuffixed glGet queries alike, independently of the two-sided enable', ()=>{
+    + 'unsuffixed glGet queries alike; on the front face they set both, as OpenGL 2.0 does', ()=>{
     const { context } = drawing();
     assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.FRONT],
         'a fresh context starts on the front face');
 
     // The selector is like glActiveTextureARB: it governs the setters and
     // the unsuffixed queries with the two-sided enable untouched (still off
-    // here), which is what keeps a title that never calls it writing the
-    // single record it always had.
+    // here). On the front face the one-face calls are OpenGL 2.0's, which
+    // set both faces' state.
     context.glStencilFunc(GL.GEQUAL, 3, 0xf0);
     context.glStencilOp(GL.INCR, GL.DECR, GL.REPLACE);
     context.glStencilMask(0x0f);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.GEQUAL]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_REF), [3]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_WRITEMASK), [0x0f]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.ALWAYS],
-        'the front-only write left the back record at its default');
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.GEQUAL],
+        'with two-sided testing off, the front face\'s calls set the back face too');
 
     // Selecting the back face -- the two-sided enable is still off -- moves
     // both the setters and the unsuffixed queries onto it.
     context.glActiveStencilFaceEXT(GL.BACK);
     assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.BACK]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.ALWAYS],
+    context.glStencilFuncSeparate(GL.BACK, GL.LESS, 1, 0xff);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.LESS],
         'glGet with no suffix answers the active face, not always the front');
     context.glStencilFunc(GL.ALWAYS, 9, 0xff);
     context.glStencilOp(GL.KEEP, GL.KEEP, GL.INCR_WRAP);

@@ -126,6 +126,10 @@ export const longCodeOf = compiled=>LONG_CODE.get(compiled);
  * @property {(destination: number, source: number, count: number) => void} copyDown
  *     Byte by byte from the last, as `std; rep movsb` copies.
  * @property {(destination: number, value: number, count: number) => void} fill
+ * @property {(address: number, expected: number, value: number) => number} compareExchange
+ *     The dword at the address replaced by the value where it held `expected`,
+ *     answering what it held, as `lock cmpxchg` does: the 32-bit kernel's
+ *     words that several executors change at once.
  * @property {(fn: number, ...args: number[]) => number} call
  * @property {(fn: number, ...args: number[]) => number} callStd
  *     The same of a stdcall function, which pops its arguments itself.
@@ -260,6 +264,15 @@ export function guestMemory(host){
                 return;
             }
             host.writeMemory(destination >>> 0, new Uint8Array(count >>> 0).fill(value & 0xff));
+        },
+        // One thread's reference: the host answers it with nothing else running.
+        compareExchange: (address, expected, value)=>{
+            const held = view(address, 4).getUint32(0, true);
+            if (held === expected >>> 0)
+            {
+                write(address, 4, v=>v.setUint32(0, value >>> 0, true));
+            }
+            return held;
         },
         call: (fn, ...args)=>{
             if (!host.call)

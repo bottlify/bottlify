@@ -1334,3 +1334,36 @@ test('everything outside the subset is refused where it is written', ()=>{
     refused(one(q, 'const v = host();\n    return v;'), /only returned: return host\(\)/);
     refused(one(q, 'host();\n    return 0;'), /only returned: return host\(\)/);
 });
+
+test('compareExchange: lock cmpxchg of a dword, answering what it held, the value stored only'
+    + ' where it held the expected one; a variable in EDX kept across it; refused at 64 bits',
+async()=>{
+    const { same, compiled, refusedAt64 } = await load(`
+export const SLOT = Uint32Array.of(0);
+/**
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} at @param {u32} expected @param {u32} value
+ * @returns {u32}
+ */
+export function exchange({ u32, compareExchange }, at, expected, value){
+    let k = u32(at + 4) | 0;
+    const held = compareExchange(at + SLOT[0], expected, (value + k) >>> 0);
+    k = (k + 1) | 0;
+    return (held + k) >>> 0;
+}
+`);
+    const next = random(21);
+    let stored = 0;
+    for (let i = 0; i < 200; i++)
+    {
+        const held = next();
+        const expected = i % 2 === 0 ? held : next();
+        const bytes = [...new Uint8Array(new Uint32Array([held, next()]).buffer)];
+        const js = same('exchange', { stack: [DATA, expected, next()], memory: [[DATA, bytes]] });
+        stored += js.data[0] !== bytes[0] || js.data[3] !== bytes[3] ? 1 : 0;
+    }
+    assert.ok(stored > 50 && stored < 150, `${stored} of 200 stored: both outcomes taken`);
+    assert.deepEqual(Object.keys(compiled.exchange.tables), ['SLOT'],
+        'the table it reads, and where');
+    assert.match(refusedAt64.exchange, /compareExchange: .*refused at 64 bits/);
+});

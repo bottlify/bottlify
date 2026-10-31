@@ -167,6 +167,8 @@ export class Assembler {
         this.labels = 0;
         /** @type {Map<string, number>} Each label's offset, once `finish` has laid the code out. */
         this.offsets = new Map();
+        /** @type {Map<string, number>} Each table's offset, once `finish` has placed it. */
+        this.placed = new Map();
     }
 
     /** A label no other call returns. @param {string} hint */
@@ -342,6 +344,7 @@ export class Assembler {
             out.set(table.bytes, /** @type {number} */ (placed.get(table.name)));
         }
         this.offsets = at;
+        this.placed = placed;
         return out;
     }
 }

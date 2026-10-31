@@ -29,6 +29,17 @@ test('an x86-64 console program prints its line and exits with 0', { timeout: 12
     const code = await app.run({ timeoutMs: 100000 });
     assert.equal(output.join(''), 'hello from x64, fib(25)=75025\n');
     assert.equal(code, 0, 'the program checked its own arithmetic');
+    // Every system export runs at 64 bits -- its x86-64, its handler's trap,
+    // or a variable -- but these, i386 alone: a new export that is i386
+    // guest code and nothing else shows here, before a program calls it.
+    const app64 = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'app');
+    const crt = ['msvcrt.dll', 'CRTDLL.dll', 'MSVCR71.dll', 'MSVCR80.dll', 'ucrtbase.dll'];
+    assert.deepEqual([...app64.metrics.leftOutAt64].sort(), [
+        ...crt.flatMap(dll=>[`${dll}!_EH_prolog`, `${dll}!_chkesp`]),
+        'ntdll.dll!RtlActivateActivationContextUnsafeFast',
+        'ntdll.dll!RtlDeactivateActivationContextUnsafeFast',
+        'ntdll.dll!RtlInterlockedPushListSList',
+    ].sort());
 });
 
 test('fed every slice, as a program that presents frames is, a 64-bit process\'s regions are'

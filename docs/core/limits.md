@@ -13,7 +13,9 @@ differently raises a `divergence` event naming the API.
   64 bits (`roadmap/x64.md`). A message's WPARAM and LPARAM keep 32 bits there. A run whose
   first program is 64-bit is on a 64-bit Windows, where a 32-bit child runs under WOW64 without
   the file system's and the registry's redirection.
-  A structured exception there passes no `_set_se_translator` translator. A 16-bit (NE) image is
+  A structured exception there passes no `_set_se_translator` translator. The exports that are
+  i386 code alone (`_chkesp`, the __fastcall `Rtl*` calls) are not in a 64-bit process's modules,
+  `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is
   refused when it is loaded.
 - Only user mode. There is no kernel underneath; the engine's layers answer every system call.
 - Reading or writing through a null pointer does not fault: memory from address 0 is readable and
@@ -159,6 +161,12 @@ differently raises a `divergence` event naming the API.
 - OpenGL keeps a texture's data only where it draws, in the graphics worker, and lets a level's
   texels go once the device holds them (a compressed level keeps its blocks). `glGetTexImage`
   reads black, as `glReadPixels` on a device does, and says so as a divergence.
+- OpenGL goes up to 2.1 with GLSL 1.20 and framebuffer objects; no 3.x context
+  (`wglCreateContextAttribsARB`). A framebuffer whose attachments differ in size, or has separate
+  depth and stencil images or a depth texture, is `GL_FRAMEBUFFER_UNSUPPORTED`; multisampled
+  renderbuffers draw with one sample; `glBlitFramebuffer` copies colour only; occlusion queries
+  answer the viewport's area; 3D textures are accepted and kept nowhere, and a GLSL program that
+  samples one does not link.
 - Direct3D 10 has no geometry shaders: WebGPU has no geometry stage and none is emulated, so
   `CreateGeometryShader` and its stream-output variant answer `E_NOTIMPL` for a valid shader. An
   effect pass that sets one is drawn without it, and the effect says so.

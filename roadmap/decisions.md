@@ -668,6 +668,42 @@ the newest runtime's files and detection values are the bottle's. Revisit if a t
 package installs into the Windows folder something that must not be there before it asks.
 *2026-10-31.*
 
+**A68. A GLSL program's generic attribute 0 is the vertex position, and generic attributes alias
+the conventional arrays.** OpenGL 2.0 lets an implementation alias them or not (section 2.7);
+here they alias as `ARB_vertex_program`'s table says (1 the weight, 2 the normal, 3 the colour, 8
+to 15 the texture coordinates), so one array state serves the assembly programs, GLSL and the
+fixed pipeline. An attribute the program does not bind takes the lowest location free, the first
+of them 0 unless the program reads `gl_Vertex`, and skips a location whose conventional array the
+program also reads. *2026-10-31.*
+
+**A69. A shader's info log reads `ERROR: <string>:<line>: <message>`, one line per error.** The
+specification leaves the log's text to the implementation; this is the form most drivers of the
+2.x era print and most loaders that show a log expect. A program that compiled has an empty log.
+*2026-10-31.*
+
+**A70. A framebuffer WebGPU cannot draw into answers `GL_FRAMEBUFFER_UNSUPPORTED`.** OpenGL 2.1
+with `ARB_framebuffer_object` allows attachments of different sizes, separate depth and stencil
+images, and depth textures; a WebGPU pass needs one size and one depth-stencil attachment. Each
+of those cases is answered as unsupported, which the extension provides for, rather than drawn
+partly. *2026-10-31.*
+
+**A71. OpenGL calls accepted but not honoured, each said as a divergence.** An occlusion query
+answers the viewport's area, all of it passing. A 3D texture is accepted up to 16 texels a side
+and kept nowhere; a program that samples a `sampler3D` fails to link and its log says why.
+`GL_MAX_SAMPLES` is 4 and a multisampled renderbuffer is drawn single-sampled.
+`glBlitFramebuffer` copies colour alone. A program that only asks for them runs; one that depends
+on their result draws without it. *2026-10-31.*
+
+**A72. A 64-bit process's system modules leave out the exports that are i386 code alone.** An
+export written as i386 guest code with neither an x86-64 form nor a host handler -- `_chkesp` and
+`_EH_prolog` of the C runtimes, the __fastcall `RtlInterlockedPushListSList`,
+`RtlActivateActivationContextUnsafeFast` and `RtlDeactivateActivationContextUnsafeFast` -- is not
+in a 64-bit process's module, so a program that imports one is refused at load by name and
+`GetProcAddress` answers NULL, rather than its i386 running as x86-64. x64 Windows has the first
+three nowhere; it has the two activation-context calls, whose frame is laid out for 64-bit
+pointers there, which this layer does not write. The app's diagnostics list what is left out
+(`leftOutAt64`); revisit the two when a 64-bit program is found that imports them. *2026-10-31.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

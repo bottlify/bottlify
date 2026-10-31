@@ -4,9 +4,11 @@
  * See LICENSE for details
  */
 
-import { EVENT_TAG, MIRROR, MUTEX_TAG, createEventMirror } from './internal/event-mirror.js';
+import { EVENT_TAG, MIRROR, MUTEX_TAG, SEMAPHORE_TAG, createEventMirror }
+    from './internal/event-mirror.js';
 import { createEventWords } from './internal/event-words.js';
 import { createMutexWords } from './internal/mutex-words.js';
+import { createSemaphoreWords } from './internal/semaphore-words.js';
 import { createHandleTable } from './internal/handles.js';
 import { createSwitcher } from './internal/switch.js';
 import {
@@ -119,7 +121,7 @@ export function createKernelModule(){
              *          processes: any, stacks: any, disposed: boolean, resumeLog: string[],
              *          refreshClock: (() => void) | undefined,
              *          hostAnswering: (() => boolean) | undefined, readyWord: number,
-             *          mutexWords: any, eventWords: any }}
+             *          mutexWords: any, eventWords: any, semaphoreWords: any }}
              */
             const state = {
                 stacks,
@@ -138,6 +140,8 @@ export function createKernelModule(){
                 mutexWords: null,
                 // The words of the process's events (`event-words.js`).
                 eventWords: null,
+                // The words of the process's semaphores (`semaphore-words.js`).
+                semaphoreWords: null,
                 // The last parks, holds and scheduled resumes, newest last: what a
                 // thread that sits in the park loop is read by.
                 resumeLog: [],
@@ -226,9 +230,13 @@ export function createKernelModule(){
             // places them (`mirrorEvents`).
             const eventWords = createEventWords(/** @type {any} */ (memory));
             state.eventWords = eventWords;
+            // The words the guest releases and takes semaphores by, the same way.
+            const semaphoreWords = createSemaphoreWords(/** @type {any} */ (memory));
+            state.semaphoreWords = semaphoreWords;
             state.sync = createSyncObjects({ scheduler: state.scheduler,
                 remote: config?.remoteObjects ?? null,
-                eventChanged: event=>mirror.changed(event), mutexWords, eventWords });
+                eventChanged: event=>mirror.changed(event), mutexWords, eventWords,
+                semaphoreWords });
             // A wait of this process on another's object, across a link,
             // ends there; the word comes back here.
             config?.remoteObjects?.onWake?.((/** @type {number} */ token,
@@ -263,6 +271,7 @@ export function createKernelModule(){
                 EventMirror: MIRROR,
                 MUTEX_TAG,
                 EVENT_TAG,
+                SEMAPHORE_TAG,
 
                 /**
                  * Creates a thread, giving it a stack of its own.
@@ -867,20 +876,26 @@ export function createKernelModule(){
                  * with room for them, each mutex's own word, `mutexCount` of
                  * them at `mutexTable`, its handles' words pointing there
                  * (`mutex-words.js`), and each event's, `eventCount` of them at
-                 * `eventTable` (`event-words.js`).
+                 * `eventTable` (`event-words.js`), and each semaphore's two,
+                 * `semaphoreCount` of them at `semaphoreTable` (`semaphore-words.js`).
                  *
                  * @param {number} table @param {number} count
                  * @param {number} [mutexTable] @param {number} [mutexCount]
                  * @param {number} [eventTable] @param {number} [eventCount]
+                 * @param {number} [semaphoreTable] @param {number} [semaphoreCount]
                  */
                 mirrorEvents: (table, count, mutexTable = 0, mutexCount = 0, eventTable = 0,
-                    eventCount = 0)=>
+                    eventCount = 0, semaphoreTable = 0, semaphoreCount = 0)=>
                 {
                     if (live())
                     {
                         if (mutexTable !== 0 && mutexCount > 0)
                         {
                             state.mutexWords.attach(mutexTable, mutexCount);
+                        }
+                        if (semaphoreTable !== 0 && semaphoreCount > 0)
+                        {
+                            state.semaphoreWords.attach(semaphoreTable, semaphoreCount);
                         }
                         // Before the handles' words: an event open already
                         // gets its word, and its handles point there.
@@ -893,11 +908,11 @@ export function createKernelModule(){
                 },
 
                 /**
-                 * Whether the guest answers its events and mutexes by itself
-                 * (`mirrorEvents`), switched as the program runs: off, every
-                 * word of the table says nothing and the host keeps every
-                 * mutex's word, so each wait, SetEvent, ResetEvent and
-                 * ReleaseMutex crosses into the host, as with
+                 * Whether the guest answers its events, mutexes and semaphores
+                 * by itself (`mirrorEvents`), switched as the program runs: off,
+                 * every word of the table says nothing and the host keeps every
+                 * object's word, so each wait, SetEvent, ResetEvent, ReleaseMutex
+                 * and ReleaseSemaphore crosses into the host, as with
                  * `win32.handleWords: false`; on again, the words are written
                  * afresh from the handles open. A diagnostic: a fault that
                  * goes with the guest's own answers goes while they are off.
@@ -914,6 +929,7 @@ export function createKernelModule(){
                     {
                         mutexWords.reattach();
                         eventWords.reattach();
+                        semaphoreWords.reattach();
                         mirror.reattach(state.handles.list());
                     }
                     else
@@ -921,6 +937,7 @@ export function createKernelModule(){
                         mirror.detach();
                         mutexWords.detach();
                         eventWords.detach();
+                        semaphoreWords.detach();
                     }
                     return mirror.attached();
                 },
@@ -1084,6 +1101,7 @@ export function createKernelModule(){
                     // words given out, kept by the host now, and the hand-overs.
                     // A string: a report keeps the flat metrics only.
                     eventWords: JSON.stringify(instance.eventWords?.diagnostics() ?? {}),
+                    semaphoreWords: JSON.stringify(instance.semaphoreWords?.diagnostics() ?? {}),
                     processes: instance.processes.diagnostics(),
                     time: instance.clock.diagnostics(),
                 },

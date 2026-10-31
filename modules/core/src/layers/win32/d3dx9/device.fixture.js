@@ -26,7 +26,8 @@ const D3DPOOL_DEFAULT = 0;
 
 /** What each slot is called, by kind, for the record. */
 const NAMES = {
-    device: { 1: 'AddRef', 2: 'Release', 7: 'GetDeviceCaps', 23: 'CreateTexture',
+    device: { 1: 'AddRef', 2: 'Release', 6: 'GetDirect3D', 7: 'GetDeviceCaps',
+        8: 'GetDisplayMode', 9: 'GetCreationParameters', 23: 'CreateTexture',
         24: 'CreateVolumeTexture', 25: 'CreateCubeTexture', 26: 'CreateVertexBuffer',
         27: 'CreateIndexBuffer',
         28: 'CreateRenderTarget', 29: 'CreateDepthStencilSurface',
@@ -48,6 +49,7 @@ const NAMES = {
     indices: { 1: 'AddRef', 2: 'Release', 11: 'Lock', 12: 'Unlock', 13: 'GetDesc' },
     vertices: { 1: 'AddRef', 2: 'Release', 11: 'Lock', 12: 'Unlock', 13: 'GetDesc' },
     block: { 1: 'AddRef', 2: 'Release', 5: 'Apply' },
+    d3d: { 1: 'AddRef', 2: 'Release', 10: 'CheckDeviceFormat' },
     mesh: { 1: 'AddRef', 2: 'Release', 4: 'GetNumFaces', 5: 'GetNumVertices', 6: 'GetFVF',
         7: 'GetDeclaration', 8: 'GetNumBytesPerVertex', 9: 'GetOptions', 10: 'GetDevice',
         15: 'LockVertexBuffer', 16: 'UnlockVertexBuffer', 17: 'LockIndexBuffer',
@@ -62,7 +64,9 @@ const BYTES = new Map([[20, 3], [21, 4], [22, 4], [23, 2], [24, 2], [25, 2], [26
  * @param {{ caps?: Partial<Record<'textureCaps' | 'maxWidth' | 'maxHeight' | 'maxVolume'
  *     | 'vertexShader' | 'pixelShader',
  *     number>>,
- *     viewport?: number[] }} [options]
+ *     viewport?: number[], refused?: number[] }} [options]
+ *     `refused`: the formats CheckDeviceFormat refuses, R8G8B8 by default, as
+ *     a card without 24-bit textures does
  */
 export function deviceRig(options = {}){
     const memory = new Uint8Array(1 << 22);
@@ -170,6 +174,8 @@ export function deviceRig(options = {}){
     const depth = surface({ width: viewport[2], height: viewport[3], format: 75,
         usage: D3DUSAGE_DEPTHSTENCIL, pool: D3DPOOL_DEFAULT });
     const device = object({ kind: 'device', target: backBuffer, depth });
+    const d3d = object({ kind: 'd3d' });
+    const refused = new Set(options.refused ?? [20]);
 
     /** @param {number} at @param {number} value */
     const put = (at, value)=>view.setUint32(at, value >>> 0, true);
@@ -241,6 +247,15 @@ export function deviceRig(options = {}){
         {
             switch (slot)
             {
+                case 6:
+                    put(args[1], addRef(d3d));
+                    return 0;
+                case 8:
+                    putAll(args[2], [640, 480, 60, 22]);
+                    return 0;
+                case 9:
+                    putAll(args[1], [0, 1, 0, 0x40]);
+                    return 0;
                 case 7: {
                     const at = args[1];
                     memory.fill(0, at, at + 304);
@@ -326,6 +341,11 @@ export function deviceRig(options = {}){
                 default:
                     return 0;
             }
+        }
+        if (self.kind === 'd3d')
+        {
+            // CheckDeviceFormat(Adapter, DeviceType, AdapterFormat, Usage, RType, CheckFormat)
+            return slot === 10 && refused.has(args[6]) ? 0x8876086a : 0;
         }
         if (self.kind === 'volume')
         {

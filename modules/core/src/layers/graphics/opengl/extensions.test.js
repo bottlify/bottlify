@@ -15,7 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    EXTENSION_FUNCTIONS, EXTENSION_WORDS, GL_EXTENSIONS, HIDDEN_GL_EXTENSIONS, WGL_EXTENSIONS,
+    EXTENSION_FUNCTIONS, EXTENSION_WORDS, GL_EXTENSIONS, GL_VERSIONS, HIDDEN_GL_EXTENSIONS,
+    WGL_EXTENSIONS,
 } from './extensions.js';
 import { ARGUMENT_WORDS, createOpengl } from './exports.js';
 import { CORE_FUNCTIONS } from './context.js';
@@ -68,7 +69,8 @@ test('every extension function is declared, sized and implemented', ()=>{
     const declared = new Set(Object.values(EXTENSION_WORDS).flat());
     const { opengl } = library();
     const implemented = new Set(opengl.implemented);
-    for (const [extension, functions] of Object.entries({ ...GL_EXTENSIONS, ...WGL_EXTENSIONS }))
+    for (const [extension, functions] of Object.entries({ ...GL_EXTENSIONS, ...GL_VERSIONS,
+        ...WGL_EXTENSIONS }))
     {
         for (const name of functions)
         {
@@ -106,8 +108,18 @@ test('the extension string reports exactly what wglGetProcAddress can hand out',
         assert.ok(!extensions.includes(name), `${name} is hidden and yet reported`);
     }
     assert.equal(table.wglGetProcAddress.handler([cstring('glEnable')]), 0, 'core is null');
-    assert.equal(table.wglGetProcAddress.handler([cstring('glActiveTexture')]), 0,
-        'an unsuffixed name belongs to a version this does not claim');
+    // A version's functions past 1.1 are obtained, as the DLL exports 1.1 alone.
+    for (const [version, functions] of Object.entries(GL_VERSIONS))
+    {
+        for (const name of functions)
+        {
+            assert.notEqual(table.wglGetProcAddress.handler([cstring(name)]), 0,
+                `${version}: ${name} is claimed and not obtainable`);
+        }
+        assert.ok(!extensions.includes(version), `${version} is not an extension's name`);
+    }
+    assert.equal(table.wglGetProcAddress.handler([cstring('glGetStringi')]), 0,
+        'a function of a version past the one claimed is not');
     assert.equal(table.wglGetProcAddress.handler([cstring('glFrobnicateXYZ')]), 0);
     assert.equal(table.wglGetProcAddress.handler([0]), 0);
 
@@ -133,9 +145,10 @@ test('without a way to hand out addresses, nothing is advertised and nothing is 
         assert.equal(table.wglGetProcAddress.handler([cstring('wglGetExtensionsStringARB')]), 0);
     });
 
-test('the version string claims only what the core entry points implement', ()=>{
+test('the version string claims only what the entry points implement', ()=>{
     const { table, readString } = library();
-    assert.equal(readString(table.glGetString.handler([GL.VERSION])), '1.1');
+    assert.equal(readString(table.glGetString.handler([GL.VERSION])), '2.1');
+    assert.equal(readString(table.glGetString.handler([GL.SHADING_LANGUAGE_VERSION])), '1.20');
 });
 
 test('every state in the default table is in an attribute group or deliberately not saved', ()=>{

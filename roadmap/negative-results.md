@@ -2460,3 +2460,24 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   trade ran only under `cpu.freeHost: false`, which nothing in the product set. Removed with
   `freeHost`, `playPinned` and `placementTiming`; `placement: 'concentrate'` stays as a debugging
   switch.
+
+### 2026-10-31: a job thread's executor chosen by where the other threads will run
+
+- **Idea.** The scheduler gives a new thread the executor fewest threads call theirs (`homeOf`),
+  counting each by its `home`. A main thread pinned to the first processor runs where that
+  processor is played (`freeHost`), not at the home it had before it was pinned, so the executor
+  it took counted nothing and could be given to a job thread. The candidate counted each thread
+  at the first executor its mask allows when its home no longer does.
+- **Workload.** `tools/sync-handoff-bench.mjs --frames 150 --jobs 12 --work 100000
+  --main-work 6000000 --executors 3 --pin-main` (node 22.21.0, V8 12.4, branch hints read), on
+  guest-semaphores at 38e36c60, two runs an arm.
+- **Values.** Before: 8.716, 8.866 ms a frame; the two workers ready-waiting 6.76 and 6.67 ms a
+  frame, held 1.22 and 1.41 ms. Candidate: 8.777, 8.657 ms; ready-waiting 6.13 and 7.73 ms, held
+  1.61 and 1.36 ms. Placements moved (the worker that had main's executor went to the third), the
+  ready time did not. Noise floor not measured beyond the two runs.
+- **Why.** Not found: the workers' ready time in this program is not where their homes are. Deus
+  Ex: Human Revolution's job threads 7 and 8 wait ready about 9.5 ms a frame each while the third
+  executor idles 22 ms (Megan's lab, 3 executors, hardware WebGPU, a Parallels ARM VM), and the
+  bench reproduces that shape with `--pin-main` alone (without it the workers wait about 1 ms).
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
+- **Decision.** Removed; the reproduction (`--pin-main`) stays in the bench for the next attempt.
