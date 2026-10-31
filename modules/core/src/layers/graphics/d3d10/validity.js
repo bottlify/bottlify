@@ -777,5 +777,9 @@ export function bindFlagsForUsage(usage){
     {
         bindFlags |= D3D10_BIND.SHADER_RESOURCE;
     }
+    if ((usage & DXGI_USAGE.UNORDERED_ACCESS) !== 0)
+    {
+        bindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+    }
     return bindFlags;
 }

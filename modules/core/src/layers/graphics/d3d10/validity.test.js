@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3D10_BIND, D3D10_CPU_ACCESS, D3D10_USAGE, DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE,
-    E_INVALIDARG, S_OK,
+    D3D10_BIND, D3D10_CPU_ACCESS, D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS, DXGI_FORMAT,
+    DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, S_OK,
 } from './constants.js';
 import {
     RESOURCE_ACCESS, backBufferUsage, bindFlagsForUsage, bufferCreateResult,
@@ -283,6 +283,7 @@ test('a swap chain usage word and a bind flag word are the same idea', ()=>{
     assert.equal(bindFlagsForUsage(0), 0);
     assert.equal(bindFlagsForUsage(DXGI_USAGE.RENDER_TARGET_OUTPUT), D3D10_BIND.RENDER_TARGET);
     assert.equal(bindFlagsForUsage(DXGI_USAGE.SHADER_INPUT), D3D10_BIND.SHADER_RESOURCE);
+    assert.equal(bindFlagsForUsage(DXGI_USAGE.UNORDERED_ACCESS), D3D11_BIND_UNORDERED_ACCESS);
     assert.equal(
         bindFlagsForUsage(DXGI_USAGE.SHADER_INPUT | DXGI_USAGE.RENDER_TARGET_OUTPUT),
         D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.RENDER_TARGET);
