@@ -87,8 +87,12 @@ function hubOver(platforms = {}){
         get: async()=>kept.session
             && { accountName: kept.session.accountName, id: kept.session.id },
         token: async()=>kept.session,
-        set: async(/** @type {any} */ one)=>{
-            kept.session = one;
+        signIn: async(/** @type {any} */ options)=>{
+            kept.session = await steam.signInWithQr(null, options);
+            return { accountName: kept.session.accountName };
+        },
+        signOut: async()=>{
+            kept.session = null;
         },
     };
     const hub = createHub({ version: '0.2.0', platforms, stores: { steam: steamStore({ vault,

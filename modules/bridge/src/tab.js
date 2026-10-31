@@ -11,9 +11,10 @@
  * An extension's service worker is kept at a low one, and on a busy machine
  * (a game running) its work waited tens of seconds (roadmap/gamehub.md).
  *
- * The worker keeps the sessions (serve.js): a store asks it who is signed in,
- * the token for a logon, and keeps a sign-in's token there; nothing of it is
- * kept here. The port to the worker is made at the first ask and made again
+ * The worker keeps the sessions (serve.js): it signs in, over HTTPS, and a
+ * store here asks it who is signed in and what to log on with; a sign-in
+ * gives this tab its challenge and the account's name, never its token.
+ * The port to the worker is made at the first ask and made again
  * after it drops (the worker stopped); an ask it had not answered fails.
  */
 
@@ -43,7 +44,10 @@ export function startTab({ version, connect, socket, toPage, platforms, steam })
     /** @type {{ wire: ReturnType<typeof createWire> } | null} */
     let link = null;
     let next = 0;
-    /** @type {Map<number, { resolve: (value: any) => void, reject: (e: Error) => void }>} */
+    /**
+     * @type {Map<number, { resolve: (value: any) => void, reject: (e: Error) => void,
+     *     onEvent?: (event: string, data: any) => void }>}
+     */
     const waiting = new Map();
 
     const open = ()=>{
@@ -57,7 +61,11 @@ export function startTab({ version, connect, socket, toPage, platforms, steam })
         port.onMessage.addListener(raw=>{
             const answer = now.wire.receive(raw)?.answer;
             const asked = answer && waiting.get(answer.id);
-            if (asked)
+            if (asked && 'event' in answer)
+            {
+                asked.onEvent?.(answer.event, answer.data);
+            }
+            else if (asked)
             {
                 waiting.delete(answer.id);
                 if ('error' in answer)
@@ -84,18 +92,28 @@ export function startTab({ version, connect, socket, toPage, platforms, steam })
         return now;
     };
 
-    /** @param {string} op @param {Record<string, any>} [args] @returns {Promise<any>} */
-    const ask = (op, args = {})=>new Promise((resolve, reject)=>{
+    /**
+     * @param {string} op @param {Record<string, any>} [args]
+     * @param {{ onEvent?: (event: string, data: any) => void, signal?: AbortSignal }} [also]
+     * @returns {Promise<any>}
+     */
+    const ask = (op, args = {}, { onEvent, signal } = {})=>new Promise((resolve, reject)=>{
         const id = ++next;
-        waiting.set(id, { resolve, reject });
-        open().wire.send({ ask: { id, op, args } });
+        waiting.set(id, { resolve, reject, onEvent });
+        const { wire } = open();
+        signal?.addEventListener('abort', ()=>wire.send({ ask: { id: ++next, op: 'cancel',
+            args: { target: id } } }), { once: true });
+        wire.send({ ask: { id, op, args } });
     });
 
-    /** @param {string} store */
+    /** @param {string} store @returns {import('./stores/steam/store.js').Vault} */
     const vault = store=>({
         get: ()=>ask('session', { store }),
         token: ()=>ask('token', { store }),
-        set: (/** @type {any} */ session)=>ask('keep', { store, session }).then(()=>{}),
+        signIn: ({ onChallenge, onScanned, signal })=>ask('signIn', { store }, { signal,
+            onEvent: (event, data)=>(event === 'challenge'
+                ? onChallenge(data.url) : onScanned()) }),
+        signOut: ()=>ask('signOut', { store }).then(()=>{}),
     });
 
     /** @type {typeof fetch} */

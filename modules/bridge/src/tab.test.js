@@ -7,8 +7,9 @@
 /**
  * The whole path in one process: a page's requests, GameHub in the tab with
  * Steam's own protocol code over a connection manager made up here, a JSON
- * port, and the worker keeping the session -- to see where the token goes,
- * and that a worker stopped and started again still gives a logon its token.
+ * port, and the worker signing in over HTTPS and keeping the session -- to see
+ * where the token goes, and that a worker stopped and started again still
+ * gives a logon its token.
  */
 
 import { test } from 'node:test';
@@ -17,10 +18,11 @@ import { startTab } from './tab.js';
 import { FETCHED, serveTab } from './serve.js';
 import { createWire } from './wire.js';
 import { FakeSocket, portPair } from './port.fixture.js';
-import { STEAM } from './stores/steam/store.js';
 import { buildFrame, parseFrame } from './stores/steam/connection.js';
+import { signInWithQr } from './stores/steam/auth.js';
+import { webApi } from './stores/steam/webapi.js';
 import {
-    ClientLicenseList, ClientLogonResponse, EMsg, PICSProductInfoResponse,
+    Authentication, ClientLicenseList, ClientLogonResponse, EMsg, PICSProductInfoResponse,
 } from './stores/steam/messages.js';
 import { encode } from '../../core/src/steam/protobuf.js';
 
@@ -66,31 +68,58 @@ class FakeCm extends FakeSocket {
     }
 }
 
-/** Steam's directory, as the worker fetches it. @type {typeof fetch} */
-const directory = async url=>(String(url).startsWith(FETCHED[0])
-    ? Response.json({ response: { serverlist: [{ endpoint: 'cm.example:443' }] } })
-    : new Response(null, { status: 404 }));
+/** The token a sign-in ends in. */
+const SIGNED_IN = `${TOKEN.slice(0, -SECRET.length)}signed-in-${SECRET}`;
+
+/**
+ * Steam over HTTPS, as the worker asks it: the directory, and a QR sign-in
+ * approved at its first poll.
+ *
+ * @type {typeof fetch}
+ */
+const steamHttps = async url=>{
+    const answer = (/** @type {any} */ schema, /** @type {any} */ body)=>new Response(
+        /** @type {any} */ (encode(schema, body)), { headers: { 'x-eresult': '1' } });
+    if (String(url).startsWith(FETCHED[0]))
+    {
+        return Response.json({ response: { serverlist: [{ endpoint: 'cm.example:443' }] } });
+    }
+    if (String(url).endsWith('/IAuthenticationService/BeginAuthSessionViaQR/v1/'))
+    {
+        return answer(Authentication.BeginAuthSessionViaQRResponse, { client_id: 1n,
+            challenge_url: 'https://s.team/q/1/1', request_id: Uint8Array.of(1), interval: 1 });
+    }
+    if (String(url).endsWith('/IAuthenticationService/PollAuthSessionStatus/v1/'))
+    {
+        return answer(Authentication.PollAuthSessionStatusResponse, {
+            had_remote_interaction: true, refresh_token: SIGNED_IN, account_name: 'other' });
+    }
+    return new Response(null, { status: 404 });
+};
 
 /**
  * A page, GameHub in its tab, and the worker: each port served by a worker
  * started anew, as Chrome starts one after it stopped, over one database.
  *
- * @param {Record<string, any>} [steam]
  */
-function rig(steam){
+function rig(){
     const seen = { logons: 0, frames: /** @type {Uint8Array[]} */ ([]) };
     /** The worker's database: what outlives the worker. */
     const disk = { session: /** @type {any} */ ({ accountName: 'someone', refreshToken: TOKEN, id: 'a' }) };
-    const vaults = { steam: { get: async()=>disk.session, set: async(/** @type {any} */ one)=>{
-        disk.session = one;
-    } } };
+    const stores = { steam: {
+        vault: { get: async()=>disk.session, set: async(/** @type {any} */ one)=>{
+            disk.session = one;
+        } },
+        signIn: (/** @type {any} */ options)=>signInWithQr(
+            async()=>/** @type {any} */ (webApi({ fetch: steamHttps })), options),
+    } };
     /** @type {ReturnType<typeof portPair>[]} */
     const pairs = [];
     /** @type {FakeCm[]} */
     const sockets = [];
     /** @type {Record<string, any>[]} Everything the page was posted. */
     const page = [];
-    const tab = startTab({ version: '0.2.0', platforms: {}, steam,
+    const tab = startTab({ version: '0.2.0', platforms: {},
         toPage: answer=>page.push(answer),
         socket: url=>{
             const one = new FakeCm(url, seen);
@@ -101,7 +130,7 @@ function rig(steam){
             const pair = portPair();
             pairs.push(pair);
             serveTab(/** @type {any} */ (pair.worker),
-                { switch: async()=>({ steam: true }), vaults, fetch: directory });
+                { switch: async()=>({ steam: true }), stores, fetch: steamHttps });
             return pair.page;
         } });
     let next = 0;
@@ -109,7 +138,7 @@ function rig(steam){
     const ask = async(op, args = {})=>{
         const id = ++next;
         tab.request({ to: 'bottlify-bridge', id, op, args });
-        for (let i = 0; i < 400; i++)
+        for (let i = 0; i < 1000; i++)
         {
             const done = page.find(one=>one.id === id && ('result' in one || 'error' in one));
             if (done)
@@ -158,20 +187,16 @@ test('the token is asked of the worker for a logon alone, and the page is given 
     tab.close();
 });
 
-test('a sign-in\'s token goes to the worker, and the page is given the name', async()=>{
-    const { disk, page, ask, carried, pairs, tab } = rig({ ...STEAM,
-        signInWithQr: async(/** @type {any} */ _next, /** @type {any} */ options)=>{
-            options.onChallenge('https://s.team/q/1/1');
-            return { accountName: 'other', refreshToken: `${TOKEN}2` };
-        } });
+test('a sign-in in the worker, over HTTPS: the tab sees its code and name alone', async()=>{
+    const { disk, page, ask, carried, pairs, sockets, tab } = rig();
     disk.session = null;
     assert.deepEqual((await ask('signIn', { store: 'steam' })).result, { name: 'other' });
-    assert.equal(disk.session.refreshToken, `${TOKEN}2`, 'kept by the worker');
+    assert.equal(disk.session.refreshToken, SIGNED_IN, 'kept by the worker');
     assert.match(disk.session.id, /^[0-9a-f-]{36}$/, 'a new id: the next op logs on with it');
-    assert.ok(page.some(one=>one.event === 'challenge'));
-    assert.doesNotMatch(text(page), new RegExp(SECRET));
-    assert.deepEqual(carried().filter(one=>text(one).includes(SECRET)).map(one=>one.ask?.op),
-        ['keep'], 'over the port once, asked to keep');
+    assert.deepEqual(page.filter(one=>one.event).map(one=>one.event), ['challenge', 'scanned']);
+    assert.deepEqual(sockets, [], 'no socket of the tab took part');
+    assert.doesNotMatch(text([carried(), page]), new RegExp(`signed-in-${SECRET}`),
+        'the token in nothing the port carried or the page was posted');
     assert.deepEqual((await ask('signOut', { store: 'steam' })).result, {});
     assert.equal(disk.session, null);
     assert.equal((await ask('account', { store: 'steam' })).result, null);
@@ -206,7 +231,8 @@ test('what the tab and the worker refuse', async()=>{
     tab.close();
 
     const pair = portPair();
-    serveTab(/** @type {any} */ (pair.worker), { switch: async()=>({}), vaults: {}, fetch: directory });
+    serveTab(/** @type {any} */ (pair.worker), { switch: async()=>({}), stores: {},
+        fetch: steamHttps });
     const wire = createWire(raw=>pair.page.postMessage(raw));
     /** @type {Record<string, any>[]} */
     const answers = [];

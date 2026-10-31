@@ -8,8 +8,8 @@
  * Steam, as GameHub answers a page for it (hub.js), in the page's content
  * script (tab.js): every message to Steam built and read here, over a CM
  * socket the content script opens. The account's session is the service
- * worker's (`vault`): its refresh token is asked of it for a logon, put into
- * the logon and not kept here; a sign-in's token is handed to it at once.
+ * worker's (`vault`): it signs in, and is asked what to log on with, which is
+ * put into the logon and not kept here.
  *
  * One connection, logged on with the kept session or anonymously, is held
  * while the page is open, and made again when it closes. A sign-in uses
@@ -19,7 +19,6 @@
  */
 
 import * as connection from './connection.js';
-import * as auth from './auth.js';
 import * as session from './session.js';
 import * as keys from './keys.js';
 import * as client from './client.js';
@@ -53,7 +52,7 @@ const PRODUCT_INFO_BATCH = 500;
 
 /** Steam's own protocol, as the store speaks it; a test answers for Steam. */
 export const STEAM = Object.freeze({
-    ...connection, ...auth, ...session, ...keys, fetchClientFiles: client.fetchClientFiles,
+    ...connection, ...session, ...keys, fetchClientFiles: client.fetchClientFiles,
 });
 
 /**
@@ -85,7 +84,9 @@ export async function steamManagers(get = fetch){
  * @typedef {Object} Vault
  * @property {() => Promise<Account | null>} get  Who is signed in, without the token.
  * @property {() => Promise<(Session & Account) | null>} token  The session, for a logon.
- * @property {(session: Session | null) => Promise<void>} set  Null signs out.
+ * @property {(options: { onChallenge: (url: string) => void, onScanned: () => void,
+ *     signal: AbortSignal }) => Promise<Account>} signIn  By QR code, in the worker.
+ * @property {() => Promise<void>} signOut
  */
 
 /**
@@ -266,39 +267,15 @@ export function steamStore({ vault, socket, fetch: get = fetch,
             },
 
             signIn: async(_args, emit, signal)=>{
-                /** @type {any} */
-                let link = null;
-                // A manager drops a connection that has not logged on after a
-                // minute or so; the sign-in, which Steam keeps, goes on over the next.
-                const next = async()=>{
-                    if (!link || link.closed)
-                    {
-                        link = await connect();
-                    }
-                    return link;
-                };
-                signal.addEventListener('abort', ()=>link?.close(), { once: true });
-                try
-                {
-                    // The token goes to the worker at once and is not kept here.
-                    const { accountName, refreshToken } = await steam.signInWithQr(next, {
-                        deviceName: 'Bottlify',
-                        signal,
-                        onChallenge: (/** @type {string} */ url)=>emit('challenge', { url }),
-                        onScanned: ()=>emit('scanned', {}),
-                    });
-                    await vault.set({ accountName, refreshToken });
-                    drop();
-                    return { name: accountName };
-                }
-                finally
-                {
-                    link?.close();
-                }
+                const { accountName } = await vault.signIn({ signal,
+                    onChallenge: url=>emit('challenge', { url }),
+                    onScanned: ()=>emit('scanned', {}) });
+                drop();
+                return { name: accountName };
             },
 
             signOut: async()=>{
-                await vault.set(null);
+                await vault.signOut();
                 drop();
                 return {};
             },

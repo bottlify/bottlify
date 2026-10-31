@@ -174,12 +174,15 @@ try
         await browser.send('Page.navigate', { url }, sessionId);
         await new Promise(done=>setTimeout(done, 1500));
         const started = Date.now();
-        const worker = await page(
+        // GameHub's first answer: its modules loaded and the worker asked.
+        await page('ask("hello")');
+        const hello = Date.now() - started;
+        const hub = await page(
             'ask("bench", { store: "steam" }).catch(e => ({ error: String(e.message) }))');
         const wall = Date.now() - started;
         const own = await page(inPage);
-        console.log(`run ${run}: worker ${JSON.stringify(worker)} (${wall} ms in all);`
-            + ` page ${JSON.stringify(own)}`);
+        console.log(`run ${run}: GameHub ${JSON.stringify(hub)} (hello ${hello} ms,`
+            + ` ${wall} ms in all); page ${JSON.stringify(own)}`);
     }
 }
 finally
