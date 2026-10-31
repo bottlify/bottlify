@@ -58,8 +58,15 @@ const ALLOCATION_TYPES = MEM_COMMIT | MEM_RESERVE | MEM_RESET | 0x00100000 | MEM
 /** What HeapSize returns when it cannot answer: (SIZE_T)-1. */
 const INVALID_SIZE = 0xffffffff;
 
-/** Every block starts on an 8-byte boundary, which is what malloc guarantees. */
+/**
+ * Every block starts on an 8-byte boundary, which is what malloc guarantees
+ * at 32 bits; a 64-bit process's on 16 (`ALIGNMENT_64`), Windows x64's
+ * MEMORY_ALLOCATION_ALIGNMENT, which code built for it takes for granted --
+ * an SSE store of a jmp_buf's XMM registers (`movdqa`) at the start of a
+ * block faults on one eight bytes off.
+ */
 const ALIGNMENT = 8;
+export const ALIGNMENT_64 = 16;
 
 const PAGE_SIZE = 4096;
 
@@ -433,9 +440,11 @@ export function createAddressIndex(){
  * Deterministic: the same sequence of requests yields the same addresses,
  * which is what makes a heap bug reproducible.
  *
- * @param {{ base: number, size: number }} arena  Memory nothing has written yet.
+ * @param {{ base: number, size: number, alignment?: number }} arena  Memory nothing has
+ *        written yet, and where every block starts and how its size is rounded:
+ *        ALIGNMENT, or ALIGNMENT_64 in a 64-bit process. The base is on it.
  */
-export function createHeapAllocator({ base, size }){
+export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }){
     /** @type {FreeSpan[][]} */
     const bins = Array.from({ length: BINS }, ()=>[]);
     // Three maps by address, and none of them is ever deleted from: an entry
@@ -580,17 +589,17 @@ export function createHeapAllocator({ base, size }){
          * @param {any} [options.owner]
          * @returns {number} the address, or 0 when nothing fits
          */
-        allocate(bytes, { alignment = ALIGNMENT, owner = null } = {}){
+        allocate(bytes, { alignment = least, owner = null } = {}){
             // A zero-byte request still yields a distinct pointer, because a
             // program compares it against NULL to decide whether it failed.
-            const capacity = Math.max(ALIGNMENT, roundUp(bytes, ALIGNMENT));
+            const capacity = Math.max(least, roundUp(bytes, least));
             if (capacity > size)
             {
                 return 0;
             }
             // Room for the padding a coarser alignment may need in front: a
-            // span begins on an eight-byte boundary, so at most this much.
-            const span = fit(capacity + (alignment > ALIGNMENT ? alignment - ALIGNMENT : 0));
+            // span begins on the least alignment, so at most this much.
+            const span = fit(capacity + (alignment > least ? alignment - least : 0));
             if (span === null)
             {
                 return 0;
@@ -631,10 +640,10 @@ export function createHeapAllocator({ base, size }){
          * @returns {boolean} false when any of the range is taken or outside the arena
          */
         allocateAt(address, bytes, { owner = null } = {}){
-            const capacity = Math.max(ALIGNMENT, roundUp(bytes, ALIGNMENT));
+            const capacity = Math.max(least, roundUp(bytes, least));
             const start = address >>> 0;
             const end = start + capacity;
-            if (start % ALIGNMENT !== 0 || start < base || end > base + size)
+            if (start % least !== 0 || start < base || end > base + size)
             {
                 return false;
             }

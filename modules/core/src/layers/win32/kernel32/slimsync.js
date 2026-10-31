@@ -175,6 +175,152 @@ export function executeOnceCode(at, { begin, end }){
 }
 
 /**
+ * The x86-64 routines below call the host's traps through `call rel32`s whose
+ * displacements the loader fills in (`jumps`, each named by the trap it
+ * reaches), as it fills the `jmp rel32` of every other export placed with its
+ * module. Each takes a frame of 40 bytes -- the home space its callees are
+ * owed, and eight bytes of its own, RSP a multiple of 16 at every call -- and
+ * keeps its arguments in its own home space across the calls.
+ *
+ * @typedef {{ code: Uint8Array, jumps: { at: number, trap: string }[] }} LongRoutine
+ */
+
+/** The four argument registers into the home space, then `sub rsp, 40`. */
+const LONG_ENTRY = [
+    0x48, 0x89, 0x4c, 0x24, 0x08, //              mov [rsp+8], rcx
+    0x48, 0x89, 0x54, 0x24, 0x10, //              mov [rsp+16], rdx
+    0x4c, 0x89, 0x44, 0x24, 0x18, //              mov [rsp+24], r8
+    0x4c, 0x89, 0x4c, 0x24, 0x20, //              mov [rsp+32], r9
+    0x48, 0x83, 0xec, 0x28, //                    sub rsp, 40
+];
+/** Where, past `sub rsp, 40`, the caller's RCX, RDX, R8 and R9 were kept. */
+const HOME = [0x30, 0x38, 0x40, 0x48];
+/** The eight bytes of the frame no callee owns: the answer kept across a call. */
+const KEPT = 0x20;
+
+/**
+ * Lays out a routine of byte runs and `call`/`jmp` to named traps.
+ *
+ * @param {(number[] | { call: string } | { jmp: string })[]} parts
+ * @returns {LongRoutine}
+ */
+const longRoutine = parts=>{
+    /** @type {number[]} */
+    const code = [];
+    /** @type {{ at: number, trap: string }[]} */
+    const jumps = [];
+    for (const part of parts)
+    {
+        if (Array.isArray(part))
+        {
+            code.push(...part);
+            continue;
+        }
+        const calls = 'call' in part;
+        code.push(calls ? 0xe8 : 0xe9);
+        jumps.push({ at: code.length, trap: calls ? part.call : part.jmp });
+        code.push(0, 0, 0, 0);
+    }
+    return { code: new Uint8Array(code), jumps };
+};
+
+/**
+ * SleepConditionVariableSRW in a 64-bit process, as `sleepSrwCode` is at 32
+ * bits: the variable, lock, time and flags in RCX, RDX, R8 and R9.
+ *
+ *     (entry)
+ *     call <cv-sleep-srw>                 ; the four as they came
+ *     mov [rsp+32], eax
+ *     test eax, eax; jnz back; call <cv-timed-out>
+ *   back:
+ *     mov rcx, [rsp+56]                   ; lock
+ *     test byte [rsp+72], LOCKMODE_SHARED ; flags
+ *     jz exclusive
+ *     call <srw-acquire-shared>; jmp done
+ *   exclusive:
+ *     call <srw-acquire-exclusive>
+ *   done:
+ *     mov eax, [rsp+32]; add rsp, 40; ret
+ *
+ * @returns {LongRoutine}
+ */
+export const sleepSrwLongCode = ()=>longRoutine([
+    LONG_ENTRY,
+    { call: 'sleep' },
+    [0x89, 0x44, 0x24, KEPT], //                 mov [rsp+32], eax
+    [0x85, 0xc0, 0x75, 0x05], //                 test eax, eax; jnz back (+5)
+    { call: 'timedOut' },
+    // back:
+    [0x48, 0x8b, 0x4c, 0x24, HOME[1]], //        mov rcx, [rsp+56]
+    [0xf6, 0x44, 0x24, HOME[3], CONDITION_VARIABLE_LOCKMODE_SHARED], // test byte [rsp+72], 1
+    [0x74, 0x07], //                             jz exclusive (+7)
+    { call: 'shared' },
+    [0xeb, 0x05], //                             jmp done (+5)
+    // exclusive:
+    { call: 'exclusive' },
+    // done:
+    [0x8b, 0x44, 0x24, KEPT], //                 mov eax, [rsp+32]
+    [0x48, 0x83, 0xc4, 0x28, 0xc3], //           add rsp, 40; ret
+]);
+
+/**
+ * SleepConditionVariableCS in a 64-bit process: the same shape, taking the
+ * section back through EnterCriticalSection's trap.
+ *
+ * @returns {LongRoutine}
+ */
+export const sleepCsLongCode = ()=>longRoutine([
+    LONG_ENTRY,
+    { call: 'sleep' },
+    [0x89, 0x44, 0x24, KEPT], //                 mov [rsp+32], eax
+    [0x85, 0xc0, 0x75, 0x05], //                 test eax, eax; jnz back (+5)
+    { call: 'timedOut' },
+    // back:
+    [0x48, 0x8b, 0x4c, 0x24, HOME[1]], //        mov rcx, [rsp+56]   critical section
+    { call: 'enter' },
+    [0x8b, 0x44, 0x24, KEPT], //                 mov eax, [rsp+32]
+    [0x48, 0x83, 0xc4, 0x28, 0xc3], //           add rsp, 40; ret
+]);
+
+/**
+ * InitOnceExecuteOnce in a 64-bit process, as `executeOnceCode` is at 32
+ * bits: InitOnce, InitFn, Parameter and Context in RCX, RDX, R8 and R9. The
+ * program's function is called as the x64 convention calls, and its BOOL --
+ * EAX, RAX's upper half being undefined -- goes to the host as it is.
+ *
+ *     (entry)
+ *     mov rdx, r9; call <init-once-begin>          ; InitOnce, Context
+ *     cmp eax, 1; je run
+ *     test eax, eax; sete al; movzx eax, al
+ *     add rsp, 40; ret                             ; done: TRUE, refused: FALSE
+ *   run:
+ *     mov rcx, [rsp+48]; mov rdx, [rsp+64]; mov r8, [rsp+72]
+ *     call [rsp+56]                                ; InitFn(InitOnce, Parameter, Context)
+ *     mov rcx, [rsp+48]; mov edx, eax; mov r8, [rsp+72]
+ *     add rsp, 40; jmp <init-once-end>
+ *
+ * @returns {LongRoutine}
+ */
+export const executeOnceLongCode = ()=>longRoutine([
+    LONG_ENTRY,
+    [0x4c, 0x89, 0xca], //                       mov rdx, r9
+    { call: 'begin' },
+    [0x83, 0xf8, 0x01, 0x74, 0x0d], //           cmp eax, 1; je run (+13)
+    [0x85, 0xc0, 0x0f, 0x94, 0xc0, 0x0f, 0xb6, 0xc0], // test eax, eax; sete al; movzx eax, al
+    [0x48, 0x83, 0xc4, 0x28, 0xc3], //           add rsp, 40; ret
+    // run:
+    [0x48, 0x8b, 0x4c, 0x24, HOME[0]], //        mov rcx, [rsp+48]   InitOnce
+    [0x48, 0x8b, 0x54, 0x24, HOME[2]], //        mov rdx, [rsp+64]   Parameter
+    [0x4c, 0x8b, 0x44, 0x24, HOME[3]], //        mov r8, [rsp+72]    Context
+    [0xff, 0x54, 0x24, HOME[1]], //              call [rsp+56]       InitFn
+    [0x48, 0x8b, 0x4c, 0x24, HOME[0]], //        mov rcx, [rsp+48]
+    [0x89, 0xc2], //                             mov edx, eax
+    [0x4c, 0x8b, 0x44, 0x24, HOME[3]], //        mov r8, [rsp+72]
+    [0x48, 0x83, 0xc4, 0x28], //                 add rsp, 40
+    { jmp: 'end' },
+]);
+
+/**
  * @typedef {Object} SlimHost
  * @property {any} kernel
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -191,13 +337,31 @@ export function executeOnceCode(at, { begin, end }){
  */
 
 /**
+ * What a 64-bit process's module hands an export's x86-64 as it is placed.
+ *
+ * @typedef {{ register: (trap: any) => number,
+ *     jump: (at: number, target: number) => void }} LongBuilder
+ */
+
+/**
  * @param {SlimHost} host
  * @param {(builder: any) => number} enterCritical
  *        Where EnterCriticalSection's guest code is, placed on first use.
+ * @param {(args: number[]) => any} [enterSection]
+ *        EnterCriticalSection's trap, which a 64-bit process's sleep takes
+ *        the section back through.
  */
-export function createSlimSync(host, enterCritical){
+export function createSlimSync(host, enterCritical, enterSection){
     const { kernel } = host;
     const CS = criticalLayout(host.pointerSize);
+    /** An SRW lock, condition variable, INIT_ONCE or context: a pointer's width. */
+    const WORD = host.pointerSize ?? 4;
+    /** @param {number} value  Below 4 GiB, as every address is. */
+    const wide = value=>{
+        const bytes = new Uint8Array(WORD);
+        bytes.set(dword(value >>> 0));
+        return bytes;
+    };
 
     /**
      * @typedef {Object} SrwState
@@ -224,7 +388,7 @@ export function createSlimSync(host, enterCritical){
     /** @param {number} address @param {SrwState} state */
     const publish = (address, state)=>{
         const word = state.owner !== null ? 1 : state.shared > 0 ? (state.shared << 4 | 1) : 0;
-        host.writeMemory(address, new Uint8Array(dword(word >>> 0)));
+        host.writeMemory(address, wide(word));
     };
 
     /**
@@ -306,7 +470,7 @@ export function createSlimSync(host, enterCritical){
         {
             // A lock no acquire here ever took -- a word the program set --
             // is released to free, as the word's own arithmetic would leave it.
-            host.writeMemory(address, new Uint8Array(4));
+            host.writeMemory(address, new Uint8Array(WORD));
             return;
         }
         if (exclusive)
@@ -417,6 +581,43 @@ export function createSlimSync(host, enterCritical){
         }
     };
 
+    /**
+     * The traps the sleeps' guest code calls, by the name their x86-64
+     * routines give them (`sleepSrwLongCode`, `sleepCsLongCode`).
+     */
+    const sleepTraps = {
+        timedOut: {
+            argBytes: 0,
+            handler: ()=>{
+                host.setLastError?.(ERROR_TIMEOUT);
+                return 0;
+            },
+        },
+        shared: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([lock])=>acquire(lock >>> 0, false),
+        },
+        exclusive: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([lock])=>acquire(lock >>> 0, true),
+        },
+        sleepSrw: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([variable, lock, milliseconds, flags])=>sleep(variable >>> 0,
+                milliseconds, ()=>release(lock >>> 0,
+                    (flags & CONDITION_VARIABLE_LOCKMODE_SHARED) === 0)),
+        },
+        sleepCs: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([variable, section, milliseconds])=>sleep(variable >>> 0,
+                milliseconds, ()=>leaveSection(section >>> 0)),
+        },
+    };
+
     /** @type {{ srw: number, cs: number } | null} */
     let stubs = null;
     /** @param {any} builder */
@@ -425,39 +626,14 @@ export function createSlimSync(host, enterCritical){
         {
             return stubs;
         }
-        const timedOut = builder.register('<cv-timed-out>', {
-            argBytes: 0,
-            handler: ()=>{
-                host.setLastError?.(ERROR_TIMEOUT);
-                return 0;
-            },
-        });
+        const timedOut = builder.register('<cv-timed-out>', sleepTraps.timedOut);
         const traps = {
             timedOut,
-            shared: builder.register('<srw-acquire-shared>', {
-                argBytes: 4,
-                /** @param {number[]} args */
-                handler: ([lock])=>acquire(lock >>> 0, false),
-            }),
-            exclusive: builder.register('<srw-acquire-exclusive>', {
-                argBytes: 4,
-                /** @param {number[]} args */
-                handler: ([lock])=>acquire(lock >>> 0, true),
-            }),
+            shared: builder.register('<srw-acquire-shared>', sleepTraps.shared),
+            exclusive: builder.register('<srw-acquire-exclusive>', sleepTraps.exclusive),
         };
-        const sleepSrw = builder.register('<cv-sleep-srw>', {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([variable, lock, milliseconds, flags])=>sleep(variable >>> 0,
-                milliseconds, ()=>release(lock >>> 0,
-                    (flags & CONDITION_VARIABLE_LOCKMODE_SHARED) === 0)),
-        });
-        const sleepCs = builder.register('<cv-sleep-cs>', {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([variable, section, milliseconds])=>sleep(variable >>> 0,
-                milliseconds, ()=>leaveSection(section >>> 0)),
-        });
+        const sleepSrw = builder.register('<cv-sleep-srw>', sleepTraps.sleepSrw);
+        const sleepCs = builder.register('<cv-sleep-cs>', sleepTraps.sleepCs);
         /** @param {(at: number) => Uint8Array} code */
         const place = code=>{
             const at = (host.allocateCode ?? host.allocate)(code(0).length);
@@ -472,17 +648,48 @@ export function createSlimSync(host, enterCritical){
         return stubs;
     };
 
+    /**
+     * An x86-64 routine bound as its module is placed: each of its calls
+     * reaches the trap it names.
+     *
+     * @param {LongRoutine} routine
+     * @param {Record<string, { argBytes: number, handler: (args: number[]) => any }>} traps
+     * @returns {(builder: LongBuilder) => Uint8Array}
+     */
+    const bindLong = (routine, traps)=>builder=>{
+        for (const { at, trap } of routine.jumps)
+        {
+            builder.jump(at, builder.register(traps[trap]));
+        }
+        return routine.code;
+    };
+
     /** @param {number} address */
-    const clear = address=>host.writeMemory(address, new Uint8Array(4));
+    const clear = address=>host.writeMemory(address, new Uint8Array(WORD));
 
     /** @param {number} address */
     const readWord = address=>new DataView(
         host.readMemory(address, 4).slice().buffer).getUint32(0, true);
-    /** @param {number} address @param {number} value */
+    /**
+     * A pointer-sized word: an INIT_ONCE, or the context one hands out.
+     *
+     * @param {number} address @param {number} value
+     */
     const writeWord = (address, value)=>{
         if (address !== 0)
         {
-            host.writeMemory(address, new Uint8Array(dword(value >>> 0)));
+            host.writeMemory(address, wide(value));
+        }
+    };
+    /**
+     * A BOOL: fPending.
+     *
+     * @param {number} address @param {number} value
+     */
+    const writeBool = (address, value)=>{
+        if (address !== 0)
+        {
+            host.writeMemory(address, new Uint8Array(dword(value)));
         }
     };
 
@@ -519,7 +726,7 @@ export function createSlimSync(host, enterCritical){
                 writeWord(waiter.context, context & ~3);
                 if (!waiter.execute)
                 {
-                    writeWord(waiter.pending, 0);
+                    writeBool(waiter.pending, 0);
                 }
                 kernel.wake(waiter.thread, waiter.execute ? 0 : 1);
             }
@@ -531,7 +738,7 @@ export function createSlimSync(host, enterCritical){
         {
             if (!next.execute)
             {
-                writeWord(next.pending, 1);
+                writeBool(next.pending, 1);
             }
             kernel.wake(next.thread, 1);
         }
@@ -551,15 +758,9 @@ export function createSlimSync(host, enterCritical){
         return host.park(thread);
     };
 
-    /** @type {number | null} */
-    let executeOnce = null;
-    /** @param {any} builder */
-    const executeOnceAt = builder=>{
-        if (executeOnce !== null)
-        {
-            return executeOnce;
-        }
-        const begin = builder.register('<init-once-begin>', {
+    /** The traps ExecuteOnce's guest code calls, by the names its x86-64 gives them. */
+    const onceTraps = {
+        begin: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pointer, context])=>{
@@ -583,8 +784,8 @@ export function createSlimSync(host, enterCritical){
                         return 2;
                 }
             },
-        });
-        const end = builder.register('<init-once-end>', {
+        },
+        end: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pointer, succeeded, context])=>{
@@ -592,7 +793,19 @@ export function createSlimSync(host, enterCritical){
                 settle(pointer >>> 0, succeeded !== 0, value);
                 return succeeded !== 0 ? 1 : 0;
             },
-        });
+        },
+    };
+
+    /** @type {number | null} */
+    let executeOnce = null;
+    /** @param {any} builder */
+    const executeOnceAt = builder=>{
+        if (executeOnce !== null)
+        {
+            return executeOnce;
+        }
+        const begin = builder.register('<init-once-begin>', onceTraps.begin);
+        const end = builder.register('<init-once-end>', onceTraps.end);
         const code = (/** @type {number} */ at)=>executeOnceCode(at, { begin, end });
         executeOnce = (host.allocateCode ?? host.allocate)(code(0).length);
         host.writeMemory(executeOnce, code(executeOnce));
@@ -699,6 +912,7 @@ export function createSlimSync(host, enterCritical){
             argBytes: 16,
             /** @param {any} builder */
             guest: builder=>placed(builder).srw,
+            long: bindLong(sleepSrwLongCode(), { ...sleepTraps, sleep: sleepTraps.sleepSrw }),
         },
         /**
          * BOOL SleepConditionVariableCS(PCONDITION_VARIABLE, PCRITICAL_SECTION,
@@ -708,6 +922,10 @@ export function createSlimSync(host, enterCritical){
             argBytes: 12,
             /** @param {any} builder */
             guest: builder=>placed(builder).cs,
+            ...enterSection ? {
+                long: bindLong(sleepCsLongCode(), { ...sleepTraps, sleep: sleepTraps.sleepCs,
+                    enter: { argBytes: 4, handler: enterSection } }),
+            } : {},
         },
 
         /** VOID InitOnceInitialize(PINIT_ONCE) */
@@ -746,7 +964,7 @@ export function createSlimSync(host, enterCritical){
                 const state = word & 3;
                 if (state === ONCE_DONE)
                 {
-                    writeWord(pending >>> 0, 0);
+                    writeBool(pending >>> 0, 0);
                     writeWord(context >>> 0, word & ~3);
                     return 1;
                 }
@@ -757,7 +975,7 @@ export function createSlimSync(host, enterCritical){
                 if (state === ONCE_FRESH)
                 {
                     writeWord(once, async ? ONCE_RUNNING_ASYNC : ONCE_RUNNING);
-                    writeWord(pending >>> 0, 1);
+                    writeBool(pending >>> 0, 1);
                     return 1;
                 }
                 if (async !== (state === ONCE_RUNNING_ASYNC))
@@ -766,7 +984,7 @@ export function createSlimSync(host, enterCritical){
                 }
                 if (async)
                 {
-                    writeWord(pending >>> 0, 1);
+                    writeBool(pending >>> 0, 1);
                     return 1;
                 }
                 return awaitOnce(once,
@@ -816,6 +1034,7 @@ export function createSlimSync(host, enterCritical){
             argBytes: 16,
             /** @param {any} builder */
             guest: builder=>executeOnceAt(builder),
+            long: bindLong(executeOnceLongCode(), onceTraps),
         },
     };
 }

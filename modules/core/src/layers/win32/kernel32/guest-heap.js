@@ -57,9 +57,17 @@ export const CELL_SIZES = Object.freeze([
     320, 384, 448, 512, 640, 768, 896, 1024,
 ]);
 
-/** Each request's class, by its size rounded up to eight bytes and divided by eight. */
-const CLASS_OF = Uint8Array.from({ length: SMALL_LIMIT / 8 + 1 },
-    (_, eighths)=>CELL_SIZES.findIndex(size=>size >= Math.max(8, eighths * 8)));
+/**
+ * Each request's class, by its size rounded up to eight bytes and divided by
+ * eight: the least cell that holds it whose size is a multiple of `alignment`
+ * -- a slab begins at 16 KiB, so its cells are as aligned as their size is.
+ * At 16, a 64-bit process's, the classes of 8, 24, 40 and 56 go unused.
+ *
+ * @param {number} alignment
+ */
+const classesOf = alignment=>Uint8Array.from({ length: SMALL_LIMIT / 8 + 1 },
+    (_, eighths)=>CELL_SIZES.findIndex(size=>size % alignment === 0
+        && size >= Math.max(8, eighths * 8)));
 
 /** A slab's size, and what one directory word covers. */
 export const SLAB = 16384;
@@ -173,9 +181,11 @@ const OWN = Symbol('guest heap');
 
 /**
  * @param {{ allocator: Backend, arena: { base: number, size: number },
- *     memory: HeapMemory }} options
+ *     memory: HeapMemory, alignment?: number }} options
+ *     alignment: where every block starts, the allocator's; 16 in a 64-bit process
  */
-export function createGuestHeap({ allocator, arena, memory }){
+export function createGuestHeap({ allocator, arena, memory, alignment = 8 }){
+    const CLASS_OF = classesOf(alignment);
     /** The directory's first granule starts here, at or below the arena. */
     const dirBase = Math.floor(arena.base / SLAB) * SLAB;
     const dirSpan = arena.base + arena.size - dirBase;
@@ -640,7 +650,7 @@ export function createGuestHeap({ allocator, arena, memory }){
                     const heap = !ready || options.owner === undefined ? undefined
                         : heaps.get(options.owner);
                     if (heap !== undefined && bytes <= SMALL_LIMIT
-                        && (options.alignment ?? 8) <= 8)
+                        && (options.alignment ?? alignment) <= alignment)
                     {
                         const address = allocateSmall(heap, bytes);
                         if (address !== 0)

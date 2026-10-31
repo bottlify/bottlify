@@ -5605,6 +5605,16 @@ async function buildApp(options){
     // the libraries a program brings, and a module is a few pages -- a
     // megabyte apart, sixty of them left a third of the window to those.
     let systemModulesEnd = MODULE_BASE;
+    /**
+     * The exports a 64-bit process's modules leave out: i386 alone -- guest
+     * code with neither x86-64 (`long`) nor a host handler to trap into, as
+     * `_chkesp` and the __fastcall entries are. Bound, its i386 would run as
+     * x86-64; left out, a program that imports one is refused at load, by
+     * name. Most have no x64 export on Windows either.
+     *
+     * @type {string[]}
+     */
+    const leftOutAt64 = [];
     Object.entries(allLibraries).forEach(([name, table])=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
@@ -5614,7 +5624,14 @@ async function buildApp(options){
         const declared = new Map(Object.entries(byOrdinal)
             .map(([ordinal, exported])=>[exported, Number(ordinal)]));
 
-        const exports = Object.entries(table).map(([exported, fn])=>({
+        const exports = Object.entries(table).filter(([exported, fn])=>{
+            const runs = !long || fn.long || fn.handler || fn.data;
+            if (!runs)
+            {
+                leftOutAt64.push(`${name}!${exported}`);
+            }
+            return runs;
+        }).map(([exported, fn])=>({
             name: exported,
             ordinal: declared.get(exported),
             // An export is a function that is code of its own, a variable the
@@ -8672,6 +8689,8 @@ async function buildApp(options){
                     // what this build accepted and did not do, and the journal
                     // has long since let go of a line said once.
                     divergences: [...divergences].slice(0, DIVERGENCES_KEPT),
+                    // The system exports a 64-bit process has no x86-64 of.
+                    leftOutAt64,
                     // The guest-to-guest calls a watch was put in front of, by label.
                     watches: [...watches.keys()],
                     // How many calls a site kernel issued through `frame.gl`,
