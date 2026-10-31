@@ -2481,3 +2481,28 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   bench reproduces that shape with `--pin-main` alone (without it the workers wait about 1 ms).
 - **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
 - **Decision.** Removed; the reproduction (`--pin-main`) stays in the bench for the next attempt.
+
+### 2026-10-31: a CM Multi inflated in GameHub's worker without a Blob
+
+- **Idea.** A cold `list` took 41 s in a person's Chrome where the same product info took about
+  3 s in the page. Inflating each Multi through a `DecompressionStream`'s own writer and reader,
+  rather than a `Blob` and a `Response` (whose bytes the service worker reads back through the
+  browser's process), was to take that wait out.
+- **Workload.** `tools/gamehub-bench.mjs` (and a scratch copy of it before it was a tool):
+  product info for 704 app ids (200000 to 207030 by tens, 434 of them described), anonymous,
+  through the dev build's service worker and, for comparison, in the page; gamehub-speed at
+  0835b98b plus the change; headless Chrome 156; one browser a measurement.
+- **Values.** Idle machine, worker, three runs a launch, before: info 2441, 10007, 2002 ms (time
+  in the inflate 464, 6389, 60 ms; in KeyValues parsing 115, 884, 97 ms). With four cores kept
+  busy, after the change: info 44657 ms (inflate 17222 ms, parsing 13251 ms), and in another
+  launch the worker restarted before answering. The page under the same load: 1078 to 3553 ms.
+  Noise floor: the worker's own spread at idle is 1.4 to 25 s; the page's 1.8 to 1.9 s.
+- **Why.** The inflate was never the cost: everything the worker does waits, parsing included
+  (100 times its idle time), and so does its logon (22 s). Chrome keeps the extension's service
+  worker at a low priority (during a run two of the headless browser's three extension
+  renderer processes had the Idle priority class; which one held the worker was not determined),
+  and a busy machine leaves it nothing.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
+- **Decision.** Reverted; where GameHub's protocol work runs is for the user to decide (the
+  report of 2026-10-31).
+
