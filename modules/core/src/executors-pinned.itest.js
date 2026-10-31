@@ -6,7 +6,7 @@
 
 /**
  * The gate of the process's own executor kept for the host's answers
- * (`freeHost` in the kernel's scheduler): a main thread pinned to the first
+ * (`freeTarget` in the kernel's scheduler): a main thread pinned to the first
  * processor computes, a worker pinned to another calls into the host every
  * hundred instructions, and both ask which processor they are on throughout.
  * The first processor is played by another executor, the process's own playing
