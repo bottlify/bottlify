@@ -510,3 +510,9 @@ test('K32GetModuleFileNameEx and K32GetModuleBaseName answer a path and its file
     assert.equal(fns.K32GetModuleFileNameExA.handler([0xffffffff, 0x20000000, 0x500, 260]), 0);
     assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
 });
+
+test('DelayLoadFailureHook offers no stand-in, leaving the delay-load helper to raise', ()=>{
+    const fns = /** @type {any} */ (createModuleFunctions(hostFor().host));
+    assert.equal(fns.DelayLoadFailureHook.argBytes, 8);
+    assert.equal(fns.DelayLoadFailureHook.handler([0x1000, 0x2000]), 0);
+});

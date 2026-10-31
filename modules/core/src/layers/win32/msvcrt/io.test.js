@@ -1016,3 +1016,12 @@ test('_O_SEQUENTIAL and fopen\'s S give the handle the sequential hint; R before
             stdio.fclose.handler([stream]);
         }
     });
+
+test('__badioinfo is the entry of no descriptor: an invalid handle, text mode, not open', ()=>{
+    const { fns } = build();
+    const bytes = fns.__badioinfo.data();
+    const view = new DataView(bytes.buffer);
+    assert.equal(view.getInt32(0, true), -1);
+    assert.equal(bytes[4], 0x80, 'WX_TEXT, and not WX_OPEN');
+    assert.equal(bytes.length, 36);
+});

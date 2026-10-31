@@ -521,6 +521,16 @@ export function createModuleFunctions(host){
         },
 
         /**
+         * FARPROC DelayLoadFailureHook(LPCSTR pszDllName, LPCSTR pszProcName)
+         *
+         * The failure hook a library's delay-load helper may call when a
+         * delay-loaded library or function is not there. NULL offers no
+         * stand-in, and the helper raises its delay-load exception as it would
+         * with no hook.
+         */
+        DelayLoadFailureHook: { argBytes: 8, handler: ()=>0 },
+
+        /**
          * FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
          *
          * The address is the export's own trampoline inside the module, the

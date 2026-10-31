@@ -69,6 +69,8 @@ const CT_HEX = 0x0080;
  * matches on the overlap, the same as every other mask here.
  */
 const CT_ALPHA_MARK = 0x0100;
+/** `_LEADBYTE`: a multibyte character's first byte in the locale's code page. */
+const CT_LEADBYTE = 0x8000;
 
 
 /**
@@ -451,6 +453,19 @@ export function createStringFunctions(host){
             }
             return (ctypeTable[value + 1] & type) !== 0 ? 1 : 0;
         },
+    };
+
+    /**
+     * int isleadbyte(int c)
+     *
+     * `_isctype(c, _LEADBYTE)`: the table is the "C" locale's, which has no
+     * lead bytes, so never.
+     */
+    table.isleadbyte = {
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([code])=>table._isctype.handler([code, CT_LEADBYTE]),
     };
 
     /**

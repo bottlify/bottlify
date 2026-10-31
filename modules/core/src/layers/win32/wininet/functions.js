@@ -42,6 +42,7 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_CANCELLED = 1223;
+const ERROR_NOT_CONNECTED = 2250;
 
 /** InternetCanonicalizeUrl's flags, the ones that change the answer. */
 const ICU_NO_ENCODE = 0x20000000;
@@ -1742,6 +1743,19 @@ export function createWininetFunctions(host){
     };
 
     /** What InternetGetConnectedState reports: RAS is always there, a LAN only online. */
+    /** @param {boolean} wide */
+    const checkConnection = wide=>(/** @type {number[]} */ [url])=>{
+        const cracked = (url >>> 0) === 0 ? null : crackUrl(reader(wide)(url >>> 0, MAX_TEXT));
+        // ponytail: a transport is taken to reach every host; FLAG_ICC_FORCE_CONNECTION
+        // could ask the server itself once a title needs the difference.
+        if (!cracked?.host?.text || !online())
+        {
+            return fail(ERROR_NOT_CONNECTED);
+        }
+        host.setLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+
     const connectedFlags = ()=>(online() ? INTERNET_CONNECTION_LAN | INTERNET_RAS_INSTALLED
         : INTERNET_RAS_INSTALLED);
 
@@ -2197,6 +2211,16 @@ export function createWininetFunctions(host){
         InternetGetConnectedStateEx: { argBytes: 16, handler: connectedStateEx(false) },
         InternetGetConnectedStateExA: { argBytes: 16, handler: connectedStateEx(false) },
         InternetGetConnectedStateExW: { argBytes: 16, handler: connectedStateEx(true) },
+
+        /**
+         * BOOL InternetCheckConnection(LPCTSTR lpszUrl, DWORD dwFlags, DWORD dwReserved)
+         *
+         * Whether the URL's server can be reached. No URL asks the server
+         * database, which holds nothing here; a URL with no host names no
+         * server. Either way, and offline, ERROR_NOT_CONNECTED.
+         */
+        InternetCheckConnectionA: { argBytes: 12, handler: checkConnection(false) },
+        InternetCheckConnectionW: { argBytes: 12, handler: checkConnection(true) },
 
         /**
          * DWORD InternetAttemptConnect(DWORD dwReserved)

@@ -35,6 +35,9 @@
 /** What a call on an input context answers in the last error when it was handed none. */
 const ERROR_INVALID_HANDLE = 6;
 
+/** The virtual key a key an input method processed reads as. */
+const VK_PROCESSKEY = 0xe5;
+
 /**
  * The messages an input method's own window handles: the composition's
  * start, progress and end, and the context, notification, overflow and
@@ -107,6 +110,14 @@ export function createImmFunctions(host){
          * the rest of this surface is reached only by a program that did not.
          */
         ImmGetContext: { argBytes: 4, handler: ()=>0 },
+
+        /**
+         * UINT ImmGetVirtualKey(HWND hWnd)
+         *
+         * The key an IME took for itself, or VK_PROCESSKEY when it kept none;
+         * no window has an input context (ImmGetContext), so none was taken.
+         */
+        ImmGetVirtualKey: { argBytes: 4, handler: ()=>VK_PROCESSKEY },
 
         /** BOOL ImmReleaseContext(HWND hWnd, HIMC hIMC) */
         ImmReleaseContext: { argBytes: 8, handler: ()=>1 },
