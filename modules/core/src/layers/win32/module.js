@@ -3343,6 +3343,7 @@ export function createWin32Module(){
                 // volume every file call uses; a queue's notifications go to the
                 // program's own callback on the thread that asked.
                 'SETUPAPI.dll': createSetupapiFunctions({
+                    pointerSize,
                     readMemory,
                     writeMemory,
                     readCString,
