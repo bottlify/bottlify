@@ -36,10 +36,10 @@
 
 import { attachCom } from './com.js';
 import {
-    D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE,
-    D3D10_DRIVER_TYPES, D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY,
+    D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK, D3D10_DRIVER_TYPE,
+    D3D10_DRIVER_TYPES, D3D10_LIMITS, D3D10_QUERY,
     D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_1_SDK_VERSION,
-    D3D10_USAGE,
+    D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS, D3D11_RESOURCE_MISC, D3D11_TWIN,
     DXGI_ERROR_INVALID_CALL, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
     E_INVALIDARG, E_NOTIMPL, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
@@ -55,6 +55,8 @@ import { createRenderer } from './render.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
 } from './resources.js';
+import { createPipelineState } from './pipeline.js';
+import { createDeferredContext, createImmediateContext } from '../d3d11/context.js';
 import { STATE_KIND, createStateStore } from './states.js';
 import {
     DISPLAY_FORMATS, bindFlagsForUsage, bufferCreateResult, resolveViewFormat,
@@ -326,72 +328,238 @@ export function D3D10CreateDeviceAndSwapChain(adapter, driverType, software, fla
     return S_OK;
 }
 
-/** @param {number} count @returns {any[]} */
-function emptySlots(count){
-    return new Array(count).fill(null);
-}
+// --- Direct3D 11 ---
+
+/** D3D_DRIVER_TYPE as Direct3D 11 numbers it: 1 is the hardware, 0 an adapter's own. */
+const D3D11_DRIVER_TYPE = Object.freeze({
+    UNKNOWN: 0, HARDWARE: 1, REFERENCE: 2, NULL: 3, SOFTWARE: 4, WARP: 5,
+});
+
+/** D3D11_CREATE_DEVICE_* : every bit a program may pass. */
+const D3D11_CREATE_DEVICE_MASK = 0x1 | 0x2 | 0x4 | 0x8 | 0x20 | 0x40 | 0x80 | 0x100 | 0x800;
 
 /**
- * A binding is not ownership, so what a slot holds may already be gone. This is
- * the one place that is decided, and everything that reads a slot goes through
- * it.
+ * The levels a device is made at here, the highest first. 11.1's interfaces
+ * are not offered, and the 9.x levels' restrictions are not enforced, so
+ * those are refused as an adapter without them refuses them.
+ */
+/** @type {readonly number[]} */
+const DEVICE_LEVELS_11 = Object.freeze([
+    D3D_FEATURE_LEVEL.LEVEL_11_0, D3D_FEATURE_LEVEL.LEVEL_10_1, D3D_FEATURE_LEVEL.LEVEL_10_0,
+]);
+
+/** What a program that names no levels is offered, in order. */
+const DEFAULT_LEVELS_11 = Object.freeze([
+    D3D_FEATURE_LEVEL.LEVEL_11_0, D3D_FEATURE_LEVEL.LEVEL_10_1, D3D_FEATURE_LEVEL.LEVEL_10_0,
+    D3D_FEATURE_LEVEL.LEVEL_9_3, D3D_FEATURE_LEVEL.LEVEL_9_2, D3D_FEATURE_LEVEL.LEVEL_9_1,
+]);
+
+/** Every level the enumeration names, 9.1 to 12.1: anything else in the list is refused. */
+const KNOWN_LEVELS = new Set([0x9100, 0x9200, 0x9300, 0xa000, 0xa100, 0xb000, 0xb100, 0xc000,
+    0xc100]);
+
+/**
+ * @typedef {Object} DeviceRequest11
+ * @property {boolean} wantDevice   whether the caller passed somewhere for the device
+ * @property {boolean} wantContext  whether it passed somewhere for the immediate context
+ * @property {any} [device]   the device made, with the caller's reference
+ * @property {any} [made]     the device made, whoever holds it
+ * @property {any} [context]  its immediate context, with the caller's reference
+ * @property {number} [featureLevel]  the level chosen, 0 when the call failed
+ */
+
+/**
+ * HRESULT D3D11CreateDevice(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT,
+ * const D3D_FEATURE_LEVEL*, UINT, UINT SDKVersion, ID3D11Device**,
+ * D3D_FEATURE_LEVEL*, ID3D11DeviceContext**).
  *
- * @param {any} object
- * @returns {any | null}
+ * The first level of the list the device can be made at is the one it is;
+ * with no list, the runtime's own. Asked for neither the device nor its
+ * context, the call says whether it could make one: S_FALSE.
+ *
+ * @param {any} adapter @param {number} driverType @param {any} software
+ * @param {number} flags @param {readonly number[] | null} levels
+ * @param {DeviceRequest11} out
+ * @param {DeviceOptions} [options]
+ * @returns {number}
  */
-function stillAlive(object){
-    return object && object.refCount > 0 ? object : null;
-}
-
-/** The per-stage half of the pipeline, identical for all three shader stages. */
-function createStage(){
-    return {
-        shader: /** @type {any} */ (null),
-        constantBuffers: emptySlots(D3D10_LIMITS.CONSTANT_BUFFER_SLOTS),
-        shaderResources: emptySlots(D3D10_LIMITS.SHADER_RESOURCE_SLOTS),
-        samplers: emptySlots(D3D10_LIMITS.SAMPLER_SLOTS),
-    };
+export function D3D11CreateDevice(adapter, driverType, software, flags, levels, out,
+    options = {})
+{
+    out.device = null;
+    out.context = null;
+    out.featureLevel = 0;
+    // An adapter given is the driver; a driver named needs no adapter.
+    if (adapter ? driverType !== D3D11_DRIVER_TYPE.UNKNOWN
+        : driverType === D3D11_DRIVER_TYPE.UNKNOWN || driverType > D3D11_DRIVER_TYPE.WARP)
+    {
+        return E_INVALIDARG;
+    }
+    if ((driverType === D3D11_DRIVER_TYPE.SOFTWARE) !== !!software
+        || (flags & ~D3D11_CREATE_DEVICE_MASK) !== 0)
+    {
+        return E_INVALIDARG;
+    }
+    const asked = levels && levels.length > 0 ? levels : DEFAULT_LEVELS_11;
+    if (asked.some(level=>!KNOWN_LEVELS.has(level)))
+    {
+        return E_INVALIDARG;
+    }
+    const level = asked.find(one=>DEVICE_LEVELS_11.includes(one));
+    if (level === undefined)
+    {
+        return E_INVALIDARG;
+    }
+    out.featureLevel = level;
+    if (!out.wantDevice && !out.wantContext)
+    {
+        return S_FALSE;
+    }
+    const device = createDevice({ ...options, adapter, flags, api: 'd3d11', featureLevel: level });
+    out.made = device;
+    if (out.wantContext)
+    {
+        const context = device.immediateContext();
+        context.addRef();
+        out.context = context;
+    }
+    if (out.wantDevice)
+    {
+        out.device = device;
+    }
+    else
+    {
+        // The context alone was asked for, and holds the device.
+        device.release();
+    }
+    return S_OK;
 }
 
 /**
- * @param {any[]} slots
- * @param {number} startSlot
- * @param {readonly any[]} values
- * @param {any} [absent]  What an unsupplied entry means: no object, or zero.
+ * HRESULT D3D11CreateDeviceAndSwapChain(..., const DXGI_SWAP_CHAIN_DESC*,
+ * IDXGISwapChain**, ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**).
+ *
+ * A swap chain asked for needs its description and a window; asked for
+ * nothing, the call answers as the device's create does.
+ *
+ * @param {any} adapter @param {number} driverType @param {any} software
+ * @param {number} flags @param {readonly number[] | null} levels
+ * @param {import('./structs.js').SwapChainFields | null} swapChainDesc
+ * @param {DeviceRequest11 & { wantSwapChain: boolean, swapChain?: any }} out
+ * @param {DeviceOptions} [options]
+ * @returns {number}
  */
-function writeSlots(slots, startSlot, values, absent = null){
-    for (let index = 0; index < values.length; index++)
+export function D3D11CreateDeviceAndSwapChain(adapter, driverType, software, flags, levels,
+    swapChainDesc, out, options = {})
+{
+    out.swapChain = null;
+    if (out.wantSwapChain && (!swapChainDesc || !swapChainDesc.outputWindow))
     {
-        const slot = startSlot + index;
-        if (slot < slots.length)
-        {
-            slots[slot] = values[index] ?? absent;
+        out.device = null;
+        out.context = null;
+        out.featureLevel = 0;
+        return swapChainDesc ? DXGI_ERROR_INVALID_CALL : E_INVALIDARG;
+    }
+    const wanted = { wantDevice: out.wantDevice, wantContext: out.wantContext };
+    // The device is made for the swap chain even when the caller keeps none.
+    const request = { ...out, wantDevice: out.wantDevice || out.wantSwapChain };
+    const hr = D3D11CreateDevice(adapter, driverType, software, flags, levels, request, options);
+    out.featureLevel = request.featureLevel;
+    out.context = request.context;
+    out.made = request.made;
+    if (hr !== S_OK || !out.wantSwapChain)
+    {
+        out.device = request.device;
+        return hr;
+    }
+    const device = request.device;
+    out.made = device;
+    /** @type {{ swapChain?: any }} */
+    const chain = {};
+    const created = device.factory().CreateSwapChain(device, swapChainDesc, chain);
+    if (created !== S_OK)
+    {
+        request.context?.release();
+        device.release();
+        out.device = null;
+        out.made = null;
+        out.context = null;
+        out.featureLevel = 0;
+        return created;
+    }
+    out.swapChain = chain.swapChain;
+    if (wanted.wantDevice)
+    {
+        out.device = device;
+    }
+    else
+    {
+        // The swap chain holds the device it presents through.
+        device.release();
+        out.device = null;
+    }
+    return S_OK;
+}
+
+/**
+ * D3D11_FEATURE_*'s answers, by the structure the program hands in: what
+ * this device does past its level. Its views are emulated, so a command
+ * list is the runtime's and not the driver's; WebGPU has no doubles, no
+ * minimum precision and no tiling to say; a 10.x level runs no compute.
+ *
+ * @param {number} feature @param {Uint8Array} input @param {number} level
+ * @param {any} device  for a format's support
+ * @returns {Uint8Array | null}  the structure's bytes, or null for a feature not known
+ */
+function featureSupport(feature, input, level, device){
+    /** @param {number[]} words */
+    const bytesOf = words=>new Uint8Array(Uint32Array.from(words).buffer);
+    const format = input.length >= 4 ? new DataView(input.buffer, input.byteOffset).getUint32(0,
+        true) : 0;
+    switch (feature)
+    {
+        case 0: // THREADING: concurrent creates, driver command lists
+            return bytesOf([1, 0]);
+        case 1: // DOUBLES
+            return bytesOf([0]);
+        case 2: { // FORMAT_SUPPORT: the format, then what it supports
+            /** @type {{ support?: number }} */
+            const held = {};
+            return device.CheckFormatSupport(format, held) === S_OK
+                ? bytesOf([format, held.support ?? 0]) : null;
         }
+        case 3: // FORMAT_SUPPORT2: no typed view loads or atomics
+            return bytesOf([format, 0]);
+        case 4: // D3D10_X_HARDWARE_OPTIONS: compute at shader model 4
+            return bytesOf([0]);
+        case 5: // D3D11_OPTIONS: none of 11.1's fourteen
+            return new Uint8Array(14 * 4);
+        case 6: // ARCHITECTURE_INFO: not a tiled renderer
+            return bytesOf([0]);
+        case 7: // D3D9_OPTIONS: textures of any size
+            return bytesOf([1]);
+        case 8: // SHADER_MIN_PRECISION_SUPPORT
+            return bytesOf([0, 0]);
+        case 9: // D3D9_SHADOW_SUPPORT: depth compared through a view
+            return bytesOf([1]);
+        case 10: // D3D11_OPTIONS1
+            return new Uint8Array(4 * 4);
+        case 11: // D3D9_SIMPLE_INSTANCING_SUPPORT
+            return bytesOf([1]);
+        case 12: // MARKER_SUPPORT
+            return bytesOf([0]);
+        case 13: // D3D9_OPTIONS1
+            return bytesOf([1, 1, 1, 1]);
+        default:
+            void level;
+            return null;
     }
 }
 
 /**
- * @param {any[]} slots
- * @param {number} startSlot
- * @param {number} count
- * @returns {any[]} the live objects in those slots, each with a new reference
- */
-function readSlots(slots, startSlot, count){
-    const result = [];
-    for (let index = 0; index < count; index++)
-    {
-        const object = stillAlive(slots[startSlot + index]);
-        if (object)
-        {
-            object.addRef();
-        }
-        result.push(object ?? null);
-    }
-    return result;
-}
-
-/**
- * @param {DeviceOptions & { flags?: number }} [options]
+ * @param {DeviceOptions & { flags?: number, api?: 'd3d10' | 'd3d11', featureLevel?: number }}
+ *     [options]  `api` is the version whose entry point made it; `featureLevel` the
+ *     level Direct3D 11 made it at
  */
 export function createDevice(options = {}){
     const multisampleQualityLevels = options.multisampleQualityLevels
@@ -399,7 +567,9 @@ export function createDevice(options = {}){
     const caps = { multisampleQualityLevels };
     const factory = options.adapter
         ? null
-        : createFactory(options.factoryOptions);
+        // Direct3D 11's runtime makes its own factory through DXGI 1.1's
+        // entry point (test_device_interfaces); Direct3D 10's through 1.0's.
+        : createFactory(options.factoryOptions, options.api === 'd3d11');
     /** @type {{ adapter?: any }} */
     const enumerated = {};
     if (factory)
@@ -482,38 +652,71 @@ export function createDevice(options = {}){
      */
     const namesNoMemory = data=>!!data && data.some(entry=>!entry || !entry.pSysMem);
 
-    const pipeline = {
-        stages: { vs: createStage(), gs: createStage(), ps: createStage() },
-        inputLayout: /** @type {any} */ (null),
-        vertexBuffers: emptySlots(D3D10_LIMITS.VERTEX_INPUT_SLOTS),
-        vertexStrides: /** @type {number[]} */ (new Array(D3D10_LIMITS.VERTEX_INPUT_SLOTS).fill(0)),
-        vertexOffsets: /** @type {number[]} */ (new Array(D3D10_LIMITS.VERTEX_INPUT_SLOTS).fill(0)),
-        indexBuffer: /** @type {any} */ (null),
-        indexFormat: /** @type {number} */ (DXGI_FORMAT.UNKNOWN),
-        indexOffset: 0,
-        topology: /** @type {number} */ (D3D10_PRIMITIVE_TOPOLOGY.UNDEFINED),
-        renderTargets: emptySlots(D3D10_LIMITS.SIMULTANEOUS_RENDER_TARGETS),
-        depthStencilView: /** @type {any} */ (null),
-        blendState: /** @type {any} */ (null),
-        blendFactor: /** @type {number[]} */ ([...D3D10_DEFAULTS.BLEND_FACTOR]),
-        sampleMask: /** @type {number} */ (D3D10_DEFAULTS.SAMPLE_MASK),
-        depthStencilState: /** @type {any} */ (null),
-        stencilRef: 0,
-        rasterizerState: /** @type {any} */ (null),
-        /** @type {any[]} */
-        viewports: [],
-        /** @type {any[]} */
-        scissorRects: [],
-        streamOutput: emptySlots(D3D10_LIMITS.SO_BUFFER_SLOTS),
-        /** @type {number[]} */
-        streamOutputOffsets: new Array(D3D10_LIMITS.SO_BUFFER_SLOTS).fill(0),
-        predicate: /** @type {any} */ (null),
-        predicateValue: false,
-    };
+    /** Whether Direct3D 11 made the device, which decides what it answers to. */
+    const d3d11 = options.api === 'd3d11';
+    const state = createPipelineState({ diverge, keepsBound: d3d11 });
+    const featureLevel = options.featureLevel ?? D3D_FEATURE_LEVEL.LEVEL_10_0;
+    /** The newest shader model the device takes, as 0xMm (`dxbc.js`). */
+    const shaderModel = !d3d11 ? 0x40
+        : featureLevel >= D3D_FEATURE_LEVEL.LEVEL_11_0 ? 0x50
+            : featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1 ? 0x41 : 0x40;
+    /** @type {import('./validity.js').CreateRules} */
+    const rules = { d3d11, featureLevel };
+    /**
+     * A resource only Direct3D 11 can describe -- a structured buffer, a
+     * clamped texture -- answers to none of Direct3D 10's interfaces
+     * (test_buffer_interfaces, test_texture1d_interfaces): its own list, in
+     * Direct3D 11's names.
+     *
+     * @param {any} desc @param {string[]} interfaces
+     */
+    const elevenOnly = (desc, interfaces)=>(((desc.MiscFlags11 ?? 0)
+        & (D3D11_RESOURCE_MISC.BUFFER_STRUCTURED | D3D11_RESOURCE_MISC.RESOURCE_CLAMP)) !== 0
+        ? interfaces.map(id=>D3D11_TWIN[id] ?? id) : interfaces);
+    /** Whether a context state was ever made, which has the device answer Direct3D 10. */
+    let stateEmulation = false;
+    /** The context state the immediate context is on, once one was swapped on. @type {any} */
+    let currentState = null;
+    /**
+     * @param {string} emulated @param {boolean} implicit  the device's own, made at the
+     *     first swap with no count of the program's
+     */
+    const contextState = (emulated, implicit)=>attachCom({
+        /** Gone with its last reference, and what its pipeline binds with it. */
+        get destroyed(){
+            const gone = this.refCount === 0 && !(this.bound > 0);
+            if (gone && this.pipeline)
+            {
+                state.letGo(this.pipeline);
+                this.pipeline = null;
+            }
+            return gone;
+        },
+        emulated,
+        /** @type {any} */
+        pipeline: null,
+        /** @param {{ device?: any }} target */
+        GetDevice(target){
+            retainDevice();
+            target.device = self;
+            return S_OK;
+        },
+    }, {
+        interfaces: [IID.ID3D11DeviceChild, IID.ID3DDeviceContextState],
+        implicit,
+        onFirstRef: retainDevice,
+        onLastRef: releaseDevice,
+    });
+    /** @type {import('../d3d11/context.js').ContextServices} */
+    const contextServices = { device: deviceHandle, retainDevice, releaseDevice, diverge };
+    const immediate = createImmediateContext(contextServices);
     let exceptionMode = 0;
     let textFilter = { width: 0, height: 0 };
-    // A device is thread-safe unless it was made single-threaded.
-    let multithreadProtected = ((options.flags ?? 0) & D3D10_CREATE_DEVICE.SINGLETHREADED) === 0;
+    // A Direct3D 10 device is thread-safe unless it was made single-threaded;
+    // Direct3D 11's leaves its context unguarded until asked
+    // (test_immediate_context).
+    let multithreadProtected = options.api !== 'd3d11'
+        && ((options.flags ?? 0) & D3D10_CREATE_DEVICE.SINGLETHREADED) === 0;
     let maximumFrameLatency = DEFAULT_FRAME_LATENCY;
 
     /**
@@ -538,7 +741,7 @@ export function createDevice(options = {}){
         {
             return E_INVALIDARG;
         }
-        const hr = textureCreateResult(desc, dimension, caps, !!data);
+        const hr = textureCreateResult(desc, dimension, caps, !!data, rules);
         if (hr !== S_OK)
         {
             return hr;
@@ -560,7 +763,7 @@ export function createDevice(options = {}){
         out.resource = createResource({
             dimension,
             desc: resolved,
-            interfaces: textureInterfaces(resolved, iid, dimension),
+            interfaces: elevenOnly(resolved, textureInterfaces(resolved, iid, dimension)),
             retainDevice,
             releaseDevice,
             device: deviceHandle,
@@ -603,6 +806,7 @@ export function createDevice(options = {}){
             range: resolved.range,
             iid: kind.iid,
             also: kind.also,
+            eleven: kind.eleven,
             retainDevice,
             releaseDevice,
             device: deviceHandle,
@@ -615,6 +819,10 @@ export function createDevice(options = {}){
      * create is for. Anything else -- an older shader model's tokens, a pixel
      * shader handed to the vertex create -- is the plain bad-argument code.
      *
+     * A Direct3D 11 device takes the shader models its level has: 4.0 at
+     * 10.0, 4.1 at 10.1, 5.0 at 11.0 -- and a hull, domain or compute shader
+     * only at 5.0.
+     *
      * @param {string} iid
      * @param {number} kind  A SHADER_KIND.
      * @param {{ shader?: any }} out
@@ -623,8 +831,9 @@ export function createDevice(options = {}){
      */
     const createShader = (iid, kind, out, bytecode)=>{
         out.shader = null;
-        const container = bytecode ? parseShaderOfKind(bytecode, kind) : null;
-        if (!container)
+        const container = bytecode ? parseShaderOfKind(bytecode, kind, shaderModel) : null;
+        if (!container || (kind >= SHADER_KIND.HULL
+            && /** @type {any} */ (container.shader).major < 5))
         {
             return E_INVALIDARG;
         }
@@ -637,7 +846,8 @@ export function createDevice(options = {}){
                 return S_OK;
             },
         }, {
-            interfaces: [IID.ID3D10DeviceChild, iid],
+            interfaces: [kind >= SHADER_KIND.HULL ? IID.ID3D11DeviceChild : IID.ID3D10DeviceChild,
+                iid],
             onFirstRef: retainDevice,
             onLastRef: releaseDevice,
         });
@@ -655,12 +865,17 @@ export function createDevice(options = {}){
         {
             out.query = null;
         }
-        if (!desc || !Object.values(D3D10_QUERY).includes(desc.Query))
+        // Direct3D 11 adds a stream-output count and overflow per stream.
+        if (!desc || !(Object.values(D3D10_QUERY).includes(desc.Query)
+            || (d3d11 && desc.Query >= 8 && desc.Query <= 15)))
         {
             return E_INVALIDARG;
         }
-        const isPredicate = PREDICATE_QUERIES.has(desc.Query);
-        if (predicate && !isPredicate)
+        // A stream's overflow is a predicate, which only CreateQuery makes
+        // (test_create_query).
+        const streamOverflow = desc.Query >= 8 && desc.Query % 2 === 1;
+        const isPredicate = PREDICATE_QUERIES.has(desc.Query) || streamOverflow;
+        if (predicate && (!isPredicate || streamOverflow))
         {
             return E_INVALIDARG;
         }
@@ -685,6 +900,7 @@ export function createDevice(options = {}){
                 },
                 now: options.now ?? (()=>performance.now()),
                 diverge,
+                eleven: d3d11,
                 occlusion: {
                     begin: ()=>renderer.beginOcclusion(),
                     end: counter=>renderer.endOcclusion(counter),
@@ -693,48 +909,7 @@ export function createDevice(options = {}){
         return S_OK;
     };
 
-    /**
-     * Everything bound, with anything released since read as nothing: the
-     * one moment a draw looks at the pipeline.
-     *
-     * @returns {PipelineSnapshot}
-     */
-    const snapshot = ()=>{
-        /** @param {any[]} slots */
-        const live = slots=>slots.map(stillAlive);
-        /** @param {StageBindings} stage */
-        const stageOf = stage=>({
-            shader: stillAlive(stage.shader),
-            constantBuffers: live(stage.constantBuffers),
-            shaderResources: live(stage.shaderResources),
-            samplers: live(stage.samplers),
-        });
-        return {
-            stages: {
-                vs: stageOf(pipeline.stages.vs),
-                gs: stageOf(pipeline.stages.gs),
-                ps: stageOf(pipeline.stages.ps),
-            },
-            inputLayout: stillAlive(pipeline.inputLayout),
-            vertexBuffers: live(pipeline.vertexBuffers),
-            vertexStrides: pipeline.vertexStrides,
-            vertexOffsets: pipeline.vertexOffsets,
-            indexBuffer: stillAlive(pipeline.indexBuffer),
-            indexFormat: pipeline.indexFormat,
-            indexOffset: pipeline.indexOffset,
-            topology: pipeline.topology,
-            renderTargets: live(pipeline.renderTargets),
-            depthStencilView: stillAlive(pipeline.depthStencilView),
-            blendState: stillAlive(pipeline.blendState),
-            blendFactor: pipeline.blendFactor,
-            sampleMask: pipeline.sampleMask,
-            depthStencilState: stillAlive(pipeline.depthStencilState),
-            stencilRef: pipeline.stencilRef,
-            rasterizerState: stillAlive(pipeline.rasterizerState),
-            viewports: pipeline.viewports,
-            scissorRects: pipeline.scissorRects,
-        };
-    };
+    const snapshot = ()=>state.snapshot();
 
     /**
      * Every draw, as the queries count it and the renderer records it.
@@ -787,50 +962,32 @@ export function createDevice(options = {}){
         return true;
     };
 
-    /** @param {'vs' | 'gs' | 'ps'} stage */
-    const stageMethods = stage=>({
-        /** @param {any} shader */
-        setShader(shader){
-            pipeline.stages[stage].shader = shader ?? null;
-        },
-        /** @param {{ shader?: any }} out */
-        getShader(out){
-            const shader = stillAlive(pipeline.stages[stage].shader);
-            if (shader)
-            {
-                shader.addRef();
-            }
-            out.shader = shader;
-        },
-        /** @param {number} startSlot @param {readonly any[]} buffers */
-        setConstantBuffers(startSlot, buffers){
-            writeSlots(pipeline.stages[stage].constantBuffers, startSlot, buffers);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ buffers?: any[] }} out */
-        getConstantBuffers(startSlot, count, out){
-            out.buffers = readSlots(pipeline.stages[stage].constantBuffers, startSlot, count);
-        },
-        /** @param {number} startSlot @param {readonly any[]} views */
-        setShaderResources(startSlot, views){
-            writeSlots(pipeline.stages[stage].shaderResources, startSlot, views);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ views?: any[] }} out */
-        getShaderResources(startSlot, count, out){
-            out.views = readSlots(pipeline.stages[stage].shaderResources, startSlot, count);
-        },
-        /** @param {number} startSlot @param {readonly any[]} samplers */
-        setSamplers(startSlot, samplers){
-            writeSlots(pipeline.stages[stage].samplers, startSlot, samplers);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ samplers?: any[] }} out */
-        getSamplers(startSlot, count, out){
-            out.samplers = readSlots(pipeline.stages[stage].samplers, startSlot, count);
-        },
-    });
-
-    const vs = stageMethods('vs');
-    const gs = stageMethods('gs');
-    const ps = stageMethods('ps');
+    /**
+     * The arguments an indirect call reads out of a buffer: `count` words at
+     * `offset`, from the bytes the device keeps of it. A buffer the GPU wrote
+     * them into holds what it held before here: said, and drawn as that.
+     *
+     * @param {any} buffer @param {number} offset @param {number} count @param {string} call
+     * @returns {Uint32Array | null}
+     */
+    const indirectWords = (buffer, offset, count, call)=>{
+        if (!buffer || (offset & 3) !== 0
+            || offset + count * 4 > (buffer.desc?.ByteWidth ?? 0))
+        {
+            return null;
+        }
+        const bytes = renderer.bufferBytes(buffer);
+        if (!bytes)
+        {
+            return null;
+        }
+        if ((buffer.desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) !== 0)
+        {
+            diverge(`${call} reads its arguments as the processor last wrote them, not as a`
+                + ' shader did');
+        }
+        return new Uint32Array(bytes.slice(offset, offset + count * 4).buffer);
+    };
 
     self = attachCom({
         // --- resources ---
@@ -852,16 +1009,21 @@ export function createDevice(options = {}){
             {
                 return E_INVALIDARG;
             }
-            const hr = bufferCreateResult(desc, !!data);
+            const hr = bufferCreateResult(desc, !!data, rules);
             if (hr !== S_OK)
             {
                 return hr;
             }
             out.resource = createResource({
                 dimension: D3D10_RESOURCE_DIMENSION.BUFFER,
-                desc: Object.freeze({ ...desc, MipLevels: 1, ArraySize: 1 }),
-                interfaces: [IID.ID3D10DeviceChild, IID.ID3D10Resource, IID.IDXGIObject,
-                    IID.IDXGIDeviceSubObject, IID.IDXGIResource, IID.ID3D10Buffer],
+                desc: Object.freeze({ ...desc, MipLevels: 1, ArraySize: 1,
+                    // A buffer of no structures has no stride (test_create_buffer).
+                    StructureByteStride: ((desc.MiscFlags11 ?? 0)
+                        & D3D11_RESOURCE_MISC.BUFFER_STRUCTURED) !== 0
+                        ? desc.StructureByteStride : 0 }),
+                interfaces: elevenOnly(desc, [IID.ID3D10DeviceChild, IID.ID3D10Resource,
+                    IID.IDXGIObject, IID.IDXGIDeviceSubObject, IID.IDXGIResource,
+                    IID.ID3D10Buffer]),
                 retainDevice,
                 releaseDevice,
                 device: deviceHandle,
@@ -900,12 +1062,20 @@ export function createDevice(options = {}){
 
         /** @param {any} resource @param {any} desc @param {{ view?: any }} out */
         CreateDepthStencilView(resource, desc, out){
-            return createViewOf(resource, desc, VIEW_KINDS.DEPTH_STENCIL, out);
+            return createViewOf(resource, desc,
+                d3d11 ? VIEW_KINDS.DEPTH_STENCIL11 : VIEW_KINDS.DEPTH_STENCIL, out);
         },
 
         /** @param {any} resource @param {any} desc @param {{ view?: any }} out */
         CreateShaderResourceView(resource, desc, out){
-            return createViewOf(resource, desc, VIEW_KINDS.SHADER_RESOURCE, out);
+            if (d3d11 && desc?.ViewDimension === D3D10_SRV_DIMENSION1_TEXTURECUBEARRAY
+                && featureLevel < D3D_FEATURE_LEVEL.LEVEL_10_1)
+            {
+                out.view = null;
+                return E_INVALIDARG;
+            }
+            return createViewOf(resource, desc,
+                d3d11 ? VIEW_KINDS.SHADER_RESOURCE11 : VIEW_KINDS.SHADER_RESOURCE, out);
         },
 
         /**
@@ -968,24 +1138,169 @@ export function createDevice(options = {}){
         },
 
         /**
-         * A geometry shader is refused, once its bytecode is known to be one:
-         * WebGPU has no geometry stage and the translator does not emulate
-         * one, and a shader made and then left out of every draw would draw
-         * the program's points and triangles where it expands, culls or
-         * routes them. Bytecode that is not a geometry shader is the plain
-         * bad-argument answer Windows gives.
+         * A geometry shader is made, and a draw with one bound is skipped
+         * (`render.js`): WebGPU has no geometry stage and none is emulated
+         * here, and drawing the program's points and triangles where it
+         * expands, culls or routes them would draw what it never asked for.
+         * The shader is made because hardware of this level always has the
+         * stage, so a program checks nothing before relying on it
+         * (`roadmap/decisions.md`, A75).
          *
          * @param {Uint8Array} bytecode @param {{ shader?: any }} out
          */
         CreateGeometryShader(bytecode, out){
-            out.shader = null;
-            if (!bytecode || !parseShaderOfKind(bytecode, SHADER_KIND.GEOMETRY))
+            return createShader(IID.ID3D10GeometryShader, SHADER_KIND.GEOMETRY, out, bytecode);
+        },
+
+        /**
+         * Tessellation's two stages, made as a geometry shader is: a draw with
+         * either bound is skipped, there being no tessellator.
+         *
+         * @param {Uint8Array} bytecode @param {{ shader?: any }} out
+         */
+        CreateHullShader(bytecode, out){
+            return createShader(IID.ID3D11HullShader, SHADER_KIND.HULL, out, bytecode);
+        },
+        /** @param {Uint8Array} bytecode @param {{ shader?: any }} out */
+        CreateDomainShader(bytecode, out){
+            return createShader(IID.ID3D11DomainShader, SHADER_KIND.DOMAIN, out, bytecode);
+        },
+        /** @param {Uint8Array} bytecode @param {{ shader?: any }} out */
+        CreateComputeShader(bytecode, out){
+            return createShader(IID.ID3D11ComputeShader, SHADER_KIND.COMPUTE, out, bytecode);
+        },
+
+        /**
+         * Dynamic linkage's library of class instances. A shader that names
+         * none links nothing, which is every shader made here: the linkage is
+         * made and holds no instance.
+         *
+         * @param {{ linkage?: any }} out
+         */
+        CreateClassLinkage(out){
+            out.linkage = attachCom({
+                /** @param {{ device?: any }} target */
+                GetDevice(target){
+                    retainDevice();
+                    target.device = self;
+                    return S_OK;
+                },
+            }, {
+                interfaces: [IID.ID3D11DeviceChild, IID.ID3D11ClassLinkage],
+                onFirstRef: retainDevice,
+                onLastRef: releaseDevice,
+            });
+            return S_OK;
+        },
+
+        /**
+         * @param {any} resource @param {any} desc @param {{ view?: any }} out
+         * @returns {number}
+         */
+        CreateUnorderedAccessView(resource, desc, out){
+            out.view = null;
+            if (featureLevel < D3D_FEATURE_LEVEL.LEVEL_11_0)
             {
                 return E_INVALIDARG;
             }
-            diverge('a geometry shader is refused: WebGPU has no geometry stage and none is'
-                + ' emulated here');
-            return E_NOTIMPL;
+            return createViewOf(resource, desc, VIEW_KINDS.UNORDERED_ACCESS, out);
+        },
+
+        /**
+         * A context of its own pipeline, whose calls a command list carries
+         * to the immediate context. A device made single-threaded has none.
+         *
+         * @param {number} flags @param {{ context?: any }} out
+         */
+        CreateDeferredContext(flags, out){
+            out.context = null;
+            if (flags !== 0 || ((options.flags ?? 0) & D3D10_CREATE_DEVICE.SINGLETHREADED) !== 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            out.context = createDeferredContext(contextServices, flags);
+            return S_OK;
+        },
+
+        /** @returns {any} the immediate context, with no reference taken */
+        immediateContext(){
+            return immediate;
+        },
+
+        /** @returns {boolean} whether the context state swapped on is Direct3D 10's */
+        drawsAsTen(){
+            return currentState !== null && (currentState.emulated === IID.ID3D10Device
+                || currentState.emulated === IID.ID3D10Device1);
+        },
+
+        /**
+         * Direct3D 11.1's context state: a whole pipeline the immediate
+         * context can be swapped onto, made for the version a program will
+         * draw through. A device that has made one answers Direct3D 10's
+         * interfaces as well (test_device_context_state).
+         *
+         * @param {readonly number[]} levels @param {string} emulated  the device interface
+         * @param {{ state?: any, featureLevel?: number } | null} out  null asks whether one
+         *     could be made
+         * @returns {number}
+         */
+        CreateDeviceContextState(levels, emulated, out){
+            const level = levels.find(one=>one <= featureLevel
+                && one >= D3D_FEATURE_LEVEL.LEVEL_10_0);
+            if (level === undefined
+                || !/** @type {string[]} */ ([IID.ID3D10Device, IID.ID3D10Device1,
+                    IID.ID3D11Device, IID.ID3D11Device1]).includes(emulated))
+            {
+                return E_INVALIDARG;
+            }
+            stateEmulation = true;
+            if (!out)
+            {
+                return S_FALSE;
+            }
+            out.featureLevel = level;
+            out.state = contextState(emulated, false);
+            return S_OK;
+        },
+
+        /**
+         * The immediate context's whole pipeline swapped for a context
+         * state's: the one it had goes into the state handed back, which the
+         * device made for it the first time.
+         *
+         * @param {any} next @param {{ previous?: any } | null} out
+         */
+        SwapDeviceContextState(next, out){
+            if (!next)
+            {
+                if (out)
+                {
+                    out.previous = null;
+                }
+                return;
+            }
+            const previous = currentState ?? contextState(d3d11 ? IID.ID3D11Device
+                : IID.ID3D10Device, true);
+            if (next === previous)
+            {
+                // The state it is on: the pipeline is that state's already.
+                if (out)
+                {
+                    previous.addRef();
+                    out.previous = previous;
+                }
+                return;
+            }
+            previous.pipeline = state.exchange(next.pipeline);
+            next.pipeline = null;
+            next.bound = (next.bound ?? 0) + 1;
+            previous.bound = Math.max(0, (previous.bound ?? 0) - 1);
+            currentState = next;
+            if (out)
+            {
+                previous.addRef();
+                out.previous = previous;
+            }
         },
 
         /**
@@ -1201,288 +1516,7 @@ export function createDevice(options = {}){
             return S_OK;
         },
 
-        // --- input assembler ---
-
-        /** @param {any} layout */
-        IASetInputLayout(layout){
-            pipeline.inputLayout = layout ?? null;
-        },
-
-        /** @param {{ layout?: any }} out */
-        IAGetInputLayout(out){
-            const layout = stillAlive(pipeline.inputLayout);
-            if (layout)
-            {
-                layout.addRef();
-            }
-            out.layout = layout;
-        },
-
-        /**
-         * @param {number} startSlot
-         * @param {readonly any[]} buffers
-         * @param {readonly number[]} strides
-         * @param {readonly number[]} offsets
-         */
-        IASetVertexBuffers(startSlot, buffers, strides, offsets){
-            writeSlots(pipeline.vertexBuffers, startSlot, buffers);
-            writeSlots(pipeline.vertexStrides, startSlot, strides ?? [], 0);
-            writeSlots(pipeline.vertexOffsets, startSlot, offsets ?? [], 0);
-        },
-
-        /**
-         * @param {number} startSlot
-         * @param {number} count
-         * @param {{ buffers?: any[], strides?: number[], offsets?: number[] }} out
-         */
-        IAGetVertexBuffers(startSlot, count, out){
-            out.buffers = readSlots(pipeline.vertexBuffers, startSlot, count);
-            out.strides = pipeline.vertexStrides.slice(startSlot, startSlot + count);
-            out.offsets = pipeline.vertexOffsets.slice(startSlot, startSlot + count);
-        },
-
-        /** @param {any} buffer @param {number} format @param {number} offset */
-        IASetIndexBuffer(buffer, format, offset){
-            pipeline.indexBuffer = buffer ?? null;
-            pipeline.indexFormat = format;
-            pipeline.indexOffset = offset;
-        },
-
-        /** @param {{ buffer?: any, format?: number, offset?: number }} out */
-        IAGetIndexBuffer(out){
-            const buffer = stillAlive(pipeline.indexBuffer);
-            if (buffer)
-            {
-                buffer.addRef();
-            }
-            out.buffer = buffer;
-            out.format = pipeline.indexFormat;
-            out.offset = pipeline.indexOffset;
-        },
-
-        /** @param {number} topology */
-        IASetPrimitiveTopology(topology){
-            pipeline.topology = topology;
-        },
-
-        /** @param {{ topology?: number }} out */
-        IAGetPrimitiveTopology(out){
-            out.topology = pipeline.topology;
-        },
-
-        // --- shader stages ---
-
-        /** @param {any} shader */
-        VSSetShader(shader){
-            vs.setShader(shader);
-        },
-        /** @param {{ shader?: any }} out */
-        VSGetShader(out){
-            vs.getShader(out);
-        },
-        /** @param {number} startSlot @param {readonly any[]} buffers */
-        VSSetConstantBuffers(startSlot, buffers){
-            vs.setConstantBuffers(startSlot, buffers);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ buffers?: any[] }} out */
-        VSGetConstantBuffers(startSlot, count, out){
-            vs.getConstantBuffers(startSlot, count, out);
-        },
-        /** @param {number} startSlot @param {readonly any[]} views */
-        VSSetShaderResources(startSlot, views){
-            vs.setShaderResources(startSlot, views);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ views?: any[] }} out */
-        VSGetShaderResources(startSlot, count, out){
-            vs.getShaderResources(startSlot, count, out);
-        },
-        /** @param {number} startSlot @param {readonly any[]} samplers */
-        VSSetSamplers(startSlot, samplers){
-            vs.setSamplers(startSlot, samplers);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ samplers?: any[] }} out */
-        VSGetSamplers(startSlot, count, out){
-            vs.getSamplers(startSlot, count, out);
-        },
-
-        /** @param {any} shader */
-        GSSetShader(shader){
-            gs.setShader(shader);
-        },
-        /** @param {{ shader?: any }} out */
-        GSGetShader(out){
-            gs.getShader(out);
-        },
-        /** @param {number} startSlot @param {readonly any[]} buffers */
-        GSSetConstantBuffers(startSlot, buffers){
-            gs.setConstantBuffers(startSlot, buffers);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ buffers?: any[] }} out */
-        GSGetConstantBuffers(startSlot, count, out){
-            gs.getConstantBuffers(startSlot, count, out);
-        },
-        /** @param {number} startSlot @param {readonly any[]} views */
-        GSSetShaderResources(startSlot, views){
-            gs.setShaderResources(startSlot, views);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ views?: any[] }} out */
-        GSGetShaderResources(startSlot, count, out){
-            gs.getShaderResources(startSlot, count, out);
-        },
-        /** @param {number} startSlot @param {readonly any[]} samplers */
-        GSSetSamplers(startSlot, samplers){
-            gs.setSamplers(startSlot, samplers);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ samplers?: any[] }} out */
-        GSGetSamplers(startSlot, count, out){
-            gs.getSamplers(startSlot, count, out);
-        },
-
-        /** @param {any} shader */
-        PSSetShader(shader){
-            ps.setShader(shader);
-        },
-        /** @param {{ shader?: any }} out */
-        PSGetShader(out){
-            ps.getShader(out);
-        },
-        /** @param {number} startSlot @param {readonly any[]} buffers */
-        PSSetConstantBuffers(startSlot, buffers){
-            ps.setConstantBuffers(startSlot, buffers);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ buffers?: any[] }} out */
-        PSGetConstantBuffers(startSlot, count, out){
-            ps.getConstantBuffers(startSlot, count, out);
-        },
-        /** @param {number} startSlot @param {readonly any[]} views */
-        PSSetShaderResources(startSlot, views){
-            ps.setShaderResources(startSlot, views);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ views?: any[] }} out */
-        PSGetShaderResources(startSlot, count, out){
-            ps.getShaderResources(startSlot, count, out);
-        },
-        /** @param {number} startSlot @param {readonly any[]} samplers */
-        PSSetSamplers(startSlot, samplers){
-            ps.setSamplers(startSlot, samplers);
-        },
-        /** @param {number} startSlot @param {number} count @param {{ samplers?: any[] }} out */
-        PSGetSamplers(startSlot, count, out){
-            ps.getSamplers(startSlot, count, out);
-        },
-
-        // --- rasterizer ---
-
-        /** @param {any} state */
-        RSSetState(state){
-            pipeline.rasterizerState = state ?? null;
-        },
-
-        /** @param {{ state?: any }} out */
-        RSGetState(out){
-            const state = stillAlive(pipeline.rasterizerState);
-            if (state)
-            {
-                state.addRef();
-            }
-            out.state = state;
-        },
-
-        /** @param {readonly any[]} viewports */
-        RSSetViewports(viewports){
-            // More than the pipeline has slots for is ignored whole, not cut
-            // down to what fits.
-            if ((viewports?.length ?? 0) > D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS)
-            {
-                return;
-            }
-            pipeline.viewports = (viewports ?? []).map(viewport=>({ ...viewport }));
-        },
-
-        /** @param {{ count?: number, viewports?: any[] }} out */
-        RSGetViewports(out){
-            out.count = pipeline.viewports.length;
-            out.viewports = pipeline.viewports.map(viewport=>({ ...viewport }));
-        },
-
-        /** @param {readonly any[]} rects */
-        RSSetScissorRects(rects){
-            pipeline.scissorRects = (rects ?? [])
-                .slice(0, D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS)
-                .map(rect=>({ ...rect }));
-        },
-
-        /** @param {{ count?: number, rects?: any[] }} out */
-        RSGetScissorRects(out){
-            out.count = pipeline.scissorRects.length;
-            out.rects = pipeline.scissorRects.map(rect=>({ ...rect }));
-        },
-
-        // --- output merger ---
-
-        /** @param {readonly any[]} renderTargetViews @param {any} depthStencilView */
-        OMSetRenderTargets(renderTargetViews, depthStencilView){
-            pipeline.renderTargets = emptySlots(D3D10_LIMITS.SIMULTANEOUS_RENDER_TARGETS);
-            writeSlots(pipeline.renderTargets, 0, renderTargetViews ?? []);
-            pipeline.depthStencilView = depthStencilView ?? null;
-        },
-
-        /** @param {number} count @param {{ views?: any[], depthStencilView?: any }} out */
-        OMGetRenderTargets(count, out){
-            out.views = readSlots(pipeline.renderTargets, 0, count);
-            const dsv = stillAlive(pipeline.depthStencilView);
-            if (dsv)
-            {
-                dsv.addRef();
-            }
-            out.depthStencilView = dsv;
-        },
-
-        /**
-         * A null blend factor is not "all zero": it means the default, which is
-         * white, and a program that passes null and then reads the factor back
-         * sees ones.
-         *
-         * @param {any} state
-         * @param {readonly number[] | null} blendFactor
-         * @param {number} sampleMask
-         */
-        OMSetBlendState(state, blendFactor, sampleMask){
-            pipeline.blendState = state ?? null;
-            pipeline.blendFactor = blendFactor
-                ? [...blendFactor]
-                : [...D3D10_DEFAULTS.BLEND_FACTOR];
-            pipeline.sampleMask = sampleMask >>> 0;
-        },
-
-        /** @param {{ state?: any, blendFactor?: number[], sampleMask?: number }} out */
-        OMGetBlendState(out){
-            const state = stillAlive(pipeline.blendState);
-            if (state)
-            {
-                state.addRef();
-            }
-            out.state = state;
-            out.blendFactor = [...pipeline.blendFactor];
-            out.sampleMask = pipeline.sampleMask;
-        },
-
-        /** @param {any} state @param {number} stencilRef */
-        OMSetDepthStencilState(state, stencilRef){
-            pipeline.depthStencilState = state ?? null;
-            pipeline.stencilRef = stencilRef;
-        },
-
-        /** @param {{ state?: any, stencilRef?: number }} out */
-        OMGetDepthStencilState(out){
-            const state = stillAlive(pipeline.depthStencilState);
-            if (state)
-            {
-                state.addRef();
-            }
-            out.state = state;
-            out.stencilRef = pipeline.stencilRef;
-        },
+        ...state.methods,
 
         // --- drawing ---
 
@@ -1515,6 +1549,152 @@ export function createDevice(options = {}){
 
         DrawAuto(){
             diverge('DrawAuto draws nothing: there is no stream-output buffer to count');
+        },
+
+        /**
+         * A draw whose counts the GPU reads out of a buffer: its arguments
+         * are read here, from the bytes the device keeps, as of now.
+         *
+         * @param {any} buffer @param {number} offset
+         */
+        DrawInstancedIndirect(buffer, offset){
+            const words = indirectWords(buffer, offset, 4, 'DrawInstancedIndirect');
+            if (words)
+            {
+                draw({ vertexCount: words[0], instanceCount: words[1], startVertex: words[2],
+                    startInstance: words[3] });
+            }
+        },
+        /** @param {any} buffer @param {number} offset */
+        DrawIndexedInstancedIndirect(buffer, offset){
+            const words = indirectWords(buffer, offset, 5, 'DrawIndexedInstancedIndirect');
+            if (words)
+            {
+                draw({ vertexCount: 0, startVertex: 0, indexCount: words[0],
+                    instanceCount: words[1], startIndex: words[2], baseVertex: words[3] | 0,
+                    startInstance: words[4] });
+            }
+        },
+
+        /**
+         * A compute shader run over a grid of thread groups.
+         *
+         * @param {number} x @param {number} y @param {number} z
+         */
+        Dispatch(x, y, z){
+            if (x === 0 || y === 0 || z === 0)
+            {
+                return;
+            }
+            renderer.dispatch(state.snapshot(), { x, y, z });
+        },
+        /** @param {any} buffer @param {number} offset */
+        DispatchIndirect(buffer, offset){
+            const words = indirectWords(buffer, offset, 3, 'DispatchIndirect');
+            if (words)
+            {
+                this.Dispatch(words[0], words[1], words[2]);
+            }
+        },
+
+        /**
+         * @param {any} view @param {readonly number[]} values  four words, each a channel's
+         *     bits as the view's format holds them
+         */
+        ClearUnorderedAccessViewUint(view, values){
+            if (view && values)
+            {
+                renderer.clearUnorderedAccessView(view, [...values], false);
+            }
+        },
+        /** @param {any} view @param {readonly number[]} values  four floats */
+        ClearUnorderedAccessViewFloat(view, values){
+            if (view && values)
+            {
+                renderer.clearUnorderedAccessView(view, [...values], true);
+            }
+        },
+        /**
+         * An append view's hidden count, written into a buffer.
+         *
+         * @param {any} destination @param {number} offset @param {any} view
+         */
+        CopyStructureCount(destination, offset, view){
+            if (destination && view)
+            {
+                renderer.copyStructureCount(destination, offset, view);
+            }
+        },
+
+        /**
+         * The most detailed level a shader may sample: kept for the getter,
+         * and not applied -- WebGPU clamps a view's levels when the view is
+         * made, not per resource.
+         *
+         * @param {any} resource @param {number} lod
+         */
+        SetResourceMinLOD(resource, lod){
+            if (resource)
+            {
+                resource.minLod = lod;
+                if (lod !== 0)
+                {
+                    diverge('SetResourceMinLOD is kept and not applied to sampling');
+                }
+            }
+        },
+        /** @param {any} resource @returns {number} */
+        GetResourceMinLOD(resource){
+            return resource?.minLod ?? 0;
+        },
+
+        /**
+         * A deferred context's command list, played on the device: from a
+         * cleared pipeline, as the list was recorded, and after it the
+         * pipeline as it was -- or cleared, unless the program asks to keep
+         * its own.
+         *
+         * @param {any} list @param {boolean} restore
+         */
+        ExecuteCommandList(list, restore){
+            if (!list?.calls)
+            {
+                return;
+            }
+            const kept = state.capture();
+            state.clear();
+            for (const [name, args] of list.calls)
+            {
+                if (name === 'Begin' || name === 'End')
+                {
+                    args[0]?.[name]();
+                    continue;
+                }
+                /** @type {any} */ (self)[name](...args);
+            }
+            if (restore)
+            {
+                state.restore(kept);
+            }
+            else
+            {
+                state.clear();
+            }
+        },
+
+        /**
+         * What the device can do past its feature level, as a structure the
+         * program names by number and hands in -- a format's support is
+         * asked by the format at its head. A feature not known, or a size
+         * not the structure's, is refused and nothing written.
+         *
+         * @param {number} feature @param {Uint8Array | null} data  the structure as given
+         * @returns {{ hr: number, data?: Uint8Array }}
+         */
+        CheckFeatureSupport(feature, data){
+            const answer = data ? featureSupport(feature, data, featureLevel, this) : null;
+            return answer && answer.length === data?.length ? { hr: S_OK, data: answer }
+                : { hr: E_INVALIDARG };
         },
 
         /** @param {any} view @param {readonly number[]} color */
@@ -1674,45 +1854,6 @@ export function createDevice(options = {}){
             renderer.flush();
         },
 
-        // --- stream output and predication ---
-
-        /** @param {readonly any[]} buffers @param {readonly number[]} offsets */
-        SOSetTargets(buffers, offsets){
-            if (buffers && buffers.some(buffer=>buffer))
-            {
-                diverge('a stream-output target is bound and never written');
-            }
-            pipeline.streamOutput = (buffers ?? []).slice(0, D3D10_LIMITS.SO_BUFFER_SLOTS);
-            pipeline.streamOutputOffsets = (offsets ?? []).slice(0, D3D10_LIMITS.SO_BUFFER_SLOTS);
-        },
-
-        /** @param {number} count @param {{ buffers?: any[], offsets?: number[] }} out */
-        SOGetTargets(count, out){
-            out.buffers = readSlots(pipeline.streamOutput, 0, count);
-            out.offsets = pipeline.streamOutputOffsets.slice(0, count);
-        },
-
-        /** @param {any} predicate @param {boolean} value */
-        SetPredication(predicate, value){
-            if (predicate)
-            {
-                diverge('predication is recorded and never consulted: every draw runs');
-            }
-            pipeline.predicate = predicate ?? null;
-            pipeline.predicateValue = !!value;
-        },
-
-        /** @param {{ predicate?: any, value?: boolean }} out */
-        GetPredication(out){
-            const predicate = stillAlive(pipeline.predicate);
-            if (predicate)
-            {
-                predicate.addRef();
-            }
-            out.predicate = predicate;
-            out.value = pipeline.predicateValue;
-        },
-
         // --- odds and ends ---
 
         /** @param {number} flags */
@@ -1808,34 +1949,12 @@ export function createDevice(options = {}){
          * white blend factor, a full sample mask, and an undefined topology.
          */
         ClearState(){
-            pipeline.stages = { vs: createStage(), gs: createStage(), ps: createStage() };
-            pipeline.inputLayout = null;
-            pipeline.vertexBuffers = emptySlots(D3D10_LIMITS.VERTEX_INPUT_SLOTS);
-            pipeline.vertexStrides = new Array(D3D10_LIMITS.VERTEX_INPUT_SLOTS).fill(0);
-            pipeline.vertexOffsets = new Array(D3D10_LIMITS.VERTEX_INPUT_SLOTS).fill(0);
-            pipeline.indexBuffer = null;
-            pipeline.indexFormat = DXGI_FORMAT.UNKNOWN;
-            pipeline.indexOffset = 0;
-            pipeline.topology = D3D10_PRIMITIVE_TOPOLOGY.UNDEFINED;
-            pipeline.renderTargets = emptySlots(D3D10_LIMITS.SIMULTANEOUS_RENDER_TARGETS);
-            pipeline.depthStencilView = null;
-            pipeline.blendState = null;
-            pipeline.blendFactor = [...D3D10_DEFAULTS.BLEND_FACTOR];
-            pipeline.sampleMask = D3D10_DEFAULTS.SAMPLE_MASK;
-            pipeline.depthStencilState = null;
-            pipeline.stencilRef = 0;
-            pipeline.rasterizerState = null;
-            pipeline.viewports = [];
-            pipeline.scissorRects = [];
-            pipeline.streamOutput = emptySlots(D3D10_LIMITS.SO_BUFFER_SLOTS);
-            pipeline.streamOutputOffsets = new Array(D3D10_LIMITS.SO_BUFFER_SLOTS).fill(0);
-            pipeline.predicate = null;
-            pipeline.predicateValue = false;
+            state.clear();
         },
 
-        /** @returns {number} always 10.0, the one level any entry point makes a device at */
+        /** @returns {number} the level the device was made at: 10.0 for Direct3D 10's */
         GetFeatureLevel(){
-            return D3D_FEATURE_LEVEL.LEVEL_10_0;
+            return featureLevel;
         },
 
         /** @returns {number} the flags the device was created with */
@@ -1983,8 +2102,12 @@ export function createDevice(options = {}){
             });
         },
     }, {
-        interfaces: [IID.ID3D10Device, IID.ID3D10Device1, IID.ID3D10Multithread, IID.IDXGIObject,
-            IID.IDXGIDevice, IID.IDXGIDevice1],
+        // Direct3D 10's device is Direct3D 11's too; one made by Direct3D 11
+        // is not Direct3D 10's (test_device_interfaces).
+        also: iid=>stateEmulation && (iid === IID.ID3D10Device || iid === IID.ID3D10Device1),
+        interfaces: [...(d3d11 ? [IID.ID3D11Device1] : [IID.ID3D10Device, IID.ID3D10Device1]),
+            IID.ID3D11Device,
+            IID.ID3D10Multithread, IID.IDXGIObject, IID.IDXGIDevice, IID.IDXGIDevice1],
         parent: adapter,
         // The adapter is the device's to hold: a program that releases its own
         // reference to the adapter and keeps the device must still be able to

@@ -61,6 +61,29 @@ export const QUERY_DATA_SIZE = Object.freeze({
     [D3D10_QUERY.SO_OVERFLOW_PREDICATE]: 4,
 });
 
+/**
+ * The size of a kind's answer as the version that made the query has it:
+ * Direct3D 11's pipeline statistics count the hull, domain and compute
+ * stages too, and its four streams have statistics and an overflow
+ * predicate each.
+ *
+ * @param {number} kind @param {boolean} eleven
+ * @returns {number}
+ */
+export function dataSizeOf(kind, eleven){
+    if (eleven && kind === D3D10_QUERY.PIPELINE_STATISTICS)
+    {
+        return 88;
+    }
+    // Stream N's statistics are 8 + 2N, its overflow predicate the one after.
+    if (kind >= 8 && kind <= 15)
+    {
+        return QUERY_DATA_SIZE[kind % 2 === 0 ? D3D10_QUERY.SO_STATISTICS
+            : D3D10_QUERY.SO_OVERFLOW_PREDICATE];
+    }
+    return QUERY_DATA_SIZE[kind];
+}
+
 /** The kinds a program only ends: they mark a point rather than bracket a span. */
 /** @type {ReadonlySet<number>} */
 const END_ONLY = new Set([D3D10_QUERY.EVENT, D3D10_QUERY.TIMESTAMP]);
@@ -189,6 +212,8 @@ export function createDrawStatistics(){
  * @property {() => void} flush        Hands what is recorded to the GPU.
  * @property {() => number} now        Milliseconds, for a timestamp.
  * @property {(detail: string) => void} diverge
+ * @property {boolean} [eleven]  Whether Direct3D 11 made it: its pipeline statistics
+ *     count the stages that version added.
  * @property {{ begin: () => any, end: (counter: any) => void }} [occlusion]
  *     Where an occlusion query's draws are counted on the GPU. A counter
  *     answers `samples` once `settled`, unless it `failed`; with no counter,
@@ -203,7 +228,7 @@ export function createDrawStatistics(){
  */
 export function createQueryObject(desc, interfaces, services, owner){
     const kind = desc.Query;
-    const size = QUERY_DATA_SIZE[kind];
+    const size = dataSizeOf(kind, services.eleven === true);
     const endOnly = END_ONLY.has(kind);
     /** @type {'idle' | 'building' | 'issued'} */
     let state = 'idle';

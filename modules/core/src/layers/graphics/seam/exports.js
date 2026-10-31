@@ -76,6 +76,9 @@ const REGISTER_CONSTANT = 2;
 /** E_OUTOFMEMORY, which is what a create that cannot make an object reports. */
 const E_OUTOFMEMORY = 0x8007000e | 0;
 
+/** The libraries the Direct3D 10 and 11 seam answers: either version's, and DXGI's. */
+const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll'];
+
 /**
  * Every entry point in one place.
  *
@@ -324,11 +327,13 @@ export function createGraphicsLibraries(
      * as built because every handler that reaches it leaves with the library.
      *
      * @template T
-     * @param {string} library @param {() => T} make
+     * @param {string | string[]} library  or any of these
+     * @param {() => T} make
      * @returns {T}
      */
     function built(library, make){
-        return has(library) ? make() : /** @type {T} */ (/** @type {unknown} */ (null));
+        return (Array.isArray(library) ? library.some(has) : has(library)) ? make()
+            : /** @type {T} */ (/** @type {unknown} */ (null));
     }
     // Without guest code, Direct3D 8 and 9 keep no block, ring or getters in
     // the guest: every call is a trap, which is what a regression in them is
@@ -348,12 +353,13 @@ export function createGraphicsLibraries(
         traps: new Set(guestTraps), ringBytes, pointerSize, floatResult,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
-    const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
+    // Direct3D 10 and 11 are one seam over one device, and DXGI is theirs.
+    const d3d10 = built(DXGI_LIBRARIES, ()=>createDirect3D10Seam({
         publisher, memory, allocate, free, screen, resolution, gdi,
         // The device's command ring, with guest code: none in a 64-bit
         // process, whose calls all trap.
         ringAllocate: guestAllocate,
-        allocateCode: guestAllocateCode, traps: new Set(guestTraps), ringBytes,
+        allocateCode: guestAllocateCode, traps: new Set(guestTraps), ringBytes, floatResult,
         identity: ()=>graphics.adapter?.() ?? null,
         videoMemory: ()=>graphics.videoMemory?.() ?? null,
         root: (/** @type {any} */ factoryOptions)=>graphics.create('d3d10', { factoryOptions }),
@@ -662,7 +668,8 @@ export function createGraphicsLibraries(
             },
         },
 
-        ...d3d10?.libraries,
+        ...Object.fromEntries(Object.entries(d3d10?.libraries ?? {})
+            .filter(([library])=>has(library))),
 
         'vulkan-1.dll': vulkan?.library,
 

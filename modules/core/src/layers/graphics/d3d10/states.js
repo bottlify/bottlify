@@ -444,6 +444,7 @@ export function createStateStore(options){
 
         let count = 1;
         options.retainDevice();
+        /** @type {any} */
         const state = {
             kind,
             ...createPrivateData(),
@@ -451,6 +452,12 @@ export function createStateStore(options){
                 return count;
             },
             addRef(){
+                // Handed out again by a getter while bound with no count of
+                // its own (Direct3D 11's context keeps it alive).
+                if (count === 0)
+                {
+                    options.retainDevice();
+                }
                 count++;
                 return count;
             },
@@ -462,10 +469,28 @@ export function createStateStore(options){
                 count--;
                 if (count === 0)
                 {
-                    live.delete(key);
                     options.releaseDevice();
+                    if (!(state.bound > 0))
+                    {
+                        live.delete(key);
+                    }
                 }
                 return count;
+            },
+            /** Its last binding let go: with no count either, it is gone. */
+            unbound(){
+                if (count === 0)
+                {
+                    live.delete(key);
+                }
+            },
+            /** @returns {boolean} gone at no count, unless a context still keeps it bound */
+            get destroyed(){
+                return count === 0 && !(state.bound > 0);
+            },
+            /** Whether a pointer to it may still be called: while it is bound. */
+            reachable(){
+                return state.bound > 0;
             },
 
             /** @param {{ desc?: any }} target */

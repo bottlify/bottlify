@@ -492,7 +492,8 @@ test('a draw with no viewport, target or vertex shader draws nothing and is coun
     await h.present();
     assert.equal(h.gpu.count('draw'), 0);
     assert.deepEqual(h.device.diagnostics().skipped,
-        { noViewport: 1, noTarget: 1, noShader: 1, untranslatable: 0, pipeline: 0 });
+        { noViewport: 1, noTarget: 1, noShader: 1, untranslatable: 0, pipeline: 0,
+            stage: 0 });
 });
 
 // --- constant buffers ---
@@ -2039,7 +2040,8 @@ test('a draw with no pixel shader writes depth and no render target (test_depth_
     await h.present();
     assert.equal(h.gpu.count('draw'), 1, 'the draw runs');
     assert.deepEqual(h.device.diagnostics().skipped,
-        { noViewport: 0, noTarget: 0, noShader: 0, untranslatable: 0, pipeline: 0 });
+        { noViewport: 0, noTarget: 0, noShader: 0, untranslatable: 0, pipeline: 0,
+            stage: 0 });
     const pipeline = h.gpu.of('createRenderPipeline').at(-1).descriptor;
     assert.equal(pipeline.depthStencil.format, 'depth32float');
     assert.equal(pipeline.depthStencil.depthWriteEnabled, true);
@@ -2079,22 +2081,30 @@ test('a draw with no input layout runs on what the vertex shader makes of SV_Ver
     assert.deepEqual(h.divergences, []);
 });
 
-test('a geometry shader is refused when it is made, never made and then left out of the draw',
-    ()=>{
-        const h = harness();
-        const { device } = h;
-        const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
-        const gs = assemble({ kind: SHADER_KIND.GEOMETRY, inputs: [position], outputs: [position],
-            instructions: [ret()] });
-        /** @type {{ shader?: any }} */
-        const out = { shader: 'untouched' };
-        assert.equal(device.CreateGeometryShader(gs, out), 0x80004001, 'E_NOTIMPL');
-        assert.equal(out.shader, null);
-        assert.ok(diverged(h, 'a geometry shader is refused'), h.divergences.join('\n'));
-        // What is not a geometry shader is the bad argument Windows answers.
-        assert.equal(device.CreateGeometryShader(passThroughVertexShader(), out), 0x80070057);
-        assert.equal(device.CreateGeometryShader(null, out), 0x80070057);
-    });
+test('a geometry shader is made, and a draw with it bound is skipped and counted, never drawn'
+    + ' as if the stage were not there', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [1, 0, 0, 1]);
+    const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    const gs = assemble({ kind: SHADER_KIND.GEOMETRY, inputs: [position], outputs: [position],
+        instructions: [ret()] });
+    /** @type {{ shader?: any }} */
+    const out = { shader: 'untouched' };
+    assert.equal(device.CreateGeometryShader(gs, out), S_OK);
+    device.GSSetShader(out.shader);
+    device.Draw(3, 0);
+    device.GSSetShader(null);
+    device.Draw(3, 0);
+    await h.present();
+    assert.equal(h.gpu.count('draw'), 1, 'only the draw without the stage');
+    assert.equal(device.diagnostics().skipped.stage, 1);
+    assert.ok(diverged(h, 'a draw with a geometry shader bound is skipped'),
+        h.divergences.join('\n'));
+    // What is not a geometry shader is the bad argument Windows answers.
+    assert.equal(device.CreateGeometryShader(passThroughVertexShader(), out), 0x80070057);
+    assert.equal(device.CreateGeometryShader(null, out), 0x80070057);
+});
 
 // --- multisampling ---
 

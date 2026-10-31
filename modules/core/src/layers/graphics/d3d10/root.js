@@ -5,7 +5,7 @@
  */
 
 /**
- * Direct3D 10's entry points as one object's methods, with what they draw
+ * Direct3D 10's and 11's entry points as one object's methods, with what they draw
  * through bound in: what a program's DXGI factory and devices come from.
  *
  * Each is named as a recording knows a method that hands out an object
@@ -18,7 +18,7 @@
 
 import {
     D3D10CreateDevice, D3D10CreateDevice1, D3D10CreateDeviceAndSwapChain,
-    D3D10CreateDeviceAndSwapChain1,
+    D3D10CreateDeviceAndSwapChain1, D3D11CreateDevice, D3D11CreateDeviceAndSwapChain,
 } from './device.js';
 import { CreateDXGIFactory, CreateDXGIFactory1 } from './dxgi.js';
 
@@ -68,5 +68,25 @@ export function createDirect3D10(options = {}){
             sdkVersion, desc, chainOut, deviceOut)=>D3D10CreateDeviceAndSwapChain1(adapter,
             driverType, software, flags, featureLevel, sdkVersion, desc, chainOut, deviceOut,
             options),
+        /**
+         * Direct3D 11's: the same device, made at a feature level, with its
+         * immediate context.
+         *
+         * @param {any} adapter @param {number} driverType @param {any} software
+         * @param {number} flags @param {readonly number[] | null} levels
+         * @param {import('./device.js').DeviceRequest11} out
+         */
+        CreateDevice11: (adapter, driverType, software, flags, levels, out)=>
+            D3D11CreateDevice(adapter, driverType, software, flags, levels, out, options),
+        /**
+         * @param {any} adapter @param {number} driverType @param {any} software
+         * @param {number} flags @param {readonly number[] | null} levels
+         * @param {import('./structs.js').SwapChainFields | null} desc
+         * @param {import('./device.js').DeviceRequest11 & { wantSwapChain: boolean,
+         *     swapChain?: any }} out
+         */
+        CreateDeviceAndSwapChain11: (adapter, driverType, software, flags, levels, desc, out)=>
+            D3D11CreateDeviceAndSwapChain(adapter, driverType, software, flags, levels, desc, out,
+                options),
     };
 }

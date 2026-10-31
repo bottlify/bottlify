@@ -33,6 +33,9 @@ export const SHADER_KIND = Object.freeze({
     PIXEL: 0,
     VERTEX: 1,
     GEOMETRY: 2,
+    HULL: 3,
+    DOMAIN: 4,
+    COMPUTE: 5,
 });
 
 /** The component types a signature element declares. */
@@ -216,12 +219,15 @@ export function parseDxbc(bytes){
  *
  * @param {Uint8Array} bytes
  * @param {number} kind  A SHADER_KIND.
+ * @param {number} [most]  The newest shader model the device takes, as 0xMm: 0x40 is
+ *     4.0, the default, and 0x50 is 5.0.
  * @returns {DxbcContainer | null}
  */
-export function parseShaderOfKind(bytes, kind){
+export function parseShaderOfKind(bytes, kind, most = 0x40){
     const container = parseDxbc(bytes);
-    if (!container || !container.shader || container.shader.kind !== kind
-        || container.shader.major !== 4)
+    const shader = container?.shader;
+    if (!container || !shader || shader.kind !== kind || shader.major < 4
+        || ((shader.major << 4) | shader.minor) > most)
     {
         return null;
     }

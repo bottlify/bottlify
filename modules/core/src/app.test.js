@@ -515,7 +515,7 @@ test('a Windows that is not one of the four is refused before anything is built'
 test('a graphics choice nobody knows is refused before anything is built', async()=>{
     const options = /** @type {any} */ ({ executable: new Uint8Array(0), graphicsApi: 'glide' });
     await assert.rejects(createApp(options),
-        /unknown graphics choice "glide": the choices are directx7, directx8, directx9, directx10, opengl/);
+        /unknown graphics choice "glide": the choices are directx7, directx8, directx9, directx10, directx11, opengl/);
 });
 
 test('a library loaded as data answers for its resources by the handle it was given', ()=>{

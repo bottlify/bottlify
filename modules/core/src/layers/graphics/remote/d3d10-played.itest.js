@@ -22,103 +22,19 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { createDirect3D10 } from '../d3d10/root.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
     D3D10_QUERY, D3D10_SDK_VERSION, D3D10_USAGE, DXGI_FORMAT, IID, S_OK,
 } from '../d3d10/constants.js';
 import { defaultSwapChainDesc } from '../d3d10/dxgi.js';
-import { SHADER_KIND, SYSTEM_VALUE } from '../d3d10/dxbc.js';
-import {
-    assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclOutput, mov, o,
-    ret,
-} from '../d3d10/shader-fixtures.js';
+import { colouredPixelShader, colouredVertexShader } from '../d3d10/shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { gpuReads, idle } from '../seam/frames-contract.itest.js';
 import { playedAtOnce } from './direct3d.js';
 import { playedDirect3D10, recordedDirect3D10 } from './d3d10.js';
-
-/** @param {number} seed */
-const random = seed=>{
-    let drawn = 0;
-    const next = ()=>createHash('sha256').update(`${seed}:${drawn++}`).digest()
-        .readUInt32LE(0) / 4294967296;
-    return {
-        /** @param {number} n */
-        below: n=>Math.floor(next() * n),
-        /** @template T @param {T[]} list @returns {T} */
-        pick: list=>list[Math.floor(next() * list.length)],
-        float: ()=>next() * 2 - 1,
-    };
-};
-
-/**
- * Guest memory as the engine gives it: a bump heap, and a write watch at page
- * grain with a view of its own for each watch, as the engine's write clock
- * gives one to each buffer.
- */
-function guestMemory(){
-    const memory = new Uint8Array(1 << 20);
-    let next = 0x10000;
-    /** The writes each page has had. @type {Uint32Array} */
-    const versions = new Uint32Array(memory.length >>> 12);
-    /** @param {number} address @param {number} length */
-    const mark = (address, length)=>{
-        for (let page = address >>> 12; page <= (address + length - 1) >>> 12; page++)
-        {
-            versions[page]++;
-        }
-    };
-    /** @param {number} address @param {Uint8Array} bytes */
-    const store = (address, bytes)=>{
-        memory.set(bytes, address);
-        mark(address, bytes.length);
-    };
-    return {
-        memory,
-        store,
-        /** @type {import('../d3d10/render.js').GuestStorage} */
-        storage: {
-            allocate: bytes=>{
-                const at = next;
-                next += (bytes + 0xfff) & ~0xfff;
-                return at;
-            },
-            free: ()=>{},
-            readMemory: (address, length)=>memory.slice(address, address + length),
-            writeMemory: store,
-            watchWrites: (base, length)=>{
-                const seen = versions.slice(base >>> 12, ((base + length - 1) >>> 12) + 1);
-                return {
-                    take: (address, size)=>{
-                        /** @type {number[]} */
-                        const pages = [];
-                        for (let page = address >>> 12; page <= (address + size - 1) >>> 12;
-                            page++)
-                        {
-                            const at = page - (base >>> 12);
-                            if (at >= 0 && at < seen.length && seen[at] !== versions[page])
-                            {
-                                seen[at] = versions[page];
-                                pages.push(page);
-                            }
-                        }
-                        return pages;
-                    },
-                };
-            },
-        },
-    };
-}
-
-/** A pixel shader whose colour is the first register of cb0. */
-const constantPixelShader = ()=>assemble({
-    kind: SHADER_KIND.PIXEL,
-    outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
-    instructions: [dclConstantBuffer(0, 1), dclOutput(o(0)), mov(o(0), cb(0, 0)), ret()],
-});
+import { constantPixelShader, guestMemory, random } from './played-fixtures.js';
 
 const STRIDE = 32;
 const VERTICES = 128;

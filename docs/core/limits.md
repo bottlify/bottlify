@@ -155,8 +155,15 @@ differently raises a `divergence` event naming the API.
   foreground window's process's picture. A process's picture is what it presented last, whole: a
   windowed Direct3D device's back buffer is placed at the screen's corner rather than in its
   window, and the windows of a process that has presented nothing show what is under them.
-- No Direct3D 11 or 12.
-- Vulkan draws on the engine thread; Direct3D 7, 8, 9, 10 and OpenGL in the graphics worker.
+- No Direct3D 12. Direct3D 11 makes devices at feature levels 11.0, 10.1 and 10.0; a program
+  that asks only for 11.1 or the 9.x levels is refused. Its deferred contexts record calls that
+  the immediate context plays (`DriverCommandLists` is false). A context state
+  (`CreateDeviceContextState`) swaps the whole pipeline; one made for Direct3D 10 makes Direct3D
+  11's calls on the context do nothing. Compute shaders are made and not run yet; a constant
+  buffer offset (`*SetConstantBuffers1`) is ignored and the whole buffer bound
+  (`ConstantBufferOffsetting` is false); a logic operation in a blend state and a forced sample
+  count in a rasterizer state are refused; `ClearView` of rectangles is not made.
+- Vulkan draws on the engine thread; Direct3D 7, 8, 9, 10, 11 and OpenGL in the graphics worker.
 - Direct3D 10's command ring is i386 code: a 64-bit process traps every device call.
 - `D3DX10CompileFromMemory` has no shader model 4 compiler: it answers `E_FAIL` with an error
   blob saying so. A program that ships its shaders compiled asks only for what its cache lacks.
@@ -170,9 +177,9 @@ differently raises a `divergence` event naming the API.
   renderbuffers draw with one sample; `glBlitFramebuffer` copies colour only; occlusion queries
   answer the viewport's area; 3D textures are accepted and kept nowhere, and a GLSL program that
   samples one does not link.
-- Direct3D 10 has no geometry shaders: WebGPU has no geometry stage and none is emulated, so
-  `CreateGeometryShader` and its stream-output variant answer `E_NOTIMPL` for a valid shader. An
-  effect pass that sets one is drawn without it, and the effect says so.
+- Direct3D 10 and 11 have no geometry, hull or domain stage and no stream output: WebGPU has none
+  and none is emulated. The shaders are made, and a draw with one bound is skipped and counted
+  (`roadmap/decisions.md`, A75); `CreateGeometryShaderWithStreamOutput` answers `E_NOTIMPL`.
 - Direct3D 10 multisamples at four samples only, the count WebGPU has:
   `CheckMultisampleQualityLevels` answers one quality level at four for the colour and depth
   formats WebGPU multisamples, and none at two, eight or any other count. A multisampled texture

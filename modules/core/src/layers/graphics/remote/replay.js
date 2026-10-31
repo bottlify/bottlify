@@ -73,8 +73,10 @@ function handsOut(name){
     return name.startsWith('Create') || name.startsWith('Get') || name.startsWith('Query')
         || name === 'EndStateBlock'
         // DXGI's enumerations, and Direct3D 10's getters of a stage's bindings:
-        // EnumAdapters, IAGetVertexBuffers, PSGetShader.
-        || name.startsWith('Enum') || /^[A-Z]{2}Get/.test(name);
+        // EnumAdapters, IAGetVertexBuffers, PSGetShader; and Direct3D 11's
+        // command lists and context states, which a context hands back.
+        || name.startsWith('Enum') || /^[A-Z]{2}Get/.test(name)
+        || name === 'FinishCommandList' || name === 'SwapDeviceContextState';
 }
 
 /** The calls that hand out one of a texture's levels as an object of its own. */

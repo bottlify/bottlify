@@ -23,7 +23,8 @@
  */
 
 import {
-    DXGI_ERROR_MORE_DATA, DXGI_ERROR_NOT_FOUND, E_INVALIDARG, E_NOINTERFACE, IID, S_FALSE, S_OK,
+    D3D11_TWIN, DXGI_ERROR_MORE_DATA, DXGI_ERROR_NOT_FOUND, E_INVALIDARG, E_NOINTERFACE, IID,
+    S_FALSE, S_OK,
 } from './constants.js';
 
 /**
@@ -143,6 +144,7 @@ export function createPrivateData(){
  * @property {boolean} [implicit]            Start at zero references.
  * @property {() => void} [onFirstRef]
  * @property {() => void} [onLastRef]
+ * @property {(iid: string) => boolean} [also]  Interfaces it has come to answer to since.
  */
 
 /**
@@ -156,7 +158,8 @@ export function createPrivateData(){
  *          & ReturnType<typeof createPrivateData>}
  */
 export function attachCom(target, options){
-    const interfaces = new Set([IID.IUnknown, ...options.interfaces]);
+    const interfaces = new Set([IID.IUnknown, ...options.interfaces.flatMap(id=>
+        (D3D11_TWIN[id] ? [id, D3D11_TWIN[id]] : [id]))]);
     const privateData = createPrivateData();
     let count = options.implicit ? 0 : 1;
     if (!options.implicit)
@@ -167,7 +170,7 @@ export function attachCom(target, options){
     const methods = {
         /** @param {string} iid */
         supports(iid){
-            return interfaces.has(iid);
+            return interfaces.has(iid) || options.also?.(iid) === true;
         },
 
         addRef(){
@@ -198,7 +201,7 @@ export function attachCom(target, options){
          * @returns {number}
          */
         QueryInterface(iid, out){
-            if (!interfaces.has(iid))
+            if (!methods.supports(iid))
             {
                 // Cleared on failure: callers read the out pointer back without
                 // checking and would otherwise follow whatever it held before.
@@ -232,6 +235,21 @@ export function attachCom(target, options){
     // for each method (`remote/replay.js`), which a frozen property forbids.
     /** @param {Function} value */
     const method = value=>({ value, enumerable: true, writable: true, configurable: true });
+    // Gone at no references, unless a context still keeps it bound (Direct3D
+    // 11's), or the object says otherwise itself.
+    if (!Object.hasOwn(/** @type {any} */ (target), 'destroyed'))
+    {
+        Object.defineProperty(target, 'destroyed', {
+            get: ()=>count === 0 && !(/** @type {any} */ (target).bound > 0),
+            enumerable: false, configurable: true,
+        });
+        // The bridge keeps an interface whose count went to zero published
+        // while the object is still reachable: here, while it is bound.
+        Object.defineProperty(target, 'reachable', {
+            value: ()=>/** @type {any} */ (target).bound > 0,
+            enumerable: false, configurable: true, writable: true,
+        });
+    }
     return Object.defineProperties(/** @type {any} */ (target), {
         SetPrivateData: method(privateData.SetPrivateData),
         SetPrivateDataInterface: method(privateData.SetPrivateDataInterface),

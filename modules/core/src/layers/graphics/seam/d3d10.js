@@ -29,6 +29,7 @@
 import { describe as describeSlots } from './vtables.js';
 import { compiledAt } from './shadow.js';
 import { createDeviceRing } from './d3d10-ring.js';
+import { createDirect3D11Seam } from './d3d11.js';
 import { COMPILED } from './d3d10-inguest.x86.js';
 
 /** The routines by name. @type {Record<string, any>} */
@@ -491,6 +492,8 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  * @property {import('../d3d10/dxgi.js').FactoryOptions['resolution']} [resolution]
  *     Told the mode a fullscreen swap chain takes the screen at, as Direct3D 9 tells it.
  * @property {import('./ddraw.js').SurfaceDcServices} [gdi]
+ * @property {(value: number) => void} [floatResult]  Sets the float a method answers on
+ *     the floating-point stack (GetResourceMinLOD).
  *     Device contexts over guest memory, for IDXGISurface1::GetDC; absent, none is handed out.
  */
 
@@ -499,7 +502,7 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  */
 export function createDirect3D10Seam({ publisher, memory, allocate, free, root: makeRoot,
     divergence, factoryOptions: given, screen, identity, videoMemory, resolution, gdi,
-    ringAllocate, allocateCode, traps = new Set(), ringBytes })
+    ringAllocate, allocateCode, traps = new Set(), ringBytes, floatResult })
 {
     const fields = createFields(memory);
 
@@ -689,16 +692,6 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     /** @param {number} address @param {number} count */
     const readFloats = (address, count)=>readDwords(address, count).map(fields.asFloat);
 
-    /**
-     * The descriptors an object answers to: an interface it does not claim is
-     * left out, so QueryInterface refuses it rather than answering for it.
-     *
-     * @param {any} object
-     * @param {import('./com.js').InterfaceDescriptor[]} interfaces
-     */
-    const answeredBy = (object, interfaces)=>(typeof object?.supports === 'function'
-        ? interfaces.filter(entry=>object.supports(entry.id))
-        : interfaces);
 
     /**
      * Objects an API `Get` handed back, written as published pointers. Each
@@ -720,7 +713,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         }
         objects.forEach((object, index)=>{
             fields.writeU32(address + index * 4,
-                object ? publisher.publish(object, answeredBy(object, interfaces), id) : 0);
+                object ? publisher.publish(object, interfaces, id) : 0);
         });
     };
 
@@ -739,7 +732,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         // A record in a ring may name it: the rings are played before its
         // count is touched on the host.
         object.settleGuestRefs ??= syncRings;
-        const pointer = publisher.publish(object, answeredBy(object, interfaces), id);
+        const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
         return pointer === 0 ? E_INVALIDARG : S_OK;
     };
@@ -793,11 +786,23 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         GetPrivateData: getPrivateData,
     };
 
-    /** @param {any} child @param {number[]} args */
+    /**
+     * A child's device, as Direct3D 10's. An object Direct3D 11 made answers
+     * Direct3D 10's interfaces too, but its device does not: it hands back
+     * none (test_buffer_interfaces).
+     *
+     * @param {any} child @param {number[]} args
+     */
     const getDevice = (child, [out])=>{
         /** @type {{ device?: any }} */
         const held = {};
         child.GetDevice(held);
+        if (!held.device?.supports(IID.ID3D10Device))
+        {
+            held.device?.release();
+            fields.writeU32(out, 0);
+            return;
+        }
         handBack(held.device, deviceInterfaces, IID.ID3D10Device, out);
     };
 
@@ -1504,9 +1509,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     const contexts = new WeakMap();
 
     /**
+     * Direct3D 11's faces of the same objects (`d3d11.js`), each list below
+     * ending with its own: what a program reaches through either version.
+     */
+    const eleven = createDirect3D11Seam(describe, ()=>kit, { context: {} });
+
+    /**
      * The interfaces every resource shares, after its own: Direct3D's two
      * bases and DXGI's four faces of the same object. Which of them a given
-     * resource answers to is its own to say (`answeredBy`).
+     * resource answers to is its own to say (its `supports`, which the publisher asks).
      *
      * @type {import('./com.js').InterfaceDescriptor[]}
      */
@@ -1570,7 +1581,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         GetDesc: (buffer, [out])=>{
             fields.writeStruct(out, D3D10_BUFFER_DESC, buffer.desc);
         },
-    }, bufferGuests, buffer=>ringOf(buffer)?.released(buffer)), ...resourceBases];
+    }, bufferGuests, buffer=>ringOf(buffer)?.released(buffer)), ...resourceBases,
+    ...eleven.faces.buffer];
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const texture1DInterfaces = [describe(IID.ID3D10Texture1D, ID3D10TEXTURE_SLOTS, {
@@ -1582,7 +1594,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         GetDesc: (texture, [out])=>{
             fields.writeStruct(out, D3D10_TEXTURE1D_DESC, texture.desc);
         },
-    }), ...resourceBases];
+    }), ...resourceBases, ...eleven.faces.texture1D];
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const texture2DInterfaces = [describe(IID.ID3D10Texture2D, ID3D10TEXTURE_SLOTS, {
@@ -1598,7 +1610,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                 SampleQuality: texture.desc.SampleDesc.Quality,
             });
         },
-    }), ...resourceBases];
+    }), ...resourceBases, ...eleven.faces.texture2D];
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const texture3DInterfaces = [describe(IID.ID3D10Texture3D, ID3D10TEXTURE_SLOTS, {
@@ -1621,7 +1633,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         GetDesc: (texture, [out])=>{
             fields.writeStruct(out, D3D10_TEXTURE3D_DESC, texture.desc);
         },
-    }), ...resourceBases];
+    }), ...resourceBases, ...eleven.faces.texture3D];
 
     /**
      * The interface list a resource is published as, by what it is.
@@ -1681,13 +1693,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         },
     });
 
-    const renderTargetViewInterfaces = viewInterfaces(IID.ID3D10RenderTargetView,
-        VIEW_UNION.RENDER_TARGET);
-    const depthStencilViewInterfaces = viewInterfaces(IID.ID3D10DepthStencilView,
-        VIEW_UNION.DEPTH_STENCIL);
-    const shaderResourceViewInterfaces = viewInterfaces(IID.ID3D10ShaderResourceView,
+    const renderTargetViewInterfaces = [...viewInterfaces(IID.ID3D10RenderTargetView,
+        VIEW_UNION.RENDER_TARGET), ...eleven.faces.rtv];
+    const depthStencilViewInterfaces = [...viewInterfaces(IID.ID3D10DepthStencilView,
+        VIEW_UNION.DEPTH_STENCIL), ...eleven.faces.dsv];
+    const shaderResourceViewInterfaces = [...viewInterfaces(IID.ID3D10ShaderResourceView,
         VIEW_UNION.SHADER_RESOURCE, [[IID.ID3D10ShaderResourceView1,
-            ID3D10SHADERRESOURCEVIEW1_SLOTS]], VIEW_UNION.SHADER_RESOURCE1);
+            ID3D10SHADERRESOURCEVIEW1_SLOTS]], VIEW_UNION.SHADER_RESOURCE1),
+    ...eleven.faces.srv];
 
     /**
      * @param {string} id
@@ -1795,24 +1808,25 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             fields.writeF32(out + D3D10_SAMPLER_DESC.BorderColor + index * 4, value);
         });
     };
-    const blendStateInterfaces = stateInterfaces(IID.ID3D10BlendState, writeBlendDesc,
-        [[IID.ID3D10BlendState1, ID3D10BLENDSTATE1_SLOTS]]);
-    const depthStencilStateInterfaces = stateInterfaces(IID.ID3D10DepthStencilState,
-        writeDepthStencilDesc);
-    const rasterizerStateInterfaces = stateInterfaces(IID.ID3D10RasterizerState,
-        writeRasterizerDesc);
-    const samplerStateInterfaces = stateInterfaces(IID.ID3D10SamplerState, writeSamplerDesc);
+    const blendStateInterfaces = [...stateInterfaces(IID.ID3D10BlendState, writeBlendDesc,
+        [[IID.ID3D10BlendState1, ID3D10BLENDSTATE1_SLOTS]]), ...eleven.faces.blend];
+    const depthStencilStateInterfaces = [...stateInterfaces(IID.ID3D10DepthStencilState,
+        writeDepthStencilDesc), ...eleven.faces.depthStencil];
+    const rasterizerStateInterfaces = [...stateInterfaces(IID.ID3D10RasterizerState,
+        writeRasterizerDesc), ...eleven.faces.rasterizer];
+    const samplerStateInterfaces = [...stateInterfaces(IID.ID3D10SamplerState,
+        writeSamplerDesc), ...eleven.faces.sampler];
 
     const childMethods = { GetDevice: getDevice, ...privateDataMethods };
     const childBase = describe(IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS, childMethods);
     const vertexShaderInterfaces = [describe(IID.ID3D10VertexShader, ID3D10SHADER_SLOTS,
-        childMethods), childBase];
+        childMethods), childBase, ...eleven.faces.vs];
     const geometryShaderInterfaces = [describe(IID.ID3D10GeometryShader, ID3D10SHADER_SLOTS,
-        childMethods), childBase];
+        childMethods), childBase, ...eleven.faces.gs];
     const pixelShaderInterfaces = [describe(IID.ID3D10PixelShader, ID3D10SHADER_SLOTS,
-        childMethods), childBase];
+        childMethods), childBase, ...eleven.faces.ps];
     const inputLayoutInterfaces = [describe(IID.ID3D10InputLayout, ID3D10SHADER_SLOTS,
-        childMethods), childBase];
+        childMethods), childBase, ...eleven.faces.inputLayout];
     const queryMethods = {
         ...childMethods,
         /** @param {any} query */
@@ -1845,7 +1859,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     // for all three; which of them an object answers to is its own to say.
     const queryDescriptors = [IID.ID3D10Query, IID.ID3D10Asynchronous, IID.ID3D10Predicate]
         .map(id=>describe(id, ID3D10QUERY_SLOTS, queryMethods))
-        .concat(describe(IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS, queryMethods));
+        .concat(describe(IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS, queryMethods),
+            eleven.faces.query);
 
     // --- reading descriptions ---
 
@@ -2838,7 +2853,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                 }
                 made.forEach((surface, index)=>{
                     fields.writeU32(out + index * 4, publisher.publish(surface,
-                        answeredBy(surface, texture2DInterfaces), IID.IDXGISurface));
+                        texture2DInterfaces, IID.IDXGISurface));
                 });
                 return S_OK;
             },
@@ -2894,7 +2909,65 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             /** @param {any} device */
             GetMultithreadProtected: device=>(device.GetMultithreadProtected() ? 1 : 0),
         }),
+        // Direct3D 11's device: the same object, created by either version.
+        ...eleven.faces.device,
     ];
+
+    /** What Direct3D 11's half of the seam reads of this one, when its calls run. */
+    /** @type {import('./d3d11.js').Direct3D11Kit} */
+    const kit = {
+        publisher, memory, fields, handBack, writeObjects, readObjects, readDwords, readFloats,
+        privateDataMethods, readInitialData, readTexture2DDesc,
+        readTexture1DDesc: address=>fields.readStruct(address, D3D10_TEXTURE1D_DESC),
+        readTexture3DDesc: address=>fields.readStruct(address, D3D10_TEXTURE3D_DESC),
+        writeTextureDesc: (texture, out)=>{
+            switch (texture.dimension)
+            {
+                case D3D10_RESOURCE_DIMENSION.TEXTURE1D:
+                    fields.writeStruct(out, D3D10_TEXTURE1D_DESC, texture.desc);
+                    break;
+                case D3D10_RESOURCE_DIMENSION.TEXTURE3D:
+                    fields.writeStruct(out, D3D10_TEXTURE3D_DESC, texture.desc);
+                    break;
+                default:
+                    fields.writeStruct(out, D3D10_TEXTURE2D_DESC, {
+                        ...texture.desc,
+                        SampleCount: texture.desc.SampleDesc.Count,
+                        SampleQuality: texture.desc.SampleDesc.Quality,
+                    });
+            }
+        },
+        readBox, updateBytesOf, readInputElements, readRects, readBlendDesc1,
+        readDepthStencilDesc, readRasterizerDesc, readSamplerDesc, writeBlendDesc1,
+        writeDepthStencilDesc, writeRasterizerDesc, writeSamplerDesc,
+        readQueryDesc: address=>fields.readStruct(address, D3D10_QUERY_DESC),
+        writeQueryDesc: (desc, out)=>{
+            fields.writeStruct(out, D3D10_QUERY_DESC, desc);
+        },
+        mapInto, unmapFrom, whenMappable, ringOf, attachRing, attachBuffer,
+        created: device=>{
+            created.push(device);
+        },
+        pairSwapChain: (swapChain, device)=>{
+            swapChainDevices.set(swapChain, device);
+        },
+        readSwapChainDesc: address=>sized(readSwapChainDesc(memory, address)),
+        root,
+        floatResult,
+        diverge: detail=>divergence?.('Direct3D 11', detail),
+        lists: {
+            device: deviceInterfaces, buffer: bufferInterfaces,
+            srv: shaderResourceViewInterfaces, rtv: renderTargetViewInterfaces,
+            dsv: depthStencilViewInterfaces, uav: eleven.lists.uav,
+            blend: blendStateInterfaces, depthStencil: depthStencilStateInterfaces,
+            rasterizer: rasterizerStateInterfaces, sampler: samplerStateInterfaces,
+            vs: vertexShaderInterfaces, hs: eleven.lists.hs, ds: eleven.lists.ds,
+            gs: geometryShaderInterfaces, ps: pixelShaderInterfaces, cs: eleven.lists.cs,
+            inputLayout: inputLayoutInterfaces, query: queryDescriptors,
+            swapChain: swapChainInterfaces,
+        },
+        resourceInterfaces: resource=>resourceInterfaces(resource)[0],
+    };
 
     // --- blobs and reflection ---
 
@@ -3673,6 +3746,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                     name !== 'D3D10CreateDevice' && name !== 'D3D10CreateDeviceAndSwapChain')),
             },
             'D3D10.dll': d3d10Exports,
+            'D3D11.dll': eleven.library,
             'DXGI.dll': {
                 /** HRESULT CreateDXGIFactory(REFIID, void**) */
                 CreateDXGIFactory: {

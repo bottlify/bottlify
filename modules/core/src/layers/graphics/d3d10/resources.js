@@ -32,7 +32,8 @@ import { attachCom } from './com.js';
 import {
     ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_MAP,
     D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC,
-    D3D10_USAGE, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FORMAT, DXGI_USAGE,
+    D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS, D3D11_BUFFER_UAV_FLAG, D3D11_RESOURCE_MISC,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FORMAT, DXGI_USAGE,
     E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_OK,
 } from './constants.js';
 import { VIEW_UNION } from './structs.js';
@@ -410,7 +411,10 @@ function defaultDimensionName(resource, dimensions){
     // it as one -- and its six faces as an array where it has not.
     if (isCube(resource) && dimensions.TEXTURECUBE !== undefined)
     {
-        return 'TEXTURECUBE';
+        // Two cubes' faces or more are viewed as an array of them, where the
+        // kind has one.
+        return resource.desc.ArraySize >= 12 && dimensions.TEXTURECUBEARRAY !== undefined
+            ? 'TEXTURECUBEARRAY' : 'TEXTURECUBE';
     }
     const name = isMultisampled(resource)
         ? (resource.desc.ArraySize > 1 ? 'TEXTURE2DMSARRAY' : 'TEXTURE2DMS')
@@ -536,8 +540,15 @@ export function resolveViewDesc(request){
     if (resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER)
     {
         // A buffer has no shape to infer a view from, so a null description is
-        // not "the obvious one" but a request that cannot be answered.
-        const reported = desc ? resolveBufferViewDesc(resource, desc, dimensions) : null;
+        // not "the obvious one" but a request that cannot be answered -- but
+        // for a buffer of structures, whose shape is its stride.
+        const structured = ((resource.desc.MiscFlags11 ?? 0)
+            & D3D11_RESOURCE_MISC.BUFFER_STRUCTURED) !== 0;
+        const asked = desc ?? (structured ? { Format: DXGI_FORMAT.UNKNOWN,
+            ViewDimension: dimensions.BUFFER, FirstElement: 0,
+            NumElements: Math.floor(resource.desc.ByteWidth / resource.desc.StructureByteStride) }
+            : null);
+        const reported = asked ? resolveBufferViewDesc(resource, asked, dimensions) : null;
         return reported ? { desc: reported, dimensionName: 'BUFFER', range: null } : null;
     }
 
@@ -550,7 +561,8 @@ export function resolveViewDesc(request){
         return null;
     }
 
-    const format = resolveViewFormat(resource.desc.Format, desc ? desc.Format : 0);
+    const format = resolveViewFormat(resource.desc.Format, desc ? desc.Format : 0,
+        resource.desc.DXGIUsage !== undefined);
     if (format === null)
     {
         return null;
@@ -561,6 +573,10 @@ export function resolveViewDesc(request){
     /** @type {Record<string, number>} */
     const values = {};
 
+    if (members.includes('Flags'))
+    {
+        values.Flags = asked('Flags', 0);
+    }
     const mipMember = members.includes('MostDetailedMip') ? 'MostDetailedMip' : 'MipSlice';
     const mip = members.includes(mipMember) ? asked(mipMember, 0) : 0;
     if (mip >= resource.desc.MipLevels)
@@ -584,22 +600,28 @@ export function resolveViewDesc(request){
     let first = 0;
     let count = 1;
     for (const [firstMember, countMember] of [['FirstArraySlice', 'ArraySize'],
-        ['FirstWSlice', 'WSize']])
+        ['FirstWSlice', 'WSize'], ['First2DArrayFace', 'NumCubes']])
     {
         if (!members.includes(firstMember))
         {
             continue;
         }
         first = asked(firstMember, 0);
-        const fits = sliceCountOf(first, asked(countMember, ALL_REMAINING),
-            availableSlices(resource, mip));
-        if (fits === null)
+        // A cube array counts cubes, six faces each, from any face: "all
+        // that remain" is as many whole cubes as fit (test_create_shader_resource_view).
+        const per = countMember === 'NumCubes' ? 6 : 1;
+        const wanted = asked(countMember, ALL_REMAINING);
+        const remaining = availableSlices(resource, mip) - first;
+        const fits = sliceCountOf(first, wanted === ALL_REMAINING
+            ? Math.floor(Math.max(0, remaining) / per) * per : wanted * per,
+        availableSlices(resource, mip));
+        if (fits === null || fits % per !== 0)
         {
             return null;
         }
         count = fits;
         values[firstMember] = first;
-        values[countMember] = count;
+        values[countMember] = fits / per;
     }
     if (resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
         && !members.includes('FirstWSlice'))
@@ -627,29 +649,68 @@ export function resolveViewDesc(request){
  * @returns {any | null}
  */
 function resolveBufferViewDesc(resource, desc, dimensions){
-    if (desc.ViewDimension !== dimensions.BUFFER)
+    const extended = desc.ViewDimension === dimensions.BUFFEREX;
+    if (desc.ViewDimension !== dimensions.BUFFER && !extended)
     {
         return null;
     }
-    // A buffer is bytes and carries no format of its own, so there is nothing
-    // for the view's format to be a cast *of*: it only has to name a real,
-    // concrete format. This is the one view whose format stands alone.
-    const info = FORMAT_INFO[desc.Format];
-    const offset = desc.ElementOffset ?? 0;
-    const width = desc.ElementWidth;
+    // Direct3D 11 names the range FirstElement and NumElements, and may read
+    // the buffer raw -- four bytes at a time, through R32_TYPELESS -- or as
+    // the structures it was made of, through no format at all.
+    const offset = desc.ElementOffset ?? desc.FirstElement ?? 0;
+    const width = desc.ElementWidth ?? desc.NumElements;
+    const flags = desc.Flags ?? 0;
+    const raw = (flags & D3D11_BUFFER_UAV_FLAG.RAW) !== 0;
+    const eleven = resource.desc.MiscFlags11 ?? 0;
+    const structured = (eleven & D3D11_RESOURCE_MISC.BUFFER_STRUCTURED) !== 0;
+    /** @type {number} */
+    let size;
+    if (raw)
+    {
+        if (desc.Format !== DXGI_FORMAT.R32_TYPELESS
+            || (eleven & D3D11_RESOURCE_MISC.BUFFER_ALLOW_RAW_VIEWS) === 0)
+        {
+            return null;
+        }
+        size = 4;
+    }
+    else if (structured)
+    {
+        if (desc.Format !== DXGI_FORMAT.UNKNOWN)
+        {
+            return null;
+        }
+        size = resource.desc.StructureByteStride ?? 0;
+    }
+    else
+    {
+        // A buffer is bytes and carries no format of its own, so there is
+        // nothing for the view's format to be a cast *of*: it only has to name
+        // a real, concrete format.
+        const info = FORMAT_INFO[desc.Format];
+        if (!info || info.kind === FORMAT_KIND.TYPELESS)
+        {
+            return null;
+        }
+        size = info.bytesPerPixel;
+    }
     // The range is elements of the view's format, and every one of them has
     // to lie in the buffer; a width that is missing is no width at all.
-    if (!info || info.kind === FORMAT_KIND.TYPELESS || !(width >= 1)
-        || (offset + width) * info.bytesPerPixel > resource.desc.ByteWidth)
+    if (!(size >= 1) || !(width >= 1) || (offset + width) * size > resource.desc.ByteWidth)
     {
         return null;
     }
     return {
         Format: desc.Format,
-        ViewDimension: dimensions.BUFFER,
+        ViewDimension: desc.ViewDimension,
         dimensionName: 'BUFFER',
+        // Both versions' names for the range's two words, and 11's flags.
         ElementOffset: offset,
         ElementWidth: width,
+        FirstElement: offset,
+        NumElements: width,
+        ...(extended ? { Flags: flags } : {}),
+        elementBytes: size,
     };
 }
 
@@ -661,6 +722,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
  * @property {ViewRange | null} range  What it reaches; null for a buffer's view.
  * @property {string} iid
  * @property {readonly string[]} [also]  Later versions of the interface it answers to.
+ * @property {boolean} [eleven]  A view Direct3D 11 has alone: no Direct3D 10 interface.
  * @property {() => void} retainDevice
  * @property {() => void} releaseDevice
  * @property {() => any} device
@@ -673,6 +735,16 @@ export function createView(options){
     return attachCom({
         dimensionName: options.dimensionName,
         range: options.range,
+        /** An append or counter view's hidden count, as a binding last set it. */
+        counter: 0,
+
+        /** @param {number} count  ~0 keeps the count it has */
+        setInitialCount(count){
+            if (count !== 0xffffffff)
+            {
+                this.counter = count >>> 0;
+            }
+        },
 
         /** @param {{ desc?: any }} out */
         GetDesc(out){
@@ -704,8 +776,8 @@ export function createView(options){
             return S_OK;
         },
     }, {
-        interfaces: [IID.ID3D10DeviceChild, IID.ID3D10View, options.iid,
-            ...(options.also ?? [])],
+        interfaces: [...(options.eleven ? [IID.ID3D11DeviceChild, IID.ID3D11View]
+            : [IID.ID3D10DeviceChild, IID.ID3D10View]), options.iid, ...(options.also ?? [])],
         onFirstRef: options.retainDevice,
         onLastRef: options.releaseDevice,
     });
@@ -728,6 +800,24 @@ export const VIEW_KINDS = Object.freeze({
         bindFlag: D3D10_BIND.SHADER_RESOURCE,
         iid: IID.ID3D10ShaderResourceView,
         also: Object.freeze([IID.ID3D10ShaderResourceView1]),
+    }),
+    // Direct3D 11's descriptions of the same views, and its own kind.
+    SHADER_RESOURCE11: Object.freeze({
+        union: VIEW_UNION.SHADER_RESOURCE11,
+        bindFlag: D3D10_BIND.SHADER_RESOURCE,
+        iid: IID.ID3D10ShaderResourceView,
+        also: Object.freeze([IID.ID3D10ShaderResourceView1]),
+    }),
+    DEPTH_STENCIL11: Object.freeze({
+        union: VIEW_UNION.DEPTH_STENCIL11,
+        bindFlag: D3D10_BIND.DEPTH_STENCIL,
+        iid: IID.ID3D10DepthStencilView,
+    }),
+    UNORDERED_ACCESS: Object.freeze({
+        union: VIEW_UNION.UNORDERED_ACCESS,
+        bindFlag: D3D11_BIND_UNORDERED_ACCESS,
+        iid: IID.ID3D11UnorderedAccessView,
+        eleven: true,
     }),
 });
 

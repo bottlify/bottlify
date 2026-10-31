@@ -13,7 +13,10 @@
  * every library and DirectX 9.0c.
  */
 
-/** @typedef {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} GraphicsChoice */
+/**
+ * @typedef {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'directx11' | 'opengl'}
+ *     GraphicsChoice
+ */
 
 /**
  * @typedef {Object} GraphicsStack
@@ -46,6 +49,10 @@ export const GRAPHICS_CHOICES = Object.freeze({
     directx10: Object.freeze({
         libraries: [...DIRECTX9.libraries, 'D3D10.dll', 'D3D10_1.dll', 'DXGI.dll'],
         apis: [...DIRECTX9.apis, 'd3d10'], directx: '9', videoMemory: 1024 }),
+    // Direct3D 11 is the same root as 10 (`d3d10/root.js`), with its library.
+    directx11: Object.freeze({
+        libraries: [...DIRECTX9.libraries, 'D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll'],
+        apis: [...DIRECTX9.apis, 'd3d10'], directx: '9', videoMemory: 2048 }),
     opengl: Object.freeze({ libraries: ['OPENGL32.dll', 'GLU32.dll'], apis: ['opengl'],
         directx: null, videoMemory: DEFAULT_VIDEO_MEMORY }),
 });

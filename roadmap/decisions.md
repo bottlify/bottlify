@@ -733,6 +733,15 @@ from the rest reads what Windows would give it: something, not what it wrote bef
 given another storage only where the engine watches the program's writes, so an unmap sends the
 pages written and not the storage. *2026-10-31.*
 
+**A75. A geometry, hull or domain shader is made, and a draw with one bound is skipped.** WebGPU
+has none of those stages and none is emulated. Hardware of the levels Direct3D 10 and 11 run at
+always has them, so a program checks nothing before relying on them: refusing the create
+(`E_NOTIMPL`, as Direct3D 10 here did until now) leaves it holding a null shader it goes on to
+bind and release -- Wine's d3d10core and d3d11 tests crash there, hiding every check after. A
+draw through the missing stage would put the program's points and triangles where the stage
+expands, culls or routes them, so it is not drawn at all; the renderer counts it
+(`skipped.stage`) and says so once. *2026-10-31.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

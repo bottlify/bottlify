@@ -33,7 +33,8 @@ import {
     D3D10_DEPTH_WRITE_MASK, D3D10_FILL_MODE, D3D10_FILTER, D3D10_FILTER_ANISOTROPIC_BIT,
     D3D10_FILTER_COMPARISON_BIT, D3D10_INPUT_CLASSIFICATION, D3D10_PRIMITIVE_TOPOLOGY,
     D3D10_RESOURCE_DIMENSION, D3D10_STENCIL_OP, D3D10_TEXTURE_ADDRESS, D3D10_USAGE,
-    D3D10_APPEND_ALIGNED_ELEMENT, DXGI_FORMAT, FORMAT_INFO, formatPitch,
+    D3D10_APPEND_ALIGNED_ELEMENT, D3D11_BIND_UNORDERED_ACCESS, DXGI_FORMAT, FORMAT_INFO,
+    formatPitch,
 } from './constants.js';
 
 /** The most bytes a constant buffer has: 4096 registers of sixteen. */
@@ -260,7 +261,8 @@ const DEFAULT_BLEND = Object.freeze({
  * been released already read as nothing.
  *
  * @typedef {Object} PipelineSnapshot
- * @property {{ vs: StageBindings, gs: StageBindings, ps: StageBindings }} stages
+ * @property {{ vs: StageBindings, hs: StageBindings, ds: StageBindings, gs: StageBindings,
+ *     ps: StageBindings, cs: StageBindings }} stages
  * @property {any} inputLayout
  * @property {any[]} vertexBuffers
  * @property {number[]} vertexStrides
@@ -271,6 +273,8 @@ const DEFAULT_BLEND = Object.freeze({
  * @property {number} topology
  * @property {any[]} renderTargets
  * @property {any} depthStencilView
+ * @property {any[]} [pixelViews]    what a pixel shader writes through, by slot
+ * @property {any[]} [computeViews]  what a compute shader writes through, by slot
  * @property {any} blendState
  * @property {number[]} blendFactor
  * @property {number} sampleMask
@@ -478,6 +482,8 @@ export function createRenderer(services){
             noShader: 0,
             untranslatable: 0,
             pipeline: 0,
+            /** A draw with a geometry, hull or domain shader bound. */
+            stage: 0,
         },
         /** @type {string[]} */
         failures: [],
@@ -671,7 +677,8 @@ export function createRenderer(services){
     const bufferUsageOf = desc=>{
         const usage = /** @type {any} */ (BufferUsage);
         return usage.VERTEX | usage.INDEX | usage.UNIFORM | usage.COPY_DST | usage.COPY_SRC
-            | ((desc.BindFlags & D3D10_BIND.SHADER_RESOURCE) !== 0 ? usage.STORAGE : 0);
+            | ((desc.BindFlags & (D3D10_BIND.SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS)) !== 0
+                ? usage.STORAGE : 0);
     };
 
     /** @param {any} resource */
@@ -2553,6 +2560,53 @@ export function createRenderer(services){
         },
 
         /**
+         * The bytes the device keeps of a buffer, as the processor last made
+         * them: what an indirect call's arguments are read from.
+         *
+         * @param {any} resource
+         * @returns {Uint8Array}
+         */
+        bufferBytes(resource){
+            const backing = backingOf(resource);
+            if (backing.guest)
+            {
+                guestWritten(backing, 0, backing.bytes.length);
+            }
+            return backing.bytes;
+        },
+
+        /**
+         * A compute shader's run over a grid of groups.
+         *
+         * @param {PipelineSnapshot} pipeline
+         * @param {{ x: number, y: number, z: number }} groups
+         */
+        dispatch(pipeline, groups){
+            void pipeline;
+            void groups;
+            diverge('a compute shader is not run');
+        },
+
+        /**
+         * @param {any} view an unordered-access view
+         * @param {number[]} values @param {boolean} float
+         */
+        clearUnorderedAccessView(view, values, float){
+            void view;
+            void values;
+            void float;
+            diverge('an unordered-access view is not cleared');
+        },
+
+        /** @param {any} destination @param {number} offset @param {any} view */
+        copyStructureCount(destination, offset, view){
+            void destination;
+            void offset;
+            void view;
+            diverge('a structure count is not copied');
+        },
+
+        /**
          * @param {PipelineSnapshot} pipeline
          * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
          *           indexCount?: number, startIndex?: number, baseVertex?: number,
@@ -2593,6 +2647,18 @@ export function createRenderer(services){
             if (!viewport || !(viewport.Width > 0) || !(viewport.Height > 0))
             {
                 counters.skipped.noViewport++;
+                return;
+            }
+            // WebGPU has no geometry stage and no tessellator: a draw through
+            // one is skipped, never drawn as if the stage were not there.
+            const absent = [['gs', 'geometry'], ['hs', 'hull'], ['ds', 'domain']]
+                .find(([stage])=>pipeline.stages[/** @type {'gs' | 'hs' | 'ds'} */ (stage)]
+                    ?.shader);
+            if (absent)
+            {
+                counters.skipped.stage++;
+                diverge(`a draw with a ${absent[1]} shader bound is skipped: WebGPU has no such`
+                    + ' stage, and none is emulated');
                 return;
             }
             // Without a pixel shader the draw still runs: it writes depth and

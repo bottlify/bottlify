@@ -178,7 +178,9 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells){
                 return { id, methods: IUNKNOWN_ONLY };
             }
             const descriptor = declared.get(id);
-            if (!descriptor)
+            // An object that says which interfaces it has says it now: one may
+            // come to answer an interface it did not when it was published.
+            if (!descriptor || (typeof api.supports === 'function' && !api.supports(id)))
             {
                 return null;
             }
