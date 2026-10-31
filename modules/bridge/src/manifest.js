@@ -47,12 +47,17 @@ export const PLATFORMS = Object.freeze({
             '*://*.steamcontent.com/*', '*://*.steampipe.akamaized.net/*',
             // Valve's client distribution: the client's own DLLs, which a DRM
             // wrapper reads as the installed client's (core's steam/client.js).
-            'https://client-update.akamai.steamstatic.com/*']),
+            'https://client-update.akamai.steamstatic.com/*',
+            // The apps' art a library shows (core's steam/apps.js, STEAM_ART),
+            // under the hosts Steam has served it from.
+            'https://shared.steamstatic.com/*', 'https://shared.akamai.steamstatic.com/*',
+            'https://shared.cloudflare.steamstatic.com/*', 'https://cdn.akamai.steamstatic.com/*',
+            'https://cdn.cloudflare.steamstatic.com/*']),
     }),
 });
 
 /** What the content script imports, which the page may therefore load too. */
-export const MODULES = Object.freeze(['bridge.js', 'protocol.js', 'steam/*', 'zstd.js']);
+export const MODULES = Object.freeze(['bridge.js', 'protocol.js', 'platforms/*', 'steam/*', 'zstd.js']);
 
 /**
  * @param {keyof typeof PAGES} build

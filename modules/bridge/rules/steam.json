@@ -23,5 +23,22 @@
                 "client-update.akamai.steamstatic.com"],
             "resourceTypes": ["xmlhttprequest", "other"]
         }
+    },
+    {
+        "id": 3,
+        "priority": 1,
+        "action": {
+            "type": "modifyHeaders",
+            "responseHeaders": [
+                { "header": "Access-Control-Allow-Origin", "operation": "set", "value": "*" },
+                { "header": "Cross-Origin-Resource-Policy", "operation": "set", "value": "cross-origin" }
+            ]
+        },
+        "condition": {
+            "requestDomains": ["shared.steamstatic.com", "shared.akamai.steamstatic.com",
+                "shared.cloudflare.steamstatic.com", "cdn.akamai.steamstatic.com",
+                "cdn.cloudflare.steamstatic.com"],
+            "resourceTypes": ["image"]
+        }
     }
 ]
