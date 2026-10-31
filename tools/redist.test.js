@@ -359,3 +359,26 @@ test('a program the app carries that is not read as an installer is passed over,
     assert.ok(said.some(line=>line.startsWith('Binaries\\Tool.exe: not read as an installer (')),
         said.join('\n'));
 });
+
+test('DirectX setup installs its optional packages alone, not the system it carries', async()=>{
+    const [x86] = directxCabinets();
+    /** @type {Map<string, Uint8Array>} */
+    const files = new Map([
+        ['_CommonRedist\\DirectX\\DXSETUP.exe', peImage(0x14c)],
+        // dxnt.cab carries the system's own DirectX for a system before XP.
+        ['_CommonRedist\\DirectX\\dxnt.cab', x86],
+        ['_CommonRedist\\DirectX\\installscript.vdf', latin1(DIRECTX_SCRIPT
+            .replace(/Jun2010\\\\/g, ''))],
+    ]);
+    const tree = {
+        list: async()=>[...files.keys()],
+        read: async(/** @type {string} */ path)=>/** @type {Uint8Array} */ (files.get(path)),
+        write: async(/** @type {string} */ path, /** @type {Uint8Array} */ bytes)=>{
+            files.set(path, bytes);
+        },
+    };
+    const said = await redist.installRedistributables(tree,
+        ['_CommonRedist\\DirectX\\installscript.vdf'], 'x86');
+    assert.deepEqual([...files.keys()].filter(path=>path.startsWith('.bottlify')), [],
+        said.join('\n'));
+});

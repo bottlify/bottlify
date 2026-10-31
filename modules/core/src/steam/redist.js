@@ -831,9 +831,13 @@ export async function installRedistributables(tree, scripts, machine){
         {
             // DirectX's setup: the cabinets in its own folder.
             const folder = inside.slice(0, inside.lastIndexOf('\\') + 1).toLowerCase();
-            const cabinetPaths = paths.filter(path=>/\.cab$/i.test(path)
-                && path.toLowerCase().startsWith(folder)
-                && !path.slice(folder.length).includes('\\'));
+            // The optional packages alone (`Jun2010_XAudio_x86.cab`): what the
+            // setup installs on XP and later. dxnt.cab, DirectX.cab and the
+            // like carry the system's own DirectX (dsound, ddraw, d3d8,
+            // dinput) for systems before it, which the setup leaves alone
+            // there and the engine answers for itself.
+            const cabinetPaths = paths.filter(path=>path.toLowerCase().startsWith(folder)
+                && /^[a-z]{3}20\d\d_[^\\]+\.cab$/i.test(path.slice(folder.length)));
             const cabinets = await Promise.all(cabinetPaths.map(path=>tree.read(path)));
             /** @type {ReturnType<typeof directxFiles>} */
             let directx;
