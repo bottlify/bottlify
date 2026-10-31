@@ -29,8 +29,12 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 const UAV_BUFFER = 1;
 const UAV_TEXTURE2D = 4;
 
-/** A level 11 device over the recording GPU, and its immediate context. */
-function harness(){
+/**
+ * A level 11 device over the recording GPU, and its immediate context.
+ *
+ * @param {(descriptor: any, made: (descriptor: any) => any) => any} [createTexture]
+ */
+function harness(createTexture){
     const gpu = createFakeDevice();
     /** @type {string[]} */
     const divergences = [];
@@ -41,7 +45,9 @@ function harness(){
     assert.equal(D3D11CreateDevice(null, 1, null, 0, [D3D_FEATURE_LEVEL.LEVEL_11_0], out, {
         backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
-        createTexture: gpu.device.createTexture,
+        createTexture: createTexture
+            ? (/** @type {any} */ descriptor)=>createTexture(descriptor, gpu.device.createTexture)
+            : gpu.device.createTexture,
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
     }), S_OK);
     return { gpu, divergences, device: out.device, context: out.context };
@@ -283,4 +289,24 @@ test('DispatchIndirect from a buffer a shader writes reads its grid on the GPU',
     await h.device.idle();
     const [dispatch] = h.gpu.of('dispatchWorkgroups');
     assert.deepEqual(dispatch.indirect, { buffer: args.gpu, offset: 12 });
+});
+
+test('a texture the device refuses on the spot is kept in memory and said, and the device goes'
+    + ' on', ()=>{
+    const h = harness((descriptor, made)=>{
+        if (descriptor.format === 'rg16unorm')
+        {
+            throw new TypeError('rg16unorm needs texture-formats-tier1');
+        }
+        return made(descriptor);
+    });
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    assert.equal(h.device.CreateTexture2D({
+        Width: 4, Height: 4, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT.R16G16_UNORM,
+        SampleDesc: { Count: 1, Quality: 0 }, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0, MiscFlags: 0,
+    }, null, texture), S_OK);
+    assert.ok(h.divergences.some(line=>line.includes('rg16unorm texture cannot be made')),
+        h.divergences.join(' / '));
 });

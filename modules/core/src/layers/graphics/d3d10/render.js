@@ -693,6 +693,25 @@ export function createRenderer(services){
                 : 0);
     };
 
+    /**
+     * A GPU texture, or null where the device refuses the description on
+     * the spot - a format a feature it lacks gates - which is said and the
+     * texture kept in memory, as one of a format with no GPU counterpart.
+     *
+     * @param {any} descriptor
+     */
+    const madeTexture = descriptor=>{
+        try
+        {
+            return createTexture(descriptor);
+        }
+        catch (e){
+            diverge(`a ${descriptor.format} texture cannot be made on this device: ${
+                /** @type {any} */ (e)?.message ?? e}; it is kept in memory and never drawn with`);
+            return null;
+        }
+    };
+
     /** @param {any} resource */
     const backingOf = resource=>{
         let backing = backings.get(resource);
@@ -759,7 +778,7 @@ export function createRenderer(services){
                     : desc.ArraySize,
             };
             const viewFormats = layout.storage ? layout.storage.viewFormats : [];
-            backing.texture = createTexture({
+            backing.texture = madeTexture({
                 label: `d3d10:texture${resource.dimension - 1}d:${layout.format}`,
                 size,
                 mipLevelCount: desc.MipLevels,
@@ -773,6 +792,12 @@ export function createRenderer(services){
                 ...(viewFormats.length > 0 ? { viewFormats } : {}),
                 usage,
             });
+            if (!backing.texture)
+            {
+                backing.storable = false;
+                backings.set(resource, backing);
+                return backing;
+            }
             // The surface a swap chain shows: the whole of level zero.
             backing.surface = {
                 texture: backing.texture,
