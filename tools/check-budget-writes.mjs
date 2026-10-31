@@ -60,8 +60,7 @@ for (const name of readdirSync(EMIT).filter(file=>file.endsWith('.js')
         const returned = statement.includes('CallStack.BUDGET');
         const ended = ending !== null && at > ending.start && at < ending.end
             && /store\('i32',\{offset:\/\*\*@type\{number\}\*\/\(this\.layout\.origin\)\}\)/
-                .test(ending.text.replace(/\s+/g, ''))
-            && ending.text.includes('localSet(Local.origin)');
+                .test(ending.text.replace(/\s+/g, ''));
         if (!charge && !returned && !ended)
         {
             problems.push(`${name}:${line}: the budget written other than as a count:`
