@@ -168,7 +168,8 @@ differently raises a `divergence` event naming the API.
   (`ConstantBufferOffsetting` is false); a logic operation in a blend state and a forced sample
   count in a rasterizer state are refused; `ClearView` of rectangles is not made.
 - Vulkan draws on the engine thread; Direct3D 7, 8, 9, 10, 11 and OpenGL in the graphics worker.
-- Direct3D 10's command ring is i386 code: a 64-bit process traps every device call.
+- Direct3D 10's command ring, which Direct3D 11's immediate context shares, is i386 code: a
+  64-bit process traps every device and context call. A deferred context's calls trap.
 - `D3DX10CompileFromMemory` has no shader model 4 compiler: it answers `E_FAIL` with an error
   blob saying so. A program that ships its shaders compiled asks only for what its cache lacks.
   `D3DX10SaveTextureToFile` answers `E_NOTIMPL`.

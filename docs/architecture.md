@@ -737,6 +737,11 @@ flowchart TB
   A deferred context keeps a pipeline of its own and records its calls; the command list it
   finishes is played on the device from a cleared pipeline. The seam's Direct3D 11 half
   (`seam/d3d11.js`) adds its descriptors to the Direct3D 10 seam's lists for the same objects.
+  The immediate context's per-draw calls go into the device's command ring as 10's do: a call
+  that means what 10's does is 10's routine and record, and where 11's arguments differ (class
+  instances, viewports of floats, a map through the context) a routine of the context's writes
+  the record. Compute shaders run as WebGPU compute passes among the draws; a buffer a shader
+  may write takes the program's bytes, copies and read backs in their turn among them.
 - **Dynamic buffers.** A program may write a dynamic buffer through the pointer a lock gave it,
   after the `Unlock`, and draw from it with no lock between, so a draw sends what changed in the
   range it reads since the buffer was last sent. Only the part of the range on pages written
