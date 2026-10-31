@@ -1569,8 +1569,9 @@ function describe(result, context, calls, symbols){
                 .filter(([, count])=>count > 0)
                 .map(([kind, count])=>`${kind} ${Math.round(count)}`).join(', ');
             say(`    a frame: ${(steady.cork.retired / 1e6).toFixed(1)} M instructions,`
-                + ` ${Math.round(steady.cork.transfers)} transfers through the hash`
-                + ` (countTransfers), exits to the host: ${exits}`);
+                + (steady.cork.transfers === undefined ? ' transfers not counted'
+                    : ` ${Math.round(steady.cork.transfers)} transfers through the hash`)
+                + `, exits to the host: ${exits}`);
         }
     }
     const series = /** @type {any[]} */ (result.series ?? []);

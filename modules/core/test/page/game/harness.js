@@ -1054,7 +1054,9 @@ export function presentFrame(app, request, state, frame){
                 const per = (a, b)=>(a - b) / 240;
                 state.steady.cork = {
                     retired: per(to.retired, from.retired),
-                    transfers: per(to.transfers ?? 0, from.transfers ?? 0),
+                    // Absent where the run did not count them (countTransfers).
+                    ...to.transfers === undefined ? {}
+                        : { transfers: per(to.transfers, from.transfers ?? 0) },
                     exits: Object.fromEntries(Object.keys(to.exits ?? {}).map(kind=>[kind,
                         per(to.exits[kind], from.exits?.[kind] ?? 0)])),
                 };

@@ -5,19 +5,17 @@
  */
 
 /**
- * The engine the core's cpu layer loads when a launch selects cork.
+ * The engine the core's cpu layer loads.
  *
  * The contract is the core's, not this package's: `engine.js` in the cpu
  * layer says what an engine factory takes and what the runtime it returns
- * must answer, and this module is one implementation of it. The core reaches
- * this file through a module URL in its configuration, never through an
- * import -- a launch that selects the emulator runs with this package absent.
+ * must answer, and this module is its implementation. The core reaches this
+ * file through a module URL in its configuration, never through an import.
  *
- * Under `engine: 'cork'` (milestone 5) the core's cork host runs over a memory
- * of its own rather than the emulator's, so it also needs the layout this
- * package translates against and the arithmetic that sizes that memory. Those
- * are re-exported here for the same reason `createEngine` is: the host reaches
- * them through the module URL, never through an import.
+ * The core's cork host runs over a memory laid out as this package translates
+ * against, so it also needs that layout and the arithmetic that sizes the
+ * memory. Those are re-exported here for the same reason `createEngine` is:
+ * the host reaches them through the module URL, never through an import.
  *
  * @typedef {import('../../core/src/layers/cpu/engine.js').EngineEnv} EngineEnv
  * @typedef {import('../../core/src/layers/cpu/engine.js').Runtime} Runtime
