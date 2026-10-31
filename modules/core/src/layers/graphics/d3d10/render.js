@@ -38,6 +38,12 @@ import {
 
 /** The most bytes a constant buffer has: 4096 registers of sixteen. */
 const MOST_CONSTANT_BYTES = 65536;
+
+/**
+ * The most bytes an input element reads past its slot's stride: a 32-bit
+ * four-component element at the largest aligned offset an element may have.
+ */
+const UNBOUND_ATTRIBUTE_BYTES = 2048 + 16;
 import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
     INDEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, copyCompatible,
@@ -1090,6 +1096,26 @@ export function createRenderer(services){
         return gpu;
     };
 
+    /** Zeros a slot with nothing bound is read from, grown as draws need more. @type {any} */
+    let zeros = null;
+    /**
+     * At least `bytes` of zeros as a vertex buffer. WebGPU creates a buffer
+     * zeroed, and nothing ever writes this one.
+     *
+     * @param {number} bytes
+     */
+    const zeroVertices = bytes=>{
+        if (!zeros || zeros.size < bytes)
+        {
+            zeros = backend.createDynamicBuffer({
+                label: 'd3d10:unbound-vertices',
+                size: Math.max(bytes, 4096),
+                usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
+            });
+        }
+        return zeros.gpu;
+    };
+
     /**
      * What an unbound slot reads as: zeros, black, and a point sampler -- a
      * texture of the type and shape the shader declared, because WebGPU binds
@@ -1633,6 +1659,7 @@ export function createRenderer(services){
         return {
             gpu, program, groupLayouts, slots: layout.slots,
             steps: layout.buffers.map((/** @type {any} */ buffer)=>buffer.stepMode),
+            strides: layout.buffers.map((/** @type {any} */ buffer)=>buffer.arrayStride ?? 0),
         };
     };
 
@@ -3158,16 +3185,26 @@ export function createRenderer(services){
                 }
                 pipeline.slots.forEach((/** @type {number} */ slot, /** @type {number} */ index)=>{
                     const buffer = command.vertexBuffers[slot];
+                    const instanced = pipeline.steps[index] === 'instance';
                     if (buffer)
                     {
                         // SV_InstanceID counts from zero whatever the first
                         // instance, where WebGPU's instance index counts from
                         // it: the per-instance streams start there instead.
-                        const skipped = pipeline.steps[index] === 'instance'
-                            ? command.startInstance * buffer.stride
-                            : 0;
+                        const skipped = instanced ? command.startInstance * buffer.stride : 0;
                         current.setVertexBuffer(index, buffer.gpu, buffer.offset + skipped);
+                        return;
                     }
+                    // A slot the layout reads and nothing is bound to reads
+                    // zeros in Direct3D; WebGPU refuses the frame over a slot
+                    // left empty, so zeros enough for every element the draw
+                    // reads are bound there.
+                    const stride = pipeline.strides[index] ?? 0;
+                    const elements = instanced ? command.instanceCount
+                        : command.indexCount === null ? command.startVertex + command.vertexCount
+                            : 0;
+                    current.setVertexBuffer(index,
+                        zeroVertices(stride * elements + UNBOUND_ATTRIBUTE_BYTES), 0);
                 });
                 if (command.indexCount !== null)
                 {

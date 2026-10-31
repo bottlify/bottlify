@@ -284,7 +284,28 @@ export function createFakeDevice(options = {}){
         pass.beginOcclusionQuery = (/** @type {number} */ index)=>
             record('beginOcclusionQuery', { index });
         pass.endOcclusionQuery = ()=>record('endOcclusionQuery', {});
-        pass.setPipeline = (/** @type {any} */ pipeline)=>record('setPipeline', { pipeline });
+        /** The pipeline set, and the vertex slots given a buffer. @type {any} */
+        let bound = null;
+        /** @type {Set<number>} */
+        const vertexSlots = new Set();
+        pass.setPipeline = (/** @type {any} */ pipeline)=>{
+            bound = pipeline;
+            record('setPipeline', { pipeline });
+        };
+        // WebGPU's rule a renderer has to keep: every vertex buffer slot the
+        // pipeline reads has a buffer set before the draw, which a real
+        // device refuses the frame over and this one refuses too.
+        const slotsSet = ()=>{
+            const wanted = bound?.descriptor?.vertex?.buffers?.length ?? 0;
+            for (let slot = 0; slot < wanted; slot++)
+            {
+                if (!vertexSlots.has(slot) && !encoder.invalid)
+                {
+                    encoder.invalid = true;
+                    refuse(`Vertex buffer slot ${slot} required by the pipeline was not set.`);
+                }
+            }
+        };
         // A dynamic binding resolves to the byte range the shader would read:
         // the offsets arrive in binding order, and the resource names the
         // buffer and the block's declared size. Recording that, not only the
@@ -333,16 +354,21 @@ export function createFakeDevice(options = {}){
             // same array again for its next draw.
             record('setBindGroup', { index, group, offsets: offsets && [...offsets], resolved });
         };
-        pass.setVertexBuffer = (/** @type {number} */ slot, /** @type {any} */ buffer,
-            /** @type {number} */ offset)=>record('setVertexBuffer', { slot, buffer, offset });
+        /** @param {number} slot @param {any} buffer @param {number} offset */
+        pass.setVertexBuffer = (slot, buffer, offset)=>{
+            vertexSlots.add(slot);
+            record('setVertexBuffer', { slot, buffer, offset });
+        };
         pass.setIndexBuffer = (/** @type {any} */ buffer, /** @type {string} */ format,
             /** @type {number} */ offset)=>record('setIndexBuffer', { buffer, format, offset });
         pass.draw = (/** @type {number[]} */ ...args)=>{
             stats.draws++;
+            slotsSet();
             record('draw', { args });
         };
         pass.drawIndexed = (/** @type {number[]} */ ...args)=>{
             stats.draws++;
+            slotsSet();
             record('drawIndexed', { args });
         };
         pass.end = ()=>record('endPass', {});

@@ -549,6 +549,35 @@ test('a dynamic constant buffer is mapped, written, and bound at the draw', asyn
     assert.deepEqual(h.gpu.of('setBindGroup').map((/** @type {any} */ call)=>call.index), [0, 1]);
 });
 
+test('a vertex slot the layout reads with nothing bound reads zeros: WebGPU refuses a frame'
+    + ' with the slot left empty', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ layout?: any }} */
+    const layout = {};
+    assert.equal(device.CreateInputLayout([POSITION_ELEMENT, {
+        SemanticName: 'COLOR', SemanticIndex: 0, Format: DXGI_FORMAT.R32G32B32A32_FLOAT,
+        InputSlot: 1, AlignedByteOffset: 0, InputSlotClass: 1, InstanceDataStepRate: 1,
+    }], colouredVertexShader(), layout), S_OK);
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(device.CreateVertexShader(colouredVertexShader(), vs), S_OK);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(colouredPixelShader(), ps), S_OK);
+    device.VSSetShader(vs.shader);
+    device.PSSetShader(ps.shader);
+    device.IASetInputLayout(layout.layout);
+    device.DrawInstanced(3, 2, 0, 0);
+    await h.present();
+    assert.deepEqual(h.gpu.errors, [], 'the GPU took the frame');
+    assert.deepEqual(h.divergences, []);
+    assert.equal(h.gpu.of('draw').length, 1);
+    assert.ok(h.gpu.of('setVertexBuffer').some((/** @type {any} */ call)=>call.slot === 1),
+        'the empty slot was given zeros');
+});
+
 test('a constant buffer smaller than the shader declares is bound whole, padded with zeros to'
     + ' the declaration: WebGPU refuses the frame over a smaller binding', async()=>{
     const h = harness();
