@@ -906,10 +906,10 @@ export function createThreadingFunctions(host){
         host.writeMemory(mutexes, new Uint8Array(MUTEX_SLOTS * 4));
         const events = host.allocate(EVENT_WORD_SLOTS * 4);
         host.writeMemory(events, new Uint8Array(EVENT_WORD_SLOTS * 4));
-        const semaphores = host.allocate(SEMAPHORE_SLOTS * 8);
-        host.writeMemory(semaphores, new Uint8Array(SEMAPHORE_SLOTS * 8));
-        kernel.mirrorEvents(words, EVENT_SLOTS, mutexes, MUTEX_SLOTS, events, EVENT_WORD_SLOTS,
-            semaphores, SEMAPHORE_SLOTS);
+        // The semaphores' two words each at the table's end (`wait-one.js`).
+        const eventWords = EVENT_WORD_SLOTS - SEMAPHORE_SLOTS * 2;
+        kernel.mirrorEvents(words, EVENT_SLOTS, mutexes, MUTEX_SLOTS, events, eventWords,
+            events + eventWords * 4, SEMAPHORE_SLOTS);
         handleWords = words;
         return words;
     };

@@ -112,11 +112,16 @@ export const EVENT_SLOTS = 0x4000;
 /** Mutexes with a word of their own (`mutex-words.js`): 64 KiB of them. */
 export const MUTEX_SLOTS = 0x4000;
 
-/** Events with a word of their own (`event-words.js`): 64 KiB of them. */
+/**
+ * Events with a word of their own (`event-words.js`) and semaphores with two
+ * (`semaphore-words.js`) share one 64 KiB table, the semaphores' at its end:
+ * the process's arena gives up nothing more for the semaphores, and a game
+ * that fills it to the last aligned block finds it as before.
+ */
 export const EVENT_WORD_SLOTS = 0x4000;
 
-/** Semaphores with words of their own (`semaphore-words.js`), two each: 64 KiB of them. */
-export const SEMAPHORE_SLOTS = 0x2000;
+/** Semaphores with words of their own, at the end of the events' table: 16 KiB of it. */
+export const SEMAPHORE_SLOTS = 0x800;
 
 /**
  * What the kernel's words say, from the kernel (`kernel.EventMirror`,
