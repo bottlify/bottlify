@@ -78,6 +78,7 @@ import {
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createLibcefFunctions } from './libcef/functions.js';
+import { createSteamStart } from './steamclient/steam-start.js';
 import { STEAM_PATH, announceSteamClient, createSteamclientFunctions, steamClientDll }
     from './steamclient/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
@@ -425,9 +426,29 @@ export function createWin32Module(){
             const system = config?.system ?? null;
             // Across a link the run's namespace is asked there, and the
             // objects here are stand-ins for the run's (`system-objects.js`).
-            const namedObjects = system?.objects
+            const runObjects = system?.objects
                 ? createRemoteNamedObjects({ objects: system.objects, kernel })
                 : createNamedObjects({ table: system?.namedObjects });
+            // The objects a running Steam client offers by name (its
+            // SteamStart lock and section), made when a process first opens
+            // one, as the client made them before the game ran.
+            const steamStart = config?.steam ? createSteamStart({ kernel,
+                owns: app=>(config.steam?.apps ?? []).includes(app >>> 0) }) : null;
+            const namedObjects = steamStart ? {
+                ...runObjects,
+                /** @param {string | null} name @param {string} kind */
+                existing(name, kind){
+                    const found = runObjects.existing(name, kind);
+                    const offered = found === null && name !== null
+                        ? steamStart.provide(name, kind) : null;
+                    if (offered)
+                    {
+                        // The client's own hold, which keeps the name for the run.
+                        runObjects.remember(name, kind, offered, false, ()=>{});
+                    }
+                    return offered ?? found;
+                },
+            } : runObjects;
             /** @type {import('./display/functions.js').DisplayHost} */
             const displayHost = {
                 readMemory: (address, length)=>readMemory(address, length),
@@ -2391,6 +2412,12 @@ export function createWin32Module(){
                         sharedViews: system?.sharedViews
                             ? { shared: system.sharedViews, process: processId } : undefined,
                         metrics: mappings,
+                        /** @param {number} ms @param {() => void} tick */
+                        every: (ms, tick)=>{
+                            const timer = kernel.createTimer({ name: 'section watch' });
+                            kernel.armTimer(timer, kernel.clock.virtualTime() + ms, ms, tick);
+                            return ()=>kernel.cancelTimer(timer);
+                        },
                         /** @param {number} bytes @param {{ alignment?: number }} [options] */
                         allocate: (bytes, options)=>allocator.allocate(bytes, options),
                         /** @param {number} address @param {number} bytes */
