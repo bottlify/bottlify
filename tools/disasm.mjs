@@ -63,7 +63,9 @@ def file_of(rva):
         if vaddr <= rva < vaddr + max(vsize, rsize):
             return raddr + rva - vaddr
     return None
-md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+# A PE32+ image (optional header magic 0x20b) is 64-bit code.
+wide = struct.unpack_from('<H', data, pe + 24)[0] == 0x20b
+md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64 if wide else capstone.CS_MODE_32)
 for spec in sys.argv[2:]:
     parts = spec.split(':')
     rva = int(parts[0], 16)

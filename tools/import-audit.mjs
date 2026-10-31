@@ -51,7 +51,8 @@ const SPEC_LIBRARIES = ['kernel32', 'ntdll', 'user32', 'gdi32', 'advapi32', 'ole
     'powrprof', 'iphlpapi', 'crypt32', 'wintrust', 'secur32', 'netapi32', 'userenv', 'uxtheme',
     'dwmapi', 'msacm32', 'avifil32', 'msvfw32', 'quartz', 'mscoree', 'oleacc', 'hhctrl.ocx',
     'riched20', 'riched32', 'mapi32', 'oledlg', 'urlmon', 'odbc32', 'winspool.drv', 'mpr', 'msi',
-    'cabinet', 'lz32', 'dbghelp', 'imagehlp', 'gdiplus', 'd3dx9_43', 'xinput1_3', 'dplayx'];
+    'cabinet', 'lz32', 'dbghelp', 'imagehlp', 'gdiplus', 'd3dx9_43', 'xinput1_3', 'dplayx',
+    'kernelbase', 'ucrtbase', 'vcruntime140', 'xinput1_4', 'bcrypt', 'shcore'];
 if (argv.includes('--fetch-specs'))
 {
     const into = argv[argv.indexOf('--fetch-specs') + 1];

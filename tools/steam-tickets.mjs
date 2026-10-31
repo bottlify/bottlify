@@ -12,6 +12,9 @@
  *
  * --session is { accountName, refreshToken }, as tools/steam-signin.mjs
  * --token writes it; `-` reads it from stdin.
+ *
+ * `--steam-ticket APP=FILE` (any number) hands a ticket already in a file
+ * instead -- the raw bytes Steam signed -- for a run with no session.
  */
 
 import { readFileSync } from 'node:fs';
@@ -64,4 +67,23 @@ export async function ownershipTickets(sessionPath, apps){
     {
         connection.close?.();
     }
+}
+
+/**
+ * The tickets the command line names with `--steam-ticket APP=FILE`.
+ *
+ * @param {string[]} argv
+ * @returns {Record<number, Uint8Array>}
+ */
+export function ticketsFromArgv(argv){
+    /** @type {Record<number, Uint8Array>} */
+    const tickets = {};
+    argv.forEach((argument, i)=>{
+        if (argument === '--steam-ticket')
+        {
+            const [app, file] = argv[i + 1].split(/=(.*)/s);
+            tickets[Number(app)] = new Uint8Array(readFileSync(file));
+        }
+    });
+    return tickets;
 }

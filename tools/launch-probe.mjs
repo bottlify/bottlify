@@ -21,6 +21,7 @@
  *
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
  *         [--network ws://host:port/] [--steam ACCOUNT.json] [--steam-session FILE|-]
+ *         [--steam-ticket APP=FILE]
  *
  * `--network` puts the program on a relay's network (tools/relay-option.mjs);
  * without it the machine has the loopback adapter alone.
@@ -40,7 +41,7 @@ import { placementOf } from '../modules/installer/src/prefix.js';
 import { modeOf } from './play/modes.js';
 import { relayFromArgv, rootsFromArgv } from './relay-option.mjs';
 import { clientFilesCached } from './steam-client.mjs';
-import { ownershipTickets } from './steam-tickets.mjs';
+import { ownershipTickets, ticketsFromArgv } from './steam-tickets.mjs';
 
 const BUNDLES = new URL('../bundles/', import.meta.url);
 
@@ -598,8 +599,9 @@ async function main(){
     const app = await createApp({
         win32: { ...network ? { network } : {},
             ...steam ? { steam: { ...steam, clientFiles: (await clientFilesCached()).files,
-                ownershipTickets: steamSession && manifest.steam?.appId
-                    ? await ownershipTickets(steamSession, [manifest.steam.appId]) : {},
+                ownershipTickets: { ...ticketsFromArgv(process.argv.slice(2)),
+                    ...steamSession && manifest.steam?.appId
+                        ? await ownershipTickets(steamSession, [manifest.steam.appId]) : {} },
                 ...manifest.steam?.appId ? { appId: manifest.steam.appId } : {} } } : {},
             ...roots ? { trustedRoots: roots } : {} },
         executable: new Uint8Array(executable),
