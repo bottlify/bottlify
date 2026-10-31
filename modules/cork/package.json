@@ -45,6 +45,7 @@
     "test": "node --test --test-timeout=1200000 \"src/**/*.test.js\"",
     "test:integration": "node --test --test-timeout=1800000 \"src/**/*.itest.js\"",
     "typecheck": "tsc -p jsconfig.json",
+    "version": "node scripts/stamp-version.mjs && git add src/version.js",
     "prepack": "node -e \"require('node:fs').copyFileSync('../../LICENSE', 'LICENSE')\""
   },
   "publishConfig": {
