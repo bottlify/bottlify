@@ -98,9 +98,16 @@ export function createImmediateContext(services){
      * getters see nothing bound.
      */
     const ignored = createPipelineState({ diverge: ()=>{} }).methods;
-    /** @param {string} name */
+    /**
+     * Under Direct3D 10's state a getter answers nothing bound -- but for the
+     * pixel stage's samplers, which Windows leaves unwritten
+     * (test_device_context_state).
+     *
+     * @param {string} name
+     */
     const forward = name=>(/** @type {any[]} */ ...args)=>(device().drawsAsTen?.()
-        ? (isGetter(name) ? /** @type {any} */ (ignored)[name]?.(...args) : undefined)
+        ? (isGetter(name) && name !== 'PSGetSamplers'
+            ? /** @type {any} */ (ignored)[name]?.(...args) : undefined)
         : device()[name](...args));
     /** A call the context state does not decide about. @param {string} name */
     const always = name=>(/** @type {any[]} */ ...args)=>device()[name](...args);
@@ -113,6 +120,8 @@ export function createImmediateContext(services){
         ...contextBase(services, D3D11_DEVICE_CONTEXT.IMMEDIATE, 0),
         /** An immediate context has no list to finish. */
         FinishCommandList: ()=>DXGI_ERROR_INVALID_CALL,
+        /** Its device, no reference taken: the seam's, for the device's ring. */
+        owner: ()=>device(),
         /**
          * Not gone at no references while its device lives: the device hands
          * the same context out again, at the same address.

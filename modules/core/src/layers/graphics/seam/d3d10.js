@@ -92,6 +92,27 @@ const RING_METHODS = Object.freeze(['VSSetShader', 'PSSetShader', 'GSSetShader',
     'DrawIndexed', 'DrawInstanced', 'DrawIndexedInstanced', 'ClearRenderTargetView',
     'ClearDepthStencilView']);
 
+/**
+ * Direct3D 11's immediate context's methods that run in the guest, by the
+ * routine that carries each: 10's own where the two calls mean the same, a
+ * routine of the context's where 11's arguments differ.
+ */
+export const CONTEXT_RING = Object.freeze({
+    ...Object.fromEntries(['IASetInputLayout', 'IASetPrimitiveTopology', 'RSSetState',
+        'VSSetConstantBuffers', 'PSSetConstantBuffers', 'GSSetConstantBuffers',
+        'VSSetShaderResources', 'PSSetShaderResources', 'GSSetShaderResources', 'VSSetSamplers',
+        'PSSetSamplers', 'GSSetSamplers', 'IASetVertexBuffers', 'IASetIndexBuffer',
+        'OMSetRenderTargets', 'OMSetBlendState', 'OMSetDepthStencilState', 'RSSetScissorRects',
+        'Draw', 'DrawIndexed', 'DrawInstanced', 'DrawIndexedInstanced', 'ClearRenderTargetView',
+        'ClearDepthStencilView'].map(name=>[name, name])),
+    VSSetShader: 'ContextVSSetShader',
+    PSSetShader: 'ContextPSSetShader',
+    GSSetShader: 'ContextGSSetShader',
+    RSSetViewports: 'ContextRSSetViewports',
+    Map: 'ContextMap',
+    Unmap: 'ContextUnmap',
+});
+
 /** DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, for what a browser has no counterpart of. */
 const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022 | 0;
 
@@ -603,6 +624,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         ? Object.fromEntries(RING_METHODS.filter(name=>!traps.has(name)).map(name=>[name,
             (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>compiledAt(IN_GUEST[name], at,
                 trap)) || trap]))
+        : {};
+    /** Direct3D 11's immediate context's, into its device's ring. */
+    const contextGuests = ringAllocate
+        ? Object.fromEntries(Object.entries(CONTEXT_RING)
+            .filter(([name])=>!traps.has(`Context.${name}`)).map(([name, routine])=>[name,
+                (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>compiledAt(
+                    IN_GUEST[routine], at, trap)) || trap]))
         : {};
     /**
      * A device's command ring, made before the device is published: publishing
@@ -1514,7 +1542,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
      * Direct3D 11's faces of the same objects (`d3d11.js`), each list below
      * ending with its own: what a program reaches through either version.
      */
-    const eleven = createDirect3D11Seam(describe, ()=>kit, { context: {} });
+    const eleven = createDirect3D11Seam(describe, ()=>kit, { context: contextGuests });
 
     /**
      * The interfaces every resource shares, after its own: Direct3D's two

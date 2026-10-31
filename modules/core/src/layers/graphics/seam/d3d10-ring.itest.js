@@ -43,8 +43,9 @@ import { COMPILED } from './d3d10-inguest.x86.js';
 const IN_GUEST = COMPILED;
 import { gpuReads, idle } from './frames-contract.itest.js';
 import {
-    ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, IDXGISWAPCHAIN_SLOTS, ID3D10VIEW_SLOTS,
+    CONTEXT_RING, ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, IDXGISWAPCHAIN_SLOTS, ID3D10VIEW_SLOTS,
 } from './d3d10.js';
+import { ID3D11DEVICECONTEXT_SLOTS, ID3D11DEVICE_SLOTS } from './d3d11.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY, D3D10_SDK_VERSION,
     D3D10_USAGE, DXGI_FORMAT,
@@ -54,6 +55,9 @@ import {
     assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclOutput, mov, o,
     ret,
 } from '../d3d10/shader-fixtures.js';
+
+/** D3D11_SDK_VERSION. */
+const D3D11_SDK_VERSION = 7;
 
 const PROGRAM = 0x8000;
 const STRINGS = 0x9000;
@@ -77,6 +81,8 @@ const SLOTS = /** @type {Record<string, [string, number][]>} */ ({
     buffer: ID3D10BUFFER_SLOTS,
     chain: IDXGISWAPCHAIN_SLOTS,
     view: ID3D10VIEW_SLOTS,
+    device11: ID3D11DEVICE_SLOTS,
+    context: ID3D11DEVICECONTEXT_SLOTS,
 });
 
 /** @param {number} seed */
@@ -107,11 +113,12 @@ const floatWord = value=>new Uint32Array(new Float32Array([value]).buffer)[0];
  */
 
 /**
- * The processor with Direct3D 10's seam over it.
+ * The processor with Direct3D 10's seam over it, and a device of 10's, or
+ * of 11's with its immediate context.
  *
- * @param {boolean} guestCode @param {boolean} worker
+ * @param {boolean} guestCode @param {boolean} worker @param {boolean} [eleven]
  */
-function machine(guestCode, worker){
+function machine(guestCode, worker, eleven = false){
     const gpu = createFakeDevice();
     const reads = gpuReads(gpu);
     const host = createCorkHost({
@@ -221,7 +228,7 @@ function machine(guestCode, worker){
             available: ()=>false,
             adapter: ()=>({ vendor: 'nvidia', architecture: 'ampere', description: '' }),
         },
-        only: ['D3D10.dll', 'DXGI.dll'],
+        only: [eleven ? 'D3D11.dll' : 'D3D10.dll', 'DXGI.dll'],
         memory,
         publishInterface: (object, id)=>vtables.publish(object, id),
         unpublishInterface: (object, id)=>vtables.unpublish(object, id),
@@ -359,10 +366,17 @@ function machine(guestCode, worker){
     // A device and a swap chain, through the entry point the host answers.
     const descAt = place([16, 16, 60, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 0, 0, 1, 0, 0x20, 1, HWND,
         1, 0, 0]);
-    assert.equal(libraries.libraries['D3D10.dll'].D3D10CreateDeviceAndSwapChain.handler([0, 1, 0,
-        0, D3D10_SDK_VERSION, descAt, OUT + 4, OUT]) >>> 0, 0);
+    assert.equal(eleven
+        ? libraries.libraries['D3D11.dll'].D3D11CreateDeviceAndSwapChain.handler([0, 1, 0, 0, 0,
+            0, D3D11_SDK_VERSION, descAt, OUT + 4, OUT, 0, OUT + 8]) >>> 0
+        : libraries.libraries['D3D10.dll'].D3D10CreateDeviceAndSwapChain.handler([0, 1, 0,
+            0, D3D10_SDK_VERSION, descAt, OUT + 4, OUT]) >>> 0, 0);
     name(readU32(OUT));
     name(readU32(OUT + 4));
+    if (eleven)
+    {
+        name(readU32(OUT + 8));
+    }
     const strings = new TextEncoder().encode('POSITION\0COLOR\0');
     writeBytes(STRINGS, strings);
     return { run, gpu, reads, writeBytes, readBytes, readU32, pointerOf };
@@ -632,3 +646,223 @@ test('Direct3D 10: a buffer the guest maps with DISCARD faster than the host pla
     assert.ok(trapped[0] > 0, `the first maps trapped: ${trapped}`);
     assert.deepEqual(trapped.slice(-4), [0, 0, 0, 0], `none trapped in the end: ${trapped}`);
 });
+
+/** The routines Direct3D 11's immediate context runs in the guest. */
+const CARRIED11 = new Set(Object.values(CONTEXT_RING));
+
+/**
+ * A Direct3D 11 program drawn from a seed, through its immediate context:
+ * Direct3D 10's calls under 11's interface, with 11's own arguments -- class
+ * instances, viewports of floats, maps through the context.
+ *
+ * @param {number} seed @param {number} steps @param {boolean} guestCode
+ * @param {boolean} worker
+ */
+async function play11(seed, steps, guestCode, worker){
+    const m = machine(guestCode, worker, true);
+    const pick = random(seed);
+    /** @type {string[]} */
+    const answers = [];
+    let trapped = 0;
+    /** @type {Map<string, number>} */
+    const trappedBy = new Map();
+    /** @type {Set<string>} */
+    const carried = new Set();
+    /** @param {string} on @param {string} kind @param {string} method @param {Call['args']} args */
+    const call = (on, kind, method, args = [])=>{
+        const answer = m.run({ on, kind, method, args },
+            method.startsWith('Create') || method === 'GetBuffer');
+        const routine = kind === 'context' ? /** @type {Record<string, string>} */ (CONTEXT_RING)[
+            method] : undefined;
+        if (routine)
+        {
+            carried.add(routine);
+            if (answer.traps.includes(method))
+            {
+                trapped++;
+                trappedBy.set(method, (trappedBy.get(method) ?? 0) + 1);
+            }
+        }
+        // Where a map puts the bytes is the device's to choose; its pitches are not.
+        answers.push(method === 'Map'
+            ? `Map ${answer.eax.toString(16)} ${answer.out !== 0} ${answer.out2} ${answer.out3}`
+            : `${method} ${answer.eax.toString(16)} ${answer.out} ${answer.out2} ${answer.out3}`);
+        return answer;
+    };
+    /** @param {string} method @param {Call['args']} args */
+    const device = (method, args = [])=>call('#0', 'device11', method, args);
+    /** @param {string} method @param {Call['args']} args */
+    const context = (method, args = [])=>call('#2', 'context', method, args);
+    /** @param {string} method @param {Call['args']} args @returns {string} */
+    const make = (method, args)=>{
+        const made = device(method, args);
+        assert.ok(made.out && made.out !== 'untouched',
+            `${method} made something: ${made.eax.toString(16)}`);
+        return /** @type {string} */ (made.out);
+    };
+
+    const iidTexture2D = [0x6f15aaf2, 0x4e89d208, 0x9548b49a, 0x9c4fd335];
+    const back = /** @type {string} */ (call('#1', 'chain', 'GetBuffer', [0,
+        { words: iidTexture2D }, 'out']).out);
+    const target = make('CreateRenderTargetView', [back, 0, 'out']);
+    const depthTexture = make('CreateTexture2D', [{ words: [16, 16, 1, 1,
+        DXGI_FORMAT.D24_UNORM_S8_UINT, 1, 0, D3D10_USAGE.DEFAULT, D3D10_BIND.DEPTH_STENCIL, 0,
+        0] }, 0, 'out']);
+    const depthView = make('CreateDepthStencilView', [depthTexture, 0, 'out']);
+    const dynamic = make('CreateBuffer', [{ words: [VERTICES * STRIDE, D3D10_USAGE.DYNAMIC,
+        D3D10_BIND.VERTEX_BUFFER, D3D10_CPU_ACCESS.WRITE, 0, 0] }, 0, 'out']);
+    const fixed = make('CreateBuffer', [{ words: [VERTICES * STRIDE, D3D10_USAGE.DEFAULT,
+        D3D10_BIND.VERTEX_BUFFER, 0, 0, 0] }, { words: [STRUCTS + 0x200, 0, 0] }, 'out']);
+    const indices = make('CreateBuffer', [{ words: [256, D3D10_USAGE.DEFAULT,
+        D3D10_BIND.INDEX_BUFFER, 0, 0, 0] }, { words: [STRUCTS + 0x200, 0, 0] }, 'out']);
+    const constants = make('CreateBuffer', [{ words: [16, D3D10_USAGE.DYNAMIC,
+        D3D10_BIND.CONSTANT_BUFFER, D3D10_CPU_ACCESS.WRITE, 0, 0] }, 0, 'out']);
+    const vsCode = colouredVertexShader();
+    const vs = make('CreateVertexShader', [{ words: words(vsCode) }, vsCode.length, 0, 'out']);
+    const pixel = [colouredPixelShader(), constantPixelShader()].map(bytes=>make(
+        'CreatePixelShader', [{ words: words(bytes) }, bytes.length, 0, 'out']));
+    const layout = make('CreateInputLayout', [{ words: [
+        STRINGS, 0, DXGI_FORMAT.R32G32B32A32_FLOAT, 0, 0, 0, 0,
+        STRINGS + 9, 0, DXGI_FORMAT.R32G32B32A32_FLOAT, 0, 16, 0, 0,
+    ] }, 2, { words: words(vsCode) }, vsCode.length, 'out']);
+    const rasterizers = [0, make('CreateRasterizerState', [{ words: [3, 1, 0, 0, 0, 0, 1, 0,
+        0, 0] }, 'out'])];
+    const depthStates = [0, make('CreateDepthStencilState', [{ words: [0, 1, 2, 0, 0xffff, 0, 0,
+        0, 0, 0, 0, 0, 0] }, 'out'])];
+    // Direct3D 11's blend description: a target's state each, ONE, ZERO, ADD.
+    const blends = [0, make('CreateBlendState', [{ words: [0, 0, ...Array.from({ length: 8 },
+        ()=>[0, 2, 1, 1, 2, 1, 1, 0x0f]).flat()] }, 'out'])];
+    const samplers = [0, make('CreateSamplerState', [{ words: [0x15, 1, 1, 1, 0, 1, 8, 0, 0, 0,
+        0, 0, floatWord(1000)] }, 'out'])];
+    const vertices = ()=>words(new Uint8Array(Float32Array.from({ length: VERTICES * STRIDE / 4 },
+        ()=>pick.float()).buffer));
+
+    const actions = {
+        shaders: ()=>{
+            // A class instance named leaves the call to the host.
+            const instances = pick.below(8) === 0 ? 1 : 0;
+            context('VSSetShader', [pick.pick([vs, 0]), instances ? { words: [0] } : 0, instances]);
+            context('PSSetShader', [pick.pick(pixel), 0, 0]);
+            context('GSSetShader', [0, 0, 0]);
+            context('IASetInputLayout', [pick.pick([layout, layout, 0])]);
+        },
+        streams: ()=>{
+            const count = pick.pick([0, 1, 2, 16, 17]);
+            context('IASetVertexBuffers', [pick.below(2), count,
+                pick.below(12) === 0 ? 0 : { words: Array.from({ length: count },
+                    ()=>pick.pick([dynamic, fixed, 0])) },
+                { words: Array.from({ length: count }, ()=>STRIDE) },
+                { words: Array.from({ length: count }, ()=>STRIDE * pick.below(4)) }]);
+            context('IASetVertexBuffers', [0, 1, { words: [pick.pick([dynamic, fixed])] },
+                { words: [STRIDE] }, { words: [STRIDE * pick.below(4)] }]);
+            context('IASetIndexBuffer', [pick.pick([indices, 0]),
+                pick.pick([DXGI_FORMAT.R16_UINT, DXGI_FORMAT.R32_UINT]), 2 * pick.below(8)]);
+            context('IASetPrimitiveTopology', [pick.pick([D3D10_PRIMITIVE_TOPOLOGY.TRIANGLELIST,
+                D3D10_PRIMITIVE_TOPOLOGY.TRIANGLESTRIP, D3D10_PRIMITIVE_TOPOLOGY.LINELIST])]);
+        },
+        stages: ()=>{
+            for (const stage of ['VS', 'PS', 'GS'])
+            {
+                const count = pick.pick([0, 1, 2, 17]);
+                context(`${stage}SetConstantBuffers`, [pick.below(3), count, count > 0
+                    && pick.below(10) === 0 ? 0 : { words: Array.from({ length: count },
+                        ()=>pick.pick([constants, 0])) }]);
+                context(`${stage}SetSamplers`, [pick.below(3), Math.min(count, 2), { words:
+                    Array.from({ length: Math.min(count, 2) }, ()=>pick.pick(samplers)) }]);
+                context(`${stage}SetShaderResources`, [pick.below(3), 1, { words: [0] }]);
+            }
+        },
+        states: ()=>{
+            context('RSSetState', [pick.pick(rasterizers)]);
+            context('OMSetDepthStencilState', [pick.pick(depthStates), pick.below(256)]);
+            const factor = pick.below(3) === 0 ? 0 : { words: [0.5, 0.25, 1, 0].map(floatWord) };
+            context('OMSetBlendState', [pick.pick(blends), factor, 0xffffffff]);
+            // Viewports of floats, a half pixel in.
+            const x = pick.below(4) + 0.5;
+            const count = pick.pick([1, 1, 2, 17]);
+            context('RSSetViewports', [count, { words: Array.from({ length: count }, ()=>[x, x,
+                16 - x, 16 - x, 0, 1].map(floatWord)).flat() }]);
+            context('RSSetScissorRects', [1, { words: [1, 1, 16, 16] }]);
+            const targets = pick.pick([1, 1, 0, 9]);
+            context('OMSetRenderTargets', [targets, { words: [target, ...Array.from(
+                { length: Math.max(0, targets - 1) }, ()=>0)] }, pick.pick([0, depthView])]);
+        },
+        map: ()=>{
+            const type = pick.pick([D3D10_MAP.WRITE_DISCARD, D3D10_MAP.WRITE_NO_OVERWRITE]);
+            const answer = context('Map', [dynamic, 0, type, 0, 'out']);
+            const at = m.readU32(OUT);
+            if (answer.eax === 0 && at !== 0)
+            {
+                const written = vertices();
+                m.writeBytes(type === D3D10_MAP.WRITE_DISCARD ? at
+                    : at + STRIDE * pick.below(VERTICES - 8), new Uint8Array(
+                    new Uint32Array(type === D3D10_MAP.WRITE_DISCARD ? written
+                        : written.slice(0, 64)).buffer));
+            }
+            context('Unmap', [dynamic, 0]);
+            context('Map', [constants, 0, D3D10_MAP.WRITE_DISCARD, 0, 'out']);
+            const cbAt = m.readU32(OUT);
+            if (cbAt !== 0)
+            {
+                m.writeBytes(cbAt, new Uint8Array(Float32Array.from([pick.float(), pick.float(),
+                    pick.float(), 1]).buffer));
+            }
+            context('Unmap', [constants, 0]);
+        },
+        draw: ()=>{
+            const count = 3 * (1 + pick.below(4));
+            const start = pick.below(VERTICES - count);
+            context('Draw', [count, start]);
+            context('DrawIndexed', [count, pick.below(8), pick.below(8)]);
+            context('DrawInstanced', [count, 1 + pick.below(2), start, 0]);
+            context('DrawIndexedInstanced', [count, 1 + pick.below(2), pick.below(8),
+                pick.below(8), 0]);
+        },
+        clear: ()=>{
+            context('ClearRenderTargetView', [target, { words: [pick.float(), pick.float(),
+                pick.float(), 1].map(floatWord) }]);
+            context('ClearDepthStencilView', [depthView, 1 + pick.below(3),
+                floatWord(pick.float()), pick.below(0x200)]);
+        },
+        read: ()=>{
+            context('IAGetVertexBuffers', [0, 1, 'out', 'out2', 'out3']);
+            context('IAGetIndexBuffer', ['out', 'out2', 'out3']);
+            context('PSGetShader', ['out', 0, 0]);
+            context('RSGetViewports', [{ words: [1] }, 'out']);
+            context('OMGetRenderTargets', [1, 'out', 'out2']);
+            context('IAGetPrimitiveTopology', ['out']);
+        },
+        present: ()=>{
+            call('#1', 'chain', 'Present', [0, 0]);
+        },
+    };
+    const names = /** @type {(keyof typeof actions)[]} */ (Object.keys(actions));
+    for (let step = 0; step < steps; step++)
+    {
+        actions[pick.pick(names)]();
+    }
+    call('#1', 'chain', 'Present', [0, 0]);
+    await idle(m.gpu);
+    return { answers, reads: m.reads, trapped, trappedBy, carried };
+}
+
+for (const seed of [1, 2, 3, 5])
+{
+    test(`Direct3D 11: the GPU is given what it would be with every call of the immediate`
+        + ` context a trap, through the device's command ring and drawn elsewhere, seed ${seed}`,
+    async()=>{
+        const traps = await play11(seed, 120, false, false);
+        const ring = await play11(seed, 120, true, false);
+        const elsewhere = await play11(seed, 120, true, true);
+        assert.ok(traps.reads.some(line=>line.includes('draw')), 'the GPU drew');
+        assert.deepEqual([...CARRIED11].filter(name=>!traps.carried.has(name)), [],
+            'every call the ring carries is in the program');
+        assert.ok(traps.trapped > 200, 'every call trapped without guest code');
+        assert.ok(ring.trapped < traps.trapped / 4, `the ring carried the calls (${ring.trapped}`
+            + ` of ${traps.trapped} trapped: ${JSON.stringify([...ring.trappedBy])})`);
+        assert.deepEqual(ring.answers, traps.answers, 'every answer, through the ring');
+        assert.deepEqual(ring.reads, traps.reads, 'what every draw read, through the ring');
+        assert.deepEqual(elsewhere.answers, traps.answers, 'every answer, drawn elsewhere');
+        assert.deepEqual(elsewhere.reads, traps.reads, 'what every draw read, drawn elsewhere');
+    });
+}

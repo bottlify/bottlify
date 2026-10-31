@@ -63,7 +63,8 @@ const HELD_WAIT_MS = 200;
  * @param {(pointer: number) => any} deps.objectAt  what a pointer the guest passed is
  * @param {(detail: string) => void} deps.refuse
  * @param {number} [deps.ringBytes]
- * @returns {{ address: () => number, sync: () => void, taken: () => number,
+ * @returns {{ address: () => number, slow: (raised: boolean) => void, sync: () => void,
+ *     taken: () => number,
  *     attachBuffer: (buffer: any) => number, hostMap: (buffer: any, type: number) => void,
  *     hostUnmap: (buffer: any) => boolean, released: (buffer: any) => void } | null}
  *     null where there is no memory for one
@@ -209,6 +210,16 @@ export function createDeviceRing(deps){
     };
     return {
         address: ()=>block,
+        /**
+         * The host's flag raised or lowered: raised, every routine leaves its
+         * call to the host -- while a Direct3D 11 context draws as Direct3D
+         * 10, whose calls of 11 are to do nothing.
+         *
+         * @param {boolean} raised
+         */
+        slow(raised){
+            write(block + SHADOW.FLAGS, raised ? FLAG_SLOW_PATH : 0);
+        },
         /**
          * A dynamic buffer's block, made for one whose bytes live in guest
          * memory, before the buffer is published: what the guest's map and

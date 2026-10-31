@@ -10,6 +10,13 @@
  * device's command ring and returns, and the host makes the ring's calls, in
  * order, on its way into any method of its own (`d3d10-ring.js`).
  *
+ * Direct3D 11's immediate context is the same device under another
+ * interface, its block one word past each of its pointers too: a call of
+ * the two versions that means the same is the same routine and the same
+ * record. Where 11's differs -- a shader set with class instances, a
+ * viewport of floats, a map through the context -- a routine of its own
+ * writes the record 10's would, or one of its own past the device's slots.
+ *
  * This version's setters and draws are `void`: a rejected argument is the
  * debug layer's to report, and the program is told nothing. So a routine
  * answers for every call it can carry, with no state to check first; what
@@ -76,11 +83,14 @@ const CLEAR_RENDER_TARGET_VIEW = 35;
 const CLEAR_DEPTH_STENCIL_VIEW = 36;
 /** The ring's record of a buffer's unmap, numbered past the device's slots (`commands.js`). */
 const BUFFER_UNMAP = 98;
+/** Direct3D 11's viewports, six floats each: the record after the buffer's unmap. */
+const RS_SET_VIEWPORTS11 = 99;
 
 /** `BUFFER10`'s offsets (`d3d10-ring.js`): a dynamic buffer's block. */
 const B_FLAGS = 0;
 const B_DEVICE = 4;
 const B_CURRENT = 8;
+const B_LENGTH = 12;
 const B_MAPPED = 16;
 const B_FREE = 24;
 const B_STORAGES = 28;
@@ -227,6 +237,64 @@ export function PSSetShader({ u32, setU32, compareExchange, host }, self, shader
  */
 export function GSSetShader({ u32, setU32, compareExchange, host }, self, shader){
     if (one({ u32, setU32, compareExchange }, self, GS_SET_SHADER, shader) !== 0)
+    {
+        return host();
+    }
+    return 0;
+}
+
+/**
+ * void ID3D11DeviceContext::VSSetShader(this, ID3D11VertexShader*,
+ * ID3D11ClassInstance *const *, UINT count): 10's record where no class
+ * instance is named.
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} self @param {u32} shader @param {u32} instances
+ * @param {u32} count
+ * @returns {u32}
+ */
+export function ContextVSSetShader({ u32, setU32, compareExchange, host }, self, shader,
+    instances, count)
+{
+    if (count !== 0 || one({ u32, setU32, compareExchange }, self, VS_SET_SHADER, shader) !== 0)
+    {
+        return host();
+    }
+    return 0;
+}
+
+/**
+ * void ID3D11DeviceContext::PSSetShader(this, ID3D11PixelShader*,
+ * ID3D11ClassInstance *const *, UINT count)
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} self @param {u32} shader @param {u32} instances
+ * @param {u32} count
+ * @returns {u32}
+ */
+export function ContextPSSetShader({ u32, setU32, compareExchange, host }, self, shader,
+    instances, count)
+{
+    if (count !== 0 || one({ u32, setU32, compareExchange }, self, PS_SET_SHADER, shader) !== 0)
+    {
+        return host();
+    }
+    return 0;
+}
+
+/**
+ * void ID3D11DeviceContext::GSSetShader(this, ID3D11GeometryShader*,
+ * ID3D11ClassInstance *const *, UINT count)
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} self @param {u32} shader @param {u32} instances
+ * @param {u32} count
+ * @returns {u32}
+ */
+export function ContextGSSetShader({ u32, setU32, compareExchange, host }, self, shader,
+    instances, count)
+{
+    if (count !== 0 || one({ u32, setU32, compareExchange }, self, GS_SET_SHADER, shader) !== 0)
     {
         return host();
     }
@@ -607,22 +675,61 @@ export function OMSetDepthStencilState({ u32, setU32, compareExchange, host }, s
  * @returns {u32}
  */
 export function RSSetViewports({ u32, setU32, compareExchange, host }, self, count, viewports){
-    if (count > MOST || (viewports === 0 && count !== 0))
+    if (counted({ u32, setU32, compareExchange }, self, RS_SET_VIEWPORTS, count, viewports, 6)
+        !== 0)
     {
         return host();
     }
-    const length = (ARGS + 4 + count * 24) >>> 0;
+    return 0;
+}
+
+/**
+ * void ID3D11DeviceContext::RSSetViewports(this, UINT count, const D3D11_VIEWPORT*):
+ * six floats each, in a record of their own.
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} viewports
+ * @returns {u32}
+ */
+export function ContextRSSetViewports({ u32, setU32, compareExchange, host }, self, count,
+    viewports)
+{
+    if (counted({ u32, setU32, compareExchange }, self, RS_SET_VIEWPORTS11, count, viewports, 6)
+        !== 0)
+    {
+        return host();
+    }
+    return 0;
+}
+
+/**
+ * A record of how many items, then the items, `words` dwords each, copied:
+ * 0 once written, 1 where the host has to make the call.
+ *
+ * @guestCode stdcall
+ * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange'>} guest
+ * @param {u32} self @param {u32} slot @param {u32} count @param {u32} items
+ * @param {u32} words
+ * @returns {u32}
+ */
+export function counted({ u32, setU32, compareExchange }, self, slot, count, items, words){
+    if (count > MOST || (items === 0 && count !== 0))
+    {
+        return 1;
+    }
+    const copied = Math.imul(count, words);
+    const length = (ARGS + 4 + copied * 4) >>> 0;
     const record = reserve({ u32, compareExchange }, u32(self + 4), length);
     if (record === 0)
     {
-        return host();
+        return 1;
     }
     setU32(record + ARGS, count);
-    for (let index = 0; index < (count * 6 | 0); index++)
+    for (let index = 0; index < (copied | 0); index++)
     {
-        setU32(record + ARGS + 4 + index * 4, u32(viewports + index * 4));
+        setU32(record + ARGS + 4 + index * 4, u32(items + index * 4));
     }
-    return publish({ setU32, compareExchange }, u32(self + 4), record, RS_SET_VIEWPORTS, length);
+    return publish({ setU32, compareExchange }, u32(self + 4), record, slot, length);
 }
 
 /**
@@ -807,23 +914,69 @@ export function ClearDepthStencilView({ u32, setU32, compareExchange, host }, se
  * @returns {u32}
  */
 export function BufferMap({ u32, setU32, compareExchange, host }, self, type, flags, out){
-    const block = u32(self + 4);
-    if (block === 0 || out === 0 || (u32(block + B_FLAGS) & FLAG_SLOW_PATH) !== 0
+    const storage = out === 0 ? 0 : mapStorage({ u32, setU32, compareExchange }, self, type);
+    if (storage === 0)
+    {
+        return host();
+    }
+    setU32(out, storage);
+    return 0;
+}
+
+/**
+ * HRESULT ID3D11DeviceContext::Map(this, ID3D11Resource*, UINT subresource,
+ * D3D11_MAP, UINT flags, D3D11_MAPPED_SUBRESOURCE*): a dynamic buffer's map
+ * as `BufferMap`, its pitches the buffer's length as the host answers them.
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} self @param {u32} resource @param {u32} subresource
+ * @param {u32} type @param {u32} flags @param {u32} out
+ * @returns {u32}
+ */
+export function ContextMap({ u32, setU32, compareExchange, host }, self, resource, subresource,
+    type, flags, out)
+{
+    const storage = out === 0 || resource === 0 || subresource !== 0 ? 0
+        : mapStorage({ u32, setU32, compareExchange }, resource, type);
+    if (storage === 0)
+    {
+        return host();
+    }
+    const length = u32(u32(resource + 4) + B_LENGTH);
+    setU32(out, storage);
+    setU32(out + 4, length);
+    setU32(out + 8, length);
+    return 0;
+}
+
+/**
+ * A dynamic buffer mapped in the guest: the storage it is now on, or 0 where
+ * the host has to make the map. The device's lock is let go before the
+ * answer, so the program's pointer is written through with it free.
+ *
+ * @guestCode stdcall
+ * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange'>} guest
+ * @param {u32} buffer @param {u32} type
+ * @returns {u32}
+ */
+export function mapStorage({ u32, setU32, compareExchange }, buffer, type){
+    const block = u32(buffer + 4);
+    if (block === 0 || (u32(block + B_FLAGS) & FLAG_SLOW_PATH) !== 0
         || u32(block + B_MAPPED) !== 0
         || (type !== WRITE_DISCARD && type !== WRITE_NO_OVERWRITE))
     {
-        return host();
+        return 0;
     }
     const device = u32(block + B_DEVICE);
     if (device === 0 || (u32(device) & FLAG_SLOW_PATH) !== 0
         || compareExchange(device + HELD, 0, HELD_GUEST) !== 0)
     {
-        return host();
+        return 0;
     }
     const free = u32(block + B_FREE);
     if (type === WRITE_DISCARD && free === 0 && letGo({ compareExchange }, device) !== 0)
     {
-        return host();
+        return 0;
     }
     if (type === WRITE_DISCARD)
     {
@@ -837,12 +990,11 @@ export function BufferMap({ u32, setU32, compareExchange, host }, self, type, fl
     }
     setU32(block + B_MAPPED, type);
     const storage = u32(block + B_CURRENT);
-    // The lock let go before the program's pointer is written through.
-    if (letGo({ compareExchange }, device) !== 0)
+    if (letGo({ compareExchange }, device) === 0)
     {
-        setU32(out, storage);
+        return 0;
     }
-    return 0;
+    return storage;
 }
 
 /**
@@ -867,19 +1019,54 @@ export function letGo({ compareExchange }, device){
  * @returns {u32}
  */
 export function BufferUnmap({ u32, setU32, compareExchange, host }, self){
-    const block = u32(self + 4);
+    if (unmapStorage({ u32, setU32, compareExchange }, self) !== 0)
+    {
+        return host();
+    }
+    return 0;
+}
+
+/**
+ * void ID3D11DeviceContext::Unmap(this, ID3D11Resource*, UINT subresource):
+ * a dynamic buffer's unmap of a map the guest made, as `BufferUnmap`.
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} self @param {u32} resource @param {u32} subresource
+ * @returns {u32}
+ */
+export function ContextUnmap({ u32, setU32, compareExchange, host }, self, resource,
+    subresource)
+{
+    if (resource === 0 || subresource !== 0
+        || unmapStorage({ u32, setU32, compareExchange }, resource) !== 0)
+    {
+        return host();
+    }
+    return 0;
+}
+
+/**
+ * The unmap of a map the guest made, into the ring: 0 once written, 1 where
+ * the host has to make it.
+ *
+ * @guestCode stdcall
+ * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange'>} guest @param {u32} buffer
+ * @returns {u32}
+ */
+export function unmapStorage({ u32, setU32, compareExchange }, buffer){
+    const block = u32(buffer + 4);
     if (block === 0 || (u32(block + B_FLAGS) & FLAG_SLOW_PATH) !== 0
         || u32(block + B_MAPPED) === 0)
     {
-        return host();
+        return 1;
     }
     const device = u32(block + B_DEVICE);
     const record = reserve({ u32, compareExchange }, device, ARGS + 12);
     if (record === 0)
     {
-        return host();
+        return 1;
     }
-    setU32(record + ARGS, self);
+    setU32(record + ARGS, buffer);
     setU32(record + ARGS + 4, u32(block + B_CURRENT));
     setU32(record + ARGS + 8, u32(block + B_MAPPED));
     setU32(block + B_MAPPED, 0);

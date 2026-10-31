@@ -257,6 +257,10 @@ test('a context state swapped on holds the pipeline the context had, and gives i
     const got = s.place([0]);
     s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'VSGetSamplers'), [0, 1, got]);
     assert.equal(s.memory.readU32(got), 0, 'Direct3D 10\'s state sees no Direct3D 11 binding');
+    const untouched = s.place([0xdeadbeef]);
+    s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'PSGetSamplers'), [0, 1, untouched]);
+    assert.equal(s.memory.readU32(untouched), 0xdeadbeef,
+        'but for the pixel stage\'s samplers, which Windows leaves unwritten');
     s.call(context1, swap, [s.memory.readU32(previousAt), s.place([0])]);
     s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'VSGetSamplers'), [0, 1, got]);
     assert.equal(s.memory.readU32(got), sampler, 'the bindings come back with their state');

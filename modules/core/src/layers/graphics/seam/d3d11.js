@@ -1500,6 +1500,10 @@ export function createDirect3D11Seam(describe, kit, guests){
             const held = {};
             target.SwapDeviceContextState(k().publisher.objectAt(stateAt),
                 isNull(out) ? null : held);
+            // Under Direct3D 10's state the context's calls do nothing: none
+            // may go into the ring, where they would be made.
+            const device = target.owner?.();
+            k().ringOf(device)?.slow(device?.drawsAsTen() === true);
             if (!isNull(out))
             {
                 if (held.previous)

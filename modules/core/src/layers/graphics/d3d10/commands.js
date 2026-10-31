@@ -119,13 +119,23 @@ const TABLE = {
     'Buffer.Unmap': { args: 3, objects: [0], make: (d, c)=>{
         c.object()?.UnmapStorage(c.arg(1), c.arg(2));
     } },
+    // Direct3D 11's viewports: six floats a viewport.
+    'Context.RSSetViewports': { args: 1, make: (d, c)=>{
+        d.RSSetViewports(Array.from({ length: c.arg(0) }, (_, i)=>({
+            TopLeftX: c.floats[i * 6], TopLeftY: c.floats[i * 6 + 1], Width: c.floats[i * 6 + 2],
+            Height: c.floats[i * 6 + 3], MinDepth: c.floats[i * 6 + 4],
+            MaxDepth: c.floats[i * 6 + 5],
+        })));
+    } },
 };
 
 /**
- * A dynamic buffer's own record, numbered past the device's slots: its unmap,
- * which the guest made (`seam/d3d10-inguest.js`, `BufferUnmap`).
+ * Records numbered past the device's slots: a dynamic buffer's unmap, which
+ * the guest made (`seam/d3d10-inguest.js`, `BufferUnmap`), and Direct3D 11's
+ * viewports, which are floats where 10's are integers (`ContextRSSetViewports`).
  */
-export const BUFFER_SLOTS = /** @type {[string, number][]} */ ([['Buffer.Unmap', 2]]);
+export const BUFFER_SLOTS = /** @type {[string, number][]} */ ([['Buffer.Unmap', 2],
+    ['Context.RSSetViewports', 2]]);
 
 /** The Direct3D 10 device's command set: its table, read by ID3D10Device's slots. */
 export const D3D10_COMMANDS = commandSet([...ID3D10DEVICE_SLOTS, ...BUFFER_SLOTS], TABLE);
