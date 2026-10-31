@@ -7,7 +7,7 @@
 /**
  * The engine's end of the wire: answers a page's requests over a port.
  *
- * Everything that is the engine lives on this side -- the emulator, the HLE,
+ * Everything that is the engine lives on this side -- the CPU, the HLE,
  * the mixer's pump, the GPU device and the copy of each frame into the
  * canvas. The page keeps what only a page can do: the DOM events, the audio
  * context, the cursor style. A GPUDevice is neither transferable nor
@@ -859,7 +859,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             (await app.debug.read(address, length)).slice(),
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
-         * The emulator's account of where the guest ran, by address. Only the
+         * An engine's account of where the guest ran, by address. Only the
          * engine's own thread can start it, and the run worth taking an account
          * of is the one the page drives -- so without these there is no way to
          * ask for one where it matters. Requests rather than shared memory: it

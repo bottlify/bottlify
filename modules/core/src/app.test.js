@@ -6,7 +6,7 @@
 
 /**
  * What createApp wires that the module graph deliberately does not express.
- * Only the parts that can be exercised without an emulator are here.
+ * Only the parts that can be exercised without an engine are here.
  */
 
 import { test } from 'node:test';

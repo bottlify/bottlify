@@ -12,7 +12,7 @@ import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js
  * The image is built in a host-side buffer first and written to the guest in one
  * go. That keeps the ordering rules — zero, map, relocate, bind — enforced by
  * the structure of this function rather than by a comment, and it means a caller
- * can inspect the finished image without an emulator running.
+ * can inspect the finished image without an engine running.
  */
 
 /** The section alignment an image that names none is mapped at. */

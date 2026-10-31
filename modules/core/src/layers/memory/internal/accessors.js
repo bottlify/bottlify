@@ -20,8 +20,8 @@ import { guestFault, unterminated } from './faults.js';
 /**
  * @typedef {Object} RawMemory
  * @property {(address: number, bytes: Uint8Array) => void} [writeData]
- *     Writes bytes the guest cannot execute, without telling the emulator's
- *     compiler anything. Absent in a build whose memory is a plain buffer.
+ *     Writes bytes the guest cannot execute, without telling the translator
+ *     anything. Absent in a build whose memory is a plain buffer.
  * @property {(address: number, value: number, length: number) => void} [fillData]
  *     The same, for a run of one repeated byte, with no buffer to hold the
  *     pattern. Absent in a build whose memory has no such path.
@@ -155,7 +155,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         // The region the last read fell in, as for a dword below: a handler
         // that reads a structure reads it out of the region its pointer is in.
         readableSpan(address, length);
-        // A copy, not a window. The emulator hands back a subarray of its own
+        // A copy, not a window. The engine hands back a subarray of its own
         // memory, and a caller that holds one has a value that changes under it
         // -- read two ranges, write one, and the other has silently moved. The
         // shape of that bug is a wrong result with nothing to point at. A hot
@@ -245,7 +245,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             charge(bytes.length);
         }
         // Only a write the guest could execute has anything to tell the
-        // emulator's compiler. Everything else -- a structure field, an
+        // translator. Everything else -- a structure field, an
         // out-parameter, a surface -- goes straight into memory.
         if (raw.writeData && !regions.executable(address))
         {
@@ -278,7 +278,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         // that is not there -- a program's memset of a stray pointer and
         // size -- is gigabytes the host would allocate only to throw away.
         regions.assert(address, length, 'write');
-        // An executable target has the emulator's compiler to tell, and the
+        // An executable target has the translator to tell, and the
         // write path is what tells it. That is a guest code page rather than a
         // heap block, so it is rare, and a buffer there costs nothing worth
         // saving.
@@ -449,7 +449,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
          * Bytes another thread wrote into the guest's memory in place -- a
          * worker sharing it -- taken as this thread's own write: the range is
          * the program's to have written, it is charged, and a range the
-         * guest could execute is told to the emulator's compiler, as a write
+         * guest could execute is told to the translator, as a write
          * through here would have been.
          *
          * @param {number} address @param {number} length
@@ -475,7 +475,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         },
 
         /**
-         * The window the copy above refuses: the emulator's own bytes, valid
+         * The window the copy above refuses: the engine's own bytes, valid
          * only until control returns to the guest. For a path that reads a
          * block every call and has measured what the copy costs.
          *

@@ -1055,8 +1055,8 @@ for (const words of [false, true])
         assert.equal(host.refreshes.length, 1, 'one block for all of them');
 
         // One block, and a page of its own: the engine writes it whenever the
-        // clock moves, and a write into a page holding compiled code costs the
-        // emulator everything it compiled there -- including these routines.
+        // clock moves, and a write near translated code drops what the
+        // translator made of it -- these routines included.
         const block = host.view.getUint32(counter + 19, true) - CLOCK.SEQUENCE;
         assert.equal(host.view.getUint32(tickCount + 1, true) - CLOCK.TICKS, block,
             'the tick count reads the same block');

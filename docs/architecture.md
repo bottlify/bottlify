@@ -721,10 +721,10 @@ flowchart TB
   wrote before, the vertices the program wrote before the call included, is then there too.
 - **Dynamic buffers.** A program may write a dynamic buffer through the pointer a lock gave it,
   after the `Unlock`, and draw from it with no lock between, so a draw sends what changed in the
-  range it reads since the buffer was last sent. Under the emulator every byte of the range is
-  compared; under cork only the part of it on pages written since the last comparison. A store
-  into a watched page marks it by the same page-flag test that finds translated code: the first
-  store after the page is armed makes one compare-and-swap. The host's writes and a worker's
+  range it reads since the buffer was last sent. Only the part of the range on pages written
+  since the last comparison is compared. A store into a watched page marks it by the same
+  page-flag test that finds translated code: the first store after the page is armed makes one
+  compare-and-swap. The host's writes and a worker's
   writes in place mark it too. The cpu layer's write watch (`cpu/internal/write-clock.js`) gives
   each buffer its own view of the marks, since one look arms a page again for everyone, and takes
   a page armed while another executor was running guest code as written until that run has ended:

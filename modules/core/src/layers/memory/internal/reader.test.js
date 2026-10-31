@@ -64,7 +64,7 @@ function setup({ lends = true } = {}){
         reader: new DwordReader(regions, machine),
         asked: ()=>asked,
         lent: ()=>lent,
-        /** The machine's memory moves, as an emulator's does when it grows. */
+        /** The machine's memory moves, as a memory does when it grows. */
         move: ()=>{
             const moved = new Uint8Array(bytes.length);
             moved.set(bytes);

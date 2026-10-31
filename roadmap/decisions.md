@@ -889,6 +889,10 @@ under `cork`, which has no emulator compiler; the launcher's per-bundle engine s
 owner's. The paired browser table (`--engine emulator` as the control) that would confirm the
 target ns per instruction is the owner's to run. *2026-09-22, cork 5.5.*
 
+*Removed 2026-10-31:* the emulator is gone (no submodule, no package exports, no `engine`
+option): cork is the only engine. The `jit.*` counters, the `jit` and `engine` metrics and the
+boot ROM went with it.
+
 **Direct3D 8's and 9's setters and draws are made in the guest and played by the host at its
 next entry; the program is told D3D_OK at the call.** Render, stage and sampler states, transforms,
 the material, textures, streams, indices, the declaration and format, shaders and their

@@ -15,7 +15,7 @@ import { createSyncObjects } from './sync.js';
 
 /**
  * A cpu whose slices retire a fixed number of instructions, so scheduling can
- * be tested without an emulator. The switch primitive is the real one.
+ * be tested without an engine. The switch primitive is the real one.
  *
  * @param {number} [perSlice]
  */
@@ -420,10 +420,10 @@ test('a thread a timed wait wakes, pinned to an executor still opening, is waite
     assert.match(sched.diagnostics().byThread, /^main 0 .* a2$/, 'the report names its processors');
 });
 
-test('a slice the emulator ran past is counted, not assumed away', ()=>{
+test('a slice the engine ran past is counted, not assumed away', ()=>{
     // The quantum is how long one thread may hold the machine before anything
     // else -- another thread, a message, a frame -- gets a look, and nothing
-    // checked that it was honoured. An emulator that runs four times the
+    // checked that it was honoured. An engine that runs four times the
     // instructions asked for holds the machine four times as long and says
     // nothing about it, and the only symptom is a frame rate with no
     // explanation. So this cpu ignores the slice, the way one really can.

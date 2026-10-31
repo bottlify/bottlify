@@ -53,8 +53,8 @@ export const RECORD = Object.freeze({
 /**
  * CONTEXT, as a program sees it.
  *
- * Not the shape the emulator keeps -- that is an array of registers in the
- * processor's own order -- so every field here is a translation, and the
+ * Not the shape the engine keeps -- its state block holds the registers in
+ * the processor's own order -- so every field here is a translation, and the
  * offsets are the ones a handler was compiled against.
  */
 export const CONTEXT = Object.freeze({

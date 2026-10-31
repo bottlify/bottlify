@@ -111,7 +111,7 @@ function bindSiteHook(entry, image, memory, register, resolveHandler, allocate, 
     }
 
     // A code-page write: the region is executable, so this routes through the
-    // emulator's own physical write and invalidates whatever was compiled
+    // engine's own physical write and invalidates whatever was compiled
     // from the bytes underneath -- it happens once, at bind time, before the
     // program's first instruction, so nothing is compiled yet to discard. The
     // same protect/write/protect discipline `app.js`'s `debug.hook` uses, even

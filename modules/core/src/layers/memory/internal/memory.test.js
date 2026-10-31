@@ -27,8 +27,8 @@ function fakeMemory(size = 0x10000){
 }
 
 /**
- * The emulator's memory as the accessors see it, with the paths it offers kept
- * apart: `writePhysical` is the one that tells the emulator's compiler about a
+ * The engine's memory as the accessors see it, with the paths it offers kept
+ * apart: `writePhysical` is the one that tells the translator about a
  * page it may have translated, `writeData` and `fillData` the ones that go
  * straight into memory. The log of which path a call took is the only way to
  * see the difference from outside, since all three leave the same bytes.
@@ -311,7 +311,7 @@ test('a read is a snapshot, not a window onto guest memory', ()=>{
     const before = accessors.readBytes(0x2000, 4);
     accessors.writeBytes(0x2000, new Uint8Array([9, 9, 9, 9]));
 
-    // The emulator hands back a subarray of its own memory. A caller holding
+    // The engine hands back a subarray of its own memory. A caller holding
     // one has a value that changes under it -- read two ranges, write one, and
     // the other has silently moved, which is how a swap turns into a copy.
     assert.deepEqual([...before], [1, 2, 3, 4]);
@@ -510,7 +510,7 @@ test('a fill over executable memory goes the way a write there does', ()=>{
     const regions = mapWithPages();
     const accessors = createAccessors({ raw, regions });
 
-    // Whatever the emulator has translated for a page it may execute has to be
+    // Whatever the translator has made of a page the guest may execute has to be
     // discarded, and the write path is what discards it. A fill that went
     // straight into memory there would leave the old translation running.
     accessors.writeBytes(0x8000, new Uint8Array(16).fill(0x90));

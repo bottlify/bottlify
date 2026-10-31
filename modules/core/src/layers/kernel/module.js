@@ -193,8 +193,7 @@ export function createKernelModule(){
                 /** @param {any} thread @param {string | null} reason @param {number} value */
                 onResume: (thread, reason, value)=>log.debug('kernel',
                     '{0} resumed from {1} with {2:x}', thread.name, reason ?? 'a park', value),
-                // Below a page the emulator cannot honour a smaller quantum anyway,
-                // so asking for one would only be a lie in the configuration.
+                // A turn's length in instructions where the run names none.
                 quantum: config?.quantum ?? 100_000,
                 // A quantum asked for is kept to the instruction: a test's, a profile's.
                 turnMs: config?.quantum === undefined ? TURN_MS : undefined,

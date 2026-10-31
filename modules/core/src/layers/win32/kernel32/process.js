@@ -128,11 +128,10 @@ export const CLOCK = {
 };
 
 /**
- * The block takes a page of its own, and the reason is the emulator's: the
- * engine writes the block whenever the guest's clock moves, and a write into
- * a page holding compiled code makes the emulator discard everything compiled
- * for that page -- so a block sharing a page with the routines above would
- * have every credit throw them away and run them interpreted after.
+ * The block takes a page of its own: the engine writes the block whenever the
+ * guest's clock moves, and a write near translated code drops what the
+ * translator made of it -- so a block sharing a page with the routines above
+ * would have every credit throw them away and run them interpreted after.
  */
 const PAGE = 4096;
 

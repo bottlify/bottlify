@@ -458,7 +458,7 @@ function createEngineMixer(
          * Called once a scheduler turn by whoever is driving the machine, which
          * is the only place that knows a turn has happened. It writes ahead
          * rather than on demand -- the device reads on its own thread and must
-         * never find the ring empty because the emulator was busy.
+         * never find the ring empty because the engine was busy.
          *
          * @param {number} [frames]  Ceiling; the ring's room is the real one.
          * @returns {number} frames written

@@ -112,7 +112,7 @@ const HEAP_SUMMARY_SIZE = 20;
  * The one page protection this build offers.
  *
  * Nothing here enforces page permissions -- guest memory is one buffer the
- * emulator reads and writes freely -- so every page is readable, writable and
+ * engine reads and writes freely -- so every page is readable, writable and
  * executable. VirtualProtect and VirtualQuery both report that rather than
  * echoing back whatever a caller asked for, because a caller that saves the old
  * protection and restores it must get something true both times.

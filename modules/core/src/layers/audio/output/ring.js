@@ -7,8 +7,8 @@
 /**
  * The one place sound crosses out of the engine.
  *
- * A browser's audio thread cannot ask the emulator for samples: it runs in a
- * different thread on a deadline of a millisecond or so, and the emulator may
+ * A browser's audio thread cannot ask the engine for samples: it runs in a
+ * different thread on a deadline of a millisecond or so, and the engine may
  * be in the middle of a guest instruction that will not finish for longer than
  * that. So nothing pulls. The engine writes ahead into a ring in shared memory
  * and the audio thread reads out of it, and the two never wait for each other.

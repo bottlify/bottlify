@@ -919,8 +919,8 @@ test('a primary is its window\'s client area windowed, and the screen with the w
     await graphicsModule.dispose();
 });
 
-test('a window\'s surface survives the emulator growing its memory under it', async()=>{
-    // A view of the emulator's memory is a view of one buffer, and growing
+test('a window\'s surface survives guest memory growing under it', async()=>{
+    // A view of guest memory is a view of one buffer, and growing
     // the memory replaces the buffer: every view of the old one empties. The
     // pixels are still at the same guest address, so the surface takes its
     // view again rather than drawing into nothing from then on.

@@ -417,7 +417,7 @@ export function createScheduler(options){
      */
     let heaviestSlice = 0;
     let heaviestFrom = 0;
-    /** Turns where the emulator ran past the slice it was given, and the worst. */
+    /** Turns where the engine ran past the slice it was given, and the worst. */
     let overruns = 0;
     let worstSlice = 0;
     /**
@@ -431,7 +431,7 @@ export function createScheduler(options){
     let worstSliceOn = null;
     /**
      * The slices that held the machine longest, by the host's clock. An
-     * instruction count says the emulator ran past its bound; a time says a
+     * instruction count says the engine ran past its bound; a time says a
      * frame and the sound ring waited, whether the count was over or not --
      * a slice of a hundred thousand instructions that each take a microsecond
      * is a freeze the count alone would never show. Kept few and sorted, so
@@ -461,8 +461,8 @@ export function createScheduler(options){
      * slice started at and the weight is everything it retired, so a slice that
      * ran through several pages is credited entirely to the first. Across
      * thousands of slices that averages out to where the guest actually is, and
-     * it is the only account of that available -- the emulator's own profiler
-     * is compiled out of the build we vendor. Coarse deliberately: a page is
+     * it is the only account of that a release build keeps -- the translator's
+     * block profile is a diagnostic run's. Coarse deliberately: a page is
      * enough to name the module, and per-address would cost an entry for
      * every basic block the guest ever entered.
      *
@@ -938,8 +938,8 @@ export function createScheduler(options){
         //
         // A quantum is how long a thread may hold the machine before
         // anything else -- another thread, a message, a frame -- gets a
-        // look. Nothing checked that the emulator honoured it, so an
-        // emulator that ran four times the instructions asked for would
+        // look. Nothing checked that the engine honoured it, so an
+        // engine that ran four times the instructions asked for would
         // hold the machine four times as long and say nothing, and the only
         // symptom would be a frame rate nobody could account for. Asking is
         // not knowing; this is the knowing.

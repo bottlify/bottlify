@@ -54,8 +54,7 @@ const LN2_HI = 6.93147180369123816490e-01;
 const LN2_LO = 1.90821492927058770002e-10;
 
 /**
- * log10(2), the double nearest it: `fldlg2` loads it under cork, and a unit
- * short of it under the emulator, whose log10(1000) was 2.999999999999999.
+ * log10(2), the double nearest it, as `fldlg2` loads it.
  */
 const LOG10_2 = 0.3010299956639812;
 

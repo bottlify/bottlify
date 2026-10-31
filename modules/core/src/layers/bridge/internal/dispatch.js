@@ -471,8 +471,8 @@ class Dispatcher {
          * (`cpu.registerFile`): ESP read and EAX written in place rather than
          * through `readReg32` and `writeReg32`, each a walk through the cpu
          * layer's api, its host and a search of the register names. Taken
-         * again when it reads empty -- an emulator that grows its memory
-         * detaches the buffer the view was on -- and never asked for again
+         * again when it reads empty -- a memory that grows detaches the
+         * buffer the view was on -- and never asked for again
          * once the cpu says it has none.
          *
          * @type {Int32Array | null}
@@ -1636,7 +1636,7 @@ class Dispatcher {
             return;
         }
         // Asked again rather than reusing `regs`: the handler may have
-        // grown the emulator's memory under the view.
+        // grown guest memory under the view.
         const answerTo = this.registers();
         if (answerTo === null)
         {
