@@ -13,7 +13,8 @@
  * maximum of zero), releases (of one, of several, of zero, negative, past the
  * maximum, with and without a previous count), polls, timed waits, waits on
  * several objects mixing semaphores with an event and a mutex (any and all),
- * closes, duplicates, a named semaphore opened again with fewer rights, with
+ * closes, duplicates, a named semaphore opened again with fewer rights, waits
+ * and releases on NULL, with
  * events set and a mutex taken and given back between: every answer, every
  * last error and every previous count folds into the exit code, which must be
  * the same with the guest's answers and with every call in the host
@@ -47,7 +48,7 @@ const EVENT = 4;
 const MUTEX = 5;
 const OPENED = 6;
 const OPS = ['create', 'release', 'release', 'release', 'poll', 'poll', 'poll', 'wait', 'any',
-    'all', 'close', 'dup', 'set', 'take', 'give', 'open'];
+    'all', 'close', 'dup', 'set', 'take', 'give', 'open', 'null'];
 /** A release's counts: ordinary, several, none, negative, the most a LONG holds. */
 const COUNTS = [1, 1, 1, 2, 3, 0, -1, 0x7fffffff];
 const MAXIMA = [1, 2, 3, 5, 0x7fffffff, 0];
@@ -140,6 +141,14 @@ function semaphoreProgram(seed, count, rounds = 1){
                         0x6a, timeout, 0x6a, op === 'all' ? 1 : 0, 0x68, ...u32(at('set')),
                         0x6a, other === slot || third === slot || other === third ? 2 : 3,
                         ...call('WaitForMultipleObjects'));
+                }
+                else if (op === 'null')
+                {
+                    // A wait on NULL, or on NULL with the program's low bits:
+                    // what a create that failed leaves a program holding.
+                    code.push(0x6a, timeout === 0 ? 0 : 0xff, 0x6a, slot,
+                        ...call('WaitForSingleObject'), ...fold,
+                        0x6a, 0x00, 0x6a, 0x01, 0x6a, 0x00, ...call('ReleaseSemaphore'));
                 }
                 else if (op === 'close')
                 {

@@ -887,7 +887,8 @@ export function createThreadingFunctions(host){
     let handleWords;
     /** What the kernel's words say, for the routines that read them. */
     const wordValues = ()=>({ clear: kernel.EventMirror.CLEAR, set: kernel.EventMirror.SET,
-        mutexTag: kernel.MUTEX_TAG, eventTag: kernel.EVENT_TAG });
+        invalid: kernel.EventMirror.INVALID, mutexTag: kernel.MUTEX_TAG,
+        eventTag: kernel.EVENT_TAG });
     const placedTable = ()=>{
         if (handleWords !== undefined)
         {

@@ -43,7 +43,7 @@
  *     cmp eax, 4                  ; an object's own word is an address
  *     jae word
  *     cmp eax, CLEAR              ; an event not signalled...
- *     jne slow
+ *     jne other
  *   poll:
  *     cmp dword [esp+8], 0        ; ...polled
  *     jne slow
@@ -93,6 +93,14 @@
  *     ret 8
  *   slow:
  *     jmp trap
+ *   other:
+ *     cmp eax, INVALID            ; handles 0 to 3: NULL, and the console's
+ *     jne slow
+ *     cmp dword [esp+4], 0        ; NULL itself
+ *     jne slow
+ *     mov dword fs:[0x34], ERROR_INVALID_HANDLE
+ *     or eax, -1                  ; WAIT_FAILED, whatever the timeout
+ *     ret 8
  */
 
 /**
@@ -117,12 +125,15 @@ export const SEMAPHORE_SLOTS = 0x2000;
  * @typedef {Object} HandleWordValues
  * @property {number} clear     the word of an event with none of its own, not signalled
  * @property {number} set       the same, signalled
+ * @property {number} invalid   the word of NULL, a handle nothing can be
  * @property {number} mutexTag  the low bits of a mutex's word
  * @property {number} eventTag  the low bits of an event's word
  */
 
 const WAIT_TIMEOUT = 0x102;
 const TEB_THREAD_ID = 0x24;
+const TEB_LAST_ERROR = 0x34;
+const ERROR_INVALID_HANDLE = 6;
 
 /** An event's own word (`event-words.js`): its state, past which the host keeps it. */
 const SIGNALLED = 0x1;
@@ -150,13 +161,14 @@ const JA = 0x87;
  * @param {number} semaphore  The wait on a semaphore (`semaphore-guest.js`), placed.
  * @returns {Uint8Array}
  */
-export function waitOneCode(at, trap, table, { clear, mutexTag, eventTag }, semaphore){
+export function waitOneCode(at, trap, table, { clear, invalid, mutexTag, eventTag }, semaphore){
     const poll = 43;
     const word = 62;
     const taken = 96;
     const mutex = 111;
     const held = 156;
     const slow = 187;
+    const other = 192;
     const bytes = [
         0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
         0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
@@ -166,7 +178,7 @@ export function waitOneCode(at, trap, table, { clear, mutexTag, eventTag }, sema
         0x83, 0xf8, 0x04,                                            // 25: cmp eax, 4
         ...jcc(JAE, 28, word),                                       // 28: jae word
         0x83, 0xf8, clear,                                           // 34: cmp eax, CLEAR
-        ...jcc(JNE, 37, slow),                                       // 37: jne slow
+        ...jcc(JNE, 37, other),                                      // 37: jne other
         // poll: (43)
         0x83, 0x7c, 0x24, 0x08, 0x00,                                // 43: cmp dword [esp+8], 0
         ...jcc(JNE, 48, slow),                                       // 48: jne slow
@@ -216,6 +228,15 @@ export function waitOneCode(at, trap, table, { clear, mutexTag, eventTag }, sema
         0xc2, 0x08, 0x00,                                            // 184: ret 8
         // slow: (187)
         0xe9, ...dword(trap - (at + slow + 5)),                      // 187: jmp trap
+        // other: (192)
+        0x83, 0xf8, invalid,                                         // 192: cmp eax, INVALID
+        0x75, (slow - 197) & 0xff,                                   // 195: jne slow
+        0x83, 0x7c, 0x24, 0x04, 0x00,                                // 197: cmp dword [esp+4], 0
+        0x75, (slow - 204) & 0xff,                                   // 202: jne slow
+        0x64, 0xc7, 0x05, ...dword(TEB_LAST_ERROR),                  // 204: mov dword fs:[0x34],
+        ...dword(ERROR_INVALID_HANDLE),                              //      ERROR_INVALID_HANDLE
+        0x83, 0xc8, 0xff,                                            // 215: or eax, -1
+        0xc2, 0x08, 0x00,                                            // 218: ret 8
     ];
     return new Uint8Array(bytes);
 }

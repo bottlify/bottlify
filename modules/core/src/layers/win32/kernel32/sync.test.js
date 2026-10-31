@@ -656,6 +656,28 @@ test('a finite timeout is a wait with a deadline, not an immediate refusal', ()=
     assert.equal(host.kernel.state.timed.at(-1), undefined);
 });
 
+test('a wait for all of a set naming one object twice fails; a wait for any of it does not', ()=>{
+    // WaitForMultipleObjects: the array "may not contain multiple copies of the
+    // same handle"; Windows refuses one for all of them with ERROR_INVALID_PARAMETER,
+    // under one handle or two onto the object, and takes one for any of them.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const semaphore = { kind: 'semaphore', count: 1, maximum: 4, waiters: [] };
+    host.register(0x10, 'semaphore', semaphore);
+    host.register(0x14, 'semaphore', semaphore);
+    const view = new DataView(host.bytes.buffer);
+    for (const second of [0x10, 0x14])
+    {
+        view.setUint32(0x400, 0x10, true);
+        view.setUint32(0x404, second, true);
+        assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 1, INFINITE]), WAIT_FAILED);
+        assert.equal(host.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+        assert.equal(semaphore.count, 1, 'nothing taken');
+    }
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, 0]), WAIT_OBJECT_0);
+    assert.equal(semaphore.count, 0, 'one count taken for any of them');
+});
+
 test('a wait on nothing, or on too much, fails rather than guessing', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);

@@ -27,7 +27,8 @@ const TRAP = 0x8400;
 const TABLE = 0x100000;
 const STACK = 0x300000;
 /** What the kernel's words say, as the routines are handed it. */
-const VALUES = { clear: MIRROR.CLEAR, set: MIRROR.SET, mutexTag: MUTEX_TAG, eventTag: EVENT_TAG };
+const VALUES = { clear: MIRROR.CLEAR, set: MIRROR.SET, invalid: MIRROR.INVALID,
+    mutexTag: MUTEX_TAG, eventTag: EVENT_TAG };
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -94,6 +95,20 @@ test('the guest poll times out an unsignalled event and leaves every other wait 
         assert.equal(poll(EVENT_SLOTS * 4, 0), 'host', 'past the table');
         assert.equal(poll(0xffffffff, 0), 'host', 'a pseudo-handle');
         assert.equal(poll(0xfffffff6, 0), 'host', 'a standard-handle number');
+
+        // NULL's word: WAIT_FAILED here, ERROR_INVALID_HANDLE in the TEB (FS's
+        // base is zero here: FS:[0x34] is linear 0x34), whatever the timeout.
+        word(0, MIRROR.INVALID);
+        for (const [handle, timeout] of [[0, 0xffffffff], [0, 0], [0, 5]])
+        {
+            host.writePhysical(0x34, new Uint8Array(u32(0)));
+            assert.equal(poll(handle, timeout), 0xffffffff, `NULL (${handle}) fails here`);
+            assert.deepEqual([...host.readPhysical(0x34, 4)], u32(6), 'ERROR_INVALID_HANDLE');
+        }
+        assert.equal(poll(1, 0), 'host', 'a console stream goes to the host');
+        assert.equal(poll(3, 0xffffffff), 'host');
+        word(0, MIRROR.NONE);
+        assert.equal(poll(0, 0xffffffff), 'host', 'NULL with no word goes to the host');
 
         host.stop();
     });

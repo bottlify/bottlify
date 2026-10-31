@@ -31,6 +31,15 @@ export const MIRROR = Object.freeze({
     CLEAR: 1,
     /** A signalled event: a poll of it takes it, which is the host's. */
     SET: 3,
+    /**
+     * The word of handles 0 to 3, which no object of the table has: a wait
+     * on NULL fails with ERROR_INVALID_HANDLE in the guest (1 to 3 are the
+     * console's streams, the host's to answer). A program that waits on a
+     * handle it never got -- a CreateSemaphore with a maximum below one
+     * answers NULL -- otherwise crossed into the host to be told so, from
+     * another executor a round trip for each.
+     */
+    INVALID: 2,
 });
 
 /**
@@ -89,6 +98,10 @@ export function createEventMirror(write, own = ()=>true){
         attach(at, count, open){
             table = at >>> 0;
             slots = count;
+            if (slots > 0)
+            {
+                write(table, MIRROR.INVALID);
+            }
             for (const { handle, type, object, access } of open)
             {
                 mirror.opened(handle, type, object, access);
@@ -177,6 +190,7 @@ export function createEventMirror(write, own = ()=>true){
             {
                 write(table + (handle >>> HANDLE_SHIFT) * 4, MIRROR.NONE);
             }
+            write(table, MIRROR.NONE);
             byHandle.clear();
             words = new WeakMap();
             detachedSlots = slots;
