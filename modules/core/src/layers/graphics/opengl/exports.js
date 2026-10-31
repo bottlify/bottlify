@@ -960,6 +960,22 @@ export function createOpengl(services){
      *     before it answers, or null
      */
     const presentCurrentFrame = (/** @type {number} */ hdc)=>{
+        const held = showFrame(hdc);
+        // The window's client area is the default framebuffer's size, as a
+        // driver keeps it: a window resized since the context was made current
+        // on it -- SDL makes it current at the size it was created and then
+        // goes full-screen -- draws its next frame at the new size, the
+        // viewport the program's to set.
+        const drawable = describeDrawable(hdc >>> 0);
+        if (drawable && (drawable.window ?? 0) !== 0)
+        {
+            current()?.resize(drawable.width, drawable.height);
+        }
+        return held;
+    };
+
+    /** @returns {Promise<void> | null} */
+    const showFrame = (/** @type {number} */ hdc)=>{
         services.presented?.();
         const context = current();
         if (!context || !services.present)

@@ -25,6 +25,7 @@ const WS_VISIBLE = 0x10000000;
 const SWP_NOSIZE = 0x1;
 const SWP_NOZORDER = 0x4;
 const SWP_NOACTIVATE = 0x10;
+const SWP_NOREDRAW = 0x8;
 const RECT = 0x13800;
 const RED = 0x000000ff;
 const BLUE = 0x00ff0000;
@@ -137,6 +138,24 @@ test('a CS_OWNDC window hands out one context, which keeps what was set in it', 
     assert.equal(fns.ReleaseDC.handler([hwnd, hdc]), 1, 'a second release succeeds too');
     assert.equal(gdi32.GetROP2.handler([hdc]), R2_WHITE);
 });
+
+test('a CS_OWNDC context taken before its window was resized describes the window as it is now',
+    async()=>{
+        // What OpenGL sizes the default framebuffer by: SDL takes its window's
+        // one context at the size it creates it, then makes it full-screen.
+        const { context, make } = await classed(CS_OWNDC);
+        const hwnd = await make(10, 10);
+        const hdc = context.fns.GetDC.handler([hwnd]);
+        assert.deepEqual(size(context.gdi.describeDrawable(hdc)), [100, 100]);
+        // Nothing erased or painted -- SDL erases nothing -- so no paint
+        // brings the context up to date.
+        await context.fns.SetWindowPos.handler([hwnd, 0, 0, 0, 160, 120,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW]);
+        assert.deepEqual(size(context.gdi.describeDrawable(hdc)), [160, 120]);
+    });
+
+/** @param {{ width: number, height: number } | null} drawable */
+const size = drawable=>[drawable?.width, drawable?.height];
 
 test('a CS_CLASSDC class hands its one context to whichever window asks', async()=>{
     const { context, make } = await classed(CS_CLASSDC);

@@ -358,6 +358,6 @@ export function setupBars(gdiEngine){
     };
 
     return { memory, desktop, fns: table, send, pump, sent, divergences, resources,
-        makeParent, control, bitmap, windowRect, clientSize, toScreen, pixel, gdi32,
+        makeParent, control, bitmap, windowRect, clientSize, toScreen, pixel, gdi32, gdi,
         lists: imageLists.functions };
 }

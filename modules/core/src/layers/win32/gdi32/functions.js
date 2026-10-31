@@ -5716,6 +5716,14 @@ export function createGdiFunctions(host){
             {
                 return null;
             }
+            // A DC a program took once and keeps (CS_OWNDC, as SDL's) is over
+            // the window as it is now: OpenGL sizes its default framebuffer by
+            // this, and a window made full-screen after the DC was taken drew
+            // at the size it was created.
+            if (dc.kind === 'window' && dc.window !== 0)
+            {
+                host.windowContextCurrent?.(hdc >>> 0);
+            }
             const bounds = dc.bounds;
             const size = bounds
                 ? { width: bounds.right - bounds.left, height: bounds.bottom - bounds.top }
