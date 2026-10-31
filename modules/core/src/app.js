@@ -235,7 +235,8 @@ const hashText = (hash, text)=>{
  * @property {{ asked: any, detail: string } | null} [fallback]
  *     What a run asked for and fell back from (`mode.js`): set by `createApp`, not
  *     something a caller supplies.
- * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} [graphicsApi]
+ * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'directx11' | 'opengl'}
+ *     [graphicsApi]
  *     The graphics a bottle prefers: every DirectX up to the one named --
  *     DirectX 9 has DirectDraw and Direct3D 8 as well -- or OpenGL alone. Only
  *     those system libraries exist and only their wrappers are built, and the

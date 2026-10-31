@@ -44,7 +44,10 @@ export function windowsChoice(value){
     return found;
 }
 
-/** @typedef {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} GraphicsChoice */
+/**
+ * @typedef {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'directx11' | 'opengl'}
+ *     GraphicsChoice
+ */
 
 /**
  * The graphics a bottle may prefer, as `graphics` in its manifest: the
@@ -53,11 +56,11 @@ export function windowsChoice(value){
  * @type {readonly GraphicsChoice[]}
  */
 export const GRAPHICS_CHOICES = Object.freeze(
-    ['directx7', 'directx8', 'directx9', 'directx10', 'opengl']);
+    ['directx7', 'directx8', 'directx9', 'directx10', 'directx11', 'opengl']);
 
 /**
  * The name itself, or undefined for none -- every API, the engine's default.
- * Anything else is refused, naming the five.
+ * Anything else is refused, naming the six.
  * @param {unknown} value
  * @returns {GraphicsChoice | undefined}
  */

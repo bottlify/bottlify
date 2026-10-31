@@ -1800,7 +1800,7 @@ test('private data is kept per object and an interface entry holds a reference',
 
     assert.equal(device.SetPrivateDataInterface(guid, null), S_OK);
     assert.deepEqual(device.GetPrivateData(guid, { size: 8, wantsData: true }),
-        { hr: S_OK, size: 4, object: null });
+        { hr: S_OK, size: 4, object: null, pointer: 0 });
 
     const other = createDevice();
     const before = other.refCount;
@@ -1817,11 +1817,12 @@ test('private data is kept per object and an interface entry holds a reference',
     assert.equal(device.SetPrivateData(guid, 42, null), S_OK);
     assert.equal(device.SetPrivateData(guid, 42, null), S_FALSE);
 
-    assert.equal(device.SetPrivateDataInterface(guid, other), S_OK);
+    assert.equal(device.SetPrivateDataInterface(guid, other, 0x1234), S_OK);
     const answered = device.GetPrivateData(guid, { size: 8, wantsData: true });
     assert.equal(answered.hr, S_OK);
     assert.equal(answered.size, 4);
     assert.equal(answered.object, other);
+    assert.equal(answered.pointer, 0x1234, 'the pointer it was given, through its interface');
     assert.equal(other.refCount, before + 2, 'reading takes a reference for the caller');
     other.release();
 
@@ -2107,6 +2108,30 @@ test('a layout of no elements feeds a vertex shader that reads only system value
     assertFullyReleased(device);
 });
 
+test('a layout made against a pixel shader feeds its position too: the vertex and instance'
+    + ' ids alone are made by the input assembler', ()=>{
+    const device = createDevice();
+    const pixel = solidPixelShaderReadingPosition();
+    /** @type {{ layout?: any }} */
+    const out = {};
+    assert.equal(device.CreateInputLayout([], pixel, out), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([{ SemanticName: 'SV_Position', SemanticIndex: 0,
+        Format: DXGI_FORMAT.R32G32B32A32_FLOAT, InputSlot: 0, AlignedByteOffset: 0,
+        InputSlotClass: 0, InstanceDataStepRate: 0 }], pixel, out), S_OK);
+    out.layout.release();
+    assertFullyReleased(device);
+});
+
+/** A pixel shader whose signature reads SV_POSITION. */
+function solidPixelShaderReadingPosition(){
+    return assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclOutputSiv(o(0), SYSTEM_VALUE.TARGET), ret()],
+    });
+}
+
 test('multisample quality levels answer as Windows does at the edges'
     + ' (test_check_multisample_quality_levels, d3d10core.c:10613-10679)', ()=>{
     const device = createDevice();
@@ -2292,5 +2317,31 @@ test('the multisample bits follow the quality levels: a four-sample target, reso
     assert.equal(support(DXGI_FORMAT.D24_UNORM_S8_UINT) & (RESOLVE | RENDERTARGET | LOAD),
         RENDERTARGET, 'depth is drawn at four samples and never resolved');
     assert.equal(support(DXGI_FORMAT.R32G32B32A32_FLOAT) & (RESOLVE | RENDERTARGET | LOAD), 0);
+    assertFullyReleased(device);
+});
+
+test('a Direct3D 10 device keeps the rasterizer state it binds past the last release, and'
+    + ' nothing else', ()=>{
+    const device = createDevice();
+    /** @type {{ state?: any }} */
+    const rasterizer = {};
+    assert.equal(device.CreateRasterizerState(RASTERIZER_DESC, rasterizer), S_OK);
+    device.RSSetState(rasterizer.state);
+    assert.equal(rasterizer.state.release(), 0);
+    /** @type {{ state?: any }} */
+    const got = {};
+    device.RSGetState(got);
+    assert.equal(got.state, rasterizer.state, 'the same object, still alive');
+    assert.equal(got.state.release(), 0);
+    /** @type {{ state?: any }} */
+    const sampler = {};
+    assert.equal(device.CreateSamplerState(SAMPLER_DESC, sampler), S_OK);
+    device.PSSetSamplers(0, [sampler.state]);
+    assert.equal(sampler.state.release(), 0);
+    /** @type {{ samplers?: any[] }} */
+    const samplers = {};
+    device.PSGetSamplers(0, 1, samplers);
+    assert.deepEqual(samplers.samplers, [null], 'a sampler goes with its last release');
+    device.ClearState();
     assertFullyReleased(device);
 });

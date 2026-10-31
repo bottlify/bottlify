@@ -9,6 +9,7 @@ import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { ringTrace } from './d3d8/commands.js';
 import { createDirect3D9 } from './d3d9/device.js';
+import { createDirect3D10 } from './d3d10/root.js';
 import { profileBehaviour, profileCaps } from './seam/adapter.js';
 import { connectGraphicsWorker } from './remote/connect.js';
 import { createGraphicsLibraries } from './seam/exports.js';
@@ -214,6 +215,25 @@ const bufferTotals = backend=>{
 
 /** What a pool says when nothing here can measure it. */
 const NOT_MEASURED = 'not measured';
+
+/**
+ * Direct3D 10's rings as one line a report prints: how often and how long
+ * each was played on the host's way in, and why buffer maps reached the host.
+ *
+ * @param {any} direct3d10 @returns {string | null}
+ */
+const ringLine = direct3d10=>{
+    if (!direct3d10)
+    {
+        return null;
+    }
+    const rings = (direct3d10.rings ?? []).map((/** @type {any} */ ring)=>`syncs ${ring.syncs}`
+        + ` ${ring.syncMs}ms maps ${Object.entries(ring.maps)
+            .map(([why, count])=>`${why}:${count}`).join(',')}`);
+    const unattached = Object.entries(direct3d10.unattachedMaps ?? {})
+        .map(([usage, count])=>`usage${usage}:${count}`).join(',');
+    return `${rings.join('; ') || 'no ring'}${unattached ? `; unattached ${unattached}` : ''}`;
+};
 
 /**
  * What this layer holds of the tab's memory, by zone (`memory-zones.js`): of
@@ -476,6 +496,14 @@ export function createGraphicsModule(){
             const direct3d = (name, factory, services)=>(remote
                 ? remote.root(name, factory, services)
                 : factory(services));
+            /**
+             * Direct3D 10's root, drawn here or in the graphics worker.
+             *
+             * @param {import('./d3d10/device.js').DeviceOptions} options
+             */
+            const direct3d10 = options=>(remote
+                ? remote.root('d3d10', createDirect3D10, options)
+                : createDirect3D10(options));
 
             /**
              * The draw check's live switch (`checkDraws` below): how many times
@@ -760,15 +788,18 @@ export function createGraphicsModule(){
                         : undefined,
                     ...options,
                 }),
-                // Direct3D 10's seam makes the device itself from what a program
-                // passes; this hands it the GPU, reached only when one is made.
-                /** @returns {import('./d3d10/device.js').DeviceOptions} */
-                d3d10: (/** @type {any} */ caps)=>({
-                    backend: device ? api.backend() : undefined,
-                    createSampler: device
+                // Direct3D 10's entry points (`d3d10/root.js`), with the GPU
+                // they draw through: here, or in the graphics worker, where the
+                // root the program gets is a recorded one (`remote/d3d10.js`).
+                // `caps.factoryOptions`: the seam's window and display answers.
+                /** @returns {any} */
+                d3d10: (/** @type {any} */ caps)=>direct3d10({
+                    factoryOptions: caps?.factoryOptions,
+                    backend: device && !remote ? api.backend() : undefined,
+                    createSampler: device && !remote
                         ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                         : undefined,
-                    createTexture: device
+                    createTexture: device && !remote
                         ? (/** @type {any} */ descriptor)=>device.device.createTexture(descriptor)
                         : undefined,
                     divergence: config?.divergence,
@@ -781,6 +812,16 @@ export function createGraphicsModule(){
                     // unclipped, which is what DepthClipEnable = FALSE asks.
                     depthClipControl: device?.device?.features?.has('depth-clip-control') === true,
                     frameQueued,
+                    // What a program maps lives in its own memory, so a map
+                    // hands out an address and an unmap reads what it wrote
+                    // (the pages written, where the engine watches them).
+                    guest: config?.allocate ? {
+                        allocate: config.allocate,
+                        free: config.free,
+                        readMemory: services.readMemory,
+                        writeMemory: services.writeMemory,
+                        watchWrites: services.watchWrites,
+                    } : undefined,
                 }),
                 /** @returns {any} */
                 vulkan: (/** @type {any} */ options)=>createVulkan({
@@ -1478,6 +1519,8 @@ export function createGraphicsModule(){
                     worker,
                     // Kept flat, where a report drops the structure above.
                     workerAnswers: worker ? worker.answers : null,
+                    // Direct3D 10's and 11's rings, flat for the same reason.
+                    d3d10Rings: ringLine(seam?.direct3d10),
                     // DXT textures kept as BC blocks on the GPU, or decoded first.
                     blockCompression: instance.blockCompression,
                     seam,

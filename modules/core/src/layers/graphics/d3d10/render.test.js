@@ -48,12 +48,55 @@ import {
 } from '../webgpu/internal/reference.js';
 
 /**
+ * Guest memory as the engine gives it: a bump heap, and a write watch at
+ * page grain that a test marks by hand, as a store into a watched page does.
+ */
+function guestMemory(){
+    const memory = new Uint8Array(1 << 20);
+    let next = 0x10000;
+    /** @type {Set<number>} */
+    const written = new Set();
+    return {
+        memory,
+        /** @param {number} address @param {Uint8Array} bytes  the program's store */
+        store(address, bytes){
+            memory.set(bytes, address);
+            for (let page = address >>> 12; page <= (address + bytes.length - 1) >>> 12; page++)
+            {
+                written.add(page);
+            }
+        },
+        storage: {
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += (bytes + 0xfff) & ~0xfff;
+                return at;
+            },
+            free: ()=>{},
+            readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+                memory.slice(address, address + length),
+            writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+                memory.set(bytes, address),
+            watchWrites: ()=>({
+                take: (/** @type {number} */ address, /** @type {number} */ length)=>{
+                    const pages = [...written].filter(page=>page >= address >>> 12
+                        && page <= (address + length - 1) >>> 12);
+                    pages.forEach(page=>written.delete(page));
+                    return pages;
+                },
+            }),
+        },
+    };
+}
+
+/**
  * A device with a backend over the recording GPU, and a swap chain to present.
  *
  * @param {{ width?: number, height?: number, compressedTextures?: boolean,
  *           depthClipControl?: boolean, sampleCount?: number, format?: number,
  *           fake?: Parameters<typeof createFakeDevice>[0],
- *           frameQueued?: import('../webgpu/internal/latency.js').FrameQueued }} [options]
+ *           frameQueued?: import('../webgpu/internal/latency.js').FrameQueued,
+ *           guest?: import('./render.js').GuestStorage }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice(options.fake);
@@ -86,6 +129,7 @@ function harness(options = {}){
             compressedTextures: options.compressedTextures,
             depthClipControl: options.depthClipControl,
             frameQueued: options.frameQueued,
+            guest: options.guest,
         }), S_OK);
     const device = deviceOut.device;
     const swapChain = chainOut.swapChain;
@@ -448,7 +492,8 @@ test('a draw with no viewport, target or vertex shader draws nothing and is coun
     await h.present();
     assert.equal(h.gpu.count('draw'), 0);
     assert.deepEqual(h.device.diagnostics().skipped,
-        { noViewport: 1, noTarget: 1, noShader: 1, untranslatable: 0, pipeline: 0 });
+        { noViewport: 1, noTarget: 1, noShader: 1, untranslatable: 0, pipeline: 0,
+            stage: 0 });
 });
 
 // --- constant buffers ---
@@ -492,7 +537,7 @@ test('a dynamic constant buffer is mapped, written, and bound at the draw', asyn
     const fragmentLayout = layouts.find((/** @type {any} */ call)=>
         call.descriptor.label === 'd3d10:ps');
     assert.deepEqual(fragmentLayout.descriptor.entries,
-        [{ binding: 0, visibility: 2, buffer: { type: 'uniform' } }]);
+        [{ binding: 0, visibility: 2, buffer: { type: 'uniform', minBindingSize: 16 } }]);
     const groups = h.gpu.of('createBindGroup');
     const fragmentGroup = groups.find((/** @type {any} */ call)=>
         call.descriptor.layout === fragmentLayout.createBindGroupLayout);
@@ -503,6 +548,76 @@ test('a dynamic constant buffer is mapped, written, and bound at the draw', asyn
     assert.deepEqual([...queuedBytes(h, entry.resource.buffer)], [...floatBytes([1, 0.5, 0, 1])],
         'the bytes written through the map are the ones the draw reads');
     assert.deepEqual(h.gpu.of('setBindGroup').map((/** @type {any} */ call)=>call.index), [0, 1]);
+});
+
+test('a vertex slot the layout reads with nothing bound reads zeros: WebGPU refuses a frame'
+    + ' with the slot left empty', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ layout?: any }} */
+    const layout = {};
+    assert.equal(device.CreateInputLayout([POSITION_ELEMENT, {
+        SemanticName: 'COLOR', SemanticIndex: 0, Format: DXGI_FORMAT.R32G32B32A32_FLOAT,
+        InputSlot: 1, AlignedByteOffset: 0, InputSlotClass: 1, InstanceDataStepRate: 1,
+    }], colouredVertexShader(), layout), S_OK);
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(device.CreateVertexShader(colouredVertexShader(), vs), S_OK);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(colouredPixelShader(), ps), S_OK);
+    device.VSSetShader(vs.shader);
+    device.PSSetShader(ps.shader);
+    device.IASetInputLayout(layout.layout);
+    device.DrawInstanced(3, 2, 0, 0);
+    await h.present();
+    assert.deepEqual(h.gpu.errors, [], 'the GPU took the frame');
+    assert.deepEqual(h.divergences, []);
+    assert.equal(h.gpu.of('draw').length, 1);
+    assert.ok(h.gpu.of('setVertexBuffer').some((/** @type {any} */ call)=>call.slot === 1),
+        'the empty slot was given zeros');
+});
+
+test('a constant buffer smaller than the shader declares is bound whole, padded with zeros to'
+    + ' the declaration: WebGPU refuses the frame over a smaller binding', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    // Two registers declared, the second read; one register's buffer bound.
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclConstantBuffer(0, 2), dclOutput(o(0)), mov(o(0), cb(0, 1)), ret()],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    /** @type {{ resource?: any }} */
+    const constants = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.CONSTANT_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 },
+    [{ pSysMem: floatBytes([1, 0.5, 0, 1]), SysMemPitch: 0, SysMemSlicePitch: 0 }], constants),
+    S_OK);
+    device.PSSetConstantBuffers(0, [constants.resource]);
+    device.Draw(3, 0);
+    device.PSSetConstantBuffers(0, []);
+    device.PSSetConstantBuffers(0, [null]);
+    device.Draw(3, 0);
+    await h.present();
+    const layout = h.gpu.of('createBindGroupLayout').find((/** @type {any} */ call)=>
+        call.descriptor.label === 'd3d10:ps');
+    const entries = h.gpu.of('createBindGroup').filter((/** @type {any} */ call)=>
+        call.descriptor.layout === layout.createBindGroupLayout)
+        .map((/** @type {any} */ call)=>call.descriptor.entries[0]);
+    assert.deepEqual(entries.map((/** @type {any} */ entry)=>entry.resource.size), [32, 32],
+        'the buffer, and nothing bound, are both read as the two registers declared');
+    // A GPU buffer is made zeroed: past the buffer's own bytes nothing is written.
+    assert.deepEqual([...queuedBytes(h, entries[0].resource.buffer)].slice(0, 16),
+        [...floatBytes([1, 0.5, 0, 1])], 'its own bytes');
+    const made = h.gpu.of('createBuffer').find((/** @type {any} */ call)=>
+        call.createBuffer === entries[0].resource.buffer);
+    assert.ok(made.descriptor.size >= 32, 'room for the two registers');
 });
 
 test('a discard map between two draws renames the buffer, so each draw keeps its bytes',
@@ -541,6 +656,59 @@ test('a discard map between two draws renames the buffer, so each draw keeps its
         assert.equal(backing.renames, 2, 'one rename per discard');
         assert.equal(h.gpu.count('draw'), 2);
     });
+
+test('a buffer whose bytes live in guest memory maps to its address, and an unmap sends the'
+    + ' pages the program wrote and no others', async()=>{
+    const guest = guestMemory();
+    const h = harness({ guest: guest.storage });
+    const { device } = h;
+    /** @type {{ resource?: any }} */
+    const made = {};
+    assert.equal(device.CreateBuffer({
+        ByteWidth: 0x10000,
+        Usage: D3D10_USAGE.DYNAMIC,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER,
+        CPUAccessFlags: D3D10_CPU_ACCESS.WRITE,
+        MiscFlags: 0,
+    }, null, made), S_OK);
+    const buffer = made.resource;
+    const gpu = h.backend.diagnostics().buffers.find((/** @type {any} */ entry)=>
+        entry.label === 'd3d10:buffer#65536');
+    assert.ok(gpu);
+    /** @type {{ pData?: number, bytes?: number }} */
+    const mapped = {};
+    assert.equal(buffer.Map(0, D3D10_MAP.WRITE_NO_OVERWRITE, 0, mapped), S_OK);
+    assert.equal(typeof mapped.pData, 'number');
+    assert.equal(mapped.bytes, 0x10000);
+    const before = h.gpu.of('writeBuffer').length;
+    guest.store(/** @type {number} */ (mapped.pData) + 0x3010, Uint8Array.of(1, 2, 3, 4));
+    buffer.Unmap(0);
+    await h.present();
+    const writes = h.gpu.of('writeBuffer').slice(before);
+    assert.deepEqual(writes.map((/** @type {any} */ call)=>[call.bufferOffset, call.size]),
+        [[0x3000, 0x1000]], 'the page written, at its offset');
+    assert.deepEqual([...writes[0].bytes.subarray(0x10, 0x14)], [1, 2, 3, 4]);
+
+    // A map of bytes the device wrote on its side -- a copy into a staging
+    // buffer -- hands out what it wrote.
+    /** @type {{ resource?: any }} */
+    const source = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 },
+    { pSysMem: Uint8Array.from({ length: 16 }, (_, i)=>i + 1), SysMemPitch: 0,
+        SysMemSlicePitch: 0 }, source), S_OK);
+    /** @type {{ resource?: any }} */
+    const staging = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.STAGING,
+        BindFlags: 0, CPUAccessFlags: D3D10_CPU_ACCESS.READ, MiscFlags: 0 }, null, staging),
+    S_OK);
+    device.CopyResource(staging.resource, source.resource);
+    assert.equal(staging.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.deepEqual([...guest.memory.subarray(/** @type {number} */ (mapped.pData),
+        /** @type {number} */ (mapped.pData) + 16)], Array.from({ length: 16 }, (_, i)=>i + 1));
+    staging.resource.Unmap(0);
+    assert.deepEqual(h.divergences, []);
+});
 
 // --- textures ---
 
@@ -755,6 +923,50 @@ test('a depth stencil view attaches to the pass and shapes the pipeline', async(
         depthBiasSlopeScale: 0,
         depthBiasClamp: 0,
     });
+});
+
+test('a depth buffer of another size than the targets is drawn with stand-ins of its size, the'
+    + ' overlap copied in once and back once; one the draw does not test is left out',
+async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ resource?: any }} */
+    const depth = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2X2, Width: 16, Height: 16, Format: DXGI_FORMAT.D24_UNORM_S8_UINT,
+        BindFlags: D3D10_BIND.DEPTH_STENCIL,
+    }, null, depth), S_OK);
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateDepthStencilView(depth.resource, null, view), S_OK);
+    device.OMSetRenderTargets([h.renderTargetView], view.view);
+    device.Draw(3, 0);
+    device.Draw(3, 0);
+    /** @type {{ state?: any }} */
+    const untested = {};
+    assert.equal(device.CreateDepthStencilState({
+        DepthEnable: false, DepthWriteMask: 0, DepthFunc: 1, StencilEnable: false,
+        StencilReadMask: 0, StencilWriteMask: 0,
+        FrontFace: { StencilFailOp: 1, StencilDepthFailOp: 1, StencilPassOp: 1, StencilFunc: 1 },
+        BackFace: { StencilFailOp: 1, StencilDepthFailOp: 1, StencilPassOp: 1, StencilFunc: 1 },
+    }, untested), S_OK);
+    device.OMSetDepthStencilState(untested.state, 0);
+    device.Draw(3, 0);
+    await h.present();
+    assert.deepEqual(h.gpu.errors, []);
+    assert.equal(h.gpu.count('draw'), 3);
+    const copies = h.gpu.of('copyTextureToTexture');
+    assert.equal(copies.length, 2, 'in before the first draw and out after the second');
+    assert.deepEqual(copies[0].size, { width: 8, height: 8, depthOrArrayLayers: 1 });
+    const standIn = copies[0].destination.texture;
+    assert.deepEqual(standIn.descriptor.size, { width: 16, height: 16, depthOrArrayLayers: 1 });
+    assert.equal(copies[1].source.texture, standIn);
+    const [drawn, untestedPass] = h.gpu.of('beginRenderPass').map(call=>call.descriptor);
+    assert.equal(drawn.colorAttachments[0].view.texture, standIn);
+    assert.ok(drawn.depthStencilAttachment);
+    assert.ok(h.gpu.of('setScissorRect').some(call=>call.rect.join() === '0,0,8,8'));
+    assert.equal(untestedPass.depthStencilAttachment, undefined, 'no depth where none is tested');
 });
 
 // --- resource traffic ---
@@ -1689,9 +1901,26 @@ test('the unsupported calls say what they did not do', ()=>{
     assert.ok(h.divergences.some(line=>line.includes('DrawAuto')));
     /** @type {{ shader?: any }} */
     const shader = {};
-    assert.equal(device.CreateGeometryShaderWithStreamOutput(new Uint8Array(0), [], 0, shader),
-        0x80004001);
+    assert.equal(device.CreateGeometryShaderWithStreamOutput(new Uint8Array(0), [], null, 0,
+        shader), 0x80070057);
     assert.equal(shader.shader, null);
+});
+
+test('a vertex shader made a geometry shader to stream out is no stage: the draw goes on,'
+    + ' and says it streams nothing out', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const gs = {};
+    assert.equal(device.CreateGeometryShaderWithStreamOutput(passThroughVertexShader(),
+        [{ Stream: 0, SemanticName: 'SV_POSITION', SemanticIndex: 0, StartComponent: 0,
+            ComponentCount: 4, OutputSlot: 0 }], [16], 0, gs), S_OK);
+    device.GSSetShader(gs.shader);
+    device.Draw(3, 0);
+    await h.present();
+    assert.equal(h.gpu.count('draw'), 1);
+    assert.ok(diverged(h, 'streams nothing out'), h.divergences.join('\n'));
 });
 
 test('a shader with an instruction that has no translation refuses its draws by name',
@@ -1872,7 +2101,8 @@ test('a draw with no pixel shader writes depth and no render target (test_depth_
     await h.present();
     assert.equal(h.gpu.count('draw'), 1, 'the draw runs');
     assert.deepEqual(h.device.diagnostics().skipped,
-        { noViewport: 0, noTarget: 0, noShader: 0, untranslatable: 0, pipeline: 0 });
+        { noViewport: 0, noTarget: 0, noShader: 0, untranslatable: 0, pipeline: 0,
+            stage: 0 });
     const pipeline = h.gpu.of('createRenderPipeline').at(-1).descriptor;
     assert.equal(pipeline.depthStencil.format, 'depth32float');
     assert.equal(pipeline.depthStencil.depthWriteEnabled, true);
@@ -1912,22 +2142,30 @@ test('a draw with no input layout runs on what the vertex shader makes of SV_Ver
     assert.deepEqual(h.divergences, []);
 });
 
-test('a geometry shader is refused when it is made, never made and then left out of the draw',
-    ()=>{
-        const h = harness();
-        const { device } = h;
-        const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
-        const gs = assemble({ kind: SHADER_KIND.GEOMETRY, inputs: [position], outputs: [position],
-            instructions: [ret()] });
-        /** @type {{ shader?: any }} */
-        const out = { shader: 'untouched' };
-        assert.equal(device.CreateGeometryShader(gs, out), 0x80004001, 'E_NOTIMPL');
-        assert.equal(out.shader, null);
-        assert.ok(diverged(h, 'a geometry shader is refused'), h.divergences.join('\n'));
-        // What is not a geometry shader is the bad argument Windows answers.
-        assert.equal(device.CreateGeometryShader(passThroughVertexShader(), out), 0x80070057);
-        assert.equal(device.CreateGeometryShader(null, out), 0x80070057);
-    });
+test('a geometry shader is made, and a draw with it bound is skipped and counted, never drawn'
+    + ' as if the stage were not there', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [1, 0, 0, 1]);
+    const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    const gs = assemble({ kind: SHADER_KIND.GEOMETRY, inputs: [position], outputs: [position],
+        instructions: [ret()] });
+    /** @type {{ shader?: any }} */
+    const out = { shader: 'untouched' };
+    assert.equal(device.CreateGeometryShader(gs, out), S_OK);
+    device.GSSetShader(out.shader);
+    device.Draw(3, 0);
+    device.GSSetShader(null);
+    device.Draw(3, 0);
+    await h.present();
+    assert.equal(h.gpu.count('draw'), 1, 'only the draw without the stage');
+    assert.equal(device.diagnostics().skipped.stage, 1);
+    assert.ok(diverged(h, 'a draw with a geometry shader bound is skipped'),
+        h.divergences.join('\n'));
+    // What is not a geometry shader is the bad argument Windows answers.
+    assert.equal(device.CreateGeometryShader(passThroughVertexShader(), out), 0x80070057);
+    assert.equal(device.CreateGeometryShader(null, out), 0x80070057);
+});
 
 // --- multisampling ---
 

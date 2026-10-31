@@ -160,7 +160,8 @@ function serveControl(port, page){
     return server;
 }
 const PACKAGE_DIR = join(REPO_ROOT, 'modules', 'core');
-const BUNDLES_DIR = join(REPO_ROOT, 'bundles');
+// A checkout without bundles of its own (a worktree) names the folder that has them.
+const BUNDLES_DIR = process.env.BOTTLIFY_BUNDLES ?? join(REPO_ROOT, 'bundles');
 const REPORTS_DIR = join(TOOL_ROOT, 'reports');
 
 /** Lines per round trip when draining the call log. */

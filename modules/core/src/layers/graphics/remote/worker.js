@@ -30,8 +30,9 @@
  *                                    true writes down everything sent from then
  *                                    on (`capture.js`), for `tools/graphics-replay.mjs`
  *   { type: 'root', api, options, port, memory, lending, source, frameLatency }
- *                                    `api` 'd3d7', 'd3d8', 'd3d9' or 'opengl', `options` the
- *                                    plain part of what the root was made with;
+ *                                    `api` 'd3d7', 'd3d8', 'd3d9', 'd3d10' or 'opengl',
+ *                                    `options` the plain part of what the root was
+ *                                    made with;
  *                                    `memory` the guest's RAM where it is shared, and
  *                                    `lending` the slots and stash a Direct3D 8 or 9
  *                                    root lends guest memory through (`lending.js`);
@@ -77,6 +78,8 @@ import { createBorrower } from './lending.js';
 import { playedDirect3D } from './direct3d.js';
 import { playedOpengl } from './opengl.js';
 import { playedDirect3D7 } from './d3d7.js';
+import { playedDirect3D10 } from './d3d10.js';
+import { createDirect3D10 } from '../d3d10/root.js';
 import { gpuFeaturesOf } from '../webgpu/features.js';
 
 /** @type {Record<string, (services: any) => any>} */
@@ -522,6 +525,24 @@ export function serveGraphics(scope, deps){
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 writeMemory: wrote,
+            });
+        }
+        else if (api === 'd3d10')
+        {
+            played = playedDirect3D10(createDirect3D10, {
+                ...options,
+                backend,
+                createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
+                createTexture: (/** @type {any} */ descriptor)=>device.createTexture(descriptor),
+                // Blocks are kept as blocks only where this device samples them.
+                compressedTextures: options.compressedTextures === true
+                    && device.features?.has?.('texture-compression-bc') === true,
+                depthClipControl: options.depthClipControl === true
+                    && device.features?.has?.('depth-clip-control') === true,
+                writeMemory: wrote,
+                divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
+                    post({ type: 'divergence', api: name, detail }),
+                frameQueued,
             });
         }
         else if (api === 'opengl')

@@ -58,6 +58,10 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
     [--user-data-dir DIR] [--port N] [--store local] [--quota MB] [--prefetch] [--export-translations FILE]
 ```
 
+The bundle is `bundles/<bundle-id>/` of this checkout, or of the folder `BOTTLIFY_BUNDLES`
+names: a worktree without bundles of its own runs the main checkout's (`frames.mjs` reads it
+too).
+
 | flag | default | what it does |
 |---|---|---|
 | `--wait SECONDS` | 900 | how long to wait for the page's result, from the start: the run, then the report, whose read-back of the last frame waits for the device to finish every frame queued before it: a few frames with the graphics layer's bound; without it, on a software adapter, far longer than the run (see *A page that does not answer*). Bound the run itself with `--run-seconds` or a scene that ends |
@@ -109,7 +113,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--gpu PROFILE` | the bundle's manifest (`gpuProfile`), else the browser's card | the card the adapter is shown as: `sm1` (GeForce4 Ti), `sm2` (Radeon 9800 Pro), `sm3` (GeForce 7800 GTX), `sm4` (GeForce 8800 GTX) or `host`. A title picks its render path and the settings it offers from the card it knows. Any other name is refused before the browser starts |
 | `--file HOST=GUEST` | none | a file put on the volume before the program's first instruction, from a host path to a guest one (`dbg/bench.demo=C:\App\base\demos\bench.demo`): what one run wrote, handed to the next. Repeatable |
 | `--save-files` | text | keep every file the program wrote as the bytes it wrote, whole, beside the report. Without it a file is saved as text and capped at a megabyte, which reads a log and ruins anything binary |
-| `--graphics-api CHOICE` | none | the graphics a bottle chooses in the launcher, `createApp`'s `graphicsApi`: `directx7`, `directx8`, `directx9`, `directx10` or `opengl`. It decides which system libraries the machine has and which DirectX release it reports |
+| `--graphics-api CHOICE` | none | the graphics a bottle chooses in the launcher, `createApp`'s `graphicsApi`: `directx7`, `directx8`, `directx9`, `directx10`, `directx11` or `opengl`. It decides which system libraries the machine has and which DirectX release it reports |
 | `--graphics-config JSON` | none | fields of the graphics layer's configuration ([`docs/core/configuration.md`](../../docs/core/configuration.md), graphics) merged into `createApp`'s `graphics` option: `--graphics-config '{"compressedTextures":true}'` turns the block-compressed upload path on for one run |
 | `--audio-config JSON` | none | fields of the audio layer's configuration merged into `createApp`'s `audio` option: `--audio-config '{"mp3":false}'` runs the program's own MP3 decoder instead of the hosted one, an A/B of the two |
 | `--capture-audio FROM:TO` | off | what the sound device mixed from FROM to TO seconds of the run, written as `game-<stamp>-audio.wav` (16-bit stereo at the device rate). With `--worker --coi` the device runs on the page, off the engine's thread, as a launcher's worklet does, so a program the engine cannot keep fed is heard, and counted in the audio layer's `staleBytes`, as in the launcher |
@@ -422,6 +426,12 @@ Reading it:
   blocked lines name what.
 - A wait of a minute and a half on a completion port means an operation
   finished without posting its completion.
+- Direct3D 10 and 11: the graphics line's `d3d10Rings` (from `seam.direct3d10` in the
+  layer's metrics) says per device how often the command ring was played on the host's way into its own methods
+  and how long that took (`syncs`, `syncMs`: the time a trapped call spends before its own
+  work), and why a dynamic buffer's maps reached the host (`maps`: not a write map, mapped
+  already, a DISCARD with no storage free that was `added` one or found the buffer at the count's
+  cap (`capped`) or the bytes' (`cappedBytes`, `largest` the biggest such buffer), or `otherwise`); `unattachedMaps` counts maps of buffers with no guest block, by usage.
 - An unresolved import is a real answer, not noise: a program that cannot bind
   one may take a different path silently.
 - With several executors, each other executor's line has two under it.

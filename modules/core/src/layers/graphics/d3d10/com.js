@@ -23,7 +23,8 @@
  */
 
 import {
-    DXGI_ERROR_MORE_DATA, DXGI_ERROR_NOT_FOUND, E_INVALIDARG, E_NOINTERFACE, IID, S_FALSE, S_OK,
+    D3D11_TWIN, DXGI_ERROR_MORE_DATA, DXGI_ERROR_NOT_FOUND, E_INVALIDARG, E_NOINTERFACE, IID,
+    S_FALSE, S_OK,
 } from './constants.js';
 
 /**
@@ -38,6 +39,7 @@ import {
  * @property {number} size            How big the entry is, which a too-small caller learns.
  * @property {Uint8Array | null} [data]
  * @property {any} [object]           An interface entry, with a reference taken for the caller.
+ * @property {number} [pointer]        The interface pointer it was stored through, or 0.
  */
 
 /**
@@ -52,7 +54,10 @@ import {
  * reference and reports the size of a pointer.
  */
 export function createPrivateData(){
-    /** @type {Map<string, { data: Uint8Array | null, object: any, isInterface: boolean }>} */
+    /**
+     * @type {Map<string, { data: Uint8Array | null, object: any, isInterface: boolean,
+     *     pointer?: number }>}
+     */
     const entries = new Map();
 
     /** @param {string} guid */
@@ -87,15 +92,18 @@ export function createPrivateData(){
         /**
          * @param {string} guid
          * @param {any} object  Null stores a null interface rather than clearing.
+         * @param {number} [pointer]  the interface pointer the program gave, which a
+         *     get hands back as it was: an object has one per interface
          * @returns {number}
          */
-        SetPrivateDataInterface(guid, object){
+        SetPrivateDataInterface(guid, object, pointer = 0){
             if (object)
             {
                 object.addRef();
             }
             drop(guid);
-            entries.set(guid, { data: null, object: object ?? null, isInterface: true });
+            entries.set(guid, { data: null, object: object ?? null, isInterface: true,
+                pointer });
             return S_OK;
         },
 
@@ -129,7 +137,7 @@ export function createPrivateData(){
                 {
                     held.object.addRef();
                 }
-                return { hr: S_OK, size, object: held.object };
+                return { hr: S_OK, size, object: held.object, pointer: held.pointer ?? 0 };
             }
             return { hr: S_OK, size, data: held.data };
         },
@@ -143,6 +151,7 @@ export function createPrivateData(){
  * @property {boolean} [implicit]            Start at zero references.
  * @property {() => void} [onFirstRef]
  * @property {() => void} [onLastRef]
+ * @property {(iid: string) => boolean} [also]  Interfaces it has come to answer to since.
  */
 
 /**
@@ -156,7 +165,8 @@ export function createPrivateData(){
  *          & ReturnType<typeof createPrivateData>}
  */
 export function attachCom(target, options){
-    const interfaces = new Set([IID.IUnknown, ...options.interfaces]);
+    const interfaces = new Set([IID.IUnknown, ...options.interfaces.flatMap(id=>
+        (D3D11_TWIN[id] ? [id, D3D11_TWIN[id]] : [id]))]);
     const privateData = createPrivateData();
     let count = options.implicit ? 0 : 1;
     if (!options.implicit)
@@ -167,7 +177,7 @@ export function attachCom(target, options){
     const methods = {
         /** @param {string} iid */
         supports(iid){
-            return interfaces.has(iid);
+            return interfaces.has(iid) || options.also?.(iid) === true;
         },
 
         addRef(){
@@ -198,7 +208,7 @@ export function attachCom(target, options){
          * @returns {number}
          */
         QueryInterface(iid, out){
-            if (!interfaces.has(iid))
+            if (!methods.supports(iid))
             {
                 // Cleared on failure: callers read the out pointer back without
                 // checking and would otherwise follow whatever it held before.
@@ -228,15 +238,34 @@ export function attachCom(target, options){
         },
     };
 
+    // Configurable: a recording's proxy of the object answers its own wrapper
+    // for each method (`remote/replay.js`), which a frozen property forbids.
+    /** @param {Function} value */
+    const method = value=>({ value, enumerable: true, writable: true, configurable: true });
+    // Gone at no references, unless a context still keeps it bound (Direct3D
+    // 11's), or the object says otherwise itself.
+    if (!Object.hasOwn(/** @type {any} */ (target), 'destroyed'))
+    {
+        Object.defineProperty(target, 'destroyed', {
+            get: ()=>count === 0 && !(/** @type {any} */ (target).bound > 0),
+            enumerable: false, configurable: true,
+        });
+        // The bridge keeps an interface whose count went to zero published
+        // while the object is still reachable: here, while it is bound.
+        Object.defineProperty(target, 'reachable', {
+            value: ()=>/** @type {any} */ (target).bound > 0,
+            enumerable: false, configurable: true, writable: true,
+        });
+    }
     return Object.defineProperties(/** @type {any} */ (target), {
-        SetPrivateData: { value: privateData.SetPrivateData, enumerable: true },
-        SetPrivateDataInterface: { value: privateData.SetPrivateDataInterface, enumerable: true },
-        GetPrivateData: { value: privateData.GetPrivateData, enumerable: true },
-        supports: { value: methods.supports, enumerable: true },
-        addRef: { value: methods.addRef, enumerable: true },
-        release: { value: methods.release, enumerable: true },
-        QueryInterface: { value: methods.QueryInterface, enumerable: true },
-        GetParent: { value: methods.GetParent, enumerable: true },
-        refCount: { get: ()=>count, enumerable: true },
+        SetPrivateData: method(privateData.SetPrivateData),
+        SetPrivateDataInterface: method(privateData.SetPrivateDataInterface),
+        GetPrivateData: method(privateData.GetPrivateData),
+        supports: method(methods.supports),
+        addRef: method(methods.addRef),
+        release: method(methods.release),
+        QueryInterface: method(methods.QueryInterface),
+        GetParent: method(methods.GetParent),
+        refCount: { get: ()=>count, enumerable: true, configurable: true },
     });
 }

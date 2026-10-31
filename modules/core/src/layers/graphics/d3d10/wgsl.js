@@ -38,8 +38,13 @@ import { DXGI_FORMAT } from './constants.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import {
     CUSTOMDATA, MODIFIER, OPCODE, OPERAND, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE,
-    decodeSm4,
+    SYNC_FLAG, decodeSm4,
 } from './sm4.js';
+
+/** Every register file is thirty-two bit patterns, four to a register. */
+const REG = 'vec4<u32>';
+
+const COMPONENT = ['x', 'y', 'z', 'w'];
 
 /** Where each kind of resource is bound within a stage's group. */
 export const BINDING = Object.freeze({
@@ -50,15 +55,83 @@ export const BINDING = Object.freeze({
     // and the view over it -- format, first element, element count, element
     // size -- a uniform here.
     BUFFER_VIEW: 160,
+    // What a shader writes through (Shader Model 5): a buffer or a storage
+    // texture, the view over a buffer as above, and an append counter.
+    UAV: 288,
+    UAV_VIEW: 352,
+    UAV_COUNTER: 416,
 });
 
 /** WebGPU's `GPUShaderStage` bits, spelled out so nothing here reads a global. */
-export const STAGE = Object.freeze({ VERTEX: 1, FRAGMENT: 2 });
+export const STAGE = Object.freeze({ VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 });
 
-/** Every register file is thirty-two bit patterns, four to a register. */
-const REG = 'vec4<u32>';
+/** The texel formats a storage texture is written in, by DXGI format; the 32-bit
+ *  single-channel ones are also read. */
+export const STORAGE_TEXTURE_FORMAT = Object.freeze({
+    [DXGI_FORMAT.R32_FLOAT]: 'r32float',
+    [DXGI_FORMAT.R32_UINT]: 'r32uint',
+    [DXGI_FORMAT.R32_SINT]: 'r32sint',
+    [DXGI_FORMAT.R32G32_FLOAT]: 'rg32float',
+    [DXGI_FORMAT.R32G32_UINT]: 'rg32uint',
+    [DXGI_FORMAT.R32G32_SINT]: 'rg32sint',
+    [DXGI_FORMAT.R32G32B32A32_FLOAT]: 'rgba32float',
+    [DXGI_FORMAT.R32G32B32A32_UINT]: 'rgba32uint',
+    [DXGI_FORMAT.R32G32B32A32_SINT]: 'rgba32sint',
+    [DXGI_FORMAT.R16G16B16A16_FLOAT]: 'rgba16float',
+    [DXGI_FORMAT.R16G16B16A16_UINT]: 'rgba16uint',
+    [DXGI_FORMAT.R16G16B16A16_SINT]: 'rgba16sint',
+    [DXGI_FORMAT.R8G8B8A8_UNORM]: 'rgba8unorm',
+    [DXGI_FORMAT.R8G8B8A8_SNORM]: 'rgba8snorm',
+    [DXGI_FORMAT.R8G8B8A8_UINT]: 'rgba8uint',
+    [DXGI_FORMAT.R8G8B8A8_SINT]: 'rgba8sint',
+    [DXGI_FORMAT.B8G8R8A8_UNORM]: 'bgra8unorm',
+});
 
-const COMPONENT = ['x', 'y', 'z', 'w'];
+/**
+ * A typed buffer element written from register bits, by the view's format:
+ * the 32-bit-per-channel formats and the packed four-channel ones. The
+ * dwords to write and how many; a format this cannot pack writes none.
+ */
+const STORE_ELEMENT = (()=>{
+    const F = DXGI_FORMAT;
+    /** @type {[number[], string, number][]} */
+    const cases = [
+        [[F.R32G32B32A32_FLOAT, F.R32G32B32A32_UINT, F.R32G32B32A32_SINT], 'v', 4],
+        [[F.R32G32B32_FLOAT, F.R32G32B32_UINT, F.R32G32B32_SINT], 'v', 3],
+        [[F.R32G32_FLOAT, F.R32G32_UINT, F.R32G32_SINT], 'v', 2],
+        [[F.R32_FLOAT, F.R32_UINT, F.R32_SINT], 'v', 1],
+        [[F.R8G8B8A8_UNORM], `${REG}(pack4x8unorm(bitcast<vec4<f32>>(v)), 0u, 0u, 0u)`, 1],
+        [[F.R8G8B8A8_SNORM], `${REG}(pack4x8snorm(bitcast<vec4<f32>>(v)), 0u, 0u, 0u)`, 1],
+        [[F.R8G8B8A8_UINT, F.R8G8B8A8_SINT], `${REG}(dot(v & ${REG}(0xffu), `
+            + `${REG}(1u, 256u, 65536u, 16777216u)), 0u, 0u, 0u)`, 1],
+        [[F.R16G16B16A16_FLOAT], `${REG}(pack2x16float(bitcast<vec4<f32>>(v).xy), `
+            + 'pack2x16float(bitcast<vec4<f32>>(v).zw), 0u, 0u)', 2],
+        [[F.R16G16B16A16_UINT, F.R16G16B16A16_SINT], `${REG}((v.x & 0xffffu) | (v.y << 16u), `
+            + '(v.z & 0xffffu) | (v.w << 16u), 0u, 0u)', 2],
+        [[F.R16G16_FLOAT], `${REG}(pack2x16float(bitcast<vec4<f32>>(v).xy), 0u, 0u, 0u)`, 1],
+        [[F.R16G16_UINT, F.R16G16_SINT], `${REG}((v.x & 0xffffu) | (v.y << 16u), 0u, 0u, 0u)`,
+            1],
+    ];
+    return [
+        `fn storeElement(format: u32, v: ${REG}) -> vec4<u32> {`,
+        '    switch (format) {',
+        ...cases.map(([formats, value, count])=>`        case ${
+            formats.map(format=>`${format}u`).join(', ')}: { let w = ${value}; `
+            + `return vec4<u32>(w.x, w.y, w.z, ${count}u); }`),
+        '        default: { return vec4<u32>(0u); }',
+        '    }',
+        '}',
+        // The count rides in the fourth word where an element has fewer than
+        // four; one of four words is told apart by its format.
+        `fn storeElementCount(format: u32) -> u32 {`,
+        '    switch (format) {',
+        `        case ${[F.R32G32B32A32_FLOAT, F.R32G32B32A32_UINT, F.R32G32B32A32_SINT]
+            .map(format=>`${format}u`).join(', ')}: { return 4u; }`,
+        '        default: { return storeElement(format, vec4<u32>(0u)).w; }',
+        '    }',
+        '}',
+    ];
+})();
 
 /**
  * How a buffer view's element of each format becomes register bits, given
@@ -179,6 +252,8 @@ export const HELPERS = Object.freeze({
         ],
     },
     bufferElement: { needs: [], text: BUFFER_ELEMENT.text },
+    storeElement: { needs: [], text: STORE_ELEMENT },
+
     imulhi: {
         needs: ['umulhi'],
         text: [
@@ -205,6 +280,8 @@ export const HELPERS = Object.freeze({
  * @property {number} returnType   A RETURN_TYPE.
  * @property {boolean} comparison  Read by a compare-sample, so declared as depth.
  * @property {boolean} [multisampled]  A TEXTURE2DMS bound to a texture of several samples.
+ * @property {'raw' | 'structured'} [structure]  A buffer read by bytes or by structures.
+ * @property {number} [stride]    Bytes a structure.
  */
 
 /**
@@ -230,6 +307,33 @@ export const HELPERS = Object.freeze({
  * @property {boolean} writesDepth
  * @property {string[]} unsupported                Opcode names with no translation.
  * @property {string[]} helpers                    HELPERS the body calls, callees first.
+ * @property {number[]} threadGroup                A compute shader's group, x by y by z.
+ * @property {UavDecl[]} uavs                      What the shader writes through.
+ * @property {SharedDecl[]} sharedMemory           Its thread-group shared memory.
+ */
+
+/**
+ * @typedef {Object} UavDecl
+ * @property {number} slot
+ * @property {'typed' | 'raw' | 'structured'} structure
+ * @property {number} dimension   A RESOURCE_DIMENSION, for a typed view.
+ * @property {number} returnType  A RETURN_TYPE, for a typed view.
+ * @property {number} stride      Bytes a structure, for a structured view.
+ * @property {boolean} counter    Whether it has an append counter.
+ * @property {boolean} atomic     Whether the shader adds, swaps or compares in it.
+ * @property {boolean} loaded     Whether the shader reads it as well as writes it.
+ * @property {string} [format]    A typed texture's storage format (`uavFormats`).
+ * @property {Set<string>} [atomicOps]  The atomic operations made on it.
+ * @property {boolean} [counted]  Whether its append counter is used.
+ */
+
+/**
+ * @typedef {Object} SharedDecl
+ * @property {number} slot
+ * @property {number} words       Its size, in dwords.
+ * @property {number} stride      Bytes a structure, or 0 for raw memory.
+ * @property {boolean} atomic
+ * @property {Set<string>} [atomicOps]
  */
 
 /**
@@ -257,6 +361,9 @@ export const NO_PIXEL_SHADER = Object.freeze({
     writesDepth: false,
     unsupported: [],
     helpers: [],
+    threadGroup: [1, 1, 1],
+    uavs: [],
+    sharedMemory: [],
 });
 
 /** @param {number} mask @returns {string} the components a mask names */
@@ -282,14 +389,19 @@ const u32Literal = dword=>`${dword >>> 0}u`;
  * slot: the view bound there is of a texture with more samples than one, and
  * WebGPU binds that only as a multisampled texture, read by sample.
  *
+ * A typed view a shader writes a texture through is a storage texture of
+ * the bound view's format, which `uavFormats` names by slot.
+ *
  * @param {import('./dxbc.js').DxbcContainer} container
- * @param {{ multisampled?: readonly number[] }} [options]
+ * @param {{ multisampled?: readonly number[], uavFormats?: Readonly<Record<number, string>> }}
+ *     [options]
  * @returns {TranslatedShader}
  */
 export function translateShader(container, options = {}){
     const program = /** @type {import('./dxbc.js').ShaderProgram} */ (container.shader);
     const instructions = decodeSm4(program.tokens);
     const isPixel = program.kind === SHADER_KIND.PIXEL;
+    const isCompute = program.kind === SHADER_KIND.COMPUTE;
 
     /** @type {TranslatedShader} */
     const result = {
@@ -308,6 +420,9 @@ export function translateShader(container, options = {}){
         writesDepth: false,
         unsupported: [],
         helpers: [],
+        threadGroup: [1, 1, 1],
+        uavs: [],
+        sharedMemory: [],
     };
     let nextTemp = 0;
     let depth = 1;
@@ -365,6 +480,14 @@ export function translateShader(container, options = {}){
                 return `cb${operand.indices[0].value}[${indexExpression(operand, 1)}].${swizzle}`;
             case OPERAND.IMMEDIATE_CONSTANT_BUFFER:
                 return `icb[${indexExpression(operand, 0)}].${swizzle}`;
+            case OPERAND.INPUT_THREAD_ID:
+                return `csThread.${swizzle}`;
+            case OPERAND.INPUT_THREAD_GROUP_ID:
+                return `csGroup.${swizzle}`;
+            case OPERAND.INPUT_THREAD_ID_IN_GROUP:
+                return `csLocal.${swizzle}`;
+            case OPERAND.INPUT_THREAD_ID_IN_GROUP_FLATTENED:
+                return `${REG}(csFlat).${swizzle}`;
             case OPERAND.IMMEDIATE32:
                 if (operand.immediate.length === 1)
                 {
@@ -391,13 +514,23 @@ export function translateShader(container, options = {}){
         }
         if (operand.modifier === MODIFIER.NEG || operand.modifier === MODIFIER.ABSNEG)
         {
-            value = `(-${value})`;
+            // WGSL negates no unsigned value: an unsigned read negated is
+            // its two's complement, zero less it.
+            value = type === 'u' ? `(${REG}(0u) - ${value})` : `(-${value})`;
         }
         return value;
     };
 
     /** @param {import('./sm4.js').Operand} operand */
+    const modifiedRead = operand=>(operand.modifier ?? MODIFIER.NONE) !== MODIFIER.NONE;
+    /** @param {import('./sm4.js').Operand} operand */
     const f = operand=>typed(operand, 'f');
+    /**
+     * A source a move copies: its bits, or the float it is with its modifier.
+     *
+     * @param {import('./sm4.js').Operand} operand
+     */
+    const moved = operand=>(modifiedRead(operand) ? fromFloat(f(operand), false) : u(operand));
     /** @param {import('./sm4.js').Operand} operand */
     const i = operand=>typed(operand, 'i');
     /** @param {import('./sm4.js').Operand} operand */
@@ -758,6 +891,111 @@ export function translateShader(container, options = {}){
     };
 
     /**
+     * Memory a Shader Model 5 instruction reads or writes by the dword: a
+     * view written through, thread-group shared memory, or a buffer read by
+     * bytes or structures. Its accessors (`<name>_word`, `<name>_put`,
+     * `<name>_atomic_<op>`) are declared once the whole shader is known, so
+     * that memory an atomic touches is declared atomic and read through it.
+     *
+     * @param {import('./sm4.js').Operand} operand
+     * @returns {{ name: string, stride: number, uav: UavDecl | null,
+     *     shared: SharedDecl | null, texture: TextureDecl | null } | null}
+     */
+    const memoryOf = operand=>{
+        const slot = operand.indices[0]?.value ?? -1;
+        if (operand.type === OPERAND.UNORDERED_ACCESS_VIEW)
+        {
+            const uav = result.uavs.find(entry=>entry.slot === slot) ?? null;
+            return uav ? { name: `u${slot}`, stride: uav.stride, uav, shared: null,
+                texture: null } : null;
+        }
+        if (operand.type === OPERAND.THREAD_GROUP_SHARED_MEMORY)
+        {
+            const shared = result.sharedMemory.find(entry=>entry.slot === slot) ?? null;
+            return shared ? { name: `g${slot}`, stride: shared.stride, uav: null, shared,
+                texture: null } : null;
+        }
+        if (operand.type === OPERAND.RESOURCE)
+        {
+            const texture = textureOf(slot);
+            return texture?.structure ? { name: `t${slot}`, stride: texture.stride ?? 0,
+                uav: null, shared: null, texture } : null;
+        }
+        return null;
+    };
+
+    /**
+     * The dword an access starts at: a byte address for raw memory, or a
+     * structure's index and the byte within it.
+     *
+     * @param {{ stride: number }} memory @param {string} first @param {string | null} within
+     */
+    const wordOf = (memory, first, within)=>{
+        const at = held();
+        emit(`let ${at} = (${within === null ? first
+            : `${first} * ${memory.stride}u + ${within}`}) / 4u;`);
+        return at;
+    };
+
+    /**
+     * An atomic operation on a dword of memory, which then is atomic: the
+     * value it held before.
+     *
+     * @param {NonNullable<ReturnType<typeof memoryOf>>} memory
+     * @param {string} op @param {string} word @param {string} value @param {string} compare
+     */
+    const atomicOn = (memory, op, word, value, compare)=>{
+        const declared = memory.uav ?? memory.shared;
+        if (!declared || memory.texture)
+        {
+            unsupported(`an atomic ${op} on a read-only resource`);
+            return '0u';
+        }
+        declared.atomic = true;
+        (declared.atomicOps ??= new Set()).add(op);
+        return `${memory.name}_atomic_${op}(${word}, ${value}, ${compare})`;
+    };
+
+    /** The storage-texture coordinate of a typed view's address. @param {UavDecl} uav @param {string} address */
+    const storageCoordinate = (uav, address)=>{
+        switch (uav.dimension)
+        {
+            case RESOURCE_DIMENSION.TEXTURE1D:
+                return { coordinate: `vec2<i32>(i32(${address}.x), 0)`, layer: null };
+            case RESOURCE_DIMENSION.TEXTURE2D:
+                return { coordinate: `vec2<i32>(${address}.xy)`, layer: null };
+            case RESOURCE_DIMENSION.TEXTURE1DARRAY:
+                return { coordinate: `vec2<i32>(i32(${address}.x), 0)`,
+                    layer: `i32(${address}.y)` };
+            case RESOURCE_DIMENSION.TEXTURE2DARRAY:
+                return { coordinate: `vec2<i32>(${address}.xy)`, layer: `i32(${address}.z)` };
+            case RESOURCE_DIMENSION.TEXTURE3D:
+                return { coordinate: `vec3<i32>(${address}.xyz)`, layer: null };
+            default:
+                return null;
+        }
+    };
+
+    /** The scalar a storage format's texels are. @param {string} format */
+    const storageScalar = format=>(/uint$/.test(format) ? 'u32'
+        : /sint$/.test(format) ? 'i32' : 'f32');
+
+    /**
+     * Each component of four through a scalar function of each operand's.
+     *
+     * @param {(...parts: string[]) => string} each @param {string[]} values
+     */
+    const perComponent = (each, values)=>{
+        const named = values.map(value=>{
+            const name = held();
+            emit(`let ${name} = ${value};`);
+            return name;
+        });
+        return `${REG}(${COMPONENT.map(component=>each(...named.map(name=>
+            `${name}.${component}`))).join(', ')})`;
+    };
+
+    /**
      * @param {import('./sm4.js').Instruction} instruction
      * @param {Frame} frame
      */
@@ -832,6 +1070,58 @@ export function translateShader(container, options = {}){
                         dest.indices[0].value + 1);
                 }
                 break;
+            case OPCODE.DCL_THREAD_GROUP:
+                result.threadGroup = instruction.extra.slice(0, 3);
+                break;
+            case OPCODE.DCL_UAV_TYPED:
+            case OPCODE.DCL_UAV_RAW:
+            case OPCODE.DCL_UAV_STRUCTURED: {
+                const slot = dest.indices[0].value;
+                const isTyped = instruction.opcode === OPCODE.DCL_UAV_TYPED;
+                const format = isTyped ? options.uavFormats?.[slot] : undefined;
+                result.uavs.push({
+                    slot,
+                    structure: isTyped ? 'typed'
+                        : instruction.opcode === OPCODE.DCL_UAV_RAW ? 'raw' : 'structured',
+                    dimension: isTyped ? instruction.control & 0x1f : RESOURCE_DIMENSION.BUFFER,
+                    returnType: isTyped ? (instruction.extra[0] ?? 0) & 0xf : RETURN_TYPE.UINT,
+                    stride: instruction.opcode === OPCODE.DCL_UAV_STRUCTURED
+                        ? instruction.extra[0] ?? 0 : 0,
+                    counter: instruction.opcode === OPCODE.DCL_UAV_STRUCTURED
+                        && ((instruction.control >>> 12) & 1) === 1,
+                    atomic: false,
+                    loaded: false,
+                    ...(format ? { format } : {}),
+                });
+                if (isTyped && (instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
+                {
+                    need('bufferElement');
+                    need('storeElement');
+                }
+                break;
+            }
+            case OPCODE.DCL_TGSM_RAW:
+                result.sharedMemory.push({ slot: dest.indices[0].value,
+                    words: Math.ceil((instruction.extra[0] ?? 0) / 4), stride: 0, atomic: false });
+                break;
+            case OPCODE.DCL_TGSM_STRUCTURED:
+                result.sharedMemory.push({ slot: dest.indices[0].value,
+                    words: Math.ceil((instruction.extra[0] ?? 0) * (instruction.extra[1] ?? 0) / 4),
+                    stride: instruction.extra[0] ?? 0, atomic: false });
+                break;
+            case OPCODE.DCL_RESOURCE_RAW:
+            case OPCODE.DCL_RESOURCE_STRUCTURED:
+                result.textures.push({
+                    slot: dest.indices[0].value,
+                    dimension: RESOURCE_DIMENSION.BUFFER,
+                    returnType: RETURN_TYPE.UINT,
+                    comparison: false,
+                    structure: instruction.opcode === OPCODE.DCL_RESOURCE_RAW ? 'raw'
+                        : 'structured',
+                    stride: instruction.opcode === OPCODE.DCL_RESOURCE_STRUCTURED
+                        ? instruction.extra[0] ?? 0 : 0,
+                });
+                break;
             case OPCODE.CUSTOMDATA:
                 if (instruction.control === CUSTOMDATA.IMMEDIATE_CONSTANT_BUFFER)
                 {
@@ -844,11 +1134,12 @@ export function translateShader(container, options = {}){
                 break;
 
             // --- moves ---
+            // A move copies bits; a source modifier makes it a float's move.
             case OPCODE.MOV:
-                store(dest, sat ? fromFloat(f(a), true) : u(a));
+                store(dest, sat || modifiedRead(a) ? fromFloat(f(a), sat) : u(a));
                 break;
             case OPCODE.MOVC:
-                store(dest, `select(${u(c)}, ${u(b)}, ${u(a)} != ${REG}(0u))`);
+                store(dest, `select(${moved(c)}, ${moved(b)}, ${u(a)} != ${REG}(0u))`);
                 break;
 
             // --- float arithmetic ---
@@ -1324,6 +1615,284 @@ export function translateShader(container, options = {}){
                 break;
             }
 
+            // --- Shader Model 5: memory read and written by the dword ---
+            case OPCODE.LD_RAW:
+            case OPCODE.LD_STRUCTURED: {
+                const structured = instruction.opcode === OPCODE.LD_STRUCTURED;
+                const source = structured ? c : b;
+                const memory = memoryOf(source);
+                if (!memory)
+                {
+                    unsupported(`${instruction.name} from undeclared memory`);
+                    break;
+                }
+                if (memory.uav)
+                {
+                    memory.uav.loaded = true;
+                }
+                const word = wordOf(memory, `${u(a)}.x`, structured ? `${u(b)}.x` : null);
+                const words = [0, 1, 2, 3].map(k=>`${memory.name}_word(${word}`
+                    + `${k === 0 ? '' : ` + ${k}u`})`).join(', ');
+                store(dest, `${REG}(${words}).${swizzleText(source.swizzle)}`);
+                break;
+            }
+            case OPCODE.STORE_RAW:
+            case OPCODE.STORE_STRUCTURED: {
+                const structured = instruction.opcode === OPCODE.STORE_STRUCTURED;
+                const memory = memoryOf(dest);
+                if (!memory || memory.texture)
+                {
+                    unsupported(`${instruction.name} into undeclared memory`);
+                    break;
+                }
+                const word = wordOf(memory, `${u(a)}.x`, structured ? `${u(b)}.x` : null);
+                const value = held();
+                emit(`let ${value} = ${u(structured ? c : b)};`);
+                // The mask's components go to consecutive dwords.
+                [...maskComponents(dest.mask)].forEach((component, k)=>{
+                    emit(`${memory.name}_put(${word}${k === 0 ? '' : ` + ${k}u`},`
+                        + ` ${value}.${COMPONENT[k]});`);
+                });
+                break;
+            }
+            case OPCODE.LD_UAV_TYPED: {
+                const memory = memoryOf(b);
+                const uav = memory?.uav;
+                if (!memory || !uav)
+                {
+                    unsupported('ld_uav_typed from an undeclared view');
+                    break;
+                }
+                uav.loaded = true;
+                if (uav.dimension === RESOURCE_DIMENSION.BUFFER)
+                {
+                    store(dest, `${memory.name}_element(${u(a)}.x).${swizzleText(b.swizzle)}`);
+                    break;
+                }
+                const at = storageCoordinate(uav, u(a));
+                if (!at || !uav.format || !/^r32/.test(uav.format))
+                {
+                    unsupported('ld_uav_typed from a texture not of one 32-bit channel');
+                    break;
+                }
+                const loaded = `textureLoad(${memory.name}, ${at.coordinate}`
+                    + `${at.layer === null ? '' : `, ${at.layer}`})`;
+                store(dest, `(${storageScalar(uav.format) === 'u32' ? loaded
+                    : `bitcast<${REG}>(${loaded})`}).${swizzleText(b.swizzle)}`);
+                break;
+            }
+            case OPCODE.STORE_UAV_TYPED: {
+                const memory = memoryOf(dest);
+                const uav = memory?.uav;
+                if (!memory || !uav)
+                {
+                    unsupported('store_uav_typed into an undeclared view');
+                    break;
+                }
+                if (uav.dimension === RESOURCE_DIMENSION.BUFFER)
+                {
+                    emit(`${memory.name}_storeElement(${u(a)}.x, ${u(b)});`);
+                    break;
+                }
+                const at = storageCoordinate(uav, u(a));
+                if (!at || !uav.format)
+                {
+                    unsupported('store_uav_typed into a texture of a format with no storage');
+                    break;
+                }
+                const scalar = storageScalar(uav.format);
+                const texel = scalar === 'u32' ? u(b) : `bitcast<vec4<${scalar}>>(${u(b)})`;
+                emit(`textureStore(${memory.name}, ${at.coordinate}`
+                    + `${at.layer === null ? '' : `, ${at.layer}`}, ${texel});`);
+                break;
+            }
+            case OPCODE.ATOMIC_AND:
+            case OPCODE.ATOMIC_OR:
+            case OPCODE.ATOMIC_XOR:
+            case OPCODE.ATOMIC_CMP_STORE:
+            case OPCODE.ATOMIC_IADD:
+            case OPCODE.ATOMIC_IMAX:
+            case OPCODE.ATOMIC_IMIN:
+            case OPCODE.ATOMIC_UMAX:
+            case OPCODE.ATOMIC_UMIN:
+            case OPCODE.IMM_ATOMIC_IADD:
+            case OPCODE.IMM_ATOMIC_AND:
+            case OPCODE.IMM_ATOMIC_OR:
+            case OPCODE.IMM_ATOMIC_XOR:
+            case OPCODE.IMM_ATOMIC_EXCH:
+            case OPCODE.IMM_ATOMIC_CMP_EXCH:
+            case OPCODE.IMM_ATOMIC_IMAX:
+            case OPCODE.IMM_ATOMIC_IMIN:
+            case OPCODE.IMM_ATOMIC_UMAX:
+            case OPCODE.IMM_ATOMIC_UMIN: {
+                const immediate = instruction.opcode >= OPCODE.IMM_ATOMIC_IADD;
+                const [target, ...rest] = immediate ? instruction.operands.slice(1)
+                    : instruction.operands;
+                const op = instruction.name.replace(/^(imm_)?atomic_/, '').replace('cmp_store',
+                    'cmp_exch');
+                const memory = memoryOf(target);
+                if (!memory)
+                {
+                    unsupported(`${instruction.name} on undeclared memory`);
+                    break;
+                }
+                const address = rest[0];
+                const structured = memory.stride > 0;
+                const typedView = memory.uav?.structure === 'typed';
+                // A typed view's address is an element: a dword, its format one
+                // channel of 32 bits.
+                const word = typedView ? `${u(address)}.x`
+                    : wordOf(memory, `${u(address)}.x`, structured ? `${u(address)}.y` : null);
+                const compare = op === 'cmp_exch' ? `${u(rest[1])}.x` : '0u';
+                const value = `${u(rest[op === 'cmp_exch' ? 2 : 1])}.x`;
+                const old = atomicOn(memory, op, word, value, compare);
+                if (immediate)
+                {
+                    store(dest, `${REG}(${old})`);
+                }
+                else
+                {
+                    emit(`_ = ${old};`);
+                }
+                break;
+            }
+            case OPCODE.IMM_ATOMIC_ALLOC:
+            case OPCODE.IMM_ATOMIC_CONSUME: {
+                const memory = memoryOf(a);
+                if (!memory?.uav || !memory.uav.counter)
+                {
+                    unsupported(`${instruction.name} on a view with no counter`);
+                    break;
+                }
+                memory.uav.counted = true;
+                store(dest, instruction.opcode === OPCODE.IMM_ATOMIC_ALLOC
+                    ? `${REG}(atomicAdd(&${memory.name}count, 1u))`
+                    : `${REG}(atomicSub(&${memory.name}count, 1u) - 1u)`);
+                break;
+            }
+            case OPCODE.SYNC: {
+                const flags = instruction.control & 0xf;
+                if (!isCompute)
+                {
+                    // A pixel shader fences its own writes, which WGSL's
+                    // fragment stage keeps in order already.
+                    break;
+                }
+                if ((flags & (SYNC_FLAG.UAV_MEMORY_GROUP | SYNC_FLAG.UAV_MEMORY_GLOBAL)) !== 0)
+                {
+                    emit('storageBarrier();');
+                }
+                if ((flags & (SYNC_FLAG.THREADS_IN_GROUP | SYNC_FLAG.THREAD_GROUP_SHARED_MEMORY))
+                    !== 0)
+                {
+                    emit('workgroupBarrier();');
+                }
+                break;
+            }
+            case OPCODE.BUFINFO: {
+                const memory = memoryOf(a);
+                const uav = memory?.uav;
+                if (!memory || (uav && uav.dimension !== RESOURCE_DIMENSION.BUFFER))
+                {
+                    unsupported('bufinfo on what is not a buffer');
+                    break;
+                }
+                const count = memory.stride > 0 ? `(${memory.name}view.z)`
+                    : memory.uav?.structure === 'typed' ? `${memory.name}view.z`
+                        : `(${memory.name}view.z * ${memory.name}view.w)`;
+                store(dest, `${REG}(${count})`);
+                break;
+            }
+
+            // --- Shader Model 5: bits and halves ---
+            case OPCODE.COUNTBITS:
+                store(dest, `countOneBits(${u(a)})`);
+                break;
+            case OPCODE.FIRSTBIT_HI:
+                // Counted from the high bit, as the instruction does; none set is ~0.
+                store(dest, `select(countLeadingZeros(${u(a)}), ${REG}(0xffffffffu),`
+                    + ` ${u(a)} == ${REG}(0u))`);
+                break;
+            case OPCODE.FIRSTBIT_SHI: {
+                const value = held();
+                emit(`let ${value} = ${u(a)};`);
+                const flipped = `(${value} ^ bitcast<${REG}>(bitcast<vec4<i32>>(${value})`
+                    + ` >> ${REG}(31u)))`;
+                store(dest, `select(countLeadingZeros(${flipped}), ${REG}(0xffffffffu),`
+                    + ` ${flipped} == ${REG}(0u))`);
+                break;
+            }
+            case OPCODE.FIRSTBIT_LO:
+                store(dest, `firstTrailingBit(${u(a)})`);
+                break;
+            case OPCODE.UBFE:
+                store(dest, perComponent((width, offset, value)=>
+                    `extractBits(${value}, ${offset} & 31u, ${width} & 31u)`, [u(a), u(b), u(c)]));
+                break;
+            case OPCODE.IBFE:
+                store(dest, perComponent((width, offset, value)=>`bitcast<u32>(extractBits(`
+                    + `bitcast<i32>(${value}), ${offset} & 31u, ${width} & 31u))`,
+                [u(a), u(b), u(c)]));
+                break;
+            case OPCODE.BFI:
+                store(dest, perComponent((width, offset, insert, base)=>
+                    `insertBits(${base}, ${insert}, ${offset} & 31u, ${width} & 31u)`,
+                [u(a), u(b), u(c), u(instruction.operands[4])]));
+                break;
+            case OPCODE.BFREV:
+                store(dest, `reverseBits(${u(a)})`);
+                break;
+            case OPCODE.UADDC:
+            case OPCODE.USUBB: {
+                const [sum, carry, left, right] = instruction.operands;
+                const x = held();
+                const y = held();
+                emit(`let ${x} = ${u(left)};`);
+                emit(`let ${y} = ${u(right)};`);
+                const add = instruction.opcode === OPCODE.UADDC;
+                const result2 = held();
+                emit(`let ${result2} = ${add ? `${x} + ${y}` : `${x} - ${y}`};`);
+                store(sum, result2);
+                store(carry, `select(${REG}(0u), ${REG}(1u), ${add ? `${result2} < ${x}`
+                    : `${x} < ${y}`})`);
+                break;
+            }
+            case OPCODE.F32TOF16:
+                store(dest, perComponent(value=>
+                    `(pack2x16float(vec2<f32>(bitcast<f32>(${value}), 0.0)) & 0xffffu)`, [u(a)]));
+                break;
+            case OPCODE.F16TOF32:
+                store(dest, perComponent(value=>
+                    `bitcast<u32>(unpack2x16float(${value} & 0xffffu).x)`, [u(a)]));
+                break;
+            case OPCODE.RCP:
+                store(dest, fromFloat(`(vec4<f32>(1.0) / ${f(a)})`, sat));
+                break;
+            case OPCODE.SWAPC: {
+                const [first, second, condition, left, right] = instruction.operands;
+                const test = held();
+                const x = held();
+                const y = held();
+                emit(`let ${test} = ${u(condition)} != ${REG}(0u);`);
+                emit(`let ${x} = ${moved(left)};`);
+                emit(`let ${y} = ${moved(right)};`);
+                store(first, `select(${x}, ${y}, ${test})`);
+                store(second, `select(${y}, ${x}, ${test})`);
+                break;
+            }
+            case OPCODE.DERIV_RTX_COARSE:
+                store(dest, fromFloat(`dpdxCoarse(${f(a)})`, sat));
+                break;
+            case OPCODE.DERIV_RTX_FINE:
+                store(dest, fromFloat(`dpdxFine(${f(a)})`, sat));
+                break;
+            case OPCODE.DERIV_RTY_COARSE:
+                store(dest, fromFloat(`dpdyCoarse(${f(a)})`, sat));
+                break;
+            case OPCODE.DERIV_RTY_FINE:
+                store(dest, fromFloat(`dpdyFine(${f(a)})`, sat));
+                break;
+
             default:
                 unsupported(instruction.name);
                 break;
@@ -1395,7 +1964,8 @@ function textureType(texture){
  * @typedef {Object} BindGroupLayoutEntry
  * @property {number} binding
  * @property {number} visibility
- * @property {{ type: string }} [buffer]
+ * @property {{ type: string, minBindingSize?: number }} [buffer]
+ * @property {{ access: string, format: string, viewDimension: string }} [storageTexture]
  * @property {{ sampleType: string, viewDimension: string, multisampled?: boolean }} [texture]
  * @property {{ type: string }} [sampler]
  */
@@ -1421,10 +1991,28 @@ function declarations(shader, group, visibility){
         const binding = BINDING.CONSTANT_BUFFER + buffer.slot;
         text.push(`@group(${group}) @binding(${binding}) var<uniform> cb${buffer.slot}: `
             + `array<${REG}, ${Math.max(1, buffer.size)}>;`);
-        entries.push({ binding, visibility, buffer: { type: 'uniform' } });
+        // The bytes the declaration reads: what a binding must have at least,
+        // which the renderer holds a smaller buffer to (`render.js`).
+        entries.push({ binding, visibility,
+            buffer: { type: 'uniform', minBindingSize: Math.max(1, buffer.size) * 16 } });
     }
     for (const texture of shader.textures)
     {
+        if (texture.structure)
+        {
+            const name = `t${texture.slot}`;
+            text.push(
+                `@group(${group}) @binding(${BINDING.TEXTURE + texture.slot})`
+                    + ` var<storage, read> ${name}: array<u32>;`,
+                `@group(${group}) @binding(${BINDING.BUFFER_VIEW + texture.slot})`
+                    + ` var<uniform> ${name}view: ${REG};`,
+                ...wordAccessors(name, false, `${name}view`));
+            entries.push({ binding: BINDING.TEXTURE + texture.slot, visibility,
+                buffer: { type: 'read-only-storage' } });
+            entries.push({ binding: BINDING.BUFFER_VIEW + texture.slot, visibility,
+                buffer: { type: 'uniform' } });
+            continue;
+        }
         if (texture.dimension === RESOURCE_DIMENSION.BUFFER)
         {
             // The element is found and bounds-checked here, where the
@@ -1475,6 +2063,75 @@ function declarations(shader, group, visibility){
             binding, visibility, sampler: { type: sampler.comparison ? 'comparison' : 'filtering' },
         });
     }
+    for (const uav of shader.uavs ?? [])
+    {
+        const name = `u${uav.slot}`;
+        const binding = BINDING.UAV + uav.slot;
+        if (uav.dimension !== RESOURCE_DIMENSION.BUFFER)
+        {
+            const shape = /** @type {Record<number, string[]>} */ (STORAGE_SHAPE)[uav.dimension];
+            if (!uav.format || !shape)
+            {
+                problems.push(`a typed view of dimension ${uav.dimension} in no storage format`);
+                continue;
+            }
+            const access = uav.loaded ? 'read_write' : 'write';
+            text.push(`@group(${group}) @binding(${binding}) var ${name}: `
+                + `texture_storage_${shape[0]}<${uav.format}, ${access}>;`);
+            entries.push({ binding, visibility, storageTexture: {
+                access: uav.loaded ? 'read-write' : 'write-only', format: uav.format,
+                viewDimension: shape[1] } });
+            continue;
+        }
+        text.push(`@group(${group}) @binding(${binding}) var<storage, read_write> ${name}: `
+            + `array<${uav.atomic ? 'atomic<u32>' : 'u32'}>;`,
+        `@group(${group}) @binding(${BINDING.UAV_VIEW + uav.slot}) var<uniform> ${name}view:`
+            + ` ${REG};`,
+        ...wordAccessors(name, uav.atomic, `${name}view`),
+        ...[...uav.atomicOps ?? []].flatMap(op=>atomicAccessor(name, op, uav.atomic,
+            `${name}view`)));
+        entries.push({ binding, visibility, buffer: { type: 'storage' } });
+        entries.push({ binding: BINDING.UAV_VIEW + uav.slot, visibility,
+            buffer: { type: 'uniform' } });
+        if (uav.structure === 'typed')
+        {
+            text.push(
+                `fn ${name}_element(index: u32) -> ${REG} {`,
+                `    let byte = index * ${name}view.w;`,
+                '    let w = byte / 4u;',
+                `    if (index >= ${name}view.z) { return ${REG}(0u); }`,
+                `    return bufferElement(${name}view.x, ${REG}(${name}_word(w), `
+                    + `${name}_word(w + 1u), ${name}_word(w + 2u), ${name}_word(w + 3u)),`
+                    + ' (byte % 4u) * 8u);',
+                '}',
+                `fn ${name}_storeElement(index: u32, value: ${REG}) {`,
+                `    if (index >= ${name}view.z) { return; }`,
+                `    let e = storeElement(${name}view.x, value);`,
+                `    let n = storeElementCount(${name}view.x);`,
+                `    let w = (index * ${name}view.w) / 4u;`,
+                `    if (n > 0u) { ${name}_put(w, e.x); }`,
+                `    if (n > 1u) { ${name}_put(w + 1u, e.y); }`,
+                `    if (n > 2u) { ${name}_put(w + 2u, e.z); }`,
+                `    if (n > 3u) { ${name}_put(w + 3u, e.w); }`,
+                '}');
+        }
+        if (uav.counted)
+        {
+            text.push(`@group(${group}) @binding(${BINDING.UAV_COUNTER + uav.slot})`
+                + ` var<storage, read_write> ${name}count: atomic<u32>;`);
+            entries.push({ binding: BINDING.UAV_COUNTER + uav.slot, visibility,
+                buffer: { type: 'storage' } });
+        }
+    }
+    for (const shared of shader.sharedMemory ?? [])
+    {
+        const name = `g${shared.slot}`;
+        text.push(`var<workgroup> ${name}: array<${shared.atomic ? 'atomic<u32>' : 'u32'}, `
+            + `${Math.max(1, shared.words)}>;`,
+        ...wordAccessors(name, shared.atomic, null, shared.words),
+        ...[...shared.atomicOps ?? []].flatMap(op=>atomicAccessor(name, op, shared.atomic,
+            null, shared.words)));
+    }
     if (shader.immediateConstants.length > 0)
     {
         const rows = shader.immediateConstants
@@ -1486,6 +2143,134 @@ function declarations(shader, group, visibility){
         text.push(...HELPERS[helper].text);
     }
     return { text, entries, unsupported: problems };
+}
+
+/** A typed view's WGSL storage shape, by its RESOURCE_DIMENSION; one dimension is a row. */
+const STORAGE_SHAPE = Object.freeze({
+    [RESOURCE_DIMENSION.TEXTURE1D]: ['2d', '2d'],
+    [RESOURCE_DIMENSION.TEXTURE2D]: ['2d', '2d'],
+    [RESOURCE_DIMENSION.TEXTURE1DARRAY]: ['2d_array', '2d-array'],
+    [RESOURCE_DIMENSION.TEXTURE2DARRAY]: ['2d_array', '2d-array'],
+    [RESOURCE_DIMENSION.TEXTURE3D]: ['3d', '3d'],
+});
+
+/**
+ * A memory's dword accessors: a read past its end answers zero and a write
+ * past it is dropped, as Direct3D defines an access out of bounds. A view
+ * reaches from its first element for its count of them; shared memory is
+ * all of itself.
+ *
+ * @param {string} name @param {boolean} atomic
+ * @param {string | null} view  the uniform of the view's first element, count and size
+ * @param {number} [words]  shared memory's size
+ * @returns {string[]}
+ */
+function wordAccessors(name, atomic, view, words = 0){
+    const bounds = view === null
+        ? [`    if (i >= ${words}u) { return 0u; }`, '    let at = i;']
+        : [`    if (i >= (${view}.z * ${view}.w) / 4u) { return 0u; }`,
+            `    let at = (${view}.y * ${view}.w) / 4u + i;`,
+            `    if (at >= arrayLength(&${name})) { return 0u; }`];
+    const read = atomic ? `atomicLoad(&${name}[at])` : `${name}[at]`;
+    const lines = [
+        `fn ${name}_word(i: u32) -> u32 {`,
+        ...bounds,
+        `    return ${read};`,
+        '}',
+    ];
+    if (view === null || !name.startsWith('t'))
+    {
+        lines.push(`fn ${name}_put(i: u32, value: u32) {`,
+            ...bounds.map(line=>line.replace('return 0u;', 'return;')),
+            atomic ? `    atomicStore(&${name}[at], value);` : `    ${name}[at] = value;`,
+            '}');
+    }
+    return lines;
+}
+
+/**
+ * One atomic operation on a memory's dword: the value it held before. A
+ * signed minimum or maximum is a compare-and-swap loop over the unsigned
+ * dword, and a compare-exchange retries the weak exchange WGSL has until it
+ * either swapped or found another value.
+ *
+ * @param {string} name @param {string} op @param {boolean} atomic
+ * @param {string | null} view @param {number} [words]
+ * @returns {string[]}
+ */
+function atomicAccessor(name, op, atomic, view, words = 0){
+    void atomic;
+    const bounds = view === null
+        ? [`    if (i >= ${words}u) { return 0u; }`, '    let at = i;']
+        : [`    if (i >= (${view}.z * ${view}.w) / 4u) { return 0u; }`,
+            `    let at = (${view}.y * ${view}.w) / 4u + i;`,
+            `    if (at >= arrayLength(&${name})) { return 0u; }`];
+    const pointer = `&${name}[at]`;
+    /** @type {Record<string, string[]>} */
+    const bodies = {
+        iadd: [`    return atomicAdd(${pointer}, value);`],
+        and: [`    return atomicAnd(${pointer}, value);`],
+        or: [`    return atomicOr(${pointer}, value);`],
+        xor: [`    return atomicXor(${pointer}, value);`],
+        umax: [`    return atomicMax(${pointer}, value);`],
+        umin: [`    return atomicMin(${pointer}, value);`],
+        exch: [`    return atomicExchange(${pointer}, value);`],
+        cmp_exch: [
+            '    loop {',
+            `        let r = atomicCompareExchangeWeak(${pointer}, compare, value);`,
+            '        if (r.exchanged || r.old_value != compare) { return r.old_value; }',
+            '    }',
+        ],
+        imax: signedLoop(pointer, 'max'),
+        imin: signedLoop(pointer, 'min'),
+    };
+    return [
+        `fn ${name}_atomic_${op}(i: u32, value: u32, compare: u32) -> u32 {`,
+        ...bounds,
+        ...bodies[op],
+        '}',
+    ];
+}
+
+/** @param {string} pointer @param {'max' | 'min'} which @returns {string[]} */
+function signedLoop(pointer, which){
+    return [
+        '    loop {',
+        `        let old = atomicLoad(${pointer});`,
+        `        let next = bitcast<u32>(${which}(bitcast<i32>(old), bitcast<i32>(value)));`,
+        `        let r = atomicCompareExchangeWeak(${pointer}, old, next);`,
+        '        if (r.exchanged) { return old; }',
+        '    }',
+    ];
+}
+
+/**
+ * A compute shader's module: its declarations, all in group 0, and the
+ * entry point at its thread group's size, its thread ids the registers the
+ * body reads them as.
+ *
+ * @param {TranslatedShader} cs
+ * @returns {{ code: string, entries: BindGroupLayoutEntry[], unsupported: string[] }}
+ */
+export function linkCompute(cs){
+    const declared = declarations(cs, 0, STAGE.COMPUTE);
+    const [x, y, z] = cs.threadGroup.map(size=>Math.max(1, size >>> 0));
+    const code = [
+        ...declared.text,
+        `@compute @workgroup_size(${x}, ${y}, ${z})`,
+        'fn computeMain(@builtin(global_invocation_id) csThreadId: vec3<u32>,',
+        '    @builtin(workgroup_id) csGroupId: vec3<u32>,',
+        '    @builtin(local_invocation_id) csLocalId: vec3<u32>,',
+        '    @builtin(local_invocation_index) csFlat: u32) {',
+        `    let csThread = ${REG}(csThreadId, 0u);`,
+        `    let csGroup = ${REG}(csGroupId, 0u);`,
+        `    let csLocal = ${REG}(csLocalId, 0u);`,
+        ...registerDeclarations(cs),
+        ...bodyText(cs, null),
+        '}',
+    ].join('\n');
+    return { code, entries: declared.entries,
+        unsupported: [...cs.unsupported, ...declared.unsupported] };
 }
 
 /** @param {number} componentType @returns {string} */
@@ -1616,6 +2401,13 @@ export function linkProgram(vs, ps, options = {}){
     // --- the interface between the stages, numbered by the vertex outputs ---
     /** @type {Map<string, { location: number, scalar: string }>} */
     const varyings = new Map();
+    /**
+     * The varying each output register is passed as: two semantics packed
+     * into one register (TEXCOORD0 in .xy, TEXCOORD1 in .zw) are one varying.
+     *
+     * @type {Map<number, { location: number, scalar: string }>}
+     */
+    const byRegister = new Map();
     /** @type {string[]} */
     const vsOut = [];
     /** @type {string[]} */
@@ -1642,9 +2434,17 @@ export function linkProgram(vs, ps, options = {}){
         {
             continue;
         }
+        const packed = byRegister.get(element.register);
+        if (packed)
+        {
+            varyings.set(key, packed);
+            continue;
+        }
         const scalar = scalarOf(element.componentType);
-        const location = varyings.size;
-        varyings.set(key, { location, scalar });
+        const location = byRegister.size;
+        const varying = { location, scalar };
+        varyings.set(key, varying);
+        byRegister.set(element.register, varying);
         // An integer varying cannot be interpolated and WGSL says so; a
         // float one is interpolated the way the rasteriser always did.
         const interpolate = scalar === 'f32' ? '' : ' @interpolate(flat)';
@@ -1665,6 +2465,8 @@ export function linkProgram(vs, ps, options = {}){
     {
         psLoad.push(`    var v${index}: ${REG} = ${REG}(0u);`);
     }
+    /** The pixel stage's member each location arrives as. @type {Map<number, string>} */
+    const arrived = new Map();
     for (const element of ps.inputs)
     {
         if (element.register >= ps.inputRegisters)
@@ -1698,12 +2500,18 @@ export function linkProgram(vs, ps, options = {}){
             unsupported.push(`pixel input ${semanticKey(element)} has no vertex output`);
             continue;
         }
-        const interpolate = varying.scalar === 'f32' ? '' : ' @interpolate(flat)';
-        psIn.push(`    @location(${varying.location})${interpolate} ${name}: `
-            + `vec4<${varying.scalar}>,`);
+        // A register two semantics share comes in once, as the first named it.
+        const member = arrived.get(varying.location) ?? name;
+        if (!arrived.has(varying.location))
+        {
+            arrived.set(varying.location, name);
+            const interpolate = varying.scalar === 'f32' ? '' : ' @interpolate(flat)';
+            psIn.push(`    @location(${varying.location})${interpolate} ${name}: `
+                + `vec4<${varying.scalar}>,`);
+        }
         psLoad.push(`    ${name} = ${varying.scalar === 'u32'
-            ? `in.${name}`
-            : `bitcast<${REG}>(in.${name})`};`);
+            ? `in.${member}`
+            : `bitcast<${REG}>(in.${member})`};`);
     }
 
     // --- the pixel stage's outputs ---
@@ -1718,15 +2526,20 @@ export function linkProgram(vs, ps, options = {}){
         const value = element.register < ps.outputRegisters
             ? `o${element.register}`
             : `${REG}(0u)`;
-        if (element.systemValue === SYSTEM_VALUE.TARGET)
+        // An output with no system value -- COLOR0 from a shader compiled for
+        // backwards compatibility (fxc /Gec) -- is the target its register names.
+        if (element.systemValue === SYSTEM_VALUE.TARGET
+            || element.systemValue === SYSTEM_VALUE.UNDEFINED)
         {
-            targets.push(element.index);
-            if (options.targets && !options.targets.includes(element.index))
+            const slot = element.systemValue === SYSTEM_VALUE.TARGET
+                ? element.index : element.register;
+            targets.push(slot);
+            if (options.targets && !options.targets.includes(slot))
             {
                 continue;
             }
             const scalar = scalarOf(element.componentType);
-            psOut.push(`    @location(${element.index}) target${element.index}: vec4<${scalar}>,`);
+            psOut.push(`    @location(${slot}) target${slot}: vec4<${scalar}>,`);
             psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
             continue;
         }

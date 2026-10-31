@@ -141,7 +141,7 @@ flowchart TB
 | Page main thread | the browser | always | The launcher's interface, the `createApp` call and DOM events live here. Per frame it does one thing only: polls the gamepads (`requestAnimationFrame` → `input.poll`) |
 | Engine thread | the page, [`core/src/host/create.js`](../modules/core/src/host/create.js) | always. With `?host=thread` the engine runs on the page's thread instead, over the same protocol | The program runs in long quanta. On the page's thread it would be interrupted by garbage collection and the interface's rendering, and a click would wait for the quantum to end. Synchronous OPFS access also exists only in a worker. A WebGPU device cannot move between threads, so the worker opens its own and gets the canvas as an `OffscreenCanvas` |
 | Log keeper | the page, [`core/src/host/remote.js`](../modules/core/src/host/remote.js) | always. Without `Worker`, a `MessageChannel` on the page takes its place | The engine writes its journal, counters and tables into shared memory and answers no questions. The keeper drains the ring before it laps, keeps the history and works out frames, the profile and the per-module breakdown. Logging then costs neither the page nor the engine anything |
-| Graphics thread | the engine thread, [`core/src/host/graphics-worker.js`](../modules/core/src/host/graphics-worker.js) (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
+| Graphics thread | the engine thread, [`core/src/host/graphics-worker.js`](../modules/core/src/host/graphics-worker.js) (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9, 10, 11 and OpenGL are played here on a WebGPU device of its own; Vulkan will move here too. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
 | Translation threads | the run's pool, [`core/src/host/pool/pool.js`](../modules/core/src/host/pool/pool.js) (made in `app.js`) | when the engine is cork, the page can share memory and a translator would use a worker; elsewhere each process opens a translator of its own. Each process is lent one from its start to its exit, and the pool's driver adds more while its translation lags (section 5). The pool lends to the process's own thread; its other executors each open a translator of their own. Until the first answers `ready`, regions are translated on the process's own thread | Emits wasm for regions, builds a module and compiles it. The process's thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives. A translation thread works for one process at a time, over a port of its own; one that works for none sleeps and holds nothing of any process |
 | Executors | the thread a process runs on, [`core/src/layers/cpu/internal/executor.js`](../modules/core/src/layers/cpu/internal/executor.js) | under cork, on a page that can share memory, when the process has more than one core ([`cpu.cores`](core/configuration.md#cpu)): one for each core past the first, opened when a thread of the program wants one | Runs the program's threads at once with the process's own thread, over the process's memory itself. A call into Win32 or the kernel, and a fault, waits while the process's thread answers it over the executor's registers. Each opens a translator of its own and takes translations from the run's store through the process |
 | Store writer | the engine thread, [`core/src/layers/cpu/internal/translation-store.js`](../modules/core/src/layers/cpu/internal/translation-store.js) | where the run's translation store is a directory on OPFS | Writes the store's records through a handle of its own: a write through the synchronous handle waits for the disk, which on the engine thread held a frame |
@@ -173,7 +173,7 @@ flowchart LR
   from then on only the engine draws into it.
 - **Engine → log keeper.** Shared memory only: the keeper looks into the ring every 200 ms. Without
   `SharedArrayBuffer` the page forwards the records to it as messages.
-- **Engine ⇄ graphics.** Direct3D 7, 8, 9 and OpenGL each have a `MessageChannel` of their own. Calls go into one
+- **Engine ⇄ graphics.** Direct3D 7, 8, 9, 10 and OpenGL each have a `MessageChannel` of their own. Calls go into one
   buffer per batch, and the buffer is transferred without a copy. Back come the frame as an
   `ImageBitmap` and the answers to calls only the renderer knows.
 - **Engine ⇄ translation.** Regions missing from the store go one way; module bytes and an already
@@ -672,16 +672,16 @@ tables in `core/src/layers/win32/<dll>/`, the search order in [`core/src/app.js`
 | Where | What it does |
 | --- | --- |
 | Page | Hands the `<canvas>` to the engine once (`transferControlToOffscreen`) and fits it into the window, keeping its proportions (`ui/src/components/PlayScreen.jsx`) |
-| Engine thread | Every graphics API the program uses. The Direct3D 7, 8 and 9 devices and the OpenGL contexts keep the state and answer the program, but draw nothing themselves. Direct3D 10 and Vulkan still draw right here through the WebGPU backend. DirectDraw and GDI draw into software surfaces in the program's memory, which the presenter uploads. The presenter also puts the finished frame into the `OffscreenCanvas` |
-| Graphics thread | The twins of the Direct3D 7, 8 and 9 devices and the OpenGL contexts play the same calls on the thread's own WebGPU device and return the frame as an `ImageBitmap` |
+| Engine thread | Every graphics API the program uses. The Direct3D 7, 8, 9, 10 and 11 devices and the OpenGL contexts keep the state and answer the program, but draw nothing themselves. Vulkan still draws right here through the WebGPU backend. DirectDraw and GDI draw into software surfaces in the program's memory, which the presenter uploads. The presenter also puts the finished frame into the `OffscreenCanvas` |
+| Graphics thread | The twins of the Direct3D 7, 8, 9, 10 and 11 devices and the OpenGL contexts play the same calls on the thread's own WebGPU device and return the frame as an `ImageBitmap` |
 | OPFS | Not used. Pipeline and shader caches live in memory only |
 
 ```mermaid
 %%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 50, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
 flowchart TB
   subgraph E1["Engine thread"]
-    D89["Direct3D 7, 8, 9, OpenGL<br/>state and answers, no renderer"]
-    D7["Direct3D 10, Vulkan<br/>still drawn here, through WebGPU"]
+    D89["Direct3D 7, 8, 9, 10, OpenGL<br/>state and answers, no renderer"]
+    D7["Vulkan<br/>still drawn here, through WebGPU"]
     SW["DirectDraw, GDI<br/>surfaces in program memory"]
   end
   TW["<b>Graphics thread</b><br/>the devices' twins:<br/>WebGPU backend, its own device"]
@@ -719,6 +719,29 @@ flowchart TB
   word, with `xchg`: the engine makes both atomic there. The host reads each length with an
   atomic load before the record, and lets the lock go with an atomic swap. What the routine
   wrote before, the vertices the program wrote before the call included, is then there too.
+- **Direct3D 10's command ring.** This version's setters and draws are `void`, so the guest's
+  routines (`graphics/seam/d3d10-inguest.js`, written as `@guestCode`) carry every call they
+  can with no state to check: the shaders, layouts, buffers, views, samplers and states bound,
+  the viewports, scissors and targets, the four draws and the two clears go into the device's
+  ring, and the host makes them on its way into any method of its own (`d3d10-ring.js`,
+  `d3d10/commands.js`). What a resource maps lives in the program's memory: a map is the
+  address, and an unmap reads the pages written since (`d3d10/render.js`, `GuestStorage`). A
+  dynamic buffer's map and unmap run in the guest too: NO_OVERWRITE hands out the storage the
+  buffer is on, DISCARD moves it onto another storage the host has let go of (a buffer is given
+  more, up to 32, when a DISCARD finds none), and the unmap is a record in the ring naming the
+  storage, whose written pages the host takes in its turn (decision A74).
+- **Direct3D 11 over the same device.** Direct3D 10 put the pipeline on the device; 11 moved it
+  to a context. Here one device serves both (`d3d10/device.js`): Direct3D 11's immediate context
+  is the device's own pipeline under another interface (`d3d11/context.js`), so a call through
+  either version is one call to the device, and every object answers both versions' interfaces.
+  A deferred context keeps a pipeline of its own and records its calls; the command list it
+  finishes is played on the device from a cleared pipeline. The seam's Direct3D 11 half
+  (`seam/d3d11.js`) adds its descriptors to the Direct3D 10 seam's lists for the same objects.
+  The immediate context's per-draw calls go into the device's command ring as 10's do: a call
+  that means what 10's does is 10's routine and record, and where 11's arguments differ (class
+  instances, viewports of floats, a map through the context) a routine of the context's writes
+  the record. Compute shaders run as WebGPU compute passes among the draws; a buffer a shader
+  may write takes the program's bytes, copies and read backs in their turn among them.
 - **Dynamic buffers.** A program may write a dynamic buffer through the pointer a lock gave it,
   after the `Unlock`, and draw from it with no lock between, so a draw sends what changed in the
   range it reads since the buffer was last sent. Only the part of the range on pages written

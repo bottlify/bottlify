@@ -56,6 +56,10 @@ const PURE_GETTERS = new Set([
     // minutes of one title, each played for nothing -- and a pause the host's
     // entry runs its calls in.
     'ringState', 'whileStill',
+    // Direct3D 10's: which interfaces an object has, asked whenever the seam
+    // hands one out, and whether a map waits for a copy into the resource --
+    // never, on a device with no renderer, whose map is the played one's.
+    'supports', 'pendingReadback',
 ]);
 
 /**
@@ -67,7 +71,12 @@ const PURE_GETTERS = new Set([
  */
 function handsOut(name){
     return name.startsWith('Create') || name.startsWith('Get') || name.startsWith('Query')
-        || name === 'EndStateBlock';
+        || name === 'EndStateBlock'
+        // DXGI's enumerations, and Direct3D 10's getters of a stage's bindings:
+        // EnumAdapters, IAGetVertexBuffers, PSGetShader; and Direct3D 11's
+        // command lists and context states, which a context hands back.
+        || name.startsWith('Enum') || /^[A-Z]{2}Get/.test(name)
+        || name === 'FinishCommandList' || name === 'SwapDeviceContextState';
 }
 
 /** The calls that hand out one of a texture's levels as an object of its own. */
@@ -723,6 +732,13 @@ export function createRecording(options){
             if (!raws.has(member) && isDeviceObject(member))
             {
                 value[key] = proxyOf(member);
+            }
+            else if (Array.isArray(member) && member.some(one=>!raws.has(one)
+                && isDeviceObject(one)))
+            {
+                // Direct3D 10's getters hand out arrays of objects.
+                value[key] = member.map(one=>(!raws.has(one) && isDeviceObject(one)
+                    ? proxyOf(one) : one));
             }
         }
     };

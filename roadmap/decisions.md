@@ -724,6 +724,27 @@ leaf of 5, so no brand and no long mode): a program named the machine by its sig
 and RDRAND still execute; they are not announced, since no processor of the class had them. When
 the engine executes SSSE3 and SSE4, the class moves with it. *2026-10-31.*
 
+**A74. A Direct3D 10 dynamic buffer's bytes are undefined after a WRITE_DISCARD map.** The
+documentation says so, and a driver hands out renamed memory that holds whatever it held. The
+guest's map (`seam/d3d10-inguest.js`, `BufferMap`) may move the buffer onto another of its
+storages in guest memory, which holds what it held the last time the buffer was on it. The
+pages the program writes travel whole from that storage, and the rest of the GPU copy is what it
+was, as a DISCARD's rename carries it. A program that writes part of a buffer after a DISCARD and draws
+from the rest reads what Windows would give it: something, not what it wrote before. A buffer is
+given another storage only where the engine watches the program's writes, so an unmap sends the
+pages written and not the storage. *2026-10-31.*
+
+**A75. A geometry, hull or domain shader is made, and a draw with one bound is skipped.** WebGPU
+has none of those stages and none is emulated. Hardware of the levels Direct3D 10 and 11 run at
+always has them, so a program checks nothing before relying on them: refusing the create
+(`E_NOTIMPL`, as Direct3D 10 here did until now) leaves it holding a null shader it goes on to
+bind and release -- Wine's d3d10core and d3d11 tests crash there, hiding every check after. A
+draw through the missing stage would put the program's points and triangles where the stage
+expands, culls or routes them, so it is not drawn at all; the renderer counts it
+(`skipped.stage`) and says so once. A geometry shader with stream output is made in the same
+way, its declaration checked as Windows checks it; one made of a vertex shader's bytecode, which
+only streams out, is no stage, so its draws are drawn. *2026-10-31.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

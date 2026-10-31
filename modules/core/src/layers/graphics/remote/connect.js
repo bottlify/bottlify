@@ -17,6 +17,7 @@ import { createLendingBuffers, mayWait } from './lending.js';
 import { recordedDirect3D } from './direct3d.js';
 import { recordedDirect3D7 } from './d3d7.js';
 import { recordedOpengl } from './opengl.js';
+import { recordedDirect3D10 } from './d3d10.js';
 
 /** GPUTextureUsage, here without the browser's global. */
 /**
@@ -58,7 +59,7 @@ function plainOf(services){
 
 /**
  * @typedef {Object} GraphicsWorkerEnd
- * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'opengl', factory: (services: any) => any,
+ * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'd3d10' | 'opengl', factory: (services: any) => any,
  *     services: any) => any} root
  *     a root the program is given, whose twin the worker plays
  * @property {() => { roots: number, frames: number, dropped: number,
@@ -523,6 +524,8 @@ export function connectGraphicsWorker(options){
                     return recordedOpengl(factory, services, sender);
                 case 'd3d7':
                     return recordedDirect3D7(services.ddraw, services, sender);
+                case 'd3d10':
+                    return recordedDirect3D10(factory, services, sender);
                 default:
                     return recordedDirect3D(factory, services, sender);
             }

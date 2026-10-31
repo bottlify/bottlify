@@ -407,6 +407,76 @@ export const dclGlobalFlags = ()=>op(OPCODE.DCL_GLOBAL_FLAGS, [], { control: 1 }
 /** @param {number[][]} rows */
 export const immediateConstantBuffer = rows=>({ customData: rows.flat() });
 
+// --- Shader Model 5 ---
+
+/** @param {number} slot @param {string} [components] */
+export const u = (slot, components)=>register(OPERAND.UNORDERED_ACCESS_VIEW, [slot], components);
+/** @param {number} slot @param {string} [components] */
+export const g = (slot, components)=>
+    register(OPERAND.THREAD_GROUP_SHARED_MEMORY, [slot], components);
+/** SV_DispatchThreadID. @param {string} [components] */
+export const vThreadID = components=>register(OPERAND.INPUT_THREAD_ID, [], components);
+/** SV_GroupIndex. @param {string} [components] */
+export const vThreadIDInGroupFlattened = components=>
+    register(OPERAND.INPUT_THREAD_ID_IN_GROUP_FLATTENED, [], components);
+/** @param {number} x @param {number} y @param {number} z */
+export const dclThreadGroup = (x, y, z)=>op(OPCODE.DCL_THREAD_GROUP, [], { extra: [x, y, z] });
+/** @param {number} slot */
+export const dclUavRaw = slot=>op(OPCODE.DCL_UAV_RAW, [u(slot)]);
+/** @param {number} slot @param {number} stride @param {boolean} [counter] */
+export const dclUavStructured = (slot, stride, counter = false)=>op(OPCODE.DCL_UAV_STRUCTURED,
+    [u(slot)], { extra: [stride], control: counter ? 1 << 12 : 0 });
+/** @param {number} slot @param {number} dimension @param {number} returnType */
+export const dclUavTyped = (slot, dimension, returnType)=>op(OPCODE.DCL_UAV_TYPED, [u(slot)], {
+    control: dimension,
+    extra: [returnType | (returnType << 4) | (returnType << 8) | (returnType << 12)],
+});
+/** @param {number} slot @param {number} bytes */
+export const dclTgsmRaw = (slot, bytes)=>op(OPCODE.DCL_TGSM_RAW, [g(slot)], { extra: [bytes] });
+/** @param {number} slot */
+export const dclResourceRaw = slot=>op(OPCODE.DCL_RESOURCE_RAW, [t(slot)]);
+/** @param {number} slot @param {number} stride */
+export const dclResourceStructured = (slot, stride)=>
+    op(OPCODE.DCL_RESOURCE_STRUCTURED, [t(slot)], { extra: [stride] });
+/** @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} memory */
+export const ldRaw = (dest, address, memory)=>op(OPCODE.LD_RAW, [dest, address, memory]);
+/** @param {AsmOperand} memory @param {AsmOperand} address @param {AsmOperand} value */
+export const storeRaw = (memory, address, value)=>op(OPCODE.STORE_RAW, [memory, address, value]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} index @param {AsmOperand} offset
+ * @param {AsmOperand} memory
+ */
+export const ldStructured = (dest, index, offset, memory)=>
+    op(OPCODE.LD_STRUCTURED, [dest, index, offset, memory]);
+/**
+ * @param {AsmOperand} memory @param {AsmOperand} index @param {AsmOperand} offset
+ * @param {AsmOperand} value
+ */
+export const storeStructured = (memory, index, offset, value)=>
+    op(OPCODE.STORE_STRUCTURED, [memory, index, offset, value]);
+/** @param {AsmOperand} memory @param {AsmOperand} address @param {AsmOperand} value */
+export const storeUavTyped = (memory, address, value)=>
+    op(OPCODE.STORE_UAV_TYPED, [memory, address, value]);
+/** @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} memory */
+export const ldUavTyped = (dest, address, memory)=>
+    op(OPCODE.LD_UAV_TYPED, [dest, address, memory]);
+/** @param {AsmOperand} memory @param {AsmOperand} address @param {AsmOperand} value */
+export const atomicIadd = (memory, address, value)=>
+    op(OPCODE.ATOMIC_IADD, [memory, address, value]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} memory @param {AsmOperand} address
+ * @param {AsmOperand} value
+ */
+export const immAtomicImax = (dest, memory, address, value)=>
+    op(OPCODE.IMM_ATOMIC_IMAX, [dest, memory, address, value], { destinations: 2 });
+/** @param {AsmOperand} dest @param {AsmOperand} memory */
+export const immAtomicAlloc = (dest, memory)=>
+    op(OPCODE.IMM_ATOMIC_ALLOC, [dest, memory], { destinations: 2 });
+/** @param {number} flags */
+export const sync = flags=>op(OPCODE.SYNC, [], { control: flags, destinations: 0 });
+/** @param {AsmOperand} dest @param {AsmOperand} memory */
+export const bufinfo = (dest, memory)=>op(OPCODE.BUFINFO, [dest, memory]);
+
 // --- the container ---
 
 /**
@@ -463,7 +533,7 @@ function encodeSignature(elements, readWriteDefault){
  * @param {(AsmInstruction | { customData: number[] })[]} instructions
  * @returns {Uint8Array}
  */
-function encodeProgram(kind, instructions){
+function encodeProgram(kind, instructions, major = 4){
     /** @type {number[]} */
     const words = [];
     for (const instruction of instructions)
@@ -478,7 +548,7 @@ function encodeProgram(kind, instructions){
     }
     const bytes = new Uint8Array((words.length + 2) * 4);
     const view = new DataView(bytes.buffer);
-    view.setUint32(0, ((kind << 16) | (4 << 4)) >>> 0, true);
+    view.setUint32(0, ((kind << 16) | (major << 4)) >>> 0, true);
     view.setUint32(4, words.length + 2, true);
     words.forEach((word, index)=>view.setUint32(8 + index * 4, word, true));
     return bytes;
@@ -523,6 +593,7 @@ export function container(chunks){
  * @property {AsmSignatureElement[]} [inputs]
  * @property {AsmSignatureElement[]} [outputs]
  * @property {(AsmInstruction | { customData: number[] })[]} instructions
+ * @property {number} [major]  The shader model: 4, or 5 for what only 5 has.
  */
 
 /**
@@ -533,7 +604,8 @@ export function assemble(shader){
     return container([
         { name: 'ISGN', bytes: encodeSignature(shader.inputs ?? [], 0xf) },
         { name: 'OSGN', bytes: encodeSignature(shader.outputs ?? [], 0) },
-        { name: 'SHDR', bytes: encodeProgram(shader.kind, shader.instructions) },
+        { name: shader.major === 5 ? 'SHEX' : 'SHDR',
+            bytes: encodeProgram(shader.kind, shader.instructions, shader.major) },
     ]);
 }
 
