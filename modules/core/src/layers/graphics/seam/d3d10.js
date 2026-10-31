@@ -1288,13 +1288,29 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
      * @param {number} subresource
      * @param {number} mapType
      * @param {number} flags
-     * @returns {{ hr: number, address: number, rowPitch: number, depthPitch: number }}
+     * @param {(mapped: { hr: number, address: number, rowPitch: number, depthPitch: number })
+     *     => number} use  what the call answers once the map is made
+     * @returns {number | Promise<number>}
      */
-    const mapInto = (resource, subresource, mapType, flags)=>{
+    const mapInto = (resource, subresource, mapType, flags, use)=>{
         /** @type {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number,
          *     pData?: number }} */
         const held = {};
-        const hr = resource.Map(subresource, mapType, flags, held);
+        const made = resource.Map(subresource, mapType, flags, held);
+        // A device drawn elsewhere answers a read map of a staging resource
+        // when its bytes arrive: the map is finished then.
+        return typeof made?.then === 'function'
+            ? made.then((/** @type {number} */ hr)=>use(mappedOf(resource, subresource, hr, held)))
+            : use(mappedOf(resource, subresource, made, held));
+    };
+
+    /**
+     * @param {any} resource @param {number} subresource @param {number} hr
+     * @param {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number,
+     *     pData?: number }} held  what the object's map gave
+     * @returns {{ hr: number, address: number, rowPitch: number, depthPitch: number }}
+     */
+    const mappedOf = (resource, subresource, hr, held)=>{
         if (hr === S_OK && typeof held.pData === 'number')
         {
             // The bytes are in guest memory already: the address is the map.
@@ -1345,7 +1361,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
      *
      * @param {any} resource
      * @param {number} flags
-     * @param {() => number} run
+     * @param {() => number | Promise<number>} run
      * @returns {number | Promise<number>}
      */
     const whenMappable = (resource, flags, run)=>{
@@ -1464,15 +1480,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             {
                 return E_INVALIDARG;
             }
-            return whenMappable(texture, 0, ()=>{
-                const mapped = mapInto(texture, 0, mapType, 0);
+            return whenMappable(texture, 0, ()=>mapInto(texture, 0, mapType, 0, mapped=>{
                 if (mapped.hr === S_OK)
                 {
                     fields.writeU32(rect, mapped.rowPitch);
                     fields.writeU32(rect + 4, mapped.address);
                 }
                 return mapped.hr;
-            });
+            }));
         },
         /** @param {any} texture */
         Unmap: texture=>{
@@ -1579,19 +1594,19 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
      * @param {boolean} pitches  Whether the out structure has room for pitches.
      */
     const mapTexture = (texture, [subresource, mapType, flags, out], pitches)=>
-        whenMappable(texture, flags >>> 0, ()=>{
-            const mapped = mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0);
-            if (mapped.hr !== S_OK || (out >>> 0) === 0)
-            {
-                return mapped.hr;
-            }
-            fields.writeU32(out, mapped.address);
-            if (pitches)
-            {
-                fields.writeU32(out + 4, mapped.rowPitch);
-            }
-            return S_OK;
-        });
+        whenMappable(texture, flags >>> 0, ()=>mapInto(texture, subresource >>> 0,
+            mapType >>> 0, flags >>> 0, mapped=>{
+                if (mapped.hr !== S_OK || (out >>> 0) === 0)
+                {
+                    return mapped.hr;
+                }
+                fields.writeU32(out, mapped.address);
+                if (pitches)
+                {
+                    fields.writeU32(out + 4, mapped.rowPitch);
+                }
+                return S_OK;
+            }));
 
     /** @param {any} texture @param {number[]} args */
     const unmapTexture = (texture, [subresource])=>unmapFrom(texture, subresource >>> 0);
@@ -1603,12 +1618,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         Map: (buffer, [mapType, flags, out])=>whenMappable(buffer, flags >>> 0, ()=>{
             countUnattached(buffer);
             ringOf(buffer)?.hostMap(buffer, mapType >>> 0);
-            const mapped = mapInto(buffer, 0, mapType >>> 0, flags >>> 0);
-            if (mapped.hr === S_OK && (out >>> 0) !== 0)
-            {
-                fields.writeU32(out, mapped.address);
-            }
-            return mapped.hr;
+            return mapInto(buffer, 0, mapType >>> 0, flags >>> 0, mapped=>{
+                if (mapped.hr === S_OK && (out >>> 0) !== 0)
+                {
+                    fields.writeU32(out, mapped.address);
+                }
+                return mapped.hr;
+            });
         }),
         /** @param {any} buffer */
         Unmap: buffer=>{
@@ -1658,8 +1674,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         ...resourceMethods,
         /** @param {any} texture @param {number[]} args */
         Map: (texture, [subresource, mapType, flags, out])=>whenMappable(texture, flags >>> 0,
-            ()=>{
-                const mapped = mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0);
+            ()=>mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0, mapped=>{
                 if (mapped.hr !== S_OK || (out >>> 0) === 0)
                 {
                     return mapped.hr;
@@ -1668,7 +1683,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                 fields.writeU32(out + 4, mapped.rowPitch);
                 fields.writeU32(out + 8, mapped.depthPitch);
                 return S_OK;
-            }),
+            })),
         Unmap: unmapTexture,
         /** @param {any} texture @param {number[]} args */
         GetDesc: (texture, [out])=>{

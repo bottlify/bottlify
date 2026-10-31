@@ -24,6 +24,8 @@ import {
     D3D10_BIND, D3D10_USAGE, D3D_FEATURE_LEVEL, DXGI_FORMAT, E_INVALIDARG, IID, S_FALSE, S_OK,
 } from '../d3d10/constants.js';
 import { createDirect3D10 } from '../d3d10/root.js';
+import { playedAtOnce } from '../remote/direct3d.js';
+import { playedDirect3D10, recordedDirect3D10 } from '../remote/d3d10.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
@@ -39,8 +41,13 @@ const QUERY_INTERFACE = 0;
 const ADD_REF = 1;
 const RELEASE = 2;
 
-/** A flat address space, the bridge's publisher, and the seam over a recording GPU. */
-function seamed(){
+/**
+ * A flat address space, the bridge's publisher, and the seam over a recording
+ * GPU: the device drawn here, or recorded and played elsewhere.
+ *
+ * @param {{ elsewhere?: boolean }} [options]
+ */
+function seamed(options = {}){
     const bytes = new Uint8Array(4 << 20);
     let next = 0x100;
     /** @param {number} size */
@@ -89,12 +96,23 @@ function seamed(){
         publisher,
         memory: { readMemory: memory.readBytes, writeMemory: memory.writeBytes },
         allocate,
-        root: factoryOptions=>createDirect3D10({
-            factoryOptions, backend,
-            createSampler: descriptor=>({ kind: 'sampler', descriptor }),
-            createTexture: gpu.device.createTexture,
-            divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
-        }),
+        root: factoryOptions=>{
+            const drawing = {
+                factoryOptions, backend,
+                createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',
+                    descriptor }),
+                createTexture: gpu.device.createTexture,
+                divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+                    divergences.push(`${api}: ${detail}`),
+            };
+            const guest = { allocate, free: ()=>{}, readMemory: memory.readBytes,
+                writeMemory: memory.writeBytes };
+            return options.elsewhere
+                ? recordedDirect3D10(createDirect3D10, { factoryOptions, guest },
+                    playedAtOnce(playedDirect3D10(createDirect3D10, { ...drawing,
+                        writeMemory: memory.writeBytes })))
+                : createDirect3D10({ ...drawing, guest });
+        },
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
     });
     /** @param {number[]} dwords */
@@ -117,12 +135,20 @@ function seamed(){
         }
         return at;
     };
-    /** @param {number} pointer @param {number} index @param {number[]} args */
-    const call = (pointer, index, args = [])=>{
+    /**
+     * The call's answer as the handler gives it: a number, or a promise of one
+     * where the call waits.
+     *
+     * @param {number} pointer @param {number} index @param {number[]} args
+     * @returns {any}
+     */
+    const answer = (pointer, index, args = [])=>{
         const entry = registered.get(memory.readU32(memory.readU32(pointer) + index * 4));
         assert.ok(entry, `slot ${index} has an implementation`);
-        return entry.fn.handler([pointer, ...args]) >>> 0;
+        return entry.fn.handler([pointer, ...args]);
     };
+    /** @param {number} pointer @param {number} index @param {number[]} args */
+    const call = (pointer, index, args = [])=>answer(pointer, index, args) >>> 0;
     /** @param {number} pointer @param {string} iid @returns {number} the pointer, or 0 */
     const query = (pointer, iid)=>{
         const out = place([0]);
@@ -147,7 +173,7 @@ function seamed(){
             context: contextAt ? memory.readU32(contextAt) : 0,
         };
     };
-    return { memory, place, call, query, create, divergences, seam };
+    return { memory, place, call, answer, query, create, divergences, seam };
 }
 
 test('D3D11CreateDevice answers S_FALSE asked for nothing, and makes a device of level 11.0'
@@ -274,4 +300,41 @@ function placeGuidOf(s, iid){
         ...[16, 24].map(at=>parseInt((hex.slice(at, at + 8).match(/../g) ?? []).reverse()
             .join(''), 16))];
     return s.place(words);
+}
+
+for (const elsewhere of [false, true])
+{
+    test(`a staging texture copied from a cleared target maps to the cleared colour, drawn`
+        + ` ${elsewhere ? 'elsewhere' : 'here'}`, async()=>{
+        const s = seamed({ elsewhere });
+        const { device, context } = s.create();
+        const textureAt = s.place([0]);
+        // D3D11_TEXTURE2D_DESC: 4 by 4, one level, one slice, RGBA8, one sample.
+        const desc = (/** @type {number} */ usage, /** @type {number} */ bind,
+            /** @type {number} */ cpu)=>s.place([4, 4, 1, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0,
+            usage, bind, cpu, 0]);
+        assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateTexture2D'),
+            [desc(D3D10_USAGE.DEFAULT, D3D10_BIND.RENDER_TARGET, 0), 0, textureAt]), S_OK);
+        const stagingAt = s.place([0]);
+        assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateTexture2D'),
+            [desc(D3D10_USAGE.STAGING, 0, 0x20000), 0, stagingAt]), S_OK);
+        const viewAt = s.place([0]);
+        assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateRenderTargetView'),
+            [s.memory.readU32(textureAt), 0, viewAt]), S_OK);
+        const red = s.place([1, 0, 0, 1].map(value=>new Uint32Array(
+            new Float32Array([value]).buffer)[0]));
+        s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'ClearRenderTargetView'),
+            [s.memory.readU32(viewAt), red]);
+        s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'CopyResource'),
+            [s.memory.readU32(stagingAt), s.memory.readU32(textureAt)]);
+        const mappedAt = s.place([0, 0, 0]);
+        // D3D11_MAP_READ
+        const hr = await s.answer(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'Map'),
+            [s.memory.readU32(stagingAt), 0, 1, 0, mappedAt]);
+        assert.equal(hr >>> 0, S_OK);
+        const at = s.memory.readU32(mappedAt);
+        assert.notEqual(at, 0, 'the map wrote where the bytes are');
+        assert.deepEqual([...s.memory.readBytes(at, 4)], [255, 0, 0, 255]);
+        assert.equal(s.memory.readU32(mappedAt + 4), 16, 'four texels a row');
+    });
 }

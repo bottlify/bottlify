@@ -284,10 +284,12 @@ const STAGE_SHADERS = Object.freeze({
  * @property {(desc: any, out: number) => void} writeSamplerDesc
  * @property {(address: number) => any} readQueryDesc
  * @property {(desc: any, out: number) => void} writeQueryDesc
- * @property {(resource: any, subresource: number, mapType: number, flags: number) =>
- *     { hr: number, address: number, rowPitch: number, depthPitch: number }} mapInto
+ * @property {(resource: any, subresource: number, mapType: number, flags: number,
+ *     use: (mapped: { hr: number, address: number, rowPitch: number, depthPitch: number })
+ *     => number) => number | Promise<number>} mapInto
  * @property {(resource: any, subresource: number) => void} unmapFrom
- * @property {(resource: any, flags: number, run: () => number) => number | Promise<number>}
+ * @property {(resource: any, flags: number, run: () => number | Promise<number>) =>
+ *     number | Promise<number>}
  *     whenMappable
  * @property {(object: any) => any} ringOf
  * @property {(buffer: any) => void} countUnattached
@@ -986,19 +988,20 @@ export function createDirect3D11Seam(describe, kit, guests){
                 k().countUnattached(resource);
                 k().ringOf(resource)?.hostMap(resource, type >>> 0);
             }
-            const mapped = k().mapInto(resource, subresource >>> 0, type >>> 0,
-                flags & MAP_DO_NOT_WAIT);
-            if (mapped.hr !== S_OK)
-            {
-                k().memory.writeMemory(out >>> 0, new Uint8Array(12));
-                return mapped.hr;
-            }
-            const whole = resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER
-                ? resource.desc.ByteWidth : 0;
-            k().fields.writeU32(out, mapped.address);
-            k().fields.writeU32(out + 4, whole || mapped.rowPitch);
-            k().fields.writeU32(out + 8, whole || mapped.depthPitch);
-            return S_OK;
+            return k().mapInto(resource, subresource >>> 0, type >>> 0, flags & MAP_DO_NOT_WAIT,
+                mapped=>{
+                    if (mapped.hr !== S_OK)
+                    {
+                        k().memory.writeMemory(out >>> 0, new Uint8Array(12));
+                        return mapped.hr;
+                    }
+                    const whole = resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER
+                        ? resource.desc.ByteWidth : 0;
+                    k().fields.writeU32(out, mapped.address);
+                    k().fields.writeU32(out + 4, whole || mapped.rowPitch);
+                    k().fields.writeU32(out + 8, whole || mapped.depthPitch);
+                    return S_OK;
+                });
         });
     };
 
