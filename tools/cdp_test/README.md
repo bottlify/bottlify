@@ -55,6 +55,10 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
     [--user-data-dir DIR] [--port N] [--store local] [--quota MB] [--prefetch] [--export-translations FILE]
 ```
 
+The bundle is `bundles/<bundle-id>/` of this checkout, or of the folder `BOTTLIFY_BUNDLES`
+names: a worktree without bundles of its own runs the main checkout's (`frames.mjs` reads it
+too).
+
 | flag | default | what it does |
 |---|---|---|
 | `--wait SECONDS` | 900 | how long to wait for the page's result, from the start: the run, then the report, whose read-back of the last frame waits for the device to finish every frame queued before it: a few frames with the graphics layer's bound; without it, on a software adapter, far longer than the run (see *A page that does not answer*). Bound the run itself with `--run-seconds` or a scene that ends |

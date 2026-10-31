@@ -143,6 +143,7 @@ import { USER_NAME } from './advapi32/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
 import { defaultTrustedRoots } from './wintrust/roots.js';
 import { createD3dxFunctions, d3dxVersionFunctions } from './d3dx9/functions.js';
+import { createD3dx10Functions } from './d3dx10/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
 import { createNetbiosFunctions, createSensFunctions, createSessionNotificationFunctions,
@@ -249,6 +250,26 @@ const REFUSED_OPENS_KEPT = 32;
  */
 const d3dxLibraries = table=>Object.fromEntries(Array.from({ length: 20 },
     (_, i)=>[`d3dx9_${24 + i}.dll`, { ...table, ...d3dxVersionFunctions(24 + i) }]));
+
+/**
+ * What D3DX 10 exports of D3DX 9's: the mathematics, the same functions under
+ * the same names (Wine's d3dx10_43.spec).
+ */
+const D3DX10_SHARED = /^D3DX(Vec|Matrix|Quaternion|Plane|Color|Float|SH|FresnelTerm|IntersectTri|BoxBoundProbe|SphereBoundProbe|ComputeBounding|CreateMatrixStack|CpuOptimizations)/;
+
+/**
+ * Every version of the D3DX 10 helper library, d3dx10_33 to d3dx10_43: D3DX
+ * 9's mathematics and the library's own loaders, each answering to its version.
+ *
+ * @param {Record<string, any>} d3dx9  D3DX 9's table
+ * @param {import('./d3dx10/functions.js').D3dx10Host} host
+ */
+const d3dx10Libraries = (d3dx9, host)=>{
+    const shared = Object.fromEntries(Object.entries(d3dx9)
+        .filter(([name])=>D3DX10_SHARED.test(name)));
+    return Object.fromEntries(Array.from({ length: 11 }, (_, i)=>[`d3dx10_${33 + i}.dll`,
+        { ...shared, ...createD3dx10Functions(host, 33 + i) }]));
+};
 
 /**
  * The libraries Windows keeps under
@@ -3576,62 +3597,67 @@ export function createWin32Module(){
                 // The maths half of the Direct3D helper: pure vector and matrix
                 // functions, here for their stack width as much as their answers,
                 // since d3dx9 exports them undecorated though they are stdcall.
-                ...d3dxLibraries(createD3dxFunctions({ readMemory, writeMemory,
-                    // A word read and written in place: an effect's commit reads
-                    // a version word for every constant of its pass.
-                    readU32: (/** @type {number} */ at)=>memory.readU32(at),
-                    writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>
-                        memory.writeU32(at, value),
-                    divergence: config?.divergence, vtables: comVtables, heap,
-                    shaderCompiled: config?.shaderCompiled,
-                    // The font engine GDI draws with, for D3DX's font.
-                    fontMetrics: (/** @type {any} */ font)=>
-                        config?.graphics?.fontMetrics?.(font) ?? null,
-                    glyph: (/** @type {number} */ code, /** @type {any} */ font)=>
-                        config?.graphics?.glyph?.(code, font) ?? null,
-                    callGuest: call=>bridge.callGuest(call),
-                    drive: steps=>bridge.drive(steps),
-                    currentThread: ()=>kernel.currentThread(),
-                    // The FromFile and FromResource functions read the same
-                    // volume and modules the program does; SaveToFile writes it.
-                    readFile: async path=>{
-                        const entry = volume.stat(path);
-                        const node = entry && !entry.isDirectory
-                            ? volume.open(path, { read: true }) : null;
-                        if (!entry || !node)
-                        {
-                            return null;
-                        }
-                        try
-                        {
-                            return await volume.read(node, 0, entry.size);
-                        }
-                        finally
-                        {
-                            volume.close(node);
-                        }
-                    },
-                    writeFile: (path, bytes)=>{
-                        const node = volume.open(path,
-                            { read: false, write: true, create: true, truncate: true });
-                        if (!node)
-                        {
-                            return false;
-                        }
-                        try
-                        {
-                            return volume.write(node, 0, bytes) === bytes.length;
-                        }
-                        finally
-                        {
-                            volume.close(node);
-                        }
-                    },
-                    resource: (module, name, type)=>{
-                        const entry = modules.findResource?.(module, type, name) ?? null;
-                        const base = modules.moduleBase?.(module) ?? 0;
-                        return entry ? readMemory(base + entry.rva, entry.size) : null;
-                    } })),
+                ...(()=>{
+                    const d3dxHost = { readMemory, writeMemory,
+                        // A word read and written in place: an effect's commit reads
+                        // a version word for every constant of its pass.
+                        readU32: (/** @type {number} */ at)=>memory.readU32(at),
+                        writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+                            memory.writeU32(at, value),
+                        divergence: config?.divergence, vtables: comVtables, heap,
+                        shaderCompiled: config?.shaderCompiled,
+                        // The font engine GDI draws with, for D3DX's font.
+                        fontMetrics: (/** @type {any} */ font)=>
+                            config?.graphics?.fontMetrics?.(font) ?? null,
+                        glyph: (/** @type {number} */ code, /** @type {any} */ font)=>
+                            config?.graphics?.glyph?.(code, font) ?? null,
+                        callGuest: call=>bridge.callGuest(call),
+                        drive: steps=>bridge.drive(steps),
+                        currentThread: ()=>kernel.currentThread(),
+                        // The FromFile and FromResource functions read the same
+                        // volume and modules the program does; SaveToFile writes it.
+                        readFile: async path=>{
+                            const entry = volume.stat(path);
+                            const node = entry && !entry.isDirectory
+                                ? volume.open(path, { read: true }) : null;
+                            if (!entry || !node)
+                            {
+                                return null;
+                            }
+                            try
+                            {
+                                return await volume.read(node, 0, entry.size);
+                            }
+                            finally
+                            {
+                                volume.close(node);
+                            }
+                        },
+                        writeFile: (path, bytes)=>{
+                            const node = volume.open(path,
+                                { read: false, write: true, create: true, truncate: true });
+                            if (!node)
+                            {
+                                return false;
+                            }
+                            try
+                            {
+                                return volume.write(node, 0, bytes) === bytes.length;
+                            }
+                            finally
+                            {
+                                volume.close(node);
+                            }
+                        },
+                        resource: (module, name, type)=>{
+                            const entry = modules.findResource?.(module, type, name) ?? null;
+                            const base = modules.moduleBase?.(module) ?? 0;
+                            return entry ? readMemory(base + entry.rva, entry.size) : null;
+                        },
+                    };
+                    const d3dx9 = createD3dxFunctions(d3dxHost);
+                    return { ...d3dxLibraries(d3dx9), ...d3dx10Libraries(d3dx9, d3dxHost) };
+                })(),
 
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, readMemory,
                     writeMemory }),
@@ -4564,7 +4590,8 @@ export function createWin32Module(){
                  *
                  * @returns {string[]}
                  */
-                redistributables: ()=>Object.keys(d3dxLibraries({})),
+                redistributables: ()=>[...Object.keys(d3dxLibraries({})),
+                    ...Array.from({ length: 11 }, (_, i)=>`d3dx10_${33 + i}.dll`)],
 
                 /**
                  * What an undecorated export of a library is, when nothing else

@@ -39,7 +39,8 @@ import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/ver
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
 const PACKAGE_DIR = join(REPO_ROOT, 'modules', 'core');
-const BUNDLES_DIR = join(REPO_ROOT, 'bundles');
+// A checkout without bundles of its own (a worktree) names the folder that has them.
+const BUNDLES_DIR = process.env.BOTTLIFY_BUNDLES ?? join(REPO_ROOT, 'bundles');
 
 /** @param {string[]} argv */
 function parse(argv){

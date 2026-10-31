@@ -295,8 +295,10 @@ test('the D3DX helpers are the redistributables, and Windows\' own libraries are
     // setup installs, whose table is only the fallback.
     const api = await win32Module.create({}, stubHost());
     const redistributable = api.redistributables();
-    assert.equal(redistributable.length, 20);
+    assert.equal(redistributable.length, 31);
     assert.ok(redistributable.includes('d3dx9_24.dll') && redistributable.includes('d3dx9_43.dll'));
+    assert.ok(redistributable.includes('d3dx10_33.dll')
+        && redistributable.includes('d3dx10_43.dll'));
     for (const name of redistributable)
     {
         assert.ok(name in api.libraries(), `${name} has a table`);
