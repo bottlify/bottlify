@@ -226,7 +226,7 @@ const images = (await Promise.all(paths.map(gather))).flat().map(found=>{
     try
     {
         const image = parsePe(found.bytes, { wide: true });
-        return { ...found, imports: readImports(found.bytes, image),
+        return { ...found, bits: image.bits, imports: readImports(found.bytes, image),
             exports: readExports(found.bytes, image).exports };
     }
     catch (e){
@@ -247,15 +247,19 @@ for (const image of /** @type {any[]} */ (images))
 }
 
 // The system libraries are asked of the engine itself, as a program's loader
-// would find them.
-const app = await createApp({
+// would find them -- a 64-bit image of a 64-bit process, whose libraries leave
+// out the exports that only run as i386 and have the ones only Win64 has.
+const apps = await Promise.all(/** @type {(32 | 64)[]} */ ([32, 64]).map(bits=>createApp({
     executable: buildExe({
+        bits,
         imports: { 'KERNEL32.dll': ['ExitProcess'] },
         data: {},
         codeSize: 0x10,
-        code: ()=>[0x6a, 0x00, 0xcc, ...new Array(13).fill(0xcc)],
+        code: ()=>new Array(16).fill(0xcc),
     }),
-});
+})));
+/** @param {{ bits: number }} image */
+const appOf = image=>apps[image.bits === 64 ? 1 : 0];
 
 /** @type {Map<string, Map<string, Set<string>>>} missing function -> importers, by library */
 const missing = new Map();
@@ -287,7 +291,8 @@ for (const image of /** @type {any[]} */ (images))
             const provided = ownLibrary
                 ? (entry.name ? ownLibrary.names.has(entry.name)
                     : ownLibrary.ordinals.has(entry.ordinal))
-                : app.debug.exported(library.dll, entry.name ?? null, entry.ordinal ?? null);
+                : appOf(image).debug.exported(library.dll, entry.name ?? null,
+                    entry.ordinal ?? null);
             if (provided === null)
             {
                 absent.set(library.dll, (absent.get(library.dll) ?? new Set()).add(image.where));
@@ -412,7 +417,7 @@ if (argv.includes('--dynamic'))
             {
                 continue;
             }
-            if (app.debug.exported(text, '\u0000') === null)
+            if (appOf(image).debug.exported(text, '\u0000') === null)
             {
                 unnamed.set(text, (unnamed.get(text) ?? new Set()).add(image.name));
                 continue;
@@ -431,7 +436,7 @@ if (argv.includes('--dynamic'))
                 {
                     continue;
                 }
-                const made = app.debug.exported(library, text);
+                const made = appOf(image).debug.exported(library, text);
                 if (made === true)
                 {
                     note(dynamic, libraryKey(library), text, image.name);
@@ -444,7 +449,7 @@ if (argv.includes('--dynamic'))
         }
     }
 }
-await app.dispose();
+await Promise.all(apps.map(app=>app.dispose()));
 
 console.log(`${images.length} images read`);
 for (const [library, names] of [...missing].sort(([a], [b])=>a.localeCompare(b)))
