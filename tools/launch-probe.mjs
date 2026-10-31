@@ -745,8 +745,10 @@ async function main(){
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
         'library-loaded', 'library-missing', 'unimplemented', 'warning', 'debug'])
     {
+        // A trace line whole: a fault's registers and stack run past any cut.
         app.on(name, (/** @type {any} */ payload)=>
-            console.log(`  [${name}] ${JSON.stringify(payload).slice(0, 300)}`));
+            console.log(`  [${name}] ${name === 'debug' ? JSON.stringify(payload)
+                : JSON.stringify(payload).slice(0, 300)}`));
     }
 
     // Nobody here can press a message box's button: the program only waits on
