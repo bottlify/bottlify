@@ -7,13 +7,14 @@
 /**
  * Builds the extension, unpacked: `dist/public/` for Bottlify's sites,
  * `dist/dev/` for a local launcher as well (src/manifest.js). The Steam
- * modules are core's, copied as they are: one source, no second copy in git.
+ * modules are core's, copied as they are with every core module they import,
+ * at the same paths: one source, no second copy in git.
  *
  *   node scripts/build.mjs [out]
  */
 
-import { copyFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOSTS, PAGES, PLATFORMS, manifestFor } from '../src/manifest.js';
 
@@ -21,6 +22,35 @@ const HERE = fileURLToPath(new URL('..', import.meta.url));
 // Core beside it in this repository, not the package node_modules names: a
 // worktree's build takes its own core.
 const CORE = resolve(HERE, '../core/src');
+
+/**
+ * Every core module `entry` reaches through static imports and re-exports, by
+ * path under core's src: what the extension must carry for it to load. Listed
+ * from the sources rather than by hand, so a module the Steam code comes to
+ * import is carried without anyone remembering to add it.
+ *
+ * @param {string} entry  a path under core's src
+ * @returns {Promise<string[]>}
+ */
+async function coreModules(entry){
+    const found = new Set([entry]);
+    const pending = [entry];
+    while (pending.length > 0)
+    {
+        const at = /** @type {string} */ (pending.pop());
+        const text = await readFile(join(CORE, at), 'utf8');
+        for (const [, path] of text.matchAll(/(?:^|\s)from\s+'(\.{1,2}\/[^']+\.js)'/gm))
+        {
+            const name = posix.join(posix.dirname(at), path);
+            if (!found.has(name))
+            {
+                found.add(name);
+                pending.push(name);
+            }
+        }
+    }
+    return [...found].sort();
+}
 
 /**
  * @param {string} [out]
@@ -35,14 +65,11 @@ export async function build(out = join(HERE, 'dist')){
     {
         files.push([join(HERE, platform.rules), platform.rules]);
     }
-    for (const name of await readdir(join(CORE, 'steam')))
+    const core = await coreModules('steam/index.js');
+    for (const name of core)
     {
-        if (name.endsWith('.js') && !name.endsWith('.test.js'))
-        {
-            files.push([join(CORE, 'steam', name), `steam/${name}`]);
-        }
+        files.push([join(CORE, name), name]);
     }
-    files.push([join(CORE, 'zstd.js'), 'zstd.js']);
     /** @type {Record<string, string>} */
     const built = {};
     for (const flavour of /** @type {(keyof typeof PAGES)[]} */ (Object.keys(PAGES)))
@@ -67,7 +94,7 @@ export async function build(out = join(HERE, 'dist')){
                 script.replace(blank, ()=>`const HOSTS = new RegExp(${JSON.stringify(hosts)});`));
         }
         await writeFile(join(dir, 'manifest.json'),
-            `${JSON.stringify(manifestFor(flavour, version), null, 2)}\n`);
+            `${JSON.stringify(manifestFor(flavour, version, core), null, 2)}\n`);
         built[flavour] = dir;
     }
     return built;

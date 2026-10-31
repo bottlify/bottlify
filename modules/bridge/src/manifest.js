@@ -51,14 +51,18 @@ export const PLATFORMS = Object.freeze({
     }),
 });
 
-/** What the content script imports, which the page may therefore load too. */
-export const MODULES = Object.freeze(['bridge.js', 'protocol.js', 'steam/*', 'zstd.js']);
+/**
+ * The extension's own modules the content script imports, which the page may
+ * therefore load too; core's, which the build copies, are named by the build.
+ */
+export const MODULES = Object.freeze(['bridge.js', 'protocol.js']);
 
 /**
  * @param {keyof typeof PAGES} build
  * @param {string} version
+ * @param {readonly string[]} [core]  core's modules the build copied, by path in the build
  */
-export function manifestFor(build, version){
+export function manifestFor(build, version, core = []){
     const pages = [...PAGES[build]];
     return {
         manifest_version: 3,
@@ -70,7 +74,7 @@ export function manifestFor(build, version){
             ...Object.values(PLATFORMS).flatMap(platform=>platform.hosts)],
         background: { service_worker: 'worker.js', type: 'module' },
         content_scripts: [{ matches: pages, js: ['content.js'], run_at: 'document_start' }],
-        web_accessible_resources: [{ resources: [...MODULES], matches: pages }],
+        web_accessible_resources: [{ resources: [...MODULES, ...core], matches: pages }],
         declarative_net_request: {
             rule_resources: Object.entries(PLATFORMS).map(([id, platform])=>(
                 { id, enabled: true, path: platform.rules })),
