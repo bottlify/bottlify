@@ -47,7 +47,9 @@ import { GL } from './constants.js';
 import { createBufferReads } from './buffer-reads.js';
 import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
-import { FACE_STRIDE, createTextureObject, isTextureComplete, levelKey } from './objects.js';
+import {
+    FACE_STRIDE, attachmentImage, createTextureObject, isTextureComplete, levelKey,
+} from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import {
     CANONICAL_LAYOUT, clientReads, expandIndices, isList, lockedFor, packVertices, planLayout,
@@ -58,12 +60,20 @@ import {
     VERTEX_PROGRAM_BINDING,
 } from './arb-wgsl.js';
 import {
-    CLEAR_UNIFORM_FLOATS, CLIP_PLANES, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor,
-    clearKey,
-    copyKey, drawDescriptor, drawKey, generateClear, generateCopy, generateDraw, generateShow,
-    lightingStateOf, sameKeyInputs,
+    BLIT_UNIFORM_FLOATS, CLEAR_UNIFORM_FLOATS, CLIP_PLANES, COPY_UNIFORM_FLOATS, UNIFORM, UNITS,
+    blitKey, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateBlit,
+    generateClear, generateCopy, generateDraw, generateShow, lightingStateOf, sameKeyInputs,
     showDescriptor, showKey, writeLighting,
 } from './wgsl.js';
+import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
+
+/**
+ * A framebuffer object is drawn upside down -- its first row GL's bottom
+ * one, the row a texture made from it holds first -- and the window's back
+ * buffer the right way up: `DrawTarget.flipped` says which a target is, and
+ * the vertex stage (`uniforms.misc.z`), the viewport and scissor, the front
+ * face and every copy between the two follow it.
+ */
 
 /** The formats every drawable is backed by. */
 const COLOUR_FORMAT = 'bgra8unorm';
@@ -108,6 +118,26 @@ const WRAPS = Object.freeze({
 
 /** @param {number} value */
 const alignUp = value=>(value + 3) & ~3;
+
+/** The base formats with an alpha of their own. @type {Set<number>} */
+const HAS_ALPHA = new Set([GL.RGBA, GL.ALPHA, GL.LUMINANCE_ALPHA, GL.INTENSITY]);
+
+/**
+ * Where draws land: the window's back buffer, or a framebuffer object's
+ * attachments, as views a pass opens on.
+ *
+ * @typedef {Object} DrawTarget
+ * @property {string} key
+ * @property {number} width
+ * @property {number} height
+ * @property {boolean} flipped  rows run up from GL's bottom one: a framebuffer object
+ * @property {(any | null)[]} colours  per draw buffer, a view to write or null
+ * @property {string[]} formats  per draw buffer, '' where none
+ * @property {number[]} masks  per draw buffer, the channels it has (an RGB one no alpha)
+ * @property {any | null} depth  the depth-stencil view, or none
+ * @property {string} depthFormat  '' where there is none
+ * @property {Set<object>} attached  the textures it draws into
+ */
 
 /**
  * The S3TC format a program uploaded → the block-compressed format a device
@@ -309,6 +339,8 @@ function describeCensus(texture){
 
 /**
  * @typedef {Object} ClearRequest
+ * @property {{ fbo: any, width: number, height: number } | null} [target]  the framebuffer
+ *     object cleared, or the window
  * @property {number} mask
  * @property {readonly number[]} colour    0..1
  * @property {number} depth
@@ -400,6 +432,7 @@ export function createGpuRenderer(services){
      * @property {any} depth
      * @property {number} width
      * @property {number} height
+     * @property {DrawTarget} target  the back buffer as a target
      */
     /** @type {WeakMap<object, DrawableSurfaces>} context -> its drawable's surfaces */
     const drawables = new WeakMap();
@@ -469,6 +502,9 @@ export function createGpuRenderer(services){
         // nothing it depends on has moved.
         uniformsBuilt: 0, uniformsReused: 0,
         programUniformsBuilt: 0, programUniformsReused: 0,
+        glslUniformsBuilt: 0, glslUniformsReused: 0,
+        // Blits between framebuffers, and mipmap levels made on the device.
+        blits: 0, mipmaps: 0,
         // An index list's (min, max) scan and widened copy: built fresh, or
         // reused because the buffer it came from has not been written since.
         indexScansBuilt: 0, indexScansReused: 0,
@@ -483,9 +519,11 @@ export function createGpuRenderer(services){
      *     uniform block, a texture pair per unit the fragment stage samples,
      *     and a uniform block per program stage.
      * @property {string} key
-     * @property {{ binding: number, cube: boolean, unit: number }[]} textures
+     * @property {{ binding: number, cube: boolean, unit: number, sampler?: number }[]} textures
+     *     `sampler`: a GLSL program's sampler, whose unit is its uniform's value
      * @property {boolean} vertexBlock
      * @property {boolean} fragmentBlock
+     * @property {boolean} [glsl]  the textures are visible to the vertex stage too
      */
     /** @type {BindPlan} */
     const NO_TEXTURE_PLAN = { key: '|', textures: [], vertexBlock: false, fragmentBlock: false };
@@ -498,9 +536,22 @@ export function createGpuRenderer(services){
     /**
      * @param {import('./wgsl.js').DrawState} state
      * @param {import('./wgsl.js').ProgramStages | null} programs
+     * @param {import('./wgsl.js').GlslStages | null} [glsl]
      * @returns {BindPlan}
      */
-    const bindPlanOf = (state, programs)=>{
+    const bindPlanOf = (state, programs, glsl = null)=>{
+        if (glsl && state.glsl)
+        {
+            const program = state.glsl.program;
+            const textures = glsl.samplers.map(index=>({ binding: 1 + index * 2,
+                cube: program.samplers[index].dim === 'Cube', unit: -1, sampler: index }))
+                .sort((a, b)=>a.binding - b.binding);
+            const vertexBlock = glsl.vertex !== null;
+            const fragmentBlock = glsl.fragment !== null;
+            const key = `g${textures.map(t=>`${t.binding}${t.cube ? 'c' : '2'}`).join(',')}|`
+                + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}`;
+            return { key, textures, vertexBlock, fragmentBlock, glsl: true };
+        }
         /** @type {{ binding: number, cube: boolean, unit: number }[]} */
         const textures = [];
         if (programs?.fragment)
@@ -563,13 +614,14 @@ export function createGpuRenderer(services){
         }];
         for (const texture of plan.textures)
         {
+            const visibility = plan.glsl ? VERTEX_STAGE | FRAGMENT_STAGE : FRAGMENT_STAGE;
             fixedEntries.push({
                 binding: texture.binding,
-                visibility: FRAGMENT_STAGE,
+                visibility,
                 texture: texture.cube ? { viewDimension: 'cube' } : {},
             });
             fixedEntries.push({
-                binding: texture.binding + 1, visibility: FRAGMENT_STAGE, sampler: {},
+                binding: texture.binding + 1, visibility, sampler: {},
             });
         }
         if (plan.vertexBlock)
@@ -626,7 +678,8 @@ export function createGpuRenderer(services){
                     label: source.label,
                     layout: layout.pipeline,
                     vertex: { module, entryPoint: 'vertexMain', buffers: descriptor.vertexBuffers },
-                    fragment: { module, entryPoint: 'fragmentMain', targets: [descriptor.target] },
+                    fragment: { module, entryPoint: 'fragmentMain',
+                        targets: descriptor.targets ?? [descriptor.target] },
                     primitive: descriptor.primitive,
                     depthStencil: descriptor.depthStencil,
                     multisample: descriptor.multisample,
@@ -894,7 +947,18 @@ export function createGpuRenderer(services){
         const texels = image.texels;
         if (!texels)
         {
-            return new Uint8Array(rect.width * rect.height * 4);
+            // A level given a shape and no data -- what a framebuffer object
+            // draws into -- holds black, opaque where its format has no
+            // alpha, which reads as one.
+            const blank = new Uint8Array(rect.width * rect.height * 4);
+            if (!HAS_ALPHA.has(image.baseFormat))
+            {
+                for (let at = 3; at < blank.length; at += 4)
+                {
+                    blank[at] = 255;
+                }
+            }
+            return blank;
         }
         if (rect.x === 0 && rect.width === image.width)
         {
@@ -1258,12 +1322,12 @@ export function createGpuRenderer(services){
      * from the bottom-left corner and the target from the top-left.
      *
      * @param {import('./pipeline.js').Scene} scene
-     * @param {DrawableSurfaces} target
+     * @param {{ width: number, height: number, flipped?: boolean }} target
      */
     const rectangles = (scene, target)=>{
         const [x, y, width, height] = scene.viewport;
         const viewport = clampRect({
-            x, y: target.height - y - height, width, height,
+            x, y: target.flipped ? y : target.height - y - height, width, height,
         }, target);
         const box = scene.scissor;
         const scissor = clampRect({
@@ -1292,9 +1356,10 @@ export function createGpuRenderer(services){
      * @param {import('./pipeline.js').Scene} scene
      * @param {import('./gpu-layout.js').DrawLayout} layout
      * @param {'point-list' | 'line-list' | 'triangle-list'} topology
+     * @param {DrawTarget} target
      * @returns {import('./wgsl.js').DrawState}
      */
-    const drawStateOf = (scene, layout, topology)=>{
+    const drawStateOf = (scene, layout, topology, target)=>{
         const units = scene.units.slice(0, UNITS).map(unit=>{
             const format = unit.baseFormat;
             return {
@@ -1313,12 +1378,22 @@ export function createGpuRenderer(services){
         const operations = scene.operations;
         const mask = operations.colourMask;
         const cullMode = scene.cull ? scene.cull.mode : undefined;
+        const colourMask = (mask[0] ? 1 : 0) | (mask[1] ? 2 : 0) | (mask[2] ? 4 : 0)
+            | (mask[3] ? 8 : 0);
+        const glsl = scene.programs.glsl;
+        const vertexShader = glsl?.linked.vertex != null;
         return {
             attributes: layout.attributes,
             strides: layout.slots.map(slot=>slot.stride),
             topology,
-            targetFormat: COLOUR_FORMAT,
-            depthFormat: DEPTH_FORMAT,
+            targetFormat: target.formats[0] || COLOUR_FORMAT,
+            depthFormat: target.depthFormat,
+            targets: target.flipped
+                ? target.formats.map((/** @type {string} */ format, /** @type {number} */ k)=>
+                    ({ format, mask: colourMask & target.masks[k] }))
+                : undefined,
+            glsl: glsl ? { id: glsl.id, program: glsl.linked } : null,
+            twoSide: glsl ? scene.twoSide : false,
             units,
             colourSum: scene.colourSum,
             fog: scene.fog
@@ -1337,16 +1412,18 @@ export function createGpuRenderer(services){
             stencil: scene.stencil,
             stencilBack: scene.stencilBack,
             cull: cullMode === undefined ? 'none' : cullMode === GL.FRONT ? 'front' : 'back',
-            frontIsCcw: scene.frontIsCcw,
-            viewportHeight: scene.framebuffer.height,
-            colourMask: (mask[0] ? 1 : 0) | (mask[1] ? 2 : 0) | (mask[2] ? 4 : 0)
-                | (mask[3] ? 8 : 0),
+            // Drawn upside down, a framebuffer object's triangles turn the
+            // other way round.
+            frontIsCcw: target.flipped ? !scene.frontIsCcw : scene.frontIsCcw,
+            viewportHeight: target.height,
+            colourMask,
             polygonOffset: scene.polygonOffset,
             vertexProgram: scene.programs.vertex,
             fragmentProgram: scene.programs.fragment,
             // A vertex program takes the place of the fixed stage, lighting and all.
-            lighting: scene.programs.vertex ? null : lightingStateOf(scene.lighting),
-            clip: clipStateOf(scene),
+            lighting: scene.programs.vertex || vertexShader ? null
+                : lightingStateOf(scene.lighting),
+            clip: vertexShader ? null : clipStateOf(scene),
         };
     };
 
@@ -1541,7 +1618,7 @@ export function createGpuRenderer(services){
      *           current: import('./pipeline.js').Scene['current'],
      *           fog: import('./pipeline.js').Scene['fog'],
      *           alphaTest: import('./pipeline.js').Scene['alphaTest'],
-     *           depthDirection: number,
+     *           depthDirection: number, ySign: number, height: number,
      *           modelview: ArrayLike<number>,
      *           block: Float32Array, lit: boolean,
      *           clipPlanes: readonly (readonly number[])[] }>}
@@ -1594,8 +1671,10 @@ export function createGpuRenderer(services){
      * @param {Float64Array} mvp   the projection-times-modelview product, the
      *          draw's own so it is not multiplied out a second time for a
      *          program stage that reads the same matrix (see `stateMatrixRow`)
+     * @param {{ flipped: boolean, height: number }} target
      */
-    const uniformsOf = (context, scene, mvp)=>{
+    const uniformsOf = (context, scene, mvp, target)=>{
+        const ySign = target.flipped ? -1 : 1;
         const cached = fixedUniformsCache.get(context);
         // ponytail: a lit draw's block is built anew -- the scene's lighting is
         // a fresh record each draw; compare its values if lit draws ever
@@ -1606,7 +1685,8 @@ export function createGpuRenderer(services){
             && sameUnits(cached.units, scene.units)
             && sameCurrent(cached.current, scene.current) && sameFog(cached.fog, scene.fog)
             && sameAlphaTest(cached.alphaTest, scene.alphaTest)
-            && cached.depthDirection === depthDirectionOf(scene))
+            && cached.depthDirection === depthDirectionOf(scene) && cached.ySign === ySign
+            && cached.height === target.height)
         {
             stats.uniformsReused++;
             return cached.block;
@@ -1678,6 +1758,8 @@ export function createGpuRenderer(services){
         block[UNIFORM.misc] = scene.alphaTest ? scene.alphaTest.reference : 0;
         const depthDirection = depthDirectionOf(scene);
         block[UNIFORM.misc + 1] = depthDirection;
+        block[UNIFORM.misc + 2] = ySign;
+        block[UNIFORM.misc + 3] = target.height;
         if (scene.lighting)
         {
             writeLighting(block, scene.lighting);
@@ -1690,7 +1772,8 @@ export function createGpuRenderer(services){
         fixedUniformsCache.set(context, {
             mvp, modelview: scene.modelview, units: scene.units, current: scene.current,
             fog: scene.fog, alphaTest: scene.alphaTest, depthDirection, block,
-            lit: scene.lighting !== null, clipPlanes: scene.clipPlanes,
+            lit: scene.lighting !== null, clipPlanes: scene.clipPlanes, ySign,
+            height: target.height,
         });
         return block;
     };
@@ -1913,7 +1996,12 @@ export function createGpuRenderer(services){
         && a.uniforms === b.uniforms && a.vertexUniforms === b.vertexUniforms
         && a.fragmentUniforms === b.fragmentUniforms && sameSlots(a.slots, b.slots)
         && sameBindings(a.bindings, b.bindings) && matchRect(a.viewport, b.viewport)
-        && matchRect(a.scissor, b.scissor) && a.stencilReference === b.stencilReference;
+        && matchRect(a.scissor, b.scissor) && a.stencilReference === b.stencilReference
+        && a.target === b.target && sameColour(a.blendConstant, b.blendConstant);
+
+    /** @param {any} a @param {any} b */
+    const sameColour = (a, b)=>a === b || (!!a && !!b && a.r === b.r && a.g === b.g
+        && a.b === b.b && a.a === b.a);
 
     /**
      * Joins the draw just pushed into the one before it in the same
@@ -1987,7 +2075,12 @@ export function createGpuRenderer(services){
      * @param {'point-list' | 'line-list' | 'triangle-list'} topology
      */
     const record = (context, scene, layout, slots, indices, count, first, baseVertex, topology)=>{
-        const target = drawables.get(context);
+        const surfaces = drawables.get(context);
+        if (!surfaces)
+        {
+            return;
+        }
+        const target = targetOf(surfaces, scene.target ?? null, recordingOf(context));
         if (!target)
         {
             return;
@@ -2011,7 +2104,7 @@ export function createGpuRenderer(services){
                 + ' WebGPU has one stencil reference and one read and write mask shared by'
                 + ' both, so the front face\'s were applied to the back face\'s test too');
         }
-        const state = drawStateOf(scene, layout, topology);
+        const state = drawStateOf(scene, layout, topology, target);
         const key = lastDraw !== null && sameKeyInputs(state, lastDraw.state)
             ? lastDraw.key : drawKey(state);
         lastDraw = { state, key };
@@ -2032,13 +2125,24 @@ export function createGpuRenderer(services){
         let plan = plans.get(key);
         if (plan === undefined)
         {
-            plan = bindPlanOf(state, generated.programs);
+            plan = bindPlanOf(state, generated.programs, generated.glsl ?? null);
             plans.set(key, plan);
         }
-        const sampled = plan.textures.map(entry=>({
-            entry,
-            texture: textureForBinding(scene, entry, plan.fragmentBlock),
-        }));
+        const executable = scene.programs.glsl;
+        const sampled = plan.textures.map(entry=>{
+            let texture = entry.sampler !== undefined && executable
+                ? textureForSampler(scene, executable, entry)
+                : textureForBinding(scene, entry, plan.fragmentBlock);
+            // Sampled while it is drawn into: GL leaves it undefined, and
+            // WebGPU refuses the pass.
+            if (target.attached.has(texture))
+            {
+                diverge('a draw sampled a texture its framebuffer draws into, and sampled'
+                    + ' black instead');
+                texture = incompleteTexture(entry.cube);
+            }
+            return { entry, texture };
+        });
         // The id strings are read only by the skip filter and the dump; a
         // frame that asks for neither never needs to build one, per draw.
         const ids = skipTextures.size > 0 || dumpDraws
@@ -2072,13 +2176,18 @@ export function createGpuRenderer(services){
         // -- and, when the view and the object are both what the previous
         // draw had, the one that draw already computed.
         const mvp = mvpFor(context, scene);
-        const uniforms = uniformsOf(context, scene, mvp);
-        const vertexUniforms = generated.programs?.vertex && state.vertexProgram
-            ? programUniforms(generated.programs.vertex, state.vertexProgram, scene, mvp)
-            : null;
-        const fragmentUniforms = generated.programs?.fragment && state.fragmentProgram
-            ? programUniforms(generated.programs.fragment, state.fragmentProgram, scene, mvp)
-            : null;
+        const uniforms = uniformsOf(context, scene, mvp, target);
+        const glslStages = generated.glsl ?? null;
+        const vertexUniforms = glslStages && executable
+            ? glslStages.vertex && glslUniforms(glslStages.vertex, executable, scene, mvp)
+            : generated.programs?.vertex && state.vertexProgram
+                ? programUniforms(generated.programs.vertex, state.vertexProgram, scene, mvp)
+                : null;
+        const fragmentUniforms = glslStages && executable
+            ? glslStages.fragment && glslUniforms(glslStages.fragment, executable, scene, mvp)
+            : generated.programs?.fragment && state.fragmentProgram
+                ? programUniforms(generated.programs.fragment, state.fragmentProgram, scene, mvp)
+                : null;
         stats.draws++;
         recording.counts.draws++;
         const rects = rectangles(scene, target);
@@ -2165,6 +2274,8 @@ export function createGpuRenderer(services){
             bindings,
             ...rects,
             stencilReference: scene.stencil ? scene.stencil.reference : 0,
+            target,
+            blendConstant: blendConstantOf(scene.blend, scene.blendColor ?? [0, 0, 0, 0]),
             probe,
             probeDraw: recording.counts.draws - 1,
         });
@@ -2200,6 +2311,308 @@ export function createGpuRenderer(services){
         }
         const position = (entry.binding - 1) / 2;
         return scene.units[position]?.texture ?? incompleteTexture(entry.cube);
+    };
+
+    /**
+     * The texture a GLSL program's sampler reads: what its uniform's unit
+     * has bound for the sampler's target, the incomplete texture's value
+     * when nothing complete is.
+     *
+     * @param {import('./pipeline.js').Scene} scene
+     * @param {any} executable
+     * @param {{ cube: boolean, sampler?: number }} entry
+     * @returns {import('./objects.js').TextureObject}
+     */
+    const textureForSampler = (scene, executable, entry)=>{
+        const sampler = executable.linked.samplers[/** @type {number} */ (entry.sampler)];
+        const unit = executable.ints[sampler.leaf.offset + sampler.element];
+        const bound = scene.boundTextures[unit];
+        const texture = sampler.dim === 'Cube' ? bound?.cube
+            : sampler.dim === '1D' ? bound?.oneD : bound?.twoD;
+        return texture && isTextureComplete(texture) ? texture : incompleteTexture(entry.cube);
+    };
+
+    /**
+     * The constant colour a draw's blend reads: GL's, or for constant-alpha
+     * factors alone its alpha in every channel, which is how WebGPU's one
+     * constant stands for them (`wgsl.js` BLEND_FACTOR). Null when the blend
+     * reads none.
+     *
+     * @param {any} blend @param {readonly number[]} colour
+     * @returns {{ r: number, g: number, b: number, a: number } | null}
+     */
+    const blendConstantOf = (blend, colour)=>{
+        if (!blend)
+        {
+            return null;
+        }
+        const factors = [blend.src, blend.dst, blend.srcAlpha ?? blend.src,
+            blend.dstAlpha ?? blend.dst];
+        const colours = factors.some(f=>f === GL.CONSTANT_COLOR
+            || f === GL.ONE_MINUS_CONSTANT_COLOR);
+        const alphas = factors.some(f=>f === GL.CONSTANT_ALPHA
+            || f === GL.ONE_MINUS_CONSTANT_ALPHA);
+        if (!colours && !alphas)
+        {
+            return null;
+        }
+        if (colours && alphas)
+        {
+            diverge('a blend read both the constant colour and the constant alpha: WebGPU has'
+                + ' one constant, and the colour was used for both');
+        }
+        const [r, g, b, a] = colour;
+        return colours ? { r, g, b, a } : { r: a, g: a, b: a, a };
+    };
+
+    /**
+     * A GLSL stage's uniform block: the program's uniform values where the
+     * plan copies them, the state uniforms it reads, and the current values
+     * of attributes the draw has no array for. Kept per plan while the
+     * program's values, the matrices the state reads and the attributes'
+     * values stay what they were.
+     *
+     * @type {WeakMap<object, { id: number, version: number, refs: any[],
+     *     values: number[], block: Float32Array }>}
+     */
+    const glslBlocks = new WeakMap();
+    /**
+     * @param {import('./glsl-wgsl.js').BlockPlan} plan @param {any} executable
+     * @param {import('./pipeline.js').Scene} scene @param {Float64Array} mvp
+     * @returns {Float32Array}
+     */
+    const glslUniforms = (plan, executable, scene, mvp)=>{
+        const matricesOnly = plan.state.every(s=>MATRIX_ONLY.test(s.name));
+        const refs = plan.state.length === 0 ? [] : [scene.modelview, scene.projection, mvp];
+        /** @type {number[]} */
+        const values = [];
+        for (const attrib of plan.attribs)
+        {
+            values.push(...currentValueOf(scene, attrib));
+        }
+        if (plan.state.some(s=>s.name === 'gl_DepthRange'))
+        {
+            values.push(...scene.depthRange);
+        }
+        const cached = glslBlocks.get(plan);
+        if (cached && cached.id === executable.id && cached.version === executable.version
+            && matricesOnly && cached.refs.every((ref, k)=>ref === refs[k])
+            && sameNumbers(cached.values, values))
+        {
+            stats.glslUniformsReused++;
+            return cached.block;
+        }
+        stats.glslUniformsBuilt++;
+        const block = new Float32Array(plan.words);
+        const words = new Uint32Array(block.buffer);
+        const store = new Uint32Array(executable.store);
+        const copies = plan.copies;
+        for (let k = 0; k < copies.length; k += 3)
+        {
+            words.set(store.subarray(copies[k], copies[k] + copies[k + 2]), copies[k + 1]);
+        }
+        for (const entry of plan.state)
+        {
+            packState(entry.name, /** @type {any} */ (scene), mvp, block, entry.offset);
+        }
+        for (const attrib of plan.attribs)
+        {
+            block.set(currentValueOf(scene, attrib), attrib.offset);
+        }
+        glslBlocks.set(plan, { id: executable.id, version: executable.version, refs, values,
+            block });
+        return block;
+    };
+
+    /**
+     * An attribute's current value: a generic one's, or a conventional
+     * attribute's current colour, normal, coordinates or fog coordinate.
+     *
+     * @param {import('./pipeline.js').Scene} scene
+     * @param {{ location: number, builtin: string | null }} attrib
+     * @returns {readonly number[]}
+     */
+    const currentValueOf = (scene, attrib)=>{
+        const current = scene.current;
+        switch (attrib.builtin)
+        {
+            case 'gl_Color':
+                return current.color;
+            case 'gl_SecondaryColor':
+                return current.secondary;
+            case 'gl_Normal':
+                return [current.normal[0], current.normal[1], current.normal[2], 0];
+            case 'gl_FogCoord':
+                return [current.fogCoord, 0, 0, 1];
+            case null:
+                return scene.genericAttribs[attrib.location] ?? [0, 0, 0, 1];
+            default: {
+                const unit = Number(attrib.builtin.slice('gl_MultiTexCoord'.length));
+                return current.texCoords[unit] ?? [0, 0, 0, 1];
+            }
+        }
+    };
+
+    /**
+     * The views a framebuffer object draws into, as a target: one for each
+     * draw buffer and its depth-stencil attachment, kept while the object
+     * and the GPU copies of what it holds stay the same.
+     *
+     * @type {WeakMap<object, { version: number, records: any[], target: DrawTarget }>}
+     */
+    const fboTargets = new WeakMap();
+    /**
+     * @param {DrawableSurfaces} surfaces
+     * @param {{ fbo: any, width: number, height: number } | null} bound
+     * @param {Recording} recording
+     * @returns {DrawTarget | null}
+     */
+    const targetOf = (surfaces, bound, recording)=>{
+        if (!bound)
+        {
+            return surfaces.target;
+        }
+        const fbo = bound.fbo;
+        /** @type {any[]} */
+        const records = [];
+        const views = fbo.drawBuffers.map((/** @type {number} */ buffer)=>{
+            const attachment = buffer === GL.NONE ? undefined : fbo.attachments.get(buffer);
+            const view = attachment ? attachmentView(attachment, recording, false) : null;
+            records.push(view);
+            return view;
+        });
+        const depthAttachment = fbo.attachments.get(GL.DEPTH_ATTACHMENT)
+            ?? fbo.attachments.get(GL.STENCIL_ATTACHMENT);
+        const depth = depthAttachment ? attachmentView(depthAttachment, recording, true) : null;
+        records.push(depth);
+        const cached = fboTargets.get(fbo);
+        if (cached && cached.version === fbo.version
+            && cached.records.every((held, k)=>held === records[k]))
+        {
+            return cached.target;
+        }
+        while (views.length > 1 && views[views.length - 1] === null)
+        {
+            views.pop();
+        }
+        if (views.every((/** @type {any} */ v)=>v === null) && !depth)
+        {
+            return null;
+        }
+        /** @type {Set<object>} */
+        const attached = new Set();
+        for (const attachment of fbo.attachments.values())
+        {
+            if (attachment.kind === 'texture')
+            {
+                attached.add(attachment.texture);
+            }
+        }
+        /** @type {DrawTarget} */
+        const target = {
+            key: `fbo${fbo.name}.${fbo.version}`,
+            width: bound.width, height: bound.height, flipped: true,
+            colours: views,
+            formats: views.map((/** @type {any} */ v)=>(v ? TEXTURE_FORMAT : '')),
+            masks: fbo.drawBuffers.slice(0, views.length).map((/** @type {number} */ buffer)=>{
+                const attachment = fbo.attachments.get(buffer);
+                const image = attachment ? attachmentImage(attachment) : null;
+                const base = image ? baseFormatOfImage(attachment) : GL.RGBA;
+                return HAS_ALPHA.has(base) ? 0xf : 0x7;
+            }),
+            depth, depthFormat: depth ? DEPTH_FORMAT : '', attached,
+        };
+        fboTargets.set(fbo, { version: fbo.version, records, target });
+        return target;
+    };
+
+    /** @param {any} attachment @returns {number} */
+    const baseFormatOfImage = attachment=>{
+        if (attachment.kind === 'texture')
+        {
+            return attachment.texture.levels.get(levelKey(attachment.level, attachment.face))
+                ?.baseFormat ?? GL.RGBA;
+        }
+        const format = attachment.renderbuffer.internalFormat;
+        return format === GL.RGB || format === GL.RGB8 || format === GL.RGB565
+            || format === GL.RGB16 ? GL.RGB : GL.RGBA;
+    };
+
+    /** A renderbuffer's GPU surface, made again when its storage is. */
+    /** @type {WeakMap<object, { version: number, surface: any }>} */
+    const renderbufferSurfaces = new WeakMap();
+
+    /**
+     * The view one attachment is drawn into: a texture level's, or a
+     * renderbuffer's surface. A texture level drawn into is the device's
+     * from then on, as a level copied from the framebuffer is: when the
+     * texture is made again in another shape, it is carried over rather than
+     * uploaded blank.
+     *
+     * @param {any} attachment @param {Recording} recording @param {boolean} depth
+     * @returns {any}
+     */
+    const attachmentView = (attachment, recording, depth)=>{
+        if (attachment.kind === 'renderbuffer')
+        {
+            const rb = attachment.renderbuffer;
+            let made = renderbufferSurfaces.get(rb);
+            if (!made || made.version !== rb.version)
+            {
+                made = {
+                    version: rb.version,
+                    surface: backend.createSurface({
+                        width: Math.max(1, rb.width), height: Math.max(1, rb.height),
+                        format: depth ? DEPTH_FORMAT : TEXTURE_FORMAT,
+                        label: `gl-renderbuffer:${rb.name}`,
+                        usage: depth ? TextureUsage.RENDER_ATTACHMENT
+                            : TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
+                                | TextureUsage.COPY_SRC,
+                    }),
+                };
+                renderbufferSurfaces.set(rb, made);
+            }
+            return made.surface;
+        }
+        return levelView(attachment.texture, attachment.level, attachment.face, recording);
+    };
+
+    /**
+     * A texture level as a target and a source: a view of it alone.
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     * @param {number} level @param {number} face @param {Recording} recording
+     * @returns {any}
+     */
+    const levelView = (texture, level, face, recording)=>{
+        const textureRecord = textureFor(texture, recording);
+        const key = levelKey(level, face);
+        const image = texture.levels.get(key);
+        if (image)
+        {
+            releasedLevels.add(image);
+        }
+        let view = textureRecord.views.get(key);
+        if (!view)
+        {
+            view = {
+                texture: textureRecord.gpu.texture,
+                view: textureRecord.gpu.texture.createView({
+                    label: `gl-texture:${texture.name}:${key}`,
+                    dimension: '2d',
+                    baseMipLevel: level,
+                    mipLevelCount: 1,
+                    baseArrayLayer: face,
+                    arrayLayerCount: 1,
+                }),
+                width: image?.width ?? 1,
+                height: image?.height ?? 1,
+                format: TEXTURE_FORMAT,
+                label: `gl-texture:${texture.name}:${key}`,
+            };
+            textureRecord.views.set(key, view);
+        }
+        return view;
     };
 
     /**
@@ -2376,44 +2789,32 @@ export function createGpuRenderer(services){
      * @param {number} x @param {number} y
      * @param {number} width @param {number} height
      */
-    const copyToTexture = (context, texture, level, face, xoffset, yoffset, x, y, width, height)=>{
-        const target = drawables.get(context);
-        if (!target || width <= 0 || height <= 0)
+    const copyToTexture = (context, texture, level, face, xoffset, yoffset, x, y, width,
+        height, readFbo = null)=>
+    {
+        const surfaces = drawables.get(context);
+        if (!surfaces || width <= 0 || height <= 0 || !texture.levels.get(levelKey(level, face)))
         {
             return;
         }
         const recording = recordingOf(context);
-        const textureRecord = textureFor(texture, recording);
-        const key = levelKey(level, face);
-        let view = textureRecord.views.get(key);
-        if (!view)
+        const source = sourceOf(surfaces, readFbo, recording);
+        if (!source)
         {
-            const image = texture.levels.get(key);
-            if (!image)
-            {
-                return;
-            }
-            view = {
-                texture: textureRecord.gpu.texture,
-                view: textureRecord.gpu.texture.createView({
-                    label: `gl-texture:${texture.name}:${key}`,
-                    dimension: '2d',
-                    baseMipLevel: level,
-                    mipLevelCount: 1,
-                    baseArrayLayer: face,
-                    arrayLayerCount: 1,
-                }),
-                width: image.width,
-                height: image.height,
-                format: TEXTURE_FORMAT,
-                label: `gl-texture:${texture.name}:${key}`,
-            };
-            textureRecord.views.set(key, view);
+            return;
+        }
+        const view = levelView(texture, level, face, recording);
+        if (source.view === view)
+        {
+            diverge('a texture level was copied from the framebuffer it is attached to, and'
+                + ' nothing was copied');
+            return;
         }
         const pipeline = pipelineFor(copyKey(TEXTURE_FORMAT), generateCopy(),
             showDescriptor(TEXTURE_FORMAT), SINGLE_TEXTURE_PLAN);
         const uniforms = new Float32Array(COPY_UNIFORM_FLOATS);
-        uniforms.set([x, y, xoffset, yoffset, target.width, target.height], 0);
+        uniforms.set([x, y, xoffset, yoffset, source.width, source.height,
+            source.flipped ? -1 : 1], 0);
         recording.counts.copies++;
         if (dumpDraws)
         {
@@ -2426,8 +2827,130 @@ export function createGpuRenderer(services){
             pipeline: pipelineSlot(recording, pipeline),
             uniforms,
             target: view,
+            source: source.view,
+            sampler: showSamplerFor(),
             scissor: clampRect({ x: xoffset, y: yoffset, width, height }, view),
         });
+    };
+
+    /**
+     * What a read of the framebuffer reads: the read framebuffer's read
+     * buffer, or the window's back buffer.
+     *
+     * @param {DrawableSurfaces} surfaces @param {any} readFbo @param {Recording} recording
+     * @returns {{ view: any, width: number, height: number, flipped: boolean } | null}
+     */
+    const sourceOf = (surfaces, readFbo, recording)=>{
+        if (!readFbo)
+        {
+            return { view: surfaces.colour, width: surfaces.width, height: surfaces.height,
+                flipped: false };
+        }
+        const attachment = readFbo.attachments.get(readFbo.readBuffer);
+        const image = attachment ? attachmentImage(attachment) : null;
+        if (!attachment || !image || image.holds !== 'colour')
+        {
+            return null;
+        }
+        return { view: attachmentView(attachment, recording, false), width: image.width,
+            height: image.height, flipped: true };
+    };
+
+    /**
+     * glBlitFramebuffer's colour: the read framebuffer's rectangle drawn into
+     * each of the draw framebuffer's draw buffers' one, scaled and filtered,
+     * either one mirrored by its corners' order.
+     *
+     * @param {object} context
+     * @param {{ srcX0: number, srcY0: number, srcX1: number, srcY1: number, dstX0: number,
+     *     dstY0: number, dstX1: number, dstY1: number, linear: boolean }} request
+     * @param {import('./pipeline.js').Scene} scene  the draw target's, and the read one's
+     */
+    const blit = (context, request, scene)=>{
+        const surfaces = drawables.get(context);
+        if (!surfaces)
+        {
+            return;
+        }
+        const recording = recordingOf(context);
+        const source = sourceOf(surfaces, scene.readFramebuffer ?? null, recording);
+        const target = targetOf(surfaces, scene.target ?? null, recording);
+        if (!source || !target)
+        {
+            return;
+        }
+        const uniforms = new Float32Array(BLIT_UNIFORM_FLOATS);
+        uniforms.set([request.srcX0, request.srcY0, request.srcX1, request.srcY1,
+            request.dstX0, request.dstY0, request.dstX1, request.dstY1,
+            source.width, source.height, source.flipped ? -1 : 1, 0,
+            target.width, target.height, target.flipped ? -1 : 1, 0], 0);
+        const x0 = Math.min(request.dstX0, request.dstX1);
+        const x1 = Math.max(request.dstX0, request.dstX1);
+        const y0 = Math.min(request.dstY0, request.dstY1);
+        const y1 = Math.max(request.dstY0, request.dstY1);
+        const scissor = clampRect({ x: x0, y: target.flipped ? y0 : target.height - y1,
+            width: x1 - x0, height: y1 - y0 }, target);
+        target.colours.forEach((view, k)=>{
+            if (!view || view === source.view)
+            {
+                return;
+            }
+            const format = target.formats[k];
+            const pipeline = pipelineFor(blitKey(format), generateBlit(), showDescriptor(format),
+                SINGLE_TEXTURE_PLAN);
+            stats.blits++;
+            recording.commands.push({
+                kind: 'copy', pipeline: pipelineSlot(recording, pipeline), uniforms,
+                target: view, source: source.view, scissor,
+                sampler: request.linear ? linearSamplerFor() : showSamplerFor(),
+            });
+        });
+    };
+
+    /**
+     * glGenerateMipmap on the device: each level drawn from the one above
+     * it, filtered, once the texture's copy holds them all.
+     *
+     * @param {object} context @param {import('./objects.js').TextureObject} texture
+     */
+    const generateMipmap = (context, texture)=>{
+        if (!drawables.has(context))
+        {
+            return;
+        }
+        const recording = recordingOf(context);
+        const copy = textureFor(texture, recording);
+        const faces = copy.cube ? 6 : 1;
+        const pipeline = pipelineFor(blitKey(copy.format), generateBlit(),
+            showDescriptor(copy.format), SINGLE_TEXTURE_PLAN);
+        for (let face = 0; face < faces; face++)
+        {
+            for (let level = 1; level < copy.levels; level++)
+            {
+                const from = levelView(texture, level - 1, face, recording);
+                const to = levelView(texture, level, face, recording);
+                const uniforms = new Float32Array(BLIT_UNIFORM_FLOATS);
+                uniforms.set([0, 0, from.width, from.height, 0, 0, to.width, to.height,
+                    from.width, from.height, -1, 0, to.width, to.height, -1, 0], 0);
+                stats.mipmaps++;
+                recording.commands.push({
+                    kind: 'copy', pipeline: pipelineSlot(recording, pipeline), uniforms,
+                    target: to, source: from, sampler: linearSamplerFor(),
+                    scissor: { x: 0, y: 0, width: to.width, height: to.height },
+                });
+            }
+        }
+    };
+
+    /** The sampler a filtered blit and a mipmap level read through. */
+    let linearSampler = /** @type {any} */ (null);
+    const linearSamplerFor = ()=>{
+        if (!linearSampler)
+        {
+            linearSampler = createSampler({ label: 'gl-blit-linear', magFilter: 'linear',
+                minFilter: 'linear' });
+        }
+        return linearSampler;
     };
 
     /**
@@ -2435,7 +2958,13 @@ export function createGpuRenderer(services){
      * @param {ClearRequest} request
      */
     const clear = (context, request)=>{
-        const target = drawables.get(context);
+        const surfaces = drawables.get(context);
+        if (!surfaces)
+        {
+            return;
+        }
+        const recording = recordingOf(context);
+        const target = targetOf(surfaces, request.target ?? null, recording);
         if (!target)
         {
             return;
@@ -2445,17 +2974,20 @@ export function createGpuRenderer(services){
             ? (request.colourMask[0] ? 1 : 0) | (request.colourMask[1] ? 2 : 0)
                 | (request.colourMask[2] ? 4 : 0) | (request.colourMask[3] ? 8 : 0)
             : 0;
-        const depth = (mask & GL.DEPTH_BUFFER_BIT) !== 0 && request.depthMask;
-        const stencilMask = mask & GL.STENCIL_BUFFER_BIT ? request.stencilMask & 0xff : 0;
+        const hasDepth = target.depthFormat !== '';
+        const depth = (mask & GL.DEPTH_BUFFER_BIT) !== 0 && request.depthMask && hasDepth;
+        const stencilMask = mask & GL.STENCIL_BUFFER_BIT && hasDepth
+            ? request.stencilMask & 0xff : 0;
         if (colourMask === 0 && !depth && stencilMask === 0)
         {
             return;
         }
-        const state = { targetFormat: COLOUR_FORMAT, depthFormat: DEPTH_FORMAT, colourMask, depth,
-            stencilMask };
-        const recording = recordingOf(context);
-        const pipeline = pipelineFor(clearKey(state), generateClear(), clearDescriptor(state),
-            NO_TEXTURE_PLAN);
+        const state = { targetFormat: target.formats[0] || COLOUR_FORMAT,
+            depthFormat: target.depthFormat, colourMask, depth, stencilMask,
+            targets: target.flipped ? target.formats.map((format, k)=>({ format,
+                mask: colourMask & target.masks[k] })) : undefined };
+        const pipeline = pipelineFor(clearKey(state), generateClear(state.targets?.length ?? 1),
+            clearDescriptor(state), NO_TEXTURE_PLAN);
         const uniforms = new Float32Array(CLEAR_UNIFORM_FLOATS);
         uniforms.set(request.colour.slice(0, 4), 0);
         uniforms[4] = Math.min(1, Math.max(0, request.depth));
@@ -2487,8 +3019,11 @@ export function createGpuRenderer(services){
                 x: 0, y: 0, width: target.width, height: target.height, minDepth: 0, maxDepth: 1,
             },
             scissor: clampRect(
-                { x: box.x0, y: box.y0, width: box.x1 - box.x0, height: box.y1 - box.y0 }, target),
+                { x: box.x0, y: box.y0, width: box.x1 - box.x0, height: box.y1 - box.y0 },
+                target),
             stencilReference: request.stencil & 0xff,
+            target,
+            blendConstant: null,
         });
     };
 
@@ -2559,30 +3094,40 @@ export function createGpuRenderer(services){
         {
             /** @type {any} */
             let pass = null;
+            /** @type {DrawTarget | null} */
+            let passTarget = null;
             /** @type {any} */
             let viewport = null;
             /** @type {any} */
             let scissor = null;
             let stencilReference = -1;
-            const drawing = ()=>{
-                if (pass)
+            /** @type {any} */
+            let blendConstant = null;
+            /** @param {DrawTarget} drawn */
+            const drawing = drawn=>{
+                if (pass && passTarget === drawn)
                 {
                     return pass;
                 }
+                passTarget = drawn;
                 pass = frame.beginPass({
-                    target: target.colour,
+                    targets: drawn.colours,
                     clear: false,
-                    depthStencilAttachment: {
-                        view: target.depth.view,
-                        depthLoadOp: 'load',
-                        depthStoreOp: 'store',
-                        stencilLoadOp: 'load',
-                        stencilStoreOp: 'store',
-                    },
+                    depthTarget: drawn.depth ?? undefined,
+                    depthStencilAttachment: drawn.depth
+                        ? {
+                            view: drawn.depth.view,
+                            depthLoadOp: 'load',
+                            depthStoreOp: 'store',
+                            stencilLoadOp: 'load',
+                            stencilStoreOp: 'store',
+                        }
+                        : undefined,
                 });
                 viewport = null;
                 scissor = null;
                 stencilReference = -1;
+                blendConstant = null;
                 return pass;
             };
             for (let at = 0; at < recording.commands.length; at++)
@@ -2618,7 +3163,7 @@ export function createGpuRenderer(services){
                 const pipeline = outcome.value;
                 if (command.kind === 'copy')
                 {
-                    // Into the level, reading the back buffer: its own pass,
+                    // Into the level, reading the framebuffer: its own pass,
                     // after which the drawing pass is reopened over what it
                     // holds.
                     const into = frame.beginPass({ target: command.target, clear: false });
@@ -2626,8 +3171,8 @@ export function createGpuRenderer(services){
                     into.setPipeline(pipeline.gpu);
                     into.setBindings(0, pipeline.layout, [
                         { binding: 0, resource: into.uniforms(command.uniforms) },
-                        { binding: 1, resource: target.colour.view },
-                        { binding: 2, resource: showSamplerFor() },
+                        { binding: 1, resource: command.source.view },
+                        { binding: 2, resource: command.sampler },
                     ]);
                     into.draw(3, 1, 0);
                     pass = null;
@@ -2641,8 +3186,14 @@ export function createGpuRenderer(services){
                         before: frame.snapshot(target.colour), after: null });
                     pass = null;
                 }
-                drawing();
+                drawing(command.target);
                 pass.setPipeline(pipeline.gpu);
+                if (command.blendConstant && !sameBlendConstant(blendConstant,
+                    command.blendConstant))
+                {
+                    blendConstant = command.blendConstant;
+                    pass.setBlendConstant(blendConstant);
+                }
                 if (!sameRect(viewport, command.viewport))
                 {
                     viewport = command.viewport;
@@ -2738,6 +3289,10 @@ export function createGpuRenderer(services){
     };
 
     /** @param {any} a @param {any} b */
+    const sameBlendConstant = (a, b)=>a !== null && a.r === b.r && a.g === b.g && a.b === b.b
+        && a.a === b.a;
+
+    /** @param {any} a @param {any} b */
     const sameRect = (a, b)=>a !== null && a.x === b.x && a.y === b.y && a.width === b.width
         && a.height === b.height && a.minDepth === b.minDepth && a.maxDepth === b.maxDepth;
 
@@ -2784,13 +3339,22 @@ export function createGpuRenderer(services){
                 }),
                 width,
                 height,
+                target: /** @type {any} */ (null),
             });
+            const surfaces = /** @type {DrawableSurfaces} */ (drawables.get(context));
+            surfaces.target = {
+                key: 'window', width, height, flipped: false, colours: [surfaces.colour],
+                formats: [COLOUR_FORMAT], masks: [0xf], depth: surfaces.depth,
+                depthFormat: DEPTH_FORMAT, attached: new Set(),
+            };
         },
 
         /** @param {object} context */
         attached: context=>drawables.has(context),
 
         clear,
+        blit,
+        generateMipmap,
         drawArrays,
         /** @param {string} why @param {number} vertices */
         noteAssembled(why, vertices){

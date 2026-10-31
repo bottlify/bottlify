@@ -110,6 +110,8 @@ export function createModelRenderer(){
             assembled.byReason[why] = (assembled.byReason[why] ?? 0) + 1;
         },
         copyToTexture(){},
+        blit(){},
+        generateMipmap(){},
         releaseBuffer(){},
 
         /**

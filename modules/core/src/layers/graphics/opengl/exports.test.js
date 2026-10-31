@@ -1092,7 +1092,8 @@ test('every export\'s floats and doubles are where its prototype puts them, in i
         // the matrix calls, whose argument is a pointer.
         else if (/[fd](ARB|EXT)?$/.test(name) && !/v(ARB|EXT)?$/.test(name))
         {
-            assert.match(name, /^gl(LoadMatrix|MultMatrix)[fd]$|^gl(End|IsEnabled)$/, name);
+            assert.match(name, /^gl(Load|Mult)(Transpose)?Matrix[fd]$|^gl(End|IsEnabled)$/,
+                name);
         }
     }
     assert.ok(typed.length > 90, `${typed.length} exports declare floats`);
@@ -1104,4 +1105,10 @@ test('every export\'s floats and doubles are where its prototype puts them, in i
     assert.deepEqual(floatArguments('glBitmap'), { 2: 'f32', 3: 'f32', 4: 'f32', 5: 'f32' });
     assert.equal(floatArguments('glVertex3i'), null);
     assert.equal(floatArguments('glLoadMatrixf'), null, 'a pointer to floats is a pointer');
+    assert.deepEqual(floatArguments('glUniform3f'), { 1: 'f32', 2: 'f32', 3: 'f32' },
+        'a uniform: the location, then the values');
+    assert.equal(floatArguments('glUniform4i'), null);
+    assert.equal(floatArguments('glUniformMatrix4fv'), null);
+    assert.deepEqual(floatArguments('glBlendColor'), { 0: 'f32', 1: 'f32', 2: 'f32', 3: 'f32' });
+    assert.deepEqual(floatArguments('glSampleCoverage'), { 0: 'f32' });
 });

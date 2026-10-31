@@ -788,7 +788,10 @@ flowchart TB
   belongs to.
 - **Shaders.** Direct3D 8/9 shader bytecode is parsed and translated to WGSL
   (`graphics/d3d9/shader.js`, `wgsl.js`). For the fixed-function pipeline, WGSL is generated
-  (`webgpu/internal/fixedfunction.js`).
+  (`webgpu/internal/fixedfunction.js`). OpenGL's GLSL 1.10/1.20 is compiled on the engine thread
+  (`graphics/opengl/glsl-*.js`: preprocessor, parser, checker, linker) and written as WGSL where it
+  is drawn (`glsl-wgsl.js`), with GL's built-in state packed into the program's uniform block; ARB
+  assembly programs go through `arb-wgsl.js`.
 - **Textures** of up to eight bits a channel go to the GPU as `bgra8unorm`, those of sixteen and
   thirty-two bits a channel as half floats (`rgba16float`, `rg16float`, `r16float`), the formats
   every WebGPU device filters and blends; DXT-compressed ones are decoded on the CPU by

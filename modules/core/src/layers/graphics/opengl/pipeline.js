@@ -134,7 +134,14 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {SceneFog | null} fog
  * @property {readonly SceneUnit[]} units  the enabled, complete texture units
  * @property {PipelineVertex} current   the current attributes, for an array that is off
- * @property {{ src: number, dst: number } | null} blend   the factors, when blending is on
+ * @property {SceneBlend | null} blend   the factors and equations, when blending is on
+ * @property {readonly number[]} [blendColor]  GL_BLEND_COLOR
+ * @property {{ fbo: import('./objects.js').FramebufferObject, width: number,
+ *     height: number } | null} [target]  the framebuffer object drawn into, or the window
+ * @property {import('./objects.js').FramebufferObject | null}
+ *     [readFramebuffer]  the framebuffer object read from, or the window
+ * @property {boolean} [twoSide]  GL_VERTEX_PROGRAM_TWO_SIDE
+ * @property {() => any} [glslState]  what a GLSL program's built-in state uniforms read
  * @property {SceneStencil | null} stencil   when the stencil test is on
  * @property {SceneStencil | null} stencilBack   GL_EXT_stencil_two_side's back-face
  *           record, present exactly when `stencil` is -- and equal to it whenever
@@ -150,16 +157,29 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {number} pointSize
  * @property {{ func: number, reference: number } | null} alphaTest
  * @property {import('./raster.js').FragmentOperations} operations
- * @property {{ vertex: SceneProgram | null, fragment: SceneProgram | null }} programs
- *           the enabled, loaded programs; null per stage when that stage is fixed
+ * @property {{ vertex: SceneProgram | null, fragment: SceneProgram | null,
+ *     glsl?: import('./glsl-link.js').Executable | null }} programs
+ *           the enabled, loaded programs; null per stage when that stage is fixed,
+ *           and the GLSL program in use, which takes the place of both
  * @property {readonly (readonly number[])[]} genericAttribs  the current
  *           generic vertex attribute values, by attribute number
  * @property {readonly (ArrayLike<number> | null)[]} textureMatrices  the texture
  *           matrix of each unit, whether or not it is enabled
  * @property {readonly { twoD: import('./objects.js').TextureObject | null,
- *             cube: import('./objects.js').TextureObject | null }[]} boundTextures
+ *             cube: import('./objects.js').TextureObject | null,
+ *             oneD?: import('./objects.js').TextureObject | null }[]} boundTextures
  *           what each unit has bound per target, whether or not it is enabled,
  *           which is what a fragment program samples
+ */
+
+/**
+ * @typedef {Object} SceneBlend
+ * @property {number} src  the colour's source factor
+ * @property {number} dst
+ * @property {number} [srcAlpha]  the alpha's, when they are separate (OpenGL 1.4)
+ * @property {number} [dstAlpha]
+ * @property {number} [equation]  GL_FUNC_ADD and the others (1.4), the colour's
+ * @property {number} [equationAlpha]
  */
 
 /** Where each attribute sits in the interpolated vector. */

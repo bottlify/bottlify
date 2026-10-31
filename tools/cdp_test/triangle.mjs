@@ -18,6 +18,11 @@
  * renderer believes it submitted. A frame that was cleared and never drawn on,
  * one that was never cleared, and one that never reached the GPU are three
  * different failures, and each of those numbers separates them.
+ *
+ * `--glsl` runs the OpenGL 2.0 program instead (`tools/gl-glsl-program.mjs`):
+ * GLSL drawn into a framebuffer object's texture and the texture drawn into
+ * the window, its four pixels saying the texture arrived neither flipped nor
+ * mirrored, and its dumped answers that every call succeeded.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -29,6 +34,10 @@ import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
 import { TRIANGLE_COLOURS, TRIANGLE_REPORT } from '../make-pe.mjs';
 import { waitingParent } from '../spawn-program.mjs';
+import { GLSL_SAMPLES, OUT, glslProgram } from '../gl-glsl-program.mjs';
+import { bytesOfHex } from '../gl-program.mjs';
+
+const GLSL = process.argv.includes('--glsl');
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
@@ -42,7 +51,7 @@ const REPORTS_DIR = join(TOOL_ROOT, 'reports');
  * Two points inside the triangle and two outside it, so a frame that was
  * cleared and never drawn on fails differently from one that was never cleared.
  */
-const EXPECTED = [
+const EXPECTED = GLSL ? GLSL_SAMPLES : [
     { name: 'triangle-middle', x: 160, y: 150, colour: TRIANGLE_COLOURS.triangle },
     { name: 'triangle-upper', x: 160, y: 120, colour: TRIANGLE_COLOURS.triangle },
     { name: 'cleared-top-left', x: 10, y: 10, colour: TRIANGLE_COLOURS.clear },
@@ -88,6 +97,10 @@ async function poll(cdp, sessionId, expression, timeoutMs){
  * @param {number[] | undefined} words
  */
 function named(words){
+    if (GLSL)
+    {
+        return null;
+    }
     /** @type {Record<string, string>} */
     const report = {};
     TRIANGLE_REPORT.forEach((name, index)=>{
@@ -123,6 +136,33 @@ function checks(result){
             ok: Boolean(found) && wanted.every((value, index)=>value === found.rgba[index]),
         };
     });
+}
+
+/**
+ * What the GLSL program dumped, by name; ok when both shaders compiled, the
+ * program linked, the framebuffer was complete and no call raised an error.
+ *
+ * @param {string} text
+ */
+function glslAnswers(text){
+    const bytes = bytesOfHex(text.trim());
+    if (bytes.length < OUT.SIZE)
+    {
+        return { ok: false, error: `dumped ${bytes.length} bytes of ${OUT.SIZE}` };
+    }
+    const view = new DataView(bytes.buffer);
+    /** @type {Record<string, number>} */
+    const answers = {};
+    for (const [name, at] of Object.entries(OUT))
+    {
+        if (name !== 'SIZE')
+        {
+            answers[name] = view.getInt32(at, true);
+        }
+    }
+    return { ok: answers.vs === 1 && answers.fs === 1 && answers.link === 1
+        && answers.framebuffer === 0x8cd5 && answers.error === 0 && answers.procs === 0,
+    ...answers };
 }
 
 /**
@@ -163,11 +203,12 @@ async function runOne({ cdp, sessionId, executable }){
         180000);
 
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const shotPath = join(REPORTS_DIR, `triangle-${stamp}.png`);
+    const shotPath = join(REPORTS_DIR, `${GLSL ? 'glsl' : 'triangle'}-${stamp}.png`);
     const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
     writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
 
     const pixels = checks(result);
+    const answers = GLSL ? glslAnswers(result.text ?? '') : null;
     return {
         ran: result.ok === true,
         exitCode: result.exitCode,
@@ -175,10 +216,11 @@ async function runOne({ cdp, sessionId, executable }){
         reason: result.reason,
         trace: result.trace,
         report: named(result.report),
+        answers,
         frame: result.frame ?? null,
         colours: result.colours ?? null,
         pixels,
-        drew: pixels.every(check=>check.ok),
+        drew: pixels.every(check=>check.ok) && (answers === null || answers.ok),
         calls: result.bridge,
         sharedMemory: result.sharedMemory ?? null,
         translation: result.translation ?? null,
@@ -207,7 +249,10 @@ export async function triangle(){
         // a SharedArrayBuffer, as the product serves it.
         coi: process.argv.includes('--isolated'),
     });
-    const browser = await launchWithGpu();
+    // `--chrome-flag F` (repeatable): `--use-webgpu-adapter=swiftshader` to judge pixels on
+    // the software adapter rather than a driver's.
+    const browser = await launchWithGpu({ extraFlags: process.argv
+        .flatMap((arg, at, all)=>(arg === '--chrome-flag' && all[at + 1] ? [all[at + 1]] : [])) });
     mkdirSync(REPORTS_DIR, { recursive: true });
 
     const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/gpu/index.html`;
@@ -249,7 +294,7 @@ export async function triangle(){
         // has to be the file that ships, or the check is of this script.
         const fixture = await runOne({
             cdp, sessionId,
-            executable: new Uint8Array(await readFile(FIXTURE)),
+            executable: GLSL ? glslProgram() : new Uint8Array(await readFile(FIXTURE)),
         });
 
         return {
