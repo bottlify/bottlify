@@ -400,15 +400,19 @@ await machine.dispose();
 
 ```sh
 npm test -w @bottlify/cork                  # юнит-тесты и гейты, минута-две
-npm run fetch:corpus                        # один раз: корпус инструкций
 npm run test:integration -w @bottlify/cork  # наборы по корпусу
 node modules/cork/bench/run.mjs             # бенчмарк (bench/README.md)
 ```
 
-- **Корпус инструкций** (`npm run fetch:corpus`, версия зафиксирована в
-  [`corpus-lock.json`](../../modules/cork/corpus-lock.json)): случаи, записанные на настоящих процессорах. Каждый
-  проходит через декодер, оба интерпретатора и переведённый код, и результат обязан совпасть с
-  железом.
+- **Корпус инструкций** ([`src/x86-corpus.json.gz`](../../modules/cork/src/x86-corpus.json.gz), лежит в
+  репозитории): короткие случайные последовательности инструкций по шаблонам, написанным по Intel
+  SDM, выполненные на настоящем процессоре. Собирает его
+  [`tools/x86-corpus.mjs`](../../tools/x86-corpus.mjs); для пересборки нужны clang, lld и llvm-mc на
+  x86-64 Linux. Каждый случай проходит через декодер, оба интерпретатора и переведённый код, и
+  результат обязан совпасть с железом. Что не сравнивается и почему, написано в
+  [`src/testing/x86-corpus.js`](../../modules/cork/src/testing/x86-corpus.js); случаи, на которых
+  движок пока ошибается, перечислены с причинами в
+  [`src/testing/x86-known.js`](../../modules/cork/src/testing/x86-known.js).
 - **Корпус последовательностей**
   ([`src/testing/sequences-judge.js`](../../modules/cork/src/testing/sequences-judge.js)): сгенерированные цепочки
   инструкций выполняются на модели и в переведённом коде и сравниваются бит в бит.

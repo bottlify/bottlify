@@ -45,7 +45,7 @@ DirectSound, DirectMusic, видео через DirectShow и сеть чере�
 
 ```sh
 npm ci
-npm run fetch:video-decoder && npm run fetch:corpus   # the pinned decoder and cork's x86 corpus
+npm run fetch:video-decoder                           # закреплённая версия видеодекодера
 npm run typecheck && npm run lint && npm test && npm run check:boundaries
 npm run test:integration && npm run build
 npm run cdp:probe   # boots the engine in a real headless Chrome

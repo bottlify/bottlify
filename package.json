@@ -14,7 +14,6 @@
     "build:bridge": "npm run build -w @bottlify/bridge",
     "build:video-decoder": "npm run build:video-decoder -w @bottlify/core --",
     "build:vendor": "npm run build:video-decoder -- --docker",
-    "fetch:corpus": "npm run fetch:corpus -w @bottlify/cork",
     "fetch:winetest": "node tools/wine-tests.mjs --fetch",
     "wine-tests": "node tools/wine-tests.mjs",
     "fetch:video-decoder": "npm run fetch:video-decoder -w @bottlify/core",

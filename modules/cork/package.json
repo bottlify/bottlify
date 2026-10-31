@@ -45,7 +45,6 @@
     "test": "node --test --test-timeout=1200000 \"src/**/*.test.js\"",
     "test:integration": "node --test --test-timeout=1800000 \"src/**/*.itest.js\"",
     "typecheck": "tsc -p jsconfig.json",
-    "fetch:corpus": "node scripts/fetch-corpus.mjs",
     "prepack": "node -e \"require('node:fs').copyFileSync('../../LICENSE', 'LICENSE')\""
   },
   "publishConfig": {

@@ -29,7 +29,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createMachine } from '../src/machine.js';
 import { regionModule } from '../src/region-module.js';
-import { parseElf32 } from '../src/testing/corpus.js';
+import { parseElf32 } from '../src/elf.js';
 
 const USAGE = `usage:
   cork run <file> [--at 0x1000] [--entry addr] [--ram MiB] [--max n]
