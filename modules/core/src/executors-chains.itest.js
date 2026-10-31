@@ -73,7 +73,7 @@ function buildProgram(imports, data, parts){
  * @param {Uint8Array} executable @param {number} cores
  */
 async function run(executable, cores){
-    const app = await createApp({ executable, cpu: { cores, eager: true } });
+    const app = await createApp({ executable, cpu: { cores } });
     try
     {
         const code = await app.run({ timeoutMs: 60_000 });
@@ -143,7 +143,7 @@ test('three threads computing on two executors take turns there a turn long, not
                     ],
                 };
             });
-        const app = await createApp({ executable, cpu: { cores: 2, eager: true } });
+        const app = await createApp({ executable, cpu: { cores: 2 } });
         try
         {
             const began = performance.now();
@@ -614,7 +614,7 @@ test('a thread on another executor calling into the host is answered at the proc
                 0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
             ],
         }));
-    const app = await createApp({ executable, cpu: { cores: 2, eager: true } });
+    const app = await createApp({ executable, cpu: { cores: 2 } });
     try
     {
         assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);

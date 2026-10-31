@@ -94,7 +94,7 @@ function expected(){
 test('a routine a thread made hot on one executor is taken from the process\'s arena on another',
     { timeout: 120_000 }, async()=>{
         const app = await createApp({ executable: buildExecutable(),
-            cpu: { cores: 3, eager: true } });
+            cpu: { cores: 3 } });
         try
         {
             const code = await app.run({ timeoutMs: 60_000 });

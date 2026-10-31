@@ -178,7 +178,7 @@ function program(threads, pinned){
  */
 async function run(threads, cores){
     const app = await createApp({ executable: program(threads, cores > 1),
-        cpu: { cores, eager: true } });
+        cpu: { cores } });
     try
     {
         const code = (await app.run({ timeoutMs: 180_000 })) >>> 0;

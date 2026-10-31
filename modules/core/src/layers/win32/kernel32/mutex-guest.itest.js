@@ -110,7 +110,7 @@ function countingProgram(hostWaits){
  * @param {Uint8Array} executable @param {number} cores
  */
 async function run(executable, cores){
-    const app = await createApp({ executable, cpu: { cores, eager: true } });
+    const app = await createApp({ executable, cpu: { cores } });
     try
     {
         const code = await app.run({ timeoutMs: 120_000 });

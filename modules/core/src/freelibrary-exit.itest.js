@@ -161,7 +161,7 @@ async function run(cores){
         files: [{ path: 'C:\\App\\probe.dll', bytes: buildProbe(where) }],
         // Open from the start, so that on two the worker runs beside the main
         // thread from its first instruction.
-        cpu: { cores, eager: true },
+        cpu: { cores },
     });
     try
     {

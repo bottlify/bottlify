@@ -102,8 +102,8 @@ function buildRaceExe(crossing = false){
  * @param {number} executors @param {boolean} [crossing]
  */
 async function race(executors, crossing = false){
-    const app = await createApp({ executable: buildRaceExe(crossing), executors,
-        cpu: { eager: true } });
+    const app = await createApp({ executable: buildRaceExe(crossing),
+        cpu: { cores: executors } });
     try
     {
         const code = await app.run({ timeoutMs: 60_000 });

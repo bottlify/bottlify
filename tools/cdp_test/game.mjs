@@ -651,9 +651,9 @@ function parse(argv){
         quantum: argv.includes('--profile')
             ? number('--profile', 2000) || 2000
             : 0,
-        // Executors of the program's process (`createApp`'s `executors`): past
+        // Executors of the program's process (`createApp`'s `cpu.cores`): past
         // one, threads that are ready together run at once.
-        executors: number('--executors', mode.executors ?? 0),
+        executors: number('--executors', mode.cores ?? 0),
         // Where the process's ready threads run past one executor (`createApp`'s
         // `cpu.placement`): auto, spread or concentrate.
         placement: argv.includes('--placement') ? argv[argv.indexOf('--placement') + 1] : null,
@@ -1926,7 +1926,7 @@ export async function game(options){
                 : options.win32Config,
             screen: options.screen,
             quantum: options.quantum,
-            executors: options.executors,
+            cores: options.executors,
             placement: options.placement,
             cpu: options.cpuConfig,
             graphicsWorker: options.graphicsWorker,

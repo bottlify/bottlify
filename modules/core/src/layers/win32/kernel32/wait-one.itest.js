@@ -721,7 +721,7 @@ test('a token passed round a ring of threads on several executors through auto-r
     const COUNT = 4;
     const ROUNDS = 150;
     const executable = tokenRing(buildExe, COUNT, ROUNDS);
-    const cpu = { cores: 3, eager: true };
+    const cpu = { cores: 3 };
     const inGuest = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
         { cpu });
     const inHost = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
@@ -789,9 +789,9 @@ test('an event a thread waits on together with another is set and not taken: the
     for (const cores of [1, 2])
     {
         const inGuest = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
-            { cpu: { cores, eager: true } });
+            { cpu: { cores } });
         const inHost = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
-            { cpu: { cores, eager: true }, win32: { handleWords: false } });
+            { cpu: { cores }, win32: { handleWords: false } });
         assert.equal(inHost.code, expected, `${cores} executors: every call in the host`);
         assert.equal(inGuest.code, expected, `${cores} executors: with the guest's answers`);
     }

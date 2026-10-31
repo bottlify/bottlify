@@ -73,7 +73,7 @@ function buildProgram(worker, own){
  *     freeHost?: boolean }} [cpu]
  */
 async function run(executable, cores, cpu = {}){
-    const app = await createApp({ executable, cpu: { cores, eager: true, ...cpu } });
+    const app = await createApp({ executable, cpu: { cores, ...cpu } });
     try
     {
         const code = await app.run({ timeoutMs: 90_000 });

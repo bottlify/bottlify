@@ -46,16 +46,19 @@ import { MODES, modeOf } from '/modes.js';
 const query = new URLSearchParams(location.search);
 const id = query.get('bottle');
 // What a run is measured under, from the address: a named mode, and past it
-// `executors=3` -- the program's threads on three executors at once -- and
-// `cork={"checkReads":true}`, the translator's settings (`EngineConfig`),
-// each overriding the mode's own.
+// `cores=3` -- the program's threads on three executors at once (`cpu.cores`;
+// `executors=3` reads the same) -- and `cork={"checkReads":true}`, the
+// translator's settings (`EngineConfig`), each overriding the mode's own.
 const mode = modeOf(query.get('mode'));
-const executors = Number(query.get('executors') ?? 0) || mode.executors || undefined;
+const cores = Number(query.get('cores') ?? query.get('executors') ?? 0) || mode.cores
+    || undefined;
 const corkConfig = query.has('cork')
     ? { ...mode.cork, ...JSON.parse(query.get('cork')) } : mode.cork ?? null;
-// `drive=1`: host calls written as steps call the guest in the slice they came
-// in (`driveGuestCalls`), off by default, for an A/B of the same run.
-const drive = query.get('drive') === '1';
+// `drive=0`: host calls written as steps run through promises, a turn for each
+// guest call, rather than calling the guest in the slice they came in
+// (`driveGuestCalls`, on by default): a debugging switch, for an A/B of the
+// same run.
+const drive = query.get('drive') !== '0';
 
 /**
  * Reloads the page in mode `name`, the bottle kept and any override dropped;
@@ -68,11 +71,12 @@ window.bottlifyMode = name=>{
     {
         console.table(Object.fromEntries(Object.entries(MODES).map(([key, one])=>
             [key, { what: one.what, active: key === mode.name }])));
-        return { mode: mode.name, executors: executors ?? 1, cork: corkConfig ?? {} };
+        return { mode: mode.name, cores: cores ?? 'automatic', cork: corkConfig ?? {} };
     }
     modeOf(name);
     const next = new URLSearchParams(location.search);
     next.set('mode', name);
+    next.delete('cores');
     next.delete('executors');
     next.delete('cork');
     location.search = next.toString();
@@ -88,7 +92,7 @@ for (const name of Object.keys(MODES))
     button.onclick = ()=>window.bottlifyMode(name);
     modes.append(button);
 }
-console.log(`bottlify: mode ${mode.name}, ${executors ?? 1} executor(s), cork`
+console.log(`bottlify: mode ${mode.name}, ${cores ?? 'automatic'} core(s), cork`
     + ` ${JSON.stringify(corkConfig ?? {})}, drive ${drive ? 'on' : 'off'};`
     + ' bottlifyMode() lists the modes');
 const base = `/bundles/${encodeURIComponent(id ?? '')}`;
@@ -127,9 +131,9 @@ async function play(){
         // Saves and settings are kept in this browser, per bottle.
         storage: 'opfs',
         id,
-        ...executors ? { executors } : {},
+        ...cores ? { cpu: { cores } } : {},
         ...corkConfig ? { cork: { config: corkConfig } } : {},
-        ...drive ? { driveGuestCalls: true } : {},
+        ...drive ? {} : { driveGuestCalls: false },
         audio: { drained: true, sampleRate: audio.sampleRate,
             ...(sound ? { port: sound.port2 } : {}) },
     });

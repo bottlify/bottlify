@@ -142,7 +142,7 @@ function program(){
  * @param {Uint8Array} executable @param {number} cores
  */
 async function run(executable, cores){
-    const app = await createApp({ executable, cpu: { cores, eager: true, freeHost: false } });
+    const app = await createApp({ executable, cpu: { cores, freeHost: false } });
     try
     {
         const code = await app.run({ timeoutMs: 120_000, maxTurns: Number.MAX_SAFE_INTEGER });

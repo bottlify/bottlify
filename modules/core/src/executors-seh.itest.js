@@ -77,7 +77,7 @@ test('a second thread\'s exception reaches its own handler on one executor and o
         for (const executors of [1, 3])
         {
             const app = await createApp({ executable: buildProgram(),
-                cpu: { cores: executors, eager: true } });
+                cpu: { cores: executors } });
             try
             {
                 assert.equal(await app.run({ timeoutMs: 30_000 }), 0x11,
@@ -167,7 +167,7 @@ test('a raiser continues on its own stack while another thread runs beside it',
         for (const executors of [1, 3])
         {
             const app = await createApp({ executable: buildRaiserBesideSpinner(),
-                cpu: { cores: executors, eager: true } });
+                cpu: { cores: executors } });
             try
             {
                 assert.equal(await app.run({ timeoutMs: 30_000 }), 0x11,

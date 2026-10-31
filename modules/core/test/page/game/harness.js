@@ -1736,12 +1736,12 @@ export function createHarness(canvas, how = {}){
             // The translator's own settings for the run.
             cork: request.cork || undefined,
             quantum: request.quantum || undefined,
-            // Executors of the program's process: past one, its threads run at once.
-            executors: request.executors || undefined,
-            // Where they run, when a run names it (the kernel's `placement`), and
-            // the rest of createApp's `cpu` a run passes (`playPinned`, `freeHost`).
-            ...request.placement || request.cpu
-                ? { cpu: { ...request.placement ? { placement: request.placement } : {},
+            // The program's cores (past one, its threads run at once), where they
+            // run when a run names it (the kernel's `placement`), and the rest of
+            // createApp's `cpu` a run passes.
+            ...request.cores || request.placement || request.cpu
+                ? { cpu: { ...request.cores ? { cores: request.cores } : {},
+                    ...request.placement ? { placement: request.placement } : {},
                     ...request.cpu } }
                 : {},
             sample: request.profile || request.quantum ? recordSample : undefined,

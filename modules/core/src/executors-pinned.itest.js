@@ -113,7 +113,7 @@ function buildProgram(workerProcessor = 1){
  */
 async function run(executable, playPinned, cpu = {}){
     const app = await createApp({ executable,
-        cpu: { cores: 2, eager: true, placement: 'spread', playPinned, freeHost: false,
+        cpu: { cores: 2, placement: 'spread', playPinned, freeHost: false,
             placementTiming: { windowMs: 25, threshold: 30 }, ...cpu } });
     try
     {

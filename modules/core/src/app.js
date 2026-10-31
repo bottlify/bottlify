@@ -296,10 +296,6 @@ const hashText = (hash, text)=>{
  *           untouched buffer (64 MB every 50 ms unless named) so that JavaScriptCore
  *           collects its young garbage before it piles up; on by default where
  *           JavaScriptCore runs and nowhere else, `false` for none.
- * @property {number} [executors]  `cpu.cores` by its older name: executors of the
- *           program's process under cork, past the process's own thread each a worker
- *           running one of its threads at once with the others, the locked
- *           instructions atomic. Default 1.
  * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
@@ -1720,7 +1716,7 @@ async function openTranslationPool(options){
     return createTranslatorPool({
         open: ()=>openProcessWorker(url),
         perProcess: cork.poolPerProcess ?? translatorsBeside(processorsFor({
-            executors: options.executors,
+            executors: options.cpu?.cores,
             sharedMemory: options.cork?.config?.sharedMemory,
         }), globalThis.navigator?.hardwareConcurrency ?? 4),
     });
@@ -1742,40 +1738,36 @@ export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - c
 /**
  * The machine's processor as the caller sets it up (`cpu`): `cores`, the
  * processors the program is told it has, is the executors that run its threads
- * at once -- `executors` by its older name, which it sets. Refused before
- * anything is built when it is not a whole number from 1 to 32, or when
- * `executors` says otherwise. Cores the caller named open before the program
- * starts (`cpu.eager`, unless it says otherwise): opened as a thread first wants
- * one, each came some tens of milliseconds late, a stall in the middle of a
- * game. Automatic cores stay lazy, so a program of one thread pays for none.
+ * at once. Refused before anything is built when it is not a whole number from
+ * 1 to 32, and when the caller names `executors`, its older name: taken as
+ * nothing, it would have left the run on cores the caller did not ask for.
+ * Cores the caller named open before the program starts (`cpu.eager`, unless it
+ * says otherwise): opened as a thread first wants one, each came some tens of
+ * milliseconds late, a stall in the middle of a game. Automatic cores stay
+ * lazy, so a program of one thread pays for none.
  *
- * @template {{ cpu?: { cores?: number, eager?: boolean }, executors?: number, mode?: string,
- *     cork?: any }} T
+ * @template {{ cpu?: { cores?: number, eager?: boolean }, mode?: string, cork?: any }} T
  * @param {T} options
  * @param {CoresHost} [host]  where the run is made (`coresHost`)
- * @returns {T & { executors?: number, cpu?: { cores?: number, eager?: boolean } }}
+ * @returns {T & { cpu?: { cores?: number, eager?: boolean } }}
  */
 export function withCpuSetup(options, host = coresHost()){
-    const named = options.cpu?.cores !== undefined || options.executors !== undefined;
-    const cores = options.cpu?.cores
-        ?? (options.executors === undefined ? automaticCores(options, host) : undefined);
+    if (/** @type {any} */ (options).executors !== undefined)
+    {
+        throw new Error('cpu: `executors` is `cpu.cores` now -- set that');
+    }
+    const named = options.cpu?.cores !== undefined;
+    const cores = options.cpu?.cores ?? automaticCores(options, host);
     if (cores === undefined)
     {
-        return named ? { ...options, cpu: { ...options.cpu, eager: options.cpu?.eager ?? true } }
-            : options;
+        return options;
     }
     if (!Number.isInteger(cores) || cores < 1 || cores > MAX_EXECUTORS)
     {
         throw new Error(`cpu: ${JSON.stringify(cores)} cores -- a whole number from 1 to`
             + ` ${MAX_EXECUTORS}, as many as an affinity mask has bits`);
     }
-    if (options.executors !== undefined && options.executors !== cores)
-    {
-        throw new Error(`cpu: ${cores} cores and ${options.executors} executors -- they are one`
-            + ' number; set cores alone');
-    }
-    return { ...options, executors: cores,
-        cpu: { ...options.cpu, eager: options.cpu?.eager ?? named } };
+    return { ...options, cpu: { ...options.cpu, cores, eager: options.cpu?.eager ?? named } };
 }
 
 /**
@@ -4375,7 +4367,7 @@ async function buildApp(options){
             // Nothing runs there all the same: a call through a null pointer
             // faults, as on Windows, rather than sliding through the zeroes.
             noExecuteBelow: 0x10000,
-            executors: long ? 1 : options.executors ?? 1,
+            executors: long ? 1 : options.cpu?.cores ?? 1,
             bits: long ? 64 : 32,
             eagerExecutors: options.cpu?.eager === true,
             // The threads holding the guest's memory bring JavaScriptCore's
@@ -8894,7 +8886,7 @@ async function buildSystemHost(deps){
         // The keys a process in a worker reads are these: they name as many
         // processors as its cpu layer will say it has.
         processors: processorsFor({
-            executors: options.executors, sharedMemory: options.cork?.config?.sharedMemory }),
+            executors: options.cpu?.cores, sharedMemory: options.cork?.config?.sharedMemory }),
     });
     system.windows = createWindowDirectory();
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
