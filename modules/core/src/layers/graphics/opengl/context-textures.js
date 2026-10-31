@@ -527,6 +527,14 @@ export function installTextureCalls(context, kernel){
         {
             return data;
         }
+        // With a buffer bound for unpacking (OpenGL 2.1), the pointer is an
+        // offset into it.
+        const unpack = record(GL.PIXEL_UNPACK_BUFFER_BINDING).values[0];
+        if (unpack !== 0 && data !== null)
+        {
+            const buffer = kernel.shareGroup().buffers.objects.get(unpack);
+            return buffer ? buffer.data.subarray(data, data + length) : null;
+        }
         const memory = kernel.memory();
         return data && memory ? memory.read(data, length) : null;
     }
@@ -1170,6 +1178,8 @@ export function installTextureCalls(context, kernel){
                         unit.bindings.set(texture.target, 0);
                     }
                 }
+                // And detaches it from the framebuffers bound.
+                kernel.side.textureDeleted?.(texture);
             }
         },
 

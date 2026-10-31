@@ -48,6 +48,9 @@ import { installLightingCalls } from './context-lighting.js';
 import { installArrayCalls } from './context-arrays.js';
 import { installPixelCalls } from './context-pixels.js';
 import { installProgramCalls } from './context-programs.js';
+import { SHADER_CALLS_NOT_COMPILED, installShaderCalls } from './context-glsl.js';
+import { FRAMEBUFFER_CALLS_NOT_COMPILED, installFramebufferCalls } from './context-framebuffers.js';
+import { BLEND_FACTORS, CORE_CALLS_NOT_COMPILED, installCoreCalls } from './context-core.js';
 import { createSceneBuilder } from './context-scene.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { GL_COMMANDS } from './commands.js';
@@ -56,10 +59,11 @@ import { GL_COMMANDS } from './commands.js';
 const STRINGS = Object.freeze({
     [GL.VENDOR]: 'Bottlify Project',
     [GL.RENDERER]: VIDEO_ADAPTER_NAME,
-    // The version is what the core entry points implement; everything past it
-    // is reported as an extension, which is how a program of the era expects
-    // to find it.
-    [GL.VERSION]: '1.1',
+    // The version is what the core entry points implement, every one of
+    // them through wglGetProcAddress past 1.1; everything past it is
+    // reported as an extension.
+    [GL.VERSION]: '2.1',
+    [GL.SHADING_LANGUAGE_VERSION]: '1.20',
 });
 
 /**
@@ -104,6 +108,7 @@ const NOT_COMPILABLE = new Set([
     'glGetProgramEnvParameterfvARB', 'glGetProgramLocalParameterfvARB',
     'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
     'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
+    ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED, ...CORE_CALLS_NOT_COMPILED,
 ]);
 
 /** @type {Set<number>} */
@@ -133,13 +138,6 @@ const STACK_DEPTH_QUERIES = Object.freeze({
 /** @type {Set<number>} */
 export const COMPARE_FUNCTIONS = new Set([
     GL.NEVER, GL.LESS, GL.EQUAL, GL.LEQUAL, GL.GREATER, GL.NOTEQUAL, GL.GEQUAL, GL.ALWAYS,
-]);
-
-/** @type {Set<number>} */
-const BLEND_FACTORS = new Set([
-    GL.ZERO, GL.ONE, GL.SRC_COLOR, GL.ONE_MINUS_SRC_COLOR, GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA,
-    GL.DST_ALPHA, GL.ONE_MINUS_DST_ALPHA, GL.DST_COLOR, GL.ONE_MINUS_DST_COLOR,
-    GL.SRC_ALPHA_SATURATE,
 ]);
 
 /** @type {Set<number>} */
@@ -175,6 +173,7 @@ const STENCIL_FACE_QUERIES = new Map([
 const HINTS = new Set([
     GL.PERSPECTIVE_CORRECTION_HINT, GL.POINT_SMOOTH_HINT, GL.LINE_SMOOTH_HINT,
     GL.POLYGON_SMOOTH_HINT, GL.FOG_HINT, GL.GENERATE_MIPMAP_HINT, GL.TEXTURE_COMPRESSION_HINT,
+    GL.FRAGMENT_SHADER_DERIVATIVE_HINT,
 ]);
 
 /** @type {Set<number>} */
@@ -378,10 +377,26 @@ export function createGlContext(options = {}){
                 ? false
                 : gpu.drawArrays(context, request, scenes.scene))
             : null,
+        generateMipmap: gpu
+            ? texture=>{
+                if (attached)
+                {
+                    gpu.generateMipmap?.(context, texture);
+                }
+            }
+            : null,
+        blit: gpu
+            ? request=>{
+                if (attached)
+                {
+                    gpu.blit?.(context, request, scenes.scene());
+                }
+            }
+            : null,
         copyToTexture: gpu
             ? (texture, level, face, xoffset, yoffset, x, y, width, height)=>
                 gpu.copyToTexture(context, texture, level, face, xoffset, yoffset, x, y,
-                    width, height)
+                    width, height, kernel.side.readFramebuffer?.() ?? null)
             : null,
         bufferDeleted: gpu ? buffer=>gpu.releaseBuffer(buffer) : null,
         gpuBacked: ()=>gpu !== null && attached,
@@ -684,10 +699,16 @@ export function createGlContext(options = {}){
                 setError(GL.INVALID_VALUE);
                 return;
             }
+            if (!kernel.side.drawComplete())
+            {
+                setError(GL.INVALID_FRAMEBUFFER_OPERATION);
+                return;
+            }
             const box = scissorBox();
             if (gpu && attached)
             {
                 gpu.clear(context, {
+                    target: kernel.side.drawTarget(),
                     mask,
                     colour: record(GL.COLOR_CLEAR_VALUE).values,
                     depth: record(GL.DEPTH_CLEAR_VALUE).values[0],
@@ -740,6 +761,10 @@ export function createGlContext(options = {}){
             }
             setState(GL.BLEND_SRC, [source]);
             setState(GL.BLEND_DST, [destination]);
+            setState(GL.BLEND_SRC_RGB, [source]);
+            setState(GL.BLEND_DST_RGB, [destination]);
+            setState(GL.BLEND_SRC_ALPHA, [source]);
+            setState(GL.BLEND_DST_ALPHA, [destination]);
         },
 
         /** @param {number} func */
@@ -967,11 +992,30 @@ export function createGlContext(options = {}){
 
         /** @param {number} mode */
         glDrawBuffer(mode){
-            setBuffer('glDrawBuffer', GL.DRAW_BUFFER, mode);
+            if (kernel.side.drawTarget())
+            {
+                if (enter('glDrawBuffer', [mode]))
+                {
+                    kernel.side.setDrawBuffers([mode]);
+                }
+                return;
+            }
+            if (setBuffer('glDrawBuffer', GL.DRAW_BUFFER, mode))
+            {
+                kernel.side.setDrawBuffers([mode]);
+            }
         },
 
         /** @param {number} mode */
         glReadBuffer(mode){
+            if (kernel.side.readFramebuffer())
+            {
+                if (enter('glReadBuffer', [mode]))
+                {
+                    kernel.side.setReadBuffer(mode);
+                }
+                return;
+            }
             setBuffer('glReadBuffer', GL.READ_BUFFER, mode);
         },
 
@@ -1535,6 +1579,9 @@ export function createGlContext(options = {}){
     installArrayCalls(context, kernel);
     installPixelCalls(context, kernel);
     installProgramCalls(context, kernel);
+    installShaderCalls(context, kernel);
+    installFramebufferCalls(context, kernel);
+    installCoreCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);
     kernel.side.scene = ()=>scenes.scene();
 
@@ -1614,8 +1661,22 @@ export function createGlContext(options = {}){
      * @param {number[]} values
      */
     function setStencilFace(frontQuery, backQuery, values){
-        setState(record(GL.ACTIVE_STENCIL_FACE_EXT).values[0] === GL.BACK
-            ? backQuery : frontQuery, values);
+        if (record(GL.ACTIVE_STENCIL_FACE_EXT).values[0] === GL.BACK)
+        {
+            setState(backQuery, values);
+            // The extension's back face, which a draw reads only while
+            // two-sided testing is on.
+            kernel.side.stencilBackFromSelector = true;
+            return;
+        }
+        setState(frontQuery, values);
+        // OpenGL 2.0: the one-face calls set both faces, unless two-sided
+        // testing is on and the extension's selector speaks for each.
+        if (record(GL.STENCIL_TEST_TWO_SIDE_EXT).values[0] === 0)
+        {
+            setState(backQuery, [...values]);
+            kernel.side.stencilBackFromSelector = false;
+        }
     }
 
     /** @param {string} name @param {number} query @param {number} value */
@@ -1653,16 +1714,19 @@ export function createGlContext(options = {}){
         setState(query, [x, y, width, height]);
     }
 
-    /** @param {string} name @param {number} query @param {number} mode */
+    /**
+     * @param {string} name @param {number} query @param {number} mode
+     * @returns {boolean} whether the mode was taken
+     */
     function setBuffer(name, query, mode){
         if (!enter(name, [mode]))
         {
-            return;
+            return false;
         }
         if (!BUFFERS.has(mode))
         {
             setError(GL.INVALID_ENUM);
-            return;
+            return false;
         }
         const doubleBuffered = record(GL.DOUBLEBUFFER).values[0] !== 0;
         if ((mode === GL.BACK || mode === GL.BACK_LEFT) && !doubleBuffered
@@ -1671,9 +1735,10 @@ export function createGlContext(options = {}){
         {
             // Naming a buffer the format does not have is an operation error.
             setError(GL.INVALID_OPERATION);
-            return;
+            return false;
         }
         setState(query, [mode]);
+        return true;
     }
 
     /**
@@ -1715,6 +1780,18 @@ export function createGlContext(options = {}){
 
     /** @returns {import('./raster.js').Box} what the scissor test leaves */
     function scissorBox(){
+        const target = kernel.side.drawTarget?.();
+        if (target)
+        {
+            // A framebuffer object's rows run up from its first, as GL's
+            // window coordinates do: the box is taken as it stands.
+            if (record(GL.SCISSOR_TEST).values[0] === 0)
+            {
+                return { x0: 0, y0: 0, x1: target.width, y1: target.height };
+            }
+            const [x, y, width, height] = record(GL.SCISSOR_BOX).values;
+            return { x0: x, y0: y, x1: x + width, y1: y + height };
+        }
         if (record(GL.SCISSOR_TEST).values[0] === 0)
         {
             return wholeOf(framebuffer);
@@ -1824,6 +1901,11 @@ export function createGlContext(options = {}){
         {
             return;
         }
+        if (!kernel.side.drawComplete())
+        {
+            setError(GL.INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
         if (gpu)
         {
             if (attached)
@@ -1836,6 +1918,11 @@ export function createGlContext(options = {}){
         if (framebuffer.width === 0)
         {
             return;
+        }
+        if (kernel.side.drawTarget())
+        {
+            diverge('a draw into a framebuffer object went to the window: the processor'
+                + ' path draws only there');
         }
         if (programActive())
         {
@@ -1860,6 +1947,10 @@ export function createGlContext(options = {}){
      * belongs to the program pipeline rather than the fixed one.
      */
     function programActive(){
+        if (kernel.side.glslExecutable())
+        {
+            return true;
+        }
         const programs = kernel.side.programs;
         if (!programs)
         {

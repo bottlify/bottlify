@@ -77,12 +77,13 @@ test('a fresh context reads back the documented default of every state', ()=>{
     done();
 });
 
-test('GL_DITHER is the one capability that starts enabled', ()=>{
+test('GL_DITHER and GL_MULTISAMPLE are the capabilities that start enabled', ()=>{
     const { gl, done } = fixture();
 
     for (const entry of DEFAULT_ENABLES)
     {
-        const expected = entry.query === GL.DITHER ? GL.TRUE : GL.FALSE;
+        const expected = entry.query === GL.DITHER || entry.query === GL.MULTISAMPLE ? GL.TRUE
+            : GL.FALSE;
         assert.equal(gl.glIsEnabled(entry.query), expected, entry.name);
     }
 

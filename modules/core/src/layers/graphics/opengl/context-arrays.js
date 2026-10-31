@@ -52,6 +52,20 @@ const PRIMITIVE_MODES = new Set([
     GL.TRIANGLE_FAN, GL.QUADS, GL.QUAD_STRIP, GL.POLYGON,
 ]);
 
+/**
+ * The targets a buffer object binds to, and the query each binding answers:
+ * vertex arrays and indices, and since OpenGL 2.1 the pixels a pack reads
+ * into and an unpack reads from.
+ *
+ * @type {Map<number, number>}
+ */
+const BINDING_QUERIES = new Map([
+    [GL.ARRAY_BUFFER, GL.ARRAY_BUFFER_BINDING],
+    [GL.ELEMENT_ARRAY_BUFFER, GL.ELEMENT_ARRAY_BUFFER_BINDING],
+    [GL.PIXEL_PACK_BUFFER, GL.PIXEL_PACK_BUFFER_BINDING],
+    [GL.PIXEL_UNPACK_BUFFER, GL.PIXEL_UNPACK_BUFFER_BINDING],
+]);
+
 /** @type {Set<number>} */
 const INDEX_TYPES = new Set([GL.UNSIGNED_BYTE, GL.UNSIGNED_SHORT, GL.UNSIGNED_INT]);
 
@@ -409,10 +423,11 @@ export function installArrayCalls(context, kernel){
 
     /**
      * The enabled arrays as a renderer takes them, the vertex array first.
-     * Under a vertex program the generic attribute arrays join them: an
-     * index whose canonical name a conventional array already feeds stays
-     * out, because the conventional array is the one the aliasing table
-     * resolves, and the rest arrive under their `attribN` names.
+     * Under a vertex program or a GLSL program the generic attribute arrays
+     * join them: an index whose canonical name a conventional array already
+     * feeds stays out, because the conventional array is the one the
+     * aliasing table resolves, and the rest arrive under their `attribN`
+     * names.
      *
      * @returns {import('./gpu-layout.js').ArrayRequest[]}
      */
@@ -420,6 +435,7 @@ export function installArrayCalls(context, kernel){
         /** @type {{ name: string, normalised: boolean,
          *           pointer: import('./arrays.js').ArrayPointer }[]} */
         const generic = record(GL.VERTEX_PROGRAM_ARB).values[0] !== 0
+            || kernel.side.glslExecutable?.()
             ? kernel.side.programs?.genericArrays() ?? []
             : [];
         /** @type {import('./gpu-layout.js').ArrayRequest[]} */
@@ -624,8 +640,7 @@ export function installArrayCalls(context, kernel){
 
     /** @param {number} target @returns {import('./objects.js').BufferObject | null} */
     function boundBuffer(target){
-        const query = target === GL.ARRAY_BUFFER ? GL.ARRAY_BUFFER_BINDING
-            : target === GL.ELEMENT_ARRAY_BUFFER ? GL.ELEMENT_ARRAY_BUFFER_BINDING : null;
+        const query = BINDING_QUERIES.get(target) ?? null;
         if (query === null)
         {
             setError(GL.INVALID_ENUM);
@@ -1096,8 +1111,7 @@ export function installArrayCalls(context, kernel){
             {
                 return;
             }
-            const query = target === GL.ARRAY_BUFFER ? GL.ARRAY_BUFFER_BINDING
-                : target === GL.ELEMENT_ARRAY_BUFFER ? GL.ELEMENT_ARRAY_BUFFER_BINDING : null;
+            const query = BINDING_QUERIES.get(target) ?? null;
             if (query === null)
             {
                 setError(GL.INVALID_ENUM);
@@ -1128,7 +1142,7 @@ export function installArrayCalls(context, kernel){
                 }
                 kernel.bufferDeleted?.(object);
                 group.buffers.remove(name);
-                for (const query of [GL.ARRAY_BUFFER_BINDING, GL.ELEMENT_ARRAY_BUFFER_BINDING])
+                for (const query of BINDING_QUERIES.values())
                 {
                     if (record(query).values[0] === name)
                     {

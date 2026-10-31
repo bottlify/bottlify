@@ -142,7 +142,8 @@ export function createSceneBuilder(kernel){
      */
     const stage = (target, kind)=>{
         const programsSide = side.programs;
-        if (!programsSide || record(target).values[0] === 0)
+        // A GLSL program in use takes the place of the assembly ones.
+        if (!programsSide || record(target).values[0] === 0 || side.glslExecutable?.())
         {
             return null;
         }
@@ -255,11 +256,14 @@ export function createSceneBuilder(kernel){
         }
 
         const programsSide = side.programs;
+        const glsl = side.glslExecutable?.() ?? null;
         const programs = {
             vertex: stage(GL.VERTEX_PROGRAM_ARB, 'vertex'),
             fragment: stage(GL.FRAGMENT_PROGRAM_ARB, 'fragment'),
+            glsl,
         };
-        const programmed = programs.vertex !== null || programs.fragment !== null;
+        const programmed = programs.vertex !== null || programs.fragment !== null
+            || glsl !== null;
         // The state a program reads that the fixed path reads only per
         // enabled unit: the matrices and bindings of every unit, and the
         // current generic attribute values. A fragment program samples what
@@ -271,6 +275,7 @@ export function createSceneBuilder(kernel){
             ? side.units.map((/** @type {any} */ unused, /** @type {number} */ index)=>({
                 twoD: side.textureBoundAt(index, GL.TEXTURE_2D),
                 cube: side.textureBoundAt(index, GL.TEXTURE_CUBE_MAP),
+                oneD: side.textureBoundAt(index, GL.TEXTURE_1D),
             }))
             : [];
         const genericAttribs = programmed && programsSide
@@ -280,6 +285,10 @@ export function createSceneBuilder(kernel){
         const blendOn = on(GL.BLEND);
         const src = record(GL.BLEND_SRC).values[0];
         const dst = record(GL.BLEND_DST).values[0];
+        const srcAlpha = record(GL.BLEND_SRC_ALPHA).values[0];
+        const dstAlpha = record(GL.BLEND_DST_ALPHA).values[0];
+        const equation = record(GL.BLEND_EQUATION_RGB).values[0];
+        const equationAlpha = record(GL.BLEND_EQUATION_ALPHA).values[0];
         const depthOn = on(GL.DEPTH_TEST);
         const depthFunc = record(GL.DEPTH_FUNC).values[0];
         const stencilFront = on(GL.STENCIL_TEST)
@@ -305,13 +314,49 @@ export function createSceneBuilder(kernel){
             fog,
             units,
             current: kernel.currentAttributes(),
-            blend: blendOn ? { src, dst } : null,
+            blend: blendOn ? { src, dst, srcAlpha, dstAlpha, equation, equationAlpha } : null,
+            blendColor: record(GL.BLEND_COLOR).values,
+            // The framebuffer object drawn into, or null for the window.
+            target: side.drawTarget?.() ?? null,
+            readFramebuffer: side.readFramebuffer?.() ?? null,
+            twoSide: on(GL.VERTEX_PROGRAM_TWO_SIDE_ARB),
+            /**
+             * The state a GLSL program's built-in uniforms read, whatever is
+             * enabled: built when a program reads any of it.
+             */
+            glslState: ()=>({
+                lights: side.lights,
+                materials: side.materials,
+                lightModelAmbient: record(GL.LIGHT_MODEL_AMBIENT).values,
+                clipPlanes: side.clipPlanes,
+                fog: {
+                    colour: record(GL.FOG_COLOR).values,
+                    density: record(GL.FOG_DENSITY).values[0],
+                    start: record(GL.FOG_START).values[0],
+                    end: record(GL.FOG_END).values[0],
+                },
+                point: {
+                    size: record(GL.POINT_SIZE).values[0],
+                    min: record(GL.POINT_SIZE_MIN).values[0],
+                    max: record(GL.POINT_SIZE_MAX).values[0],
+                    fade: record(GL.POINT_FADE_THRESHOLD_SIZE).values[0],
+                    attenuation: record(GL.POINT_DISTANCE_ATTENUATION).values,
+                },
+                units: side.units.map((/** @type {any} */ unit)=>({
+                    envColour: unit.env.colour,
+                    eyePlanes: unit.eyePlanes,
+                    objectPlanes: unit.objectPlanes,
+                })),
+            }),
             stencil: stencilFront,
-            // GL_EXT_stencil_two_side's back-face record: the layer's own
-            // `GL_STENCIL_BACK_*` storage when two-sided testing is on, and
-            // the front's own record when it is off -- the specification's
-            // "front for all fragments" rule for a disabled test.
+            // The back face's record: OpenGL 2.0 keeps one always, which
+            // the one-face calls set with the front's (`setStencilFace`) and
+            // glStencil*Separate on its own; GL_EXT_stencil_two_side's
+            // selector writes it too. With two-sided testing off and the
+            // record last written through that selector, the front stands
+            // for both, as the extension has it.
             stencilBack: stencilFront && (on(GL.STENCIL_TEST_TWO_SIDE_EXT)
+                || !side.stencilBackFromSelector
                 ? {
                     func: record(GL.STENCIL_BACK_FUNC).values[0],
                     reference: record(GL.STENCIL_BACK_REF).values[0],

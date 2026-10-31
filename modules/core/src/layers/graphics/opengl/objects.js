@@ -394,6 +394,8 @@ function createNamespace(){
  *             lists: ReturnType<typeof createNamespace>,
  *             buffers: ReturnType<typeof createNamespace>,
  *             programs: ReturnType<typeof createNamespace>,
+ *             glsl: ReturnType<typeof createNamespace>,
+ *             renderbuffers: ReturnType<typeof createNamespace>,
  *             contexts: number, used: boolean }}
  */
 export function createShareGroup(){
@@ -402,6 +404,9 @@ export function createShareGroup(){
         lists: createNamespace(),
         buffers: createNamespace(),
         programs: createNamespace(),
+        // OpenGL 2.0's shaders and programs, which share one namespace.
+        glsl: createNamespace(),
+        renderbuffers: createNamespace(),
         /** How many contexts name this group. The objects outlive all but the last. */
         contexts: 0,
         /**
@@ -411,4 +416,73 @@ export function createShareGroup(){
          */
         used: false,
     };
+}
+
+/**
+ * @typedef {Object} RenderbufferObject
+ * @property {number} name
+ * @property {number} width
+ * @property {number} height
+ * @property {number} internalFormat  zero before its first storage
+ * @property {number} samples
+ * @property {number} version  raised by every glRenderbufferStorage
+ */
+
+/**
+ * @typedef {{ kind: 'texture', texture: TextureObject, level: number,
+ *     face: number } | { kind: 'renderbuffer', renderbuffer: RenderbufferObject }} Attachment
+ */
+
+/**
+ * @typedef {Object} FramebufferObject
+ * @property {number} name
+ * @property {Map<number, Attachment>} attachments  by attachment point
+ * @property {number[]} drawBuffers  per draw buffer: an attachment point or GL_NONE
+ * @property {number} readBuffer
+ * @property {number} version  raised by every change of what it draws into
+ */
+
+/** The internal formats a renderbuffer takes, and what each holds. */
+/** @type {Map<number, 'colour' | 'depth' | 'stencil' | 'depthStencil'>} */
+export const RENDERBUFFER_FORMATS = new Map([
+    [GL.RGBA, 'colour'], [GL.RGB, 'colour'], [GL.RGBA8, 'colour'], [GL.RGB8, 'colour'],
+    [GL.RGBA4, 'colour'], [GL.RGB5_A1, 'colour'], [GL.RGB565, 'colour'],
+    [GL.RGB10_A2, 'colour'], [GL.RGBA16, 'colour'], [GL.RGB16, 'colour'],
+    [GL.DEPTH_COMPONENT, 'depth'], [GL.DEPTH_COMPONENT16, 'depth'],
+    [GL.DEPTH_COMPONENT24, 'depth'], [GL.DEPTH_COMPONENT32, 'depth'],
+    [GL.STENCIL_INDEX1, 'stencil'], [GL.STENCIL_INDEX4, 'stencil'],
+    [GL.STENCIL_INDEX8, 'stencil'], [GL.STENCIL_INDEX16, 'stencil'],
+    [GL.DEPTH_STENCIL, 'depthStencil'], [GL.DEPTH24_STENCIL8, 'depthStencil'],
+]);
+
+/**
+ * What an attachment holds, by its image's format: colour, depth, stencil
+ * or both, or null when it has no image.
+ *
+ * @param {Attachment} attachment
+ * @returns {{ holds: 'colour' | 'depth' | 'stencil' | 'depthStencil', width: number,
+ *     height: number, internalFormat: number } | null}
+ */
+export function attachmentImage(attachment){
+    if (attachment.kind === 'renderbuffer')
+    {
+        const rb = attachment.renderbuffer;
+        const holds = RENDERBUFFER_FORMATS.get(rb.internalFormat);
+        return holds && rb.width > 0 && rb.height > 0
+            ? { holds, width: rb.width, height: rb.height, internalFormat: rb.internalFormat }
+            : null;
+    }
+    const level = attachment.texture.levels.get(levelKey(attachment.level, attachment.face));
+    if (!level || level.width === 0 || level.height === 0)
+    {
+        return null;
+    }
+    if (level.compressed || level.internalFormat === GL.COMPRESSED_RGB_S3TC_DXT1_EXT)
+    {
+        return null;
+    }
+    const base = level.baseFormat;
+    const holds = base === GL.DEPTH_COMPONENT ? 'depth' : 'colour';
+    return { holds, width: level.width, height: level.height,
+        internalFormat: level.internalFormat };
 }

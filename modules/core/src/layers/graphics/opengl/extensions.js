@@ -22,9 +22,12 @@
  * stack sizes are written down here in the same form as the core table, and
  * for the same reason: a wrong count is a process lost far from the call.
  *
- * Names are never aliased. `glActiveTextureARB` is what GL_ARB_multitexture
- * defines and is the name that is answered; an unsuffixed `glActiveTexture`
- * belongs to a version this implementation does not claim.
+ * A suffixed name is its extension's and an unsuffixed one its version's:
+ * `glActiveTextureARB` is answered because GL_ARB_multitexture is reported,
+ * `glActiveTexture` because the version (2.1) includes OpenGL 1.3. A
+ * version's functions past 1.1 are obtained the same way an extension's are,
+ * since OPENGL32.dll exports 1.1 alone, and are listed here under
+ * `GL_VERSIONS`, which the extension string does not name.
  */
 
 /** GL extensions: name -> the functions it defines. */
@@ -76,6 +79,30 @@ export const GL_EXTENSIONS = Object.freeze({
         'glFogCoordPointerEXT',
     ],
     GL_EXT_draw_range_elements: ['glDrawRangeElementsEXT'],
+    GL_EXT_blend_color: ['glBlendColorEXT'],
+    GL_EXT_blend_minmax: ['glBlendEquationEXT'],
+    GL_EXT_blend_subtract: [],
+    GL_EXT_blend_func_separate: ['glBlendFuncSeparateEXT'],
+    GL_ARB_texture_non_power_of_two: [],
+    GL_ARB_framebuffer_object: [
+        'glIsRenderbuffer', 'glBindRenderbuffer', 'glDeleteRenderbuffers', 'glGenRenderbuffers',
+        'glRenderbufferStorage', 'glGetRenderbufferParameteriv', 'glIsFramebuffer',
+        'glBindFramebuffer', 'glDeleteFramebuffers', 'glGenFramebuffers',
+        'glCheckFramebufferStatus', 'glFramebufferTexture1D', 'glFramebufferTexture2D',
+        'glFramebufferTexture3D', 'glFramebufferRenderbuffer',
+        'glGetFramebufferAttachmentParameteriv', 'glGenerateMipmap', 'glBlitFramebuffer',
+        'glRenderbufferStorageMultisample', 'glFramebufferTextureLayer',
+    ],
+    GL_EXT_framebuffer_object: [
+        'glIsRenderbufferEXT', 'glBindRenderbufferEXT', 'glDeleteRenderbuffersEXT',
+        'glGenRenderbuffersEXT', 'glRenderbufferStorageEXT', 'glGetRenderbufferParameterivEXT',
+        'glIsFramebufferEXT', 'glBindFramebufferEXT', 'glDeleteFramebuffersEXT',
+        'glGenFramebuffersEXT', 'glCheckFramebufferStatusEXT', 'glFramebufferTexture1DEXT',
+        'glFramebufferTexture2DEXT', 'glFramebufferTexture3DEXT', 'glFramebufferRenderbufferEXT',
+        'glGetFramebufferAttachmentParameterivEXT', 'glGenerateMipmapEXT',
+    ],
+    GL_EXT_framebuffer_blit: ['glBlitFramebufferEXT'],
+    GL_EXT_framebuffer_multisample: ['glRenderbufferStorageMultisampleEXT'],
     GL_EXT_bgra: [],
     GL_EXT_packed_pixels: [],
     GL_EXT_texture_edge_clamp: [],
@@ -137,13 +164,132 @@ export const WGL_EXTENSIONS = Object.freeze({
     WGL_EXT_swap_control: ['wglSwapIntervalEXT', 'wglGetSwapIntervalEXT'],
 });
 
+/** How many stack words a value of each GL type letter takes. */
+const TYPE_WORDS = /** @type {Record<string, number>} */ ({ b: 1, d: 2, f: 1, i: 1, s: 1,
+    ub: 1, ui: 1, us: 1 });
+
+/**
+ * A typed family's members and their sizes: `glWindowPos3f` takes three
+ * words, `glWindowPos3d` six, every `v` form one pointer, after `leading`
+ * words of its own (a unit, an index).
+ *
+ * @param {string} stem @param {readonly number[]} counts @param {readonly string[]} types
+ * @param {number} [leading]
+ * @returns {[string, number][]}
+ */
+const typed = (stem, counts, types, leading = 0)=>counts.flatMap(count=>types.flatMap(type=>[
+    /** @type {[string, number]} */ ([`${stem}${count}${type}`,
+        leading + count * TYPE_WORDS[type]]),
+    /** @type {[string, number]} */ ([`${stem}${count}${type}v`, leading + 1]),
+]));
+
+/**
+ * The functions each version from 1.2 to 2.1 adds, with how many stack words
+ * each takes. Those an extension already brought are the same functions
+ * under the version's names.
+ *
+ * @type {Readonly<Record<string, readonly [string, number][]>>}
+ */
+const VERSION_FUNCTIONS = Object.freeze({
+    GL_VERSION_1_2: [
+        ['glBlendColor', 4], ['glBlendEquation', 1], ['glDrawRangeElements', 6],
+        ['glTexImage3D', 10], ['glTexSubImage3D', 11], ['glCopyTexSubImage3D', 9],
+    ],
+    GL_VERSION_1_3: [
+        ['glActiveTexture', 1], ['glSampleCoverage', 2], ['glCompressedTexImage3D', 9],
+        ['glCompressedTexImage2D', 8], ['glCompressedTexImage1D', 7],
+        ['glCompressedTexSubImage3D', 11], ['glCompressedTexSubImage2D', 9],
+        ['glCompressedTexSubImage1D', 7], ['glGetCompressedTexImage', 3],
+        ['glClientActiveTexture', 1],
+        ...typed('glMultiTexCoord', [1, 2, 3, 4], ['d', 'f', 'i', 's'], 1),
+        ['glLoadTransposeMatrixf', 1], ['glLoadTransposeMatrixd', 1],
+        ['glMultTransposeMatrixf', 1], ['glMultTransposeMatrixd', 1],
+    ],
+    GL_VERSION_1_4: [
+        ['glBlendFuncSeparate', 4], ['glMultiDrawArrays', 4], ['glMultiDrawElements', 5],
+        ['glPointParameterf', 2], ['glPointParameterfv', 2], ['glPointParameteri', 2],
+        ['glPointParameteriv', 2], ['glFogCoordf', 1], ['glFogCoordfv', 1], ['glFogCoordd', 2],
+        ['glFogCoorddv', 1], ['glFogCoordPointer', 3],
+        ...typed('glSecondaryColor', [3], ['b', 'd', 'f', 'i', 's', 'ub', 'ui', 'us']),
+        ['glSecondaryColorPointer', 4],
+        ...typed('glWindowPos', [2, 3], ['d', 'f', 'i', 's']),
+    ],
+    GL_VERSION_1_5: [
+        ['glGenQueries', 2], ['glDeleteQueries', 2], ['glIsQuery', 1], ['glBeginQuery', 2],
+        ['glEndQuery', 1], ['glGetQueryiv', 3], ['glGetQueryObjectiv', 3],
+        ['glGetQueryObjectuiv', 3], ['glBindBuffer', 2], ['glDeleteBuffers', 2],
+        ['glGenBuffers', 2], ['glIsBuffer', 1], ['glBufferData', 4], ['glBufferSubData', 4],
+        ['glGetBufferSubData', 4], ['glMapBuffer', 2], ['glUnmapBuffer', 1],
+        ['glGetBufferParameteriv', 3], ['glGetBufferPointerv', 3],
+    ],
+    GL_VERSION_2_0: [
+        ['glBlendEquationSeparate', 2], ['glDrawBuffers', 2], ['glStencilOpSeparate', 4],
+        ['glStencilFuncSeparate', 4], ['glStencilMaskSeparate', 2], ['glAttachShader', 2],
+        ['glBindAttribLocation', 3], ['glCompileShader', 1], ['glCreateProgram', 0],
+        ['glCreateShader', 1], ['glDeleteProgram', 1], ['glDeleteShader', 1],
+        ['glDetachShader', 2], ['glDisableVertexAttribArray', 1],
+        ['glEnableVertexAttribArray', 1], ['glGetActiveAttrib', 7], ['glGetActiveUniform', 7],
+        ['glGetAttachedShaders', 4], ['glGetAttribLocation', 2], ['glGetProgramiv', 3],
+        ['glGetProgramInfoLog', 4], ['glGetShaderiv', 3], ['glGetShaderInfoLog', 4],
+        ['glGetShaderSource', 4], ['glGetUniformLocation', 2], ['glGetUniformfv', 3],
+        ['glGetUniformiv', 3], ['glGetVertexAttribdv', 3], ['glGetVertexAttribfv', 3],
+        ['glGetVertexAttribiv', 3], ['glGetVertexAttribPointerv', 3], ['glIsProgram', 1],
+        ['glIsShader', 1], ['glLinkProgram', 1], ['glShaderSource', 4], ['glUseProgram', 1],
+        ...[1, 2, 3, 4].flatMap(n=>/** @type {[string, number][]} */ ([
+            [`glUniform${n}f`, 1 + n], [`glUniform${n}i`, 1 + n], [`glUniform${n}fv`, 3],
+            [`glUniform${n}iv`, 3]])),
+        ['glUniformMatrix2fv', 4], ['glUniformMatrix3fv', 4], ['glUniformMatrix4fv', 4],
+        ['glValidateProgram', 1],
+        ...typed('glVertexAttrib', [1, 2, 3], ['d', 'f', 's'], 1),
+        ['glVertexAttrib4d', 9], ['glVertexAttrib4dv', 2], ['glVertexAttrib4f', 5],
+        ['glVertexAttrib4fv', 2], ['glVertexAttrib4s', 5], ['glVertexAttrib4sv', 2],
+        ['glVertexAttrib4bv', 2], ['glVertexAttrib4iv', 2], ['glVertexAttrib4ubv', 2],
+        ['glVertexAttrib4uiv', 2], ['glVertexAttrib4usv', 2], ['glVertexAttrib4Nbv', 2],
+        ['glVertexAttrib4Niv', 2], ['glVertexAttrib4Nsv', 2], ['glVertexAttrib4Nub', 5],
+        ['glVertexAttrib4Nubv', 2], ['glVertexAttrib4Nuiv', 2], ['glVertexAttrib4Nusv', 2],
+        ['glVertexAttribPointer', 6],
+    ],
+    GL_VERSION_2_1: [
+        ['glUniformMatrix2x3fv', 4], ['glUniformMatrix3x2fv', 4], ['glUniformMatrix2x4fv', 4],
+        ['glUniformMatrix4x2fv', 4], ['glUniformMatrix3x4fv', 4], ['glUniformMatrix4x3fv', 4],
+    ],
+});
+
+/** The functions each version past 1.1 adds: obtainable, never in the extension string. */
+export const GL_VERSIONS = Object.freeze(Object.fromEntries(Object.entries(VERSION_FUNCTIONS)
+    .map(([version, functions])=>[version, functions.map(([name])=>name)])));
+
+/**
+ * The sizes of the functions extensions that came with the versions bring:
+ * the framebuffer objects', under both spellings, and blending's.
+ *
+ * @type {readonly [string, number][]}
+ */
+const LATER_EXTENSION_WORDS = [
+    ...['', 'EXT'].flatMap(suffix=>/** @type {[string, number][]} */ ([
+        [`glIsRenderbuffer${suffix}`, 1], [`glBindRenderbuffer${suffix}`, 2],
+        [`glDeleteRenderbuffers${suffix}`, 2], [`glGenRenderbuffers${suffix}`, 2],
+        [`glRenderbufferStorage${suffix}`, 4], [`glGetRenderbufferParameteriv${suffix}`, 3],
+        [`glIsFramebuffer${suffix}`, 1], [`glBindFramebuffer${suffix}`, 2],
+        [`glDeleteFramebuffers${suffix}`, 2], [`glGenFramebuffers${suffix}`, 2],
+        [`glCheckFramebufferStatus${suffix}`, 1], [`glFramebufferTexture1D${suffix}`, 5],
+        [`glFramebufferTexture2D${suffix}`, 5], [`glFramebufferTexture3D${suffix}`, 6],
+        [`glFramebufferRenderbuffer${suffix}`, 4],
+        [`glGetFramebufferAttachmentParameteriv${suffix}`, 4],
+        [`glGenerateMipmap${suffix}`, 1], [`glBlitFramebuffer${suffix}`, 10],
+        [`glRenderbufferStorageMultisample${suffix}`, 5],
+    ])),
+    ['glFramebufferTextureLayer', 5],
+    ['glBlendColorEXT', 4], ['glBlendEquationEXT', 1], ['glBlendFuncSeparateEXT', 4],
+];
+
 /**
  * Every extension function, grouped by how many stack words it takes -- the
  * same form as the core table, for the same reason.
  *
  * @type {Readonly<Record<number, readonly string[]>>}
  */
-export const EXTENSION_WORDS = Object.freeze({
+const BASE_EXTENSION_WORDS = Object.freeze({
     0: ['glUnlockArraysEXT', 'wglGetExtensionsStringEXT', 'wglGetSwapIntervalEXT'],
     1: [
         'glActiveStencilFaceEXT',
@@ -219,6 +365,28 @@ export const EXTENSION_WORDS = Object.freeze({
     11: ['glCompressedTexSubImage3DARB'],
 });
 
+/**
+ * Every function past the 1.1 exports -- the extensions' and the versions'
+ * -- grouped by how many stack words it takes, the same form as the core
+ * table.
+ *
+ * @type {Readonly<Record<number, readonly string[]>>}
+ */
+export const EXTENSION_WORDS = (()=>{
+    /** @type {Record<number, string[]>} */
+    const words = {};
+    for (const [count, names] of Object.entries(BASE_EXTENSION_WORDS))
+    {
+        words[Number(count)] = [...names];
+    }
+    for (const [name, count] of [...Object.values(VERSION_FUNCTIONS).flat(),
+        ...LATER_EXTENSION_WORDS])
+    {
+        (words[count] ??= []).push(name);
+    }
+    return Object.freeze(words);
+})();
+
 /** Every extension function name, for telling one from a core entry point. */
 /**
  * GL extensions that are implemented, sized and obtainable but left out of
@@ -235,4 +403,5 @@ export const HIDDEN_GL_EXTENSIONS = Object.freeze(new Set([]));
 export const EXTENSION_FUNCTIONS = Object.freeze(new Set([
     ...Object.values(GL_EXTENSIONS).flat(),
     ...Object.values(WGL_EXTENSIONS).flat(),
+    ...Object.values(GL_VERSIONS).flat(),
 ]));

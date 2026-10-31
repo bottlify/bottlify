@@ -290,6 +290,8 @@ async function run(request){
         await new Promise(resolve=>setTimeout(resolve, 20));
     }
 
+    // A program that dumps its answers as text is read by whoever drives.
+    result.text = String.fromCharCode(...bytes.slice(0, 4096));
     result.report = [];
     for (let index = 0; index < request.words && index * 4 + 3 < bytes.length; index++)
     {

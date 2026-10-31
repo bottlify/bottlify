@@ -159,6 +159,12 @@ differently raises a `divergence` event naming the API.
 - OpenGL keeps a texture's data only where it draws, in the graphics worker, and lets a level's
   texels go once the device holds them (a compressed level keeps its blocks). `glGetTexImage`
   reads black, as `glReadPixels` on a device does, and says so as a divergence.
+- OpenGL goes up to 2.1 with GLSL 1.20 and framebuffer objects; no 3.x context
+  (`wglCreateContextAttribsARB`). A framebuffer whose attachments differ in size, or has separate
+  depth and stencil images or a depth texture, is `GL_FRAMEBUFFER_UNSUPPORTED`; multisampled
+  renderbuffers draw with one sample; `glBlitFramebuffer` copies colour only; occlusion queries
+  answer the viewport's area; 3D textures are accepted and kept nowhere, and a GLSL program that
+  samples one does not link.
 - Direct3D 10 has no geometry shaders: WebGPU has no geometry stage and none is emulated, so
   `CreateGeometryShader` and its stream-output variant answer `E_NOTIMPL` for a valid shader. An
   effect pass that sets one is drawn without it, and the effect says so.

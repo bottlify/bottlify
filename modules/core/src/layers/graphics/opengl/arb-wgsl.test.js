@@ -45,7 +45,8 @@ const VARYINGS = { texcoords: [0, 1, 2, 3], fogCoord: false };
 const REMAP_Z = new RegExp(String.raw`out\.position\.z = \(out\.position\.z \* uniforms\.misc\.y`
     + String.raw` \+ out\.position\.w\) \* 0\.5;`);
 /** The fixed stage's position line, which position invariance reproduces. */
-const REMAP_POSITION = new RegExp(String.raw`out\.position = vec4f\(clip\.x, clip\.y,`
+const REMAP_POSITION = new RegExp(String.raw`out\.position = vec4f\(clip\.x,`
+    + String.raw` clip\.y \* uniforms\.misc\.z,`
     + String.raw` \(clip\.z \* uniforms\.misc\.y \+ clip\.w\) \* 0\.5, clip\.w\);`);
 test('every vertex instruction emits its arithmetic in vec4f', ()=>{
     const { code } = vertex(`!!ARBvp1.0

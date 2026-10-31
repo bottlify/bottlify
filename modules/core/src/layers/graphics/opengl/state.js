@@ -35,6 +35,7 @@
 import { GL } from './constants.js';
 import { STACK_LIMITS } from './matrix.js';
 import { PROGRAM_LIMITS } from './arb-program.js';
+import { GLSL_LIMITS } from './glsl-builtins.js';
 
 /**
  * How many texture units a context has: the larger of the coordinate sets
@@ -130,6 +131,14 @@ export const DEFAULT_ENABLES = Object.freeze([
     { query: GL.RESCALE_NORMAL, name: 'GL_RESCALE_NORMAL', kind: 'bool', value: [0] },
     { query: GL.COLOR_SUM, name: 'GL_COLOR_SUM', kind: 'bool', value: [0] },
     { query: GL.AUTO_NORMAL, name: 'GL_AUTO_NORMAL', kind: 'bool', value: [0] },
+    { query: GL.MULTISAMPLE, name: 'GL_MULTISAMPLE', kind: 'bool', value: [1] },
+    {
+        query: GL.SAMPLE_ALPHA_TO_COVERAGE, name: 'GL_SAMPLE_ALPHA_TO_COVERAGE', kind: 'bool',
+        value: [0],
+    },
+    { query: GL.SAMPLE_ALPHA_TO_ONE, name: 'GL_SAMPLE_ALPHA_TO_ONE', kind: 'bool', value: [0] },
+    { query: GL.SAMPLE_COVERAGE, name: 'GL_SAMPLE_COVERAGE', kind: 'bool', value: [0] },
+    { query: GL.POINT_SPRITE, name: 'GL_POINT_SPRITE', kind: 'bool', value: [0] },
     { query: GL.VERTEX_PROGRAM_ARB, name: 'GL_VERTEX_PROGRAM_ARB', kind: 'bool', value: [0] },
     { query: GL.FRAGMENT_PROGRAM_ARB, name: 'GL_FRAGMENT_PROGRAM_ARB', kind: 'bool', value: [0] },
     {
@@ -710,6 +719,110 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.PROGRAM_ERROR_POSITION_ARB, name: 'GL_PROGRAM_ERROR_POSITION_ARB', kind: 'int',
         value: [-1],
     },
+
+    // --- OpenGL 1.2 to 2.1: blending, points, multisampling ---
+    { query: GL.BLEND_SRC_RGB, name: 'GL_BLEND_SRC_RGB', kind: 'enum', value: [GL.ONE] },
+    { query: GL.BLEND_DST_RGB, name: 'GL_BLEND_DST_RGB', kind: 'enum', value: [GL.ZERO] },
+    { query: GL.BLEND_SRC_ALPHA, name: 'GL_BLEND_SRC_ALPHA', kind: 'enum', value: [GL.ONE] },
+    { query: GL.BLEND_DST_ALPHA, name: 'GL_BLEND_DST_ALPHA', kind: 'enum', value: [GL.ZERO] },
+    {
+        query: GL.BLEND_EQUATION_RGB, name: 'GL_BLEND_EQUATION_RGB', kind: 'enum',
+        value: [GL.FUNC_ADD],
+    },
+    {
+        query: GL.BLEND_EQUATION_ALPHA, name: 'GL_BLEND_EQUATION_ALPHA', kind: 'enum',
+        value: [GL.FUNC_ADD],
+    },
+    { query: GL.POINT_SIZE_MIN, name: 'GL_POINT_SIZE_MIN', kind: 'float', value: [0] },
+    { query: GL.POINT_SIZE_MAX, name: 'GL_POINT_SIZE_MAX', kind: 'float', value: [64] },
+    {
+        query: GL.POINT_FADE_THRESHOLD_SIZE, name: 'GL_POINT_FADE_THRESHOLD_SIZE', kind: 'float',
+        value: [1],
+    },
+    {
+        query: GL.POINT_DISTANCE_ATTENUATION, name: 'GL_POINT_DISTANCE_ATTENUATION',
+        kind: 'float', value: [1, 0, 0],
+    },
+    {
+        query: GL.POINT_SPRITE_COORD_ORIGIN, name: 'GL_POINT_SPRITE_COORD_ORIGIN', kind: 'enum',
+        value: [GL.UPPER_LEFT],
+    },
+    {
+        query: GL.SAMPLE_COVERAGE_VALUE, name: 'GL_SAMPLE_COVERAGE_VALUE', kind: 'float',
+        value: [1],
+    },
+    {
+        query: GL.SAMPLE_COVERAGE_INVERT, name: 'GL_SAMPLE_COVERAGE_INVERT', kind: 'bool',
+        value: [0],
+    },
+    { query: GL.SAMPLE_BUFFERS, name: 'GL_SAMPLE_BUFFERS', kind: 'int', value: [0] },
+    { query: GL.SAMPLES, name: 'GL_SAMPLES', kind: 'int', value: [0] },
+    {
+        query: GL.FRAGMENT_SHADER_DERIVATIVE_HINT, name: 'GL_FRAGMENT_SHADER_DERIVATIVE_HINT',
+        kind: 'enum', value: [GL.DONT_CARE],
+    },
+
+    // --- OpenGL 2.0: the program in use, the draw buffers, the limits ---
+    { query: GL.CURRENT_PROGRAM, name: 'GL_CURRENT_PROGRAM', kind: 'int', value: [0] },
+    {
+        query: GL.DRAW_BUFFER0, name: 'GL_DRAW_BUFFER0', kind: 'enum', value: [0],
+        dependsOn: 'buffer',
+    },
+    { query: GL.DRAW_BUFFER1, name: 'GL_DRAW_BUFFER1', kind: 'enum', value: [GL.NONE] },
+    { query: GL.DRAW_BUFFER2, name: 'GL_DRAW_BUFFER2', kind: 'enum', value: [GL.NONE] },
+    { query: GL.DRAW_BUFFER3, name: 'GL_DRAW_BUFFER3', kind: 'enum', value: [GL.NONE] },
+    {
+        query: GL.MAX_VERTEX_UNIFORM_COMPONENTS, name: 'GL_MAX_VERTEX_UNIFORM_COMPONENTS',
+        kind: 'int', value: [GLSL_LIMITS.vertexUniformComponents],
+    },
+    {
+        query: GL.MAX_FRAGMENT_UNIFORM_COMPONENTS, name: 'GL_MAX_FRAGMENT_UNIFORM_COMPONENTS',
+        kind: 'int', value: [GLSL_LIMITS.fragmentUniformComponents],
+    },
+    {
+        query: GL.MAX_VARYING_FLOATS, name: 'GL_MAX_VARYING_FLOATS', kind: 'int',
+        value: [GLSL_LIMITS.varyingFloats],
+    },
+    {
+        query: GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS, name: 'GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS',
+        kind: 'int', value: [GLSL_LIMITS.vertexTextureImageUnits],
+    },
+    {
+        query: GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS, name: 'GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS',
+        kind: 'int', value: [GLSL_LIMITS.combinedTextureImageUnits],
+    },
+    {
+        query: GL.MAX_DRAW_BUFFERS, name: 'GL_MAX_DRAW_BUFFERS', kind: 'int',
+        value: [GLSL_LIMITS.drawBuffers],
+    },
+    { query: GL.MAX_3D_TEXTURE_SIZE, name: 'GL_MAX_3D_TEXTURE_SIZE', kind: 'int', value: [16] },
+
+    // --- OpenGL 2.1: pixel buffer objects ---
+    {
+        query: GL.PIXEL_PACK_BUFFER_BINDING, name: 'GL_PIXEL_PACK_BUFFER_BINDING', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.PIXEL_UNPACK_BUFFER_BINDING, name: 'GL_PIXEL_UNPACK_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+
+    // --- framebuffer objects ---
+    { query: GL.FRAMEBUFFER_BINDING, name: 'GL_FRAMEBUFFER_BINDING', kind: 'int', value: [0] },
+    {
+        query: GL.READ_FRAMEBUFFER_BINDING, name: 'GL_READ_FRAMEBUFFER_BINDING', kind: 'int',
+        value: [0],
+    },
+    { query: GL.RENDERBUFFER_BINDING, name: 'GL_RENDERBUFFER_BINDING', kind: 'int', value: [0] },
+    {
+        query: GL.MAX_COLOR_ATTACHMENTS, name: 'GL_MAX_COLOR_ATTACHMENTS', kind: 'int',
+        value: [GLSL_LIMITS.drawBuffers],
+    },
+    {
+        query: GL.MAX_RENDERBUFFER_SIZE, name: 'GL_MAX_RENDERBUFFER_SIZE', kind: 'int',
+        value: [2048],
+    },
+    { query: GL.MAX_SAMPLES, name: 'GL_MAX_SAMPLES', kind: 'int', value: [4] },
 ]);
 
 /**

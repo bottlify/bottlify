@@ -67,10 +67,13 @@ import { canonicalAttribName } from './arb-program.js';
  * The fixed stage's position, from GL's clip space into WebGPU's, which the
  * position-invariant option has to reproduce exactly. `uniforms.misc.y` is
  * the depth range's direction: -1 when it runs backwards, which a WebGPU
- * viewport cannot express.
+ * viewport cannot express. `uniforms.misc.z` is the target's row order: 1
+ * for the window's back buffer, whose rows run down as WebGPU's do, and -1
+ * for a framebuffer object's, drawn upside down so that its first row is
+ * GL's bottom one, which is the row a texture made from it holds first.
  */
-export const CLIP_REMAP =
-    'vec4f(clip.x, clip.y, (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)';
+export const CLIP_REMAP = 'vec4f(clip.x, clip.y * uniforms.misc.z,'
+    + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)';
 
 export { canonicalAttribName };
 

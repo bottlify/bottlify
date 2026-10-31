@@ -294,7 +294,7 @@ export function createWgl(options){
             // their own string; the GL string names only GL extensions, and
             // not the hidden ones, which stay obtainable but unannounced.
             const contextExtensions = Object.keys(extensions).filter(name=>!name.startsWith('WGL_')
-                && !HIDDEN_GL_EXTENSIONS.has(name));
+                && !name.startsWith('GL_VERSION_') && !HIDDEN_GL_EXTENSIONS.has(name));
             const context = options.createContext
                 ? options.createContext({ extensions: contextExtensions })
                 : createGlContext({
