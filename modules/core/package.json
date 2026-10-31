@@ -92,6 +92,7 @@
     "src/layers/win32/user32/cursors.js",
     "src/layers/win32/version/functions.js",
     "src/steam/auth.js",
+    "src/steam/client.js",
     "src/steam/connection.js",
     "src/steam/depot.js",
     "src/steam/index.js",
