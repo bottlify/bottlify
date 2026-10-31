@@ -305,11 +305,26 @@ export async function installBundle({ handle, depots, servers, installscript, ex
         }
     }
     let saved = Date.now();
-    const save = async()=>{
-        await handle.flush();
-        await onSave?.({ stamp, done });
-        saved = Date.now();
-    };
+    /**
+     * One save at a time: chunks land from several downloads at once, and a
+     * second save while the first still holds its file (a browser's sync
+     * access handle) is refused.
+     *
+     * @type {Promise<void> | null}
+     */
+    let saving = null;
+    const save = ()=>(saving ??= (async()=>{
+        try
+        {
+            await handle.flush();
+            await onSave?.({ stamp, done });
+            saved = Date.now();
+        }
+        finally
+        {
+            saving = null;
+        }
+    })());
     const at = new Map(placed.files.map(file=>[file.path, file.at]));
     onProgress?.({ stage: 'downloading', done: installed, total });
     try
@@ -322,7 +337,7 @@ export async function installBundle({ handle, depots, servers, installscript, ex
                 done[number >> 3] |= 1 << (number & 7);
                 installed += bytes;
                 onProgress?.({ stage: 'downloading', done: installed, total });
-                if (Date.now() - saved > 2000)
+                if (saving === null && Date.now() - saved > 2000)
                 {
                     await save();
                 }
@@ -330,6 +345,7 @@ export async function installBundle({ handle, depots, servers, installscript, ex
     }
     finally
     {
+        await saving;
         await save();
     }
 

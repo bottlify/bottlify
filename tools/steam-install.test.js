@@ -135,9 +135,23 @@ test('an install into a directory, packed, is the bundle a browser\'s install wr
             await writeBundle({ root: out, output: join(work, 'tool.btl') });
 
             const fd = openSync(join(work, 'browser.btl'), 'w+');
+            // Every chunk finds its save due, and a save takes a while: chunks
+            // landing from several downloads at once must not save over one
+            // another (a browser refuses a second handle on install.json).
+            let clock = 0;
+            t.mock.method(Date, 'now', ()=>(clock += 3000));
+            let open = 0;
+            let most = 0;
+            let saves = 0;
+            const onSave = async()=>{
+                most = Math.max(most, ++open);
+                saves++;
+                await new Promise(done=>setTimeout(done, 5));
+                open--;
+            };
             try
             {
-                const { entry, said } = await installBundle({ ...how, handle: {
+                const { entry, said } = await installBundle({ ...how, onSave, handle: {
                     read: (buffer, { at })=>readSync(fd, buffer, 0, buffer.length, at),
                     write: (buffer, { at })=>writeSync(fd, buffer, 0, buffer.length, at),
                     truncate: size=>ftruncateSync(fd, size),
@@ -152,6 +166,8 @@ test('an install into a directory, packed, is the bundle a browser\'s install wr
                     'Engine\\Prereq\\Prereq.exe: 1 package(s), 1 file(s), the app\'s own',
                     'redistributables: 1 file(s), 5 registry value(s)',
                 ], 'the shared depot\'s script and the app\'s own prerequisite, in both');
+                assert.ok(saves > 1, 'saved along the way');
+                assert.equal(most, 1, 'one save at a time');
             }
             finally
             {
