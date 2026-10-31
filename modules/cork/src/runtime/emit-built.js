@@ -202,7 +202,7 @@ function contextKey(layout, features, options, leaveOut){
         options.resume === true, options.callReturn === true, options.emptySites === true,
         options.linkedCalls !== false, options.looseStacks === true,
         options.checkReads === true, options.expansion != null, options.crossTailCalls !== false,
-        options.callDepth ?? null, options.flagsAcrossCalls !== false, [...leaveOut].sort()]);
+        options.callDepth ?? null, [...leaveOut].sort()]);
 }
 
 /** @type {Map<string, number>} */
@@ -307,7 +307,7 @@ function sameShape(kept, shape){
  *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
  *     atomic?: boolean, ordered?: boolean,
  *     callReturn?: boolean, emptySites?: boolean, linkedCalls?: boolean, crossTailCalls?: boolean,
- *     callDepth?: number, flagsAcrossCalls?: boolean, looseStacks?: boolean, checkReads?: boolean,
+ *     callDepth?: number, looseStacks?: boolean, checkReads?: boolean,
  *     memory?: { shared?: boolean, maxPages?: number },
  *     expansion?: import('../emit/region.js').ExpansionNote | null }}
  *     [options]
@@ -348,7 +348,6 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         checkReads: options.checkReads === true,
         crossTailCalls: options.crossTailCalls !== false,
         ...(options.callDepth === undefined ? {} : { callDepth: options.callDepth }),
-        flagsAcrossCalls: options.flagsAcrossCalls !== false,
         leaveOut,
         expansion: options.expansion ?? null,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),

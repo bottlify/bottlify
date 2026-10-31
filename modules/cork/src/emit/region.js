@@ -326,14 +326,6 @@ const recordFieldsOf = layout=>{
  *     at its first look (`linkedCall`); false: through the transfer
  * @property {boolean} [crossTailCalls] false: a transfer to a region of another module leaves
  *     for the host's loop rather than tail-calling into the other instance (`finishModule`)
- * @property {boolean} [flagsAcrossCalls] false, with `callReturn`: the flag record neither
- *     crosses a guest call made as a wasm call nor comes back with its `ret` -- the caller
- *     goes on with its own, as no compiler's code reads flags across a call or a return
- *     (`callAndReturn`, `returnedEpilogue`); the flags word, which holds DF, still does
- * @property {boolean} [pathStores] false, with `callReturn`: every way out of a region
- *     stores every register, record field and the flags word the region writes, and a
- *     call's return reloads all it names, rather than what a way there wrote
- *     (`planPaths`)
  * @property {number} [callDepth] with `callReturn`, how many wasm calls may wait at once: a
  *     call made deeper leaves as any call does (`callAndReturn`); `CallStack.LIMIT` at most
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
@@ -412,7 +404,7 @@ const recordFieldsOf = layout=>{
  *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, linkedCalls?: boolean,
  *     looseStacks?: boolean, atomic?: boolean, ordered?: boolean, checkReads?: boolean,
  *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean,
- *     callDepth?: number, flagsAcrossCalls?: boolean, pathStores?: boolean }}
+ *     callDepth?: number }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
  *     (`tools/cork-expansion.mjs`), in a diagnostic build only; markBlocks: each block
  *     marked for the machine code (`blockMark`), likewise; checkReads: an
@@ -445,7 +437,7 @@ export function prepareModule(m, layout, features, memory = {},
         place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
         linkedCalls = true, looseStacks = false, atomic = false, ordered = false,
         checkReads = false, expansion = null, markBlocks = false, crossTailCalls = true,
-        callDepth = CallStack.LIMIT, flagsAcrossCalls = true, pathStores = true } = {})
+        callDepth = CallStack.LIMIT } = {})
 {
     const width = widthOf(layout);
     // Long mode's emitter keeps the record between regions and the vector
@@ -542,14 +534,6 @@ export function prepareModule(m, layout, features, memory = {},
         if (!linkedCalls)
         {
             context.linkedCalls = false;
-        }
-        if (!flagsAcrossCalls)
-        {
-            context.flagsAcrossCalls = false;
-        }
-        if (!pathStores)
-        {
-            context.pathStores = false;
         }
     }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && countTransfers)
@@ -1205,8 +1189,7 @@ export class RegionEmitter {
          * reloads what is read after it (`planPaths`): the 32-bit translator's
          * calls as wasm calls under cork's layout.
          */
-        this.pathStores = context.callReturn === true && context.pathStores !== false
-            && context.flagsAcrossCalls !== false && context.hash === true
+        this.pathStores = context.callReturn === true && context.hash === true
             && this.flagRecord >= 0 && this.width.bits === 32 && this.callReturn;
         /** Every call site's record, each copy of a block its own. @type {CallSite[]} */
         this.sites = [];
@@ -1503,15 +1486,14 @@ export class RegionEmitter {
          * body names (`all`), only the ones the parameters do not carry
          * (`uncarried`), or none. `site`: a guest call's stores, which leave out
          * what the state block already holds (`fillDeferred`). `record`: the flag
-         * record's fields and the flags word too, under cork's layout (`true`), or
-         * the flags word alone (`word`, `flagsAcrossCalls` off). Under `planPaths`
+         * record's fields and the flags word too, under cork's layout. Under `planPaths`
          * also a way out's branch into the epilogue (`exit`, `depth` its branch to
          * `$out`), the blocks its stores are entered by (`open`) and those stores
          * (`kinds`); a `point`'s stores are what it decides, and `chained` ones
          * leave out what the kinds stored.
          * @type {{ at: number, kind: 'load' | 'store' | 'exit' | 'open' | 'kinds',
          *     regs: 'all' | 'uncarried' | 'none', x87: boolean, site?: CallSite,
-         *     record?: true | 'word', depth?: number, point?: StorePoint,
+         *     record?: true, depth?: number, point?: StorePoint,
          *     chained?: boolean }[]}
          */
         this.deferred = [];
@@ -1858,15 +1840,12 @@ export class RegionEmitter {
     /**
      * The registers, the flags, the vector registers and the x87 block into the
      * locals. `fromParams`: eax to ebx came in as parameters (cork's layout,
-     * on entry), so only the other registers are loaded. `afterCall`: back
-     * from a guest call's wasm call, where with `flagsAcrossCalls` off the
-     * record stays the caller's own.
+     * on entry), so only the other registers are loaded. `site`: back from
+     * that guest call's wasm call, whose return reloads what `planPaths` says.
      *
-     * `site`: that call's, whose return reloads what `planPaths` says.
-     *
-     * @param {boolean} [fromParams] @param {boolean} [afterCall] @param {CallSite} [site]
+     * @param {boolean} [fromParams] @param {CallSite} [site]
      */
-    loadState(fromParams = false, afterCall = false, site = undefined){
+    loadState(fromParams = false, site = undefined){
         const { b, layout, context } = this;
         if (this.flagRecord >= 0)
         {
@@ -1875,8 +1854,7 @@ export class RegionEmitter {
             // registers, each field and the flags word only where the body
             // reads it (`fillDeferred`).
             this.deferred.push({ at: b.length, kind: 'load', regs: 'none', x87: false,
-                record: afterCall && this.context.flagsAcrossCalls === false ? 'word' : true,
-                site });
+                record: true, site });
             this.pending = null;
         }
         else
@@ -2117,8 +2095,7 @@ export class RegionEmitter {
         // Under `planPaths`, of what the parameters do not carry, what a way
         // here wrote since the state block last held it.
         this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false,
-            record: this.context.flagsAcrossCalls === false ? 'word' : true,
-            ...this.pathStores ? { point: this.notePoint('ret') } : {} });
+            record: true, ...this.pathStores ? { point: this.notePoint('ret') } : {} });
         atState(this.context, b).localGet(Local.budget)
             .store('i32', { offset: layout.regs + CallStack.BUDGET });
         b.i32const(Exit.RETURNED).return();
@@ -2353,10 +2330,8 @@ export class RegionEmitter {
                 }
                 else
                 {
-                    // Not the record into a call that does not carry it.
-                    const into = record === true && !(site !== undefined
-                        && this.context.flagsAcrossCalls === false);
-                    this.storeRecord(b, local=>into && main.writes(local) && due(local));
+                    this.storeRecord(b, local=>record === true && main.writes(local)
+                        && due(local));
                     if (main.writes(Local.flags) && due(Local.flags))
                     {
                         atState(this.context, b).localGet(Local.flags)

@@ -15,9 +15,7 @@
  * clear the direction flag, call one another directly and through a register,
  * run each with a budget that spends inside the callees and with one that does
  * not, translated and interpreted -- the two must leave the same memory,
- * registers, flags and instruction count. With `flagsAcrossCalls` off the record
- * neither goes into a call nor comes back with its `ret`: the same, on programs
- * that read no flag a call or a return hands over, as compiled code never does.
+ * registers, flags and instruction count.
  */
 
 import { test } from 'node:test';
@@ -35,13 +33,12 @@ const le = value=>[value & 0xff, value >> 8 & 0xff, value >> 16 & 0xff, value >>
 
 /**
  * A program: functions of flag writers, flag readers and moves, a loop in main
- * calling them, the flags each call leaves read after it -- or, `clean`, every
- * flag written before it is read in a function and after each call.
+ * calling them, the flags each call leaves read after it.
  *
- * @param {number} seed @param {boolean} [clean]
+ * @param {number} seed
  * @returns {{ at: number, code: number[] }[]}
  */
-function generate(seed, clean = false){
+function generate(seed){
     let state = seed >>> 0;
     /** @param {number} n */
     const pick = n=>{
@@ -62,8 +59,6 @@ function generate(seed, clean = false){
         ()=>[0xf9], // stc
         ()=>[0xf8], // clc
     ];
-    // Those that write every flag a reader here reads, from no flag before them.
-    const whole = writers.slice(0, 4);
     const readers = [
         ()=>[0x11, 0xd8], // adc eax, ebx
         ()=>[0x19, 0xc7], // sbb edi, eax
@@ -95,10 +90,10 @@ function generate(seed, clean = false){
         const kinds = [[quiet], [quiet, writers], [readers, quiet],
             [quiet, writers, readers]][shape];
         /** @type {number[]} */
-        const code = clean && shape >= 2 ? one(whole) : [];
+        const code = [];
         /** @type {{ at: number, to: number }[]} */
         const calls = [];
-        if (shape === 2 && pick(2) && !clean)
+        if (shape === 2 && pick(2))
         {
             // pushfd; pop eax; and eax, ~AF: what the caller left
             code.push(0x9c, 0x58, 0x83, 0xe0, 0xef, ...store());
@@ -118,10 +113,6 @@ function generate(seed, clean = false){
             {
                 code.push(0xe8, 0, 0, 0, 0);
                 calls.push({ at: code.length - 4, to: pick(fns.length) });
-                if (clean)
-                {
-                    code.push(...one(whole));
-                }
             }
         }
         code.push(0xc3);
@@ -151,10 +142,6 @@ function generate(seed, clean = false){
         {
             main.push(0xe8, 0, 0, 0, 0);
             calls.push({ at: main.length - 4, to });
-        }
-        if (clean)
-        {
-            main.push(...one(whole));
         }
         main.push(...one(readers), ...store());
         if (pick(2))
@@ -210,24 +197,23 @@ async function runProgram(pieces, config){
     }
 }
 
-for (const [first, budget, clean] of /** @type {[number, number, boolean][]} */ ([
-    [1, 10_000_000, false], [501, 37, false], [1001, 10_000_000, true], [1501, 37, true]]))
+for (const [first, budget] of /** @type {[number, number][]} */ ([
+    [1, 10_000_000], [501, 37], [1001, 10_000_000], [1501, 37]]))
 {
     test(`flags across calls, transfers and exits leave what the interpreter leaves (seeds ${
-        first}.., budget ${budget}${clean ? ', flagsAcrossCalls off' : ''})`, async()=>{
+        first}.., budget ${budget})`, async()=>{
         let translated = 0;
         let returned = 0;
         for (let seed = first; seed < first + 120; seed++)
         {
-            const pieces = generate(seed * 7919, clean);
+            const pieces = generate(seed * 7919);
             const interpreted = await runProgram(pieces, { translate: false });
             assert.equal(interpreted.stop.reason, 'halt', `seed ${seed} halts`);
             // Callees formed in and called apart, and every call apart with its
             // profile counts, which say how many `ret`s came back to a wasm call.
             for (const config of [{}, { formDepth: 0 }, { formDepth: 0, blockProfile: true }])
             {
-                const ran = await runProgram(pieces, { yieldChunk: budget, ...config,
-                    ...clean ? { flagsAcrossCalls: false } : {} });
+                const ran = await runProgram(pieces, { yieldChunk: budget, ...config });
                 assert.deepEqual({ ...ran, translated: 0, returned: 0 },
                     { ...interpreted, returned: 0 }, `seed ${seed}, ${JSON.stringify(config)}`);
                 translated += ran.translated > 0 ? 1 : 0;

@@ -382,7 +382,7 @@ function callAndReturn(e, next, target, mechanism){
     e.close();
     atState(context, b).load('i32', { offset: layout.regs + CallStack.BUDGET })
         .localSet(Local.budget);
-    e.loadState(false, true, call);
+    e.loadState(false, call);
     if (call?.after !== undefined)
     {
         // What follows the return, the way the call does nothing too, reads
