@@ -10,6 +10,7 @@ import { TAKEN } from './named-objects.js';
 import { askChild, childThread, threadEnd } from './cross-process.js';
 import { MODIFY_STATE, SYNCHRONIZE, allows, grantedAccess } from './access.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
+import { overlappedLayout } from '../common/overlapped.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
     releaseMutexCode, waitOneCode } from './wait-one.js';
 import { COMPILED as SEMAPHORE_CODE } from './semaphore-guest.x86.js';
@@ -78,9 +79,6 @@ const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_IO_INCOMPLETE = 996;
 
 /** OVERLAPPED: the operation's status, its byte count, and the event it signals. */
-const OVERLAPPED_INTERNAL = 0;
-const OVERLAPPED_INTERNAL_HIGH = 4;
-const OVERLAPPED_EVENT = 16;
 
 /**
  * How long SwitchToThread stands aside when only threads of lower priority are
@@ -104,6 +102,8 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
 
 /**
  * @typedef {Object} ThreadingHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
+ *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {any} kernel                       The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -245,6 +245,7 @@ const readU32 = (bytes, at)=>
  * @param {ThreadingHost} host
  */
 export function createThreadingFunctions(host){
+    const overlappedFields = overlappedLayout(host.pointerSize);
     /**
      * @param {number} handle
      * @returns {{ flags: number, processes: SnapshotProcess[], threads: SnapshotThread[],
@@ -1087,10 +1088,11 @@ export function createThreadingFunctions(host){
                 };
                 const count = ()=>{
                     const bytes = new Uint8Array(4);
-                    new DataView(bytes.buffer).setUint32(0, field(OVERLAPPED_INTERNAL_HIGH), true);
+                    new DataView(bytes.buffer).setUint32(0, field(overlappedFields.internalHigh),
+                        true);
                     host.writeMemory(transferred >>> 0, bytes);
                 };
-                let status = field(OVERLAPPED_INTERNAL);
+                let status = field(overlappedFields.internal);
                 if (status === STATUS.PENDING)
                 {
                     if (wait === 0)
@@ -1098,7 +1100,7 @@ export function createThreadingFunctions(host){
                         host.setLastError(ERROR_IO_INCOMPLETE);
                         return 0;
                     }
-                    const eventHandle = (field(OVERLAPPED_EVENT) & ~1) >>> 0;
+                    const eventHandle = (field(overlappedFields.event) & ~1) >>> 0;
                     const target = object(eventHandle !== 0 ? eventHandle : file >>> 0);
                     if (!target)
                     {
@@ -1116,7 +1118,7 @@ export function createThreadingFunctions(host){
                         count();
                         return host.park();
                     }
-                    status = field(OVERLAPPED_INTERNAL);
+                    status = field(overlappedFields.internal);
                     if (status === STATUS.PENDING)
                     {
                         count();

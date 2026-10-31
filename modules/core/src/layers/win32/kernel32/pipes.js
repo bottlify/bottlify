@@ -30,6 +30,7 @@
  */
 
 import { STATUS, toDosError } from '../ntdll/status.js';
+import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -89,9 +90,6 @@ const STATUS_PIPE_LISTENING = STATUS.PIPE_LISTENING;
 const STATUS_PIPE_CLOSING = STATUS.PIPE_CLOSING;
 
 /** OVERLAPPED's two status fields and its event. */
-const OVERLAPPED_INTERNAL = 0;
-const OVERLAPPED_INTERNAL_HIGH = 4;
-const OVERLAPPED_EVENT = 16;
 
 /** Where a pipe's names begin, in the namespace's own spelling. */
 const PREFIXES = ['\\\\.\\pipe\\', '\\\\?\\pipe\\'];
@@ -113,6 +111,8 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  * What a process gives the pipes to finish its operations with.
  *
  * @typedef {Object} PipeHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
+ *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {any} kernel  block, wake, onTimeout, clock
  * @property {{ open: (type: string, object: any) => number,
  *     resolve: (handle: number, type?: string) => any,
@@ -215,6 +215,7 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
 
 /** @param {PipeHost} host */
 export function createNamedPipes(host){
+    const layout = overlappedLayout(host.pointerSize);
     const { kernel } = host;
     /** @type {Map<string, any>} */
     const table = host.table ?? new Map();
@@ -341,9 +342,10 @@ export function createNamedPipes(host){
             }
             else
             {
-                owner.writeMemory(op.overlapped + OVERLAPPED_INTERNAL, dwordBytes(status));
-                owner.writeMemory(op.overlapped + OVERLAPPED_INTERNAL_HIGH, dwordBytes(count));
-                const event = readFrom(owner, op.overlapped + OVERLAPPED_EVENT);
+                const theirs = overlappedLayout(owner.pointerSize);
+                overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)), theirs,
+                    op.overlapped, status, count);
+                const event = readFrom(owner, op.overlapped + theirs.event);
                 if (event !== 0)
                 {
                     owner.setEvent?.(event);
@@ -735,8 +737,7 @@ export function createNamedPipes(host){
         }
         if (overlapped !== 0)
         {
-            writeDword(overlapped + OVERLAPPED_INTERNAL, STATUS.PENDING);
-            writeDword(overlapped + OVERLAPPED_INTERNAL_HIGH, 0);
+            overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
             return native ? STATUS.PENDING : fail(ERROR_IO_PENDING);
         }
         kernel.block(op.thread, 'pipe read');
@@ -982,8 +983,7 @@ export function createNamedPipes(host){
                 }
                 if ((overlapped >>> 0) !== 0)
                 {
-                    writeDword(overlapped, STATUS.PENDING);
-                    writeDword((overlapped >>> 0) + OVERLAPPED_INTERNAL_HIGH, 0);
+                    overlappedResult(writeDword, layout, overlapped >>> 0, STATUS.PENDING, 0);
                     return fail(ERROR_IO_PENDING);
                 }
                 kernel.block(op.thread, `pipe ${instance.pipe.name}`);

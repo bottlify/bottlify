@@ -30,6 +30,7 @@
  */
 
 import { toDosError } from '../ntdll/status.js';
+import { overlappedLayout, overlappedPosition, overlappedResult } from '../common/overlapped.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -51,10 +52,6 @@ const INVALID_HANDLE_VALUE = 0xffffffff;
  * its byte count, which is where GetOverlappedResult reads them from; hEvent is
  * signalled as well as the port, because a caller may be waiting on either.
  */
-const OVERLAPPED_INTERNAL = 0;
-const OVERLAPPED_INTERNAL_HIGH = 4;
-const OVERLAPPED_OFFSET = 8;
-const OVERLAPPED_EVENT = 16;
 
 /**
  * How long a thread may wait on a port before the wait is reported as a
@@ -89,6 +86,8 @@ const HANG_AFTER_MS = 10_000;
 
 /**
  * @typedef {Object} CompletionPortHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
+ *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {any} kernel                        The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -109,6 +108,7 @@ const HANG_AFTER_MS = 10_000;
  * @param {CompletionPortHost} host
  */
 export function createIoCompletionPorts(host){
+    const layout = overlappedLayout(host.pointerSize);
     const { kernel } = host;
     const hostTime = host.hostTime ?? (()=>Date.now());
 
@@ -401,7 +401,7 @@ export function createIoCompletionPorts(host){
          *
          * @param {number} overlapped
          */
-        offsetOf: overlapped=>readDword((overlapped >>> 0) + OVERLAPPED_OFFSET),
+        offsetOf: overlapped=>overlappedPosition(readDword, layout, overlapped >>> 0),
 
         /**
          * Finishes an overlapped operation: the OVERLAPPED's own status fields,
@@ -420,9 +420,8 @@ export function createIoCompletionPorts(host){
             const pointer = overlapped >>> 0;
             if (pointer !== 0)
             {
-                writeDword(pointer + OVERLAPPED_INTERNAL, status >>> 0);
-                writeDword(pointer + OVERLAPPED_INTERNAL_HIGH, transferred >>> 0);
-                const event = readDword(pointer + OVERLAPPED_EVENT);
+                overlappedResult(writeDword, layout, pointer, status, transferred);
+                const event = readDword(pointer + layout.event);
                 if (event !== 0 && !skip.event)
                 {
                     host.signalEvent(event);

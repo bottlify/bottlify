@@ -34,6 +34,7 @@ import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
 import { createResourceUpdates } from './resource-update.js';
 import { readToTerminator } from '../common/scan-windows.js';
+import { overlappedLayout, overlappedPosition, overlappedResult } from '../common/overlapped.js';
 import { mountPointsOf, onVolume } from './drives.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
@@ -83,10 +84,6 @@ const ERROR_HANDLE_EOF = 38;
 const ERROR_FILENAME_EXCED_RANGE = 206;
 
 /** Where an OVERLAPPED keeps its status, its count and its starting offset. */
-const OVERLAPPED_INTERNAL = 0;
-const OVERLAPPED_INTERNAL_HIGH = 4;
-const OVERLAPPED_OFFSET = 8;
-const OVERLAPPED_EVENT = 16;
 
 /** ReadDirectoryChangesW's statuses, and the error a completion routine is told. */
 const STATUS_PENDING = 0x103;
@@ -423,6 +420,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
 
 /**
  * @typedef {Object} FileHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
+ *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {{ read: (handle: number, buffer: number, length: number, out: number,
  *     native?: boolean, overlapped?: number) => any,
@@ -646,6 +645,7 @@ export function withSystemLibraries(real, libraries, where = {}){
  * @param {FileHost} host
  */
 export function createFileFunctions(host){
+    const layout = overlappedLayout(host.pointerSize);
     const files = withSystemLibraries(host.files, host.systemLibraries);
 
     // A machine has these directories before any program runs: GetTempPath
@@ -713,8 +713,7 @@ export function createFileFunctions(host){
      * @param {number} transferred
      */
     const completeWith = (thread, overlapped, routine, transferred)=>{
-        writeDword(overlapped + OVERLAPPED_INTERNAL, ERROR_SUCCESS);
-        writeDword(overlapped + OVERLAPPED_INTERNAL_HIGH, transferred >>> 0);
+        overlappedResult(writeDword, layout, overlapped, ERROR_SUCCESS, transferred);
         if ((routine >>> 0) !== 0)
         {
             host.queueApc?.(thread, routine >>> 0,
@@ -2792,15 +2791,13 @@ export function createFileFunctions(host){
                 }
                 if ((routine >>> 0) !== 0)
                 {
-                    writeDword(pointer + OVERLAPPED_INTERNAL, status);
-                    writeDword(pointer + OVERLAPPED_INTERNAL_HIGH, count);
+                    overlappedResult(writeDword, layout, pointer, status, count);
                     host.queueApc?.(thread, routine >>> 0,
                         [status === 0 ? ERROR_SUCCESS : ERROR_NOTIFY_ENUM_DIR, count, pointer]);
                     return 1;
                 }
                 host.ports?.completed(handle >>> 0, count, pointer);
-                writeDword(pointer + OVERLAPPED_INTERNAL, status);
-                writeDword(pointer + OVERLAPPED_INTERNAL_HIGH, count);
+                overlappedResult(writeDword, layout, pointer, status, count);
                 return 1;
             };
             if (watched.records.length > 0 || watched.overflowed)
@@ -2813,10 +2810,10 @@ export function createFileFunctions(host){
                     watched.waiting.push(records=>resolve(give(records)));
                 });
             }
-            writeDword(pointer + OVERLAPPED_INTERNAL, STATUS_PENDING);
+            overlappedResult(writeDword, layout, pointer, STATUS_PENDING);
             if ((routine >>> 0) === 0)
             {
-                const event = (readDword(pointer + OVERLAPPED_EVENT) & ~1) >>> 0;
+                const event = (readDword(pointer + layout.event) & ~1) >>> 0;
                 if (event !== 0)
                 {
                     host.resetEvent?.(event);
@@ -3728,7 +3725,7 @@ export function createFileFunctions(host){
                     }
                     return completeWith(thread, pointer, routine, bytes.length);
                 };
-                const bytes = files.read(file.node, readDword(pointer + OVERLAPPED_OFFSET),
+                const bytes = files.read(file.node, overlappedPosition(readDword, layout, pointer),
                     length >>> 0);
                 if (typeof (/** @type {any} */ (bytes))?.then !== 'function')
                 {
@@ -3770,8 +3767,8 @@ export function createFileFunctions(host){
                 const bytes = count === 0
                     ? new Uint8Array(0)
                     : host.readMemory(buffer >>> 0, count).slice();
-                const stored = files.write(file.node, readDword(pointer + OVERLAPPED_OFFSET),
-                    bytes);
+                const stored = files.write(file.node,
+                    overlappedPosition(readDword, layout, pointer), bytes);
                 return completeWith(host.currentThread?.() ?? null, pointer, routine, stored);
             },
         },
@@ -4465,7 +4462,7 @@ export function createFileFunctions(host){
                 }
                 const at = overlapped >>> 0;
                 const answer = lockRange(handle >>> 0,
-                    qword(readDword(at + OVERLAPPED_OFFSET), readDword(at + OVERLAPPED_OFFSET + 4)),
+                    qword(readDword(at + layout.offset), readDword(at + layout.offsetHigh)),
                     qword(lengthLow, lengthHigh), ((flags >>> 0) & LOCKFILE_EXCLUSIVE_LOCK) !== 0);
                 return answer === ERROR_SUCCESS ? 1 : fail(answer);
             },
@@ -4489,7 +4486,7 @@ export function createFileFunctions(host){
                 }
                 const at = overlapped >>> 0;
                 const answer = unlockRange(handle >>> 0,
-                    qword(readDword(at + OVERLAPPED_OFFSET), readDword(at + OVERLAPPED_OFFSET + 4)),
+                    qword(readDword(at + layout.offset), readDword(at + layout.offsetHigh)),
                     qword(lengthLow, lengthHigh));
                 return answer === ERROR_SUCCESS ? 1 : fail(answer);
             },

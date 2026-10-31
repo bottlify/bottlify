@@ -985,6 +985,7 @@ export function createWin32Module(){
             // port a program waits on, and the file calls that owe it a packet when
             // an overlapped read or write finishes.
             const ports = createIoCompletionPorts({
+                pointerSize,
                 kernel,
                 readMemory,
                 writeMemory,
@@ -1012,6 +1013,7 @@ export function createWin32Module(){
             // Named pipes, in the run's namespace: their own calls, and ReadFile,
             // WriteFile, CreateFile, CloseHandle and CancelIo hand theirs on.
             const pipes = createNamedPipes({
+                pointerSize,
                 kernel,
                 handles,
                 readMemory,
@@ -2108,6 +2110,7 @@ export function createWin32Module(){
                             ?.handler([0, text, 0, 0x1000]) ?? 0,
                     }),
                     ...createThreadingFunctions({
+                        pointerSize,
                         kernel,
                         pipes,
                         // A thread made in a child, and one waited on there.
@@ -2651,6 +2654,7 @@ export function createWin32Module(){
                     // entry points for a file as for a console or an event, and the
                     // one that knows about files answers for all of them.
                     ...createFileFunctions({
+                        pointerSize,
                         divergence: config?.divergence,
                         openRefused: record=>{
                             refusedOpens.push(record);
