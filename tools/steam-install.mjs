@@ -45,12 +45,11 @@ import { directoryTree } from './redist.mjs';
 import {
     contentServers, depotKey, manifestRequestCode, readDepotAccess,
 } from '../modules/core/src/steam/depot.js';
+import { depotManifest, downloadFiles, installedFiles } from '../modules/core/src/steam/install.js';
+import { installSteamRedistributables } from '../modules/core/src/steam/redist.js';
 import {
-    depotManifest, downloadFiles, installedFiles, windowsLaunch,
-} from '../modules/core/src/steam/install.js';
-import {
-    depotOwners, installSteamRedistributables, sharedDepots, wantedDepot,
-} from '../modules/core/src/steam/redist.js';
+    depotOwners, sharedDepots, wantedDepot, windowsLaunch,
+} from '../modules/core/src/steam/apps.js';
 
 /** @typedef {import('../modules/core/src/steam/install.js').DepotOpening} DepotOpening */
 /** @typedef {import('../modules/core/src/steam/depot.js').ContentServer} ContentServer */

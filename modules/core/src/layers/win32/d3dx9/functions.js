@@ -89,6 +89,43 @@ const NOT_BUILT = {
 };
 
 
+/** D3D_SDK_VERSION of the DirectX 9 headers every d3dx9 version was built against. */
+const D3D_SDK_VERSION = 32;
+
+/**
+ * What differs between the d3dx9 versions' tables: the version a library
+ * answers to. A program built against one SDK asks the library it imports
+ * whether it is that SDK's (D3DXCheckVersion) and gives up when not; d3dx9_N's
+ * D3DX_SDK_VERSION is N.
+ *
+ * @param {number} version  24 to 43.
+ */
+export function d3dxVersionFunctions(version){
+    let muted = 0;
+    return {
+        /** BOOL D3DXCheckVersion(UINT D3DSdkVersion, UINT D3DXSdkVersion) */
+        D3DXCheckVersion: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([d3d, d3dx])=>((d3d >>> 0) === D3D_SDK_VERSION && (d3dx >>> 0) === version
+                ? 1 : 0),
+        },
+        /**
+         * BOOL D3DXDebugMute(BOOL Mute): the setting before this call. A retail
+         * library prints no debug output either way.
+         */
+        D3DXDebugMute: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([mute])=>{
+                const before = muted;
+                muted = mute === 0 ? 0 : 1;
+                return before;
+            },
+        },
+    };
+}
+
 /**
  * Each module of guest code and what the build made of it: every function
  * compiled is exported under its own name.

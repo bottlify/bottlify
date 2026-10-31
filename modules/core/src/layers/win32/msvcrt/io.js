@@ -1292,6 +1292,20 @@ export function createIoFunctions(host, descriptors){
             data: ()=>descriptors.ioinfoBytes(),
             pointers: [{ at: 0, to: '__pioinfo', offset: IOINFO.BLOCKS * 4 }],
         },
+        /**
+         * ioinfo __badioinfo
+         *
+         * Data: the entry the runtime's own macros read for a descriptor out
+         * of range -- no handle, text mode, not open.
+         */
+        __badioinfo: {
+            data: ()=>{
+                const bytes = new Uint8Array(IOINFO.SIZE);
+                new DataView(bytes.buffer).setInt32(IOINFO.HANDLE, -1, true);
+                bytes[IOINFO.WXFLAG] = WX_TEXT;
+                return bytes;
+            },
+        },
     };
 
     return {

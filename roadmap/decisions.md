@@ -658,9 +658,13 @@ directory by `tools/redist.mjs`, over the bottle a page writes by an install in 
 what the programs would at install time instead: it unpacks each one with the engine's cabinet and installer-database
 readers and applies the packages inside by their tables -- the files of each component whose
 condition holds into the bottle's system folders, its registry rows into the bottle's registry
--- rather than running a Burn bootstrapper and Windows Installer in the guest. A program with
-no package inside (DirectX's setup) is left to the engine, which answers DSETUP and D3DX itself.
-Beyond what Steam declares, every other program the app carries is read the same way, and a
+-- rather than running a Burn bootstrapper and Windows Installer in the guest. DirectX's setup
+has no package inside: its cabinets' Windows NT INFs are applied instead, each component's
+libraries copied where the INF puts them for the bottle's machine, since the engine answers
+DSETUP and D3DX 9 but not X3DAudio, XAPOFX, XAudio2, XACT, D3DCompiler or D3DX 10 and 11, which a
+program imports and otherwise finds missing. A library the engine also answers stays the
+engine's while its table covers what a program imports from it, and the COM servers are copied
+but not registered. Beyond what Steam declares, every other program the app carries is read the same way, and a
 package whose files all go into the Windows folder is applied too: an engine's prerequisite
 installer (Unreal's `UE4PrereqSetup_x64.exe`), whose newer runtime the program's launcher checks
 for and on Windows offers to install on the person's say-so; without it the bottle asks a

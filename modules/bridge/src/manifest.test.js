@@ -6,8 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { HOSTS, manifestFor } from './manifest.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { HOSTS, PLATFORMS, manifestFor } from './manifest.js';
+import { STEAM_ART } from '../../core/src/steam/apps.js';
 
 test('the public build reaches Bottlify\'s own sites and the platforms, nothing local', ()=>{
     const manifest = manifestFor('public', '1.2.3');
@@ -56,4 +57,48 @@ test('the dev bridge answers on a local launcher and Bottlify\'s sites alone', (
         assert.ok(!hosts.test(host), host);
     }
     assert.equal(HOSTS.public, null, 'the public build is matched on its sites alone');
+});
+
+/**
+ * Whether a host permission reaches a domain: Chrome applies a rule's header
+ * changes only where the extension may reach the request's URL.
+ *
+ * @param {string[]} permissions @param {string} domain
+ */
+const reaches = (permissions, domain)=>permissions.some(pattern=>{
+    const host = /^[a-z*]+:\/\/([^/]+)\//.exec(pattern)?.[1] ?? '';
+    return host === domain || (host.startsWith('*.')
+        && (domain === host.slice(2) || domain.endsWith(host.slice(1))));
+});
+
+test('every host a platform\'s rules change is a host permission of both builds', ()=>{
+    for (const [id, platform] of Object.entries(PLATFORMS))
+    {
+        const rules = JSON.parse(
+            readFileSync(new URL(`../${platform.rules}`, import.meta.url), 'utf8'));
+        for (const build of /** @type {const} */ (['public', 'dev']))
+        {
+            const manifest = manifestFor(build, '1.0.0');
+            for (const domain of rules.flatMap((/** @type {any} */ rule)=>rule.condition.requestDomains))
+            {
+                assert.ok(reaches(manifest.host_permissions, domain), `${build} ${id}: ${domain}`);
+            }
+        }
+    }
+});
+
+test('the art a library shows is opened to the page as an image, under Steam\'s art hosts', ()=>{
+    const rules = JSON.parse(readFileSync(new URL('../rules/steam.json', import.meta.url), 'utf8'));
+    const art = rules.find((/** @type {any} */ rule)=>rule.condition.resourceTypes.includes('image'));
+    assert.ok(art, 'a rule for images');
+    assert.deepEqual(art.action.responseHeaders.map((/** @type {any} */ one)=>one.header).sort(),
+        ['Access-Control-Allow-Origin', 'Cross-Origin-Resource-Policy']);
+    assert.ok(art.condition.requestDomains.includes(new URL(STEAM_ART).hostname));
+    for (const host of ['cdn.akamai.steamstatic.com', 'shared.cloudflare.steamstatic.com'])
+    {
+        assert.ok(art.condition.requestDomains.includes(host), `${host}: older bottles' art`);
+    }
+    const publicBuild = manifestFor('public', '1.0.0');
+    assert.deepEqual(publicBuild.content_scripts[0].matches,
+        ['https://bottlify.app/*', 'https://play.bottlify.app/*'], 'pages stay Bottlify\'s own');
 });

@@ -23,6 +23,7 @@ import {
     parseInstallScript, registryValue, sharedDepots, unpackRedistributable, wantedDepot,
     writeRegistry,
 } from './redist.mjs';
+import * as redist from '../modules/core/src/steam/redist.js';
 
 const HKLM = 0x80000002;
 const HKCU = 0x80000001;
@@ -221,3 +222,119 @@ test('an app\'s install scripts and the runtimes it carries are installed into i
             await rm(app, { recursive: true, force: true });
         }
     });
+
+/** A PE image of a machine, as much of one as says which. @param {number} machine */
+function peImage(machine){
+    const bytes = new Uint8Array(0x100);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0x3c, 0x80, true);
+    view.setUint16(0x84, machine, true);
+    return bytes;
+}
+
+/**
+ * DirectX's cabinets as the June 2010 runtime lays them out: a 32-bit one whose
+ * Windows NT INF installs into system32 or, on a 64-bit machine, SysWOW64,
+ * beside its 9x INF; a 64-bit one with its own section and a COM server.
+ */
+function directxCabinets(){
+    const x86 = cabinet({
+        'X3DAudio1_7.dll': peImage(0x14c),
+        'X3DAudio1_7_x86.inf': latin1([
+            '[Version]', 'Signature = "$Windows NT$"', '',
+            '[DestinationDirs]', 'DefaultDestDir = 11', 'DirectX_SysWOW64 = 10,SysWOW64', '',
+            '[x86_Install]', 'CopyFiles = DirectX_System', '[x64_Install]',
+            'CopyFiles = DirectX_SysWOW64', '[DirectX_System]', 'X3DAudio1_7.dll',
+            '[DirectX_SysWOW64]', 'X3DAudio1_7.dll ; the same file'].join('\r\n')),
+        'X3DAudio1_7_w9x.inf': latin1(['[Version]', 'Signature = "$CHICAGO$"',
+            '[DestinationDirs]', 'DefaultDestDir = 11', '[DefaultInstall]',
+            'CopyFiles = Files', '[Files]', 'X3DAudio1_7.dll'].join('\n')),
+    });
+    const x64 = cabinet({
+        'XAudio2_7.dll': peImage(0x8664),
+        'XAudio2_7_x64.inf': latin1(['[Version]', 'Signature = "$Windows NT$"',
+            '[DestinationDirs]', 'DirectX_System = 11', '[DefaultInstall]',
+            'CopyFiles = DirectX_System', '[DirectX_System]', 'XAudio2_7.dll',
+            '[DllRegisterServer]', '%11%\\XAudio2_7.dll'].join('\n')),
+    });
+    return [x86, x64];
+}
+
+test('an INF is its sections, comments and blank lines dropped', ()=>{
+    const inf = redist.parseInf(
+        '; head\r\n[Version]\r\nSignature = "$Windows NT$" ; why\r\n\r\n[A]\r\nb\r\n');
+    assert.deepEqual([...inf], [['version', ['Signature = "$Windows NT$"']], ['a', ['b']]]);
+});
+
+test('DirectX\'s cabinets are installed by their Windows NT INFs for the machine', ()=>{
+    const narrow = redist.directxFiles(directxCabinets(), 'x86');
+    assert.deepEqual(narrow.files.map(file=>file.path),
+        ['C:\\WINDOWS\\system32\\X3DAudio1_7.dll'],
+        'a 32-bit machine takes the 32-bit section, and no 64-bit image');
+    assert.deepEqual(narrow.unregistered, []);
+    const wide = redist.directxFiles(directxCabinets(), 'amd64');
+    assert.deepEqual(wide.files.map(file=>file.path).sort(), [
+        'C:\\WINDOWS\\SysWOW64\\X3DAudio1_7.dll', 'C:\\WINDOWS\\system32\\XAudio2_7.dll']);
+    assert.deepEqual(wide.unregistered, ['XAudio2_7.dll'], 'a COM server named, not registered');
+    assert.deepEqual(redist.directxFiles([latin1('not a cabinet')], 'x86').files, []);
+});
+
+/** Steam's DirectX script, as the redistributables' depot carries it. */
+const DIRECTX_SCRIPT = String.raw`"installscript"
+{ "Run Process" { "dxsetup" {
+  "process 1" "%INSTALLDIR%\\_CommonRedist\\DirectX\\Jun2010\\DXSETUP.exe"
+  "command 1" "/silent" } } }`;
+
+test('Steam\'s DirectX step installs what its setup\'s cabinets hold, in a directory', async()=>{
+    const app = await mkdtemp(join(tmpdir(), 'redist-'));
+    try
+    {
+        const dx = join(app, '_CommonRedist', 'DirectX', 'Jun2010');
+        await mkdir(dx, { recursive: true });
+        await writeFile(join(dx, 'DXSETUP.exe'), peImage(0x14c));
+        const [x86, x64] = directxCabinets();
+        await writeFile(join(dx, 'Feb2010_X3DAudio_x86.cab'), x86);
+        await writeFile(join(dx, 'Jun2010_XAudio_x64.cab'), x64);
+        await writeFile(join(dx, 'installscript.vdf'), DIRECTX_SCRIPT);
+        const said = await installRedistributables(app,
+            ['_CommonRedist\\DirectX\\Jun2010\\installscript.vdf'], 'x86');
+        assert.deepEqual(said, [
+            '_CommonRedist\\DirectX\\Jun2010\\DXSETUP.exe: 1 file(s) by its cabinets\' INFs',
+            'redistributables: 1 file(s), 0 registry value(s)',
+        ]);
+        assert.ok(existsSync(join(app, '.bottlify', 'drive_c', 'WINDOWS', 'system32',
+            'X3DAudio1_7.dll')));
+    }
+    finally
+    {
+        await rm(app, { recursive: true, force: true });
+    }
+});
+
+test('the DirectX step runs over a bottle a browser writes in place: the tree alone', async()=>{
+    const [x86, x64] = directxCabinets();
+    /** @type {Map<string, Uint8Array>} */
+    const files = new Map([
+        ['_CommonRedist\\DirectX\\Jun2010\\DXSETUP.exe', peImage(0x14c)],
+        ['_CommonRedist\\DirectX\\Jun2010\\Feb2010_X3DAudio_x86.cab', x86],
+        ['_CommonRedist\\DirectX\\Jun2010\\Jun2010_XAudio_x64.cab', x64],
+        ['_CommonRedist\\DirectX\\Jun2010\\installscript.vdf', latin1(DIRECTX_SCRIPT)],
+        // A cabinet elsewhere is not the setup's.
+        ['Other\\Feb2010_X3DAudio_x86.cab', x86],
+    ]);
+    const tree = {
+        list: async()=>[...files.keys()],
+        read: async(/** @type {string} */ path)=>/** @type {Uint8Array} */ (files.get(path)),
+        write: async(/** @type {string} */ path, /** @type {Uint8Array} */ bytes)=>{
+            files.set(path, bytes);
+        },
+    };
+    const said = await redist.installRedistributables(tree,
+        ['_CommonRedist\\DirectX\\Jun2010\\installscript.vdf'], 'amd64');
+    assert.equal(said[0], '_CommonRedist\\DirectX\\Jun2010\\DXSETUP.exe: 2 file(s) by its '
+        + 'cabinets\' INFs, not registered: XAudio2_7.dll');
+    assert.deepEqual([...files.keys()].filter(path=>path.startsWith('.bottlify')).sort(), [
+        '.bottlify\\drive_c\\WINDOWS\\SysWOW64\\X3DAudio1_7.dll',
+        '.bottlify\\drive_c\\WINDOWS\\system32\\XAudio2_7.dll',
+    ]);
+});

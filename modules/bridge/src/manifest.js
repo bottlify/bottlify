@@ -47,22 +47,23 @@ export const PLATFORMS = Object.freeze({
             '*://*.steamcontent.com/*', '*://*.steampipe.akamaized.net/*',
             // Valve's client distribution: the client's own DLLs, which a DRM
             // wrapper reads as the installed client's (core's steam/client.js).
-            'https://client-update.akamai.steamstatic.com/*']),
+            'https://client-update.akamai.steamstatic.com/*',
+            // The apps' art a library shows (core's steam/apps.js, STEAM_ART),
+            // under the hosts Steam has served it from.
+            'https://shared.steamstatic.com/*', 'https://shared.akamai.steamstatic.com/*',
+            'https://shared.cloudflare.steamstatic.com/*', 'https://cdn.akamai.steamstatic.com/*',
+            'https://cdn.cloudflare.steamstatic.com/*']),
     }),
 });
 
-/**
- * The extension's own modules the content script imports, which the page may
- * therefore load too; core's, which the build copies, are named by the build.
- */
-export const MODULES = Object.freeze(['bridge.js', 'protocol.js']);
+/** What the content script imports, which the page may therefore load too. */
+export const MODULES = Object.freeze(['bridge.js', 'protocol.js', 'platforms/*', 'steam/*', 'zstd.js']);
 
 /**
  * @param {keyof typeof PAGES} build
  * @param {string} version
- * @param {readonly string[]} [core]  core's modules the build copied, by path in the build
  */
-export function manifestFor(build, version, core = []){
+export function manifestFor(build, version){
     const pages = [...PAGES[build]];
     return {
         manifest_version: 3,
@@ -74,7 +75,7 @@ export function manifestFor(build, version, core = []){
             ...Object.values(PLATFORMS).flatMap(platform=>platform.hosts)],
         background: { service_worker: 'worker.js', type: 'module' },
         content_scripts: [{ matches: pages, js: ['content.js'], run_at: 'document_start' }],
-        web_accessible_resources: [{ resources: [...MODULES, ...core], matches: pages }],
+        web_accessible_resources: [{ resources: [...MODULES], matches: pages }],
         declarative_net_request: {
             rule_resources: Object.entries(PLATFORMS).map(([id, platform])=>(
                 { id, enabled: true, path: platform.rules })),

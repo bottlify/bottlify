@@ -110,6 +110,7 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { createFaultrepFunctions } from './faultrep/functions.js';
 import { createHidFunctions } from './hid/functions.js';
 import { ODBC32_ORDINALS, createOdbcFunctions } from './odbc32/functions.js';
 import { createOleaccFunctions } from './oleacc/functions.js';
@@ -141,7 +142,7 @@ import { COMPUTER_NAME } from './kernel32/drives.js';
 import { USER_NAME } from './advapi32/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
 import { defaultTrustedRoots } from './wintrust/roots.js';
-import { createD3dxFunctions } from './d3dx9/functions.js';
+import { createD3dxFunctions, d3dxVersionFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
 import { createNetbiosFunctions, createSensFunctions, createSessionNotificationFunctions,
@@ -242,12 +243,12 @@ const REFUSED_OPENS_KEPT = 32;
 /**
  * Every version of the D3DX 9 helper library, d3dx9_24 to d3dx9_43, bound to
  * one table: the versions' mathematics is the same, and a program imports the
- * one its SDK named.
+ * one its SDK named. Only the version each answers to is its own.
  *
  * @param {Record<string, any>} table
  */
 const d3dxLibraries = table=>Object.fromEntries(Array.from({ length: 20 },
-    (_, i)=>[`d3dx9_${24 + i}.dll`, table]));
+    (_, i)=>[`d3dx9_${24 + i}.dll`, { ...table, ...d3dxVersionFunctions(24 + i) }]));
 
 /**
  * The libraries Windows keeps under
@@ -3269,6 +3270,7 @@ export function createWin32Module(){
                     setLastError: setError }),
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+                'faultrep.dll': createFaultrepFunctions(),
                 'HID.DLL': createHidFunctions({ writeMemory, setLastError: setError }),
 
                 // The ODBC Driver Manager, with no driver and no data source set up.
