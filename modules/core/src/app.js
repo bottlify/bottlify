@@ -3846,6 +3846,15 @@ function journalEvents(events, into){
  * @returns {Promise<any>} an AppController
  */
 async function buildApp(options){
+    /**
+     * The libraries this build synthesises, once their table is made: a file
+     * call the modules make while they are being built (the standard
+     * directories made at start) finds none, rather than the table before it
+     * exists.
+     *
+     * @type {Record<string, unknown> | null}
+     */
+    let builtLibraries = null;
     // Handed in across a replacement, so a caller's subscriptions outlive the
     // process they were made against: the program has changed, the machine it
     // is running in has not.
@@ -5232,7 +5241,7 @@ async function buildApp(options){
                  * Every library this build synthesises, whichever layer
                  * answers for it: what a setup finds in the system folder.
                  */
-                systemLibraries: ()=>Object.keys(allLibraries),
+                systemLibraries: ()=>Object.keys(builtLibraries ?? {}),
                 /**
                  * A synthesised library's image, which its file holds where it
                  * stands in its folder (`withSystemLibraries`): read out of
@@ -5573,6 +5582,7 @@ async function buildApp(options){
      * @type {string[]}
      */
     const leftOutAt64 = [];
+    builtLibraries = allLibraries;
     Object.entries(allLibraries).forEach(([name, table])=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to

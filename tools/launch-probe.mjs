@@ -41,7 +41,7 @@ import { placementOf } from '../modules/installer/src/prefix.js';
 import { modeOf } from './play/modes.js';
 import { relayFromArgv, rootsFromArgv } from './relay-option.mjs';
 import { clientFilesCached } from './steam-client.mjs';
-import { ownershipTickets, ticketsFromArgv } from './steam-tickets.mjs';
+import { ownershipTickets, steamAppOf, ticketsFromArgv } from './steam-tickets.mjs';
 
 const BUNDLES = new URL('../bundles/', import.meta.url);
 
@@ -643,9 +643,9 @@ async function main(){
         win32: { ...network ? { network } : {},
             ...steam ? { steam: { ...steam, clientFiles: (await clientFilesCached()).files,
                 ownershipTickets: { ...ticketsFromArgv(process.argv.slice(2)),
-                    ...steamSession && manifest.steam?.appId
-                        ? await ownershipTickets(steamSession, [manifest.steam.appId]) : {} },
-                ...manifest.steam?.appId ? { appId: manifest.steam.appId } : {} } } : {},
+                    ...steamSession && steamAppOf(manifest)
+                        ? await ownershipTickets(steamSession, [steamAppOf(manifest)]) : {} },
+                ...steamAppOf(manifest) ? { appId: steamAppOf(manifest) } : {} } } : {},
             ...roots ? { trustedRoots: roots } : {} },
         executable: new Uint8Array(executable),
         // Where the bundle is mounted and the program started from: where its

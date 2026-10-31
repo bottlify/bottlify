@@ -192,3 +192,14 @@ test('a detached log sink stops receiving output', { timeout: 15000 }, async t=>
     assert.equal(kept.join(''), EXPECTED_OUTPUT);
     assert.deepEqual(dropped, [], 'detached before the run, so it saw nothing');
 });
+
+test('a machine has its standard folders before the program runs: the profile\'s, TEMP', async t=>{
+    // Made while the modules are built, before the synthesised libraries'
+    // table exists; a program that saves into its profile's Application Data
+    // creates its own folder inside and fails where that is not there.
+    const app = await startApp(t);
+    const names = (/** @type {string} */ path)=>app.files.list(path)
+        .map((/** @type {any} */ entry)=>entry.name);
+    assert.ok(names('C:\\Documents and Settings\\User').includes('Application Data'));
+    assert.ok(names('C:\\WINDOWS').includes('TEMP'));
+});

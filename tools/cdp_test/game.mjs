@@ -68,7 +68,7 @@ import { modeOf } from '../play/modes.js';
 import { threadWindow } from './thread-window.mjs';
 import { rootsFromArgv } from '../relay-option.mjs';
 import { clientFilesCached } from '../steam-client.mjs';
-import { ownershipTickets, ticketsFromArgv } from '../steam-tickets.mjs';
+import { ownershipTickets, steamAppOf, ticketsFromArgv } from '../steam-tickets.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -1847,8 +1847,8 @@ export async function game(options){
 
     const steamClient = options.steamAccount ? await clientFilesCached() : null;
     const tickets = { ...ticketsFromArgv(process.argv.slice(2)),
-        ...options.steamAccount && options.steamSession && manifest.steam?.appId
-            ? await ownershipTickets(options.steamSession, [manifest.steam.appId]) : {} };
+        ...options.steamAccount && options.steamSession && steamAppOf(manifest)
+            ? await ownershipTickets(options.steamSession, [steamAppOf(manifest)]) : {} };
     const server = await serveStatic({
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
@@ -1965,7 +1965,7 @@ export async function game(options){
                 .map(([app, ticket])=>[app, Buffer.from(ticket).toString('base64')])),
             win32: options.steamAccount
                 ? { ...options.win32Config, steam: { ...options.steamAccount,
-                    ...manifest.steam?.appId ? { appId: manifest.steam.appId } : {} } }
+                    ...steamAppOf(manifest) ? { appId: steamAppOf(manifest) } : {} } }
                 : options.win32Config,
             screen: options.screen,
             quantum: options.quantum,

@@ -88,3 +88,15 @@ export function ticketsFromArgv(argv){
     });
     return tickets;
 }
+
+/**
+ * A bottle's Steam app: `store: { id: 'steam', game }` as a store's install
+ * writes it, or `steam.appId` as bottles made before said it.
+ *
+ * @param {{ steam?: { appId?: number }, store?: { id?: string, game?: string } }} manifest
+ * @returns {number | undefined}
+ */
+export function steamAppOf(manifest){
+    return manifest.steam?.appId
+        ?? (manifest.store?.id === 'steam' ? Number(manifest.store.game) : undefined);
+}
