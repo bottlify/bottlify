@@ -36,15 +36,16 @@ test('a 64-bit program finds VirtualAlloc2 in kernelbase.dll and NtAllocateVirtu
     + ' in ntdll, and both allocate', { timeout: 60000 }, async t=>{
     /** @type {Record<string, number>} */
     const where = {};
-    const names = ['kernelbase', 'virtualAlloc2', 'aligned', 'native', 'status', 'base', 'size',
-        'queried', 'information', 'longPaths', 'refused'];
+    const names = ['kernelbase', 'virtualAlloc2', 'fromApp', 'aligned', 'native', 'status',
+        'base', 'size', 'queried', 'information', 'longPaths', 'refused'];
     const program = buildExe({
         bits: 64, codeSize: 0x300,
         imports: { 'KERNEL32.dll': ['LoadLibraryA', 'GetModuleHandleA', 'GetProcAddress',
             'VirtualQuery', 'ExitProcess'] },
         data: {
             kernelbaseName: ascii('kernelbase.dll'), ntdllName: ascii('ntdll.dll'),
-            allocName: ascii('VirtualAlloc2'), nativeName: ascii('NtAllocateVirtualMemoryEx'),
+            allocName: ascii('VirtualAlloc2'), fromAppName: ascii('VirtualAlloc2FromApp'),
+            nativeName: ascii('NtAllocateVirtualMemoryEx'),
             longName: ascii('RtlAreLongPathsEnabled'),
             // MEM_ADDRESS_REQUIREMENTS: no bounds, the alignment
             requirements: [...new Array(16).fill(0), ...u32(ALIGNMENT), 0, 0, 0, 0],
@@ -93,6 +94,10 @@ test('a 64-bit program finds VirtualAlloc2 in kernelbase.dll and NtAllocateVirtu
             rip([0x48, 0x8d, 0x15], at('allocName'));
             call('GetProcAddress');
             storeRax('virtualAlloc2');
+            rip([0x48, 0x8b, 0x0d], at('kernelbase')); //                  mov rcx, [kernelbase]
+            rip([0x48, 0x8d, 0x15], at('fromAppName'));
+            call('GetProcAddress');
+            storeRax('fromApp');
             allocate2('parameter');
             storeRax('aligned');
             allocate2('unknown');
@@ -141,6 +146,7 @@ test('a 64-bit program finds VirtualAlloc2 in kernelbase.dll and NtAllocateVirtu
         .slice().buffer).getBigUint64(0, true);
     assert.notEqual(quad('kernelbase'), 0n, 'kernelbase.dll loads by name');
     assert.notEqual(quad('virtualAlloc2'), 0n, 'and has VirtualAlloc2');
+    assert.notEqual(quad('fromApp'), 0n, 'and VirtualAlloc2FromApp');
     const aligned = quad('aligned');
     assert.ok(aligned !== 0n && aligned % BigInt(ALIGNMENT) === 0n,
         `the reservation on the alignment asked for (0x${aligned.toString(16)})`);

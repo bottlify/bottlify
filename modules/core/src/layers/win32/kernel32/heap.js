@@ -2860,6 +2860,12 @@ export function createHeapFunctions(host){
         ...table,
         /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
         VirtualAllocEx: inProcess('VirtualAlloc', 20),
+        /**
+         * PVOID VirtualAlloc2FromApp(...): VirtualAlloc2 under the name a
+         * packaged app may call, whose limits -- no executable pages without
+         * the capability -- a desktop process has none of.
+         */
+        VirtualAlloc2FromApp: table.VirtualAlloc2,
         /** BOOL VirtualFreeEx(HANDLE, LPVOID, SIZE_T, DWORD) */
         VirtualFreeEx: inProcess('VirtualFree', 16),
         /** BOOL VirtualProtectEx(HANDLE, LPVOID, SIZE_T, DWORD, PDWORD) */
