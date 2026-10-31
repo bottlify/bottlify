@@ -338,3 +338,24 @@ test('the DirectX step runs over a bottle a browser writes in place: the tree al
         '.bottlify\\drive_c\\WINDOWS\\system32\\XAudio2_7.dll',
     ]);
 });
+
+test('a program the app carries that is not read as an installer is passed over, said', async()=>{
+    const packed = cabinet({ 'note.txt': new Uint8Array(40_000).fill(7) });
+    // A data block whose bytes are not the ones its checksum was taken over.
+    packed[packed.length - 10] ^= 0xff;
+    /** @type {Map<string, Uint8Array>} */
+    const files = new Map([
+        ['Binaries\\Tool.exe', Uint8Array.from([...peImage(0x14c), ...packed])],
+        ['game.vdf', latin1('"InstallScript"\n{\n}\n')],
+    ]);
+    const tree = {
+        list: async()=>[...files.keys()],
+        read: async(/** @type {string} */ path)=>/** @type {Uint8Array} */ (files.get(path)),
+        write: async(/** @type {string} */ path, /** @type {Uint8Array} */ bytes)=>{
+            files.set(path, bytes);
+        },
+    };
+    const said = await redist.installRedistributables(tree, ['game.vdf'], 'x86');
+    assert.ok(said.some(line=>line.startsWith('Binaries\\Tool.exe: not read as an installer (')),
+        said.join('\n'));
+});

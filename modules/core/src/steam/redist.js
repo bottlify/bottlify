@@ -808,15 +808,54 @@ export async function installRedistributables(tree, scripts, machine){
     for (const inside of [...declared.values(), ...carriedPrograms])
     {
         const named = declared.has(inside.toLowerCase());
-        const { packages, files } = await unpackRedistributable(await tree.read(inside));
+        /** @type {Awaited<ReturnType<typeof unpackRedistributable>>} */
+        let unpacked;
+        try
+        {
+            unpacked = await unpackRedistributable(await tree.read(inside));
+        }
+        catch (e){
+            const why = String(/** @type {Error} */ (e)?.message ?? e);
+            // A program the app merely carries need not be an installer at
+            // all: one this cannot read is passed over, said; one a script
+            // names is the install's to fail on, by its name.
+            if (named)
+            {
+                throw new Error(`${inside}: ${why}`, { cause: e });
+            }
+            said.push(`${inside}: not read as an installer (${why})`);
+            continue;
+        }
+        const { packages, files } = unpacked;
         if (named && packages.length === 0)
         {
             // DirectX's setup: the cabinets in its own folder.
             const folder = inside.slice(0, inside.lastIndexOf('\\') + 1).toLowerCase();
-            const cabinets = await Promise.all(paths.filter(path=>/\.cab$/i.test(path)
+            const cabinetPaths = paths.filter(path=>/\.cab$/i.test(path)
                 && path.toLowerCase().startsWith(folder)
-                && !path.slice(folder.length).includes('\\')).map(path=>tree.read(path)));
-            const directx = directxFiles(cabinets, machine);
+                && !path.slice(folder.length).includes('\\'));
+            const cabinets = await Promise.all(cabinetPaths.map(path=>tree.read(path)));
+            /** @type {ReturnType<typeof directxFiles>} */
+            let directx;
+            try
+            {
+                directx = directxFiles(cabinets, machine);
+            }
+            catch (e){
+                // Which cabinet it is, for whoever reads the failure.
+                const at = cabinets.findIndex(bytes=>{
+                    try
+                    {
+                        cabinetFiles(bytes);
+                        return false;
+                    }
+                    catch {
+                        return true;
+                    }
+                });
+                throw new Error(`${at >= 0 ? cabinetPaths[at] : folder}: `
+                    + `${String(/** @type {Error} */ (e)?.message ?? e)}`, { cause: e });
+            }
             if (directx.files.length === 0)
             {
                 said.push(`${inside}: no installer package inside; left to the engine`);
