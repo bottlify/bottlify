@@ -65,6 +65,7 @@ import { GPU_PROFILES } from '../../modules/core/src/layers/graphics/seam/adapte
 import { disassemble } from '../../modules/core/src/layers/win32/d3dx9/d3d9-machine.fixture.js';
 import { disassembleShader } from '../../modules/core/src/layers/win32/d3dx9/shader-asm.js';
 import { modeOf } from '../play/modes.js';
+import { threadWindow } from './thread-window.mjs';
 import { rootsFromArgv } from '../relay-option.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -1638,6 +1639,10 @@ function describe(result, context, calls, symbols){
             // light over the run and heavy in the window can be missing here.
             say(`  its host calls by host ms: ${heaviest.join('; ')}`);
         }
+        if (row.threadTimes && before.threadTimes)
+        {
+            say(`  ${threadWindow(before, row).join('\n  ')}`);
+        }
     }
     // The gaps between presents are the shape a stutter has, and the page's
     // long tasks say whether the thread the person's browser lives on was held.
@@ -2475,7 +2480,8 @@ the run as it stands: ${path}`;
                 JSON.stringify(result.series));
         }
         result.cpuProfiles = (cpuProfiles ?? []).map(one=>({
-            url: one.url, windowMs: one.windowMs, summary: summarise(one.profile, one.windowMs),
+            url: one.url, windowMs: one.windowMs,
+            summary: summarise(one.profile, one.windowMs, 40, result.memoryLayout ?? []),
             allocations: one.allocations ? summariseAllocations(one.allocations) : null,
             // The frames the program presented inside the window, so a profile's
             // milliseconds divide into a frame's.

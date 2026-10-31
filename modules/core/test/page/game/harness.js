@@ -977,6 +977,19 @@ export function seriesRow(app, count, at){
         instructions: layers.cpu?.instructions ?? null,
         byThread: countsOf(String(layers.kernel?.byThread ?? '').split(' | ').filter(Boolean)),
         byFunction: countsOf(layers.bridge?.byFunction ?? []),
+        // Each thread's totals (the kernel's `threadTimes`) and each executor's
+        // time, so a window shows which thread ran how fast and what it waited for.
+        threadTimes: typeof layers.kernel?.threadTimes === 'string'
+            ? JSON.parse(layers.kernel.threadTimes) : null,
+        executors: {
+            own: typeof layers.kernel?.sharedTime === 'string'
+                ? JSON.parse(layers.kernel.sharedTime) : null,
+            remotes: (layers.cpu?.executors ?? []).map((/** @type {any} */ one)=>({
+                index: one.index, retired: one.retired ?? null,
+                slicesMs: one.spent?.slicesMs ?? null,
+                answerWaitMs: one.spent?.answerWaitMs ?? null,
+                idleMs: one.spent?.idleMs ?? null, traps: one.spent?.traps ?? null })),
+        },
     };
 }
 
@@ -2021,6 +2034,8 @@ export function createHarness(canvas, how = {}){
         // is the difference between a trace and a list of numbers.
         const layout = metrics('memory').layout ?? [];
         const where = symboliser(layout);
+        // For the driver to name translated regions (`r004ea329`) in a CPU profile.
+        result.memoryLayout = layout;
         result.bridge = {
             sequence: metrics('bridge').sequence ?? [],
             hot: metrics('bridge').hot ?? [],

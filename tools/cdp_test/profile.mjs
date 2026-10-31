@@ -32,8 +32,10 @@
  * @param {any} profile  Profiler's Profile.
  * @param {number} windowMs
  * @param {number} [keep]  rows per table
+ * @param {string[]} [layout]  the memory layer's module layout: with it, translated regions
+ *     are also folded by the guest module their entry is in, and named by module and offset
  */
-export function summarise(profile, windowMs, keep = 40){
+export function summarise(profile, windowMs, keep = 40, layout = []){
     /** @type {Map<number, any>} */
     const nodes = new Map(profile.nodes.map((/** @type {any} */ node)=>[node.id, node]));
     /** @type {Map<number, number>} */
@@ -70,11 +72,42 @@ export function summarise(profile, windowMs, keep = 40){
     const rows = (/** @type {Map<string, number>} */ map, /** @type {number} */ count)=>
         [...map].sort((left, right)=>right[1] - left[1]).slice(0, count)
             .map(([name, micros])=>({ name, ms: micros / 1000, share: micros / Math.max(1, total) }));
+    // A region function is `r` and its entry's eight hex digits.
+    const modules = layout.map(entry=>{
+        const [name, extent] = entry.split(' ');
+        const [base, size] = extent.split('+').map(Number);
+        return { name, base, end: base + size };
+    });
+    /** @param {number} address */
+    const moduleOf = address=>modules.find(one=>address >= one.base && address < one.end);
+    /** @type {Map<string, number>} */
+    const byModule = new Map();
+    /** @type {Map<string, number>} */
+    const regions = new Map();
+    if (modules.length > 0)
+    {
+        for (const [name, micros] of byFunction)
+        {
+            const match = /^r([0-9a-f]{8}) wasm$/.exec(name);
+            if (!match)
+            {
+                continue;
+            }
+            const address = parseInt(match[1], 16);
+            const module = moduleOf(address);
+            const key = module?.name ?? '<unmapped>';
+            byModule.set(key, (byModule.get(key) ?? 0) + micros);
+            regions.set(`${name.slice(0, 9)} ${module ? `${module.name}+0x${
+                (address - module.base).toString(16)}` : '<unmapped>'}`, micros);
+        }
+    }
     return {
         sampledMs: total / 1000,
         busyShare: total / 1000 / windowMs,
         functions: rows(byFunction, keep),
         files: rows(byFile, 16),
+        modules: rows(byModule, 12),
+        regions: rows(regions, 25),
     };
 }
 
@@ -272,6 +305,21 @@ export function describeProfile(label, summary, windowMs){
     {
         lines.push(`    ${(row.share * 100).toFixed(1).padStart(5)}%`
             + `  ${row.ms.toFixed(0).padStart(7)} ms  ${row.name}`);
+    }
+    if ((summary.modules ?? []).length > 0)
+    {
+        lines.push('  translated regions by guest module, self time:');
+        for (const row of summary.modules ?? [])
+        {
+            lines.push(`    ${(row.share * 100).toFixed(1).padStart(5)}%`
+                + `  ${row.ms.toFixed(0).padStart(7)} ms  ${row.name}`);
+        }
+        lines.push('  hottest translated regions:');
+        for (const row of summary.regions ?? [])
+        {
+            lines.push(`    ${(row.share * 100).toFixed(1).padStart(5)}%`
+                + `  ${row.ms.toFixed(0).padStart(7)} ms  ${row.name}`);
+        }
     }
     return lines;
 }
