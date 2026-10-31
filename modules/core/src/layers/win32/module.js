@@ -728,7 +728,10 @@ export function createWin32Module(){
             const volume = withSystemLibraries(
                 createVolume(filesystem, config?.fetchBlocks ?? null),
                 ()=>systemLibraryNames(),
-                { homeOf: libraryHome, imageOf: name=>modules.systemImage?.(name) ?? null });
+                { homeOf: libraryHome,
+                    imageOf: name=>(libraryHome(name) !== null
+                        ? config?.steam?.clientFiles?.[name] : null)
+                        ?? modules.systemImage?.(name) ?? null });
             // A child whose parent handed it files for its output and error
             // writes there, at the position it shares with the parent's handle,
             // rather than to the console.

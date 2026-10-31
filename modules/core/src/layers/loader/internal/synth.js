@@ -564,3 +564,46 @@ function requireAscii(text, what){
 function align(value, to){
     return Math.ceil(value / to) * to;
 }
+
+/**
+ * The headers a synthesised module carries when the real library's file is
+ * installed beside it: the file's own, as the loader would have mapped them
+ * -- its DOS header and stub, and its NT headers through the first section
+ * header -- with ImageBase where the module is placed. A program that opens
+ * the file a module was loaded from and compares the two (a DRM wrapper
+ * checking the Steam client it loaded) finds them the same; the rest of the
+ * module is the engine's. Null for a file too short to be an image, or one
+ * whose headers would not fit before the module's first section.
+ *
+ * @param {Uint8Array} file @param {number} base
+ * @returns {Uint8Array | null}
+ */
+export function installedHeaders(file, base){
+    if (file.length < 0x40)
+    {
+        return null;
+    }
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const nt = view.getUint32(0x3c, true);
+    // Signature, file header, the optional header the file header sizes, and
+    // one section header.
+    const optionalSize = nt + 0x18 <= file.length ? view.getUint16(nt + 0x14, true) : 0;
+    const end = nt + 0x18 + optionalSize + 0x28;
+    if (optionalSize === 0 || end > file.length || end > HEADERS_SIZE
+        || view.getUint32(nt, true) !== 0x00004550)
+    {
+        return null;
+    }
+    const headers = file.slice(0, end);
+    const out = new DataView(headers.buffer);
+    const magic = out.getUint16(nt + 0x18, true);
+    if (magic === 0x20b)
+    {
+        out.setBigUint64(nt + 0x30, BigInt(base >>> 0), true);
+    }
+    else
+    {
+        out.setUint32(nt + 0x34, base >>> 0, true);
+    }
+    return headers;
+}

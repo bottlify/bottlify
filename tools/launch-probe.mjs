@@ -20,7 +20,7 @@
  * far enough to run at all.
  *
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
- *         [--network ws://host:port/] [--steam ACCOUNT.json]
+ *         [--network ws://host:port/] [--steam ACCOUNT.json] [--steam-session FILE|-]
  *
  * `--network` puts the program on a relay's network (tools/relay-option.mjs);
  * without it the machine has the loopback adapter alone.
@@ -39,6 +39,8 @@ import { peekBytes } from '../modules/core/src/trace.js';
 import { placementOf } from '../modules/installer/src/prefix.js';
 import { modeOf } from './play/modes.js';
 import { relayFromArgv, rootsFromArgv } from './relay-option.mjs';
+import { clientFilesCached } from './steam-client.mjs';
+import { ownershipTickets } from './steam-tickets.mjs';
 
 const BUNDLES = new URL('../bundles/', import.meta.url);
 
@@ -59,6 +61,10 @@ function parse(argv){
         // `--steam` has it, for a game that needs Steam running.
         steam: argv.includes('--steam')
             ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
+        // A signed-in session (or `-`, stdin) the app's ownership ticket is
+        // asked for with (tools/steam-tickets.mjs), held for this run only.
+        steamSession: argv.includes('--steam-session')
+            ? argv[argv.indexOf('--steam-session') + 1] : null,
         // Which executable in the bundle to start. `--which launcher` takes the
         // one the manifest names as such, and any other value is a path in the
         // bundle -- a launcher is a different program from the game it starts,
@@ -532,7 +538,8 @@ async function cpuProfiler(spec){
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
         corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
-        memory, mode, translationStore, cpuProfile, steam } = parse(process.argv.slice(2));
+        memory, mode, translationStore, cpuProfile, steam, steamSession }
+        = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -590,7 +597,9 @@ async function main(){
     const roots = rootsFromArgv(process.argv.slice(2));
     const app = await createApp({
         win32: { ...network ? { network } : {},
-            ...steam ? { steam: { ...steam,
+            ...steam ? { steam: { ...steam, clientFiles: (await clientFilesCached()).files,
+                ownershipTickets: steamSession && manifest.steam?.appId
+                    ? await ownershipTickets(steamSession, [manifest.steam.appId]) : {},
                 ...manifest.steam?.appId ? { appId: manifest.steam.appId } : {} } } : {},
             ...roots ? { trustedRoots: roots } : {} },
         executable: new Uint8Array(executable),

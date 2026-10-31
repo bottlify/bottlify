@@ -26,6 +26,9 @@
  * - `account` -> `{ steamId, accountName, apps }`, or null when nobody is
  *   signed in: the games the account's licences grant, by app id.
  * - `depotKey { app, depot }` -> Uint8Array, the depot's AES key.
+ * - `appOwnershipTicket { app }` -> Uint8Array, the signed-in account's app
+ *   ownership ticket for the app as Steam signs it (EMsg 857/858), or null
+ *   signed out or for an app the account does not own.
  * - `manifestCode { app, depot, gid, branch? }` -> string; `gid` a decimal string.
  * - `contentServers` -> `[{ host, vhost, type }]`, those the page may fetch from.
  *
@@ -46,6 +49,7 @@ export const OPS = Object.freeze({
     signOut: {},
     account: {},
     depotKey: { app: 'uint', depot: 'uint' },
+    appOwnershipTicket: { app: 'uint' },
     manifestCode: { app: 'uint', depot: 'uint', gid: 'u64', branch: 'string?' },
     contentServers: {},
 });

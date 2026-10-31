@@ -35,6 +35,7 @@ import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
+import { installedHeaders } from './layers/loader/internal/synth.js';
 import { createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
 import { SHARED_USER_DATA, createSharedUserData } from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
@@ -5678,10 +5679,16 @@ async function buildApp(options){
         // A table with a DllMain is a module with an entry point, run when a
         // program first loads it -- which is how a library the program did not
         // import announces itself to the one that asked for it.
+        // The Steam client's own file, where the embedder fetched Valve's: the
+        // module carries its headers, as the file stands in Steam's folder
+        // (the win32 layer's volume).
+        const installed = options.win32?.steam?.clientFiles?.[name];
         const placed = loader.synthesise({
             name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined, long,
+            headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
         });
         systemModulesEnd = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+
 
         // An export's address is its trampoline inside the module, and that is
         // what both the import table and GetProcAddress hand out -- so a program

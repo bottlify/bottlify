@@ -263,3 +263,36 @@ test('the eight-byte and floating-point arguments of a method are named for an x
         .filter(one=>one.startsWith('SetStat:')), ['SetStat:8:i', 'SetStat:8:i:1f']);
     assert.equal(entry('SteamUser021', 'GetSteamID'), 'GetSteamID:0:s8');
 });
+
+test('ISteamAppTicket hands out the ticket Steam signed for an owned app, and none otherwise',
+    ()=>{
+        // A ticket as Steam lays one out: its signed length first, the Steam
+        // ID at 8, the app id at 16, the signature after the signed part.
+        const ticket = new Uint8Array(46 + 128);
+        const view = new DataView(ticket.buffer);
+        view.setUint32(0, 46, true);
+        view.setBigUint64(8, 76561197960287930n, true);
+        view.setUint32(16, 620, true);
+        ticket.fill(0xa5, 46);
+        const { fns, put, method, view: memory } = fixture(/** @type {any} */ (
+            { ...ACCOUNT, ownershipTickets: { 620: ticket } }));
+        const client = fns.CreateInterface.handler([put('SteamClient017'), 0]);
+        const slots = INTERFACES.SteamClient017.split(',');
+        const generic = method(client, slots.findIndex(slot=>
+            slot.startsWith('GetISteamGenericInterface:')));
+        const tickets = generic.fn.handler([client, 1, 1,
+            put('STEAMAPPTICKET_INTERFACE_VERSION001')]);
+        assert.notEqual(tickets, 0);
+        const get = method(tickets, 0);
+        assert.equal(get.name, 'STEAMAPPTICKET_INTERFACE_VERSION001.GetAppOwnershipTicketData');
+        const [buffer, outs] = [0x20000, 0x21000];
+        const call = (/** @type {number} */ app, size = 0x400)=>get.fn.handler([tickets, app,
+            buffer, size, outs, outs + 4, outs + 8, outs + 12]);
+        assert.equal(call(620), ticket.length);
+        assert.deepEqual([...new Uint8Array(memory.buffer, buffer, ticket.length)], [...ticket]);
+        assert.deepEqual([0, 4, 8, 12].map(at=>memory.getUint32(outs + at, true)),
+            [16, 8, 46, 128], 'the app id, the Steam ID, the signature and its size');
+        assert.equal(call(400), 0, 'owned, but no ticket was given for it: none');
+        assert.equal(call(480), 0, 'not owned: none, as Steam has none');
+        assert.equal(call(620, 16), 0, 'nor into a buffer too small');
+    });

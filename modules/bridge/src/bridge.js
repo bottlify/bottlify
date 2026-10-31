@@ -195,6 +195,14 @@ export function createBridge({ steam, store, managers, version, platforms }){
 
         depotKey: async({ app, depot })=>steam.depotKey((await loggedOn()).connection, app, depot),
 
+        // The signed-in account's ownership ticket for an app, as Steam signs
+        // it; null signed out (no account owns anything) or for an app the
+        // account does not own. The session stays here; only the ticket goes.
+        appOwnershipTicket: async({ app })=>{
+            const now = await loggedOn();
+            return now.session ? steam.appOwnershipTicket(now.connection, app) : null;
+        },
+
         manifestCode: async({ app, depot, gid, branch })=>String(await steam.manifestRequestCode(
             (await loggedOn()).connection, app, depot, BigInt(gid), branch)),
 

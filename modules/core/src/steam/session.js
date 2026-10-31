@@ -235,3 +235,29 @@ export async function library(connection, licenses){
     }
     return games.sort((a, b)=>a.name.localeCompare(b.name));
 }
+
+/** CMsgClientGetAppOwnershipTicket, and its answer (EMsg 857, 858). */
+const EMSG_GET_APP_OWNERSHIP_TICKET = 857;
+/** @type {import('./protobuf.js').Schema} */
+const GetAppOwnershipTicket = { app_id: [1, 'uint32'] };
+/** @type {import('./protobuf.js').Schema} */
+const GetAppOwnershipTicketResponse = {
+    eresult: [1, 'uint32'], app_id: [2, 'uint32'], ticket: [3, 'bytes'],
+};
+
+/**
+ * The app ownership ticket for an app the signed-in account owns, as Steam
+ * signs it: what a running client hands a game's ISteamAppTicket, and a DRM
+ * wrapper checks offline against Valve's key. Null for an app the account
+ * does not own -- Steam refuses it (EResult AccessDenied) -- or any other
+ * refusal.
+ *
+ * @param {import('./connection.js').CmConnection} connection @param {number} app
+ * @returns {Promise<Uint8Array | null>}
+ */
+export async function appOwnershipTicket(connection, app){
+    const answer = await connection.request(EMSG_GET_APP_OWNERSHIP_TICKET, GetAppOwnershipTicket,
+        { app_id: app });
+    const body = decode(GetAppOwnershipTicketResponse, answer.body);
+    return body.eresult === EResult.OK && body.ticket?.length ? body.ticket : null;
+}
