@@ -28,7 +28,7 @@ function fakeSteam(){
             asked.push(`logOn ${session.accountName} ${session.refreshToken === TOKEN}`);
             return { steamId: 76561197960265729n, licenses: [{ package_id: 1 }] };
         },
-        library: async()=>[{ appid: 400 }, { appid: 220 }],
+        ownedApps: async()=>[220, 400],
         depotKey: async(/** @type {any} */ _c, /** @type {number} */ app, /** @type {number} */ depot)=>{
             asked.push(`key ${app} ${depot}`);
             return new Uint8Array(32);

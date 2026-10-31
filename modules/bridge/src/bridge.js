@@ -190,10 +190,11 @@ export function createBridge({ steam, store, managers, version, platforms }){
             }
             if (!library || Date.now() - library.at > LIBRARY_KEPT_MS)
             {
-                const games = await steam.library(now.connection, now.licenses);
+                // Every app the licences grant: which are games the page asks
+                // of what Steam tells anyone, which this session's product
+                // info would mostly leave out (core's ownedApps).
                 library = { at: Date.now(),
-                    apps: games.map((/** @type {any} */ game)=>game.appid)
-                        .sort((/** @type {number} */ a, /** @type {number} */ b)=>a - b) };
+                    apps: await steam.ownedApps(now.connection, now.licenses) };
             }
             return { steamId: String(now.steamId), accountName: now.session.accountName,
                 apps: library.apps, licenses: now.licenses.length };

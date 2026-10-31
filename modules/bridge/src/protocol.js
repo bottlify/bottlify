@@ -24,8 +24,8 @@
  * - `cancel { target }` -> `{}`: stops the sign-in asked as `target`.
  * - `signOut` -> `{}`.
  * - `account { fresh? }` -> `{ steamId, accountName, apps, licenses }`, or null
- *   when nobody is signed in: the games the account's licences grant, by app
- *   id, and how many licences there are. `fresh` logs on again and reads them
+ *   when nobody is signed in: every app the account's licences grant (games,
+ *   DLC, tools), by id, and how many licences there are. `fresh` logs on again and reads them
  *   anew rather than as they were read a while ago.
  * - `depotKey { app, depot }` -> Uint8Array, the depot's AES key.
  * - `appOwnershipTicket { app }` -> Uint8Array, the signed-in account's app

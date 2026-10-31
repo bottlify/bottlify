@@ -200,18 +200,23 @@ const field = (node, key)=>{
 };
 
 /**
- * The games a session's licences grant, by name.
+ * Every app a session's licences grant -- games, their DLC, tools -- by id,
+ * read from the licences' packages alone. A signed-in account's product info
+ * for apps comes back without its data for most of them once Steam has sent
+ * it to that account a while before (a sha and a size, the client taken to
+ * have kept it), so what an app is is better asked of an anonymous logon.
  *
  * @param {CmConnection} connection
  * @param {Array<Record<string, any>>} licenses
- * @returns {Promise<LibraryGame[]>}
+ * @returns {Promise<number[]>}
  */
-export async function library(connection, licenses){
+export async function ownedApps(connection, licenses){
     const { packages } = await productInfo(connection, {
         packages: licenses.map(license=>({
             packageid: license.package_id, access_token: license.access_token ?? 0n,
         })),
     });
+    /** @type {Set<number>} */
     const appids = new Set();
     for (const info of packages.values())
     {
@@ -221,7 +226,21 @@ export async function library(connection, licenses){
             appids.add(Number(appid));
         }
     }
-    const { apps } = await productInfo(connection, { apps: [...appids] });
+    return [...appids].sort((a, b)=>a - b);
+}
+
+/**
+ * The games a session's licences grant, by name.
+ * ponytail: asked over the session itself, so it misses the apps Steam sends
+ * without their data (see ownedApps); a caller wanting all of them asks an
+ * anonymous logon for ownedApps' ids, as the launcher's bridged path does.
+ *
+ * @param {CmConnection} connection
+ * @param {Array<Record<string, any>>} licenses
+ * @returns {Promise<LibraryGame[]>}
+ */
+export async function library(connection, licenses){
+    const { apps } = await productInfo(connection, { apps: await ownedApps(connection, licenses) });
     /** @type {LibraryGame[]} */
     const games = [];
     for (const [appid, info] of apps)

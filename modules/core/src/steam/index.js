@@ -7,7 +7,7 @@
 export { connectCm, ANONYMOUS_INDIVIDUAL } from './connection.js';
 export { signInWithQr } from './auth.js';
 export {
-    appOwnershipTicket, logOn, logOnAnonymously, library, productInfo, steamIdOfToken,
+    appOwnershipTicket, logOn, logOnAnonymously, library, ownedApps, productInfo, steamIdOfToken,
 } from './session.js';
 export { encodeQr, qrToSvg } from './qr.js';
 export { parseText, parseBinary } from './keyvalues.js';
