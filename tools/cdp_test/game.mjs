@@ -67,6 +67,8 @@ import { disassembleShader } from '../../modules/core/src/layers/win32/d3dx9/sha
 import { modeOf } from '../play/modes.js';
 import { threadWindow } from './thread-window.mjs';
 import { rootsFromArgv } from '../relay-option.mjs';
+import { clientFilesCached } from '../steam-client.mjs';
+import { ownershipTickets } from '../steam-tickets.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -408,6 +410,11 @@ function parse(argv){
         // `steam.appId`.
         steamAccount: argv.includes('--steam')
             ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
+        // `--steam-session FILE` (or `-`, stdin): a signed-in session, which the
+        // app's ownership ticket is asked for with (tools/steam-tickets.mjs) --
+        // what the launcher's bridge gets -- held in memory for this run only.
+        steamSession: argv.includes('--steam-session')
+            ? argv[argv.indexOf('--steam-session') + 1] : null,
         // createApp's `cpu` as JSON ('{"playPinned":false}'): a run whose threads
         // are placed one fixed way, beside another placed the same way.
         cpuConfig: argv.includes('--cpu-config')
@@ -1840,6 +1847,9 @@ export async function game(options){
     writeFileSync(join(entryDirectory, 'entry.exe'), executable);
     process.on('exit', ()=>rmSync(entryDirectory, { recursive: true, force: true }));
 
+    const steamClient = options.steamAccount ? await clientFilesCached() : null;
+    const tickets = options.steamAccount && options.steamSession && manifest.steam?.appId
+        ? await ownershipTickets(options.steamSession, [manifest.steam.appId]) : {};
     const server = await serveStatic({
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
@@ -1851,6 +1861,9 @@ export async function game(options){
             { prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') },
             // The networking client, for a run that names a relay.
             { prefix: '/networking/', root: join(PACKAGE_DIR, '..', 'networking', 'src') },
+            // The Steam client's own files, from this machine's cache of Valve's
+            // (tools/steam-client.mjs), for a run with a Steam account.
+            ...steamClient ? [{ prefix: '/steam-client/', root: steamClient.folder }] : [],
         ],
         coi: options.coi,
         port: options.port,
@@ -1947,6 +1960,10 @@ export async function game(options){
             // A harness run is a diagnostic one: the translator's timings and its
             // record of long holds are on unless the run turns them off.
             cork: { config: { timings: true, ...options.corkConfig } },
+            steamClientUrls: steamClient ? Object.fromEntries(Object.keys(steamClient.files)
+                .map(name=>[name, `http://127.0.0.1:${server.port}/steam-client/${name}`])) : undefined,
+            steamTickets: Object.fromEntries(Object.entries(tickets)
+                .map(([app, ticket])=>[app, Buffer.from(ticket).toString('base64')])),
             win32: options.steamAccount
                 ? { ...options.win32Config, steam: { ...options.steamAccount,
                     ...manifest.steam?.appId ? { appId: manifest.steam.appId } : {} } }

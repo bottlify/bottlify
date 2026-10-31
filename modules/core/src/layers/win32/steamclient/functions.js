@@ -33,6 +33,13 @@ import { createSteamObjects } from './objects.js';
  * @property {number[]} apps      The app ids the account's licences grant.
  * @property {number} [appId]     The app being run, where the launcher knows it.
  * @property {string} [language]  Steam's name of it: "english".
+ * @property {Record<number, Uint8Array>} [ownershipTickets]  Each app's ownership ticket
+ *     as Steam signed it for this account (EMsg 858, through the embedder's session):
+ *     what ISteamAppTicket hands a game. An app with none -- not owned -- gets none.
+ * @property {Record<string, Uint8Array>} [clientFiles]  The Steam client's own DLLs by
+ *     name (`steamclient.dll`, `steamclient64.dll`), as Valve distributes them
+ *     (`steam/client.js`): data the installed client's files hold, which a program
+ *     may open and check; never run. Absent, those files hold the engine's images.
  */
 
 /**
@@ -318,6 +325,32 @@ export function createSteamclientFunctions(host){
             writeString(buffer, `C:\\Program Files (x86)\\Steam\\userdata\\${
                 Number(steamId & 0xffffffffn)}\\${appId()}\\local`, size | 0);
             return 1;
+        },
+
+        // ISteamAppTicket: the ownership ticket Steam signed, whole, and where in
+        // it the app id, the Steam ID and the signature are (the ticket's first
+        // dword is the length the signature follows). None for an app the
+        // account was given no ticket for, as Steam has none for one it does
+        // not own; none either into a buffer too small.
+        GetAppOwnershipTicketData: ([app, buffer, size, appAt, steamIdAt, signatureAt,
+            signatureSize])=>{
+            const ticket = account?.ownershipTickets?.[app >>> 0];
+            if (!ticket || ticket.length < 24 || (buffer >>> 0) === 0
+                || (size >>> 0) < ticket.length)
+            {
+                return 0;
+            }
+            const signed = new DataView(ticket.buffer, ticket.byteOffset, 4).getUint32(0, true);
+            host.writeMemory(buffer >>> 0, ticket);
+            for (const [out, value] of /** @type {const} */ ([[appAt, 16], [steamIdAt, 8],
+                [signatureAt, signed], [signatureSize, ticket.length - signed]]))
+            {
+                if ((out >>> 0) !== 0)
+                {
+                    writeDword(out, value);
+                }
+            }
+            return ticket.length;
         },
 
         // ISteamApps

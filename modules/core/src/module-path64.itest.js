@@ -18,6 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+import { installedHeaders } from './layers/loader/internal/synth.js';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -94,3 +95,65 @@ test('a library loaded by its installed path reports that path, and its file rea
         assert.equal(output.join(''), CLIENT, 'the path it was loaded from');
         assert.equal(code.toString(16), (0x5a4d).toString(16), 'and its file begins "MZ"');
     });
+
+test('with the client\'s own file installed, the file is that file and the module carries its'
+    + ' headers, ImageBase where it was placed', { timeout: 60000 }, async t=>{
+    // A 64-bit library standing in for Valve's file: what the run is handed
+    // as the client's, which a DRM wrapper compares with the module.
+    const installed = buildExe({ bits: 64, dll: true, imageBase: 0x38000000, imports: {},
+        exports: [{ name: 'CreateInterface', offset: 0 }], code: ()=>[0x31, 0xc0, 0xc3] });
+    let readAt = 0;
+    const program = buildExe({
+        bits: 64, codeSize: 0x100,
+        imports: { 'KERNEL32.dll': ['LoadLibraryExA', 'GetModuleFileNameA', 'CreateFileA',
+            'ReadFile', 'ExitProcess'] },
+        data: { path: ascii(CLIENT), name: new Array(264).fill(0),
+            read: new Array(0x400).fill(0), count: new Array(8).fill(0) },
+        code: ({ iat, at, code })=>{
+            readAt = at('read');
+            /** @type {number[]} */
+            const bytes = [];
+            /** @param {number[]} op @param {number} to */
+            const rip = (op, to)=>bytes.push(...op,
+                ...u32(to - (code(bytes.length) + op.length + 4)));
+            const call = (/** @type {string} */ name)=>rip([0xff, 0x15], iat(name));
+            bytes.push(0x48, 0x83, 0xec, 0x48); // sub rsp, 72
+            rip([0x48, 0x8d, 0x0d], at('path'));
+            bytes.push(0x31, 0xd2, 0x41, 0xb8, ...u32(8));
+            call('LoadLibraryExA');
+            bytes.push(0x48, 0x89, 0xc3, 0x48, 0x89, 0xc1); // mov rbx, rax; mov rcx, rax
+            rip([0x48, 0x8d, 0x15], at('name'));
+            bytes.push(0x41, 0xb8, ...u32(260));
+            call('GetModuleFileNameA');
+            rip([0x48, 0x8d, 0x0d], at('name'));
+            bytes.push(0xba, ...u32(0x80000000), 0x41, 0xb8, ...u32(1), 0x45, 0x31, 0xc9);
+            bytes.push(0x48, 0xc7, 0x44, 0x24, 0x20, 3, 0, 0, 0);
+            bytes.push(0x48, 0xc7, 0x44, 0x24, 0x28, 0x80, 0, 0, 0);
+            bytes.push(0x48, 0xc7, 0x44, 0x24, 0x30, 0, 0, 0, 0);
+            call('CreateFileA');
+            bytes.push(0x48, 0x89, 0xc1); // mov rcx, rax
+            rip([0x48, 0x8d, 0x15], at('read'));
+            bytes.push(0x41, 0xb8, ...u32(0x400));
+            rip([0x4c, 0x8d, 0x0d], at('count'));
+            bytes.push(0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0);
+            call('ReadFile');
+            bytes.push(0x89, 0xd9); // mov ecx, ebx: the module's base
+            call('ExitProcess');
+            return bytes;
+        },
+    });
+    const app = await createApp({ executable: program, engine: 'cork',
+        win32: { steam: { steamId: '76561197960287930', accountName: 'test', apps: [480],
+            clientFiles: { 'steamclient64.dll': installed } } } });
+    t.after(()=>app.dispose());
+    const base = await app.run({ timeoutMs: 50000 });
+    assert.deepEqual([...app.debug.read(readAt, 0x400)], [...installed.subarray(0, 0x400)],
+        'the file is the client\'s own');
+    const headers = /** @type {Uint8Array} */ (installedHeaders(installed, base));
+    assert.ok(headers.length > 0x130);
+    assert.deepEqual([...app.debug.read(base, headers.length)], [...headers],
+        'and the module its headers');
+    const nt = new DataView(installed.buffer, installed.byteOffset).getUint32(0x3c, true);
+    assert.equal(new DataView(headers.buffer).getBigUint64(nt + 0x30, true), BigInt(base),
+        'ImageBase where it was placed');
+});

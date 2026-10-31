@@ -33,6 +33,10 @@ function fakeSteam(){
             asked.push(`key ${app} ${depot}`);
             return new Uint8Array(32);
         },
+        appOwnershipTicket: async(/** @type {any} */ _c, /** @type {number} */ app)=>{
+            asked.push(`ticket ${app}`);
+            return app === 400 ? Uint8Array.of(4, 0, 0, 0) : null;
+        },
         manifestRequestCode: async(/** @type {any} */ _c, /** @type {number} */ _app,
             /** @type {number} */ _depot, /** @type {bigint} */ gid)=>gid + 1n,
         contentServers: async()=>[
@@ -111,6 +115,16 @@ test('a session another page kept is what the next op logs on with', async()=>{
     await ask('depotKey', { app: 1, depot: 2 });
     assert.deepEqual(steam.asked, ['anonymous', 'key 1 2', 'logOn elsewhere true', 'key 1 2',
         'anonymous', 'key 1 2']);
+});
+
+test('an ownership ticket is the signed-in account\'s, for an app it owns only', async()=>{
+    const { steam, ask } = bridgeOver();
+    assert.equal(await ask('appOwnershipTicket', { app: 400 }), null, 'signed out: none');
+    await ask('signIn');
+    assert.deepEqual(await ask('appOwnershipTicket', { app: 400 }), Uint8Array.of(4, 0, 0, 0));
+    assert.equal(await ask('appOwnershipTicket', { app: 480 }), null, 'not owned: none');
+    assert.deepEqual(steam.asked.filter(line=>line.startsWith('ticket')),
+        ['ticket 400', 'ticket 480']);
 });
 
 test('a sign-in is cancelled by its id', async()=>{

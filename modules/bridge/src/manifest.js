@@ -44,7 +44,10 @@ export const PLATFORMS = Object.freeze({
     steam: Object.freeze({
         rules: 'rules/steam.json',
         hosts: Object.freeze(['wss://*.steamserver.net/*', 'https://api.steampowered.com/*',
-            '*://*.steamcontent.com/*', '*://*.steampipe.akamaized.net/*']),
+            '*://*.steamcontent.com/*', '*://*.steampipe.akamaized.net/*',
+            // Valve's client distribution: the client's own DLLs, which a DRM
+            // wrapper reads as the installed client's (core's steam/client.js).
+            'https://client-update.akamai.steamstatic.com/*']),
     }),
 });
 
