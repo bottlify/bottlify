@@ -379,7 +379,7 @@ function machine(guestCode, worker, eleven = false){
     }
     const strings = new TextEncoder().encode('POSITION\0COLOR\0');
     writeBytes(STRINGS, strings);
-    return { run, gpu, reads, writeBytes, readBytes, readU32, pointerOf };
+    return { run, gpu, reads, writeBytes, readBytes, readU32, pointerOf, libraries };
 }
 
 /** A pixel shader whose colour is the first register of cb0. */
@@ -395,7 +395,9 @@ const words = bytes=>[...new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.b
 const STRIDE = 32;
 const VERTICES = 64;
 /** The device's calls the ring carries: any of them that traps with guest code had to. */
-const CARRIED = new Set(Object.keys(IN_GUEST).filter(name=>/^[A-Z]/.test(name)));
+/** The routines Direct3D 10's device and buffers run in the guest: not the 11 context's own. */
+const CARRIED = new Set(Object.keys(IN_GUEST).filter(name=>/^[A-Z]/.test(name)
+    && !name.startsWith('Context')));
 
 /**
  * A program drawn from a seed, run on one machine: every call's answer and
@@ -645,6 +647,10 @@ test('Direct3D 10: a buffer the guest maps with DISCARD faster than the host pla
     // gives it one more each time, and a frame's eight then fit.
     assert.ok(trapped[0] > 0, `the first maps trapped: ${trapped}`);
     assert.deepEqual(trapped.slice(-4), [0, 0, 0, 0], `none trapped in the end: ${trapped}`);
+    // The ring says why: every trapped DISCARD found no storage free and was given one.
+    const [ring] = m.libraries.diagnostics().direct3d10.rings;
+    assert.equal(ring.maps.added, trapped.reduce((sum, count)=>sum + count, 0));
+    assert.ok(ring.syncs >= 12, `the ring was played at each host call: ${ring.syncs}`);
 });
 
 /** The routines Direct3D 11's immediate context runs in the guest. */

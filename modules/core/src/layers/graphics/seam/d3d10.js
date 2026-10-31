@@ -612,6 +612,16 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             buffer.guestState = ()=>block;
         }
     };
+    /** @type {Record<string, number>} usage -> maps of buffers with no block of their own */
+    const unattachedMaps = {};
+    /** @param {any} buffer */
+    const countUnattached = buffer=>{
+        if (!ringOf(buffer))
+        {
+            const usage = String(buffer.desc?.Usage ?? '?');
+            unattachedMaps[usage] = (unattachedMaps[usage] ?? 0) + 1;
+        }
+    };
     /** A dynamic buffer's map and unmap, in the guest, where devices have rings. */
     const bufferGuests = ringAllocate
         ? Object.fromEntries([['Map', 'BufferMap'], ['Unmap', 'BufferUnmap']]
@@ -1591,6 +1601,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         ...resourceMethods,
         /** @param {any} buffer @param {number[]} args */
         Map: (buffer, [mapType, flags, out])=>whenMappable(buffer, flags >>> 0, ()=>{
+            countUnattached(buffer);
             ringOf(buffer)?.hostMap(buffer, mapType >>> 0);
             const mapped = mapInto(buffer, 0, mapType >>> 0, flags >>> 0);
             if (mapped.hr === S_OK && (out >>> 0) !== 0)
@@ -3017,7 +3028,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         writeQueryDesc: (desc, out)=>{
             fields.writeStruct(out, D3D10_QUERY_DESC, desc);
         },
-        mapInto, unmapFrom, whenMappable, ringOf, attachRing, attachBuffer,
+        mapInto, unmapFrom, whenMappable, ringOf, countUnattached, attachRing, attachBuffer,
         created: device=>{
             created.push(device);
         },
@@ -3862,6 +3873,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         diagnostics: ()=>({
             devices: created.length,
             renderer: created.length > 0 ? created[created.length - 1].diagnostics() : null,
+            // Each device's ring: how often and how long it was played, and why
+            // a dynamic buffer's maps reached the host.
+            rings: [...rings].map(ring=>ring.counters()),
+            // Maps of buffers the guest cannot map, by their usage.
+            unattachedMaps: { ...unattachedMaps },
         }),
     };
 }

@@ -290,6 +290,7 @@ const STAGE_SHADERS = Object.freeze({
  * @property {(resource: any, flags: number, run: () => number) => number | Promise<number>}
  *     whenMappable
  * @property {(object: any) => any} ringOf
+ * @property {(buffer: any) => void} countUnattached
  * @property {(device: any) => void} attachRing
  * @property {(device: any, buffer: any) => void} attachBuffer
  * @property {(device: any) => void} created
@@ -982,6 +983,7 @@ export function createDirect3D11Seam(describe, kit, guests){
         return k().whenMappable(resource, flags & MAP_DO_NOT_WAIT, ()=>{
             if (resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER)
             {
+                k().countUnattached(resource);
                 k().ringOf(resource)?.hostMap(resource, type >>> 0);
             }
             const mapped = k().mapInto(resource, subresource >>> 0, type >>> 0,

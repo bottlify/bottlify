@@ -855,6 +855,7 @@ export function createGraphicsLibraries(
             // and compressed blocks.
             openglHeld: opengl ? opengl.diagnostics().held : null,
             vulkan: vulkan?.diagnostics() ?? null,
+            direct3d10: d3d10?.diagnostics() ?? null,
             // How the Presents of the version that presented were paced.
             presentPacing: [d3d9?.presentPacing(), d3d8?.presentPacing()]
                 .find(pacing=>pacing && pacing.presents > 0) ?? null,

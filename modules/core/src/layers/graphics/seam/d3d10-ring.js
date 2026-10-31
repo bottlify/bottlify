@@ -40,8 +40,9 @@ export const BUFFER10 = Object.freeze({
 /** The bytes of storages a buffer may be given in all: past it, its DISCARDs trap. */
 const STORAGE_BYTES = 4 * 1024 * 1024;
 
-/** D3D10_MAP_WRITE_DISCARD. */
+/** D3D10_MAP_WRITE_DISCARD and D3D10_MAP_WRITE_NO_OVERWRITE. */
 const MAP_WRITE_DISCARD = 4;
+const MAP_WRITE_NO_OVERWRITE = 5;
 
 /** How long the host waits for a routine on another executor to let the device go. */
 const HELD_WAIT_MS = 200;
@@ -56,6 +57,18 @@ const HELD_WAIT_MS = 200;
  */
 
 /**
+ * What a ring counts: the plays of it on the host's way into its own
+ * methods and their time, and why a dynamic buffer's maps reached the host
+ * -- a map that is not a write the guest makes, a buffer mapped already, a
+ * DISCARD (given one more storage, or at its cap: nearly always one that
+ * found none free), or a NO_OVERWRITE otherwise (the ring full, the device
+ * held, the host's flag).
+ *
+ * @typedef {{ syncs: number, syncMs: number, maps: { type: number, mapped: number,
+ *     added: number, capped: number, otherwise: number } }} RingCounters
+ */
+
+/**
  * @param {Object} deps
  * @param {(bytes: number) => number} deps.allocate  guest memory, 0 when there is none
  * @param {RingMemory} deps.memory
@@ -64,7 +77,7 @@ const HELD_WAIT_MS = 200;
  * @param {(detail: string) => void} deps.refuse
  * @param {number} [deps.ringBytes]
  * @returns {{ address: () => number, slow: (raised: boolean) => void, sync: () => void,
- *     taken: () => number,
+ *     taken: () => number, counters: () => RingCounters,
  *     attachBuffer: (buffer: any) => number, hostMap: (buffer: any, type: number) => void,
  *     hostUnmap: (buffer: any) => boolean, released: (buffer: any) => void } | null}
  *     null where there is no memory for one
@@ -169,6 +182,9 @@ export function createDeviceRing(deps){
     };
     /** @param {number} value */
     const word = value=>new Uint8Array(new Uint32Array([value]).buffer);
+    /** @type {RingCounters} */
+    const counted = { syncs: 0, syncMs: 0,
+        maps: { type: 0, mapped: 0, added: 0, capped: 0, otherwise: 0 } };
     let holds = 0;
     /**
      * The device's lock, taken for the host while it reads the ring: a
@@ -282,7 +298,25 @@ export function createDeviceRing(deps){
          */
         hostMap(buffer, type){
             const held = buffers.get(buffer);
-            if (!held || type !== MAP_WRITE_DISCARD)
+            if (!held)
+            {
+                return;
+            }
+            // The ring was played before this, freeing what its unmaps let
+            // go: a DISCARD here is counted as one that found nothing free.
+            if (type !== MAP_WRITE_DISCARD && type !== MAP_WRITE_NO_OVERWRITE)
+            {
+                counted.maps.type++;
+            }
+            else if (read(held.block + BUFFER10.MAPPED) !== 0)
+            {
+                counted.maps.mapped++;
+            }
+            else if (type !== MAP_WRITE_DISCARD)
+            {
+                counted.maps.otherwise++;
+            }
+            if (type !== MAP_WRITE_DISCARD)
             {
                 return;
             }
@@ -293,8 +327,10 @@ export function createDeviceRing(deps){
                 if (count >= BUFFER10.MOST
                     || (count + 1) * read(held.block + BUFFER10.LENGTH) > STORAGE_BYTES)
                 {
+                    counted.maps.capped++;
                     return;
                 }
+                counted.maps.added++;
                 const base = buffer.AddStorage();
                 if (base !== 0)
                 {
@@ -347,6 +383,7 @@ export function createDeviceRing(deps){
             return true;
         },
         sync(){
+            const from = performance.now();
             hold();
             try
             {
@@ -355,8 +392,12 @@ export function createDeviceRing(deps){
             finally
             {
                 letGo();
+                counted.syncs++;
+                counted.syncMs += performance.now() - from;
             }
         },
+        counters: ()=>({ ...counted, syncMs: Math.round(counted.syncMs),
+            maps: { ...counted.maps } }),
         taken: ()=>reader.taken(),
     };
 }
