@@ -959,8 +959,8 @@ export function createMissingImports({ register, events, journal, classify, faul
  * microtasks after each, and a loop that posts its next yield from those
  * microtasks stays inside the pass: a thousand turns go by before a timer
  * fires, a file read or a fetch answers, another port -- a worker's --
- * delivers a message, or a module the emulator compiled for a hot page is
- * installed, so the emulator interprets. Measured: a loop of half-millisecond
+ * delivers a message, or a module the translator compiled for hot code is
+ * installed, so the engine interprets. Measured: a loop of half-millisecond
  * turns yielding through a port saw a 3 ms interval fire three times in two
  * seconds, and through an immediate six hundred and sixty times. An immediate
  * set from inside an immediate runs on the next pass, and every pass looks at
@@ -1817,8 +1817,7 @@ const IOS_CALL_DEPTH = 64;
  * call into another faults, in the interpreter tier every wasm function starts
  * in: cork's regions placed by module (`dispatch`), a
  * transfer within a module a direct tail call and one out of it entered by the
- * runtime's loop (`crossTailCalls`); the emulator's chaining, every link of it
- * into another module, off. With them fewer calls wait as wasm calls
+ * runtime's loop (`crossTailCalls`). With them fewer calls wait as wasm calls
  * (`IOS_CALL_DEPTH`). The caller's own settings win. Decided on the page and
  * carried to every worker in the options.
  *
@@ -2222,7 +2221,7 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory){
  *
  * Where they start is not a constant: it is wherever the system modules end,
  * because a fixed address chosen in advance is a guess about how much memory
- * the emulator was given, and a wrong guess maps a library outside guest RAM.
+ * the machine was given, and a wrong guess maps a library outside guest RAM.
  */
 const LIBRARY_ALIGN = 0x10000;
 
@@ -3491,7 +3490,7 @@ export function areaOf(call, cache){
  * A kernel's view of guest memory: the scalar accessors a hook has always
  * had, plus `u8s`/`i32s`/`f32s`, a typed-array view over a span rather than
  * one call per element. `memory.window` already hands back a live subarray
- * of the emulator's own RAM, bounds-checked once for the whole span (the
+ * of guest RAM, bounds-checked once for the whole span (the
  * same primitive `audio` and `graphics` already read through) -- this only
  * adds the `Int32Array`/`Float32Array` reinterpretation on top of it, so
  * nothing new needed to be added to the memory layer itself.
@@ -4063,7 +4062,7 @@ async function buildApp(options){
         return performance?.memory?.usedJSHeapSize ?? 0;
     };
 
-    // Filled in once the emulator is up and a bundle, if any, is mounted. win32
+    // Filled in once the machine is up and a bundle, if any, is mounted. win32
     // is built before that and is handed the lookup rather than the answer.
     /** @type {{ source: any, fetch: (needed: any[]) => Promise<void>, stop: () => void,
      *          ahead: () => number,
@@ -4444,8 +4443,8 @@ async function buildApp(options){
             volume: options.system?.volume,
         },
         media: {
-            // The decoder, handed down the same way the emulator's binary is:
-            // this layer is one module over one wasm blob, and which blob is
+            // The decoder, handed down rather than fetched: this layer is one
+            // module over one wasm blob, and which blob is
             // the assembling caller's decision rather than something to fetch
             // from inside a worker. Absent, the layer comes up and says so.
             wasmBytes: options.media?.wasmBytes,
@@ -5364,8 +5363,8 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    // Cork runs with nothing of the emulator loaded: its own host, its own
-    // memory, and the translator named by `engineUrl`.
+    // The machine: cork's own host and memory, and the translator named by
+    // `engineUrl`.
     await cpu.boot();
 
     // A processor exception goes to the handlers the program registered
@@ -5394,12 +5393,11 @@ async function buildApp(options){
         return true;
     });
 
-    // Mounted after the machine is up. A zstd block is decoded by this
-    // project's own decoder now, so the mount no longer needs the emulator.
-    // The bundle is the run's: the first process opens it -- its index, its
-    // block cache, the background fill -- and every process after it mounts
-    // the same one, rather than each reading the index again and filling a
-    // second cache from the network beside the first.
+    // Mounted after the machine is up. The bundle is the run's: the first
+    // process opens it -- its index, its block cache, the background fill --
+    // and every process after it mounts the same one, rather than each reading
+    // the index again and filling a second cache from the network beside the
+    // first.
     mountedBlocks = !options.system?.bundle;
     blocks = options.system?.bundle
         ?? await mountBundle({ options, events, translationStore });
@@ -5466,19 +5464,6 @@ async function buildApp(options){
         name: 'heap', base: HEAP_BASE, size: HEAP_SIZE,
         kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
     });
-    // Our own boot ROM, so that a report can name it. A fault leaves the
-    // processor standing in the stub behind its vector, and until this was here
-    // that address came back as unmapped -- which sent every reader of a crash
-    // looking for a guest bug at an address belonging to the engine. Cork has
-    // no ROM and so registers none.
-    if (cpu.layout.romSize > 0)
-    {
-        memory.register({
-            name: 'boot-rom', base: cpu.layout.romBase, size: cpu.layout.romSize,
-            kind: memory.RegionKind.LOW_MEM, access: memory.Access.READ_EXECUTE,
-        });
-    }
-
     // Every system module exists in guest memory before the program's first
     // instruction, not when something first asks for it. An address taken early
     // has to be the address that works later (§13.3), and a module conjured on
@@ -7463,7 +7448,7 @@ async function buildApp(options){
         /**
          * Runs the program to completion, one scheduler turn at a time.
          *
-         * Turns rather than a free-running emulator: a turn is where a thread
+         * Turns rather than a free-running machine: a turn is where a thread
          * can be preempted, where a blocked one is put back on the road, and
          * where "nothing can run" becomes visible instead of looking like work.
          *
@@ -7985,19 +7970,15 @@ async function buildApp(options){
         off: (name, handler)=>events.off(name, handler),
 
         /**
-         * The emulator's account of where the guest ran, by the address of
-         * every compiled block and interpreted instruction, weighted by the
-         * instructions retired there. A sample taken where a turn stops lands
-         * on whatever stopped it; this is kept by the code as it runs, and is
-         * the only honest answer to "which of the program's own instructions
-         * is the time going to". Costs a call per block while it is kept, so
-         * it is started for a measurement and stopped after.
+         * An engine's own account of where the guest ran, by address, weighted
+         * by the instructions retired there, for an engine that keeps one.
+         * Cork keeps none here (`available` answers false): its block profile
+         * (`cork.blockProfile`) is a diagnostic run's.
          */
         guestProfile: {
             /**
-             * What a profiler build of the emulator counted since it started:
-             * its event counters by name and retired instructions by opcode.
-             * Null in a build without the profiler; a window is two readings.
+             * An engine's event counters by name and retired instructions by
+             * opcode since it started; null where it keeps none.
              */
             instructionStats: ()=>core.api('cpu').profile?.instructionStats() ?? null,
             available: ()=>Boolean(core.api('cpu').profile?.available()),

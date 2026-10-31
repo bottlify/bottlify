@@ -5,10 +5,9 @@
  */
 
 /**
- * The cork host runs with nothing of the emulator loaded: its own memory and
- * the engine loaded by URL. Step 5.2 wires the interpreter
- * tier in, so an address the translator has no entry for runs on cork's own
- * decoder and evaluator; an instruction the evaluator has no model for is an
+ * The cork host runs over its own memory and the engine loaded by URL. Step
+ * 5.2 wires the interpreter tier in, so an address the translator has no entry
+ * for runs on cork's own decoder and evaluator; an instruction the evaluator has no model for is an
  * invalid-opcode fault, and a fault becomes the host's fault record.
  */
 
@@ -20,10 +19,10 @@ import * as engine from '../../../../../cork/src/index.js';
 const ENTRY_VECTOR = 0x7000;
 
 /**
- * A host over the engine module, with nothing of the emulator loaded, its
- * slices ended by their instruction count alone: an interpreted slice
- * otherwise ends once it has taken its time (`sliceMs`), and with eight busy
- * loops beside the suite one ended at the trap, short of the hlt after it.
+ * A host over the engine module, its slices ended by their instruction count
+ * alone: an interpreted slice otherwise ends once it has taken its time
+ * (`sliceMs`), and with eight busy loops beside the suite one ended at the
+ * trap, short of the hlt after it.
  */
 function host(){
     return createCorkHost({

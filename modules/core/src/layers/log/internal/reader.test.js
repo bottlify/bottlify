@@ -250,23 +250,20 @@ test('a frame says what the program did and what it cost us, without a second ru
     const reader = createLogReader({ memory: api.memory() });
 
     /**
-     * @param {number} ms @param {number} retired @param {number} interpreted
+     * @param {number} ms @param {number} retired
      * @param {Object} [extra]
-     * @param {number} [extra.stretches]  Interpreter entries, cumulative.
-     * @param {number} [extra.worst]      Steps of the frame's heaviest stretch.
+     * @param {number} [extra.worst]      Steps of the frame's heaviest interpreted stretch.
      * @param {number} [extra.at]         Where that stretch began.
      * @param {number} [extra.written]    Bytes the host wrote, cumulative.
      * @param {string} [extra.writer]     Which call wrote most of them.
      * @param {number} [extra.writerBytes]
      */
-    const frame = (ms, retired, interpreted, extra = {})=>{
+    const frame = (ms, retired, extra = {})=>{
         api.beginFrame();
         api.begin('slice', 'guest');
         time += ms;
         api.end('slice', { instructions: retired });
         cpu('retired', retired);
-        cpu('interpretedSteps', interpreted);
-        cpu('interpretedDispatches', extra.stretches ?? 0);
         cpu('hostWrittenBytes', extra.written ?? 0);
         cpu('interpretedWorst', extra.worst ?? 0);
         cpu('interpretedAt', extra.at ?? 0);
@@ -279,40 +276,24 @@ test('a frame says what the program did and what it cost us, without a second ru
     };
 
     // Three frames of a counter that only ever grows, read as three frames.
-    frame(10, 1_000_000, 500, { stretches: 10, written: 1000 });
-    frame(10, 3_000_000, 1500, { stretches: 40, written: 5000,
-        writer: 'LockRect', writerBytes: 2000 });
-    frame(100, 3_500_000, 60_000, { stretches: 140, written: 900_000,
+    frame(10, 1_000_000, { written: 1000 });
+    frame(10, 3_000_000, { written: 5000, writer: 'LockRect', writerBytes: 2000 });
+    frame(100, 3_500_000, { written: 900_000,
         worst: 48_000, at: 0x6f02000, writer: 'CreateTexture', writerBytes: 700_000 });
     const frames = reader.frames();
     assert.equal(frames.length, 3);
     assert.deepEqual(frames.map(one=>one.instructions), [0, 2_000_000, 500_000],
         'the oldest row has nothing to subtract from and claims nothing');
-    assert.deepEqual(frames.map(one=>one.counters.interpretedSteps), [0, 1000, 58_500]);
-    assert.equal(frames[2].counters.interpretedSteps > frames[1].counters.interpretedSteps * 50,
-        true, 'the interpret burst is in the frame that had it');
+    assert.deepEqual(frames.map(one=>one.counters.hostWrittenBytes), [0, 4000, 895_000]);
     assert.equal(frames[2].instructions / frames[2].ms < frames[1].instructions / frames[1].ms,
         true, 'and that frame ran the program slower than the one before');
-    assert.equal(frames[2].counters.x87TagLost, 0, 'a counter nothing wrote reads as nothing');
+    assert.equal(frames[2].counters.trapCrossings, 0, 'a counter nothing wrote reads as nothing');
     assert.deepEqual(frames[2].thread,
         { name: 'main', instructions: 3_500_000, at: 0x6f01000, module: 'Storm.dll' });
     // The two things a count alone could not say: where the interpreter ran,
     // and which of our own calls put the bytes into the guest.
-    assert.deepEqual(frames[2].interpreted, {
-        steps: 58_500, compiledSteps: 0, stretches: 100, perStretch: 585,
-        worst: 48_000, at: 0x6f02000, module: 'Storm.dll',
-        // Every reason reported, and nothing left absent because no layer
-        // moved it: a field that only appears when it is interesting cannot
-        // be read as an answer when it is missing.
-        reasons: {
-            noCode: { stretches: 0, steps: 0 },
-            noEntry: { stretches: 0, steps: 0 },
-            nearPageEnd: { stretches: 0, steps: 0 },
-            differentState: { stretches: 0, steps: 0 },
-        },
-        belowThreshold: 0, compileDeferred: 0, entryAfterPageWalk: 0,
-        lostToWrites: { modules: 0, hotness: 0 },
-    });
+    assert.deepEqual(frames[2].interpreted,
+        { worst: 48_000, at: 0x6f02000, module: 'Storm.dll' });
     assert.deepEqual(frames[2].wrote,
         { bytes: 895_000, busiest: 'CreateTexture', busiestBytes: 700_000 });
     assert.equal(frames[0].wrote.busiest, null,
@@ -322,85 +303,8 @@ test('a frame says what the program did and what it cost us, without a second ru
 
     // A counter that went backwards -- a machine restarted under the reader --
     // is reported as no work rather than as negative work.
-    frame(10, 10, 0);
+    frame(10, 10);
     assert.equal(reader.frames().at(-1)?.instructions, 0);
-    await logModule.dispose();
-});
-
-test('a frame says why the interpreter ran, as the step the counters took in it', async()=>{
-    let time = 0;
-    const api = await logModule.create({ now: ()=>time, wallClock: ()=>time, shared: false });
-    const cpu = mirroredBy(api, 'cpu');
-    const reader = createLogReader({ memory: api.memory() });
-
-    /**
-     * The interpreter's reason counters as a frame's row carries them, and
-     * what each of them is worth cumulatively after the second frame. Named
-     * one by one on purpose: a list derived from the layout would still pass
-     * with a column dropped from it, and the point of this test is that none
-     * of these can go missing again unnoticed.
-     *
-     * @type {[string, number, number][]}
-     */
-    const reasons = [
-        ['interpNoCode', 100, 900],
-        ['interpNoEntry', 20, 25],
-        ['interpNearPageEnd', 7, 11],
-        ['interpDifferentState', 3, 3],
-        ['interpNoCodeSteps', 4_000, 44_000],
-        ['interpNoEntrySteps', 500, 700],
-        ['interpNearPageEndSteps', 60, 100],
-        ['interpDifferentStateSteps', 9, 9],
-        ['interpBelowThreshold', 80, 800],
-        ['interpEntryAfterPageWalk', 1_000, 1_400],
-        ['modulesLostToWrites', 2, 5],
-        ['hotnessLostToWrites', 6, 6],
-        ['compiledSteps', 1_000_000, 1_040_000],
-        // Left where it was on purpose: a reason the frame did not take has to
-        // report nothing, not report missing.
-        ['interpCompileDeferred', 0, 0],
-    ];
-
-    /** @param {number} ms @param {boolean} second  Which of the two readings to write. */
-    const frame = (ms, second)=>{
-        api.beginFrame();
-        api.begin('slice', 'guest');
-        time += ms;
-        api.end('slice', { instructions: 1000 });
-        for (const [column, before, after] of reasons)
-        {
-            cpu(column, second ? after : before);
-        }
-        api.endFrame();
-    };
-    frame(10, false);
-    frame(60, true);
-
-    const frames = reader.frames();
-    assert.equal(frames.length, 2);
-    for (const [column, before, after] of reasons)
-    {
-        assert.equal(frames[1].counters[column], after - before,
-            `${column} as the step this frame took, not as the run's total`);
-        assert.equal(frames[0].counters[column], 0,
-            `${column} claims nothing in a frame with nothing before it`);
-    }
-
-    // And as a reader reads them: the four reasons with the steps each one
-    // interpreted, which is what a bare step count could never say.
-    assert.deepEqual(frames[1].interpreted.reasons, {
-        noCode: { stretches: 800, steps: 40_000 },
-        noEntry: { stretches: 5, steps: 200 },
-        nearPageEnd: { stretches: 4, steps: 40 },
-        differentState: { stretches: 0, steps: 0 },
-    });
-    assert.equal(frames[1].interpreted.belowThreshold, 720);
-    assert.equal(frames[1].interpreted.compileDeferred, 0,
-        'a reason nothing moved is zero rather than absent');
-    assert.equal(frames[1].interpreted.entryAfterPageWalk, 400);
-    assert.deepEqual(frames[1].interpreted.lostToWrites, { modules: 3, hotness: 0 });
-    assert.equal(frames[1].interpreted.compiledSteps, 40_000,
-        'beside the interpreted steps, so the two can be compared in one frame');
     await logModule.dispose();
 });
 

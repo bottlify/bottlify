@@ -181,7 +181,7 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
     const entries = [];
 
     // Slot 0 is never dispatched: it holds the park loop. A handler that ends the
-    // process cannot stop the emulator from inside its own trap callback — the
+    // process cannot stop the machine from inside its own trap callback — the
     // guest would still execute the stub's `ret` and return into whatever the
     // stack happened to hold. Instead the return address is redirected here, and
     // the machine is stopped from outside the callback. `hlt` rather than a tight

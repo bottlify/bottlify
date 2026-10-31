@@ -156,7 +156,6 @@ test('hello ends translated as it ends on the model',
         const cork = await run(exe);
         assert.equal(cork.code, reference.code);
         assert.equal(cork.output, reference.output);
-        assert.equal(cork.diagnostics.metrics?.engine, 'cork');
     });
 
 for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])

@@ -39,7 +39,6 @@ function machine({ stack = {}, registers = {}, waiting = [], threads = [] } = {}
             /** @param {string} name */
             readReg32: name=>values[name] ?? 0,
             instructionCount: ()=>12345,
-            inProtectedMode: ()=>true,
         },
         memory: {
             /** @param {number} address */
@@ -128,12 +127,12 @@ test('the stack walk finds return addresses and ignores everything else', ()=>{
 test('a trace is taken even when the machine cannot answer', ()=>{
     const sources = machine();
     sources.cpu.eip = ()=>{
-        throw new Error('the emulator is gone');
+        throw new Error('the machine is gone');
     };
 
     // A diagnostic that throws while diagnosing takes the diagnosis with it.
     const trace = captureTrace(sources);
-    assert.match(trace.cpuUnavailable, /the emulator is gone/);
+    assert.match(trace.cpuUnavailable, /the machine is gone/);
     assert.deepEqual(trace.hostCalls, ['msvcrt.dll!qsort'], 'the rest still arrived');
 });
 

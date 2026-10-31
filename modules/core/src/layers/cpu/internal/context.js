@@ -13,127 +13,20 @@
  * bug this project has (master plan §12.1).
  *
  * This lives in the cpu layer rather than the kernel because it is shaped by
- * the executor's own representation. The kernel decides *when* to switch; what
+ * the engine's own representation. The kernel decides *when* to switch; what
  * a CPU context *is* belongs here, behind an opaque record.
  *
- * Cork alone keeps the whole register file in one 512-byte state block, so its
- * record is a copy of that block plus the halted flag. The emulator's record
- * stays beside it for the emulator a caller brings.
- *
- * Every field was located and round-tripped against v86 before being listed.
- * Two of them are the traps:
- *
- *   - Arithmetic flags are lazy. The raw `flags` word is missing OF, SF, AF and
- *     PF while `flags_changed` is non-zero -- measured, not theorised: after an
- *     overflowing add the raw word read 0x2 where the materialised value was
- *     0x896. All five lazy fields move together, which is bit-exact and needs no
- *     call into wasm.
- *   - `fpu_stack_ptr` and `fpu_stack_empty` are two single bytes that decide
- *     what the eight x87 registers *mean*. `fpu_stack_empty` is the tag word;
- *     there is no other. Any MMX instruction zeroes both, because MMX registers
- *     are the same storage. Restoring the 32 register words without them yields
- *     a wrong number with no fault at all.
+ * The engine keeps the whole register file in one state block -- the general
+ * registers, the flags word and the arithmetic record a region left beside it,
+ * the x87 stack with its top and empty mask, the vector registers, the thread
+ * block's base -- so a record is a copy of that block plus the halted flag.
+ * The x87 top and empty mask are two bytes that decide what the eight
+ * registers *mean*: restoring the registers without them yields a wrong number
+ * with no fault at all, and the block carries them with the rest.
  */
 
-/** Index of FS in the segment tables; its base is the thread's TEB. */
-export const SEGMENT_FS = 4;
-
-/** @param {Int32Array | Uint32Array | Uint16Array | Uint8Array} view */
-const copy = view=>Array.from(view);
-
 /**
- * Captures the running thread's context.
- *
- * @param {any} cpu  The emulator's CPU object.
- * @returns {any} an opaque context record
- */
-export function captureContext(cpu){
-    return {
-        reg32: copy(cpu.reg32),
-        eip: cpu.instruction_pointer[0],
-        previousIp: cpu.previous_ip[0],
-
-        sreg: copy(cpu.sreg),
-        segmentOffsets: copy(cpu.segment_offsets),
-        segmentIsNull: copy(cpu.segment_is_null),
-        segmentLimits: copy(cpu.segment_limits),
-        segmentAccessBytes: copy(cpu.segment_access_bytes),
-
-        // All five, together: see the note above on lazy flags.
-        flags: cpu.flags[0],
-        flagsChanged: cpu.flags_changed[0],
-        lastOp1: cpu.last_op1[0],
-        lastResult: cpu.last_result[0],
-        lastOpSize: cpu.last_op_size[0],
-
-        fpuSt: copy(cpu.fpu_st),
-        fpuStackPtr: cpu.fpu_stack_ptr[0],
-        fpuStackEmpty: cpu.fpu_stack_empty[0],
-        fpuControlWord: cpu.fpu_control_word[0],
-        fpuStatusWord: cpu.fpu_status_word[0],
-        fpuOpcode: cpu.fpu_opcode[0],
-        fpuIp: cpu.fpu_ip[0],
-        fpuIpSelector: cpu.fpu_ip_selector[0],
-        fpuDp: cpu.fpu_dp[0],
-        fpuDpSelector: cpu.fpu_dp_selector[0],
-
-        regXmm: copy(cpu.reg_xmm32s),
-        mxcsr: cpu.mxcsr[0],
-
-        // A thread parked on `hlt` is halted; without this it resumes running.
-        inHlt: cpu.in_hlt[0],
-    };
-}
-
-/**
- * Restores a captured context.
- *
- * No guest instruction runs during a restore, so the writes are independent and
- * their order does not matter. What matters is that all of them happen.
- *
- * @param {any} cpu
- * @param {any} context
- */
-export function restoreContext(cpu, context){
-    cpu.reg32.set(context.reg32);
-    cpu.instruction_pointer[0] = context.eip;
-    cpu.previous_ip[0] = context.previousIp;
-
-    cpu.sreg.set(context.sreg);
-    cpu.segment_offsets.set(context.segmentOffsets);
-    cpu.segment_is_null.set(context.segmentIsNull);
-    cpu.segment_limits.set(context.segmentLimits);
-    cpu.segment_access_bytes.set(context.segmentAccessBytes);
-
-    cpu.flags[0] = context.flags;
-    cpu.flags_changed[0] = context.flagsChanged;
-    cpu.last_op1[0] = context.lastOp1;
-    cpu.last_result[0] = context.lastResult;
-    cpu.last_op_size[0] = context.lastOpSize;
-
-    cpu.fpu_st.set(context.fpuSt);
-    cpu.fpu_stack_ptr[0] = context.fpuStackPtr;
-    cpu.fpu_stack_empty[0] = context.fpuStackEmpty;
-    // Not a plain field write: the emulator's fast arithmetic path reads its own
-    // rounding-precision byte, derived from the control word by this export, not
-    // the control word itself -- a direct write here would leave that byte at
-    // whatever the previous thread's own fldcw last set it to.
-    cpu.wm.exports.set_control_word(context.fpuControlWord);
-    cpu.fpu_status_word[0] = context.fpuStatusWord;
-    cpu.fpu_opcode[0] = context.fpuOpcode;
-    cpu.fpu_ip[0] = context.fpuIp;
-    cpu.fpu_ip_selector[0] = context.fpuIpSelector;
-    cpu.fpu_dp[0] = context.fpuDp;
-    cpu.fpu_dp_selector[0] = context.fpuDpSelector;
-
-    cpu.reg_xmm32s.set(context.regXmm);
-    cpu.mxcsr[0] = context.mxcsr;
-
-    cpu.in_hlt[0] = context.inHlt;
-}
-
-/**
- * A cork-alone context: the whole state block, plus the fields the cpu module
+ * A thread's context: the whole state block, plus the fields the cpu module
  * mutates on a saved context before restoring it.
  *
  * @typedef {Object} BlockContext
@@ -174,7 +67,7 @@ function viewsOf(block){
 }
 
 /**
- * Captures the running cork thread's context.
+ * Captures the running thread's context.
  *
  * The block is every register, the flags, x87, XMM and the thread's FS base,
  * so the record is a copy of it. The retired-instruction word inside the block
@@ -219,7 +112,7 @@ export function captureBlockContext(host, into){
 }
 
 /**
- * Restores a captured cork context.
+ * Restores a captured context.
  *
  * @param {any} host
  * @param {BlockContext} context
@@ -274,59 +167,38 @@ export const THREAD_MXCSR = 0x1f80;
  * MXCSR, or values left on its x87 stack are its own and do not pass to the
  * threads it creates.
  *
- * @param {any} context  Either record: the emulator's fields or cork's block.
+ * @param {BlockContext} context
  */
 export function freshThreadFpu(context){
-    if (context.block instanceof Uint8Array)
+    const { block, layout } = context;
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    view.setUint16(layout.x87Control, THREAD_CONTROL_WORD, true);
+    view.setUint16(layout.x87Status, 0, true);
+    block[layout.x87Top] = 0;
+    block[layout.x87Empty] = 0xff;
+    if (layout.x87Exact !== undefined && layout.x87Exact >= 0)
     {
-        const { block, layout } = /** @type {BlockContext} */ (context);
-        const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
-        view.setUint16(layout.x87Control, THREAD_CONTROL_WORD, true);
-        view.setUint16(layout.x87Status, 0, true);
-        block[layout.x87Top] = 0;
-        block[layout.x87Empty] = 0xff;
-        if (layout.x87Exact !== undefined && layout.x87Exact >= 0)
-        {
-            block[layout.x87Exact] = 0;
-        }
-        block.fill(0, layout.xmm, layout.xmm + (layout.bits === 64 ? 16 : 8) * 16);
-        view.setUint32(layout.mxcsr, THREAD_MXCSR, true);
-        return;
+        block[layout.x87Exact] = 0;
     }
-    context.fpuSt.fill(0);
-    context.fpuStackPtr = 0;
-    context.fpuStackEmpty = 0xff;
-    context.fpuControlWord = THREAD_CONTROL_WORD;
-    context.fpuStatusWord = 0;
-    context.fpuOpcode = 0;
-    context.fpuIp = 0;
-    context.fpuIpSelector = 0;
-    context.fpuDp = 0;
-    context.fpuDpSelector = 0;
-    context.regXmm.fill(0);
-    context.mxcsr = THREAD_MXCSR;
+    block.fill(0, layout.xmm, layout.xmm + (layout.bits === 64 ? 16 : 8) * 16);
+    view.setUint32(layout.mxcsr, THREAD_MXCSR, true);
 }
 
 /**
  * The TEB base the thread runs on. Kept next to the context because moving it
  * is part of switching threads, not a duty of whoever calls the switch (§12.5).
  *
- * @param {any} context
+ * @param {BlockContext} context
  * @param {number} tebAddress
  */
 export function setThreadBase(context, tebAddress){
-    if (context.block !== undefined)
+    // Long mode reaches the TEB through GS; FS has no base there.
+    if (context.layout.bits === 64)
     {
-        // Long mode reaches the TEB through GS; FS has no base there.
-        if (context.layout?.bits === 64)
-        {
-            context.gsBase = tebAddress >>> 0;
-            return;
-        }
-        context.fsBase = tebAddress >>> 0;
+        context.gsBase = tebAddress >>> 0;
         return;
     }
-    context.segmentOffsets[SEGMENT_FS] = tebAddress;
+    context.fsBase = tebAddress >>> 0;
 }
 
 /**
@@ -347,28 +219,22 @@ export function clearGeneralRegisters(context){
 }
 
 /**
- * Sets a saved context's flags word, whole: the arithmetic state kept lazily
- * beside it -- cork's record, the emulator's operands -- is dropped, since the
- * word now says everything. For a thread sent into code with the flags it is
- * to start with: an exception handler, or where a handler's context continues.
+ * Sets a saved context's flags word, whole: the arithmetic record kept beside
+ * it is dropped, since the word now says everything. For a thread sent into
+ * code with the flags it is to start with: an exception handler, or where a
+ * handler's context continues.
  *
- * @param {any} context  Either record: the emulator's fields or cork's block.
+ * @param {BlockContext} context
  * @param {number} value
  */
 export function setContextEflags(context, value){
-    if (context.block instanceof Uint8Array)
+    const { block, layout } = context;
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    view.setUint32(layout.eflags, value >>> 0, true);
+    if ((layout.flagRecord ?? -1) >= 0)
     {
-        const { block, layout } = /** @type {BlockContext} */ (context);
-        const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
-        view.setUint32(layout.eflags, value >>> 0, true);
-        if ((layout.flagRecord ?? -1) >= 0)
-        {
-            view.setUint32(/** @type {number} */ (layout.flagRecord), 0, true);
-        }
-        return;
+        view.setUint32(/** @type {number} */ (layout.flagRecord), 0, true);
     }
-    context.flags = value | 0;
-    context.flagsChanged = 0;
 }
 
 /**
@@ -414,30 +280,4 @@ export function setContextLong(context, long){
     {
         view.setUint32(layout.mxcsr, long.mxcsr >>> 0, true);
     }
-}
-
-/**
- * Reports which fields differ, for tests and for diagnosing a switch that lost
- * something. Empty means the two contexts are identical.
- *
- * @param {any} a
- * @param {any} b
- * @returns {string[]}
- */
-export function diffContexts(a, b){
-    /** @type {string[]} */
-    const differing = [];
-    for (const key of Object.keys(a))
-    {
-        const left = a[key];
-        const right = b[key];
-        const same = Array.isArray(left)
-            ? left.length === right.length && left.every((value, i)=>value === right[i])
-            : left === right;
-        if (!same)
-        {
-            differing.push(key);
-        }
-    }
-    return differing;
 }

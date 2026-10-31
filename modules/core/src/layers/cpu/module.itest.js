@@ -50,10 +50,7 @@ async function booted(code, at, config = {}){
     return { api, metrics, counters };
 }
 
-test('under cork the jit counters say -1, not a dead compiler', async()=>{
-    // Cork has no emulator compiler: the `jit.*` columns stay in the table
-    // (a caller reads the same schema on every engine) but report -1, so a
-    // zero is never mistaken for a compiler that compiled nothing.
+test('the frame counters carry what the host wrote into guest memory', async()=>{
     const metrics = createMetrics({ shared: false });
     const api = await cpuModule.create({
         engineUrl: CORK,
@@ -66,9 +63,8 @@ test('under cork the jit counters say -1, not a dead compiler', async()=>{
     api.runSlice(100);
     metrics.sample();
     const row = readTable(metrics.describe().cpu.counters).row(0);
-    assert.equal(row['jit.compiledSteps'], -1);
-    assert.equal(row['jit.cache'], -1);
-    assert.equal(/** @type {any} */ (cpuModule.diagnostics().metrics).jit, -1);
+    assert.ok(row.hostWrittenBytes >= 5, `${row.hostWrittenBytes} bytes`);
+    assert.ok(row.instructions > 0);
     await cpuModule.dispose();
 });
 

@@ -5,25 +5,11 @@
  */
 
 /**
- * A processor exception, turned into something that can be reported.
- *
- * Without an interrupt table the emulator has nowhere to send a fault and stops
- * the machine, so a divide by zero, a bad pointer and an illegal instruction
- * all arrive as "the emulator gave up" -- the same message, at an address that
- * is wherever the CPU happened to be, with nothing to say which of them it was.
- * The ROM gives each of the first thirty-two vectors a gate and a stub, and
- * this reads what the processor pushed before that stub ran.
- *
- * What it pushed depends on the vector. Some exceptions carry an error code and
- * some do not, and reading the frame the wrong way round reports the faulting
- * address as a selector -- a plausible number, and wrong. The set that carries
- * one is fixed by the architecture and is listed below rather than guessed at.
+ * A processor exception, turned into something that can be reported: the
+ * record the engine builds from a fault exit (`cork-host.js`), or one the host
+ * raised itself, each named by its vector so a divide by zero, a bad pointer
+ * and an illegal instruction read as what they were.
  */
-
-import { FAULT_SAVED, inDeadBootCode } from './boot-rom.js';
-
-/** Vectors whose exception pushes an error code before the return frame. */
-const WITH_ERROR_CODE = new Set([8, 10, 11, 12, 13, 14, 17, 21]);
 
 /** What each exception is called, so a report names it rather than numbering it. */
 const NAMES = Object.freeze([
@@ -42,26 +28,24 @@ const NAMES = Object.freeze([
  * @property {number} eip          Where the faulting instruction is.
  * @property {number} cs
  * @property {number} eflags
- * @property {number | null} errorCode  Null for the exceptions that push none.
+ * @property {number | null} errorCode  Null for the exceptions that carry none.
  * @property {number} calledFrom
- *           The word sitting directly above the frame. When the fault is a jump
- *           to somewhere there is no code, that word is the return address the
- *           call pushed -- which names the instruction that made the call, and
- *           the faulting address itself names nothing at all.
+ *           When the fault is a jump to somewhere there is no code, the return
+ *           address the call pushed -- which names the instruction that made the
+ *           call, and the faulting address itself names nothing at all; 0 when
+ *           not known.
  * @property {string} [detail]
- *           The whole report, for a fault the host raised rather than read off
- *           the processor: what the machine knows about it is the sentence,
- *           not a vector and a frame.
- * @property {number} [eax]    The faulting code's, which the stub saved.
+ *           The whole report, for a fault the host raised: what the machine
+ *           knows about it is the sentence, not a vector and a frame.
+ * @property {number} [eax]    The faulting code's.
  * @property {number} [edx]
- * @property {number} [stack]  ESP as the faulting instruction had it, before
- *           the processor pushed anything.
+ * @property {number} [stack]  ESP as the faulting instruction had it.
  */
 
 /**
  * The vector of a fault the host raised: a stop the processor never saw, named
  * by whoever decided the guest could not go on. Outside the table on purpose,
- * so nothing mistakes it for an exception with a frame to read.
+ * so nothing mistakes it for a processor exception.
  */
 export const HOST_VECTOR = -1;
 
@@ -104,38 +88,6 @@ export function exceptionName(vector){
 }
 
 /**
- * Reads the frame the processor pushed, given the stack pointer as the stub
- * found it.
- *
- * Above the two registers the stub saved sits that frame: the error code when
- * there is one, then EIP, CS and EFLAGS. There is no stack switch to account
- * for -- the guest runs at ring zero, so the processor pushes no SS:ESP, and
- * the faulting code's own stack begins right after EFLAGS.
- *
- * @param {number} vector
- * @param {number} esp
- * @param {(address: number) => number} readU32
- * @returns {GuestFault}
- */
-export function readFault(vector, esp, readU32){
-    const hasError = WITH_ERROR_CODE.has(vector);
-    const frame = esp + FAULT_SAVED;
-    const at = hasError ? frame + 4 : frame;
-    return {
-        vector,
-        name: exceptionName(vector),
-        errorCode: hasError ? readU32(frame) >>> 0 : null,
-        eip: readU32(at) >>> 0,
-        cs: readU32(at + 4) >>> 0,
-        eflags: readU32(at + 8) >>> 0,
-        calledFrom: readU32(at + 12) >>> 0,
-        edx: readU32(esp) >>> 0,
-        eax: readU32(esp + 4) >>> 0,
-        stack: (at + 12) >>> 0,
-    };
-}
-
-/**
  * How a fault reads in a report.
  *
  * A page fault's error code is worth spelling out because its bits are the
@@ -153,12 +105,6 @@ export function describeFault(fault){
     }
     const where = `at 0x${fault.eip.toString(16).padStart(8, '0')}`;
     const from = `, called from 0x${fault.calledFrom.toString(16).padStart(8, '0')}`;
-    // The breakpoint is a trap, so the frame names the byte after it.
-    const executed = fault.vector === 3 ? fault.eip - 1 : fault.eip;
-    if (inDeadBootCode(executed))
-    {
-        return `guest jumped into the boot ROM ${where}${from}`;
-    }
     if (fault.errorCode === null)
     {
         // A fault at an address with no code is a call that should not have

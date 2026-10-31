@@ -5,11 +5,9 @@
  */
 
 /**
- * The cork host: the cpu layer's host over cork's own memory, with no emulator.
+ * The cork host: the cpu layer's host over cork's own memory.
  *
- * A program runs with nothing of the emulator loaded -- not its machine, not
- * its wasm. This host is what stands in for it: a
- * `WebAssembly.Memory` of its own, cork's own layout (a 512-byte state block,
+ * A `WebAssembly.Memory` of its own, cork's own layout (a 512-byte state block,
  * the guest's RAM after it, cork's tables after that), and the translator's
  * runtime over the two. The slice loop is the translator's entry, or -- where
  * none exists yet -- the interpreter tier of 5.2, which runs cork's own decoder
@@ -17,14 +15,12 @@
  * the evaluator has no model for is the engine's no-tier answer, and a fault
  * becomes the host's fault record.
  *
- * There is no ROM. The boot ROM exists to switch the emulator from real mode
- * and set up its descriptor caches; cork's layout has no segment registers and
+ * Nothing runs before the program: cork's layout has no segment registers and
  * no control registers, flat 32-bit protected mode being all it translates, so
- * the host sets the registers the ROM would have left: esp at the initial
- * stack, eflags reserved-bit set, the x87 control word and the MXCSR at their
- * defaults, every x87 register empty, and eip read from the entry vector at the
- * first slice (the loader writes the entry point there after boot, the way the
- * ROM's indirect jump read it).
+ * the host sets the registers a thread starts with -- esp at the initial stack,
+ * eflags reserved-bit set, the x87 control word and the MXCSR at their
+ * defaults, every x87 register empty -- and reads eip from the entry vector at
+ * the first slice (the loader writes the entry point there after boot).
  *
  * Nothing here imports the cork package statically -- the layer never imports an
  * engine package, so the engine module (`createEngine`, `ownLayout`, the table
@@ -58,10 +54,10 @@ const DEFAULT_CONTROL_WORD = 0x037f;
 const DEFAULT_MXCSR = 0x1f80;
 /**
  * eflags after boot: bit 1 is reserved and always set. IF stays clear although
- * a Windows thread reads it set from pushfd: the boot ROM clears it so that no
- * device interrupt ever reaches the emulator's guest (threads are switched on
- * retired instructions, not a timer), and the two engines must show a guest the
- * same flags.
+ * a Windows thread reads it set from pushfd: no interrupt is ever delivered
+ * (threads are switched on retired instructions, not a timer), and this is the
+ * word every program here has started with -- setting IF changes what a program
+ * reads from pushfd, a change to make when one is found to look.
  */
 const DEFAULT_EFLAGS = 0x2;
 /**
@@ -429,7 +425,7 @@ export function createCorkHost(config){
         ram.fill(value, Math.max(address, enginePages.to), address + length);
     };
 
-    // The boot state: the registers the ROM would have left, and nothing run.
+    // The boot state: the registers a thread starts with, and nothing run.
     block.fill(0);
     if (reg64 === null)
     {
@@ -522,8 +518,8 @@ export function createCorkHost(config){
     const isStopped = ()=>stopped;
     // Read through a function like the two above: `countHot` sets it.
     const isFeedDue = ()=>feedDue;
-    // eip is read from the entry vector at the first slice, the way the ROM's
-    // indirect jump read it: the loader writes the entry point after boot.
+    // eip is read from the entry vector at the first slice: the loader writes
+    // the entry point after boot.
     // Another executor's threads are placed in its block by the process: it
     // never starts from the entry vector.
     let entered = executor !== 0;
@@ -706,9 +702,8 @@ export function createCorkHost(config){
         },
     });
 
-    // The emulator reads every address below RAM's end, so only cork alone,
-    // which no longer answers to it, closes a range: a translated read outside
-    // `precise` still wraps into RAM rather than testing it.
+    // A translated read outside `precise` still wraps into RAM rather than
+    // testing the range (`checkReads`): the interpreter and stores find it closed.
     if (closedBelow > 0)
     {
         runtime.pages?.markRange(0, closedBelow, PAGE_INACCESSIBLE);
@@ -868,11 +863,9 @@ export function createCorkHost(config){
 
     /**
      * A fault either tier raised. Offered first to the handler, with what a
-     * handler needs that the emulator's ROM stub would have read off the
-     * frame -- the faulting code's own stack and the two registers the stub
-     * saves -- and, when the handler takes it, the machine goes on wherever
-     * the handler has put eip. Either way the slice ends here, as the
-     * emulator's fault stub ends it with a halt.
+     * handler needs beside the vector -- the faulting code's own stack, its eax
+     * and edx -- and, when the handler takes it, the machine goes on wherever
+     * the handler has put eip. Either way the slice ends here, with a halt.
      *
      * @param {number} vector
      * @param {{ address: number, write: boolean } | null} [page]  for an access to a page the
@@ -1368,13 +1361,11 @@ export function createCorkHost(config){
         }
         stopped = false;
         feedDue = false;
-        // A slice is the clock's tick. On the emulator a `hlt` holds the
-        // processor until its timer interrupt, whose handler in the ROM only
-        // returns, so the guest goes on at the instruction after the `hlt`
-        // when the layer next runs it; this host has no timer, so being asked
-        // to run is the tick, and a halt ends a slice, never the machine. A
-        // fault's halt ends the same way: the layer has read the record and
-        // decided where to run.
+        // A slice is the clock's tick: `hlt` holds a processor until its next
+        // interrupt, and this host has no timer, so being asked to run is the
+        // tick -- the guest goes on at the instruction after the `hlt`, and a
+        // halt ends a slice, never the machine. A fault's halt ends the same
+        // way: the layer has read the record and decided where to run.
         halted = false;
         if (!entered)
         {
@@ -1623,7 +1614,6 @@ export function createCorkHost(config){
 
     /** @type {Record<string, any>} */
     const host = {
-        engine: ()=>'cork',
         /** The translator's runtime, for the layer's sampler and diagnostics. */
         cork: ()=>runtime,
         /** The memory's bytes past the guest's RAM: the engine's, every executor's. */
@@ -1725,9 +1715,6 @@ export function createCorkHost(config){
         playProcessor(processor){
             played = processor;
         },
-        romBase: -1,
-        romSize: 0,
-
         halt(){
             halted = true;
         },
@@ -1740,11 +1727,6 @@ export function createCorkHost(config){
         wake(){
             halted = false;
         },
-        /** Cork is always flat 32-bit protected mode: CR0 reads PE set.
-         * @param {number} index
-         */
-        controlRegister: index=>(index === 0 ? 1 : 0),
-
         /** @param {(value: number) => void} handler */
         onTrap(handler){
             trapHandler = handler;
@@ -1952,9 +1934,6 @@ export function createCorkHost(config){
             lastFault = null;
         },
         fpu: ()=>fpu,
-        cpu(){
-            throw new Error('cpu: cork has no emulator CPU object');
-        },
 
         /** One XMM register's four lanes as u32 bit patterns. @param {number} index */
         readXmm: index=>Uint32Array.from(xmm.subarray(index * 4, index * 4 + 4)),
@@ -2005,7 +1984,6 @@ export function createCorkHost(config){
             fold();
             return counted;
         },
-        inProtectedMode: ()=>true,
         eip,
         trapCrossings: ()=>trapCrossings,
         /** The I/O ports the program touched other than the trap port. */
@@ -2037,11 +2015,6 @@ export function createCorkHost(config){
             + (r.halted ? ' H' : '')),
         hostWrites: ()=>hostWrites,
         hostWrittenBytes: ()=>hostWrittenBytes,
-        // Cork has no emulator JIT; the translator's own figures are in
-        // corkDiagnostics(). -1 tells the layer's frame counter to skip the
-        // emulator's JIT columns rather than read fields off a number.
-        jitState: ()=>-1,
-        jitCacheSize: ()=>0,
         compiledModules: ()=>runtime.counters().modules,
         interpretedSteps: ()=>0,
         /** The instructions the interpreter tier in wasm retired, for a gate that judges it. */

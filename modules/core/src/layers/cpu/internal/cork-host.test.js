@@ -5,7 +5,7 @@
  */
 
 /**
- * The cork host without an emulator: its own memory and layout, the state
+ * The cork host: its own memory and layout, the state
  * block captured and restored whole, the eager flags word, and the cpu api's
  * context over it. A small program runs here too, for the interpreter tier's
  * instruction count; the wider interpreter tier is `cork-host.itest.js`.
@@ -291,12 +291,8 @@ test('the status words the wasm tier stores unless precise are counted in the di
 
 test('the host boots a real runtime over cork\'s own memory', ()=>{
     const h = host();
-    assert.equal(h.engine(), 'cork');
     assert.ok(h.cork(), 'the translator runtime is built');
     assert.equal(h.readReg32('eflags'), 0x2, 'the boot eflags word');
-    assert.equal(h.controlRegister(0), 1, 'PE is set: flat 32-bit protected mode');
-    assert.equal(h.controlRegister(3), 0, 'and no CR3');
-    assert.equal(h.inProtectedMode(), true);
 });
 
 test('guest memory is shared where the host can share it, and regions translate over it',

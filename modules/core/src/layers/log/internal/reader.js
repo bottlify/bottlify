@@ -329,50 +329,16 @@ export function createLogReader({ memory }){
                         at: row.threadAt,
                         module: named(row.threadAt),
                     },
-                    // What fell out of compiled code: how much the interpreter
-                    // ran, how many stretches that was, and the address the
-                    // heaviest single stretch began at, named.
+                    // What fell out of translated code: the heaviest single
+                    // interpreted stretch and the address it began at, named.
                     interpreted: {
-                        steps: counters.interpretedSteps,
-                        compiledSteps: counters.compiledSteps,
-                        stretches: counters.interpretedDispatches,
-                        perStretch: counters.interpretedDispatches > 0
-                            ? counters.interpretedSteps / counters.interpretedDispatches : 0,
                         worst: row.interpretedWorst,
                         at: row.interpretedAt,
                         module: named(row.interpretedAt),
-                        // And why it ran, which is what a step count on its own
-                        // never said. The four reasons account for every
-                        // stretch, so a frame whose interpreted steps doubled
-                        // says here which reason doubled with them.
-                        reasons: {
-                            noCode: { stretches: counters.interpNoCode,
-                                steps: counters.interpNoCodeSteps },
-                            noEntry: { stretches: counters.interpNoEntry,
-                                steps: counters.interpNoEntrySteps },
-                            nearPageEnd: { stretches: counters.interpNearPageEnd,
-                                steps: counters.interpNearPageEndSteps },
-                            differentState: { stretches: counters.interpDifferentState,
-                                steps: counters.interpDifferentStateSteps },
-                        },
-                        // Of those stretches, the ones a compile was on its way
-                        // to covering against the ones whose page stays
-                        // interpreted however hot it gets; and the looks that
-                        // needed no stretch, the page walk having found the
-                        // entry. These are not reasons of their own and do not
-                        // sum with the four.
-                        belowThreshold: counters.interpBelowThreshold,
-                        compileDeferred: counters.interpCompileDeferred,
-                        entryAfterPageWalk: counters.interpEntryAfterPageWalk,
-                        // What a write into a page of code cost the frame: the
-                        // compiled module discarded, and the heat of a page
-                        // that had not compiled yet.
-                        lostToWrites: { modules: counters.modulesLostToWrites,
-                            hotness: counters.hotnessLostToWrites },
                     },
                     // What the host put into guest memory, and which of our own
                     // calls put most of it there. `bytes` is every write the
-                    // emulator saw; `busiestBytes` only those that came through
+                    // cpu layer made; `busiestBytes` only those that came through
                     // the memory layer, so a large gap between the two says a
                     // writer is going round it.
                     wrote: {

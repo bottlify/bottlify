@@ -420,7 +420,7 @@ test('a frame carries the counters of the layers it was given, and zero for the 
     at(0).beginFrame();
     at(10).endFrame();
     assert.equal(column('retired'), 1000, 'as the counter stood when the frame closed');
-    assert.equal(column('entries'), 0, 'a column no layer answers');
+    assert.equal(column('trapCrossings'), 0, 'a column no layer answers');
 
     cpu[1] = 4000;
     at(10).beginFrame();

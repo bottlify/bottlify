@@ -189,9 +189,8 @@ export function engineContractProblem(engineModule, url){
  *     to the other executor (a region exits before one), so a defect can be localised by
  *     class from a run; a run with any class left out keeps no translation store. Default none.
  * @property {number} [trapPort]         The I/O port that is the host's call channel: a
- *     write of eax to it by translated code leaves with a `trap` exit past the instruction,
- *     and the hybrid host runs the handler the port write would have reached. Without it,
- *     the instruction is the other executor's.
+ *     write of eax to it by translated code calls the host's `trap` import, which runs
+ *     the handler. Without it, the instruction is left to the interpreter.
  * @property {'frame' | 'slice'} [feed]  When the sampler's hot buckets become candidates:
  *     once a frame (the default, paced by presentation) or after every slice, for a run
  *     that has no frames -- a test in a process without a presenter.
