@@ -316,8 +316,6 @@ const hashText = (hash, text)=>{
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
  *           instructions atomic. Default 1.
- * @property {boolean} [preemption]  End a slice early when a thread of higher
- *           priority comes due, as Windows preempts (the kernel's option; off).
  * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
@@ -4376,8 +4374,6 @@ async function buildApp(options){
             // The process's own executor kept for the host's answers while a
             // thread is pinned to its processor (the kernel's `freeHost`).
             freeHost: options.cpu?.freeHost,
-            // Off unless asked for: see the kernel's `preemption`.
-            preemption: options.preemption,
             // Every thread gets the stack the image was linked to expect, the
             // way Windows does -- not a fixed small one. A program that recurses
             // in a worker thread, or builds a large structure on its stack,

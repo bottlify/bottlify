@@ -278,7 +278,7 @@ export function createCpuModule(){
              *              leaves: number },
              *          faultHandler: ((fault: any) => boolean) | null,
              *          guestClock: (() => number) | null,
-             *          yieldCheck: (() => boolean) | null, stacks: [number, number][],
+             *          stacks: [number, number][],
              *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
              *          openExecutor: ((index: number) => Promise<any>) | null,
              *          opening: Map<number, Promise<void>>, unopened: Set<number>,
@@ -330,7 +330,6 @@ export function createCpuModule(){
                 faultHandler: null,
                 // The guest's clock once the kernel gives it (`useGuestClock`).
                 guestClock: null,
-                yieldCheck: null,
                 // The translator's figures at the last frame, for the frame's own columns.
                 corkFrame: { instructions: 0, retired: 0, translateMs: 0, leaves: 0 },
                 // The threads' stacks the kernel named, for a host made after it did.
@@ -799,7 +798,6 @@ export function createCpuModule(){
                     {
                         state.host.useGuestClock(state.guestClock);
                     }
-                    state.host.setYieldCheck(state.yieldCheck);
                     state.thunks = createThunkTable({
                         base: settings.thunkBase,
                         port: settings.trapPort,
@@ -968,18 +966,6 @@ export function createCpuModule(){
                     {
                         state.host.stop();
                     }
-                },
-
-                /**
-                 * What a slice asks between regions of translated code, to end
-                 * early when it answers true; an engine with no such boundary
-                 * runs its slices whole.
-                 *
-                 * @param {(() => boolean) | null} check
-                 */
-                setYieldCheck(check){
-                    state.yieldCheck = check;
-                    state.host?.setYieldCheck?.(check);
                 },
 
                 /** @param {number} address @param {number} length */

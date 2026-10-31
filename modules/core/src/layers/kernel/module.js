@@ -218,18 +218,6 @@ export function createKernelModule(){
             {
                 log.metrics.onFrame(()=>state.scheduler.publish());
             }
-            // With `preemption` on, a slice ends between chunks of translated
-            // code once a thread of higher priority comes due, as Windows
-            // preempts for one (`preemptionDue`). Off by default: measured on
-            // the Warcraft III demo it ended ~8 000 slices early for Miles'
-            // TIME_CRITICAL mixer and changed nothing heard in a browser, where
-            // the mixer's lateness is collection pauses outside any slice; and
-            // the chunked budget it needs has not been measured for speed.
-            if (config?.preemption === true)
-            {
-                cpu.setYieldCheck?.(()=>!state.disposed
-                    && state.scheduler.preemptionDue(state.refreshClock));
-            }
             // The words the guest reads its events by, once kernel32 places
             // the table (`mirrorEvents`); until then nothing is written.
             const mirror = createEventMirror((address, value)=>memory.writeU32(address, value),
@@ -528,11 +516,9 @@ export function createKernelModule(){
                         state.scheduler.atomicCode(address, length);
                     }
                 },
-                /** Whether a thread of higher priority is due the processor now (see the scheduler). */
-                preemptionDue: ()=>live() && state.scheduler.preemptionDue(state.refreshClock),
                 /**
                  * How the guest's clock is brought up to the host's between turns,
-                 * so a wait can come due inside a slice (see `preemptionDue`).
+                 * so a wait can come due inside a slice of many crossings.
                  *
                  * @param {() => void} refresh
                  */

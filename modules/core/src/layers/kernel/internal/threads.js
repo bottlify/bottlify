@@ -628,8 +628,7 @@ export function createScheduler(options){
 
     /**
      * The threads that were ready when the running slice began: a thread
-     * among them was passed over by the choice that started it, and does not
-     * take the processor back mid-slice (see `preemptionDue`).
+     * among them was passed over by the choice that started it.
      *
      * @type {Set<any>}
      */
@@ -2523,59 +2522,6 @@ export function createScheduler(options){
             // And the process's other executors, which end their threads' runs
             // where they will, are told too.
             cpu.noteUnbroken?.(start, length >>> 0);
-        },
-
-        /**
-         * Whether the running thread should give the processor up at the host
-         * call it is in: a thread of higher priority became ready during this
-         * slice -- its timed wait came due, or the running thread set what it
-         * waited on. Windows preempts such a thread at once; a slice here is
-         * guest instructions, and one full of host calls ran 40-120 ms while a
-         * sound mixer woken every 10 ms waited for it to end. A thread that was
-         * already ready when the slice began does not count: it was passed over
-         * by the choice that started the slice.
-         *
-         * The guest's clock is moved on by the turn, so within a slice no wait
-         * comes due by itself: `refresh` brings it up to the host's first --
-         * only when a thread of higher priority is waiting at all, which keeps
-         * the look free for the many machines that have none.
-         *
-         * @param {() => void} [refresh]
-         * @returns {boolean}
-         */
-        preemptionDue(refresh){
-            if (current === null || current.state !== ThreadState.RUNNING)
-            {
-                return false;
-            }
-            const mine = absolutePriority(current.priority);
-            let waiting = false;
-            for (const thread of threads)
-            {
-                if (thread !== current && absolutePriority(thread.priority) > mine
-                    && !readyAtSlice.has(thread))
-                {
-                    waiting = true;
-                    break;
-                }
-            }
-            if (!waiting)
-            {
-                return false;
-            }
-            refresh?.();
-            expire();
-            for (const thread of threads)
-            {
-                if (thread !== current && thread.state === ThreadState.READY
-                    && !thread.awaitingHost && !(thread.suspendCount > 0)
-                    && absolutePriority(thread.priority) > mine && !readyAtSlice.has(thread))
-                {
-                    preemptions++;
-                    return true;
-                }
-            }
-            return false;
         },
 
         /** @returns {any[]} */
