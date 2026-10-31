@@ -435,8 +435,8 @@ test('threads queued on a semaphore are woken one a release in the order they qu
         const inGuest = await run(executable, SEMAPHORE_CALLS, { cpu: { cores } });
         const inHost = await run(executable, SEMAPHORE_CALLS,
             { cpu: { cores }, win32: { handleWords: false } });
-        for (const [one, how] of [[inHost, 'every call in the host'],
-            [inGuest, 'with the guest\'s answers']])
+        for (const [one, how] of /** @type {[{ code: number }, string][]} */ ([
+            [inHost, 'every call in the host'], [inGuest, 'with the guest\'s answers']]))
         {
             assert.equal(one.code & BITS.polls, BITS.polls,
                 `${cores} executor(s), ${how}: no count left after a release`);
