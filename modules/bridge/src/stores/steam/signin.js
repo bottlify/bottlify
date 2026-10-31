@@ -8,14 +8,21 @@
  * Steam's sign-in page (`steam/signin.html`), which the launcher shows in a
  * frame: a QR code, or the account name and password with Steam Guard's
  * step. It is the extension's page, not the launcher's: the launcher's
- * scripts cannot reach its document, and it speaks to GameHub's service
- * worker alone (serve.js `serveSignIn`), which signs in over HTTPS. The
- * password goes to the worker and is kept nowhere; the token stays in the
- * worker. The launcher is told only the account's name, once signed in.
+ * scripts cannot reach its document. It signs in itself (signin-flow.js), for
+ * as long as it is shown, over a CM connection of its own -- an extension
+ * page's socket, which Steam's ruleset gives Steam's Origin, as the client
+ * signs in -- and seals the token into the extension's own database; the
+ * password is kept nowhere. The launcher is
+ * told only the account's name, once signed in. A sign-in that fails or
+ * stalls says so, with Try again.
  */
 
 import { encodeQr, qrToSvg } from '../../../../core/src/steam/qr.js';
 import { Guard } from './messages.js';
+import { signInWithCredentials, signInWithQr } from './auth.js';
+import { connectCm, steamManagers } from './connection.js';
+import { createSignIn } from '../../signin-flow.js';
+import { vaultFor } from '../../vault.js';
 
 const STORE = 'steam';
 const NAME = 'Steam';
@@ -23,7 +30,6 @@ const NAME = 'Steam';
 // The hosts this build answers on beyond what its manifest lets frame this
 // page; the build writes the dev build's (manifest.js HOSTS), null answers anywhere.
 const HOSTS = /** @type {RegExp | null} */ (null);
-const { chrome } = /** @type {any} */ (globalThis);
 const parentOrigin = location.ancestorOrigins?.[0] ?? null;
 
 /** @param {string} id */
@@ -39,13 +45,12 @@ const say = (text, error = false)=>{
     status.classList.toggle('error', error);
 };
 
-/** @type {any} */
-let port = null;
 /** @type {'qr' | 'password'} */
 let mode = 'qr';
 /** The code Steam Guard asks for, of `Guard`. */
 let codeType = 0;
-let retry = 0;
+/** Whether a sign-in is going on, which a code goes to. */
+let going = false;
 
 /** The launcher learns the account's name, and nothing else. @param {string} name */
 const tellParent = name=>{
@@ -81,23 +86,21 @@ function heard(message){
         passwordForm.hidden = true;
         guardForm.hidden = true;
         $('qr').hidden = true;
+        going = false;
         say(`Signed in as ${message.done.name}.`);
         tellParent(message.done.name);
-        port?.disconnect();
-        port = null;
+        link?.close();
+        link = null;
     }
     else if (message.error)
     {
+        // Never a silent stop: what went wrong, and Try again.
+        going = false;
         say(message.error, true);
         guardForm.hidden = true;
         passwordForm.hidden = mode !== 'password';
-        // A QR code expires: a new one, after a moment so a Steam that cannot
-        // be reached is not asked again at once.
-        if (mode === 'qr')
-        {
-            clearTimeout(retry);
-            retry = Number(setTimeout(()=>start({ start: 'qr' }), 3000));
-        }
+        qrCode.textContent = '';
+        $('again').hidden = false;
     }
 }
 
@@ -127,21 +130,48 @@ function showGuard(types, hint){
     }
 }
 
-/** A sign-in over a new port to the worker; the last one ends. @param {Record<string, any>} message */
-function start(message){
-    clearTimeout(retry);
-    port?.disconnect();
-    const now = chrome.runtime.connect({ name: 'signin' });
-    port = now;
-    now.onMessage.addListener(heard);
-    now.onDisconnect.addListener(()=>{
-        if (port === now)
+/** @type {any} */
+let link = null;
+/**
+ * The open connection, a new one when the last has closed: a manager drops a
+ * connection that has not logged on after a minute or so, and the sign-in,
+ * which Steam keeps, goes on over the next.
+ */
+const connect = async()=>{
+    if (link && !link.closed)
+    {
+        return link;
+    }
+    let failure = 'none is listed';
+    for (const endpoint of (await steamManagers()).slice(0, 8))
+    {
+        try
         {
-            port = null;
-            heard({ error: 'GameHub was restarted. Try again.' });
+            link = await connectCm({ endpoint });
+            return link;
         }
-    });
-    now.postMessage(message);
+        catch (e){
+            failure = String(/** @type {Error} */ (e)?.message ?? e);
+        }
+    }
+    throw new Error(`steam: no connection manager answered (${failure})`);
+};
+const api = connect;
+const flow = createSignIn({ send: heard, kept: {
+    vault: vaultFor(STORE),
+    qr: options=>signInWithQr(api, options),
+    credentials: options=>signInWithCredentials(api, options),
+} });
+addEventListener('pagehide', ()=>{
+    flow.stop();
+    link?.close();
+});
+
+/** A sign-in; the last one ends. @param {Record<string, any>} message */
+function start(message){
+    going = true;
+    $('again').hidden = true;
+    flow.heard(message);
 }
 
 /** @param {'qr' | 'password'} to */
@@ -153,10 +183,10 @@ function show(to){
     passwordForm.hidden = to !== 'password';
     guardForm.hidden = true;
     qrCode.textContent = '';
+    $('again').hidden = true;
     say('');
-    clearTimeout(retry);
-    port?.disconnect();
-    port = null;
+    flow.stop();
+    going = false;
     if (to === 'qr')
     {
         say(`Connecting to ${NAME}…`);
@@ -172,6 +202,7 @@ else
 {
     $('by-qr').addEventListener('click', ()=>show('qr'));
     $('by-password').addEventListener('click', ()=>show('password'));
+    $('again').addEventListener('click', ()=>show(mode));
     passwordForm.addEventListener('submit', event=>{
         event.preventDefault();
         const fields = passwordForm.elements;
@@ -185,11 +216,11 @@ else
     guardForm.addEventListener('submit', event=>{
         event.preventDefault();
         const input = /** @type {HTMLInputElement} */ (guardForm.elements.namedItem('code'));
-        if (!input.value.trim() || !port)
+        if (!input.value.trim() || !going)
         {
             return;
         }
-        port.postMessage({ code: input.value.trim(), type: codeType });
+        flow.heard({ code: input.value.trim(), type: codeType });
         input.value = '';
         /** @type {HTMLButtonElement} */ ($('code-send')).disabled = true;
         say('Checking the code…');

@@ -426,3 +426,19 @@ export function connectCm({ endpoint, socket, timeout = 30000 }){
 }
 
 /** @typedef {Awaited<ReturnType<typeof connectCm>>} CmConnection */
+
+/**
+ * Steam's connection managers, port 443 first: the one a firewall least often
+ * closes. Asked from an extension's page: the ruleset does not open Steam's
+ * directory to a site's.
+ *
+ * @param {typeof fetch} [get]
+ * @returns {Promise<string[]>}
+ */
+export async function steamManagers(get = fetch){
+    const directory = await (await get('https://api.steampowered.com/ISteamDirectory/'
+        + 'GetCMListForConnect/v1/?cellid=0&cmtype=websockets')).json();
+    /** @type {string[]} */
+    const list = directory.response.serverlist.map((/** @type {any} */ server)=>server.endpoint);
+    return list.sort((a, b)=>Number(!a.endsWith(':443')) - Number(!b.endsWith(':443')));
+}

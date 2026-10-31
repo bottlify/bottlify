@@ -8,17 +8,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, posix, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { build } from './build.mjs';
-
-/** @param {string} a @param {string} b */
-const posixJoin = (a, b)=>posix.normalize(posix.join(a, b));
+import { HOST_CHECKED, STORE_PAGES } from '../src/manifest.js';
 
 /** @param {string} dir @returns {string[]} */
 const filesIn = dir=>readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter(entry=>entry.isFile()).map(entry=>join(entry.parentPath, entry.name));
 
-test('each build is whole: its imports resolve, and what the page loads it may', async()=>{
+test('each build is whole, and the page may load a store\'s pages alone', async()=>{
     const out = mkdtempSync(join(tmpdir(), 'bridge-build-'));
     try
     {
@@ -27,50 +25,34 @@ test('each build is whole: its imports resolve, and what the page loads it may',
         for (const dir of Object.values(built))
         {
             const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'));
-            const loadable = manifest.web_accessible_resources[0].resources;
-            /** @type {Set<string>} What the content script loads, and what that imports. */
-            const theirs = new Set();
             for (const file of filesIn(dir).filter(name=>name.endsWith('.js')))
             {
                 const text = readFileSync(file, 'utf8');
                 const from = relative(dir, file).replace(/\\/g, '/');
-                // Static imports, and the content script's import(getURL('...')).
-                for (const [, call, path] of text.matchAll(/(from |getURL\()'([^']+\.js)'/g))
+                for (const [, path] of text.matchAll(/from '([^']+\.js)'/g))
                 {
-                    const target = path.startsWith('.')
-                        ? join(dirname(file), path) : join(dir, path);
-                    assert.ok(existsSync(target), `${from} imports ${path}`);
-                    if (call === 'getURL(')
-                    {
-                        theirs.add(relative(dir, target).replace(/\\/g, '/'));
-                    }
+                    assert.ok(existsSync(join(dirname(file), path)), `${from} imports ${path}`);
                 }
             }
-            assert.ok(theirs.size > 0, 'the content script loads GameHub in the tab');
-            for (const path of theirs)
+            const content = readFileSync(join(dir, manifest.content_scripts[0].js[0]), 'utf8');
+            assert.doesNotMatch(content, /\bimport\b|getURL\('[^']*\.js'\)/,
+                'the content script loads no module: no store\'s protocol in the tab');
+            assert.deepEqual(manifest.web_accessible_resources.flatMap((/** @type {any} */ one)=>
+                one.resources), STORE_PAGES.map(([id, page])=>`${id}/${page}.html`),
+            'the page may load a store\'s pages, as frames, and no module');
+            for (const [id, page] of STORE_PAGES)
             {
-                assert.ok(loadable.includes(path), `${path} is not web-accessible`);
-                for (const [, imported] of readFileSync(join(dir, path), 'utf8')
-                    .matchAll(/from '(\.[^']+\.js)'/g))
-                {
-                    const name = posixJoin(dirname(path), imported);
-                    assert.ok(loadable.includes(name),
-                        `${name}, which ${path} imports, is not web-accessible`);
-                }
-            }
-            assert.ok(!loadable.some((/** @type {string} */ path)=>
-                /worker|vault|serve|auth|webapi/.test(path)),
-            'nothing of the worker is the page\'s to load');
-            assert.ok(existsSync(join(dir, manifest.background.service_worker)));
-            for (const page of manifest.web_accessible_resources[1].resources)
-            {
-                const html = readFileSync(join(dir, page), 'utf8');
+                const html = readFileSync(join(dir, `${id}/${page}.html`), 'utf8');
                 const script = /<script type="module" src="\/([^"]+)"/.exec(html)?.[1];
-                assert.ok(script && existsSync(join(dir, script)), `${page} loads ${script}`);
-                assert.equal(readFileSync(join(dir, script), 'utf8').includes('new RegExp('),
-                    dir.endsWith('dev'), `${script} checks the page framing it in the dev build`);
+                assert.ok(script && existsSync(join(dir, script)),
+                    `${id}/${page}.html loads ${script}`);
             }
-            assert.ok(existsSync(join(dir, manifest.content_scripts[0].js[0])));
+            for (const path of HOST_CHECKED)
+            {
+                assert.equal(readFileSync(join(dir, path), 'utf8').includes('new RegExp('),
+                    dir.endsWith('dev'), `${path} checks its page's host in the dev build`);
+            }
+            assert.ok(existsSync(join(dir, manifest.background.service_worker)));
             for (const ruleset of manifest.declarative_net_request.rule_resources)
             {
                 assert.ok(existsSync(join(dir, ruleset.path)), ruleset.path);

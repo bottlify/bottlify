@@ -18,7 +18,9 @@
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ENTRIES, HOSTS, PAGES, PLATFORMS, TAB, manifestFor } from '../src/manifest.js';
+import {
+    ENTRIES, HOSTS, HOST_CHECKED, PAGES, PLATFORMS, STORE_PAGES, manifestFor,
+} from '../src/manifest.js';
 
 const HERE = fileURLToPath(new URL('..', import.meta.url));
 // The modules beside it in this repository, not the packages node_modules
@@ -65,11 +67,13 @@ export async function build(out = join(HERE, 'dist')){
     const { version } = JSON.parse(await readFile(join(HERE, 'package.json'), 'utf8'));
     /** @type {[string, string][]} */
     const files = (await closure([...ENTRIES])).map(path=>[join(MODULES, path), path]);
-    const loadable = await closure([TAB]);
-    for (const [id, platform] of Object.entries(PLATFORMS))
+    for (const platform of Object.values(PLATFORMS))
     {
-        files.push([join(HERE, platform.rules), `bridge/${platform.rules}`],
-            [join(HERE, platform.signIn.page), `${id}/signin.html`]);
+        files.push([join(HERE, platform.rules), `bridge/${platform.rules}`]);
+    }
+    for (const [id, page, { html }] of STORE_PAGES)
+    {
+        files.push([join(HERE, html), `${id}/${page}.html`]);
     }
     /** @type {Record<string, string>} */
     const built = {};
@@ -83,10 +87,7 @@ export async function build(out = join(HERE, 'dist')){
             await copyFile(from, join(dir, to));
         }
         const hosts = HOSTS[flavour];
-        // The scripts that check the page they serve: the content script, and
-        // each sign-in page the page that frames it.
-        for (const path of hosts ? ['bridge/src/content.js',
-            ...Object.values(PLATFORMS).map(platform=>platform.signIn.script)] : [])
+        for (const path of hosts ? HOST_CHECKED : [])
         {
             const script = await readFile(join(MODULES, path), 'utf8');
             const blank = 'const HOSTS = /** @type {RegExp | null} */ (null);';
@@ -98,7 +99,7 @@ export async function build(out = join(HERE, 'dist')){
                 script.replace(blank, ()=>`const HOSTS = new RegExp(${JSON.stringify(hosts)});`));
         }
         await writeFile(join(dir, 'manifest.json'),
-            `${JSON.stringify(manifestFor(flavour, version, loadable), null, 2)}\n`);
+            `${JSON.stringify(manifestFor(flavour, version), null, 2)}\n`);
         built[flavour] = dir;
     }
     return built;

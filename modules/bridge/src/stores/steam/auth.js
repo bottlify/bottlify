@@ -18,9 +18,8 @@
  * and once approved the poll answers with the account name and a refresh
  * token -- a SteamClient one, which is what a client logs on with.
  *
- * `connect` gives what calls the service: a CM connection or Steam's web API
- * (webapi.js), which GameHub's service worker uses so the token comes to it
- * alone.
+ * `connect` gives what calls the service: a CM connection, which a store's
+ * sign-in page opens of its own (signin.js).
  */
 
 import {
@@ -29,11 +28,11 @@ import {
 } from './messages.js';
 
 /**
- * What calls the Authentication service's methods: a CM connection, or the
- * web API.
+ * What calls the Authentication service's methods: a CM connection, or a
+ * test's Steam.
  *
  * @typedef {{ call: (method: string, requestSchema: any, request: Record<string, any>,
- *     responseSchema: any, options?: { get?: boolean, authed?: boolean }) =>
+ *     responseSchema: any, options?: { authed?: boolean }) =>
  *     Promise<{ eresult: number, body: Record<string, any>, message?: string }> }} Service
  */
 
@@ -241,7 +240,7 @@ export async function signInWithCredentials(connect, options){
     const service = await connect();
     const key = await service.call('Authentication.GetPasswordRSAPublicKey#1',
         Authentication.GetPasswordRSAPublicKeyRequest, { account_name: accountName },
-        Authentication.GetPasswordRSAPublicKeyResponse, { get: true });
+        Authentication.GetPasswordRSAPublicKeyResponse);
     if (key.eresult !== EResult.OK || !key.body.publickey_mod)
     {
         throw new Error(`steam: no key for the password (EResult ${key.eresult})`);

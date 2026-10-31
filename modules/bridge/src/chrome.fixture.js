@@ -29,22 +29,13 @@ export function chrome(profile){
     let next = 0;
     /** @type {Map<number, (message: any) => void>} */
     const waiting = new Map();
-    /** @type {Set<(event: { method: string, params: any, sessionId?: string }) => void>} */
-    const listeners = new Set();
     inp.on('data', data=>{
         buffered += data;
         for (let end; (end = buffered.indexOf('\0')) >= 0;)
         {
             const message = JSON.parse(buffered.slice(0, end));
             buffered = buffered.slice(end + 1);
-            if (message.id)
-            {
-                waiting.get(message.id)?.(message);
-            }
-            else
-            {
-                listeners.forEach(listener=>listener(message));
-            }
+            waiting.get(message.id)?.(message);
         }
     });
     /** @param {string} method @param {object} [params] @param {string} [sessionId] */
@@ -63,7 +54,5 @@ export function chrome(profile){
         });
         out.write(`${JSON.stringify({ id, method, params, ...sessionId ? { sessionId } : {} })}\0`);
     });
-    /** @param {(event: { method: string, params: any, sessionId?: string }) => void} listener */
-    const on = listener=>listeners.add(listener);
-    return { proc, send, on };
+    return { proc, send };
 }
