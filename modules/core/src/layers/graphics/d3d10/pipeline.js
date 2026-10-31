@@ -132,15 +132,18 @@ function emptyPipeline(){
 /**
  * A context's bindings and the methods over them.
  *
- * @param {{ diverge: (detail: string) => void, uavSlots?: number, keepsBound?: boolean }}
+ * @param {{ diverge: (detail: string) => void, uavSlots?: number, keepsBound?: boolean,
+ *     keepsRasterizer?: boolean }}
  *     services  where what is accepted and not done is said, how many view slots
- *     the device's level gives a stage that writes (8 or 64), and whether the
- *     context keeps what it binds alive -- Direct3D 11's does
+ *     the device's level gives a stage that writes (8 or 64), whether the
+ *     context keeps what it binds alive - Direct3D 11's does - and whether it
+ *     keeps its rasterizer state alive alone, as Direct3D 10's device does
  */
 export function createPipelineState(services){
     const { diverge } = services;
     const uavSlots = services.uavSlots ?? D3D11_LIMITS.UNORDERED_ACCESS_SLOTS;
     const keeps = services.keepsBound === true;
+    const keepsRasterizer = !keeps && services.keepsRasterizer === true;
     let pipeline = emptyPipeline();
 
     /** @param {any} object */
@@ -318,7 +321,13 @@ export function createPipelineState(services){
 
         /** @param {any} state */
         RSSetState(state){
-            pipeline.rasterizerState = swap(pipeline.rasterizerState, state ?? null);
+            const old = pipeline.rasterizerState;
+            pipeline.rasterizerState = swap(old, state ?? null);
+            if (keepsRasterizer && old !== pipeline.rasterizerState)
+            {
+                hold(pipeline.rasterizerState);
+                drop(old);
+            }
         },
         /** @param {{ state?: any }} out */
         RSGetState(out){
@@ -563,6 +572,10 @@ export function createPipelineState(services){
             if (keeps)
             {
                 everyBinding(pipeline, drop);
+            }
+            if (keepsRasterizer)
+            {
+                drop(pipeline.rasterizerState);
             }
             pipeline = emptyPipeline();
         },

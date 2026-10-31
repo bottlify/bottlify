@@ -655,7 +655,9 @@ export function createDevice(options = {}){
 
     /** Whether Direct3D 11 made the device, which decides what it answers to. */
     const d3d11 = options.api === 'd3d11';
-    const state = createPipelineState({ diverge, keepsBound: d3d11 });
+    // Direct3D 10's device keeps the rasterizer state it binds alive past the
+    // program's last reference, and nothing else (test_state_refcounting).
+    const state = createPipelineState({ diverge, keepsBound: d3d11, keepsRasterizer: true });
     const featureLevel = options.featureLevel ?? D3D_FEATURE_LEVEL.LEVEL_10_0;
     /** The newest shader model the device takes, as 0xMm (`dxbc.js`). */
     const shaderModel = !d3d11 ? 0x40
@@ -1386,9 +1388,15 @@ export function createDevice(options = {}){
             {
                 return E_INVALIDARG;
             }
+            // The input assembler makes the vertex and instance ids; every
+            // other input -- a position a pixel shader's signature reads among
+            // them -- is fed by an element (test_create_input_layout).
             for (const input of container.inputs)
             {
-                if (input.systemValue !== SYSTEM_VALUE.UNDEFINED)
+                // A pixel shader's signature names them without the value.
+                if (input.systemValue === SYSTEM_VALUE.VERTEX_ID
+                    || input.systemValue === SYSTEM_VALUE.INSTANCE_ID
+                    || /^SV_(VERTEXID|INSTANCEID)$/i.test(input.name))
                 {
                     continue;
                 }
