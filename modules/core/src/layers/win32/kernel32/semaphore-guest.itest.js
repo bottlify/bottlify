@@ -348,15 +348,26 @@ test('jobs handed to workers on three executors through semaphores are each done
 
 test('threads queued on a semaphore are woken one a release in the order they queued, with the'
     + ' guest\'s answers and with every call in the host', { timeout: 300_000 }, async()=>{
-    // Each of four threads waits on the semaphore, then writes its index into
-    // the next place of `order`; the main thread sleeps until all are queued,
-    // then releases one count at a time, polling between to see none is left.
+    // Each of four threads writes its index into the next place of `arrival`
+    // as it comes to wait on the semaphore, and once woken into the next place
+    // of `order`; the main thread waits until all four have come and a while
+    // more for them to be queued, then releases one count at a time, polling
+    // between to see none is left. The exit code is bits: 0-3 each poll found
+    // no count left, 4-7 each thread was woken, 8-11 each place's order is its
+    // arrival.
+    //
+    // On one executor the threads run only while the main thread sleeps, so
+    // each is queued as it arrives and the two orders must agree. On three,
+    // which thread reaches the host's queue first after arriving is the
+    // loaded host's scheduling, which no guest can see: there each release
+    // must wake exactly one thread and leave no count, every thread woken
+    // once; the queue's own order is the kernel's unit test (sync.test.js).
     const executable = buildExe({
         imports: { 'KERNEL32.dll': ['CreateSemaphoreA', 'ReleaseSemaphore', 'CreateThread',
             'WaitForSingleObject', 'Sleep', 'ExitProcess'] },
         codeSize: 0x1000,
         data: { semaphore: u32(0), next: u32(0), order: new Array(16).fill(0),
-            threads: new Array(16).fill(0) },
+            arrived: u32(0), arrival: new Array(16).fill(0), threads: new Array(16).fill(0) },
         code: ({ iat, at, code })=>{
             /** @param {string} name */
             const call = name=>[0xff, 0x15, ...u32(iat(name))];
@@ -370,9 +381,13 @@ test('threads queued on a semaphore are woken one a release in the order they qu
             {
                 main.push(0x6a, 0x00, 0x6a, 0x00, 0x6a, index, 0x68, ...u32(code(WORKER_AT)),
                     0x6a, 0x00, 0x6a, 0x00, ...call('CreateThread'),
-                    0xa3, ...u32(at('threads') + 4 * index),
-                    0x6a, 0x14, ...call('Sleep'));
+                    0xa3, ...u32(at('threads') + 4 * index));
             }
+            main.push(
+                0x6a, 0x01, ...call('Sleep'), //                      come: Sleep(1)
+                0x83, 0x3d, ...u32(at('arrived')), 4, //              cmp dword [arrived], 4
+                0x72, 0xef, //                                        jb come
+                0x6a, 0x14, ...call('Sleep')); //                     queued by now
             for (let index = 0; index < 4; index++)
             {
                 main.push(0x6a, 0x00, 0x6a, 0x01, 0xff, 0x35, ...u32(at('semaphore')),
@@ -384,17 +399,26 @@ test('threads queued on a semaphore are woken one a release in the order they qu
                     0x72, 0xef, //                                    jb wait
                     // A poll: nothing is left for it once the count went to a waiter.
                     0x6a, 0x00, 0xff, 0x35, ...u32(at('semaphore')), ...call('WaitForSingleObject'),
-                    0x6b, 0xff, 0x1f, 0x01, 0xc7);
+                    0x3d, ...u32(0x102), 0x75, 0x06, //               cmp eax, WAIT_TIMEOUT; jne
+                    0x81, 0xcf, ...u32(1 << index)); //               or edi, poll bit
             }
             for (let index = 0; index < 4; index++)
             {
                 main.push(0x6a, 0xff, 0xff, 0x35, ...u32(at('threads') + 4 * index),
                     ...call('WaitForSingleObject'));
-                // imul edi, edi, 31; add edi, [order + index*4]
-                main.push(0x6b, 0xff, 0x1f, 0x03, 0x3d, ...u32(at('order') + 4 * index));
+                main.push(
+                    0x8b, 0x0d, ...u32(at('order') + 4 * index), //     mov ecx, [order + i*4]
+                    0xba, ...u32(0x10), 0xd3, 0xe2, 0x09, 0xd7, //       or edi, 0x10 << ecx
+                    0xa1, ...u32(at('order') + 4 * index), //           mov eax, [order + i*4]
+                    0x3b, 0x05, ...u32(at('arrival') + 4 * index), //   cmp eax, [arrival + i*4]
+                    0x75, 0x06, 0x81, 0xcf, ...u32(0x100 << index)); // jne; or edi, place bit
             }
             main.push(0x57, ...call('ExitProcess'));
             const worker = [
+                0xb8, ...u32(1), //                                    mov eax, 1
+                0xf0, 0x0f, 0xc1, 0x05, ...u32(at('arrived')), //      lock xadd [arrived], eax
+                0x8b, 0x4c, 0x24, 0x04, //                             mov ecx, [esp+4]
+                0x89, 0x0c, 0x85, ...u32(at('arrival')), //            mov [arrival+eax*4], ecx
                 0x6a, 0xff, 0xff, 0x35, ...u32(at('semaphore')), ...call('WaitForSingleObject'),
                 0xb8, ...u32(1), //                                    mov eax, 1
                 0xf0, 0x0f, 0xc1, 0x05, ...u32(at('next')), //         lock xadd [next], eax
@@ -405,14 +429,24 @@ test('threads queued on a semaphore are woken one a release in the order they qu
             return [...main, ...new Array(WORKER_AT - main.length).fill(0x90), ...worker];
         },
     });
-    const expected = [0x102, 0x102, 0x102, 0x102, 0, 1, 2, 3]
-        .reduce((sum, value)=>(Math.imul(sum, 31) + value) >>> 0, 0);
+    const BITS = Object.freeze({ polls: 0x00f, woken: 0x0f0, inOrder: 0xf00 });
     for (const cores of [1, 3])
     {
         const inGuest = await run(executable, SEMAPHORE_CALLS, { cpu: { cores } });
         const inHost = await run(executable, SEMAPHORE_CALLS,
             { cpu: { cores }, win32: { handleWords: false } });
-        assert.equal(inHost.code, expected, `${cores} executor(s), every call in the host`);
-        assert.equal(inGuest.code, expected, `${cores} executor(s), with the guest's answers`);
+        for (const [one, how] of [[inHost, 'every call in the host'],
+            [inGuest, 'with the guest\'s answers']])
+        {
+            assert.equal(one.code & BITS.polls, BITS.polls,
+                `${cores} executor(s), ${how}: no count left after a release`);
+            assert.equal(one.code & BITS.woken, BITS.woken,
+                `${cores} executor(s), ${how}: each thread woken once`);
+            if (cores === 1)
+            {
+                assert.equal(one.code & BITS.inOrder, BITS.inOrder,
+                    `${cores} executor, ${how}: woken in the order they came`);
+            }
+        }
     }
 });
