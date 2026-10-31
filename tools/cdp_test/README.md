@@ -423,8 +423,8 @@ Reading it:
   blocked lines name what.
 - A wait of a minute and a half on a completion port means an operation
   finished without posting its completion.
-- Direct3D 10 and 11: `game-<stamp>-graphics.json` holds `seam.direct3d10`, whose `rings`
-  say per device how often the command ring was played on the host's way into its own methods
+- Direct3D 10 and 11: the graphics line's `d3d10Rings` (from `seam.direct3d10` in the
+  layer's metrics) says per device how often the command ring was played on the host's way into its own methods
   and how long that took (`syncs`, `syncMs`: the time a trapped call spends before its own
   work), and why a dynamic buffer's maps reached the host (`maps`: not a write map, mapped
   already, a DISCARD with no storage free that was `added` one or found the buffer `capped`, or

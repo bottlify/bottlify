@@ -217,6 +217,25 @@ const bufferTotals = backend=>{
 const NOT_MEASURED = 'not measured';
 
 /**
+ * Direct3D 10's rings as one line a report prints: how often and how long
+ * each was played on the host's way in, and why buffer maps reached the host.
+ *
+ * @param {any} direct3d10 @returns {string | null}
+ */
+const ringLine = direct3d10=>{
+    if (!direct3d10)
+    {
+        return null;
+    }
+    const rings = (direct3d10.rings ?? []).map((/** @type {any} */ ring)=>`syncs ${ring.syncs}`
+        + ` ${ring.syncMs}ms maps ${Object.entries(ring.maps)
+            .map(([why, count])=>`${why}:${count}`).join(',')}`);
+    const unattached = Object.entries(direct3d10.unattachedMaps ?? {})
+        .map(([usage, count])=>`usage${usage}:${count}`).join(',');
+    return `${rings.join('; ') || 'no ring'}${unattached ? `; unattached ${unattached}` : ''}`;
+};
+
+/**
  * What this layer holds of the tab's memory, by zone (`memory-zones.js`): of
  * the heaps, the pages of guest memory a played OpenGL device keeps (its
  * answer's `mirrored`), and what is not measured yet -- the engine thread's
@@ -1500,6 +1519,8 @@ export function createGraphicsModule(){
                     worker,
                     // Kept flat, where a report drops the structure above.
                     workerAnswers: worker ? worker.answers : null,
+                    // Direct3D 10's and 11's rings, flat for the same reason.
+                    d3d10Rings: ringLine(seam?.direct3d10),
                     // DXT textures kept as BC blocks on the GPU, or decoded first.
                     blockCompression: instance.blockCompression,
                     seam,
