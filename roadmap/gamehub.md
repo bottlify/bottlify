@@ -1,121 +1,90 @@
 # GameHub
 
-Plan, no code. 2026-10-31. A number not measured says so.
+Plan, agreed 2026-10-31; built in the same change. A number not measured says so.
 
-GameHub is the browser extension in `modules/bridge`. It becomes the one place that talks to game
-stores' services and keeps their accounts: it signs in and out, lists the account's games and
-hands out what a download needs and a game's cover. Bottlify -- `@bottlify/core` and the launcher
--- keeps the engine and the install: the page fetches the manifests and chunks from the stores'
-CDNs itself, decrypts and decompresses them, writes the bottle into its own OPFS and applies the
-redistributables, as it does today. Steam is the first store.
+GameHub is the browser extension in `modules/bridge`. It extends the launcher and does not work
+without it: it keeps the stores' accounts and speaks their protocols, and the page asks it for
+finished answers. Bottlify -- `@bottlify/core` and the launcher -- keeps the engine and the install:
+the page downloads a game's manifests and chunks from the store's CDN itself, decrypts and
+decompresses them, writes the bottle into its own OPFS and applies the redistributables. Steam is
+the first store.
+
+## Who does what
+
+- **GameHub's service worker** owns each store's account and session: the refresh token (kept in
+  the extension origin's IndexedDB, which only extension contexts can open -- not the content
+  script, which shares the page's origin), the QR sign-in and sign-out, and the whole Steam
+  protocol: the logon, licences, PICS product info, depot keys, manifest request codes, content
+  servers, ownership tickets and Valve's client files. It builds and parses every CM message.
+- **The content script is a pipe.** Steam's connection managers refuse a WebSocket whose Origin is
+  not theirs, and the ruleset rewrites the Origin only of the page's requests -- a socket from the
+  extension's own context is refused. So the content script opens the CM socket for the worker and
+  relays raw frames both ways over a long-lived runtime port, and relays the page's ops to the
+  worker and its answers back. It reads nothing of either.
+- **No launcher page, no session.** The socket lives with the page. Each time the launcher opens,
+  the worker logs on again with the stored token; the port's traffic (the CM heartbeat every few
+  seconds) keeps the worker awake while the page is open. If the worker is stopped or the port
+  drops, the sockets close, and the next op reconnects and logs on again.
+- **The page** asks store-neutral ops and installs with what `download` answers.
 
 ## The ops
 
-The page asks the content script (`window.postMessage`, as now). No op names a store's protocol;
-the store is an argument.
+The page asks the content script (`window.postMessage`, `{ to: 'bottlify-bridge', id, op, args }`).
+A store is an argument, never an op name.
 
 | Op | Answer |
 | --- | --- |
 | `hello` | `{ version, stores: [{ id, name, on }] }`: the stores GameHub has, and which the site has on |
-| `account { store }` | `{ name }` or null; never a token |
-| `signIn { store }` | opens GameHub's sign-in page (needs a click on the page); resolves once signed in, or the page is closed |
+| `account { store, fresh? }` | `{ name }`, or null for nobody signed in |
+| `signIn { store }` | `{ name }`; events `challenge { url }` (shown as a QR code by the page) and `scanned` |
 | `signOut { store }` | `{}` |
-| `list { store, fresh? }` | `[{ id, name, bytes, installable }]`: the account's games |
-| `cover { store, game, kind }` | a URL of the store's art GameHub's rules open to the page; `kind` is `header`, `capsule` or `hero` |
-| `download { store, game }` | what the page needs to download it -- for Steam `{ name, launch, installscript, servers: [{ host, vhost }], depots: [{ depot, gid, key, code, shared }] }`, the redistributables' depots included and their keys and codes asked under their owning app |
-| `runData { store, game }` | what a run of the game hands the engine's emulation of that store's client -- for Steam `{ win32: { steam: { steamId, accountName, apps, ownershipTickets, clientFiles } } }` |
+| `list { store, fresh? }` | `[{ id, name, bytes, exact, installable }]`: the account's games |
+| `cover { store, game, kind }` | the URL of the store's picture (`header`, `capsule`, `hero`), which GameHub's rules open to the page |
+| `download { store, game }` | what an install needs; Steam's: `{ name, launch, installscript, art, servers, depots: [{ depot, gid, key, code, shared }] }`, the redistributables' depots asked under the app that owns them |
+| `runData { store, game }` | what a run hands the engine's emulation of the store's client; Steam's: `{ win32: { steam: { steamId, accountName, apps, ownershipTickets, clientFiles, appId } } }` |
 | `cancel { target }` | aborts a request by its id |
 
-`download` replaces today's `steam.productInfo` + `steam.depotKey` + `steam.manifestCode` +
-`steam.contentServers`: the plan is built in GameHub, from product info only GameHub reads. A
-request code lasts minutes (not measured how many), so the page asks `download` again when it
-resumes. `runData` stays store-shaped inside: the engine's `win32.steam` reads it, the launcher
-passes it through.
+A request code lasts minutes (not measured how many): a resumed install asks `download` again.
 
-## What moves, and what the page keeps
+## What moved where
 
-The line: what speaks to a store's **services** goes to GameHub; what reads a store's **file
-formats** stays with the page.
+| Code | Now in |
+| --- | --- |
+| CM connection and messages, QR sign-in, logon, licences, product info, ownership tickets (`connection.js`, `messages.js`, `auth.js`, `session.js`) | GameHub, `src/stores/steam/` |
+| Depot keys, manifest request codes, content servers (`keys.js`) | GameHub |
+| Which depots an install takes, the redistributables' depots, the launch option, art addresses, what a page is shown of an app (`apps.js`) | GameHub |
+| Valve's client files (`client.js`) | GameHub |
+| The launcher's Steam provider and plan building | GameHub (`store.js`); the launcher has one provider per store `hello` lists |
+| Manifest parsing, chunk fetch and decode, AES, LZMA, zstd, protobuf decoding (`depot.js`, `lzma.js`, `zstd.js`, `protobuf.js`) | core |
+| The install, the in-place bottle writer, redistributables, installscript (`install.js`, `bundle-in-place.js`, `redist.js`, `keyvalues.js`) | core |
+| The QR picture (`qr.js`) | core |
+| The emulated Steam client (`layers/win32/steamclient`) | core, fed `runData` |
 
-| Code (core `src/steam/` today) | Goes to | Why |
-| --- | --- | --- |
-| `connection.js`, `messages.js` (CM socket, EMsgs) | GameHub | the store's service |
-| `auth.js`, `qr.js` (QR sign-in, its picture) | GameHub (sign-in page) | the site no longer drives a sign-in |
-| `session.js` (logon, licences, `ownedApps`, PICS `productInfo`, ownership tickets) | GameHub | |
-| `depot.js` `depotKey`, `manifestRequestCode`, `contentServers` | GameHub (`download`) | |
-| `apps.js` (`wantedDepot`, `sharedDepots`, `windowsLaunch`, `publicAppInfo`, art URLs) | GameHub | reading product info is the store's knowledge |
-| `client.js` (Valve's client files from Valve's CDN) | GameHub (`runData`) | |
-| launcher `src/steam/client.js`, `install.js` (`storeGame`, `askPlan`, `depotOpenings`) | GameHub (`list`, `download`) | the launcher keeps one generic provider per store `hello` lists |
-| `depot.js` `manifest`, `downloadChunk`, `symmetricDecrypt`, `decompressChunk`, `adler32` | stays in core | the CDN's file format, read where the bytes land |
-| `lzma.js`, `../zstd.js`, `protobuf.js` (decode) | stays in core | formats; GameHub's build copies `protobuf.js` and `keyvalues.js` for its own messages, one source |
-| `install.js` (`installBundle`, `downloadFiles`, `installedFiles`), `bundle-in-place.js` | stays in core | the install |
-| `redist.js`, `keyvalues.js` (installscript text, MSI and cabinets, A67) | stays in core | a file inside the downloaded game, applied to Windows |
-| engine `layers/win32/steamclient` | stays in core | the emulated client; fed `runData` |
+GameHub's build copies the core modules it reads (`protobuf.js`, `keyvalues.js`) beside its own,
+one source. `tools/steam-install.mjs` stays a node tool and takes the protocol from GameHub's
+source. `tools/check-store-protocol.mjs` fails a change that puts store-protocol code back into
+core or the launcher.
 
-Core keeps a `./steam` export holding the formats and the install only; the protocol modules leave
-it. `tools/steam-install.mjs` stays a node tool and takes the protocol code from GameHub's source.
+## The accepted model
 
-## Tokens and sign-in
+- The refresh token is read only by the worker. It leaves the worker only inside a logon frame,
+  which crosses the content script's isolated world on its way to the socket; scripts of the page
+  never see a frame.
+- The page gets no token. It gets depot keys and request codes (the same key for every owner of a
+  depot), the game list, and an ownership ticket at a run (lifetime not measured). Script injected
+  into bottlify.app could therefore install the account's games into bottlify.app and read its
+  list; a sign-in needs the person and the Steam app.
+- A compromised extension update gets everything. It is limited by hardware 2FA on the publisher
+  account, builds from tagged commits with the zip's hash published, and the store's review.
+- Without GameHub there are no stores (A66).
 
-- **Sign-in on GameHub's own page** (an extension tab, or the action popup): the QR code over Steam's
-  HTTPS Web API, `IAuthenticationService/BeginAuthSessionViaQR` then `PollAuthSessionStatus`.
-  Whether these answer a request from an extension origin: not measured (M3).
-- **The refresh token only in the service worker**, encrypted with a non-extractable AES-GCM key kept
-  in the extension origin's IndexedDB. Today it sits in `chrome.storage.local`, which the content
-  script can read -- and the content script runs in the page's renderer, beside the engine.
-- **The CM socket.** Steam's managers refuse a WebSocket whose Origin is not theirs; today the
-  content script holds the socket because the ruleset rewrites the Origin of the page's requests.
-  Two ways to keep the refresh token out of the renderer:
-  1. the socket in an extension context (the service worker or an offscreen document), if a
-     ruleset can rewrite a request the extension itself makes -- an earlier observation in
-     `content.js` (conditions not recorded) says the worker's own socket kept its Origin (M1);
-  2. the socket stays in the content script and logs on with a short-lived token from
-     `IAuthenticationService/GenerateAccessTokenForApp` instead of the refresh token -- whether a
-     CM logon takes one, and for how long it lasts: not measured (M2).
-- **What a page can get, by design**: no token, ever. A depot key and a request code (as today; the
-  same key for every owner of the depot), the game list, an ownership ticket (lifetime not
-  measured). XSS on bottlify.app can therefore install the account's games into bottlify.app and
-  read its list; it cannot sign in, since that needs GameHub's page and the Steam app. Ops answer
-  only Bottlify's pages (as today).
-- **A compromised extension update** gets everything; it is limited by hardware 2FA on the
-  publisher account, builds from tagged commits with the zip's hash published, and the store's
-  review.
+## Tests
 
-## Migration, each step shippable
-
-0. **Measure.** M1: a CM WebSocket from the service worker or an offscreen document through a
-   ruleset that sets Origin. M2: a CM logon with a `GenerateAccessTokenForApp` token. M3: the QR
-   Web API from an extension page. Results with their conditions go here; a failure goes to
-   `negative-results.md`.
-1. **The neutral ops beside the `steam.*` ones.** GameHub answers `hello { stores }`, `account`,
-   `list`, `cover`, `download`, `runData`; the launcher's Steam provider becomes a generic GameHub
-   provider, and its `src/steam/` keeps only the install worker, store-neutral apart from reading
-   `download`'s Steam fields. Install keeps working throughout.
-2. **Sign-in in GameHub.** The sign-in page and the Web API flow; `signIn` from the page only opens
-   it; the launcher's QR dialog goes; the refresh token moves to the service worker, encrypted.
-3. **The CM socket out of the renderer** (per M1), or on a short-lived token (per M2).
-4. **The protocol code out of core**, into GameHub's source; core's `./steam` keeps the formats and
-   the install; the `steam.*` page ops are removed.
-
-## What proves each step
-
-- **Always**: lint, typecheck, `check:boundaries`, the bridge's unit tests, `extension.itest`
-  (headless Chrome against Steam, anonymous), the launcher's tests and build, and the existing
-  differential gate (the same made-up depots installed by `tools/steam-install.mjs` and by
-  `installBundle` give the same files).
-- **Step 1**: the launcher's library and Settings run against a fake second store answering the
-  neutral ops; `download` answers what the old ops answered, for the same app (unit, with a fake
-  Steam).
-- **Step 2**: `extension.itest` checks no context but the service worker can read the refresh token
-  (the content script's `chrome.storage.local`, the page), and that the QR challenge comes from
-  GameHub's page.
-- **Step 4**: a validator in `tools/` (run with the other gates) fails if core or the launcher
-  imports a store-protocol module; core's `check:package` passes without them; the bridge's build
-  test checks GameHub carries its own.
-
-## For the user to decide
-
-- If M1 and M2 both fail, the refresh token stays reachable from the content script, as today:
-  accept, or stop after step 2?
-- A66's last clause ("the server-side path a launcher already has stays its fallback") no longer
-  holds now that the launcher's server has no store code; it needs restating.
+- **The pipe**: frames relayed both ways and sockets closed with the port (`pipe.test.js`); the
+  worker's relayed socket and its reconnect after the port drops (`relay.test.js`, `hub.test.js`);
+  every message that crosses the port and every answer the page gets, read for the refresh token:
+  found only inside ClientLogon frames (`hub.test.js`).
+- **The store**: the neutral ops over a fake Steam (`store.test.js`).
+- **Live**: `extension.itest.js`, headless Chrome with the dev build against Steam, anonymous.
+- **The gates**: the install differential (`tools/steam-install.test.js`), the bundle build test,
+  `check:boundaries` with `tools/check-store-protocol.mjs`.

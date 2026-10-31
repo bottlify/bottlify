@@ -639,15 +639,16 @@ Windows, whose own libraries hold that slot. When the two arrays were one, reser
 the program's block to index 1 and that executable found a null at index 0. *2026-10-30.*
 
 **A66. A game platform's own servers are reached from the page only while the platform lets us,
-and its first request to stop is honoured for everyone at once.** The bridge extension
+and its first request to stop is honoured for everyone at once.** The GameHub extension
 (`modules/bridge`) carries a page's requests to a platform -- Steam's connection managers, which
 admit only their own and localhost origins, and its content servers, which send no CORS headers
 -- by rewriting their headers with one ruleset a platform. Each ruleset is switched by the site's
 own configuration (`config.json`'s `bridge`, `"steam": false`), read by the extension on every
 page of the site, so turning one off needs no new release of the extension and reaches every
 browser on its next page. On a platform's first request, by whatever channel, its ruleset is
-switched off and we cooperate fully -- no workaround, no appeal first; the server-side path a
-launcher already has stays its fallback. *2026-10-30.*
+switched off and we cooperate fully -- no workaround, no appeal first. Without GameHub (the
+extension's name since) there are no stores: the launcher's server has no store path, and a store
+switched off is simply absent. *2026-10-30; restated 2026-10-31.*
 
 **A67. A Steam bottle is installed with its redistributables already applied, the app's own
 prerequisite installers among them.** Steam downloads the depots an app names from other apps
