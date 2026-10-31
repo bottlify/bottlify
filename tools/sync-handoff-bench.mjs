@@ -19,8 +19,13 @@
  * interleave, so every run is also a check that nothing was lost.
  *
  *   node tools/sync-handoff-bench.mjs [--frames 200] [--jobs 28] [--workers 2]
- *       [--work 4000] [--main-work 100000] [--poll] [--executors 1,3] [--reps 3]
- *       [--win32-config JSON] [--json]
+ *       [--work 4000] [--main-work 100000] [--poll] [--others 0] [--other-work 200000]
+ *       [--pin-main] [--executors 1,3] [--reps 3] [--win32-config JSON] [--json]
+ *
+ * `--others N` adds N threads that compute `--other-work` turns and Sleep(1),
+ * round and round, as a game's streaming and sound threads beside its job
+ * system; `--pin-main` pins the main thread to the first processor
+ * (SetThreadAffinityMask), as a game's main thread often is.
  *
  * Printed per executor count: ms a frame (the run from the program's first
  * instruction to its exit over F, translation included: the median of the
@@ -47,6 +52,9 @@ const WORKERS = Number(option('workers', '2'));
 const WORK = Number(option('work', '4000'));
 const MAIN_WORK = Number(option('main-work', '100000'));
 const POLL = args.includes('--poll');
+const OTHERS = Number(option('others', '0'));
+const OTHER_WORK = Number(option('other-work', '200000'));
+const PIN_MAIN = args.includes('--pin-main');
 const EXECUTORS = option('executors', '1,3').split(',').map(Number);
 const REPS = Number(option('reps', '3'));
 const WIN32 = JSON.parse(option('win32-config', '{}'));
@@ -58,12 +66,14 @@ const u32 = value=>[
 ];
 
 const WORKER_AT = 0x400;
+const OTHER_AT = 0x800;
 
 /** The program: see the header. */
 function program(){
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateSemaphoreA', 'ReleaseSemaphore', 'CreateThread',
-            'WaitForSingleObject', 'ExitProcess'] },
+            'WaitForSingleObject', 'ExitProcess', 'Sleep', 'SetThreadAffinityMask',
+            'GetCurrentThread'] },
         codeSize: 0x1000,
         data: { jobs: u32(0), done: u32(0), quit: u32(0), counter: u32(0),
             threads: new Array(4 * WORKERS).fill(0) },
@@ -92,6 +102,17 @@ function program(){
                 0x6a, 0x00, 0x6a, 0x00, ...call('CreateSemaphoreA'), 0xa3, ...u32(at(slot))];
             /** @type {any[]} */
             const main = [...semaphore('jobs'), ...semaphore('done')];
+            if (PIN_MAIN)
+            {
+                // SetThreadAffinityMask(GetCurrentThread(), 1)
+                main.push(0x6a, 0x01, ...call('GetCurrentThread'), 0x50,
+                    ...call('SetThreadAffinityMask'));
+            }
+            for (let index = 0; index < OTHERS; index++)
+            {
+                main.push(0x6a, 0x00, 0x6a, 0x00, 0x6a, index, 0x68, ...u32(code(OTHER_AT)),
+                    0x6a, 0x00, 0x6a, 0x00, ...call('CreateThread'));
+            }
             for (let index = 0; index < WORKERS; index++)
             {
                 main.push(0x6a, 0x00, 0x6a, 0x00, 0x6a, index, 0x68, ...u32(code(WORKER_AT)),
@@ -131,12 +152,21 @@ function program(){
                 { label: 'out' },
                 0x31, 0xc0, 0xc2, 0x04, 0x00, //           xor eax, eax; ret 4
             ]);
+            const other = assemble([
+                { label: 'again' },
+                ...compute(OTHER_WORK, 'busy'),
+                0x6a, 0x01, ...call('Sleep'),
+                0x83, 0x3d, ...u32(at('quit')), 0x00, //   cmp dword [quit], 0
+                { jump: 'jz', to: 'again' },
+                0x31, 0xc0, 0xc2, 0x04, 0x00,
+            ]);
             const head = assemble(main);
-            if (head.length > WORKER_AT)
+            if (head.length > WORKER_AT || worker.length > OTHER_AT - WORKER_AT)
             {
-                throw new Error(`the main thread's code takes ${head.length} bytes`);
+                throw new Error(`main ${head.length} bytes, worker ${worker.length}`);
             }
-            return [...head, ...new Array(WORKER_AT - head.length).fill(0x90), ...worker];
+            return [...head, ...new Array(WORKER_AT - head.length).fill(0x90), ...worker,
+                ...new Array(OTHER_AT - WORKER_AT - worker.length).fill(0x90), ...other];
         },
     });
 }
@@ -211,7 +241,8 @@ for (const executors of EXECUTORS)
     });
 }
 const conditions = { engine: ENGINE, frames: FRAMES, jobs: JOBS, workers: WORKERS, work: WORK,
-    mainWork: MAIN_WORK, poll: POLL, reps: REPS, win32: WIN32 };
+    mainWork: MAIN_WORK, poll: POLL, others: OTHERS, otherWork: OTHER_WORK, pinMain: PIN_MAIN,
+    reps: REPS, win32: WIN32 };
 if (JSON_OUT)
 {
     console.log(JSON.stringify({ conditions, results }, null, 1));
