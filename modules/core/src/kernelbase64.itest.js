@@ -138,7 +138,7 @@ test('a 64-bit program finds VirtualAlloc2 in kernelbase.dll and NtAllocateVirtu
             return bytes;
         },
     });
-    const app = await createApp({ executable: program, engine: 'cork' });
+    const app = await createApp({ executable: program });
     t.after(()=>app.dispose());
     assert.equal(await app.run({ timeoutMs: 30000 }), 0);
     /** @param {string} name @param {number} [offset] */

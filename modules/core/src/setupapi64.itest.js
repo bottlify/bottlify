@@ -86,7 +86,7 @@ test('a 64-bit program enumerates devices with its own SP_DEVINFO_DATA, to the e
                 return bytes;
             },
         });
-        const app = await createApp({ executable: program, engine: 'cork' });
+        const app = await createApp({ executable: program });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 30000 }), 0);
         /** @param {string} name */

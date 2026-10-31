@@ -112,7 +112,7 @@ const wide = text=>[...text].flatMap(c=>[c.charCodeAt(0), 0]).concat(0, 0);
  * @param {string} commandLine @param {(got: Answers) => void} check
  */
 async function answers(executable, where, commandLine, check){
-    const app = await createApp({ executable, engine: 'cork', commandLine });
+    const app = await createApp({ executable, commandLine });
     try
     {
         const code = await app.run({ timeoutMs: 30000 });

@@ -255,7 +255,7 @@ test('a moved 64-bit image\'s thread-local block holds its relocated pointers', 
         - 0x140000000n);
     view.setBigUint64(0x200 + templateRva - 0x1000, BigInt(target), true);
 
-    const app = await createApp({ executable: image, engine: 'cork' });
+    const app = await createApp({ executable: image });
     t.after(()=>app.dispose());
     assert.equal((await app.run({ timeoutMs: 30_000 })) >>> 0, 0,
         'the block\'s pointer is the global\'s address where the image was mapped');

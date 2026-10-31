@@ -101,7 +101,7 @@ test('a 64-bit program reads at the offset its OVERLAPPED names and is told how 
                 return bytes;
             },
         });
-        const app = await createApp({ executable: program, engine: 'cork' });
+        const app = await createApp({ executable: program });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 30000 }), 0);
         const read = (/** @type {string} */ name, /** @type {number} */ length)=>

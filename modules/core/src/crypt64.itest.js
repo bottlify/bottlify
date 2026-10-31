@@ -68,7 +68,7 @@ test('a 64-bit program reads a root certificate\'s encoding and info where its l
                 return bytes;
             },
         });
-        const app = await createApp({ executable: program, engine: 'cork' });
+        const app = await createApp({ executable: program });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 30000 }), 0);
         /** @param {number} at @param {number} length */
