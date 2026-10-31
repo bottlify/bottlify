@@ -688,8 +688,7 @@ export function createCpuModule(){
                             awaited: ()=>state.awaited?.() === true,
                             ...(typeof engineModule.createArena === 'function'
                                 && typeof SharedArrayBuffer === 'function'
-                                && settings.cork?.arenaBytes !== 0
-                                ? { arena: engineModule.createArena(settings.cork?.arenaBytes) }
+                                ? { arena: engineModule.createArena() }
                                 : {}) } : settings.cork,
                         closedBelow: settings.closedBelow,
                         noExecuteBelow: settings.noExecuteBelow,
@@ -725,7 +724,7 @@ export function createCpuModule(){
                         {
                             cork.translators = 1;
                         }
-                        const bell = createBell(settings.cork?.spinMs);
+                        const bell = createBell();
                         state.bell = bell;
                         const host = state.host;
                         state.openExecutor = index=>createRemoteExecutor({ host, index,

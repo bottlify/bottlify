@@ -1983,7 +1983,7 @@ test('an iPhone translates without wasm tail calls; phones and Safari run on one
     }
     const off = withoutFaultingTailCalls({ cork: { config: { worker: false } } }, true);
     assert.deepEqual(off.cork.config,
-        { crossTailCalls: false, dispatch: true, callDepth: 64, gatherAfter: 0, worker: false });
+        { crossTailCalls: false, dispatch: true, callDepth: 64, worker: false });
     assert.equal(withoutFaultingTailCalls({ cork: { config: { crossTailCalls: true } } }, true)
         .cork.config.crossTailCalls, true, 'the caller\'s own setting wins');
     const options = {};

@@ -356,9 +356,9 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
 - **Regions do not repeat each other.** A candidate at a block of a region formed and not yet
   published (earlier in its batch, with a translator, or its module compiling) is not formed
   again beside it (for a region with x87 in it, at the top that region was formed for): it has an
-  entry there once that region is published. A region may also stop at a block another region has
-  an entry for and leave to it there (`regionStops`), so a function's code is translated once; that
-  is off by default, because the hot code it cuts crosses between regions (`SETTINGS.md`). A small leaf callee
+  entry there once that region is published. A region runs on through a block another region has
+  an entry for: stopping there translated a function's code once, but the hot code it cut crossed
+  between regions. A small leaf callee
   is formed into each caller, for the call it saves.
 - **The store.** A translation is keyed by the cache version, the browser's features, the memory
   layout, the bundle id, the entry address, the x87 stack top (any top for a region with no x87 in
@@ -449,7 +449,7 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     process wants none back (suspended, ended by another), an executor keeps its thread slice after
     slice: its event loop turns in between, and the process hears of the thread at most every
     250 ms. While ready threads wait for an executor, it keeps its thread for a turn
-    (`executorHoldMs`) and gives it up at the first slice's end past that, as a processor keeps a
+    (1 ms) and gives it up at the first slice's end past that, as a processor keeps a
     thread to its quantum's end. The process's thread with nothing of its own to run waits for the
     others until its soonest deadline, 4 ms at most. An executor keeping a thread the process's
     executor may run lets it go at its slice's end and the thread comes to the process's executor,

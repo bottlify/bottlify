@@ -170,7 +170,6 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [hashSlots]  The entry hash's slots, a power of two: a block start
  *     past three quarters of them is reached from translated code only through the host.
  *     Default 2^20 (`Tables.HASH_SLOTS`).
- * @property {number} [maxRegionBytes]   Default 8192.
  * @property {boolean} [precise]         Nothing relaxed for speed: the x87 exception flags,
  *     signalling NaNs, underflow and C1 kept as the processor keeps them, and the flags an
  *     instruction leaves undefined left as the instruction model leaves them rather than as the
@@ -258,15 +257,11 @@ export function engineContractProblem(engineModule, url){
  *     process's cork hosts, between them, before the wasm tier takes over: their instructions,
  *     a jump target new to a host counting as 128. Default 8192; 0 runs the wasm tier from the
  *     first instruction.
- * @property {number} [newTargetWork]  What a jump target new to a host counts as against
- *     `wasmInterpreterAfter`. Default 128.
  * @property {number} [volatileAfter]  Writes that drop one page's code, within
  *     `volatileWindowMs` of each other, before the page is left to the interpreter. Default 8.
  * @property {number} [volatileWindowMs]  The window those writes are counted in. Default 100.
  * @property {number} [volatileHoldMs]  How long a page is left to the interpreter before it is
  *     translated again, twice as long each time it is left again. Default 2000.
- * @property {boolean} [undoLog]  A differential build: every store's old bytes recorded, so a
- *     slice can be replayed. Default false.
  * @property {boolean} [countTransfers]  A diagnostic: transfers between regions through the hash
  *     counted. Default false.
  * @property {boolean} [checkStale]  A diagnostic: regions whose bytes no longer form as they
@@ -278,52 +273,24 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [relinkRegions]  Regions in each gathered module. Default 512.
  * @property {number} [mergeAfter]  Transfers between two modules' regions before the two are
  *     gathered into one on the translation worker (0: never). Default 2^16.
- * @property {number} [mergeSample]  Translated instructions between two readings of the
- *     modules' crossings. Default 2^20.
- * @property {number} [mergeEvery]  The fewest translated instructions between two merges.
- *     Default 2^23.
- * @property {number} [mergePerRegion]  Of those, per region a merge builds again. Default 2^19.
- * @property {number} [mergesARegion]  Merges one region may take part in. Default 2.
  * @property {number} [relinkCold]  Regions in each module a relink builds of those no entry
  *     or crossing reached lately: a module is held or let go whole. Default 128.
- * @property {number} [gatherAfter]  With `crossTailCalls` false and `dispatch`, crossings out
- *     of placed modules past which the hottest regions are built into one module (0: never).
- *     Default 2^18.
- * @property {number} [gatherRegions]  The most regions such a module takes. Default 2048.
  * @property {boolean} [dispatch]  Each module placed in a range of the table, a transfer inside
  *     it a direct tail call. Default false.
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
- * @property {boolean} [regionStops]  A region stops at a block another region has an entry for
- *     and leaves to it there; off by default (it cuts hot code: `SETTINGS.md`).
- * @property {number} [leafBlocks]  Its blocks at most. Default 16.
  * @property {number} [leafBytes]  Its bytes at most. Default 512.
  * @property {number} [formDepth]  How many levels of callees formed in may keep direct calls
  *     of their own, those callees formed in as well when small; 0 forms leaves alone. Default 1.
- * @property {number} [switchEntries]  Entries of a switch's jump table followed when forming.
- *     Default 1024.
- * @property {boolean} [runtimeHelpers]  A call to a compiler's runtime helper (MSVC's `_ftol2`)
- *     formed as what it amounts to. Default true.
- * @property {boolean} [importThunks]  A direct call to an import thunk (`jmp [slot]` alone)
- *     formed as the call through its slot. Default true.
  * @property {boolean} [callTargets]  Indirect calls sampled and their few small callees formed
  *     in. Default true.
  * @property {number} [predictAfter]  Samples of one call before its callees are looked at.
  *     Default 48.
- * @property {number} [predictShare]  A callee formed in takes one in this many of the call's
- *     samples. Default 8.
- * @property {number} [predictCallees]  Callees one call compares its target with. Default 4.
- * @property {number} [reforms]  Times a region is formed again for its calls. Default 3.
- * @property {number} [callWindow]  The window a call's samples are counted in. Default 64.
+ * @property {number} [callWindow]  The window a call's samples are counted in. Default 1024.
  * @property {boolean} [callReturn]  A call out of a region a wasm call, the region going on after
  *     the `ret`. Default true.
  * @property {boolean} [emptyCalls]  A call to a function that does nothing -- a `ret` or
  *     `ret imm16`, after at most three direct jumps -- returns without entering a region.
  *     Default true.
- * @property {boolean} [emptySites]  With `emptyCalls`, a call out of a region reads its target's
- *     slot first and returns from such a function in place, without calling the transfer.
- *     Default false.
- * @property {boolean} [flagsAcrossCalls]  With `callReturn`, the flag record carried into a
- *     guest call made as a wasm call and back with its `ret`. Default true.
  * @property {boolean} [linkedCalls]  A direct call out of a region reads its target's first slot
  *     and, where the entry there is the one the transfer would take at its first look, calls
  *     its function itself, without the transfer's hashing and probe. Default true.
@@ -344,12 +311,8 @@ export function engineContractProblem(engineModule, url){
  * @property {boolean} [structure]  A region's loops as wasm loops. Default true.
  * @property {boolean} [looseStacks]  A store through esp alone tests no page while no
  *     translated code lies on a stack. Default true.
- * @property {number} [hashLoad]  The share of the entry hash's slots live past which a block
- *     start stays in the host's map alone. Default 0.75.
  * @property {number} [translators]  Translation workers the runtime opens itself (0: a host's
  *     pool lends them). Default 1.
- * @property {number} [arenaBytes]  Bytes of the shared translation arena (0: none). Default
- *     48 MiB.
  * @property {SharedArrayBuffer} [arena]  The arena itself, made by the host for every executor of
  *     a process (cork's `createArena`): what one executor's translators emitted, the others take.
  * @property {number} [cacheBytes]  Wasm bytes of the modules running regions are in, past
@@ -357,39 +320,16 @@ export function engineContractProblem(engineModule, url){
  *     when asked for (0: no ceiling). Default 256 MiB; the cpu layer gives each executor's
  *     runtime its part of what the translation zone (`TRANSLATION_ZONE_BYTES`) leaves after
  *     the engine's tables (`cacheShare`). Its diagnostics say what it holds (`heldBytes`).
- * @property {number} [evictHold]  Translated instructions a module brought back after an
- *     eviction is kept whatever its mark, twice as many each time again. Default 2^28.
- * @property {number} [loadingBatch]  While the translation worker loads, the largest batch
- *     emitted on the engine thread -- none where `holdMs` bounds the work there: a batch waits
- *     for the worker. Default 16.
- * @property {number} [loadingShare]  And the share of the time since the worker was made
- *     emitting there may take. Default 0.25.
  * @property {number} [holdMs]  Where a translation worker is wanted, the engine thread's
  *     time the translator's work may take at a stretch: a batch is formed over several calls,
  *     the store's hits compiled off the thread, their compiles started and they and a worker's
  *     answers published a few at a call (0: a batch formed and published whole in one call).
  *     Default 4.
- * @property {number} [holdShare]  And the share of the engine thread's time that work may
- *     take over a while. Default 0.5.
- * @property {number} [exitTargets]  Targets of untranslated exits kept. Default 4096.
- * @property {number} [missesKept]  (Address, top) miss counts kept. Default 4096.
- * @property {number} [callSitesKept]  Indirect call sites tried with predicted callees kept.
- *     Default 4096.
- * @property {number} [yieldChunk]  Instructions translated code runs at a time while a slice may
- *     end early. Default 10000.
- * @property {number} [interpretChunk]  Instructions the interpreter runs at a time. Default 8192.
+ * @property {number} [yieldChunk]  `createMachine` alone (cork's machine for its tests): the
+ *     instructions translated code runs at a time. Default 2^24.
+ * @property {number} [interpretChunk]  `createMachine` alone: the instructions its interpreter
+ *     runs at a time. Default 2^16.
  * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
- * @property {number} [tscDriftMs]  How far `rdtsc` runs ahead of the guest's clock. Default 16.
- * @property {number} [spinMs]  With several executors, how long a side of their channel, and the
- *     process on their bell, looks at it before it sleeps. Default 1 while the slices out, the
- *     process's own executor and the graphics worker leave one of the host's processors free,
- *     0.05 otherwise.
- * @property {number} [executorIdleMs]  How long an executor waits in place for its next slice
- *     before its event loop does. Default 2.
- * @property {number} [executorYieldMs]  The longest an executor goes without a turn of its
- *     event loop. Default 4.
- * @property {number} [executorHoldMs]  How long an executor keeps a thread past its slice while
- *     other ready threads wait for one: its turn. Default 1.
  */
 
 /**

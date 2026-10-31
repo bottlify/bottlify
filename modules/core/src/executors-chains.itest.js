@@ -123,7 +123,7 @@ test('three threads computing on two executors take turns there a turn long, not
     async()=>{
         // One more thread than the executors: the other executor's is wanted by
         // a waiting thread at every slice's end. It gives it up when it has held
-        // it a turn (`executorHoldMs`), not after each quantum, which took a
+        // it a turn (`HOLD_MS` in the executor worker), not after each quantum, which took a
         // round trip through the process every 50 us and left it idle for
         // almost half its time.
         const executable = buildProgram(['CreateThread', 'WaitForSingleObject', 'ExitProcess'],

@@ -1818,13 +1818,8 @@ const IOS_CALL_DEPTH = 64;
  * transfer within a module a direct tail call and one out of it entered by the
  * runtime's loop (`crossTailCalls`); the emulator's chaining, every link of it
  * into another module, off. With them fewer calls wait as wasm calls
- * (`IOS_CALL_DEPTH`). The hottest regions are not gathered into a module of
- * their own (`gatherAfter`): each gathering builds them again, and WebKit keeps
- * what it compiled -- the Doom 3 demo's load in WebKit 27.2 (Playwright,
- * Windows, the game test page with the fake GPU, 180-240 s, one run each) held
- * 3090 MB of the web process at its end gathering and 1110 MB not, past the
- * 1720 MB an iPhone 13 Pro Max's tab is ended at. The caller's own settings
- * win. Decided on the page and carried to every worker in the options.
+ * (`IOS_CALL_DEPTH`). The caller's own settings win. Decided on the page and
+ * carried to every worker in the options.
  *
  * @template {Record<string, any>} T
  * @param {T} options
@@ -1835,7 +1830,7 @@ export function withoutFaultingTailCalls(options, fault = tailCallsFault()){
     return fault ? { ...options,
         cork: { ...options.cork,
             config: { crossTailCalls: false, dispatch: true, callDepth: IOS_CALL_DEPTH,
-                gatherAfter: 0, ...options.cork?.config } } } : options;
+                ...options.cork?.config } } } : options;
 }
 
 /**

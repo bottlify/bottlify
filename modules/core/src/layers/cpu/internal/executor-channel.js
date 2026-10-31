@@ -171,22 +171,16 @@ export const Bell = Object.freeze({ RUNG: 0, GO_ON: 1, SLEEPING: 2, RUNNING: 3 }
 export const BELL_BYTES = 16;
 
 /**
- * How long a wait looks before it sleeps, asked as each wait begins: the run's
- * own `spinMs` when it names one; otherwise `SPARE_SPIN_MS` while the slices
- * out and the threads beside them (`BUSY_BESIDE`) leave one of the host's
- * `processors` free, and `SPIN_MS` when they do not -- or when the host does
- * not say how many it has.
+ * How long a wait looks before it sleeps, asked as each wait begins:
+ * `SPARE_SPIN_MS` while the slices out and the threads beside them
+ * (`BUSY_BESIDE`) leave one of the host's `processors` free, and `SPIN_MS`
+ * when they do not -- or when the host does not say how many it has.
  *
  * @param {Int32Array | null} bell  the process's bell (`Bell.RUNNING`)
  * @param {number | undefined} processors  the host's (`navigator.hardwareConcurrency`)
- * @param {number | undefined} spinMs  the run's
  * @returns {() => number}
  */
-export function lookFor(bell, processors, spinMs){
-    if (spinMs !== undefined)
-    {
-        return ()=>spinMs;
-    }
+export function lookFor(bell, processors){
     if (bell === null || processors === undefined || !(processors > 0))
     {
         return ()=>SPIN_MS;

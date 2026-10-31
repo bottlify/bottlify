@@ -240,10 +240,9 @@ export function createCorkHost(config){
     {
         throw new Error(`cpu: executor ${executor} of ${executors}`);
     }
-    // The host's own pacing, the config's where it names one (`EngineConfig`).
-    const interpretChunk = corkConfig?.interpretChunk ?? INTERPRET_CHUNK;
+    // How long an interpreted slice may take: a test's own where it names one
+    // (`EngineConfig`), so its slices are cut by instructions alone.
     const sliceMs = corkConfig?.sliceMs ?? SLICE_MS;
-    const tscDriftMs = corkConfig?.tscDriftMs ?? TSC_DRIFT_MS;
 
     // The guest RAM is the whole memorySize; the tables and the state block are
     // memory of cork's own beside it, not carved out of the guest's. `own` is
@@ -660,7 +659,7 @@ export function createCorkHost(config){
                 guestMs = ms;
                 guestMovedAt = now;
             }
-            ticks = (guestMs + Math.min(now - guestMovedAt, tscDriftMs)) * TICKS_PER_MS;
+            ticks = (guestMs + Math.min(now - guestMovedAt, TSC_DRIFT_MS)) * TICKS_PER_MS;
         }
         return later(Math.floor(ticks));
     };
@@ -789,7 +788,6 @@ export function createCorkHost(config){
     // instruction. Once the stretch is spent the tier runs every range, and
     // `wasmSwitch` ends the range it ran out in.
     const wasmAfter = corkConfig?.wasmInterpreterAfter ?? WASM_AFTER;
-    const newTargetWork = corkConfig?.newTargetWork ?? NEW_TARGET_WORK;
     let wasmDue = wasmTier !== null && (wasmAfter <= 0 || wasmTier.started());
     let wasmSwitch = false;
     /** Counts one interpreted start and notes the address once it is hot.
@@ -799,7 +797,7 @@ export function createCorkHost(config){
         const slot = (address >>> 2) & HOT_MASK;
         if (hotCounts[slot] === 0 && !wasmDue && wasmTier !== null)
         {
-            wasmTier.stretch.work += newTargetWork;
+            wasmTier.stretch.work += NEW_TARGET_WORK;
             if (wasmTier.stretch.work >= wasmAfter)
             {
                 wasmDue = true;
@@ -1527,7 +1525,7 @@ export function createCorkHost(config){
                 continue;
             }
             const interpretAt = clock();
-            const stepped = interpretRange(at, Math.min(remaining, interpretChunk), false,
+            const stepped = interpretRange(at, Math.min(remaining, INTERPRET_CHUNK), false,
                 jumpedIn);
             interpretMs += clock() - interpretAt;
             interpreted += stepped;
