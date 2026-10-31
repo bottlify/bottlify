@@ -69,11 +69,6 @@ function fakeSteam(){
             { host: 'b', vhost: 'steampipe.akamaized.net', type: 'CDN' },
             { host: 'c', vhost: 'lancache.example.org', type: 'SteamCache' },
         ],
-        signInWithQr: async(/** @type {any} */ _next, /** @type {any} */ options)=>{
-            options.onChallenge('https://s.team/q/1/1');
-            options.onScanned();
-            return { accountName: 'someone', refreshToken: TOKEN };
-        },
         fetchClientFiles: async()=>({ version: '1',
             files: { 'steamclient.dll': Uint8Array.of(77, 90) } }),
     };
@@ -87,10 +82,6 @@ function hubOver(platforms = {}){
         get: async()=>kept.session
             && { accountName: kept.session.accountName, id: kept.session.id },
         token: async()=>kept.session,
-        signIn: async(/** @type {any} */ options)=>{
-            kept.session = await steam.signInWithQr(null, options);
-            return { accountName: kept.session.accountName };
-        },
         signOut: async()=>{
             kept.session = null;
         },
@@ -106,31 +97,26 @@ function hubOver(platforms = {}){
 
 test('hello names the stores and which the site has on', async()=>{
     assert.deepEqual(await hubOver().ask('hello'),
-        { version: '0.2.0', stores: [{ id: 'steam', name: 'Steam', on: true }] });
+        { version: '0.2.0', origin: '', stores: [{ id: 'steam', name: 'Steam', on: true }] });
     const off = hubOver({ steam: false });
     assert.deepEqual((await off.ask('hello')).stores, [{ id: 'steam', name: 'Steam', on: false }]);
     await assert.rejects(off.ask('account'), /Steam is switched off/);
-    await assert.rejects(off.ask('signIn'), /switched off/);
+    await assert.rejects(off.ask('list'), /switched off/);
     assert.deepEqual(off.steam.asked, [], 'Steam is not spoken to');
     await assert.rejects(hubOver().ask('list', { store: 'gog' }), /no store gog/);
 });
 
-test('a sign-in streams its code, keeps the token and answers only the account\'s name', async()=>{
-    const { steam, kept, ask, events } = hubOver();
-    const answer = await ask('signIn');
+test('the account the worker keeps: its name answered, its token in nothing given', async()=>{
+    const { steam, kept, ask } = hubOver();
+    kept.session = { accountName: 'someone', refreshToken: TOKEN };
+    const answer = await ask('account');
     assert.deepEqual(answer, { name: 'someone' });
-    assert.deepEqual(events, [
-        { id: 1, event: 'challenge', data: { url: 'https://s.team/q/1/1' } },
-        { id: 1, event: 'scanned', data: {} },
-    ]);
-    assert.equal(kept.session.refreshToken, TOKEN);
-    assert.deepEqual(await ask('account'), { name: 'someone' });
     await ask('account');
     await ask('account', { fresh: true });
     assert.equal(steam.asked.filter(one=>one.startsWith('logOn')).length, 2,
         'fresh logs on again rather than answering from the logon held');
     const list = await ask('list');
-    assert.doesNotMatch(JSON.stringify([answer, events, list]), /secret-signature|eyJ/);
+    assert.doesNotMatch(JSON.stringify([answer, list]), /secret-signature|eyJ/);
     assert.deepEqual(await ask('signOut'), {});
     assert.equal(kept.session, null);
     assert.equal(await ask('account'), null);
@@ -196,17 +182,4 @@ test('run data: Steam running for the account, the ticket, Valve\'s client files
     assert.deepEqual(steam.asked.filter(one=>one.startsWith('ticket')),
         ['ticket 400', 'ticket 480']);
     assert.doesNotMatch(JSON.stringify(run), /secret-signature|eyJ/);
-});
-
-test('a sign-in is cancelled by its id, and what the page held goes with it', async()=>{
-    const { steam, ask, hub } = hubOver();
-    steam.signInWithQr = (_next, options)=>new Promise((_resolve, reject)=>{
-        options.signal.addEventListener('abort', ()=>reject(options.signal.reason));
-    });
-    const going = ask('signIn', {}, 7);
-    await hub.handle({ id: 8, op: 'cancel', args: { target: 7 } }, ()=>{});
-    await assert.rejects(going, /cancelled/);
-    const again = ask('signIn', {}, 9);
-    hub.close();
-    await assert.rejects(again, /the page went/);
 });

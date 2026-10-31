@@ -37,12 +37,15 @@ export const HOSTS = Object.freeze({
 });
 
 /**
- * Each store: its ruleset (switched on and off as one) and the hosts the
- * ruleset and the service worker's own requests reach.
+ * Each store: its ruleset (switched on and off as one), the hosts the
+ * ruleset and the service worker's own requests reach, and its sign-in page,
+ * which the build lays out at `<store>/signin.html` and the launcher frames.
  */
 export const PLATFORMS = Object.freeze({
     steam: Object.freeze({
         rules: 'rules/steam.json',
+        signIn: Object.freeze({ page: 'src/stores/steam/signin.html',
+            script: 'bridge/src/stores/steam/signin.js' }),
         // The CM socket the page opens for the worker; the content servers the
         // page downloads from; Steam's directory and Valve's client
         // distribution (the client's own DLLs, which a DRM wrapper reads as the
@@ -65,7 +68,14 @@ export const PLATFORMS = Object.freeze({
  * the page's to load too (the build lists them: `TAB`).
  */
 export const ENTRIES = Object.freeze(['bridge/src/worker.js', 'bridge/src/content.js',
-    'bridge/src/tab.js']);
+    'bridge/src/tab.js', ...Object.values(PLATFORMS).map(platform=>platform.signIn.script)]);
+
+/**
+ * The pages that may frame a store's sign-in page. The dev build's are its
+ * hosts (`HOSTS`), which a match pattern cannot say of a network address: any
+ * page, the sign-in page itself refusing a frame on another host.
+ */
+export const FRAMED_BY = PAGES;
 
 /** What the content script imports. */
 export const TAB = 'bridge/src/tab.js';
@@ -87,7 +97,9 @@ export function manifestFor(build, version, modules = [TAB]){
             ...Object.values(PLATFORMS).flatMap(platform=>platform.hosts)],
         background: { service_worker: 'bridge/src/worker.js', type: 'module' },
         content_scripts: [{ matches: pages, js: ['bridge/src/content.js'], run_at: 'document_start' }],
-        web_accessible_resources: [{ resources: [...modules], matches: pages }],
+        web_accessible_resources: [{ resources: [...modules], matches: pages },
+            { resources: Object.keys(PLATFORMS).map(id=>`${id}/signin.html`),
+                matches: [...FRAMED_BY[build]] }],
         declarative_net_request: {
             rule_resources: Object.entries(PLATFORMS).map(([id, platform])=>(
                 { id, enabled: true, path: `bridge/${platform.rules}` })),

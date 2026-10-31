@@ -42,6 +42,8 @@ export const EResult = Object.freeze({
     ServiceUnavailable: 20,
     Expired: 27,
     TryAnotherCM: 48,
+    InvalidLoginAuthCode: 65,
+    TwoFactorCodeMismatch: 88,
 });
 
 /** The protocol version the client announces in its hello and logon. */
@@ -174,6 +176,51 @@ export const Authentication = Object.freeze({
         allowed_confirmations: [5, { confirmation_type: [1, 'int32'] }, 'repeated'],
     },
     /** @type {Schema} */
+    GetPasswordRSAPublicKeyRequest: {
+        account_name: [1, 'string'],
+    },
+    /** @type {Schema} */
+    GetPasswordRSAPublicKeyResponse: {
+        publickey_mod: [1, 'string'],
+        publickey_exp: [2, 'string'],
+        timestamp: [3, 'uint64'],
+    },
+    /** @type {Schema} */
+    BeginAuthSessionViaCredentialsRequest: {
+        account_name: [2, 'string'],
+        encrypted_password: [3, 'string'],
+        encryption_timestamp: [4, 'uint64'],
+        remember_login: [5, 'bool'],
+        platform_type: [6, 'int32'],
+        persistence: [7, 'int32'],
+        website_id: [8, 'string'],
+        device_details: [9, {
+            device_friendly_name: [1, 'string'],
+            platform_type: [2, 'int32'],
+            os_type: [3, 'int32'],
+            gaming_device_type: [4, 'uint32'],
+        }],
+    },
+    /** @type {Schema} */
+    BeginAuthSessionViaCredentialsResponse: {
+        client_id: [1, 'uint64'],
+        request_id: [2, 'bytes'],
+        interval: [3, 'float'],
+        allowed_confirmations: [4, { confirmation_type: [1, 'int32'],
+            associated_message: [2, 'string'] }, 'repeated'],
+        steamid: [5, 'uint64'],
+        extended_error_message: [8, 'string'],
+    },
+    /** @type {Schema} */
+    UpdateAuthSessionWithSteamGuardCodeRequest: {
+        client_id: [1, 'uint64'],
+        steamid: [2, 'fixed64'],
+        code: [3, 'string'],
+        code_type: [4, 'int32'],
+    },
+    /** @type {Schema} */
+    UpdateAuthSessionWithSteamGuardCodeResponse: {},
+    /** @type {Schema} */
     PollAuthSessionStatusRequest: {
         client_id: [1, 'uint64'],
         request_id: [2, 'bytes'],
@@ -188,6 +235,21 @@ export const Authentication = Object.freeze({
         account_name: [6, 'string'],
     },
 });
+
+/**
+ * EAuthSessionGuardType: what a sign-in by name and password asks of the
+ * person, of which Steam allows one or more.
+ */
+export const Guard = Object.freeze({
+    None: 1,
+    EmailCode: 2,
+    DeviceCode: 3,
+    DeviceConfirmation: 4,
+    EmailConfirmation: 5,
+});
+
+/** ESessionPersistence: a session the client keeps across its restarts. */
+export const PERSISTENT = 1;
 
 /** EAuthTokenPlatformType: a token the client logs on with is a SteamClient one. */
 export const PLATFORM_STEAM_CLIENT = 1;

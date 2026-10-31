@@ -7,19 +7,20 @@
 /**
  * GameHub's service worker: the stores' sessions, kept in the extension
  * origin's IndexedDB, sealed (vault.js), their sign-ins, over HTTPS, and
- * their rulesets. GameHub in each tab (tab.js) speaks the stores' protocols and
- * asks the worker here to sign in, who is signed in, what to log on with, and
- * to fetch what the ruleset does not open to a page (serve.js). Nothing it does
- * takes long: Chrome keeps an extension's worker at a low priority.
+ * their rulesets. A store's sign-in page (`<store>/signin.html`, in a frame
+ * of the launcher's) asks it to sign in; GameHub in each tab (tab.js) speaks
+ * the stores' protocols and asks it who is signed in, what to log on with,
+ * and to fetch what the ruleset does not open to a page (serve.js). Chrome
+ * keeps an extension's worker at a low priority: nothing here takes long.
  *
  * It also switches each store's ruleset as the asking site's configuration
  * says, so a store that asks us to stop is stopped for everyone from the site
  * without a new release of the extension (roadmap/decisions.md, A66).
  */
 
-import { serveTab } from './serve.js';
+import { serveSignIn, serveTab } from './serve.js';
 import { vaultFor } from './vault.js';
-import { signInWithQr } from './stores/steam/auth.js';
+import { signInWithCredentials, signInWithQr } from './stores/steam/auth.js';
 import { webApi } from './stores/steam/webapi.js';
 
 const { chrome } = /** @type {any} */ (globalThis);
@@ -66,22 +67,36 @@ async function cachedFetch(url){
     return fresh;
 }
 
+// Over HTTPS, not a CM socket: a socket is a tab's, and the token a sign-in
+// ends in would cross it.
+const steamApi = async()=>/** @type {any} */ (webApi());
+
+/** @type {Record<string, import('./serve.js').Kept>} */
 const stores = {
     steam: {
         vault: vaultFor('steam'),
-        // Over HTTPS, not a CM socket: a socket is a tab's, and the token the
-        // sign-in ends in would cross it.
-        signIn: (/** @type {any} */ options)=>signInWithQr(async()=>/** @type {any} */ (webApi()),
-            options),
+        qr: options=>signInWithQr(steamApi, options),
+        credentials: options=>signInWithCredentials(steamApi, options),
     },
 };
 
 chrome.runtime.onConnect.addListener((/** @type {any} */ port)=>{
-    // Only GameHub's own content script, in a tab: a page cannot connect.
-    if (port.name !== 'gamehub' || port.sender?.id !== chrome.runtime.id || !port.sender?.tab)
+    const sender = port.sender ?? {};
+    const own = sender.id === chrome.runtime.id;
+    const page = /^\/([a-z][a-z0-9]{0,31})\/signin\.html$/.exec(
+        sender.url?.startsWith(chrome.runtime.getURL('')) ? new URL(sender.url).pathname : '');
+    // A store's sign-in page, which only the extension serves.
+    if (own && port.name === 'signin' && page)
+    {
+        serveSignIn(port, { store: page[1], stores });
+    }
+    // GameHub's own content script, in a tab: a page cannot connect.
+    else if (own && port.name === 'gamehub' && sender.tab && !page)
+    {
+        serveTab(port, { switch: switchRulesets, stores, fetch: /** @type {any} */ (cachedFetch) });
+    }
+    else
     {
         port.disconnect();
-        return;
     }
-    serveTab(port, { switch: switchRulesets, stores, fetch: /** @type {any} */ (cachedFetch) });
 });

@@ -66,9 +66,10 @@ export async function build(out = join(HERE, 'dist')){
     /** @type {[string, string][]} */
     const files = (await closure([...ENTRIES])).map(path=>[join(MODULES, path), path]);
     const loadable = await closure([TAB]);
-    for (const platform of Object.values(PLATFORMS))
+    for (const [id, platform] of Object.entries(PLATFORMS))
     {
-        files.push([join(HERE, platform.rules), `bridge/${platform.rules}`]);
+        files.push([join(HERE, platform.rules), `bridge/${platform.rules}`],
+            [join(HERE, platform.signIn.page), `${id}/signin.html`]);
     }
     /** @type {Record<string, string>} */
     const built = {};
@@ -82,15 +83,18 @@ export async function build(out = join(HERE, 'dist')){
             await copyFile(from, join(dir, to));
         }
         const hosts = HOSTS[flavour];
-        if (hosts)
+        // The scripts that check the page they serve: the content script, and
+        // each sign-in page the page that frames it.
+        for (const path of hosts ? ['bridge/src/content.js',
+            ...Object.values(PLATFORMS).map(platform=>platform.signIn.script)] : [])
         {
-            const script = await readFile(join(MODULES, 'bridge/src/content.js'), 'utf8');
+            const script = await readFile(join(MODULES, path), 'utf8');
             const blank = 'const HOSTS = /** @type {RegExp | null} */ (null);';
             if (!script.includes(blank))
             {
-                throw new Error('content.js lost the line the build writes its hosts into');
+                throw new Error(`${path} lost the line the build writes its hosts into`);
             }
-            await writeFile(join(dir, 'bridge/src/content.js'),
+            await writeFile(join(dir, path),
                 script.replace(blank, ()=>`const HOSTS = new RegExp(${JSON.stringify(hosts)});`));
         }
         await writeFile(join(dir, 'manifest.json'),

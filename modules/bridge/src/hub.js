@@ -5,8 +5,8 @@
  */
 
 /**
- * GameHub's answers to one page (protocol.js), in the service worker: `hello`
- * and `cancel`, and every other op handed to the store it names -- a store the
+ * GameHub's answers to one page (protocol.js), in its tab: `hello`, and every
+ * other op handed to the store it names -- a store the
  * site has switched off is not spoken to at all (A66). A store is a module of
  * the same ops (stores/steam/store.js); another is added beside it, and
  * nothing here changes for it.
@@ -16,7 +16,7 @@
 
 /**
  * A store's answers to the page's ops: each given its checked arguments, a way
- * to send events before its answer, and a signal the page's `cancel` aborts.
+ * to send events before its answer, and a signal aborted when the page goes.
  *
  * @typedef {Object} Store
  * @property {string} name  As a person knows it.
@@ -28,11 +28,12 @@
 /**
  * @param {Object} options
  * @param {string} options.version
+ * @param {string} [options.origin]  The extension's, where the sign-in pages are.
  * @param {Record<string, unknown>} options.platforms  What the site switches on: a store
  *     it does not name is on, one it sets false is off.
  * @param {Record<string, Store>} options.stores
  */
-export function createHub({ version, platforms, stores }){
+export function createHub({ version, origin = '', platforms, stores }){
     /** Requests going on, by the id they were asked with. @type {Map<number, AbortController>} */
     const going = new Map();
     /** @param {string} id */
@@ -47,13 +48,8 @@ export function createHub({ version, platforms, stores }){
         async handle({ id, op, args }, emit){
             if (op === 'hello')
             {
-                return { version, stores: Object.entries(stores)
+                return { version, origin, stores: Object.entries(stores)
                     .map(([store, { name }])=>({ id: store, name, on: on(store) })) };
-            }
-            if (op === 'cancel')
-            {
-                going.get(args.target)?.abort(new Error('cancelled by the page'));
-                return {};
             }
             const store = stores[args.store];
             if (!store)
