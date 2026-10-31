@@ -5,10 +5,10 @@
  */
 
 /**
- * Steam, as GameHub answers a page for it (hub.js), in the page's content
- * script (tab.js): every message to Steam built and read here, over a CM
- * socket the content script opens. The account's session is the service
- * worker's (`vault`), which signs in, and is asked what to log on with, which is
+ * Steam, as GameHub answers a page for it (hub.js), in Steam's session frame
+ * (frame.js, session-page.js): every message to Steam built and read here,
+ * over a CM socket the frame opens. The account's session is the extension's
+ * database's (`vault`), which the sign-in page fills; it is read for a logon,
  * put into the logon and not kept here.
  *
  * One connection, logged on with the kept session or anonymously, is held
@@ -19,6 +19,9 @@
  */
 
 import * as connection from './connection.js';
+import { steamManagers } from './connection.js';
+
+export { steamManagers };
 import * as session from './session.js';
 import * as keys from './keys.js';
 import * as client from './client.js';
@@ -28,7 +31,7 @@ import {
 
 /** @typedef {{ accountName: string, refreshToken: string }} Session */
 /**
- * The account as the worker tells it without its token: `id` is new with each
+ * The account as the frame tells it without its token: `id` is new with each
  * sign-in, so a logon made with another session is told from the one kept.
  *
  * @typedef {{ accountName: string, id?: string }} Account
@@ -56,21 +59,6 @@ export const STEAM = Object.freeze({
 });
 
 /**
- * Steam's connection managers, port 443 first: the one a firewall least often
- * closes. The directory answers the worker, not a page (GameHub's `fetch`).
- *
- * @param {typeof fetch} [get]
- * @returns {Promise<string[]>}
- */
-export async function steamManagers(get = fetch){
-    const directory = await (await get('https://api.steampowered.com/ISteamDirectory/'
-        + 'GetCMListForConnect/v1/?cellid=0&cmtype=websockets')).json();
-    /** @type {string[]} */
-    const list = directory.response.serverlist.map((/** @type {any} */ server)=>server.endpoint);
-    return list.sort((a, b)=>Number(!a.endsWith(':443')) - Number(!b.endsWith(':443')));
-}
-
-/**
  * @typedef {Object} Held
  * @property {any} connection
  * @property {bigint} steamId
@@ -79,7 +67,7 @@ export async function steamManagers(get = fetch){
  */
 
 /**
- * The session as the store asks it of the worker.
+ * The session as the store asks it of the extension's database.
  *
  * @typedef {Object} Vault
  * @property {() => Promise<Account | null>} get  Who is signed in, without the token.
@@ -89,11 +77,10 @@ export async function steamManagers(get = fetch){
 
 /**
  * @param {Object} options
- * @param {Vault} options.vault  The worker's.
- * @param {(url: string) => import('./connection.js').CmSocket} [options.socket]  A socket the
- *     page opens.
- * @param {typeof fetch} [options.fetch]  Steam's directory and Valve's client files: the
- *     worker's, which the ruleset does not open to a page.
+ * @param {Vault} options.vault
+ * @param {(url: string) => import('./connection.js').CmSocket} [options.socket]  A CM
+ *     socket; a WebSocket by default.
+ * @param {typeof fetch} [options.fetch]  Steam's directory and Valve's client files.
  * @param {() => Promise<string[]>} [options.managers]
  * @param {Record<string, any>} [options.steam]  Steam's protocol (`STEAM`).
  * @returns {Store}
@@ -130,7 +117,7 @@ export function steamStore({ vault, socket, fetch: get = fetch,
         const link = await connect();
         try
         {
-            // Asked now and dropped with the logon: the token is the worker's.
+            // Read now and dropped with the logon: the token is the database's.
             const kept = anonymously ? null : await vault.token();
             if (!kept)
             {

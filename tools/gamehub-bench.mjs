@@ -8,28 +8,32 @@
  * How long Steam's product info for 704 apps takes through GameHub, against
  * the same done in a page: GameHub's dev build in a headless Chrome (its own
  * short-pathed profile, never a person's browser), a cross-origin isolated
- * page, an anonymous logon, then PICS for the apps -- in the extension's
- * service worker over the page's socket, and in the page itself over a socket
- * of its own. `--load N` keeps N cores busy meanwhile, as a game running in
- * the browser does: Chrome keeps an extension's service worker at a low
- * priority, and on a busy machine its work waits.
+ * page, an anonymous logon, then PICS for the apps -- in Steam's session frame,
+ * the extension's page the launcher embeds, and in the page itself over a
+ * socket of its own. `--load N` keeps N cores busy meanwhile, as a game running
+ * in the browser does: Chrome keeps an extension's service worker at a low
+ * priority, and on a busy machine its work waits; a frame shown in the page
+ * runs at the page's. `--hidden` embeds the frame with `display: none`, which
+ * may not count as shown.
  *
- * The worker is asked through an op this tool writes into the built copy
- * alone (`bench`), so nothing in the extension carries it.
+ * The frame is asked through an op this tool writes into the built copy alone
+ * (`bench`), so nothing in the extension carries it. Printed for each run:
+ * GameHub's `hello` (the content script and the worker), the frame's loading,
+ * the logon and the product info in it, all of it, and the page's own.
  *
- *     node tools/gamehub-bench.mjs [--runs 3] [--load 0]
+ *     node tools/gamehub-bench.mjs [--runs 3] [--load 0] [--hidden]
  *
- * Each run is a fresh page: a new port and a new store, nothing cached.
+ * Each run is a fresh page: a new frame and a new store, nothing cached.
  */
 
-import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { build } from '../modules/bridge/scripts/build.mjs';
-import { findBrowser } from './cdp_test/browser.mjs';
+import { chrome } from '../modules/bridge/src/chrome.fixture.js';
+import { PAGE_CLIENT } from '../modules/bridge/src/page.fixture.js';
 import { steamManagers } from '../modules/bridge/src/stores/steam/store.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -52,58 +56,10 @@ function patch(dir, file, from, to){
     writeFileSync(path, text.replace(from, to));
 }
 
-/** @param {string} profile */
-function chrome(profile){
-    const proc = spawn(findBrowser(), ['--headless=new', '--no-first-run',
-        '--no-default-browser-check', `--user-data-dir=${profile}`, '--remote-debugging-pipe',
-        '--enable-unsafe-extension-debugging', 'about:blank'],
-    { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
-    const out = /** @type {import('node:stream').Writable} */ (proc.stdio[3]);
-    const inp = /** @type {import('node:stream').Readable} */ (proc.stdio[4]);
-    let buffered = '';
-    let next = 0;
-    /** @type {Map<number, (message: any) => void>} */
-    const waiting = new Map();
-    inp.on('data', data=>{
-        buffered += data;
-        for (let end; (end = buffered.indexOf('\0')) >= 0;)
-        {
-            const message = JSON.parse(buffered.slice(0, end));
-            buffered = buffered.slice(end + 1);
-            waiting.get(message.id)?.(message);
-        }
-    });
-    /** @param {string} method @param {object} [params] @param {string} [sessionId] */
-    const send = (method, params = {}, sessionId)=>new Promise((done, fail)=>{
-        const id = ++next;
-        waiting.set(id, message=>{
-            waiting.delete(id);
-            if (message.error)
-            {
-                fail(new Error(`${method}: ${message.error.message}`));
-            }
-            else
-            {
-                done(message.result);
-            }
-        });
-        out.write(`${JSON.stringify({ id, method, params, ...sessionId ? { sessionId } : {} })}\0`);
-    });
-    return { proc, send };
-}
-
+const HIDDEN = argv.includes('--hidden');
 const PAGE = `<!doctype html><script>
-let n = 0;
-window.ask = (op, args) => new Promise((resolve, reject) => {
-    const id = ++n;
-    const heard = e => {
-        if (e.data?.from !== 'bottlify-bridge' || e.data.id !== id || e.data.event) return;
-        removeEventListener('message', heard);
-        'error' in e.data ? reject(new Error(e.data.error)) : resolve(e.data.result);
-    };
-    addEventListener('message', heard);
-    postMessage({ to: 'bottlify-bridge', id, op, args }, location.origin);
-});
+${HIDDEN ? "window.frameStyle = 'display:none';" : ''}
+${PAGE_CLIENT}
 </script>`;
 
 // A short profile path: Windows' MAX_PATH is 260, and a profile deep in a temp
@@ -168,21 +124,25 @@ try
     /** @param {string} expression */
     const page = async expression=>(await browser.send('Runtime.evaluate',
         { expression, awaitPromise: true, returnByValue: true }, sessionId)).result.value;
-    console.log(`product info for 704 apps, anonymous; ${LOAD} cores kept busy`);
+    console.log(`product info for 704 apps, anonymous; ${LOAD} cores kept busy;`
+        + ` the frame ${HIDDEN ? 'display: none' : 'a pixel, shown'}`);
     for (let run = 1; run <= RUNS; run++)
     {
         await browser.send('Page.navigate', { url }, sessionId);
         await new Promise(done=>setTimeout(done, 1500));
         const started = Date.now();
-        // GameHub's first answer: its modules loaded and the worker asked.
+        // GameHub's first answer: the content script, and the worker's switch.
         await page('ask("hello")');
         const hello = Date.now() - started;
+        // The frame loaded and listening: an op it answers at once.
+        await page('ask("cover", { store: "steam", game: "440", kind: "header" })');
+        const frame = Date.now() - started - hello;
         const hub = await page(
             'ask("bench", { store: "steam" }).catch(e => ({ error: String(e.message) }))');
         const wall = Date.now() - started;
         const own = await page(inPage);
-        console.log(`run ${run}: GameHub ${JSON.stringify(hub)} (hello ${hello} ms,`
-            + ` ${wall} ms in all); page ${JSON.stringify(own)}`);
+        console.log(`run ${run}: GameHub ${JSON.stringify(hub)} (hello ${hello} ms, frame`
+            + ` ${frame} ms, ${wall} ms in all); page ${JSON.stringify(own)}`);
     }
 }
 finally
@@ -191,6 +151,12 @@ finally
     browser.proc.kill();
     server.close();
     await new Promise(done=>setTimeout(done, 1000));
-    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+    try
+    {
+        rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
+    }
+    catch {
+        console.log(`not removed, Chrome still holds it: ${scratch}`);
+    }
 }
 process.exit(0);

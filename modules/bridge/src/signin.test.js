@@ -5,20 +5,18 @@
  */
 
 /**
- * A store's sign-in page and the worker (serveSignIn) over a port that carries
- * JSON, the worker signing in over a made-up HTTPS Steam: by QR code, and by
- * name and password through each of Steam Guard's paths. What the worker sends
- * the page is read for the token; what Steam was given, for the password.
+ * A store's sign-in (signin-flow.js), as its sign-in page runs it, against a
+ * made-up Steam authentication service: by QR code, and by name and password through each of
+ * Steam Guard's paths. What the page's steps are sent is read for the token;
+ * what Steam was given, for the password; the session kept, for the token.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { serveSignIn } from './serve.js';
-import { portPair } from './port.fixture.js';
+import { createSignIn } from './signin-flow.js';
 import { signInWithCredentials, signInWithQr } from './stores/steam/auth.js';
-import { webApi } from './stores/steam/webapi.js';
 import { Guard } from './stores/steam/messages.js';
-import { CODES, PASSWORD, SECRET, fakeSteamHttps, tokenOf } from './stores/steam/https.fixture.js';
+import { CODES, PASSWORD, SECRET, fakeSteamAuth, tokenOf } from './stores/steam/auth.fixture.js';
 
 /**
  * A sign-in from the page's end: `start` sent, then each code in turn when
@@ -28,37 +26,39 @@ import { CODES, PASSWORD, SECRET, fakeSteamHttps, tokenOf } from './stores/steam
  * @param {Array<{ code: string, type: number }>} [codes]
  */
 async function signIn(start, codes = []){
-    const steam = await fakeSteamHttps();
+    const steam = await fakeSteamAuth();
     const kept = { session: /** @type {any} */ (null) };
-    const api = async()=>/** @type {any} */ (webApi({ fetch: steam.fetch }));
-    const pair = portPair();
-    serveSignIn(/** @type {any} */ (pair.worker), { store: 'steam', stores: { steam: {
-        vault: { get: async()=>kept.session, set: async one=>{
+    const api = async()=>/** @type {any} */ (steam.service);
+    /** @type {Record<string, any>[]} */
+    const heard = [];
+    /** @type {(end: Record<string, any>) => void} */
+    let finish = ()=>{};
+    const ended = new Promise(resolve=>{
+        finish = resolve;
+    });
+    const flow = createSignIn({ kept: {
+        vault: { set: async one=>{
             kept.session = one;
         } },
         qr: options=>signInWithQr(api, options),
         credentials: options=>signInWithCredentials(api, options),
-    } } });
-    /** @type {Record<string, any>[]} */
-    const heard = [];
-    const ended = new Promise(resolve=>pair.page.onMessage.addListener((/** @type {any} */ message)=>{
+    }, send: message=>{
         heard.push(message);
         if (message.event === 'guard' || message.event === 'wrongCode')
         {
             const code = codes.shift();
             if (code)
             {
-                pair.page.postMessage(code);
+                queueMicrotask(()=>flow.heard(code));
             }
         }
         if (message.done || message.error)
         {
-            resolve(message);
+            finish(message);
         }
-    }));
-    pair.page.postMessage(start);
+    } });
+    flow.heard(start);
     const end = /** @type {Record<string, any>} */ (await ended);
-    pair.drop();
     return { end, heard, kept, steam };
 }
 
@@ -120,21 +120,35 @@ test('an approval in the Steam app, no code given', async()=>{
     assert.deepEqual(run.steam.seen.codes, []);
 });
 
-test('a sign-in stops when its page goes', async()=>{
-    const steam = await fakeSteamHttps();
-    const pair = portPair();
+test('a sign-in stops when its page goes, and says nothing after', async()=>{
     let stopped = /** @type {unknown} */ (null);
-    serveSignIn(/** @type {any} */ (pair.worker), { store: 'steam', stores: { steam: {
-        vault: { get: async()=>null, set: async()=>{} },
+    /** @type {Record<string, any>[]} */
+    const heard = [];
+    const flow = createSignIn({ send: message=>heard.push(message), kept: {
+        vault: { set: async()=>{} },
         qr: ({ signal })=>new Promise((_resolve, reject)=>signal.addEventListener('abort', ()=>{
             stopped = signal.reason;
             reject(signal.reason);
         })),
-        credentials: options=>signInWithCredentials(async()=>/** @type {any} */ (
-            webApi({ fetch: steam.fetch })), options),
-    } } });
-    pair.page.postMessage({ start: 'qr' });
-    await new Promise(resolve=>setTimeout(resolve, 10));
-    pair.drop();
+        credentials: ()=>Promise.reject(new Error('not asked')),
+    } });
+    const going = flow.heard({ start: 'qr' });
+    flow.stop();
+    await going;
     assert.match(String(stopped), /the sign-in page went/);
+    assert.deepEqual(heard, []);
+});
+
+test('a Steam that stops answering fails the sign-in, which says so', async()=>{
+    /** @type {Record<string, any>[]} */
+    const heard = [];
+    const flow = createSignIn({ send: message=>heard.push(message), kept: {
+        vault: { set: async()=>{} },
+        qr: ()=>Promise.reject(new Error(
+            'steam: Authentication.PollAuthSessionStatus#1 was not answered in 30 s')),
+        credentials: ()=>Promise.reject(new Error('not asked')),
+    } });
+    await flow.heard({ start: 'qr' });
+    assert.deepEqual(heard, [{ error:
+        'steam: Authentication.PollAuthSessionStatus#1 was not answered in 30 s' }]);
 });

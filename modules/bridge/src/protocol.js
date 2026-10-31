@@ -5,12 +5,15 @@
  */
 
 /**
- * What a page and GameHub say to each other, over `window.postMessage` on the
- * page's own origin; GameHub in the tab (tab.js, run by the content script)
+ * What a page and GameHub say to each other, over `window.postMessage`: `hello`
+ * to the content script, on the page's own origin; every other op to the
+ * store's session frame (`<origin>/<store>/session.html`, frame.js), which the
+ * page embeds, between the page's origin and the extension's alone. The frame
  * reads the request here.
  *
  * The page asks `{ to: 'bottlify-bridge', id, op, args }`; GameHub answers
- * `{ from: 'bottlify-bridge', id, result }` or `{ ..., id, error }`.
+ * `{ from: 'bottlify-bridge', id, result }` or `{ ..., id, error }`; a frame
+ * says `{ from: 'bottlify-bridge', ready: true }` once it listens.
  * `id` is the page's, any number it has not used for a request still open.
  * GameHub is present when the page's root element carries
  * `data-bottlify-bridge` (its version): set before any of the page's scripts
@@ -35,7 +38,7 @@
  *   store's client (Steam's: `{ win32: { steam } }`), `{}` signed out.
  *
  * Neither the session's token nor a password crosses to the page: a sign-in
- * is the frame's and the worker's.
+ * is the store's sign-in page's, a logon its session frame's.
  */
 
 export const TO = 'bottlify-bridge';

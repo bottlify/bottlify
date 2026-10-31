@@ -5,7 +5,8 @@
  */
 
 /**
- * Steam's authentication over HTTPS, made up for tests: a QR sign-in, and
+ * Steam's authentication service, made up for tests, as a CM connection's
+ * `call` reaches it: a QR sign-in, and
  * sign-ins by name and password whose Steam Guard is, by account name,
  * - `plain`: none;
  * - `email`: a code by email (`EMAIL1`), sent to the domain it hints;
@@ -42,8 +43,8 @@ const modPow = (base, power, n)=>{
     return out;
 };
 
-/** A made-up Steam, and what it was given. */
-export async function fakeSteamHttps(){
+/** A made-up Steam, what calls it, and what it was given. */
+export async function fakeSteamAuth(){
     const pair = /** @type {CryptoKeyPair} */ (await crypto.subtle.generateKey({ name: 'RSA-OAEP',
         modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true,
     ['encrypt', 'decrypt']));
@@ -81,10 +82,6 @@ export async function fakeSteamHttps(){
         const method = where.pathname.split('/')[2];
         if (method === 'GetPasswordRSAPublicKey')
         {
-            if (init?.method === 'POST')
-            {
-                return new Response(null, { status: 405 });
-            }
             return answer(Authentication.GetPasswordRSAPublicKeyResponse, {
                 publickey_mod: n.toString(16), publickey_exp: '10001', timestamp: 1234n });
         }
@@ -158,5 +155,22 @@ export async function fakeSteamHttps(){
         }
         return new Response(null, { status: 404 });
     };
-    return { fetch: fetchSteam, seen };
+    /** As connection.js `call` has it. */
+    const service = {
+        /**
+         * @param {string} method @param {any} requestSchema @param {Record<string, any>} request
+         * @param {any} responseSchema
+         */
+        async call(method, requestSchema, request, responseSchema){
+            const [, name, call] = /^(\w+)\.(\w+)#\d+$/.exec(method) ?? [];
+            const bytes = encode(requestSchema, request);
+            const form = new URLSearchParams({ input_protobuf_encoded:
+                btoa(String.fromCharCode(...bytes)) });
+            const answered = await fetchSteam(
+                `https://api.steampowered.com/I${name}Service/${call}/v1/?${form}`);
+            return { eresult: Number(answered.headers.get('x-eresult')),
+                body: decode(responseSchema, new Uint8Array(await answered.arrayBuffer())) };
+        },
+    };
+    return { service, seen };
 }

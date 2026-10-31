@@ -5,11 +5,14 @@
  */
 
 /**
- * The content script: GameHub in the page's tab (tab.js), where the stores'
- * protocols run at the tab's priority over sockets the page opens -- a socket
- * the page opens is one Chrome's request rules give Steam's Origin. The
- * sessions are the service worker's. Chrome loads a content script as a
- * classic script; its modules come in by import().
+ * The content script: that GameHub is here, and nothing secret. It marks the
+ * page before the page's scripts run, hands the site's switches (its
+ * `config.json`'s `bridge`) to the service worker for the rulesets, and
+ * answers `hello` -- the stores, which the site has on, and the extension's
+ * origin, where each store's pages are: `<store>/session.html`, the frame that
+ * speaks the store's protocol and that the page asks every other op of, and
+ * `<store>/signin.html`. It waits on nothing of the worker's, loads no module
+ * and holds no session. Chrome loads a content script as a classic script.
  */
 
 (()=>{
@@ -26,40 +29,40 @@
     // knows at once there is no GameHub, without waiting for an answer.
     document.documentElement.dataset.bottlifyBridge = version;
 
-    const TO = 'bottlify-bridge';
+    /** The stores, as a person knows them. */
+    const STORES = { steam: 'Steam' };
+    const PEER = 'bottlify-bridge';
+    const origin = new URL(chrome.runtime.getURL('')).origin;
 
-    /**
-     * What the site switches on (its `config.json`'s `bridge`), for the worker
-     * to apply to its rulesets and its stores.
-     *
-     * @returns {Promise<Record<string, unknown>>}
-     */
-    async function platforms(){
-        /** @type {{ bridge?: unknown }} */
-        const config = await fetch('/config.json', { cache: 'no-store' })
-            .then(answer=>(answer.ok ? answer.json() : {})).catch(()=>({}));
-        const wanted = config?.bridge;
-        return typeof wanted === 'object' && wanted !== null ? /** @type {any} */ (wanted) : {};
-    }
+    /** What the site switches: a store it leaves out is on. @type {Promise<Record<string, unknown>>} */
+    const wanted = fetch('/config.json', { cache: 'no-store' })
+        .then(answer=>(answer.ok ? answer.json() : {})).catch(()=>({}))
+        .then((/** @type {any} */ config)=>(typeof config?.bridge === 'object'
+            && config.bridge !== null ? config.bridge : {}));
+    // For the rulesets, which only the worker and the extension's pages may
+    // switch; a worker Chrome has just stopped misses the first message.
+    wanted.then(switches=>chrome.runtime.sendMessage({ switch: switches })
+        .catch(()=>setTimeout(()=>chrome.runtime.sendMessage({ switch: switches })
+            .catch(()=>{}), 500)));
 
-    const tab = Promise.all([import(chrome.runtime.getURL('bridge/src/tab.js')), platforms()])
-        .then(([{ startTab }, switched])=>startTab({
-            version,
-            origin: new URL(chrome.runtime.getURL('')).origin,
-            connect: ()=>chrome.runtime.connect({ name: 'gamehub' }),
-            socket: (/** @type {string} */ url)=>/** @type {any} */ (new WebSocket(url)),
-            toPage: (/** @type {Record<string, any>} */ answer)=>window.postMessage(answer, location.origin),
-            platforms: switched,
-        }));
+    /** @param {Record<string, any>} answer */
+    const reply = answer=>window.postMessage({ from: PEER, ...answer }, location.origin);
 
     window.addEventListener('message', async event=>{
         const data = event.data;
         if (event.source !== window || event.origin !== location.origin
-            || typeof data !== 'object' || data === null || data.to !== TO
+            || typeof data !== 'object' || data === null || data.to !== PEER
             || !Number.isSafeInteger(data.id))
         {
             return;
         }
-        (await tab).request({ to: TO, id: data.id, op: data.op, args: data.args });
+        if (data.op !== 'hello')
+        {
+            reply({ id: data.id, error: `${String(data.op)} is asked of a store's frame` });
+            return;
+        }
+        const switches = await wanted;
+        reply({ id: data.id, result: { version, origin, stores: Object.entries(STORES)
+            .map(([id, name])=>({ id, name, on: switches[id] !== false })) } });
     });
 })();

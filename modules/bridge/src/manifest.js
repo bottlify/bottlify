@@ -38,18 +38,23 @@ export const HOSTS = Object.freeze({
 
 /**
  * Each store: its ruleset (switched on and off as one), the hosts the
- * ruleset and the service worker's own requests reach, and its sign-in page,
- * which the build lays out at `<store>/signin.html` and the launcher frames.
+ * ruleset and the extension's own requests reach, and its pages, which the
+ * build lays out at `<store>/<page>.html` and the launcher frames: `session`,
+ * which speaks the store's protocol (frame.js), and `signin`.
  */
 export const PLATFORMS = Object.freeze({
     steam: Object.freeze({
         rules: 'rules/steam.json',
-        signIn: Object.freeze({ page: 'src/stores/steam/signin.html',
-            script: 'bridge/src/stores/steam/signin.js' }),
-        // The CM socket the page opens for the worker; the content servers the
-        // page downloads from; Steam's directory and Valve's client
-        // distribution (the client's own DLLs, which a DRM wrapper reads as the
-        // installed client's), asked by the worker alone.
+        pages: Object.freeze({
+            session: Object.freeze({ html: 'src/stores/steam/session.html',
+                script: 'bridge/src/stores/steam/session-page.js' }),
+            signin: Object.freeze({ html: 'src/stores/steam/signin.html',
+                script: 'bridge/src/stores/steam/signin.js' }),
+        }),
+        // The CM socket the session frame and the sign-in page open; the
+        // content servers the page downloads from; Steam's directory and
+        // Valve's client distribution (the client's own DLLs, which a DRM
+        // wrapper reads as the installed client's), asked by the frame.
         hosts: Object.freeze(['wss://*.steamserver.net/*', 'https://api.steampowered.com/*',
             '*://*.steamcontent.com/*', '*://*.steampipe.akamaized.net/*',
             'https://client-update.akamai.steamstatic.com/*',
@@ -61,31 +66,39 @@ export const PLATFORMS = Object.freeze({
     }),
 });
 
+/** Each store's pages, `[store, page, { html, script }]`. */
+export const STORE_PAGES = Object.freeze(Object.entries(PLATFORMS).flatMap(([id, platform])=>
+    Object.entries(platform.pages).map(([page, files])=>
+        /** @type {[string, string, { html: string, script: string }]} */ ([id, page, files]))));
+
 /**
  * The builds' entry points, by path under `modules/` as the build lays them
- * out: the service worker, the content script, and GameHub in the tab, which
- * the content script imports -- it and every module it imports are therefore
- * the page's to load too (the build lists them: `TAB`).
+ * out: the service worker, the content script -- which imports nothing -- and
+ * each store's pages' scripts.
  */
 export const ENTRIES = Object.freeze(['bridge/src/worker.js', 'bridge/src/content.js',
-    'bridge/src/tab.js', ...Object.values(PLATFORMS).map(platform=>platform.signIn.script)]);
+    ...STORE_PAGES.map(([, , files])=>files.script)]);
 
 /**
- * The pages that may frame a store's sign-in page. The dev build's are its
- * hosts (`HOSTS`), which a match pattern cannot say of a network address: any
- * page, the sign-in page itself refusing a frame on another host.
+ * The scripts that check the page they serve, by its host, where the build's
+ * pages cannot say it (`HOSTS`): the content script, a session frame's
+ * runner, and each sign-in page.
+ */
+export const HOST_CHECKED = Object.freeze(['bridge/src/content.js', 'bridge/src/frame.js',
+    ...STORE_PAGES.filter(([, page])=>page === 'signin').map(([, , files])=>files.script)]);
+
+/**
+ * The pages that may frame a store's pages. The dev build's are its hosts
+ * (`HOSTS`), which a match pattern cannot say of a network address: any page,
+ * the store's page itself refusing a frame on another host.
  */
 export const FRAMED_BY = PAGES;
-
-/** What the content script imports. */
-export const TAB = 'bridge/src/tab.js';
 
 /**
  * @param {keyof typeof PAGES} build
  * @param {string} version
- * @param {string[]} [modules]  `TAB` and what it imports.
  */
-export function manifestFor(build, version, modules = [TAB]){
+export function manifestFor(build, version){
     const pages = [...PAGES[build]];
     return {
         manifest_version: 3,
@@ -97,9 +110,10 @@ export function manifestFor(build, version, modules = [TAB]){
             ...Object.values(PLATFORMS).flatMap(platform=>platform.hosts)],
         background: { service_worker: 'bridge/src/worker.js', type: 'module' },
         content_scripts: [{ matches: pages, js: ['bridge/src/content.js'], run_at: 'document_start' }],
-        web_accessible_resources: [{ resources: [...modules], matches: pages },
-            { resources: Object.keys(PLATFORMS).map(id=>`${id}/signin.html`),
-                matches: [...FRAMED_BY[build]] }],
+        // A store's pages alone, as frames: no module is the page's to load.
+        web_accessible_resources: [{
+            resources: STORE_PAGES.map(([id, page])=>`${id}/${page}.html`),
+            matches: [...FRAMED_BY[build]] }],
         declarative_net_request: {
             rule_resources: Object.entries(PLATFORMS).map(([id, platform])=>(
                 { id, enabled: true, path: `bridge/${platform.rules}` })),

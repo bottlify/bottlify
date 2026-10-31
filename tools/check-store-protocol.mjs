@@ -8,14 +8,15 @@
  * Fails when a game store's protocol is spoken outside GameHub.
  *
  * Speaking to a store -- its connection managers, its sign-in, its keys and
- * codes -- is GameHub's (`modules/bridge/src/stores/`): its service worker
- * keeps the accounts and the page is given finished answers
- * (roadmap/gamehub.md). Core and the launcher keep only what reads a store's
- * file formats. A store's protocol found in either -- an import of GameHub's
- * store modules, a message or a service of Steam's by name, a CM socket, an
- * op of a store's protocol asked of GameHub -- is a step back to the design
- * that put the session in the page, and fails this check. Comments are not
- * read: a word in prose is not code.
+ * codes -- is GameHub's (`modules/bridge/src/stores/`), in the extension's own
+ * pages, and the page is given finished answers (roadmap/gamehub.md). Core
+ * and the launcher keep only what reads a store's file formats, and GameHub's
+ * content script, which runs in the page's tab, only says GameHub is there. A
+ * store's protocol found in any of them -- an import of GameHub's store
+ * modules, a message or a service of Steam's by name, a CM socket, an op of a
+ * store's protocol asked of GameHub -- is a step back to a design that put the
+ * session in the page's tab, and fails this check. Comments are not read: a
+ * word in prose is not code.
  *
  *     node tools/check-store-protocol.mjs [--core DIR] [--launcher DIR]
  *
@@ -98,6 +99,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
     const launcher = option('--launcher', resolve(ROOT, '..', 'bottlify-ui'));
     const coreFiles = sources(join(core, 'src'));
     const issues = storeProtocolIssues(coreFiles, core);
+    const content = join(ROOT, 'modules', 'bridge', 'src', 'content.js');
+    issues.push(...storeProtocolIssues([content], ROOT).map(line=>`content script: ${line}`));
     let launcherSaid = 'not checked: no launcher at ' + launcher;
     if (existsSync(join(launcher, 'package.json')))
     {
@@ -111,6 +114,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
         console.error(`A store's protocol outside GameHub:\n  - ${issues.join('\n  - ')}`);
         process.exit(1);
     }
-    console.log(`store protocol: none in core (${coreFiles.length} files)`
-        + ` or the launcher (${launcherSaid})`);
+    console.log(`store protocol: none in core (${coreFiles.length} files), GameHub's content`
+        + ` script or the launcher (${launcherSaid})`);
 }

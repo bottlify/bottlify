@@ -5,8 +5,8 @@
  */
 
 /**
- * GameHub's answers to one page (protocol.js), in its tab: `hello`, and every
- * other op handed to the store it names -- a store the
+ * GameHub's answers to one page (protocol.js), in a store's session frame:
+ * every op handed to the store it names -- a store the
  * site has switched off is not spoken to at all (A66). A store is a module of
  * the same ops (stores/steam/store.js); another is added beside it, and
  * nothing here changes for it.
