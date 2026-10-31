@@ -794,6 +794,30 @@ export function createStdioFunctions(host){
         return reposition(stream, base + offset) ? 0 : -1;
     };
 
+    /**
+     * `_fdopen`'s stream on a descriptor already open, reading and writing
+     * from where it stands; fclose closes the two together. The mode says
+     * what the stream may do, and the translation stays the descriptor's. A
+     * mode that is not one is EINVAL, checked before the number, which is
+     * EBADF when it is not open.
+     *
+     * @param {number} fd @param {string | null} mode
+     */
+    const openOn = (fd, mode)=>{
+        const parsed = mode === null ? null : parseMode(mode);
+        if (!parsed)
+        {
+            fail(EINVAL);
+            return 0;
+        }
+        if (!descriptors.get(fd | 0))
+        {
+            fail(EBADF);
+            return 0;
+        }
+        return attach(fd | 0, parsed.flags);
+    };
+
     return {
         /**
          * FILE _iob[20]
@@ -925,29 +949,12 @@ export function createStdioFunctions(host){
             });
         }),
 
-        /**
-         * FILE *_fdopen(int fd, const char *mode)
-         *
-         * A stream on a descriptor already open, reading and writing from
-         * where it stands; fclose closes the two together. The mode says
-         * what the stream may do, and the translation stays the
-         * descriptor's. A mode that is not one is EINVAL, checked before the
-         * number, which is EBADF when it is not open.
-         */
-        _fdopen: cdecl(8, ([fd, mode])=>{
-            const parsed = (mode >>> 0) === 0 ? null : parseMode(readString(mode));
-            if (!parsed)
-            {
-                fail(EINVAL);
-                return 0;
-            }
-            if (!descriptors.get(fd | 0))
-            {
-                fail(EBADF);
-                return 0;
-            }
-            return attach(fd | 0, parsed.flags);
-        }),
+        /** FILE *_fdopen(int fd, const char *mode) (`openOn`) */
+        _fdopen: cdecl(8, ([fd, mode])=>openOn(fd, (mode >>> 0) === 0 ? null : readString(mode))),
+
+        /** FILE *_wfdopen(int fd, const wchar_t *mode) -- _fdopen, the mode wide. */
+        _wfdopen: cdecl(8, ([fd, mode])=>openOn(fd,
+            (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))),
 
         /**
          * int fclose(FILE *stream)

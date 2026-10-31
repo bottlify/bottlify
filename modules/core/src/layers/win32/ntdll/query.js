@@ -423,6 +423,14 @@ export function createQueryFunctions(host){
 
     return {
         /**
+         * BOOLEAN RtlAreLongPathsEnabled(void)
+         *
+         * Whether paths past MAX_PATH are taken without the long-path prefix:
+         * Windows 10's default, the LongPathsEnabled value unset, is FALSE.
+         */
+        RtlAreLongPathsEnabled: { argBytes: 0, handler: ()=>0 },
+
+        /**
          * NTSTATUS RtlGetVersion(PRTL_OSVERSIONINFOW lpVersionInformation)
          *
          * The size field says which of the two structures the caller allocated,

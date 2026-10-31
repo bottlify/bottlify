@@ -142,20 +142,26 @@ const PAGE_READWRITE_VIEW = 0x04;
 const USER_ADDRESS_SPACE_TOP = 0x7fff0000;
 
 /**
- * MEMORY_BASIC_INFORMATION, as the 32-bit guest compiled it. Seven fields, all
- * four bytes, and the order matters more than the size: a caller reads State to
- * decide whether the address is usable at all.
+ * MEMORY_BASIC_INFORMATION as a process of either width compiled it. Seven
+ * fields, and the order matters more than the size: a caller reads State to
+ * decide whether the address is usable at all. At 64 bits the two addresses
+ * and RegionSize are eight bytes, a WORD PartitionId follows AllocationProtect,
+ * and the whole is 48: answered in the 28 bytes of the 32-bit form, a 64-bit
+ * program read RegionSize where State was.
+ *
+ * @param {number} [pointerSize]  4 or 8.
  */
-const MEMORY_BASIC_INFORMATION = Object.freeze({
-    BaseAddress: 0,
-    AllocationBase: 4,
-    AllocationProtect: 8,
-    RegionSize: 12,
-    State: 16,
-    Protect: 20,
-    Type: 24,
-    SIZE: 28,
-});
+export function memoryBasicInformation(pointerSize = 4){
+    return pointerSize === 8
+        ? { BaseAddress: 0, AllocationBase: 8, AllocationProtect: 16, RegionSize: 24,
+            State: 32, Protect: 36, Type: 40, SIZE: 48 }
+        : { BaseAddress: 0, AllocationBase: 4, AllocationProtect: 8, RegionSize: 12,
+            State: 16, Protect: 20, Type: 24, SIZE: 28 };
+}
+
+/** MEM_EXTENDED_PARAMETER's types VirtualAlloc2 takes: where, and which NUMA node. */
+const MEM_EXTENDED_PARAMETER = Object.freeze({ SIZE: 16, ADDRESS_REQUIREMENTS: 1,
+    NUMA_NODE: 2 });
 
 /**
  * MEMORYSTATUS. Eight DWORDs, the first of which is the structure's own size --
@@ -816,6 +822,8 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }
 /**
  * @typedef {Object} HeapHost
  * @property {{ base: number, size: number }} arena   Guest bytes to allocate out of.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose
+ *           MEMORY_BASIC_INFORMATION and MEM_ADDRESS_REQUIREMENTS are wider.
  * @property {any} [allocator]  An allocator over that arena, when one is shared.
  * @property {() => { processes: number, threads: number }} [systemCounts]
  *     The processes and threads running, for GetPerformanceInfo.
@@ -878,6 +886,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }
  * @param {HeapHost} host
  */
 export function createHeapFunctions(host){
+    const MEMORY_BASIC_INFORMATION = memoryBasicInformation(host.pointerSize);
     // One allocator for the whole arena, whoever asks. The caller may bring its
     // own so that everything guest memory is handed out from -- the heap, a DIB
     // section, COM task memory -- comes from the same free list rather than from
@@ -1406,6 +1415,260 @@ export function createHeapFunctions(host){
         }
         : {});
 
+    /**
+     * VirtualAlloc's body, and VirtualAlloc2's: `where` is the address
+     * requirements of a new reservation -- an alignment past the allocation
+     * granularity, and the lowest and highest address it may take -- or null.
+     *
+     * @param {number} pointer @param {number} bytes @param {number} type
+     * @param {number} protect
+     * @param {{ alignment: number, lowest: number, highest: number } | null} where
+     * @returns {number}
+     */
+    const virtualAlloc = (pointer, bytes, type, protect, where)=>{
+        const kind = type >>> 0;
+        const size = bytes >>> 0;
+        const requested = pointer >>> 0;
+        const protection = protect >>> 0;
+        const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
+        if ((kind & ~ALLOCATION_TYPES) !== 0 || acting === 0
+                || ((kind & MEM_RESET) !== 0 && acting !== MEM_RESET) || size === 0)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const rounded = roundUp(size, PAGE_SIZE);
+
+        if (requested !== 0 && (kind & MEM_RESERVE) !== 0)
+        {
+            // A reservation begins on an allocation granule, the
+            // address rounded down to one, and runs to the end of the
+            // page the last byte asked for is in. Whatever of that is
+            // already taken -- another reservation, or anything else
+            // -- refuses the whole of it: a reservation is never
+            // made around something that is in its way.
+            const start = (requested & ~(ALLOCATION_GRANULARITY - 1)) >>> 0;
+            const span = roundUp(requested + size - start, PAGE_SIZE);
+            // Past the end of user address space Windows refuses the
+            // reservation as an invalid parameter, as it does here: no
+            // divergence, the program is asking where nothing can be.
+            if (start + span > USER_ADDRESS_SPACE_TOP)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            if (!allocator.allocateAt(start, span, { owner: VIRTUAL }))
+            {
+                host.setLastError(ERROR_INVALID_ADDRESS);
+                host.divergence?.('VirtualAlloc', `reservation of ${span} bytes at 0x${
+                    start.toString(16)} refused: ${allocator.blockContaining(start)
+                        ?? allocator.blockContaining(start + span - 1)
+                    ? 'something is already there' : 'not free in the arena'}`);
+                return 0;
+            }
+            decommitted.delete(start);
+            committed.set(start, []);
+            unreadable.delete(start);
+            // Committed with it, the whole of what was reserved: from
+            // the granule's start, which is the address answered, not
+            // from the page asked for -- a program writes from the
+            // base it was handed (Wine's virtual_alloc maps the one
+            // range both ways).
+            if ((kind & MEM_COMMIT) !== 0)
+            {
+                markCommitted(start, start, start + span, true);
+                noteProtection(start, start, start + span, protection);
+            }
+            if ((kind & MEM_WRITE_WATCH) !== 0)
+            {
+                watched.add(start);
+            }
+            zeroHandedOver(start, span);
+            settleAccess(start, start, start + span);
+            return start;
+        }
+
+        if (requested !== 0)
+        {
+            // Reserve-then-commit is a common two-step, and the second
+            // step names a page rather than the reservation: a program
+            // reserves a span and commits pages inside it one at a
+            // time as it grows into them, so every commit after the
+            // first arrives with an interior address. Looking the
+            // address up as the *start* of a block accepts only that
+            // first page and refuses the rest, which a program reads
+            // as having run out of memory while most of what it
+            // reserved sits untouched.
+            //
+            // An address inside no reservation is refused: there is
+            // nothing there to commit.
+            //
+            // The range is whole pages: from the page the address is
+            // in to the end of the page the last byte is in, as
+            // Windows rounds it.
+            const page = requested & ~(PAGE_SIZE - 1);
+            const needed = roundUp(requested + size - page, PAGE_SIZE);
+            const existing = allocator.blockContaining(requested);
+            const offset = existing ? page - existing.address : 0;
+            if (!existing || existing.owner !== VIRTUAL
+                    || existing.capacity - offset < needed)
+            {
+                host.setLastError(ERROR_INVALID_ADDRESS);
+                host.divergence?.('VirtualAlloc', `${acting === MEM_RESET
+                    ? 'reset' : 'commit'} of ${size} bytes at 0x${
+                    requested.toString(16)} refused: ${existing
+                    ? `the reservation at 0x${existing.address.toString(16)} holds ${
+                        existing.capacity} bytes, ${existing.owner === VIRTUAL
+                        ? 'virtual' : 'not virtual'}`
+                    : 'no reservation there'}`);
+                return 0;
+            }
+            if (acting === MEM_RESET)
+            {
+                // The pages keep whatever they hold: MEM_RESET lets the
+                // system throw the contents away instead of paging them
+                // out, and says they are undefined afterwards, not
+                // zero. With no paging there is nothing to spare.
+                return page;
+            }
+            // Committing inside a reservation writes nothing.
+            //
+            // A page of a reservation the program has not committed
+            // yet reads as zero already -- the reservation was handed
+            // over that way below, and the program cannot have written
+            // where it had not committed -- so the zeroes Windows
+            // promises are there without anyone putting them there.
+            // What is not free is a page the program gave back: that
+            // one it did write, and Windows would hand it over fresh.
+            //
+            // A page that is already committed keeps what the program
+            // put in it: Windows documents committing one twice as
+            // succeeding without zeroing, and an allocator that
+            // commits up to its high-water mark each time it grows
+            // does exactly that.
+            takeBack(existing.address, page, page + needed);
+            markCommitted(existing.address, page, page + needed, true);
+            noteProtection(existing.address, page, page + needed, protection);
+            settleAccess(existing.address, page, page + needed);
+            return page;
+        }
+
+        if (acting === MEM_RESET)
+        {
+            // Resetting needs pages to reset.
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return 0;
+        }
+
+        // A reservation is granted in whole allocation granules, as
+        // Windows grants it: a program that reserves a size and commits
+        // pages up to the granule's end is within its rights, and was
+        // refused here as if it had left its reservation.
+        const span = roundUp(size, ALLOCATION_GRANULARITY);
+        const placed = allocator.allocate(span, { owner: VIRTUAL,
+            alignment: Math.max(ALLOCATION_GRANULARITY, where?.alignment ?? 0) });
+            // Where the span asked for has no room, as there is none above
+            // what the arena reaches: refused, the reservation given back.
+        const outside = placed !== 0 && where !== null
+                && (placed < where.lowest || placed + span - 1 > where.highest);
+        if (outside)
+        {
+            allocator.free(placed);
+        }
+        const address = outside ? 0 : placed;
+        if (address === 0)
+        {
+            // A caller checks the return and then asks why. A zero with
+            // no code behind it leaves whatever the previous call
+            // happened to set, which is worse than useless.
+            host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+            refused('VirtualAlloc', rounded);
+            return 0;
+        }
+        // The whole reservation reads as zero from here on, whether
+        // this call commits any of it or not, and that is what lets
+        // every commit inside it above cost nothing.
+        //
+        // Two things want it. A commit has to yield zero-filled pages,
+        // which a program relies on. And a page the program reserved
+        // but has not committed reads as whatever was there before --
+        // on Windows touching it faults, here it yields old bytes, and
+        // a stale value that happens to look like a pointer is read as
+        // one, then dereferenced far from anything that would explain
+        // where it came from. Where the processor faults a closed page
+        // (`settleAccess`) the pages not committed fault as on Windows --
+        // a program that commits a page in its own handler when it is
+        // touched depends on it; elsewhere they read zero, the more
+        // forgiving of the two wrong answers.
+        //
+        // Arena that was never handed out is zero already; only what
+        // something else finished with costs a write.
+        decommitted.delete(address);
+        committed.set(address, []);
+        unreadable.delete(address);
+        if ((kind & MEM_COMMIT) !== 0)
+        {
+            markCommitted(address, address, address + rounded, true);
+            noteProtection(address, address, address + rounded, protection);
+        }
+        if ((kind & MEM_WRITE_WATCH) !== 0)
+        {
+            watched.add(address);
+        }
+        zeroHandedOver(address, span);
+        settleAccess(address, address, address + span);
+        return address;
+    };
+
+    /**
+     * VirtualAlloc2's MEM_EXTENDED_PARAMETER list, as the address
+     * requirements it asks for: null for a list it cannot take -- a type
+     * other than those two, an alignment not a power of two of at least the
+     * granularity, or a span not running from a granule to the end of one.
+     *
+     * @param {number} list @param {number} count
+     * @returns {{ alignment: number, lowest: number, highest: number } | null}
+     */
+    const extendedParameters = (list, count)=>{
+        const where = { alignment: 0, lowest: 0, highest: 0xffffffff };
+        const pointerSize = host.pointerSize ?? 4;
+        /** @param {number} at */
+        const pointerAt = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+            .getUint32(0, true);
+        for (let index = 0; index < (count >>> 0); index++)
+        {
+            const at = (list >>> 0) + index * MEM_EXTENDED_PARAMETER.SIZE;
+            const kind = host.readMemory(at, 1)[0];
+            if (kind === MEM_EXTENDED_PARAMETER.NUMA_NODE)
+            {
+                continue;
+            }
+            if (kind !== MEM_EXTENDED_PARAMETER.ADDRESS_REQUIREMENTS)
+            {
+                return null;
+            }
+            const requirements = pointerAt(at + 8);
+            if (requirements === 0)
+            {
+                continue;
+            }
+            const lowest = pointerAt(requirements);
+            const highest = pointerAt(requirements + pointerSize);
+            const alignment = pointerAt(requirements + 2 * pointerSize);
+            if (alignment !== 0 && (alignment < ALLOCATION_GRANULARITY
+                || (alignment & (alignment - 1)) !== 0)
+                || lowest % ALLOCATION_GRANULARITY !== 0
+                || highest !== 0 && (highest + 1) % ALLOCATION_GRANULARITY !== 0)
+            {
+                return null;
+            }
+            where.alignment = alignment;
+            where.lowest = lowest;
+            where.highest = highest === 0 ? 0xffffffff : highest;
+        }
+        return where;
+    };
+
     const table = {
         /** HANDLE GetProcessHeap(VOID) */
         GetProcessHeap: {
@@ -1645,190 +1908,40 @@ export function createHeapFunctions(host){
         VirtualAlloc: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pointer, bytes, type, protect])=>{
-                const kind = type >>> 0;
-                const size = bytes >>> 0;
-                const requested = pointer >>> 0;
-                const protection = protect >>> 0;
-                const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
-                if ((kind & ~ALLOCATION_TYPES) !== 0 || acting === 0
-                    || ((kind & MEM_RESET) !== 0 && acting !== MEM_RESET) || size === 0)
+            handler: ([pointer, bytes, type, protect])=>
+                virtualAlloc(pointer, bytes, type, protect, null),
+        },
+
+        /**
+         * PVOID VirtualAlloc2(HANDLE Process, PVOID BaseAddress, SIZE_T Size,
+         *     ULONG AllocationType, ULONG PageProtection,
+         *     MEM_EXTENDED_PARAMETER *ExtendedParameters, ULONG ParameterCount)
+         *
+         * VirtualAlloc with its parameters in a list: a new reservation's
+         * alignment and the span it must lie in
+         * (MemExtendedParameterAddressRequirements), and a NUMA node, which a
+         * machine of one node has no choice of. A process is this one, as
+         * NULL or the pseudo-handle; placeholders are not kept, and their
+         * flags are refused as an unknown type is.
+         */
+        VirtualAlloc2: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([process, pointer, bytes, type, protect, list, count])=>{
+                if ((process >>> 0) !== 0 && (process >>> 0) !== CURRENT_PROCESS)
+                {
+                    host.divergence?.('VirtualAlloc2', `process 0x${(process >>> 0)
+                        .toString(16)} is not the running one`);
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const where = extendedParameters(list, count);
+                if (!where)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const rounded = roundUp(size, PAGE_SIZE);
-
-                if (requested !== 0 && (kind & MEM_RESERVE) !== 0)
-                {
-                    // A reservation begins on an allocation granule, the
-                    // address rounded down to one, and runs to the end of the
-                    // page the last byte asked for is in. Whatever of that is
-                    // already taken -- another reservation, or anything else
-                    // -- refuses the whole of it: a reservation is never
-                    // made around something that is in its way.
-                    const start = (requested & ~(ALLOCATION_GRANULARITY - 1)) >>> 0;
-                    const span = roundUp(requested + size - start, PAGE_SIZE);
-                    // Past the end of user address space Windows refuses the
-                    // reservation as an invalid parameter, as it does here: no
-                    // divergence, the program is asking where nothing can be.
-                    if (start + span > USER_ADDRESS_SPACE_TOP)
-                    {
-                        host.setLastError(ERROR_INVALID_PARAMETER);
-                        return 0;
-                    }
-                    if (!allocator.allocateAt(start, span, { owner: VIRTUAL }))
-                    {
-                        host.setLastError(ERROR_INVALID_ADDRESS);
-                        host.divergence?.('VirtualAlloc', `reservation of ${span} bytes at 0x${
-                            start.toString(16)} refused: ${allocator.blockContaining(start)
-                            ?? allocator.blockContaining(start + span - 1)
-                            ? 'something is already there' : 'not free in the arena'}`);
-                        return 0;
-                    }
-                    decommitted.delete(start);
-                    committed.set(start, []);
-                    unreadable.delete(start);
-                    // Committed with it, the whole of what was reserved: from
-                    // the granule's start, which is the address answered, not
-                    // from the page asked for -- a program writes from the
-                    // base it was handed (Wine's virtual_alloc maps the one
-                    // range both ways).
-                    if ((kind & MEM_COMMIT) !== 0)
-                    {
-                        markCommitted(start, start, start + span, true);
-                        noteProtection(start, start, start + span, protection);
-                    }
-                    if ((kind & MEM_WRITE_WATCH) !== 0)
-                    {
-                        watched.add(start);
-                    }
-                    zeroHandedOver(start, span);
-                    settleAccess(start, start, start + span);
-                    return start;
-                }
-
-                if (requested !== 0)
-                {
-                    // Reserve-then-commit is a common two-step, and the second
-                    // step names a page rather than the reservation: a program
-                    // reserves a span and commits pages inside it one at a
-                    // time as it grows into them, so every commit after the
-                    // first arrives with an interior address. Looking the
-                    // address up as the *start* of a block accepts only that
-                    // first page and refuses the rest, which a program reads
-                    // as having run out of memory while most of what it
-                    // reserved sits untouched.
-                    //
-                    // An address inside no reservation is refused: there is
-                    // nothing there to commit.
-                    //
-                    // The range is whole pages: from the page the address is
-                    // in to the end of the page the last byte is in, as
-                    // Windows rounds it.
-                    const page = requested & ~(PAGE_SIZE - 1);
-                    const needed = roundUp(requested + size - page, PAGE_SIZE);
-                    const existing = allocator.blockContaining(requested);
-                    const offset = existing ? page - existing.address : 0;
-                    if (!existing || existing.owner !== VIRTUAL
-                        || existing.capacity - offset < needed)
-                    {
-                        host.setLastError(ERROR_INVALID_ADDRESS);
-                        host.divergence?.('VirtualAlloc', `${acting === MEM_RESET
-                            ? 'reset' : 'commit'} of ${size} bytes at 0x${
-                            requested.toString(16)} refused: ${existing
-                            ? `the reservation at 0x${existing.address.toString(16)} holds ${
-                                existing.capacity} bytes, ${existing.owner === VIRTUAL
-                                ? 'virtual' : 'not virtual'}`
-                            : 'no reservation there'}`);
-                        return 0;
-                    }
-                    if (acting === MEM_RESET)
-                    {
-                        // The pages keep whatever they hold: MEM_RESET lets the
-                        // system throw the contents away instead of paging them
-                        // out, and says they are undefined afterwards, not
-                        // zero. With no paging there is nothing to spare.
-                        return page;
-                    }
-                    // Committing inside a reservation writes nothing.
-                    //
-                    // A page of a reservation the program has not committed
-                    // yet reads as zero already -- the reservation was handed
-                    // over that way below, and the program cannot have written
-                    // where it had not committed -- so the zeroes Windows
-                    // promises are there without anyone putting them there.
-                    // What is not free is a page the program gave back: that
-                    // one it did write, and Windows would hand it over fresh.
-                    //
-                    // A page that is already committed keeps what the program
-                    // put in it: Windows documents committing one twice as
-                    // succeeding without zeroing, and an allocator that
-                    // commits up to its high-water mark each time it grows
-                    // does exactly that.
-                    takeBack(existing.address, page, page + needed);
-                    markCommitted(existing.address, page, page + needed, true);
-                    noteProtection(existing.address, page, page + needed, protection);
-                    settleAccess(existing.address, page, page + needed);
-                    return page;
-                }
-
-                if (acting === MEM_RESET)
-                {
-                    // Resetting needs pages to reset.
-                    host.setLastError(ERROR_INVALID_ADDRESS);
-                    return 0;
-                }
-
-                // A reservation is granted in whole allocation granules, as
-                // Windows grants it: a program that reserves a size and commits
-                // pages up to the granule's end is within its rights, and was
-                // refused here as if it had left its reservation.
-                const span = roundUp(size, ALLOCATION_GRANULARITY);
-                const address = allocator.allocate(span,
-                    { alignment: ALLOCATION_GRANULARITY, owner: VIRTUAL });
-                if (address === 0)
-                {
-                    // A caller checks the return and then asks why. A zero with
-                    // no code behind it leaves whatever the previous call
-                    // happened to set, which is worse than useless.
-                    host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
-                    refused('VirtualAlloc', rounded);
-                    return 0;
-                }
-                // The whole reservation reads as zero from here on, whether
-                // this call commits any of it or not, and that is what lets
-                // every commit inside it above cost nothing.
-                //
-                // Two things want it. A commit has to yield zero-filled pages,
-                // which a program relies on. And a page the program reserved
-                // but has not committed reads as whatever was there before --
-                // on Windows touching it faults, here it yields old bytes, and
-                // a stale value that happens to look like a pointer is read as
-                // one, then dereferenced far from anything that would explain
-                // where it came from. Where the processor faults a closed page
-                // (`settleAccess`) the pages not committed fault as on Windows --
-                // a program that commits a page in its own handler when it is
-                // touched depends on it; elsewhere they read zero, the more
-                // forgiving of the two wrong answers.
-                //
-                // Arena that was never handed out is zero already; only what
-                // something else finished with costs a write.
-                decommitted.delete(address);
-                committed.set(address, []);
-                unreadable.delete(address);
-                if ((kind & MEM_COMMIT) !== 0)
-                {
-                    markCommitted(address, address, address + rounded, true);
-                    noteProtection(address, address, address + rounded, protection);
-                }
-                if ((kind & MEM_WRITE_WATCH) !== 0)
-                {
-                    watched.add(address);
-                }
-                zeroHandedOver(address, span);
-                settleAccess(address, address, address + span);
-                return address;
+                return virtualAlloc(pointer, bytes, type, protect, where);
             },
         },
 
@@ -2747,6 +2860,12 @@ export function createHeapFunctions(host){
         ...table,
         /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
         VirtualAllocEx: inProcess('VirtualAlloc', 20),
+        /**
+         * PVOID VirtualAlloc2FromApp(...): VirtualAlloc2 under the name a
+         * packaged app may call, whose limits -- no executable pages without
+         * the capability -- a desktop process has none of.
+         */
+        VirtualAlloc2FromApp: table.VirtualAlloc2,
         /** BOOL VirtualFreeEx(HANDLE, LPVOID, SIZE_T, DWORD) */
         VirtualFreeEx: inProcess('VirtualFree', 16),
         /** BOOL VirtualProtectEx(HANDLE, LPVOID, SIZE_T, DWORD, PDWORD) */

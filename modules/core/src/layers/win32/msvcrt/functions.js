@@ -458,7 +458,8 @@ export function createMsvcrtFunctions(host){
      * @param {number} list
      */
     const varargsAt = list=>varargsSlots(
-        host.readMemory, address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS);
+        host.readMemory, address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS,
+        host.pointerSize === 8 ? 2 : 1);
 
     /**
      * The secure printers' shared body. A size of zero leaves nowhere to put
@@ -1125,6 +1126,7 @@ export function createMsvcrtFunctions(host){
             scanCString: host.scanCString,
             allocate,
             errno,
+            pointerSize: host.pointerSize,
         }),
     };
 
@@ -1485,6 +1487,41 @@ export function createMsvcrtFunctions(host){
          * to read one from, and the runtime answers EOF.
          */
         _getch: { convention: 'cdecl', argBytes: 0, handler: ()=>-1 },
+
+        /**
+         * int _cputs(const char *text)
+         *
+         * The text to the console, untranslated: where the process's own
+         * output goes, the descriptor stdout starts on. 0, or -1 with EINVAL
+         * for no text.
+         */
+        _cputs: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([text])=>{
+                if ((text >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return -1;
+                }
+                const console = descriptors?.get(1);
+                if (console)
+                {
+                    descriptors?.put(console, encodeAnsi(host.readCString(text >>> 0, 1 << 20)));
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * int _resetstkoflw(void)
+         *
+         * Puts back the guard page a stack overflow used up. A stack here
+         * grows into memory that is already there and keeps no guard page,
+         * so there is none to restore: nonzero, success.
+         */
+        _resetstkoflw: { convention: 'cdecl', argBytes: 0, handler: ()=>1 },
 
         /** int _getpid(void): the process's identifier, as GetCurrentProcessId answers it. */
         _getpid: { convention: 'cdecl', argBytes: 0, handler: ()=>host.processId ?? 0 },

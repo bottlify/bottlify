@@ -39,6 +39,9 @@ const MESSAGES = [
     'Function not implemented', 'Directory not empty', 'Illegal byte sequence',
 ];
 
+/** How many messages there are: `_sys_nerr`. */
+export const SYSTEM_ERRORS = MESSAGES.length;
+
 /** What an errno says. @param {number} code */
 export const messageOf = code=>MESSAGES[code] ?? 'Unknown error';
 

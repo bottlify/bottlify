@@ -362,7 +362,7 @@ export function createNtdllFunctions(host){
 
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
             ? createMemoryFunctions({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, kernel32, allocate,
+                writeMemory: host.writeMemory, kernel32, allocate, pointerSize: host.pointerSize,
                 currentThread: host.currentThread, lastErrorOf: host.lastErrorOf })
             : {}),
 

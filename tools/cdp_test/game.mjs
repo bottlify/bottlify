@@ -68,7 +68,7 @@ import { modeOf } from '../play/modes.js';
 import { threadWindow } from './thread-window.mjs';
 import { rootsFromArgv } from '../relay-option.mjs';
 import { clientFilesCached } from '../steam-client.mjs';
-import { ownershipTickets } from '../steam-tickets.mjs';
+import { ownershipTickets, ticketsFromArgv } from '../steam-tickets.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -415,6 +415,8 @@ function parse(argv){
         // what the launcher's bridge gets -- held in memory for this run only.
         steamSession: argv.includes('--steam-session')
             ? argv[argv.indexOf('--steam-session') + 1] : null,
+        // `--steam-ticket APP=FILE` (any number): a ticket already in a file,
+        // read by ticketsFromArgv, for a run with no session to ask with.
         // createApp's `cpu` as JSON ('{"playPinned":false}'): a run whose threads
         // are placed one fixed way, beside another placed the same way.
         cpuConfig: argv.includes('--cpu-config')
@@ -1848,8 +1850,9 @@ export async function game(options){
     process.on('exit', ()=>rmSync(entryDirectory, { recursive: true, force: true }));
 
     const steamClient = options.steamAccount ? await clientFilesCached() : null;
-    const tickets = options.steamAccount && options.steamSession && manifest.steam?.appId
-        ? await ownershipTickets(options.steamSession, [manifest.steam.appId]) : {};
+    const tickets = { ...ticketsFromArgv(process.argv.slice(2)),
+        ...options.steamAccount && options.steamSession && manifest.steam?.appId
+            ? await ownershipTickets(options.steamSession, [manifest.steam.appId]) : {} };
     const server = await serveStatic({
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),

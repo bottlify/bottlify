@@ -986,6 +986,7 @@ export function createWin32Module(){
             // port a program waits on, and the file calls that owe it a packet when
             // an overlapped read or write finishes.
             const ports = createIoCompletionPorts({
+                pointerSize,
                 kernel,
                 readMemory,
                 writeMemory,
@@ -1013,6 +1014,7 @@ export function createWin32Module(){
             // Named pipes, in the run's namespace: their own calls, and ReadFile,
             // WriteFile, CreateFile, CloseHandle and CancelIo hand theirs on.
             const pipes = createNamedPipes({
+                pointerSize,
                 kernel,
                 handles,
                 readMemory,
@@ -2109,6 +2111,7 @@ export function createWin32Module(){
                             ?.handler([0, text, 0, 0x1000]) ?? 0,
                     }),
                     ...createThreadingFunctions({
+                        pointerSize,
                         kernel,
                         pipes,
                         // A thread made in a child, and one waited on there.
@@ -2202,6 +2205,7 @@ export function createWin32Module(){
                         say: text=>trace(text),
                     }),
                     ...createHeapFunctions({
+                        pointerSize,
                         arena, allocator, readMemory, writeMemory, fillMemory, viewAt,
                         guestHeap,
                         // A child's memory, reached where the child runs.
@@ -2652,6 +2656,7 @@ export function createWin32Module(){
                     // entry points for a file as for a console or an event, and the
                     // one that knows about files answers for all of them.
                     ...createFileFunctions({
+                        pointerSize,
                         divergence: config?.divergence,
                         openRefused: record=>{
                             refusedOpens.push(record);
@@ -3196,6 +3201,7 @@ export function createWin32Module(){
                 'CRYPT32.dll': createCrypt32Functions({
                     readMemory, writeMemory, readWideString, setLastError: setError,
                     readCString,
+                    pointerSize,
                     // LPTR: fixed and zeroed, as the caller's LocalFree expects.
                     localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
                         .handler([0x40, bytes]) >>> 0,
@@ -3340,6 +3346,7 @@ export function createWin32Module(){
                 // volume every file call uses; a queue's notifications go to the
                 // program's own callback on the thread that asked.
                 'SETUPAPI.dll': createSetupapiFunctions({
+                    pointerSize,
                     readMemory,
                     writeMemory,
                     readCString,
@@ -4371,7 +4378,7 @@ export function createWin32Module(){
                     files: volume }),
             };
             libraries['MSVCR80.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
-                { readMemory, writeMemory });
+                { readMemory, writeMemory, pointerSize });
             // And its C++ library, over that runtime's operator new and delete.
             libraries['MSVCP80.dll'] = createMsvcp80Functions(libraries['MSVCR80.dll'],
                 { readMemory, writeMemory, fillMemory });
@@ -4383,6 +4390,17 @@ export function createWin32Module(){
                 pointerSize,
                 readMemory,
                 writeMemory,
+                readCString,
+                commandLine: {
+                    narrow: ()=>libraries['KERNEL32.dll'].GetCommandLineA.handler([]),
+                    wide: ()=>libraries['KERNEL32.dll'].GetCommandLineW.handler([]),
+                },
+                // `_except1` puts back the x87 control word the caller had.
+                ...floatResults ? { fpu: { ...floatResults,
+                    ...config?.fpu?.setControlWord
+                        ? { setControlWord: config.fpu.setControlWord } : {} } } : {},
+                ...cpuRegisters.readXmm && cpuRegisters.writeXmm
+                    ? { readXmm: cpuRegisters.readXmm, writeXmm: cpuRegisters.writeXmm } : {},
                 callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 currentThread: ()=>kernel.currentThread(),
             });
@@ -4464,6 +4482,13 @@ export function createWin32Module(){
                     libraries['ntdll.dll'][name] = /** @type {any} */ (seh64.table)[name];
                 }
             }
+
+            // kernelbase.dll, where Windows keeps what kernel32 forwards to and
+            // what is newer than it (VirtualAlloc2): a program that loads it
+            // by name and asks it for a function -- an allocator looking for
+            // VirtualAlloc2 -- finds kernel32's entries, one implementation
+            // under the two names.
+            libraries['KERNELBASE.dll'] = libraries['KERNEL32.dll'];
 
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));

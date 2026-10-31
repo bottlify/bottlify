@@ -2127,6 +2127,18 @@ test('device nodes, ID lists, interface keys and interface properties', async()=
     assert.equal(m.fns.CM_Get_Parent.handler([parent, m.u32(device + 20), 0]), CR_SUCCESS);
     m.fns.CM_Get_Device_IDA.handler([m.u32(parent), out, 64, 0]);
     assert.equal(m.readCString(out, 64), 'HTREE\\ROOT\\0');
+    // CM_Locate_DevNode: an instance's node by its id, the root for none,
+    // nothing for an id no device has (Wine's cfgmgr32 test_CM_Locate_DevNode).
+    const located = m.buffer(4);
+    assert.equal(m.fns.CM_Locate_DevNodeA.handler([located, m.str(names[2]), 0]), CR_SUCCESS);
+    assert.equal(m.u32(located), m.u32(device + 20), 'the node SP_DEVINFO_DATA names');
+    assert.equal(m.fns.CM_Locate_DevNodeA.handler([located, 0, 0]), CR_SUCCESS);
+    assert.equal(m.u32(located), m.u32(parent), 'the root for no id');
+    assert.equal(m.fns.CM_Locate_DevNodeA.handler([located, m.str('ROOT\\NONE\\0'), 0]),
+        0x0d);
+    assert.equal(m.u32(located), 0, 'CR_NO_SUCH_DEVNODE, and nothing written but 0');
+    assert.equal(m.fns.CM_Locate_DevNodeA.handler([0, 0, 0]), CR_INVALID_POINTER);
+    assert.equal(m.fns.CM_Locate_DevNodeA.handler([located, 0, 8]), 4, 'CR_INVALID_FLAG');
     /** @param {number} at */
     const strings = at=>{
         const found = [];

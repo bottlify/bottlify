@@ -354,6 +354,9 @@ export function createLocaleFunctions(host){
          */
         ___lc_codepage_func: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
 
+        /** UINT ___lc_collate_cp_func(void): `__lc_collate_cp`, the C locale's zero. */
+        ___lc_collate_cp_func: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
+
         /**
          * int ___mb_cur_max_func(void)
          *

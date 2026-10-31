@@ -606,6 +606,43 @@ export function createPathFunctions(host){
         return null;
     };
 
+    /**
+     * `_splitpath_s` and its wide twin: each part into its buffer, a buffer
+     * and its size both given or both not. A path that is none, a buffer of
+     * no size, or a size with no buffer is EINVAL; a part longer than its
+     * buffer is ERANGE, and every buffer is then left empty.
+     *
+     * @param {(pointer: number) => string} read
+     * @param {(pointer: number, text: string) => void} write
+     * @param {boolean} wide
+     */
+    const splitSecure = (read, write, wide)=>({
+        convention: 'cdecl',
+        argBytes: 36,
+        /** @param {number[]} args */
+        handler: ([path, ...buffers])=>{
+            const pairs = [0, 2, 4, 6].map(at=>[buffers[at] >>> 0, buffers[at + 1] >>> 0]);
+            if ((path >>> 0) === 0 || pairs.some(([at, size])=>(at === 0) !== (size === 0)))
+            {
+                fail(EINVAL);
+                return EINVAL;
+            }
+            const parts = wide ? splitPath(read(path), undefined, true)
+                : splitPath(read(path), host.isLead);
+            const texts = [parts.drive, parts.directory, parts.name, parts.extension];
+            const length = (/** @type {string} */ text)=>(wide ? text.length
+                : encodeAnsi(text).length);
+            if (pairs.some(([at, size], index)=>at !== 0 && length(texts[index]) >= size))
+            {
+                pairs.forEach(([at])=>write(at, ''));
+                fail(ERANGE);
+                return ERANGE;
+            }
+            pairs.forEach(([at], index)=>write(at, texts[index]));
+            return 0;
+        },
+    });
+
     return {
         /**
          * void _splitpath(const char *path, char *drive, char *dir,
@@ -624,6 +661,13 @@ export function createPathFunctions(host){
                 return 0;
             },
         },
+
+        /**
+         * errno_t _splitpath_s(const char *path, char *drive, size_t driveSize,
+         *     char *dir, size_t dirSize, char *fname, size_t nameSize, char *ext,
+         *     size_t extSize)
+         */
+        _splitpath_s: splitSecure(readString, writeString, false),
 
         /**
          * void _makepath(char *path, const char *drive, const char *dir,
@@ -696,6 +740,46 @@ export function createPathFunctions(host){
                     return 0;
                 },
             },
+
+            /** errno_t _wsplitpath_s(...): `_splitpath_s` in UTF-16. */
+            _wsplitpath_s: splitSecure(readWide, writeWide, true),
+
+            /**
+             * wchar_t *_wgetcwd(wchar_t *buffer, int size): `_getcwd` in
+             * UTF-16, `size` counted in characters.
+             */
+            _wgetcwd: {
+                convention: 'cdecl',
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([buffer, size])=>{
+                    const text = host.files.currentDirectory();
+                    if ((buffer >>> 0) === 0)
+                    {
+                        const allocated = host.allocate(Math.max(text.length + 1, size | 0) * 2);
+                        writeWide(allocated, text);
+                        return allocated;
+                    }
+                    if (text.length + 1 > (size | 0))
+                    {
+                        fail(ERANGE);
+                        return 0;
+                    }
+                    writeWide(buffer, text);
+                    return buffer;
+                },
+            },
+
+            /** int _wchdir(const wchar_t *path) */
+            _wchdir: operation(4, ([path])=>{
+                const text = readWide(path);
+                if (!exists(text))
+                {
+                    return ENOENT;
+                }
+                host.files.setCurrentDirectory(text);
+                return 0;
+            }),
 
             /**
              * wchar_t *_wfullpath(wchar_t *absolute, const wchar_t *relative, size_t max)

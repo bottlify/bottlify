@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatToString, guestAccess } from './format.js';
+import { formatToString, guestAccess, sequentialArguments, wideSlots } from './format.js';
 
 /** Pointers the guest would hold; the engine never invents one of its own. */
 const HELLO = 0x100;
@@ -226,4 +226,20 @@ test('%Z prints a counted string and %n writes the count, where the guest memory
         'no|wi|(null)|(null)');
     assert.equal(formatToString('asdf%n!', [0x40], readString, options), 'asdf!');
     assert.equal(view.getInt32(0x40, true), 4);
+});
+
+test('a 64-bit caller\'s arguments are eight-byte slots, an int as much as a double', ()=>{
+    /** @type {Record<number, string>} */
+    const texts = { 0x1000: 'Astro', 0x2000: 'uproject' };
+    const read = (/** @type {number} */ pointer)=>texts[pointer];
+    const double = new DataView(new ArrayBuffer(8));
+    double.setFloat64(0, 2.5, true);
+    // "Astro", "uproject", 7, 2.5, -2^40, a pointer above 4 GiB, a size_t of 2^33
+    const arguments64 = wideSlots([0x1000, 0, 0x2000, 0, 7, 0x55555555,
+        double.getInt32(0, true), double.getInt32(4, true), 0, -0x100, 0x10, 0x1, 0, 2]);
+    assert.equal(formatToString('%s.%s %d %.1f %lld %p %zu', arguments64, read),
+        'Astro.uproject 7 2.5 -1099511627776 0000000100000010 8589934592');
+    const reordered = sequentialArguments('%2$s.%1$s', arguments64);
+    assert.equal(reordered && formatToString(reordered.format, reordered.slots, read),
+        'uproject.Astro', 'a positional format, a slot an argument');
 });

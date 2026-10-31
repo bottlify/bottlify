@@ -455,6 +455,9 @@ export function createConversionFunctions(host){
     /** @param {boolean} negative */
     const uint64Limit = negative=>(negative ? BigInt.asUintN(64, -UINT64_MAX) : UINT64_MAX);
 
+    /** `_wcstoi64`, which `_wtoi64` reads with. */
+    const wideInt64 = strtoInteger(12, toInt64, int64Limit, true, true);
+
     /**
      * The `_*toa` family: same shape, differing only in how the value is read.
      *
@@ -750,8 +753,16 @@ export function createConversionFunctions(host){
              * and unsigned __int64 _wcstoui64: the wide readings in 64 bits,
              * the high half in EDX.
              */
-            _wcstoi64: strtoInteger(12, toInt64, int64Limit, true, true),
+            _wcstoi64: wideInt64,
             _wcstoui64: strtoInteger(12, toUint64, uint64Limit, true, true),
+
+            /** __int64 _wtoi64(const wchar_t *str): `_wcstoi64` in base ten, no end. */
+            _wtoi64: {
+                convention: 'cdecl',
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([string])=>wideInt64.handler([string, 0, 10]),
+            },
 
             _wtoi: wideAtoi,
             _wtol: wideAtoi,
@@ -1002,7 +1013,11 @@ export function createConversionFunctions(host){
     const guest = { readMemory, writeMemory, fpu: host.fpu };
     return {
         ...table,
-        ...readMemory ? { wcstod: returningDouble(host.fpu, 8, wcstod) } : {},
+        ...readMemory ? {
+            wcstod: returningDouble(host.fpu, 8, wcstod),
+            /** double _wtof(const wchar_t *str): `wcstod`, no end. */
+            _wtof: returningDouble(host.fpu, 4, args=>wcstod([args[0], 0])),
+        } : {},
         atof: readMemory
             ? guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, guest, handlers.atof)
             : handlers.atof,

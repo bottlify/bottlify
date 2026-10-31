@@ -25,10 +25,15 @@
  *   `_execute_onexit_table`).
  */
 
+import { scanDecimal } from './convert.js';
+import { SYSTEM_ERRORS } from './errors.js';
+import { setSingle } from './float.js';
 import { VARIADIC_SLOTS } from './scan.js';
 import { fileLayout } from './stdio.js';
+import { createUcrtMathFunctions } from './ucrt-math.js';
 
 const EINVAL = 22;
+const ERANGE = 34;
 /** `_TRUNCATE`: a count that asks for as much as fits. */
 const TRUNCATE = 0xffffffff;
 /**
@@ -42,6 +47,8 @@ const STANDARD_SNPRINTF_BEHAVIOR = 0x2;
 const LEGACY_VSPRINTF_NULL_TERMINATION = 0x1;
 /** The bit of `__stdio_common_vsscanf` and its kin that makes `%s` and `%c` take a size after each pointer. */
 const SECURE_SCANF = 0x1;
+/** DLL_PROCESS_DETACH: what a thread-local exit callback is told at exit. */
+const PROCESS_DETACH = 0;
 
 /**
  * @typedef {Object} UcrtHost
@@ -50,6 +57,13 @@ const SECURE_SCANF = 0x1;
  * @property {(entry: number, args: number[], thread?: any) => any} callGuest
  * @property {() => any} [currentThread]
  * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
+ * @property {(address: number, maxLength: number) => string} [readCString]
+ * @property {{ narrow: () => number, wide: () => number }} [commandLine]  Where
+ *     GetCommandLineA and GetCommandLineW keep the process's command line.
+ * @property {import('./float.js').FloatHost} [fpu]  Absent, nothing that
+ *     answers a float or a double is added.
+ * @property {(index: number) => Uint32Array} [readXmm]
+ * @property {(index: number, words: Uint32Array) => void} [writeXmm]
  */
 
 /**
@@ -60,11 +74,21 @@ const SECURE_SCANF = 0x1;
  */
 export function createUcrtbaseFunctions(crt, host){
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).buffer)
+    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        host.writeMemory(address >>> 0, bytes);
+    };
+    /** A pointer's bytes: four, or eight in a 64-bit process, every address below 4 GiB. */
+    const pointer = host.pointerSize ?? 4;
+    /** @param {number} address */
+    const readPointer = readU32;
+    /** @param {number} address @param {number} value */
+    const writePointer = (address, value)=>{
+        const bytes = new Uint8Array(pointer);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address >>> 0, bytes);
     };
@@ -170,10 +194,97 @@ export function createUcrtbaseFunctions(crt, host){
      * @param {number} list
      */
     const pointersAt = list=>Array.from({ length: VARIADIC_SLOTS },
-        (_, index)=>readU32((list >>> 0) + index * 4));
+        (_, index)=>readPointer((list >>> 0) + index * pointer));
+
+    /** What `_register_thread_local_exe_atexit_callback` was given, until exit calls it. */
+    let threadLocalExit = 0;
+    /** `___lc_locale_name_func`'s array and `__sys_nerr`'s variable, made when first asked for. */
+    let localeNames = 0;
+    let errorCount = 0;
+
+    /**
+     * The command line WinMain is handed: past the program's name -- quoted or
+     * not, a quote anywhere in it opening or closing a quoted span -- and the
+     * blanks after it, every unit at or below a space one.
+     *
+     * @param {number} line  The command line. @param {number} unit  1 or 2 bytes.
+     */
+    const pastProgramName = (line, unit)=>{
+        if ((line >>> 0) === 0)
+        {
+            return 0;
+        }
+        /** @param {number} at */
+        const read = at=>{
+            const bytes = host.readMemory(at, unit);
+            return unit === 1 ? bytes[0] : bytes[0] | bytes[1] << 8;
+        };
+        let at = line >>> 0;
+        let quoted = false;
+        for (let code = read(at); code > 0x20 || code !== 0 && quoted; code = read(at))
+        {
+            quoted = code === 0x22 ? !quoted : quoted;
+            at += unit;
+        }
+        while (read(at) !== 0 && read(at) <= 0x20)
+        {
+            at += unit;
+        }
+        return at;
+    };
+
+    /**
+     * What exit and _cexit do before atexit's handlers: the exe's
+     * thread-local destructors, through the callback it registered, told the
+     * process is detaching -- once.
+     *
+     * @param {() => any} then
+     */
+    const exitingThreadLocals = then=>{
+        const callback = threadLocalExit;
+        threadLocalExit = 0;
+        return callback === 0 ? then()
+            : Promise.resolve(call(callback, [0, PROCESS_DETACH, 0])).then(then);
+    };
+
+    /**
+     * `_W_Getdays` and `_W_Getmonths`: the narrow list the runtime makes,
+     * as a wide string of its own from the heap, the narrow one freed.
+     *
+     * @param {Record<string, any>} narrow
+     */
+    const widened = narrow=>({
+        convention: 'cdecl',
+        argBytes: 0,
+        handler: ()=>{
+            const text = narrow.handler([]) >>> 0;
+            if (text === 0 || !host.readCString)
+            {
+                return text;
+            }
+            const read = host.readCString(text, 4096);
+            crt.free.handler([text]);
+            const bytes = new Uint8Array((read.length + 1) * 2);
+            for (let at = 0; at < read.length; at++)
+            {
+                bytes[at * 2] = read.charCodeAt(at) & 0xff;
+            }
+            const wide = crt.malloc.handler([bytes.length]) >>> 0;
+            if (wide !== 0)
+            {
+                host.writeMemory(wide, bytes);
+            }
+            return wide;
+        },
+    });
 
     return {
         ...crt,
+        ...host.fpu ? createUcrtMathFunctions({ fpu: host.fpu, errno: code=>{
+            fail(code);
+        }, readMemory: host.readMemory, writeMemory: host.writeMemory, pointerSize: pointer,
+        ...host.readXmm && host.writeXmm ? { readXmm: host.readXmm, writeXmm: host.writeXmm }
+            : {} }) : {},
 
         /** FILE *__acrt_iob_func(unsigned index): stdin, stdout and stderr are 0, 1 and 2. */
         __acrt_iob_func: {
@@ -390,7 +501,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     return -1;
                 }
-                host.writeMemory(table >>> 0, new Uint8Array(12));
+                host.writeMemory(table >>> 0, new Uint8Array(3 * pointer));
                 return 0;
             },
         },
@@ -411,26 +522,26 @@ export function createUcrtbaseFunctions(crt, host){
                     return -1;
                 }
                 const at = table >>> 0;
-                let first = readU32(at);
-                let last = readU32(at + 4);
-                let end = readU32(at + 8);
+                let first = readPointer(at);
+                let last = readPointer(at + pointer);
+                let end = readPointer(at + 2 * pointer);
                 if (last === end)
                 {
-                    const used = first === 0 ? 0 : (last - first) / 4;
+                    const used = first === 0 ? 0 : (last - first) / pointer;
                     const room = Math.max(8, used * 2);
-                    const grown = crt.realloc.handler([first, room * 4]) >>> 0;
+                    const grown = crt.realloc.handler([first, room * pointer]) >>> 0;
                     if (grown === 0)
                     {
                         return -1;
                     }
                     first = grown;
-                    last = grown + used * 4;
-                    end = grown + room * 4;
+                    last = grown + used * pointer;
+                    end = grown + room * pointer;
                 }
-                writeU32(last, fn);
-                writeU32(at, first);
-                writeU32(at + 4, last + 4);
-                writeU32(at + 8, end);
+                writePointer(last, fn);
+                writePointer(at, first);
+                writePointer(at + pointer, last + pointer);
+                writePointer(at + 2 * pointer, end);
                 return 0;
             },
         },
@@ -452,11 +563,12 @@ export function createUcrtbaseFunctions(crt, host){
                     return -1;
                 }
                 const at = table >>> 0;
-                const first = readU32(at);
-                const last = readU32(at + 4);
-                const functions = first === 0 ? [] : Array.from({ length: (last - first) / 4 },
-                    (_, index)=>readU32(first + index * 4));
-                host.writeMemory(at, new Uint8Array(12));
+                const first = readPointer(at);
+                const last = readPointer(at + pointer);
+                const functions = first === 0 ? [] : Array.from(
+                    { length: (last - first) / pointer },
+                    (_, index)=>readPointer(first + index * pointer));
+                host.writeMemory(at, new Uint8Array(3 * pointer));
                 if (first !== 0)
                 {
                     crt.free.handler([first]);
@@ -562,6 +674,254 @@ export function createUcrtbaseFunctions(crt, host){
                 writeU32(out, readU32(crt.__p__fmode.handler([])));
                 return 0;
             },
+        },
+
+        /**
+         * float strtof(const char *str, char **end): strtod's reading, rounded
+         * to a float, ERANGE for one past a float's range.
+         */
+        ...host.fpu && host.readCString ? {
+            strtof: {
+                convention: 'cdecl',
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([text, end])=>{
+                    const scanned = (text >>> 0) === 0 ? null
+                        : scanDecimal(/** @type {NonNullable<typeof host.readCString>} */ (
+                            host.readCString)(text >>> 0, 1024));
+                    if ((end >>> 0) !== 0)
+                    {
+                        writePointer(end, scanned ? text + scanned.end : text);
+                    }
+                    const value = Math.fround(scanned?.value ?? 0);
+                    if (scanned && (scanned.range || !Number.isFinite(value)
+                        || value === 0 && scanned.value !== 0))
+                    {
+                        fail(ERANGE);
+                    }
+                    setSingle(/** @type {import('./float.js').FloatHost} */ (host.fpu), value);
+                    return 0;
+                },
+            },
+        } : {},
+
+        /** long long strtoll(...) and unsigned long long strtoull(...): C99's names for them. */
+        strtoll: crt._strtoi64,
+        strtoull: crt._strtoui64,
+
+        /** void _lock_locales(void), void _unlock_locales(void): the locale never changes here. */
+        _lock_locales: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
+        _unlock_locales: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
+
+        /**
+         * wchar_t **___lc_locale_name_func(void)
+         *
+         * The names of the locale's categories, LC_ALL to LC_TIME: none, for
+         * the C locale, which a caller reads as "C".
+         */
+        ___lc_locale_name_func: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>{
+                localeNames ||= crt.calloc.handler([6, pointer]) >>> 0;
+                return localeNames;
+            },
+        },
+
+        /** int *__sys_nerr(void): how many messages `_sys_errlist` holds. */
+        __sys_nerr: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>{
+                if (errorCount === 0)
+                {
+                    errorCount = crt.malloc.handler([4]) >>> 0;
+                    if (errorCount !== 0)
+                    {
+                        writeU32(errorCount, SYSTEM_ERRORS);
+                    }
+                }
+                return errorCount;
+            },
+        },
+
+        /** char **__tzname(void): `_tzname`, the zone's two names. */
+        __tzname: crt.__p__tzname,
+
+        /** _PNH _set_new_handler(_PNH handler): msvcrt's under its C name. */
+        _set_new_handler: crt['?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z'],
+
+        ...host.commandLine ? {
+            /** char *_get_narrow_winmain_command_line(void): the line past the program's name. */
+            _get_narrow_winmain_command_line: {
+                convention: 'cdecl',
+                argBytes: 0,
+                handler: ()=>pastProgramName(
+                    /** @type {NonNullable<typeof host.commandLine>} */ (host.commandLine).narrow(),
+                    1),
+            },
+            /** wchar_t *_get_wide_winmain_command_line(void) */
+            _get_wide_winmain_command_line: {
+                convention: 'cdecl',
+                argBytes: 0,
+                handler: ()=>pastProgramName(
+                    /** @type {NonNullable<typeof host.commandLine>} */ (host.commandLine).wide(),
+                    2),
+            },
+        } : {},
+
+        /**
+         * void _register_thread_local_exe_atexit_callback(_tls_callback_type callback)
+         *
+         * The exe's callback for its thread-local destructors, which exit and
+         * _cexit call first, as a TLS callback is called, with the process
+         * detaching.
+         */
+        _register_thread_local_exe_atexit_callback: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([callback])=>{
+                threadLocalExit = callback >>> 0;
+                return 0;
+            },
+        },
+        exit: { ...crt.exit,
+            handler: (/** @type {number[]} */ args)=>exitingThreadLocals(()=>
+                crt.exit.handler(args)) },
+        _cexit: { ...crt._cexit,
+            handler: (/** @type {number[]} */ args)=>exitingThreadLocals(()=>
+                crt._cexit.handler(args)) },
+
+        /**
+         * int __stdio_common_vfprintf_s(unsigned __int64 options, FILE *stream,
+         *     const char *format, _locale_t locale, va_list args)
+         */
+        __stdio_common_vfprintf_s: {
+            convention: 'cdecl',
+            argBytes: 24,
+            quadwords: [0],
+            /** @param {number[]} args */
+            handler: ([, , stream, format, , list])=>{
+                if ((format >>> 0) === 0)
+                {
+                    fail(EINVAL);
+                    return -1;
+                }
+                return crt.vfprintf.handler([stream, format, list]);
+            },
+        },
+
+        /**
+         * int __stdio_common_vswprintf_s(unsigned __int64 options, wchar_t *buffer,
+         *     size_t size, const wchar_t *format, _locale_t locale, va_list args)
+         */
+        __stdio_common_vswprintf_s: {
+            convention: 'cdecl',
+            argBytes: 28,
+            quadwords: [0],
+            /** @param {number[]} args */
+            handler: ([, , buffer, size, format, , list])=>
+                crt.vswprintf_s.handler([buffer, size, format, list]),
+        },
+
+        /**
+         * int __stdio_common_vsnwprintf_s(unsigned __int64 options, wchar_t *buffer,
+         *     size_t size, size_t count, const wchar_t *format, _locale_t locale,
+         *     va_list args)
+         */
+        __stdio_common_vsnwprintf_s: {
+            convention: 'cdecl',
+            argBytes: 32,
+            quadwords: [0],
+            /** @param {number[]} args */
+            handler: ([, , buffer, size, count, format, , list])=>
+                crt._vsnwprintf_s.handler([buffer, size, count, format, list]),
+        },
+
+        /**
+         * errno_t _get_stream_buffer_pointers(FILE *stream, char ***base,
+         *     char ***ptr, int **count)
+         *
+         * Where the stream keeps its buffer's start, its place in it and what
+         * is left: the record's own fields, which say it holds nothing, so a
+         * C++ stream on it reads and writes through the calls.
+         */
+        _get_stream_buffer_pointers: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([stream, base, place, count])=>{
+                if ((stream >>> 0) === 0)
+                {
+                    return fail(EINVAL);
+                }
+                const at = stream >>> 0;
+                [[base, at + 2 * pointer], [place, at], [count, at + fileLayout(pointer).cnt]]
+                    .forEach(([out, field])=>{
+                        if ((out >>> 0) !== 0)
+                        {
+                            writePointer(out, field);
+                        }
+                    });
+                return 0;
+            },
+        },
+
+        /**
+         * size_t fread_s(void *buffer, size_t size, size_t elementSize,
+         *     size_t count, FILE *stream)
+         *
+         * fread, refused with EINVAL for no buffer or no stream, and with
+         * ERANGE, the buffer cleared, when it asks for more than the buffer
+         * holds.
+         */
+        fread_s: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([buffer, size, elementSize, count, stream])=>{
+                const wanted = (elementSize >>> 0) * (count >>> 0);
+                if (wanted === 0)
+                {
+                    return 0;
+                }
+                if ((buffer >>> 0) === 0 || (stream >>> 0) === 0)
+                {
+                    fail(EINVAL);
+                    return 0;
+                }
+                if (wanted > (size >>> 0))
+                {
+                    host.writeMemory(buffer >>> 0, new Uint8Array(size >>> 0));
+                    fail(ERANGE);
+                    return 0;
+                }
+                return crt.fread.handler([buffer, elementSize, count, stream]);
+            },
+        },
+
+        /**
+         * wchar_t *_W_Getdays(void), wchar_t *_W_Getmonths(void): the day and
+         * month names `_Getdays` and `_Getmonths` list, wide.
+         */
+        _W_Getdays: widened(crt._Getdays),
+        _W_Getmonths: widened(crt._Getmonths),
+
+        /** void *_W_Gettnames(void): `_Gettnames`'s table, handed back to `_Wcsftime`. */
+        _W_Gettnames: crt._Gettnames,
+
+        /**
+         * size_t _Wcsftime(wchar_t *buffer, size_t size, const wchar_t *format,
+         *     const struct tm *time, void *names): wcsftime, the names the C
+         *     locale's.
+         */
+        _Wcsftime: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, time])=>
+                crt.wcsftime.handler([buffer, size, format, time]),
         },
     };
 }

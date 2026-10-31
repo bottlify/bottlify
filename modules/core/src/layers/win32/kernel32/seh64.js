@@ -140,6 +140,9 @@ const VECTOR_TO_STATUS = Object.freeze({
 
 /** @param {number} value */
 const hex = value=>`0x${(value >>> 0).toString(16)}`;
+/** The general registers in the encoding's order, as an UnwindContext keeps them. */
+const LONG_NAMES = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
+    'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
 
 /**
  * @typedef {import('./unwind.js').UnwindContext} UnwindContext
@@ -799,6 +802,24 @@ export function createSeh64(host){
     };
 
     /**
+     * The low dwords of the 48 quadwords at a fault's RSP, where a
+     * frame's return addresses are, for the fault's trace: none when the
+     * stack is not there to read.
+     *
+     * @param {number} rsp
+     */
+    const stackWords = rsp=>{
+        try
+        {
+            return Array.from({ length: 48 }, (_, slot)=>readU32(rsp + slot * 8).toString(16))
+                .join(' ');
+        }
+        catch {
+            return 'unreadable';
+        }
+    };
+
+    /**
      * RtlDispatchException: walks the frames from the fault, offering the
      * exception to each frame's handler until one takes it.
      *
@@ -811,7 +832,15 @@ export function createSeh64(host){
         const record = { code: what.code >>> 0, flags: what.flags ?? 0,
             address: what.address >>> 0,
             ...what.parameters ? { parameters: what.parameters } : {} };
-        host.trace?.(`exception ${hex(record.code)} at ${hex(record.address)}`);
+        // An error -- an access violation, an illegal instruction -- says
+        // what it touched and the registers it had, which is all a fault in
+        // code nobody has the source of can be read from; an informational
+        // raise (a thread's name) says only its code.
+        host.trace?.(`exception ${hex(record.code)} at ${hex(record.address)}${
+            record.code >= 0xc0000000 ? ` [${(record.parameters ?? []).map(hex).join(', ')}] ${
+                LONG_NAMES.map((name, index)=>`${name}=${
+                    faultContext.gpr[index].toString(16)}`).join(' ')} stack=${
+                stackWords(Number(faultContext.gpr[4] & 0xffffffffn))}` : ''}`);
         const thread = host.currentThread();
         const pass = passFor(record, faultContext, thread);
         // A dispatcher context below this raise belongs to a walk a handler
@@ -826,6 +855,26 @@ export function createSeh64(host){
         const context = copyContext(faultContext);
         /** @type {Map<string, any>} */
         const memo = new Map();
+        // An error's frames, traced before any handler runs -- a filter may
+        // report the crash and end the process from inside the walk: where
+        // the fault was called from, which the stack's words alone do not say.
+        if (record.code >= 0xc0000000 && host.trace)
+        {
+            const probe = copyContext(faultContext);
+            /** @type {number[]} */
+            const frames = [];
+            for (let depth = 0; depth < 24; depth++)
+            {
+                frames.push(probe.rip >>> 0);
+                const at = { rip: probe.rip >>> 0, stack: stackOf(probe) };
+                if (!step(probe, thread, UNW_FLAG.NHANDLER, new Map())
+                    || (probe.rip >>> 0) === at.rip && stackOf(probe) === at.stack)
+                {
+                    break;
+                }
+            }
+            host.trace(`exception ${hex(record.code)} frames ${frames.map(hex).join(' ')}`);
+        }
         for (let guard = 0; guard < WALK_LIMIT; guard++)
         {
             const before = { rip: context.rip >>> 0, stack: stackOf(context) };

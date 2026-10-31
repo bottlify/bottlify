@@ -1310,7 +1310,9 @@ test('the Ex forms act on the running process, and refuse any other', ()=>{
     const fns = createHeapFunctions(host);
     const self = 0xffffffff;
 
-    const base = fns.VirtualAllocEx.handler([self, 0, 0x8000, 0x1000, 0x40]);
+    // In this process the answer is at once, a number.
+    const base = /** @type {number} */ (fns.VirtualAllocEx.handler(
+        [self, 0, 0x8000, 0x1000, 0x40]));
     assert.notEqual(base, 0);
     assert.equal(fns.VirtualQueryEx.handler([self, base, 0x100, 28]), 28);
     assert.equal(fns.VirtualProtectEx.handler([self, base, 4096, 0x04, 0x200]), 1);

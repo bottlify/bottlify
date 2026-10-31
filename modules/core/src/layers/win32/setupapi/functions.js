@@ -152,6 +152,8 @@ const CO_INSTALLERS_KEY = 'SYSTEM\\CurrentControlSet\\Control\\CoDeviceInstaller
 const CR_SUCCESS = 0x00;
 const CR_INVALID_POINTER = 0x03;
 const CR_INVALID_FLAG = 0x04;
+/** CM_LOCATE_DEVNODE_BITS: NORMAL, PHANTOM, CANCELREMOVE, NOVALIDATION. */
+const CM_LOCATE_DEVNODE_BITS = 0x7;
 const CR_INVALID_DEVNODE = 0x05;
 const CR_NO_SUCH_DEVNODE = 0x0d;
 const CR_BUFFER_SMALL = 0x1a;
@@ -225,20 +227,32 @@ const IDF_CHECKFIRST = 0x100;
 const DPROMPT = Object.freeze({ SUCCESS: 0, CANCEL: 1, SKIPFILE: 2, BUFFERTOOSMALL: 3 });
 
 /**
- * SP_DEVINFO_LIST_DETAIL_DATA's sizes: cbSize, a GUID, a handle and 263
- * characters, packed to a byte as setupapi.h packs its structures on x86.
+ * The cbSize each enumeration structure must carry, by the process's width.
+ * setupapi.h packs its structures to a byte on x86 and to eight bytes on
+ * x64, so a pointer-sized field -- SP_DEVINFO_DATA's and
+ * SP_DEVICE_INTERFACE_DATA's Reserved, SP_DEVINFO_LIST_DETAIL_DATA's handle
+ * -- both widens and pads the whole: a 64-bit program's SP_DEVINFO_DATA is
+ * 32 bytes, and refused as the 28 of a 32-bit one it was answered
+ * ERROR_INVALID_USER_BUFFER for every index, and enumerated for ever.
+ *
+ * @param {number} [pointerSize]  4 or 8.
  */
-const LIST_DETAIL_A_SIZE = 287;
-const LIST_DETAIL_W_SIZE = 550;
-
-/** SP_DEVICE_INTERFACE_DETAIL_DATA's cbSize: a DWORD and the first character of the path. */
-const DETAIL_A_SIZE = 5;
-const DETAIL_W_SIZE = 6;
-
-/** sizeof(SP_DEVINFO_DATA): cbSize, the class GUID, DevInst, Reserved. */
-const SP_DEVINFO_DATA_SIZE = 28;
-/** SP_DEVICE_INTERFACE_DATA's cbSize: a GUID, two DWORDs and a ULONG_PTR. */
-const SP_DEVICE_INTERFACE_DATA_SIZE = 28;
+export function setupLayouts(pointerSize = 4){
+    const long = pointerSize === 8;
+    return {
+        /** cbSize, the class GUID, DevInst, Reserved (a ULONG_PTR, at 24 either way). */
+        devinfoData: long ? 32 : 28,
+        /** cbSize, the class GUID, Flags, Reserved. */
+        interfaceData: long ? 32 : 28,
+        /** cbSize and the first character of the path. */
+        detailA: long ? 8 : 5,
+        detailW: long ? 8 : 6,
+        /** cbSize, a GUID, a handle and 263 characters. */
+        listDetailA: long ? 296 : 287,
+        listDetailW: long ? 560 : 550,
+        reserved: long ? 8 : 4,
+    };
+}
 
 /** The first DIRID a program may assign with SetupSetDirectoryId. */
 const DIRID_USER = 0x8000;
@@ -298,6 +312,8 @@ const SOURCE_MEDIA_SIZE = 24;
  * @typedef {import('../kernel32/files.js').FileSystem} FileSystem
  *
  * @typedef {Object} SetupapiHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose enumeration
+ *     structures are larger (`setupLayouts`); absent, 4.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -355,6 +371,23 @@ export const joinPath = (...parts)=>parts.filter(part=>part !== '').reduce((path
  * @param {SetupapiHost} host
  */
 export function createSetupapiFunctions(host){
+    const sizes = setupLayouts(host.pointerSize);
+    const SP_DEVINFO_DATA_SIZE = sizes.devinfoData;
+    const SP_DEVICE_INTERFACE_DATA_SIZE = sizes.interfaceData;
+    const DETAIL_A_SIZE = sizes.detailA;
+    const DETAIL_W_SIZE = sizes.detailW;
+    const LIST_DETAIL_A_SIZE = sizes.listDetailA;
+    const LIST_DETAIL_W_SIZE = sizes.listDetailW;
+    /**
+     * A ULONG_PTR field, its high half zero in a 64-bit process.
+     *
+     * @param {number} at @param {number} value
+     */
+    const writeReserved = (at, value)=>{
+        const bytes = new Uint8Array(sizes.reserved);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        host.writeMemory(at >>> 0, bytes);
+    };
     /** @param {number} address */
     const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
         .getUint32(0, true);
@@ -1162,7 +1195,7 @@ export function createSetupapiFunctions(host){
     const writeDevice = (address, device)=>{
         writeGuid(address + 4, device.classGuid);
         writeU32(address + 20, device.devnode);
-        writeU32(address + 24, device.key);
+        writeReserved(address + 24, device.key);
     };
 
     /**
@@ -2232,7 +2265,7 @@ export function createSetupapiFunctions(host){
         }
         writeGuid(address + 4, face.classGuid);
         writeU32(address + 20, face.flags);
-        writeU32(address + 24, key);
+        writeReserved(address + 24, key);
     };
 
     /**
@@ -3826,6 +3859,42 @@ export function createSetupapiFunctions(host){
                     appendLog(log.errors, message);
                 }
                 return 1;
+            },
+        })),
+
+        /**
+         * CONFIGRET CM_Locate_DevNodeA(PDEVINST pdnDevInst, DEVINSTID_A pDeviceID,
+         *     ULONG ulFlags), and the W form
+         *
+         * The device node of an instance id, the tree's root for none or an
+         * empty one; CR_NO_SUCH_DEVNODE, and 0 written, for an id no device
+         * has. The flags are CM_LOCATE_DEVNODE_BITS.
+         */
+        ...bothWidths('CM_Locate_DevNode', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [out, id, flags])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                writeU32(out, 0);
+                if (((flags >>> 0) & ~CM_LOCATE_DEVNODE_BITS) !== 0)
+                {
+                    return CR_INVALID_FLAG;
+                }
+                const name = (id >>> 0) === 0 ? '' : textOf(id, wide) ?? '';
+                if (name === '' || name.toUpperCase() === ROOT_ID)
+                {
+                    writeU32(out, ROOT_DEVNODE);
+                    return CR_SUCCESS;
+                }
+                if (!devices?.exists(name))
+                {
+                    return CR_NO_SUCH_DEVNODE;
+                }
+                writeU32(out, devices.devnodeOf(name));
+                return CR_SUCCESS;
             },
         })),
 
