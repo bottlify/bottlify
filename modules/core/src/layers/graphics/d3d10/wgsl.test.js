@@ -410,7 +410,7 @@ test('the declarations become bindings in the stage group', ()=>{
     const linked = linkProgram(vs, translated);
     assert.deepEqual(linked.groups[1], [
         { binding: BINDING.CONSTANT_BUFFER + 2, visibility: STAGE.FRAGMENT,
-            buffer: { type: 'uniform' } },
+            buffer: { type: 'uniform', minBindingSize: 64 } },
         { binding: BINDING.TEXTURE + 1, visibility: STAGE.FRAGMENT,
             texture: { sampleType: 'float', viewDimension: '2d' } },
         { binding: BINDING.SAMPLER + 3, visibility: STAGE.FRAGMENT,

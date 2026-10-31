@@ -35,6 +35,9 @@ import {
     D3D10_RESOURCE_DIMENSION, D3D10_STENCIL_OP, D3D10_TEXTURE_ADDRESS, D3D10_USAGE,
     D3D10_APPEND_ALIGNED_ELEMENT, DXGI_FORMAT, FORMAT_INFO, formatPitch,
 } from './constants.js';
+
+/** The most bytes a constant buffer has: 4096 registers of sixteen. */
+const MOST_CONSTANT_BYTES = 65536;
 import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
     INDEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, copyCompatible,
@@ -654,6 +657,17 @@ export function createRenderer(services){
         return { start: spans[0], end: spans[spans.length - 1] };
     };
 
+    /**
+     * What a buffer's GPU copy may be used as: everything a binding may make it.
+     *
+     * @param {any} desc
+     */
+    const bufferUsageOf = desc=>{
+        const usage = /** @type {any} */ (BufferUsage);
+        return usage.VERTEX | usage.INDEX | usage.UNIFORM | usage.COPY_DST | usage.COPY_SRC
+            | ((desc.BindFlags & D3D10_BIND.SHADER_RESOURCE) !== 0 ? usage.STORAGE : 0);
+    };
+
     /** @param {any} resource */
     const backingOf = resource=>{
         let backing = backings.get(resource);
@@ -684,11 +698,7 @@ export function createRenderer(services){
                 backing.gpu = backend.createDynamicBuffer({
                     label: `d3d10:buffer#${desc.ByteWidth}`,
                     size: desc.ByteWidth,
-                    usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.UNIFORM
-                        | BufferUsage.COPY_DST | BufferUsage.COPY_SRC
-                        | ((desc.BindFlags & D3D10_BIND.SHADER_RESOURCE) !== 0
-                            ? BufferUsage.STORAGE
-                            : 0),
+                    usage: bufferUsageOf(desc),
                 });
             }
         }
@@ -1090,9 +1100,11 @@ export function createRenderer(services){
         {
             return placeholders;
         }
+        // As many constants as a buffer can hold, so that any declaration
+        // reads zeros where nothing is bound.
         const buffer = backend.createDynamicBuffer({
             label: 'd3d10:unbound-constants',
-            size: 16,
+            size: MOST_CONSTANT_BYTES,
             usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
         });
         // An unbound buffer view: its zeroed uniform above says no elements.
@@ -1735,11 +1747,17 @@ export function createRenderer(services){
             {
                 const buffer = stage.constantBuffers[entry.binding] ?? null;
                 const backing = buffer ? backingOf(buffer) : null;
+                const declared = entry.buffer.minBindingSize ?? 16;
+                if (backing?.gpu && backing.gpu.size < declared)
+                {
+                    roomFor(buffer, backing, declared);
+                }
                 return {
                     binding: entry.binding,
                     resource: backing && backing.gpu
-                        ? { buffer: backing.gpu.gpu, offset: 0, size: buffer.desc.ByteWidth }
-                        : { buffer: fallback.buffer.gpu, offset: 0, size: 16 },
+                        ? { buffer: backing.gpu.gpu, offset: 0,
+                            size: Math.max(buffer.desc.ByteWidth, declared) }
+                        : { buffer: fallback.buffer.gpu, offset: 0, size: declared },
                 };
             }
             if (entry.texture)
@@ -1790,6 +1808,24 @@ export function createRenderer(services){
                     : comparison ? fallback.comparison : fallback.sampler,
             };
         });
+    };
+
+    /**
+     * A constant buffer bound where a shader declares more constants than it
+     * holds: Direct3D reads zeros past its end, and WebGPU binds no fewer
+     * bytes than the declaration reads, refusing the whole frame otherwise.
+     * Its GPU copy grows to the declaration's size, the bytes past the
+     * buffer's zeros, once; later draws bind it as it is.
+     *
+     * @param {any} buffer @param {any} backing @param {number} declared
+     */
+    const roomFor = (buffer, backing, declared)=>{
+        backing.gpu = backend.createDynamicBuffer({
+            label: `d3d10:buffer#${buffer.desc.ByteWidth}+`,
+            size: declared,
+            usage: bufferUsageOf(buffer.desc),
+        });
+        upload(buffer, 0);
     };
 
     /**

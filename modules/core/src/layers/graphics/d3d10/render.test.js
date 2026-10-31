@@ -536,7 +536,7 @@ test('a dynamic constant buffer is mapped, written, and bound at the draw', asyn
     const fragmentLayout = layouts.find((/** @type {any} */ call)=>
         call.descriptor.label === 'd3d10:ps');
     assert.deepEqual(fragmentLayout.descriptor.entries,
-        [{ binding: 0, visibility: 2, buffer: { type: 'uniform' } }]);
+        [{ binding: 0, visibility: 2, buffer: { type: 'uniform', minBindingSize: 16 } }]);
     const groups = h.gpu.of('createBindGroup');
     const fragmentGroup = groups.find((/** @type {any} */ call)=>
         call.descriptor.layout === fragmentLayout.createBindGroupLayout);
@@ -547,6 +547,47 @@ test('a dynamic constant buffer is mapped, written, and bound at the draw', asyn
     assert.deepEqual([...queuedBytes(h, entry.resource.buffer)], [...floatBytes([1, 0.5, 0, 1])],
         'the bytes written through the map are the ones the draw reads');
     assert.deepEqual(h.gpu.of('setBindGroup').map((/** @type {any} */ call)=>call.index), [0, 1]);
+});
+
+test('a constant buffer smaller than the shader declares is bound whole, padded with zeros to'
+    + ' the declaration: WebGPU refuses the frame over a smaller binding', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    // Two registers declared, the second read; one register's buffer bound.
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclConstantBuffer(0, 2), dclOutput(o(0)), mov(o(0), cb(0, 1)), ret()],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    /** @type {{ resource?: any }} */
+    const constants = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.CONSTANT_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 },
+    [{ pSysMem: floatBytes([1, 0.5, 0, 1]), SysMemPitch: 0, SysMemSlicePitch: 0 }], constants),
+    S_OK);
+    device.PSSetConstantBuffers(0, [constants.resource]);
+    device.Draw(3, 0);
+    device.PSSetConstantBuffers(0, []);
+    device.PSSetConstantBuffers(0, [null]);
+    device.Draw(3, 0);
+    await h.present();
+    const layout = h.gpu.of('createBindGroupLayout').find((/** @type {any} */ call)=>
+        call.descriptor.label === 'd3d10:ps');
+    const entries = h.gpu.of('createBindGroup').filter((/** @type {any} */ call)=>
+        call.descriptor.layout === layout.createBindGroupLayout)
+        .map((/** @type {any} */ call)=>call.descriptor.entries[0]);
+    assert.deepEqual(entries.map((/** @type {any} */ entry)=>entry.resource.size), [32, 32],
+        'the buffer, and nothing bound, are both read as the two registers declared');
+    // A GPU buffer is made zeroed: past the buffer's own bytes nothing is written.
+    assert.deepEqual([...queuedBytes(h, entries[0].resource.buffer)].slice(0, 16),
+        [...floatBytes([1, 0.5, 0, 1])], 'its own bytes');
+    const made = h.gpu.of('createBuffer').find((/** @type {any} */ call)=>
+        call.createBuffer === entries[0].resource.buffer);
+    assert.ok(made.descriptor.size >= 32, 'room for the two registers');
 });
 
 test('a discard map between two draws renames the buffer, so each draw keeps its bytes',

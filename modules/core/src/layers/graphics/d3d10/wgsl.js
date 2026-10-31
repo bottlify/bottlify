@@ -1406,7 +1406,7 @@ function textureType(texture){
  * @typedef {Object} BindGroupLayoutEntry
  * @property {number} binding
  * @property {number} visibility
- * @property {{ type: string }} [buffer]
+ * @property {{ type: string, minBindingSize?: number }} [buffer]
  * @property {{ sampleType: string, viewDimension: string, multisampled?: boolean }} [texture]
  * @property {{ type: string }} [sampler]
  */
@@ -1432,7 +1432,10 @@ function declarations(shader, group, visibility){
         const binding = BINDING.CONSTANT_BUFFER + buffer.slot;
         text.push(`@group(${group}) @binding(${binding}) var<uniform> cb${buffer.slot}: `
             + `array<${REG}, ${Math.max(1, buffer.size)}>;`);
-        entries.push({ binding, visibility, buffer: { type: 'uniform' } });
+        // The bytes the declaration reads: what a binding must have at least,
+        // which the renderer holds a smaller buffer to (`render.js`).
+        entries.push({ binding, visibility,
+            buffer: { type: 'uniform', minBindingSize: Math.max(1, buffer.size) * 16 } });
     }
     for (const texture of shader.textures)
     {

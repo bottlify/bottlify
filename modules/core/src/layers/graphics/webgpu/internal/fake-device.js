@@ -477,6 +477,24 @@ export function createFakeDevice(options = {}){
         createPipelineLayout: recorder('createPipelineLayout'),
         /** @param {any} descriptor */
         createBindGroup: descriptor=>{
+            // WebGPU's rule a renderer has to keep: a buffer binding is no
+            // smaller than its layout says the shader reads. A real device
+            // refuses the frame the group is used in; this one refuses the
+            // call, so a test cannot pass over it.
+            for (const entry of descriptor.entries ?? [])
+            {
+                const declared = descriptor.layout?.descriptor?.entries?.find(
+                    (/** @type {any} */ one)=>one.binding === entry.binding)?.buffer
+                    ?.minBindingSize ?? 0;
+                const buffer = entry.resource?.buffer;
+                const size = entry.resource?.size
+                    ?? (buffer ? (buffer.descriptor?.size ?? 0) - (entry.resource.offset ?? 0) : 0);
+                if (buffer && size < declared)
+                {
+                    throw new Error(`a buffer bound with size ${size} at binding ${entry.binding}`
+                        + ` is too small: the layout reads ${declared}`);
+                }
+            }
             const group = object('createBindGroup', {
                 descriptor, entries: descriptor.entries,
             });
