@@ -1164,6 +1164,16 @@ system folder is never in its way, and a program that loads the name still gets 
 library (the loader's `ours` rule). A setup that only opens one to look leaves an empty file there,
 which is no library the loader takes. *2026-10-15.*
 
+**A41 revisited again: a library standing in its folder reads as its image, and stands where it
+is installed.** A DRM wrapper around a 64-bit Steam game (SteamStub) loads the Steam client from
+the folder the registry names, asks GetModuleFileName where it is and opens that file to read it;
+the module said `system32\steamclient64.dll` and the open was refused, and the game stopped at
+"Application load error". A library this build implements now stands in the folder it is
+installed in -- the system folder, or Steam's for the Steam client while one runs -- and
+GetModuleFileName answers that folder; opened to be read, the file holds the library's image as
+it lies in the process's memory, its size what GetFileSize answers. Opened to be written it is
+still the setup's file, as above. *2026-10-31.*
+
 **DirectX's setup is the engine's: a title's `dsetup.dll` and `DXSETUP.exe` answer that DirectX is
 in place.** DirectX 9.0c is part of XP, and on XP SP3 its redistributable finds every file of it in
 the system folder at a newer build and installs only the D3DX helpers. Here the system folder holds

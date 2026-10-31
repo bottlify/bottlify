@@ -710,7 +710,25 @@ export function createWin32Module(){
             });
             // Absent unless a bundle is mounted, in which case a read of a block
             // that is not here yet becomes a wait rather than a fault.
-            const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
+            /**
+             * The folder a library of this build is installed in when it is not
+             * the system folder: the Steam client's, in Steam's, while one runs.
+             *
+             * @param {string} name
+             */
+            const libraryHome = name=>(config?.steam
+                && name.toLowerCase() === steamClientDll(pointerSize).toLowerCase()
+                ? STEAM_PATH : null);
+            // The libraries this build stands in for, by file name.
+            const systemLibraryNames = ()=>(/** @type {string[]} */ (
+                modules.systemLibraries?.() ?? Object.keys(libraries)))
+                .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name));
+            // Every file call's volume, with the engine's libraries standing in
+            // their folders as files of their images (A41).
+            const volume = withSystemLibraries(
+                createVolume(filesystem, config?.fetchBlocks ?? null),
+                ()=>systemLibraryNames(),
+                { homeOf: libraryHome, imageOf: name=>modules.systemImage?.(name) ?? null });
             // A child whose parent handed it files for its output and error
             // writes there, at the position it shares with the parent's handle,
             // rather than to the console.
@@ -2051,9 +2069,6 @@ export function createWin32Module(){
             // file calls and setupapi's alike. Every layer's, not only this
             // one's: DDRAW.dll stands there as much as KERNEL32.dll does, and
             // VERSION already answers for both.
-            const systemLibraryNames = ()=>(/** @type {string[]} */ (
-                modules.systemLibraries?.() ?? Object.keys(libraries)))
-                .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name));
             libraries = {
                 'KERNEL32.dll': {
                     ...createConsoleFunctions({
@@ -2581,6 +2596,7 @@ export function createWin32Module(){
                         byBase: base=>modules.byBase(base),
                         setLastError: setError,
                         imagePath: ()=>modules.imagePath(),
+                        libraryHome,
                         list: ()=>modules.list?.() ?? [],
                         // Reading a library off the volume belongs to whoever
                         // assembled the process, so it is passed straight through.
@@ -3298,7 +3314,7 @@ export function createWin32Module(){
                     readWideString,
                     setLastError: setError,
                     setLastErrorFor: setErrorOn,
-                    files: withSystemLibraries(volume, systemLibraryNames),
+                    files: volume,
                     /** @param {string} path */
                     fullPath: path=>filesystem.resolve(path).path,
                     /** @param {number} bytes */
