@@ -152,6 +152,8 @@ const CO_INSTALLERS_KEY = 'SYSTEM\\CurrentControlSet\\Control\\CoDeviceInstaller
 const CR_SUCCESS = 0x00;
 const CR_INVALID_POINTER = 0x03;
 const CR_INVALID_FLAG = 0x04;
+/** CM_LOCATE_DEVNODE_BITS: NORMAL, PHANTOM, CANCELREMOVE, NOVALIDATION. */
+const CM_LOCATE_DEVNODE_BITS = 0x7;
 const CR_INVALID_DEVNODE = 0x05;
 const CR_NO_SUCH_DEVNODE = 0x0d;
 const CR_BUFFER_SMALL = 0x1a;
@@ -3857,6 +3859,42 @@ export function createSetupapiFunctions(host){
                     appendLog(log.errors, message);
                 }
                 return 1;
+            },
+        })),
+
+        /**
+         * CONFIGRET CM_Locate_DevNodeA(PDEVINST pdnDevInst, DEVINSTID_A pDeviceID,
+         *     ULONG ulFlags), and the W form
+         *
+         * The device node of an instance id, the tree's root for none or an
+         * empty one; CR_NO_SUCH_DEVNODE, and 0 written, for an id no device
+         * has. The flags are CM_LOCATE_DEVNODE_BITS.
+         */
+        ...bothWidths('CM_Locate_DevNode', wide=>({
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [out, id, flags])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return CR_INVALID_POINTER;
+                }
+                writeU32(out, 0);
+                if (((flags >>> 0) & ~CM_LOCATE_DEVNODE_BITS) !== 0)
+                {
+                    return CR_INVALID_FLAG;
+                }
+                const name = (id >>> 0) === 0 ? '' : textOf(id, wide) ?? '';
+                if (name === '' || name.toUpperCase() === ROOT_ID)
+                {
+                    writeU32(out, ROOT_DEVNODE);
+                    return CR_SUCCESS;
+                }
+                if (!devices?.exists(name))
+                {
+                    return CR_NO_SUCH_DEVNODE;
+                }
+                writeU32(out, devices.devnodeOf(name));
+                return CR_SUCCESS;
             },
         })),
 
