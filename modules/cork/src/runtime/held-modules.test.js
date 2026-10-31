@@ -5,10 +5,8 @@
  */
 
 /**
- * The modules translated code is held in, by heat. Without tail calls into
- * another instance (`crossTailCalls`) the hottest regions of two full modules
- * crossing into each other are gathered into one (`gatherAfter`), and a relink
- * puts the regions run lately apart from the rest (`relinkCold`). Past a
+ * The modules translated code is held in, by heat. A relink puts the regions
+ * run lately apart from the rest (`relinkCold`). Past a
  * ceiling (`cacheBytes`) the modules gone longest without running are let go
  * and brought back from the store when asked for. Each runs as the program
  * runs without it: the same registers and memory.
@@ -125,81 +123,6 @@ async function runToHalt(m, at, { budget = 1_000_000, held } = {}){
     assert.fail('the program halted');
 }
 
-test('two full modules crossing into each other have their hottest regions gathered into one,'
-    + ' and the crossings stop', async()=>{
-    if (!probeFeatures().tailCalls)
-    {
-        return;
-    }
-    // A loop at LOOP calling F, each in a module of four with three stubs:
-    // neither may take the other whole (`relinkRegions` 4), nor the region it
-    // crosses into alone (both full), so no merge.
-    const LOOP = 0x2000;
-    const F = 0x3000;
-    const DATA = 0x9000;
-    const ROUND = 300_000;
-    /** @param {Record<string, unknown>} config */
-    const program = async config=>{
-        const m = machine({ leafCalls: false, dispatch: true, worker: true, callReturn: false,
-            crossTailCalls: false, batchRegions: 4, maxBatchRegions: 4, relinkRegions: 4,
-            relinkAfter: 0, ...config });
-        try
-        {
-            m.write(LOOP, [0xb9, ...le32(ROUND), ...call(LOOP + 5, F), 0x49, 0x75, 0xf8, 0xf4]);
-            m.write(F, [0x42, 0x01, 0x15, ...le32(DATA), 0xc3]);
-            const stubs = (/** @type {number} */ from)=>[0, 1, 2].map(i=>from + i * 0x10);
-            for (const stub of [...stubs(LOOP + 0x100), ...stubs(F + 0x100)])
-            {
-                m.write(stub, [0xc3]);
-            }
-            await untilWorkerLoaded(m);
-            for (const batch of [[F, ...stubs(F + 0x100)], [LOOP, ...stubs(LOOP + 0x100)]])
-            {
-                batch.forEach(at=>m.runtime.noteHot(at, 0, 64));
-                await until(m, ()=>batch.every(at=>m.runtime.entryOf(at) >= 0));
-            }
-            assert.equal(diagnostics(m).relinked ?? 0, 0);
-            /** @type {number[]} */
-            const crossings = [];
-            for (let round = 0; round < 3; round++)
-            {
-                const before = diagnostics(m).crossingsAll;
-                m.setReg(4, 0x80000);
-                await runToHalt(m, LOOP);
-                crossings.push(diagnostics(m).crossingsAll - before);
-                // The translator reads the crossings and, where it gathers,
-                // the worker builds the module.
-                for (let i = 0; i < 20; i++)
-                {
-                    await m.runtime.translatePending();
-                    await turn();
-                }
-                if (round === 0 && config.gatherAfter !== 0)
-                {
-                    await until(m, ()=>(diagnostics(m).relinked ?? 0) >= 2);
-                }
-            }
-            const d = diagnostics(m);
-            return { crossings, gathers: d.gathers, gathered: d.gathered, merges: d.merges,
-                state: [m.reg(0), m.reg(1), m.reg(2), m.reg(3), m.reg(4), ...m.read(DATA, 16)] };
-        }
-        finally
-        {
-            await m.runtime.flush();
-        }
-    };
-    const gathered = await program({ gatherAfter: 1000 });
-    const kept = await program({ gatherAfter: 0 });
-    assert.deepEqual(gathered.state, kept.state, 'the same registers and memory');
-    assert.equal(gathered.state[2], 3 * ROUND);
-    assert.equal(kept.merges, 0, 'no merge joins two full modules');
-    assert.deepEqual(kept.crossings, [2 * ROUND, 2 * ROUND, 2 * ROUND], 'each call and return');
-    assert.equal(gathered.crossings[0], 2 * ROUND);
-    assert.equal(gathered.gathers, 1);
-    assert.equal(gathered.gathered, 2, 'the loop and its callee, not the stubs');
-    assert.deepEqual(gathered.crossings.slice(1), [0, 0], 'the two in one module');
-});
-
 test('a relink puts the regions entered lately in one module and the rest in small ones',
     async()=>{
         if (!probeFeatures().tailCalls)
@@ -213,7 +136,7 @@ test('a relink puts the regions entered lately in one module and the rest in sma
         const F = 0x3000;
         const m = machine({ leafCalls: false, dispatch: true, worker: true, callReturn: false,
             crossTailCalls: false, batchRegions: 2, maxBatchRegions: 2, relinkRegions: 8,
-            relinkCold: 2, relinkAfter: 4, gatherAfter: 0, mergeAfter: 0 });
+            relinkCold: 2, relinkAfter: 4, mergeAfter: 0 });
         try
         {
             m.write(LOOP, [0xb9, ...le32(1000), ...call(LOOP + 5, F), 0x49, 0x75, 0xf8, 0xf4]);

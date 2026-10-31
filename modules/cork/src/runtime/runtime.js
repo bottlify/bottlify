@@ -232,13 +232,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // twice as many each time again.
         cacheBytes: 256 << 20,
         evictHold: 1 << 28,
-        // Without tail calls into another module (`crossTailCalls`), the
-        // crossings out of placed modules since the last gathering past which
-        // the hottest regions, wherever they are, are built into one module
-        // (0: never): where two full modules keep crossing, a merge cannot.
-        // At most this many go into that module.
-        gatherAfter: 1 << 18,
-        gatherRegions: 2048,
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
@@ -370,12 +363,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // shipped build runs, the clock is read only where the translator needs
         // it (a batch that never comes back is freed after a time).
         timings: false,
-        // While the translation worker loads: the largest batch emitted on the
-        // engine thread, and the share of the time since the worker was made
-        // that emitting there may take -- where the work there is bounded
-        // (`holdMs`), none: a batch waits for the worker.
-        loadingBatch: 16,
-        loadingShare: 0.25,
         // The engine thread's time the translator's work may take at a
         // stretch, and the share of its time over a while, where a worker is
         // wanted: a batch goes on forming in the calls after, the store's
@@ -1088,10 +1075,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
         relinks: 0, relinked: 0, merges: 0, merged: 0, reforms: 0, copied: 0,
-        // The hottest regions built into one module (`gatherAfter`), and how
-        // many; at the last weighing, the regions with any heat and the share
-        // of it those built took.
-        gathers: 0, gathered: 0, gatherWarm: 0, gatherShare: 0,
         // Modules let go past `cacheBytes`, their regions, and the regions of
         // them published again; the crossings counted by modules no longer placed.
         evictions: 0, evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
@@ -1801,9 +1784,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const translators = [];
     /** Whether the translators are a pool's to lend, none opened here, until the first is. */
     let awaitingLend = workerUrl !== null && settings.translators === 0;
-    /** When the first translator was made, and the time spent emitting here since. */
-    let loadingSince = performance.now();
-    let inlineWhileLoading = 0;
     let workerClosed = false;
     /** One that can take a batch now. */
     const freeTranslator = ()=>translators.find(one=>one.ready && !one.leaving
@@ -3249,7 +3229,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const relinkStep = store=>{
         if (relinkQueue === null)
         {
-            if (mergeStep(store) || gatherStep(store))
+            if (mergeStep(store))
             {
                 return true;
             }
@@ -3258,7 +3238,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 return false;
             }
             // Only what still lives in a batch's own small module: a region
-            // relinked once stays in its big one, unless a gathering takes it.
+            // relinked once stays in its big one.
             // The hottest first, so they share the big modules, and those no
             // entry or crossing reached lately in small ones of their own.
             foldHeat();
@@ -3293,7 +3273,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     /**
      * Each running region's heat: what it had, halved, and the host's entries
      * into it and the crossings read into it since (`readModules`). Read only
-     * when a relink or a gathering is weighed: the entries count themselves.
+     * when a relink is weighed: the entries count themselves.
      * One entered once and not since is under one at the next reading: cold.
      */
     const foldHeat = ()=>{
@@ -3332,8 +3312,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     /** Readings of the modules' crossings, and the one the merges last weighed. */
     let modulesRead = 0;
     let mergeRead = 0;
-    /** Crossings read since the last gathering. */
-    let crossedSince = 0;
     /**
      * Reads each placed module's count of transfers out of it, every so many
      * translated instructions, not every call: a loading phase has hundreds
@@ -3357,7 +3335,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             {
                 continue;
             }
-            crossedSince += crossed;
             const from = heldModules.get(placed.instance);
             if (from !== undefined)
             {
@@ -3381,63 +3358,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
     };
 
-    // Without tail calls into another instance every crossing leaves for the
-    // host's loop, and a merge cannot help two full modules: past
-    // `gatherAfter` crossings the hottest regions, wherever they are, are
-    // built into one module -- those that took all but a hundredth of the
-    // heat, `gatherRegions` at most. Paced as merges are, the wait doubling
-    // while the hottest stay the same ones: a working set larger than the
-    // module crosses on, and building it again buys nothing.
-    const GATHER_AFTER = settings.crossTailCalls === false ? settings.gatherAfter : 0;
-    let gatheredAt = -MERGE_EVERY;
-    let gatherWait = MERGE_EVERY;
-    /** @type {Set<RegionRecord>} */
-    let lastGathered = new Set();
-    /**
-     * @param {any} store
-     * @returns {boolean} whether a gathering was taken this call
-     */
-    const gatherStep = store=>{
-        if (!(GATHER_AFTER > 0) || !translatorReady() || crossedSince < GATHER_AFTER
-            || corkRetired - gatheredAt < gatherWait)
-        {
-            return false;
-        }
-        crossedSince = 0;
-        gatheredAt = corkRetired;
-        foldHeat();
-        const warm = [...regions].filter(record=>(record.heat ?? 0) >= 1)
-            .sort((a, b)=>(b.heat ?? 0) - (a.heat ?? 0));
-        const total = warm.reduce((sum, record)=>sum + (record.heat ?? 0), 0);
-        /** @type {RegionRecord[]} */
-        const hot = [];
-        let covered = 0;
-        for (const record of warm)
-        {
-            if (hot.length >= settings.gatherRegions || covered >= total * 0.99)
-            {
-                break;
-            }
-            hot.push(record);
-            covered += record.heat ?? 0;
-        }
-        counts.gatherWarm = warm.length;
-        counts.gatherShare = total > 0 ? covered / total : 0;
-        const modules = new Set(hot.map(record=>record.module));
-        // The hottest in one module already: what crosses is between them and
-        // the rest, which a gathering of these would not change.
-        if (hot.length < 2 || (modules.size === 1 && !modules.has(undefined)))
-        {
-            return false;
-        }
-        const again = hot.filter(record=>lastGathered.has(record)).length * 2 >= hot.length;
-        gatherWait = again ? Math.min(gatherWait * 2, MERGE_EVERY * 1024)
-            : Math.max(MERGE_EVERY, hot.length * MERGE_PER_REGION);
-        lastGathered = new Set(hot);
-        counts.gathers++;
-        counts.gathered += hot.length;
-        return relinkChunk(hot, store);
-    };
     /**
      * What a merge of `from` into `into` would build: both whole when they fit
      * in `relinkRegions`, else the region `from` crossed into last, alone, into
@@ -4020,10 +3940,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         /** @type {Translator} */
         const translator = { adapter, ready: false, pending: null, leaving: false };
-        if (translators.length === 0 && !awaitingLend)
-        {
-            loadingSince = performance.now();
-        }
         awaitingLend = false;
         translators.push(translator);
         adapter.onMessage(data=>{
@@ -4805,16 +4721,14 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // batch, a quarter of what waits up to `maxBatchRegions`, so the
         // round trip through the worker and the store is paid per hundreds
         // of regions rather than per thirty-two.
-        // While the worker loads, a batch emitted here is kept small. Where the
-        // work here is bounded (`holding`), nothing is emitted here while a
-        // translator loads -- the batch waits for it, a region of a shader
-        // compiler's emitted alone held the thread for twenty-five
+        // Where the work here is bounded (`holding`), nothing is emitted here
+        // while a translator loads -- the batch waits for it, a region of a
+        // shader compiler's emitted alone held the thread for twenty-five
         // milliseconds -- and with none to come a batch emitted here is one
         // region, emitted in the call that finishes it.
         const inline = !translatorReady();
         const loading = translatorLoading();
-        const ceiling = inline && holding() && !loading ? 1
-            : inline && loading && !holding() ? settings.loadingBatch : settings.maxBatchRegions;
+        const ceiling = inline && holding() && !loading ? 1 : settings.maxBatchRegions;
         const wanted = Math.min(ceiling,
             Math.max(settings.batchRegions, queue.size >> 2));
         forming = { batch: hottest(wanted), next: 0, formed: [], covered: new Set(), ceiling,
@@ -5120,7 +5034,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         run(entry, budget){
             const one = entries.at(entry);
             const { fn, label } = one;
-            // The heat a relink and a gathering weigh by, and the mark of the
+            // The heat a relink weighs by, and the mark of the
             // module the eviction weighs by.
             one.heat++;
             if (one.owner !== null)
@@ -5418,31 +5332,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         /** @type {() => Promise<number>} */
         async translatePending(){
             liftVolatile();
-            // Bounded (`holding`), nothing is emitted here while a translator
-            // loads: the share below is for emitting.
-            if (!translatorLoading() || translatorReady() || holding())
-            {
-                return translateNow();
-            }
-            // The worker is loading: what is asked for now is emitted here, in
-            // small batches and for a quarter of the time the load has taken at
-            // most, and the rest waits for it. A loading phase's thousands of
-            // starts, each run a few times, cost more emitted on this thread
-            // than interpreted until the worker takes them.
-            if (inlineWhileLoading > settings.loadingShare * (performance.now() - loadingSince))
-            {
-                owed++;
-                return 0;
-            }
-            const startedAt = performance.now();
-            try
-            {
-                return translateNow();
-            }
-            finally
-            {
-                inlineWhileLoading += performance.now() - startedAt;
-            }
+            return translateNow();
         },
         invalidatePage,
         /**
@@ -5612,10 +5502,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // And all of them since the start, those of modules gone included.
                 crossingsAll: counts.crossingsGone
                     + [...placedLive].reduce((sum, placed)=>sum + placed.crossings.value, 0),
-                gathers: counts.gathers,
-                gathered: counts.gathered,
-                gatherWarm: counts.gatherWarm,
-                gatherShare: counts.gatherShare,
                 // The wasm bytes of the modules some running region's function is
                 // in, and how many: what the translated code holds now, against
                 // `moduleBytes`, all made in the run. Past `cacheBytes` the modules
