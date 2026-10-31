@@ -7,7 +7,13 @@
 /**
  * Installs a Steam app the account owns into a directory, as the Steam
  * client lays it out: the depots for Windows and one language, each file
- * put together from its chunks (@bottlify/core/steam's depot.js).
+ * put together from its chunks (@bottlify/core/steam's depot.js) -- and the
+ * redistributables the app declares, as Steam installs them on a first start
+ * (tools/redist.mjs): the depots of other apps it names (`depotfromapp`,
+ * Steamworks Common Redistributables' Visual C++ and DirectX, which an
+ * anonymous logon downloads), put in the app's directory, and its install
+ * scripts' registry values and the packages their programs carry, put where
+ * the bottle mounts them.
  *
  *   NODE_USE_ENV_PROXY=1 node tools/steam-install.mjs --session <file> --app <id> --out <dir>
  *       [--branch public] [--language english] [--depots 401,402] [--jobs 16]
@@ -34,6 +40,9 @@ import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, open, symlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { connectCm, logOn, logOnAnonymously, productInfo } from '../modules/core/src/steam/index.js';
+import {
+    depotOwners, imageMachine, installRedistributables, sharedDepots, wantedDepot,
+} from './redist.mjs';
 import {
     FILE_FLAG_DIRECTORY, contentServers, depotKey, downloadChunk, manifest, manifestRequestCode,
     readDepotAccess,
@@ -98,44 +107,48 @@ if (!connection)
 {
     throw new Error('no Steam connection manager answered');
 }
-/** @type {Array<{ id: number, gid: bigint, key?: Uint8Array, code?: bigint }>} */
+/**
+ * The depots to download; `app` is the app that owns a shared one, whose id
+ * its key and manifest code are asked under.
+ *
+ * @type {Array<{ id: number, gid: bigint, app?: number, key?: Uint8Array, code?: bigint }>}
+ */
 const chosen = [];
 if (given)
 {
-    // The content servers are all this logon is for.
+    // The content servers and what Steam tells anyone of the app are all this
+    // logon is for.
     await logOnAnonymously(connection);
     chosen.push(...given.map(({ depot, gid, key, code })=>({ id: depot, gid, key, code })));
-    console.log(`app ${app}: depots ${chosen.map(d=>d.id).join(', ')}`);
 }
 else
 {
     const session = JSON.parse(readFileSync(sessionPath === '-' ? 0 : String(sessionPath), 'utf8'));
     await logOn(connection, session);
     console.log(`logged on as ${session.accountName}`);
-
-    const { apps } = await productInfo(connection, { apps: [app] });
-    const info = /** @type {Record<string, any>} */ (apps.get(app));
-    const depots = /** @type {Record<string, any>} */ (info?.depots ?? {});
-    for (const [id, depot] of Object.entries(depots))
+}
+const info = /** @type {Record<string, any>} */ (
+    (await productInfo(connection, { apps: [app] })).apps.get(app));
+if (!given)
+{
+    for (const [id, depot] of Object.entries(info?.depots ?? {}))
     {
         const gid = depot?.manifests?.[branch]?.gid;
-        if (!/^\d+$/.test(id) || !gid)
-        {
-            continue;
-        }
-        const os = String(depot.config?.oslist ?? '');
-        const lang = String(depot.config?.language ?? '');
-        const wanted = only ? only.includes(Number(id))
-            : (!os || os.split(',').includes('windows')) && (!lang || lang === language)
-                && !depot.dlcappid;
-        if (wanted)
+        if (/^\d+$/.test(id) && gid && (only ? only.includes(Number(id)) : wantedDepot(depot, language)))
         {
             chosen.push({ id: Number(id), gid: BigInt(gid) });
         }
     }
-    console.log(`${info?.common?.name} (${app}), branch ${branch}:`
-        + ` depots ${chosen.map(d=>d.id).join(', ')}`);
 }
+// The redistributables' depots, another app's: an anonymous logon opens them
+// as well as the account's, so a bridged install is handed no key for them.
+const owners = depotOwners(info);
+const shared = owners.length === 0 ? []
+    : sharedDepots(info, (await productInfo(connection, { apps: owners })).apps, language)
+        .filter(depot=>!only || only.includes(depot.id));
+chosen.push(...shared);
+console.log(`${info?.common?.name ?? 'app'} (${app}), branch ${branch}:`
+    + ` depots ${chosen.map(d=>(d.app ? `${d.id} (of ${d.app})` : d.id)).join(', ')}`);
 
 const servers = await contentServers(connection);
 if (!servers.length)
@@ -207,9 +220,10 @@ async function fetchChunk(depot, piece, key, first){
 const planned = [];
 for (const depot of chosen)
 {
-    const key = depot.key ?? await depotKey(connection, app, depot.id);
-    const code = depot.code
-        ?? await manifestRequestCode(connection, app, depot.id, depot.gid, branch);
+    const owner = depot.app ?? app;
+    const key = depot.key ?? await depotKey(connection, owner, depot.id);
+    const code = depot.code ?? await manifestRequestCode(connection, owner, depot.id, depot.gid,
+        depot.app ? 'public' : branch);
     const files = await manifest(servers[0], { depot: depot.id, gid: depot.gid, code, key })
         .catch(e=>{
             if (!depot.code)
@@ -274,6 +288,27 @@ for (const { depot, key, files } of planned)
 }
 
 clearInterval(progress);
+
+// What Steam does on the first start: the app's install script, then each
+// redistributable's, run against the bottle's machine -- its program's width;
+// and the prerequisites the app carries itself (tools/redist.mjs).
+/** @param {string} name  A path in the app, either separator. */
+const inApp = name=>join(out, ...name.split(/[\\/]/));
+const scripts = [
+    ...info?.extended?.installscript ? [String(info.extended.installscript)] : [],
+    ...planned.filter(({ depot })=>depot.app).flatMap(({ files })=>files.files
+        .filter(file=>/(^|\\)installscript\.vdf$/i.test(file.name)).map(file=>file.name)),
+].map(script=>script.replace(/\//g, '\\')).filter(script=>existsSync(inApp(script)));
+const launch = Object.values(info?.config?.launch ?? {}).find(one=>one?.executable
+    && (!one?.config?.oslist || String(one.config.oslist).split(',').includes('windows')));
+const program = launch ? inApp(String(launch.executable)) : '';
+const machine = program && existsSync(program)
+    ? imageMachine(readFileSync(program).subarray(0, 4096)) : 'x86';
+for (const line of await installRedistributables(out, scripts, machine))
+{
+    console.log(line);
+}
+
 const disk = [...onDisk.values()].reduce((sum, size)=>sum + size, 0);
 console.log(`installed into ${out}: ${(disk / 2 ** 20).toFixed(0)} MiB on disk`
     + ` (${(total / 2 ** 20).toFixed(0)} MiB in the depots),`

@@ -649,6 +649,25 @@ browser on its next page. On a platform's first request, by whatever channel, it
 switched off and we cooperate fully -- no workaround, no appeal first; the server-side path a
 launcher already has stays its fallback. *2026-10-30.*
 
+**A67. A Steam bottle is installed with its redistributables already applied, the app's own
+prerequisite installers among them.** Steam downloads the depots an app names from other apps
+(Steamworks Common Redistributables' Visual C++ and DirectX) and, on the first start, runs its
+install scripts' programs silently. The download (`tools/steam-install.mjs`) takes those depots
+too -- an anonymous logon opens them -- and `tools/redist.mjs` does what the programs would at
+install time instead: it unpacks each one with the engine's cabinet and installer-database
+readers and applies the packages inside by their tables -- the files of each component whose
+condition holds into the bottle's system folders, its registry rows into the bottle's registry
+-- rather than running a Burn bootstrapper and Windows Installer in the guest. A program with
+no package inside (DirectX's setup) is left to the engine, which answers DSETUP and D3DX itself.
+Beyond what Steam declares, every other program the app carries is read the same way, and a
+package whose files all go into the Windows folder is applied too: an engine's prerequisite
+installer (Unreal's `UE4PrereqSetup_x64.exe`), whose newer runtime the program's launcher checks
+for and on Windows offers to install on the person's say-so; without it the bottle asks a
+question the person cannot usefully answer. Packages are applied oldest product version first, so
+the newest runtime's files and detection values are the bottle's. Revisit if a title's own
+package installs into the Windows folder something that must not be there before it asks.
+*2026-10-31.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
