@@ -5274,6 +5274,19 @@ async function buildApp(options){
                  * answers for it: what a setup finds in the system folder.
                  */
                 systemLibraries: ()=>Object.keys(allLibraries),
+                /**
+                 * A synthesised library's image, which its file holds where it
+                 * stands in its folder (`withSystemLibraries`): read out of
+                 * the guest's memory where it lies whole, rather than a copy
+                 * of every library kept for a file few programs read.
+                 *
+                 * @param {string} name
+                 */
+                systemImage: name=>{
+                    const module = byName.get(moduleKeyOf(name));
+                    return module && !module.file
+                        ? memory.readBytes(module.base, module.size) : null;
+                },
             },
             commandLine: options.commandLine,
             // Every child a program asks for, while the stack that asked is

@@ -518,56 +518,119 @@ const int64 = (lowPart, highPart)=>(highPart | 0) * 0x100000000 + (lowPart >>> 0
 
 /** When a library the system folder shows was made: Windows XP SP3's build. */
 const SYSTEM_LIBRARY_TIME = Date.UTC(2008, 3, 14, 12);
-/** The size such a library reports; nothing reads its bytes through the file. */
+/** The size such a library reports when its image is not to hand. */
 const SYSTEM_LIBRARY_SIZE = 0x10000;
 
 /**
- * A volume on which the system folder also holds the libraries this build
- * implements, each by its own name, unless a file of that name is there.
+ * Where the engine's libraries stand as files, and what they hold.
  *
- * Only for the questions a setup asks before it loads one -- is it there, what
- * are its attributes, a search for its exact name (InstallShield's UseDLL looks
- * with FindFirstFile first). A search with a wildcard lists the folder as it
- * is, and the file cannot be read: what it holds is the engine's, not bytes
- * on a volume (decision A41). Opened to be written, it becomes a file on the
- * volume that the program writes -- a setup replacing it, as a DirectX setup
- * replaces what it finds older -- and a program that loads the name still gets
- * the engine's own: what a setup puts there is never in its way.
- *
- * @param {FileSystem} real @param {(() => string[]) | undefined} libraries
- * @returns {FileSystem}
+ * @typedef {Object} LibraryFiles
+ * @property {(name: string) => string | null} [homeOf]
+ *           The folder a library is installed in when it is not the system
+ *           folder -- the Steam client's, in Steam's -- or null.
+ * @property {(name: string) => Uint8Array | null} [imageOf]
+ *           The library's image as the engine made it, which its file holds.
  */
-export function withSystemLibraries(real, libraries){
+
+/**
+ * A volume on which the system folder -- or the folder a library is
+ * installed in (`homeOf`) -- also holds the libraries this build implements,
+ * each by its own name, unless a file of that name is there.
+ *
+ * Is it there, what are its attributes, a search for its exact name
+ * (InstallShield's UseDLL looks with FindFirstFile first), and its bytes: the
+ * image the engine made, read as any file is (A41) -- the Steam API and a DRM
+ * wrapper read the client they loaded. A search with a wildcard lists the
+ * folder as it is. Opened to be written, it becomes a file on the volume that
+ * the program writes -- a setup replacing it, as a DirectX setup replaces what
+ * it finds older -- and a program that loads the name still gets the engine's
+ * own: what a setup puts there is never in its way.
+ *
+ * @template {FileSystem} T
+ * @param {T} real @param {(() => string[]) | undefined} libraries
+ * @param {LibraryFiles} [where]
+ * @returns {T}
+ */
+export function withSystemLibraries(real, libraries, where = {}){
     if (!libraries)
     {
         return real;
     }
-    const folder = `${SYSTEM_DIRECTORY.toLowerCase()}\\`;
+    const system = SYSTEM_DIRECTORY.toLowerCase();
     /** @param {string} path @returns {string | null} the library's own spelling */
     const libraryAt = path=>{
         const lower = path.toLowerCase();
-        if (!lower.startsWith(folder) || lower.indexOf('\\', folder.length) !== -1)
+        const cut = lower.lastIndexOf('\\');
+        const name = lower.slice(cut + 1);
+        const library = libraries().find(each=>each.toLowerCase() === name);
+        if (library === undefined)
         {
             return null;
         }
-        const name = lower.slice(folder.length);
-        return libraries().find(each=>each.toLowerCase() === name) ?? null;
+        const home = where.homeOf?.(library)?.toLowerCase() ?? system;
+        return lower.slice(0, cut) === home ? library : null;
     };
-    const entry = { exists: true, isDirectory: false, size: SYSTEM_LIBRARY_SIZE,
-        modified: SYSTEM_LIBRARY_TIME };
+    /** @param {string} library */
+    const entryOf = library=>({ exists: true, isDirectory: false,
+        size: where.imageOf?.(library)?.length ?? SYSTEM_LIBRARY_SIZE,
+        modified: SYSTEM_LIBRARY_TIME });
+    /** The open stand-ins, each its library's image. @type {WeakMap<object, Uint8Array>} */
+    const opened = new WeakMap();
     return Object.assign(Object.create(real), {
         /** @param {string} path */
-        stat: path=>real.stat(path) ?? (libraryAt(path) ? { ...entry } : null),
+        stat: path=>{
+            const found = real.stat(path);
+            const library = found ? null : libraryAt(path);
+            return found ?? (library ? entryOf(library) : null);
+        },
         /** @param {string} path @param {any} options */
-        open: (path, options)=>real.open(path, options)
-            ?? (options?.write && !real.stat(path) && libraryAt(path)
-                ? real.open(path, { ...options, create: true }) : null),
+        open: (path, options)=>{
+            const node = real.open(path, options);
+            const library = node || real.stat(path) ? null : libraryAt(path);
+            if (node || !library)
+            {
+                return node;
+            }
+            if (options?.write)
+            {
+                return real.open(path, { ...options, create: true });
+            }
+            const image = where.imageOf?.(library) ?? null;
+            if (!image)
+            {
+                return null;
+            }
+            const standIn = {};
+            opened.set(standIn, image);
+            return standIn;
+        },
+        /** @param {any} node @param {number} offset @param {number} length */
+        read: (node, offset, length)=>{
+            const image = opened.get(node);
+            return image ? image.slice(offset, offset + length) : real.read(node, offset, length);
+        },
+        /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
+        write: (node, offset, bytes)=>(opened.has(node) ? 0 : real.write(node, offset, bytes)),
+        /** @param {any} node @param {number} size */
+        truncate: (node, size)=>{
+            if (!opened.has(node))
+            {
+                real.truncate(node, size);
+            }
+        },
+        /** @param {any} node */
+        close: node=>{
+            if (!opened.delete(node))
+            {
+                real.close(node);
+            }
+        },
         /** @param {string} path @param {string} pattern */
         list: (path, pattern)=>{
             const found = real.list(path, pattern);
             const name = (found?.length ?? 0) === 0 && !/[*?]/.test(pattern ?? '')
                 ? libraryAt(`${path.replace(/\\$/, '')}\\${pattern}`) : null;
-            return name ? [{ ...entry, name }] : found;
+            return name ? [{ ...entryOf(name), name }] : found;
         },
     });
 }
