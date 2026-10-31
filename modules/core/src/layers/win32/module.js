@@ -2204,6 +2204,7 @@ export function createWin32Module(){
                         say: text=>trace(text),
                     }),
                     ...createHeapFunctions({
+                        pointerSize,
                         arena, allocator, readMemory, writeMemory, fillMemory, viewAt,
                         guestHeap,
                         // A child's memory, reached where the child runs.
@@ -4479,6 +4480,13 @@ export function createWin32Module(){
                     libraries['ntdll.dll'][name] = /** @type {any} */ (seh64.table)[name];
                 }
             }
+
+            // kernelbase.dll, where Windows keeps what kernel32 forwards to and
+            // what is newer than it (VirtualAlloc2): a program that loads it
+            // by name and asks it for a function -- an allocator looking for
+            // VirtualAlloc2 -- finds kernel32's entries, one implementation
+            // under the two names.
+            libraries['KERNELBASE.dll'] = libraries['KERNEL32.dll'];
 
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));

@@ -5,6 +5,7 @@
  */
 
 import { STATUS } from './status.js';
+import { memoryBasicInformation } from '../kernel32/heap.js';
 
 /**
  * The native virtual-memory calls, over kernel32's.
@@ -22,8 +23,6 @@ const PAGE = 0x1000;
 
 /** VirtualQuery's MEMORY_BASIC_INFORMATION, the one information class kept. */
 const MEMORY_BASIC_INFORMATION = 0;
-const MEMORY_BASIC_INFORMATION_SIZE = 28;
-const REGION_SIZE = 12;
 
 /** The statuses these answer beyond the shared table's. */
 const STATUS_CONFLICTING_ADDRESSES = 0xc0000018;
@@ -55,18 +54,22 @@ const ERROR_INVALID_ADDRESS = 487;
  * @property {(thread: any) => number} [lastErrorOf]  A thread's last error, for
  *           a call into another process answered after its thread stopped
  *           running.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose PVOID and
+ *           SIZE_T out-parameters and MEMORY_BASIC_INFORMATION are wider.
  */
 
 /** The kernel32 entries these are built over. */
-export const MEMORY_ENTRIES = Object.freeze(['VirtualAllocEx', 'VirtualFreeEx',
-    'VirtualProtectEx', 'VirtualQueryEx', 'ReadProcessMemory', 'WriteProcessMemory',
-    'GetLastError']);
+export const MEMORY_ENTRIES = Object.freeze(['VirtualAllocEx', 'VirtualAlloc2',
+    'VirtualFreeEx', 'VirtualProtectEx', 'VirtualQueryEx', 'ReadProcessMemory',
+    'WriteProcessMemory', 'GetLastError']);
 
 /**
  * @param {MemoryHost} host
  */
 export function createMemoryFunctions(host){
     const { kernel32 } = host;
+    const pointer = host.pointerSize === 8 ? 8 : 4;
+    const BASIC = memoryBasicInformation(pointer);
 
     /**
      * What a kernel32 call answered, now or -- made in another process --
@@ -90,11 +93,16 @@ export function createMemoryFunctions(host){
     };
 
     /** @param {number} address */
-    const read32 = address=>new DataView(host.readMemory(address >>> 0, 4).buffer)
+    const read32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
         .getUint32(0, true);
-    /** @param {number} address @param {number} value */
+    /**
+     * A PVOID or SIZE_T out-parameter, as wide as the process's: its high
+     * half zero at 64 bits, every address and size below 4 GiB.
+     *
+     * @param {number} address @param {number} value
+     */
     const write32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
+        const bytes = new Uint8Array(pointer);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address >>> 0, bytes);
     };
@@ -108,15 +116,14 @@ export function createMemoryFunctions(host){
      * @returns {number | Promise<number>}
      */
     const regionSize = (process, base)=>{
-        scratch ||= host.allocate(MEMORY_BASIC_INFORMATION_SIZE);
+        scratch ||= host.allocate(BASIC.SIZE);
         if (scratch === 0)
         {
             return PAGE;
         }
         const at = scratch;
-        return settled(kernel32.VirtualQueryEx.handler(
-            [process, base, at, MEMORY_BASIC_INFORMATION_SIZE]),
-        wrote=>(wrote ? read32(at + REGION_SIZE) : PAGE));
+        return settled(kernel32.VirtualQueryEx.handler([process, base, at, BASIC.SIZE]),
+            wrote=>(wrote ? read32(at + BASIC.RegionSize) : PAGE));
     };
 
     /**
@@ -161,6 +168,32 @@ export function createMemoryFunctions(host){
                 const size = read32(sizeOut);
                 return settled(kernel32.VirtualAllocEx.handler(
                     [process, asked, size, type, protect]), (got, error)=>{
+                    if ((got >>> 0) === 0)
+                    {
+                        return failure(error, STATUS_CONFLICTING_ADDRESSES);
+                    }
+                    report(baseOut, sizeOut, got >>> 0, (asked === 0 ? got >>> 0 : asked) + size);
+                    return STATUS.SUCCESS;
+                });
+            },
+        },
+
+        /**
+         * NTSTATUS NtAllocateVirtualMemoryEx(HANDLE ProcessHandle, PVOID *BaseAddress,
+         *     PSIZE_T RegionSize, ULONG AllocationType, ULONG PageProtection,
+         *     MEM_EXTENDED_PARAMETER *ExtendedParameters, ULONG ParameterCount)
+         *
+         * VirtualAlloc2 in the native shape, as NtAllocateVirtualMemory is
+         * VirtualAllocEx in it.
+         */
+        NtAllocateVirtualMemoryEx: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([process, baseOut, sizeOut, type, protect, list, count])=>{
+                const asked = read32(baseOut);
+                const size = read32(sizeOut);
+                return settled(kernel32.VirtualAlloc2.handler(
+                    [process, asked, size, type, protect, list, count]), (got, error)=>{
                     if ((got >>> 0) === 0)
                     {
                         return failure(error, STATUS_CONFLICTING_ADDRESSES);
@@ -236,7 +269,7 @@ export function createMemoryFunctions(host){
                 {
                     return STATUS.INVALID_INFO_CLASS;
                 }
-                if ((length >>> 0) < MEMORY_BASIC_INFORMATION_SIZE)
+                if ((length >>> 0) < BASIC.SIZE)
                 {
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
