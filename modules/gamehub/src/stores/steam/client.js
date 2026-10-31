@@ -15,7 +15,7 @@
  * in that machine's storage beside the rest of its Steam data.
  *
  * Through `fetch`, WebCrypto and the platform's decompression streams, so it
- * runs in a page (the bridge adds the CDN's CORS headers) as in Node.
+ * runs in a page (GameHub adds the CDN's CORS headers) as in Node.
  */
 
 import { parseText } from '../../../../core/src/steam/keyvalues.js';

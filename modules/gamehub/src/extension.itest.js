@@ -38,9 +38,9 @@ const FAKE_TOKEN = `eyJhbGciOiJFZERTQSJ9.${Buffer.from('{"sub":"7656119796028793
 
 /** The page's side of the protocol, as a launcher would write it. */
 const PAGE = `<!doctype html><script>
-window.presence = document.documentElement.dataset.bottlifyBridge ?? null;
+window.presence = document.documentElement.dataset.bottlifyGamehub ?? null;
 window.seen = [];
-addEventListener('message', e => { if (e.data?.from === 'bottlify-bridge') seen.push(e.data); });
+addEventListener('message', e => { if (e.data?.from === 'bottlify-gamehub') seen.push(e.data); });
 ${PAGE_CLIENT}
 window.outcome = promise => promise.then(result => ({ result }),
     e => ({ error: String(e.message ?? e) }));
@@ -307,7 +307,7 @@ test('the dev build carries a page to Steam and keeps the session from it', asyn
         });
 
         await t.test('Steam switched off by the site: Steam refuses the page again', async()=>{
-            config = { bridge: { steam: false } };
+            config = { gamehub: { steam: false } };
             await open();
             assert.deepEqual(await page('ask("hello")'), hello(false, extension));
             // The frame switches the ruleset before it answers; the worker too, unwaited.

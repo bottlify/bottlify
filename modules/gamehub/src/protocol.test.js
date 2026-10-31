@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TO, readRequest } from './protocol.js';
 
-test('a message not addressed to the bridge is not read', ()=>{
+test('a message not addressed to GameHub is not read', ()=>{
     for (const data of [null, 'hello', 7, {}, { to: 'other', id: 1, op: 'hello' },
         { to: TO, op: 'hello' }, { to: TO, id: 1.5, op: 'hello' }])
     {

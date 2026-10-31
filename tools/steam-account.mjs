@@ -16,8 +16,8 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { connectCm } from '../modules/bridge/src/stores/steam/connection.js';
-import { library, logOn } from '../modules/bridge/src/stores/steam/session.js';
+import { connectCm } from '../modules/gamehub/src/stores/steam/connection.js';
+import { library, logOn } from '../modules/gamehub/src/stores/steam/session.js';
 
 const args = process.argv.slice(2);
 /** @param {string} name */
@@ -31,7 +31,7 @@ if (!sessionPath || !out)
 
 const directory = await (await fetch('https://api.steampowered.com/ISteamDirectory/'
     + 'GetCMListForConnect/v1/?cellid=0&cmtype=websockets')).json();
-/** @type {import('../modules/bridge/src/stores/steam/connection.js').CmConnection | undefined} */
+/** @type {import('../modules/gamehub/src/stores/steam/connection.js').CmConnection | undefined} */
 let connection;
 for (const server of directory.response.serverlist.slice(0, 8))
 {

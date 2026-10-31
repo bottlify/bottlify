@@ -18,8 +18,8 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { connectCm } from '../modules/bridge/src/stores/steam/connection.js';
-import { appOwnershipTicket, logOn } from '../modules/bridge/src/stores/steam/session.js';
+import { connectCm } from '../modules/gamehub/src/stores/steam/connection.js';
+import { appOwnershipTicket, logOn } from '../modules/gamehub/src/stores/steam/session.js';
 
 /**
  * Each app's ownership ticket the session's account is given: none for an

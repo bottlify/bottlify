@@ -8,7 +8,7 @@
  * A depot's files as SteamPipe's content servers serve them: the manifest a
  * request code unlocks, and the chunks each file is cut into -- encrypted with
  * the depot's key, then compressed. The key, the code and the servers are the
- * store's to give (GameHub, `modules/bridge`); this reads the formats, through
+ * store's to give (GameHub, `modules/gamehub`); this reads the formats, through
  * WebCrypto and the platform's decompression streams, in a page as in Node.
  */
 

@@ -7,7 +7,7 @@
 /**
  * The content script: that GameHub is here, and nothing secret. It marks the
  * page before the page's scripts run, hands the site's switches (its
- * `config.json`'s `bridge`) to the service worker for the rulesets, and
+ * `config.json`'s `gamehub`) to the service worker for the rulesets, and
  * answers `hello` -- the stores, which the site has on, and the extension's
  * origin, where each store's pages are: `<store>/session.html`, the frame that
  * speaks the store's protocol and that the page asks every other op of, and
@@ -27,18 +27,18 @@
     const version = chrome.runtime.getManifest().version;
     // Before any of the page's scripts runs: a page that does not find it
     // knows at once there is no GameHub, without waiting for an answer.
-    document.documentElement.dataset.bottlifyBridge = version;
+    document.documentElement.dataset.bottlifyGamehub = version;
 
     /** The stores, as a person knows them. */
     const STORES = { steam: 'Steam' };
-    const PEER = 'bottlify-bridge';
+    const PEER = 'bottlify-gamehub';
     const origin = new URL(chrome.runtime.getURL('')).origin;
 
     /** What the site switches: a store it leaves out is on. @type {Promise<Record<string, unknown>>} */
     const wanted = fetch('/config.json', { cache: 'no-store' })
         .then(answer=>(answer.ok ? answer.json() : {})).catch(()=>({}))
-        .then((/** @type {any} */ config)=>(typeof config?.bridge === 'object'
-            && config.bridge !== null ? config.bridge : {}));
+        .then((/** @type {any} */ config)=>(typeof config?.gamehub === 'object'
+            && config.gamehub !== null ? config.gamehub : {}));
     // For the rulesets, which only the worker and the extension's pages may
     // switch; a worker Chrome has just stopped misses the first message.
     wanted.then(switches=>chrome.runtime.sendMessage({ switch: switches })

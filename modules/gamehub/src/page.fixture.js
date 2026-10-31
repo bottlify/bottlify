@@ -18,13 +18,13 @@ let n = 0;
 const askOf = (target, origin, op, args) => new Promise((resolve, reject) => {
     const id = ++n;
     const heard = e => {
-        if (e.origin !== origin || e.source !== target || e.data?.from !== 'bottlify-bridge'
+        if (e.origin !== origin || e.source !== target || e.data?.from !== 'bottlify-gamehub'
             || e.data.id !== id || e.data.event) return;
         removeEventListener('message', heard);
         'error' in e.data ? reject(new Error(e.data.error)) : resolve(e.data.result);
     };
     addEventListener('message', heard);
-    target.postMessage({ to: 'bottlify-bridge', id, op, args }, origin);
+    target.postMessage({ to: 'bottlify-gamehub', id, op, args }, origin);
 });
 const frames = {};
 const frameOf = store => frames[store] ??= (async () => {

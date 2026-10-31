@@ -8,14 +8,14 @@
  * What an app's product info says an install of it takes: its depots for
  * Windows and a language, the redistributables' depots of other apps it
  * names, how it starts -- read the same by the engine's tools, a page and the
- * Bottlify bridge, which answers a page the part of the info these read
+ * Bottlify GameHub, which answers a page the part of the info these read
  * (`publicAppInfo`).
  */
 
 /**
  * Steam's own art for its apps, on its CDN: `${STEAM_ART}/<appid>/<file>`. A
  * cross-origin isolated page may show it only with the headers the Bottlify
- * bridge adds to its responses.
+ * GameHub adds to its responses.
  */
 export const STEAM_ART = 'https://shared.steamstatic.com/store_item_assets/steam/apps';
 
@@ -94,7 +94,7 @@ export function windowsLaunch(info){
 
 /**
  * The part of an app's product info a library and an install read, which is
- * what the bridge hands a page: its type and name, its launch options, its
+ * what GameHub hands a page: its type and name, its launch options, its
  * install script, and its depots with their public manifests -- a branch
  * other than public, and the rest of the info, stay where they are.
  *

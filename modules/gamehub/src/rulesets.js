@@ -6,7 +6,7 @@
 
 /**
  * Each store's ruleset, switched as the site's configuration says (its
- * `config.json`'s `bridge`), so a store that asks us to stop is stopped for
+ * `config.json`'s `gamehub`), so a store that asks us to stop is stopped for
  * everyone from the site without a new release of the extension
  * (roadmap/decisions.md, A66). Switched by the service worker when a page of
  * the site loads, and by a store's session frame before it speaks the store's
@@ -21,8 +21,8 @@
  * @returns {Record<string, unknown>}
  */
 export function wantedBy(config){
-    const bridge = /** @type {any} */ (config)?.bridge;
-    return typeof bridge === 'object' && bridge !== null ? bridge : {};
+    const wanted = /** @type {any} */ (config)?.gamehub;
+    return typeof wanted === 'object' && wanted !== null ? wanted : {};
 }
 
 /**

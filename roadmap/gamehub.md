@@ -4,7 +4,7 @@ Built. Agreed 2026-10-31 and revised the same day as measurements came in: the s
 moved from the service worker into the tab, then out of the tab into the extension's own frames;
 the sign-in moved into the extension's own page. A number not measured says so.
 
-GameHub is the browser extension in `modules/bridge`. It extends the launcher and does not work
+GameHub is the browser extension in `modules/gamehub`. It extends the launcher and does not work
 without it: it keeps the stores' accounts and speaks their protocols, and the page asks it for
 finished answers. Bottlify -- `@bottlify/core` and the launcher -- keeps the engine and the install:
 the page downloads a game's manifests and chunks from the store's CDN itself, decrypts and
@@ -63,7 +63,7 @@ of the store's session frame. A store is an argument, never an op name.
 | `download { store, game }` | what an install needs; Steam's: `{ name, launch, installscript, art, servers, depots: [{ depot, gid, key, code, shared }] }`, the redistributables' depots asked under the app that owns them |
 | `runData { store, game }` | what a run hands the engine's emulation of the store's client; Steam's: `{ win32: { steam: { steamId, accountName, apps, ownershipTickets, clientFiles, appId } } }` |
 
-The frame says `{ from: 'bottlify-bridge', ready: true }` once it listens. A request code lasts
+The frame says `{ from: 'bottlify-gamehub', ready: true }` once it listens. A request code lasts
 minutes (not measured how many): a resumed install asks `download` again.
 
 ## The threat model

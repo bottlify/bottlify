@@ -101,7 +101,7 @@ function rig(steam){
     /** @param {string} op @param {Record<string, any>} [args] */
     const ask = async(op, args = {})=>{
         const id = ++next;
-        frame.request({ to: 'bottlify-bridge', id, op, args });
+        frame.request({ to: 'bottlify-gamehub', id, op, args });
         for (let i = 0; i < 1000; i++)
         {
             const done = page.find(one=>one.id === id && ('result' in one || 'error' in one));
@@ -123,7 +123,7 @@ const text = value=>JSON.stringify(value, (_, one)=>(one instanceof Uint8Array
 test('the frame says it is ready, and its token goes into a logon alone', async()=>{
     const { seen, page, ask, frame } = rig();
     frame.ready();
-    assert.deepEqual(page[0], { from: 'bottlify-bridge', ready: true });
+    assert.deepEqual(page[0], { from: 'bottlify-gamehub', ready: true });
     assert.deepEqual((await ask('account', { store: 'steam' })).result, { name: 'someone' });
     assert.deepEqual((await ask('list', { store: 'steam' })).result, []);
     assert.deepEqual((await ask('account', { store: 'steam', fresh: true })).result,
@@ -174,6 +174,6 @@ test('what the frame refuses, and a store switched off', async()=>{
     const off = startFrame({ store: 'steam', toPage: answer=>page.push(answer),
         enabled: async()=>[], kept: { get: async()=>null, set: async()=>{} },
         make: vault=>steamStore({ vault, fetch: steamHttps }) });
-    await off.request({ to: 'bottlify-bridge', id: 1, op: 'account', args: { store: 'steam' } });
+    await off.request({ to: 'bottlify-gamehub', id: 1, op: 'account', args: { store: 'steam' } });
     assert.match(page[0].error, /Steam is switched off/);
 });

@@ -24,9 +24,9 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { connectCm } from '../modules/bridge/src/stores/steam/connection.js';
-import { signInWithQr } from '../modules/bridge/src/stores/steam/auth.js';
-import { logOn, steamIdOfToken } from '../modules/bridge/src/stores/steam/session.js';
+import { connectCm } from '../modules/gamehub/src/stores/steam/connection.js';
+import { signInWithQr } from '../modules/gamehub/src/stores/steam/auth.js';
+import { logOn, steamIdOfToken } from '../modules/gamehub/src/stores/steam/session.js';
 import { decode, encode } from '../modules/core/src/steam/protobuf.js';
 import { encodeQr } from '../modules/core/src/steam/qr.js';
 import { qrPng } from './qr-png.mjs';

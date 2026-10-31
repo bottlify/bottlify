@@ -14,9 +14,9 @@
  * the page's tab never holds it, and the service worker, which Chrome keeps
  * at a low priority and stops when idle, is not asked for it.
  *
- * The page asks by `postMessage` to this frame, `{ to: 'bottlify-bridge', id,
+ * The page asks by `postMessage` to this frame, `{ to: 'bottlify-gamehub', id,
  * op, args }`, and is answered as protocol.js says; the frame says
- * `{ from: 'bottlify-bridge', ready: true }` first. It hears its parent alone,
+ * `{ from: 'bottlify-gamehub', ready: true }` first. It hears its parent alone,
  * from the parent's origin, and answers that origin alone.
  */
 

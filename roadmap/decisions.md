@@ -640,7 +640,7 @@ the program's block to index 1 and that executable found a null at index 0. *202
 
 **A66. A game platform's own servers are reached from the page only while the platform lets us,
 and its first request to stop is honoured for everyone at once.** The GameHub extension
-(`modules/bridge`) carries a page's requests to a platform -- Steam's connection managers, which
+(`modules/gamehub`) carries a page's requests to a platform -- Steam's connection managers, which
 admit only their own and localhost origins, and its content servers, which send no CORS headers
 -- by rewriting their headers with one ruleset a platform. Each ruleset is switched by the site's
 own configuration (`config.json`'s `bridge`, `"steam": false`), read by the extension on every

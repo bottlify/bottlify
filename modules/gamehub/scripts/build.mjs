@@ -8,7 +8,7 @@
  * Builds the extension, unpacked: `dist/public/` for Bottlify's sites,
  * `dist/dev/` for a local launcher as well (src/manifest.js). Its entry points
  * and every module they import are copied as they are, each at its path under
- * `modules/` -- GameHub's own under `bridge/`, the core formats it reads under
+ * `modules/` -- GameHub's own under `gamehub/`, the core formats it reads under
  * `core/` -- so a relative import between the two holds in the build as in the
  * repository: one source, no second copy in git.
  *
@@ -30,7 +30,7 @@ const MODULES = resolve(HERE, '..');
 /**
  * Modules and every module they import, by path under `modules/`.
  *
- * @param {string[]} entries  `bridge/src/worker.js`, ...
+ * @param {string[]} entries  `gamehub/src/worker.js`, ...
  * @returns {Promise<string[]>}
  */
 export async function closure(entries){
@@ -69,7 +69,7 @@ export async function build(out = join(HERE, 'dist')){
     const files = (await closure([...ENTRIES])).map(path=>[join(MODULES, path), path]);
     for (const platform of Object.values(PLATFORMS))
     {
-        files.push([join(HERE, platform.rules), `bridge/${platform.rules}`]);
+        files.push([join(HERE, platform.rules), `gamehub/${platform.rules}`]);
     }
     for (const [id, page, { html }] of STORE_PAGES)
     {

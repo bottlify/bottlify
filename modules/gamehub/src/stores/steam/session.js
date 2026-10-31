@@ -233,7 +233,7 @@ export async function ownedApps(connection, licenses){
  * The games a session's licences grant, by name.
  * ponytail: asked over the session itself, so it misses the apps Steam sends
  * without their data (see ownedApps); a caller wanting all of them asks an
- * anonymous logon for ownedApps' ids, as the launcher's bridged path does.
+ * anonymous logon for ownedApps' ids, as the launcher's GameHub path does.
  *
  * @param {CmConnection} connection
  * @param {Array<Record<string, any>>} licenses

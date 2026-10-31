@@ -17,7 +17,7 @@ const filesIn = dir=>readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter(entry=>entry.isFile()).map(entry=>join(entry.parentPath, entry.name));
 
 test('each build is whole, and the page may load a store\'s pages alone', async()=>{
-    const out = mkdtempSync(join(tmpdir(), 'bridge-build-'));
+    const out = mkdtempSync(join(tmpdir(), 'gamehub-build-'));
     try
     {
         const built = await build(out);

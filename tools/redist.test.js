@@ -22,7 +22,7 @@ import {
     applyPackage, compareVersions, imageMachine, installRedistributables,
     parseInstallScript, registryValue, unpackRedistributable, writeRegistry,
 } from './redist.mjs';
-import { depotOwners, sharedDepots, wantedDepot } from '../modules/bridge/src/stores/steam/apps.js';
+import { depotOwners, sharedDepots, wantedDepot } from '../modules/gamehub/src/stores/steam/apps.js';
 import * as redist from '../modules/core/src/steam/redist.js';
 
 const HKLM = 0x80000002;

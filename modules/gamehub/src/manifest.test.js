@@ -44,7 +44,7 @@ test('every page is a host permission, and the CM socket is listed as wss', ()=>
     }
 });
 
-test('the dev bridge answers on a local launcher and Bottlify\'s sites alone', ()=>{
+test('the dev GameHub answers on a local launcher and Bottlify\'s sites alone', ()=>{
     const hosts = new RegExp(/** @type {string} */ (HOSTS.dev));
     for (const host of ['localhost', 'bottlify.localhost', '127.0.0.1', '192.168.100.22',
         '192.168.0.5', 'bottlify.app', 'play.bottlify.app'])

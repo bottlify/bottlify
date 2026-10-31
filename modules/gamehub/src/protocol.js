@@ -11,17 +11,17 @@
  * page embeds, between the page's origin and the extension's alone. The frame
  * reads the request here.
  *
- * The page asks `{ to: 'bottlify-bridge', id, op, args }`; GameHub answers
- * `{ from: 'bottlify-bridge', id, result }` or `{ ..., id, error }`; a frame
- * says `{ from: 'bottlify-bridge', ready: true }` once it listens.
+ * The page asks `{ to: 'bottlify-gamehub', id, op, args }`; GameHub answers
+ * `{ from: 'bottlify-gamehub', id, result }` or `{ ..., id, error }`; a frame
+ * says `{ from: 'bottlify-gamehub', ready: true }` once it listens.
  * `id` is the page's, any number it has not used for a request still open.
  * GameHub is present when the page's root element carries
- * `data-bottlify-bridge` (its version): set before any of the page's scripts
+ * `data-bottlify-gamehub` (its version): set before any of the page's scripts
  * runs, so a page that does not find it need not wait for an answer.
  *
  * No op names a store's protocol: the store is an argument (`steam`).
  * - `hello` -> `{ version, origin, stores: [{ id, name, on }] }`: the stores GameHub has,
- *   and which the site has on (its `config.json`'s `bridge`); `origin` the
+ *   and which the site has on (its `config.json`'s `gamehub`); `origin` the
  *   extension's, where a store's sign-in page is: `<origin>/<store>/signin.html`,
  *   which the page shows in a frame, and which posts the page
  *   `{ from: 'bottlify-signin', store, signedIn: { name } }` once signed in.
@@ -41,8 +41,8 @@
  * is the store's sign-in page's, a logon its session frame's.
  */
 
-export const TO = 'bottlify-bridge';
-export const FROM = 'bottlify-bridge';
+export const TO = 'bottlify-gamehub';
+export const FROM = 'bottlify-gamehub';
 
 /** @typedef {'id' | 'store' | 'game' | 'kind' | 'bool?'} ArgKind */
 

@@ -7,7 +7,7 @@
 // The formats of Steam's files, which a page reads where the bytes land: a
 // manifest, a chunk, a KeyValues text, and the QR code a sign-in is shown as.
 // Speaking to Steam -- the account, the keys, the codes -- is GameHub's
-// (`modules/bridge`), and the install is `@bottlify/core/steam/install`.
+// (`modules/gamehub`), and the install is `@bottlify/core/steam/install`.
 export { encodeQr, qrToSvg } from './qr.js';
 export { parseText, parseBinary } from './keyvalues.js';
 export {

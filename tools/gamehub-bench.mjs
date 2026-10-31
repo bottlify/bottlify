@@ -31,10 +31,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
-import { build } from '../modules/bridge/scripts/build.mjs';
-import { chrome } from '../modules/bridge/src/chrome.fixture.js';
-import { PAGE_CLIENT } from '../modules/bridge/src/page.fixture.js';
-import { steamManagers } from '../modules/bridge/src/stores/steam/store.js';
+import { build } from '../modules/gamehub/scripts/build.mjs';
+import { chrome } from '../modules/gamehub/src/chrome.fixture.js';
+import { PAGE_CLIENT } from '../modules/gamehub/src/page.fixture.js';
+import { steamManagers } from '../modules/gamehub/src/stores/steam/store.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const argv = process.argv.slice(2);
@@ -67,9 +67,9 @@ ${PAGE_CLIENT}
 const base = process.env.LOCALAPPDATA ?? resolve('.');
 const scratch = mkdtempSync(join(base, 'ghb-'));
 const { dev } = await build(join(scratch, 'x'));
-patch(dev, 'bridge/src/protocol.js', "    runData: { store: 'store', game: 'game' },",
+patch(dev, 'gamehub/src/protocol.js', "    runData: { store: 'store', game: 'game' },",
     "    runData: { store: 'store', game: 'game' },\n    bench: { store: 'store' },");
-patch(dev, 'bridge/src/stores/steam/store.js', '        ops: {', `        ops: {
+patch(dev, 'gamehub/src/stores/steam/store.js', '        ops: {', `        ops: {
             bench: async()=>{
                 const t0 = Date.now();
                 await anonymousConnection();
@@ -79,8 +79,8 @@ patch(dev, 'bridge/src/stores/steam/store.js', '        ops: {', `        ops: {
             },`);
 const [endpoint] = await steamManagers();
 const inPage = `(async () => {
-    const { connectCm } = await import('/m/bridge/src/stores/steam/connection.js');
-    const { logOnAnonymously, productInfo } = await import('/m/bridge/src/stores/steam/session.js');
+    const { connectCm } = await import('/m/gamehub/src/stores/steam/connection.js');
+    const { logOnAnonymously, productInfo } = await import('/m/gamehub/src/stores/steam/session.js');
     const t0 = Date.now();
     const link = await connectCm({ endpoint: ${JSON.stringify(endpoint)} });
     await logOnAnonymously(link);

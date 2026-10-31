@@ -47,9 +47,9 @@ export const PLATFORMS = Object.freeze({
         rules: 'rules/steam.json',
         pages: Object.freeze({
             session: Object.freeze({ html: 'src/stores/steam/session.html',
-                script: 'bridge/src/stores/steam/session-page.js' }),
+                script: 'gamehub/src/stores/steam/session-page.js' }),
             signin: Object.freeze({ html: 'src/stores/steam/signin.html',
-                script: 'bridge/src/stores/steam/signin.js' }),
+                script: 'gamehub/src/stores/steam/signin.js' }),
         }),
         // The CM socket the session frame and the sign-in page open; the
         // content servers the page downloads from; Steam's directory and
@@ -76,7 +76,7 @@ export const STORE_PAGES = Object.freeze(Object.entries(PLATFORMS).flatMap(([id,
  * out: the service worker, the content script -- which imports nothing -- and
  * each store's pages' scripts.
  */
-export const ENTRIES = Object.freeze(['bridge/src/worker.js', 'bridge/src/content.js',
+export const ENTRIES = Object.freeze(['gamehub/src/worker.js', 'gamehub/src/content.js',
     ...STORE_PAGES.map(([, , files])=>files.script)]);
 
 /**
@@ -84,7 +84,7 @@ export const ENTRIES = Object.freeze(['bridge/src/worker.js', 'bridge/src/conten
  * pages cannot say it (`HOSTS`): the content script, a session frame's
  * runner, and each sign-in page.
  */
-export const HOST_CHECKED = Object.freeze(['bridge/src/content.js', 'bridge/src/frame.js',
+export const HOST_CHECKED = Object.freeze(['gamehub/src/content.js', 'gamehub/src/frame.js',
     ...STORE_PAGES.filter(([, page])=>page === 'signin').map(([, , files])=>files.script)]);
 
 /**
@@ -108,15 +108,15 @@ export function manifestFor(build, version){
         permissions: ['declarativeNetRequest', 'storage'],
         host_permissions: [...pages,
             ...Object.values(PLATFORMS).flatMap(platform=>platform.hosts)],
-        background: { service_worker: 'bridge/src/worker.js', type: 'module' },
-        content_scripts: [{ matches: pages, js: ['bridge/src/content.js'], run_at: 'document_start' }],
+        background: { service_worker: 'gamehub/src/worker.js', type: 'module' },
+        content_scripts: [{ matches: pages, js: ['gamehub/src/content.js'], run_at: 'document_start' }],
         // A store's pages alone, as frames: no module is the page's to load.
         web_accessible_resources: [{
             resources: STORE_PAGES.map(([id, page])=>`${id}/${page}.html`),
             matches: [...FRAMED_BY[build]] }],
         declarative_net_request: {
             rule_resources: Object.entries(PLATFORMS).map(([id, platform])=>(
-                { id, enabled: true, path: `bridge/${platform.rules}` })),
+                { id, enabled: true, path: `gamehub/${platform.rules}` })),
         },
     };
 }

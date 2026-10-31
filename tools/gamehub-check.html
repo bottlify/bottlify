@@ -31,7 +31,7 @@ const log = (text, cls) => {
   if (cls) line.className = cls;
   document.getElementById('log').prepend(line);
 };
-const present = document.documentElement.dataset.bottlifyBridge;
+const present = document.documentElement.dataset.bottlifyGamehub;
 const presentEl = document.getElementById('present');
 presentEl.textContent = present ? 'found, version ' + present : 'not found (dev build loaded? page reloaded after loading it?)';
 presentEl.className = 'state ' + (present ? 'ok' : 'bad');
@@ -41,13 +41,13 @@ const ask = (op, args = {}) => new Promise((resolve) => {
   const timer = setTimeout(() => { removeEventListener('message', heard); resolve({ error: 'no answer in 120 s' }); }, 120000);
   function heard(event) {
     const data = event.data;
-    if (event.origin !== location.origin || data?.from !== 'bottlify-bridge' || data.id !== id) return;
+    if (event.origin !== location.origin || data?.from !== 'bottlify-gamehub' || data.id !== id) return;
     if (data.event) { log(op + ' event ' + data.event); return; }
     removeEventListener('message', heard); clearTimeout(timer);
     resolve({ ...data, ms: Math.round(performance.now() - started) });
   }
   addEventListener('message', heard);
-  postMessage({ to: 'bottlify-bridge', id, op, args }, location.origin);
+  postMessage({ to: 'bottlify-gamehub', id, op, args }, location.origin);
 });
 const store = () => document.getElementById('store').value;
 let origin = null;
