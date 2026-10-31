@@ -15,7 +15,7 @@
  *     node tools/pull-bottle.mjs --list [--port 9333]
  */
 
-import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
+import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -115,7 +115,7 @@ for (const name of ['manifest.json', 'bundle.btl'])
 }
 // The manifest a browser keeps names its bundle as its own; here it is the file beside it.
 const manifestPath = join(into, 'manifest.json');
-const manifest = JSON.parse(await (await import('node:fs/promises')).readFile(manifestPath, 'utf8'));
+const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 manifest.id = id;
 writeFileSync(manifestPath, JSON.stringify(manifest, null, 4));
 console.log(`bundles/${id}: done`);
