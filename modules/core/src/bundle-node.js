@@ -563,6 +563,10 @@ export async function verifyBundle(path, onProgress){
 
     for (const file of bundle.list())
     {
+        if (file.sha256 === undefined)
+        {
+            continue;
+        }
         const digest = createHash('sha256');
         for (let at = 0; at < file.size; at += bundle.blockSize)
         {

@@ -248,8 +248,9 @@ export async function downloadFiles({ files, servers, write, done = ()=>false,
  *
  * @param {InstalledFile[]} files @param {Map<string, number>} at
  * @param {RandomAccess} handle
+ * @param {(task: number) => boolean} [which]  The chunks to read back; every one by default.
  */
-export function wrongChunks(files, at, handle){
+export function wrongChunks(files, at, handle, which = ()=>true){
     /** @type {number[]} */
     const tasks = [];
     /** @type {Set<string>} */
@@ -259,6 +260,11 @@ export function wrongChunks(files, at, handle){
     {
         for (const chunk of file.chunks)
         {
+            if (!which(task))
+            {
+                task++;
+                continue;
+            }
             const bytes = new Uint8Array(chunk.size);
             const read = handle.read(bytes, { at: /** @type {number} */ (at.get(file.path))
                 + chunk.offset });
@@ -381,16 +387,19 @@ export async function installBundle({ handle, depots, servers, installscript, ex
             await save();
         }
     };
+    // What this run fetched was checked as it was opened; what it took up from
+    // an earlier run is only what that run wrote down.
+    const takenUp = going ? Uint8Array.from(done) : null;
     await fetchMissing();
-    // What a run taken up from an earlier one counts as done is only what that
-    // run wrote down; every chunk is read back against the manifest's
-    // Adler-32, and one that differs is fetched again, once.
+    // Those chunks are read back against the manifest's Adler-32, and one that
+    // differs is fetched again, once.
     /** @type {string[]} */
     const rewritten = [];
     for (let round = 0; ; round++)
     {
         signal?.throwIfAborted();
-        const wrong = wrongChunks(files, at, handle);
+        const wrong = takenUp ? wrongChunks(files, at, handle,
+            number=>(takenUp[number >> 3] & (1 << (number & 7))) !== 0) : { tasks: [], paths: [] };
         if (wrong.tasks.length === 0)
         {
             break;
@@ -450,7 +459,9 @@ export async function installBundle({ handle, depots, servers, installscript, ex
     }
     const bundled = [...placed.files.filter(file=>!added.has(file.path.toLowerCase())),
         ...extra.files].sort((a, b)=>comparePaths(a.path, b.path));
-    const bundle = await finishBundle(handle, bundled, directories, {
+    // Every file's bytes were checked against Steam's own sums as they landed
+    // and again where a run was taken up: no SHA-256 of each besides.
+    const bundle = await finishBundle(handle, bundled, directories, { hashFiles: false,
         onProgress: (read, all)=>onProgress?.({ stage: 'finishing', done: read, total: all }) });
     const program = executable ? byPath.get(executable.replace(/\//g, '\\').toLowerCase()) : null;
     return { bundle, entry: program ? await tree.read(program.path) : null,

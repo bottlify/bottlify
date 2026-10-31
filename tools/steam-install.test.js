@@ -177,7 +177,9 @@ test('an install into a directory, packed, is the bundle a browser\'s install wr
             const tool = await bundleFiles(join(work, 'tool.btl'));
             const browser = await bundleFiles(join(work, 'browser.btl'));
             /** @param {{ bytes: Uint8Array }} file */
-            const described = ({ bytes, ...file })=>({ ...file, bytes: bytes.length });
+            // A browser's bottle has no SHA-256 of each file: Steam's sums checked them.
+            const described = ({ bytes, ...file })=>(
+                { ...file, sha256: undefined, bytes: bytes.length });
             assert.deepEqual(browser.files.map(described), tool.files.map(described),
                 'the same files, in the same order');
             assert.deepEqual(browser.files.map(file=>file.bytes), tool.files.map(file=>file.bytes));

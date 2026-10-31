@@ -71,14 +71,17 @@ const hex = bytes=>Array.from(bytes, byte=>byte.toString(16).padStart(2, '0')).j
  * @param {RandomAccess} handle
  * @param {PlacedFile[]} files  The bundle's files, their bytes in place.
  * @param {string[]} directories  The empty ones, which a program may expect.
- * @param {{ blockSize?: number, onProgress?: (read: number, total: number) => void }} [options]
+ * @param {{ blockSize?: number, hashFiles?: boolean,
+ *     onProgress?: (read: number, total: number) => void }} [options]
+ *     hashFiles: each file's SHA-256 in the index; a store's install, whose
+ *     files were checked against the store's own sums, leaves it out.
  */
 export async function finishBundle(handle, files, directories,
-    { blockSize = DEFAULT_BLOCK_SIZE, onProgress } = {})
+    { blockSize = DEFAULT_BLOCK_SIZE, hashFiles = true, onProgress } = {})
 {
     /** @type {{ offset: number, packed: number, codec: number, crc: number }[]} */
     const blocks = [];
-    /** @type {{ path: string, size: number, firstBlock: number, blocks: number, sha256: string }[]} */
+    /** @type {{ path: string, size: number, firstBlock: number, blocks: number, sha256?: string }[]} */
     const index = [];
     const total = files.reduce((sum, file)=>sum + file.size, 0);
     const buffer = new Uint8Array(blockSize);
@@ -87,9 +90,9 @@ export async function finishBundle(handle, files, directories,
     for (const file of files)
     {
         const firstBlock = blocks.length;
-        // ponytail: SHA-256 in JS runs at about 100 MB/s, the most of finishing
-        // a large game; hash in the decode workers as chunks land if it drags.
-        const digest = createSha256();
+        // SHA-256 in JS runs at about 100 MB/s, four times slower than the
+        // blocks' CRC, and the most of finishing a large game.
+        const digest = hashFiles ? createSha256() : null;
         for (let offset = 0; offset < file.size; offset += blockSize)
         {
             const block = buffer.subarray(0, Math.min(blockSize, file.size - offset));
@@ -97,14 +100,15 @@ export async function finishBundle(handle, files, directories,
             {
                 throw new Error(`bundle: ${file.path} is cut short in the container`);
             }
-            digest.update(block);
+            digest?.update(block);
             blocks.push({ offset: file.at + offset, packed: block.length, codec: Codec.STORED,
                 crc: crc32(block) });
             read += block.length;
             onProgress?.(read, total);
         }
         index.push({ path: file.path, size: file.size, firstBlock,
-            blocks: blocks.length - firstBlock, sha256: hex(digest.digest()) });
+            blocks: blocks.length - firstBlock,
+            ...digest ? { sha256: hex(digest.digest()) } : {} });
     }
 
     const indexBytes = new TextEncoder().encode(

@@ -106,7 +106,8 @@ export const Codec = {
  * @property {number} size
  * @property {number} firstBlock  Where this file's run starts in the container.
  * @property {number} blocks
- * @property {string} sha256      Of the file's contents, as written.
+ * @property {string} [sha256]    Of the file's contents, as written. Absent from a bottle a
+ *     browser wrote in place, whose files were checked against the store's own sums.
  */
 
 /**
@@ -138,7 +139,7 @@ export const Codec = {
  * @property {number} size        Its bytes, decoded.
  * @property {number} firstBlock
  * @property {number} blocks
- * @property {string} sha256      Of its bytes, as written.
+ * @property {string} [sha256]    Of its bytes, as written; absent as a BundleFile's may be.
  */
 
 /**
