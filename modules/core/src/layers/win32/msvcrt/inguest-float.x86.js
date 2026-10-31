@@ -14,7 +14,12 @@ export const COMPILED = /** @type {const} */ ({
         params: ['u32', 'u32'],
         returns: 'u32',
         uses: ['controlWord', 'setControlWord'],
-        tables: { EXCEPTIONS: 268, ROUNDING_PRECISION: 524, HARDWARE_EXCEPTIONS: 588, HARDWARE_PRECISION: 652 },
+        tables: {
+            EXCEPTIONS: 268,
+            ROUNDING_PRECISION: 524,
+            HARDWARE_EXCEPTIONS: 588,
+            HARDWARE_PRECISION: 652,
+        },
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x83, 0xec,
             0x04, 0xd9, 0x3c, 0x24, 0x0f, 0xb7, 0x04, 0x24, 0x83, 0xc4, 0x04, 0x89,
@@ -78,7 +83,12 @@ export const COMPILED = /** @type {const} */ ({
         params: ['u32', 'u32'],
         returns: 'u32',
         uses: ['controlWord', 'setControlWord'],
-        tables: { EXCEPTIONS: 272, ROUNDING_PRECISION: 528, HARDWARE_EXCEPTIONS: 592, HARDWARE_PRECISION: 656 },
+        tables: {
+            EXCEPTIONS: 272,
+            ROUNDING_PRECISION: 528,
+            HARDWARE_EXCEPTIONS: 592,
+            HARDWARE_PRECISION: 656,
+        },
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x83, 0xec,
             0x04, 0xd9, 0x3c, 0x24, 0x0f, 0xb7, 0x04, 0x24, 0x83, 0xc4, 0x04, 0x89,
@@ -143,7 +153,12 @@ export const COMPILED = /** @type {const} */ ({
         params: ['u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['controlWord', 'setControlWord', 'setU32'],
-        tables: { EXCEPTIONS: 292, ROUNDING_PRECISION: 548, HARDWARE_EXCEPTIONS: 612, HARDWARE_PRECISION: 676 },
+        tables: {
+            EXCEPTIONS: 292,
+            ROUNDING_PRECISION: 548,
+            HARDWARE_EXCEPTIONS: 612,
+            HARDWARE_PRECISION: 676,
+        },
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x83, 0xec,
             0x04, 0xd9, 0x3c, 0x24, 0x0f, 0xb7, 0x04, 0x24, 0x83, 0xc4, 0x04, 0x89,
