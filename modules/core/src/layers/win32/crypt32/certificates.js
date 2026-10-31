@@ -166,10 +166,40 @@ const SSL_IGNORE = Object.freeze({ REVOCATION: 0x80, UNKNOWN_CA: 0x100, WRONG_US
     CN_INVALID: 0x1000, DATE_INVALID: 0x2000 });
 const AUTHTYPE_CLIENT = 1;
 
-/** Sizes of the structures a program reads. */
-const CERT_CONTEXT_SIZE = 20;
-const CERT_INFO_SIZE = 112;
-const CERT_EXTENSION_SIZE = 16;
+/**
+ * CERT_CONTEXT, CERT_INFO and CERT_EXTENSION as a process of either width
+ * lays them out: every pointer, and every blob's, eight bytes and aligned at
+ * 64 bits, so that a 64-bit program reading pbCertEncoded at 8 does not read
+ * cbCertEncoded and pCertInfo as one pointer.
+ *
+ * @param {number} pointer  4 or 8.
+ */
+export function certificateLayout(pointer = 4){
+    const p = pointer === 8 ? 8 : 4;
+    // CRYPT_*_BLOB: a count and a pointer; CRYPT_ALGORITHM_IDENTIFIER: a
+    // pointer and a blob; CRYPT_BIT_BLOB: a blob and a count of unused bits.
+    const blob = 2 * p;
+    const algorithm = p + blob;
+    const bits = blob + p;
+    const serial = p;
+    const signature = serial + blob;
+    const issuer = signature + algorithm;
+    const notBefore = issuer + blob;
+    const subject = notBefore + 16;
+    const publicKey = subject + blob;
+    const keyBits = publicKey + algorithm;
+    const extensionCount = keyBits + 3 * bits;
+    return {
+        pointer: p,
+        context: { size: 5 * p, encoded: p, length: 2 * p, info: 3 * p, store: 4 * p },
+        info: { size: extensionCount + 2 * p, serial, signature, issuer, notBefore,
+            notAfter: notBefore + 8, subject, publicKey, keyBits, unused: keyBits + blob,
+            extensionCount, extensions: extensionCount + p },
+        extension: { size: 2 * p + blob, critical: p, value: 2 * p },
+        /** Where a blob's pointer is, past its count. */
+        blobData: p,
+    };
+}
 const CHAIN_CONTEXT_SIZE = 56;
 const SIMPLE_CHAIN_SIZE = 32;
 const CHAIN_ELEMENT_SIZE = 32;
@@ -186,6 +216,8 @@ const STORE_BASE = 0x5c000000;
  * @property {(code: number) => void} setLastError
  * @property {(bytes: number) => number} localAlloc  LPTR; 0 when it cannot be had.
  * @property {(address: number) => void} localFree
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose contexts are
+ *           laid out wider (`certificateLayout`); absent, 4.
  * @property {() => number} now  The guest's wall clock, ms since 1970 UTC.
  * @property {() => Uint8Array[]} trustedRoots  The machine's root store, as DER.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -206,11 +238,16 @@ class Layout {
         this.pointers = [];
     }
 
-    /** Room for `length` bytes, 4-aligned. @param {number} length */
+    /**
+     * Room for `length` bytes, 8-aligned: a 64-bit structure's pointers
+     * fall on their own alignment, and a 32-bit one's are no worse for it.
+     *
+     * @param {number} length
+     */
     reserve(length){
         const at = this.size;
-        this.pieces.push(new Uint8Array((length + 3) & ~3));
-        this.size += (length + 3) & ~3;
+        this.pieces.push(new Uint8Array((length + 7) & ~7));
+        this.size += (length + 7) & ~7;
         return at;
     }
 
@@ -303,6 +340,18 @@ export function nameMatches(pattern, host){
 
 /** @param {CertificatesHost} host */
 export function createCertificateFunctions(host){
+    const shape = certificateLayout(host.pointerSize);
+    /**
+     * A pointer the program is handed back through an out-parameter, as wide
+     * as its process's: a 64-bit caller reads the whole quadword.
+     *
+     * @param {number} address @param {number} value
+     */
+    const setPointer = (address, value)=>{
+        const out = new Uint8Array(shape.pointer);
+        new DataView(out.buffer).setUint32(0, value >>> 0, true);
+        host.writeMemory(address, out);
+    };
     /** @param {number} address */
     const dword = address=>{
         const bytes = host.readMemory(address, 4);
@@ -354,52 +403,53 @@ export function createCertificateFunctions(host){
      */
     const makeContext = (certificate, store)=>{
         const layout = new Layout();
-        const context = layout.reserve(CERT_CONTEXT_SIZE);
-        const info = layout.reserve(CERT_INFO_SIZE);
+        const { context: C, info: I, extension: E, blobData } = shape;
+        const context = layout.reserve(C.size);
+        const info = layout.reserve(I.size);
         /** @type {Map<number, number>} */
         const values = new Map();
         const encoded = layout.add(certificate.encoded);
         values.set(context, X509_ASN_ENCODING);
-        layout.point(context + 4, encoded);
-        values.set(context + 8, certificate.encoded.length);
-        layout.point(context + 12, info);
-        values.set(context + 16, store);
+        layout.point(context + C.encoded, encoded);
+        values.set(context + C.length, certificate.encoded.length);
+        layout.point(context + C.info, info);
+        values.set(context + C.store, store);
 
         /** A CRYPT_*_BLOB at `field`: count, then a pointer (none when empty). */
         const blob = (/** @type {number} */ field, /** @type {Uint8Array} */ bytes)=>{
             values.set(field, bytes.length);
             if (bytes.length > 0)
             {
-                layout.point(field + 4, layout.add(bytes));
+                layout.point(field + blobData, layout.add(bytes));
             }
         };
         values.set(info, certificate.version - 1);
         // CERT_INFO's serial number is little-endian, the reverse of DER's.
-        blob(info + 4, Uint8Array.from(certificate.serial).reverse());
-        layout.point(info + 12, layout.addString(certificate.signatureAlgorithm));
-        blob(info + 16, certificate.signatureParameters);
-        blob(info + 24, certificate.issuer);
+        blob(info + I.serial, Uint8Array.from(certificate.serial).reverse());
+        layout.point(info + I.signature, layout.addString(certificate.signatureAlgorithm));
+        blob(info + I.signature + shape.pointer, certificate.signatureParameters);
+        blob(info + I.issuer, certificate.issuer);
         const [beforeLow, beforeHigh] = fileTime(certificate.notBefore);
         const [afterLow, afterHigh] = fileTime(certificate.notAfter);
-        values.set(info + 32, beforeLow);
-        values.set(info + 36, beforeHigh);
-        values.set(info + 40, afterLow);
-        values.set(info + 44, afterHigh);
-        blob(info + 48, certificate.subject);
-        layout.point(info + 56, layout.addString(certificate.publicKeyAlgorithm));
-        blob(info + 60, certificate.publicKeyParameters);
-        blob(info + 68, certificate.publicKeyBits.bits);
-        values.set(info + 76, certificate.publicKeyBits.unused);
-        values.set(info + 104, certificate.extensions.length);
+        values.set(info + I.notBefore, beforeLow);
+        values.set(info + I.notBefore + 4, beforeHigh);
+        values.set(info + I.notAfter, afterLow);
+        values.set(info + I.notAfter + 4, afterHigh);
+        blob(info + I.subject, certificate.subject);
+        layout.point(info + I.publicKey, layout.addString(certificate.publicKeyAlgorithm));
+        blob(info + I.publicKey + shape.pointer, certificate.publicKeyParameters);
+        blob(info + I.keyBits, certificate.publicKeyBits.bits);
+        values.set(info + I.unused, certificate.publicKeyBits.unused);
+        values.set(info + I.extensionCount, certificate.extensions.length);
         if (certificate.extensions.length > 0)
         {
-            const list = layout.reserve(certificate.extensions.length * CERT_EXTENSION_SIZE);
-            layout.point(info + 108, list);
+            const list = layout.reserve(certificate.extensions.length * E.size);
+            layout.point(info + I.extensions, list);
             certificate.extensions.forEach((extension, index)=>{
-                const at = list + index * CERT_EXTENSION_SIZE;
+                const at = list + index * E.size;
                 layout.point(at, layout.addString(extension.id));
-                values.set(at + 4, extension.critical ? 1 : 0);
-                blob(at + 8, extension.value);
+                values.set(at + E.critical, extension.critical ? 1 : 0);
+                blob(at + E.value, extension.value);
             });
         }
         const base = host.localAlloc(layout.size);
@@ -819,7 +869,7 @@ export function createCertificateFunctions(host){
         }
         if (out !== 0)
         {
-            setDword(out, duplicate(result));
+            setPointer(out, duplicate(result));
         }
         return 1;
     };
@@ -1035,7 +1085,8 @@ export function createCertificateFunctions(host){
         /** @param {number} at */
         const blob = at=>{
             const size = dword(at);
-            return size === 0 ? new Uint8Array(0) : host.readMemory(dword(at + 4), size).slice();
+            return size === 0 ? new Uint8Array(0)
+                : host.readMemory(dword(at + shape.blobData), size).slice();
         };
         switch (compare)
         {
@@ -1544,7 +1595,7 @@ export function createCertificateFunctions(host){
                     elements.forEach(element=>release(element.address));
                     return fail(ERROR_NOT_ENOUGH_MEMORY);
                 }
-                setDword(out >>> 0, chain);
+                setPointer(out >>> 0, chain);
                 return 1;
             },
         },
@@ -1854,16 +1905,18 @@ export function createCertificateFunctions(host){
         CertGetIntendedKeyUsage: {
             argBytes: 16,
             handler: (/** @type {number[]} */ [, info, out, length])=>{
-                const count = dword((info >>> 0) + 104);
-                const list = dword((info >>> 0) + 108);
+                const count = dword((info >>> 0) + shape.info.extensionCount);
+                const list = dword((info >>> 0) + shape.info.extensions);
                 for (let i = 0; i < Math.min(count, 256); i++)
                 {
-                    const at = list + i * 16;
+                    const at = list + i * shape.extension.size;
                     if (host.readCString(dword(at), 64) !== '2.5.29.15')
                     {
                         continue;
                     }
-                    const value = host.readMemory(dword(at + 12), dword(at + 8)).slice();
+                    const value = host.readMemory(
+                        dword(at + shape.extension.value + shape.blobData),
+                        dword(at + shape.extension.value)).slice();
                     let bits;
                     try
                     {
@@ -1904,7 +1957,7 @@ export function createCertificateFunctions(host){
                 const wanted = host.readCString(oid >>> 0, 128);
                 for (let i = 0; i < Math.min(count >>> 0, 256); i++)
                 {
-                    const at = (list >>> 0) + i * 16;
+                    const at = (list >>> 0) + i * shape.extension.size;
                     if (host.readCString(dword(at), 128) === wanted)
                     {
                         return at;
@@ -1966,7 +2019,7 @@ export function createCertificateFunctions(host){
                 const engine = nextEngine;
                 nextEngine += 4;
                 engines.set(engine, { additional, exclusiveRoot });
-                setDword(out >>> 0, engine);
+                setPointer(out >>> 0, engine);
                 return 1;
             },
         },
@@ -2110,7 +2163,7 @@ export function createCertificateFunctions(host){
                             /** @type {Store} */ (storeOf(store)).held.push(address);
                         }
                     }
-                    setDword(storeOut >>> 0, store);
+                    setPointer(storeOut >>> 0, store);
                 }
                 if ((messageOut >>> 0) !== 0)
                 {
@@ -2119,16 +2172,16 @@ export function createCertificateFunctions(host){
                         const handle = nextMessage;
                         nextMessage += 4;
                         messages.set(handle, { ...found.signed, der: found.message });
-                        setDword(messageOut >>> 0, handle);
+                        setPointer(messageOut >>> 0, handle);
                     }
                     else
                     {
-                        setDword(messageOut >>> 0, 0);
+                        setPointer(messageOut >>> 0, 0);
                     }
                 }
                 if ((contextOut >>> 0) !== 0)
                 {
-                    setDword(contextOut >>> 0, found.type === CONTENT.CERT
+                    setPointer(contextOut >>> 0, found.type === CONTENT.CERT
                         ? makeContext(certificates[0], 0) : 0);
                 }
                 return 1;
@@ -2179,15 +2232,17 @@ export function createCertificateFunctions(host){
                         }
                         return answer(at=>{
                             const serial = Uint8Array.from(signer.serial).reverse();
-                            const out2 = new Uint8Array(CERT_INFO_SIZE + serial.length
+                            const { info: I, blobData } = shape;
+                            const out2 = new Uint8Array(I.size + serial.length
                                 + signer.issuer.length);
                             const view = new DataView(out2.buffer);
-                            view.setUint32(4, serial.length, true);
-                            view.setUint32(8, at + CERT_INFO_SIZE, true);
-                            view.setUint32(24, signer.issuer.length, true);
-                            view.setUint32(28, at + CERT_INFO_SIZE + serial.length, true);
-                            out2.set(serial, CERT_INFO_SIZE);
-                            out2.set(signer.issuer, CERT_INFO_SIZE + serial.length);
+                            view.setUint32(I.serial, serial.length, true);
+                            view.setUint32(I.serial + blobData, at + I.size, true);
+                            view.setUint32(I.issuer, signer.issuer.length, true);
+                            view.setUint32(I.issuer + blobData, at + I.size + serial.length,
+                                true);
+                            out2.set(serial, I.size);
+                            out2.set(signer.issuer, I.size + serial.length);
                             return out2;
                         }, out >>> 0, size >>> 0);
                     }

@@ -3199,6 +3199,7 @@ export function createWin32Module(){
                 'CRYPT32.dll': createCrypt32Functions({
                     readMemory, writeMemory, readWideString, setLastError: setError,
                     readCString,
+                    pointerSize,
                     // LPTR: fixed and zeroed, as the caller's LocalFree expects.
                     localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
                         .handler([0x40, bytes]) >>> 0,
