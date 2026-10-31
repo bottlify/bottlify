@@ -249,7 +249,7 @@ test('the machine classes answer as Windows does: one instance each, a boolean a
     assert.equal(get(only('Win32_PhysicalMemoryArray'), 'MaxCapacity').value, 512 << 10);
 
     const processor = get(only('Win32_Processor'), 'ProcessorId');
-    assert.equal(text(processor.value), '0780A97900000673', 'CPUID leaf 1: EDX, then EAX');
+    assert.equal(text(processor.value), '0788A97900000F65', 'CPUID leaf 1: EDX, then EAX');
     assert.equal(get(only('Win32_Processor'), 'MaxClockSpeed').value, 1000);
 
     const location = only('Win32_MemoryDeviceLocation');

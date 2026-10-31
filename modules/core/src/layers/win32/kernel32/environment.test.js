@@ -330,9 +330,9 @@ test('the system Windows directory is the Windows directory: this is no terminal
 const PROCESSOR_VARIABLES = Object.freeze({
     NUMBER_OF_PROCESSORS: '1',
     PROCESSOR_ARCHITECTURE: 'x86',
-    PROCESSOR_IDENTIFIER: 'x86 Family 6 Model 7 Stepping 3, GenuineIntel',
-    PROCESSOR_LEVEL: '6',
-    PROCESSOR_REVISION: '0703',
+    PROCESSOR_IDENTIFIER: 'x86 Family 15 Model 6 Stepping 5, GenuineIntel',
+    PROCESSOR_LEVEL: '15',
+    PROCESSOR_REVISION: '0605',
 });
 
 test('a process starts with the profile variables of the machine\'s layout', ()=>{

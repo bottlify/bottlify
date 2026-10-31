@@ -705,6 +705,20 @@ three nowhere; it has the two activation-context calls, whose frame is laid out 
 pointers there, which this layer does not write. The app's diagnostics list what is left out
 (`leftOutAt64`); revisit the two when a 64-bit program is found that imports them. *2026-10-31.*
 
+**A73. The processor is a family 15 of our own name, with nothing virtual about it.** CPUID
+answers what the engine executes, as a processor of the one class that has exactly that set:
+Intel family 15, model 6, stepping 5 (the Pentium 4 and Pentium D of 65 nm), with x87, MMX, SSE,
+SSE2, SSE3, CMPXCHG16B, CLFLUSH, and in the extended leaves long mode, execute-disable and
+LAHF/SAHF in 64-bit mode; its caches are that class's (a 16 KiB level 1 data cache, a 2 MiB level
+2). The brand string is `Bottlify Virtual CPU @ 3.00GHz`, the rate the time-stamp counter counts,
+as a virtual machine that does not pass its host's processor through names its own. No
+hypervisor bit and no hypervisor leaves: copy protection of the programs' time refuses to run
+where it finds one. Before this the table was another engine's (family 6 model 7, a Pentium III
+signature claiming SSE2, SSE3, POPCNT and RDRAND, a VMware hypervisor, and a highest extended
+leaf of 5, so no brand and no long mode): a program named the machine by its signature. POPCNT
+and RDRAND still execute; they are not announced, since no processor of the class had them. When
+the engine executes SSSE3 and SSE4, the class moves with it. *2026-10-31.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

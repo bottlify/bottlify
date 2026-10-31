@@ -13,18 +13,19 @@ import {
 import { CPUID_LEAVES } from '../../../../../cork/src/cpuid.js';
 
 test('family, model and stepping come out of the CPUID signature', ()=>{
-    assert.equal(CPUID.signature, 0x673);
-    assert.deepEqual([PROCESSOR.family, PROCESSOR.model, PROCESSOR.stepping], [6, 7, 3]);
-    assert.equal(PROCESSOR_IDENTIFIER, 'x86 Family 6 Model 7 Stepping 3');
-    assert.equal(PROCESSOR_LEVEL, 6, 'the family, not a Pentium\'s 5');
-    assert.equal(PROCESSOR_REVISION, 0x0703);
+    assert.equal(CPUID.signature, 0xf65);
+    assert.deepEqual([PROCESSOR.family, PROCESSOR.model, PROCESSOR.stepping], [15, 6, 5]);
+    assert.equal(PROCESSOR_IDENTIFIER, 'x86 Family 15 Model 6 Stepping 5');
+    assert.equal(PROCESSOR_LEVEL, 15, 'the family, not a Pentium\'s 5');
+    assert.equal(PROCESSOR_REVISION, 0x0605);
 });
 
 test('each feature a program asks for is the CPUID bit that says so', ()=>{
-    // MMX, SSE, SSE2, rdtsc and cmpxchg8b from EDX; SSE3 and rdrand from ECX.
+    // MMX, SSE, SSE2, rdtsc and cmpxchg8b from EDX; SSE3 and cmpxchg16b from
+    // ECX; no rdrand, which this class of processor did not have.
     /** @type {[number, boolean][]} */
     const expected = [[2, true], [3, true], [6, true], [8, true], [10, true],
-        [13, true], [28, true], [1, false], [7, false]];
+        [13, true], [14, true], [28, false], [1, false], [7, false]];
     for (const [feature, present] of expected)
     {
         assert.equal(PROCESSOR_FEATURES.get(feature), present, `PF ${feature}`);
@@ -51,13 +52,12 @@ test('the record is what cork\'s CPUID answers, leaf 0, leaf 1 and leaf 4', ()=>
         ({ eax: eax & 0x03ffffff, ebx, ecx })));
 });
 
-test('each processor has its own two 32 KiB level 1 caches and a 6 MiB level 2', ()=>{
+test('each processor has its own 16 KiB level 1 data cache and a 2 MiB level 2', ()=>{
     // Leaf 4: ways EBX[31:22] + 1, partitions EBX[21:12] + 1, line EBX[11:0] + 1,
     // sets ECX + 1; the kind EAX[4:0] and the level EAX[7:5].
     assert.deepEqual(PROCESSOR_CACHES, [
-        { level: 1, type: 'data', ways: 8, lineSize: 64, size: 32 << 10 },
-        { level: 1, type: 'instruction', ways: 8, lineSize: 64, size: 32 << 10 },
-        { level: 2, type: 'unified', ways: 24, lineSize: 64, size: 6 << 20 },
+        { level: 1, type: 'data', ways: 8, lineSize: 64, size: 16 << 10 },
+        { level: 2, type: 'unified', ways: 8, lineSize: 64, size: 2 << 20 },
     ]);
 });
 
