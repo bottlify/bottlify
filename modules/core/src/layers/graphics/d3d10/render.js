@@ -400,6 +400,9 @@ export function createRenderer(services){
     const BufferUsage = backend ? backend.BufferUsage : null;
     const TextureUsage = backend ? backend.TextureUsage : null;
     const compressed = services.compressedTextures ?? false;
+    /** What a texture's GPU format is chosen with: the device's block and depth features. */
+    const formatOptions = { compressed,
+        depth32Stencil: backend ? backend.hasFeature?.('depth32float-stencil8') === true : true };
 
     /** Said once per distinct detail, so a loop of draws does not flood. */
     const reported = new Set();
@@ -546,7 +549,7 @@ export function createRenderer(services){
                 slices: 1,
             };
         }
-        const storage = textureStorage(desc.Format, desc.BindFlags, { compressed });
+        const storage = textureStorage(desc.Format, desc.BindFlags, formatOptions);
         const info = FORMAT_INFO[desc.Format];
         const levels = [];
         let offset = 0;
@@ -1084,7 +1087,7 @@ export function createRenderer(services){
         const shape = view.dimensionName ?? '';
         const isCube = shape === 'TEXTURECUBE';
         const array = shape.endsWith('ARRAY') || isCube;
-        const chosen = viewFormatOf(backing.layout.storage, desc.Format, { compressed });
+        const chosen = viewFormatOf(backing.layout.storage, desc.Format, formatOptions);
         if (chosen.reinterpreted)
         {
             diverge(`a view of a typeless texture as format ${desc.Format} reads it as`
@@ -1823,7 +1826,7 @@ export function createRenderer(services){
         {
             diverge('a view into a slice of a 3D texture draws into its first slice');
         }
-        const chosen = viewFormatOf(backing.layout.storage, desc.Format, { compressed });
+        const chosen = viewFormatOf(backing.layout.storage, desc.Format, formatOptions);
         const format = chosen.format ?? backing.layout.format;
         const width = levelExtent(held.resource.desc.Width, mip);
         const height = held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D
@@ -3575,8 +3578,8 @@ export function createRenderer(services){
             {
                 return;
             }
-            const read = viewFormatOf(from.layout.storage, format, { compressed });
-            const written = viewFormatOf(to.layout.storage, format, { compressed });
+            const read = viewFormatOf(from.layout.storage, format, formatOptions);
+            const written = viewFormatOf(to.layout.storage, format, formatOptions);
             if (!read.format || read.reinterpreted || written.reinterpreted
                 || read.format !== written.format || !resolvable(read.format))
             {
