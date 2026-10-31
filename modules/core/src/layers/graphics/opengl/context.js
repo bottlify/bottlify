@@ -443,6 +443,7 @@ export function createGlContext(options = {}){
         attach(drawable){
             if (attached)
             {
+                context.resize(drawable.width, drawable.height);
                 return;
             }
             attached = true;
@@ -458,6 +459,29 @@ export function createGlContext(options = {}){
             }
             framebuffer = createFramebuffer(drawable.width, drawable.height,
                 { depth: (drawable.depthBits ?? 0) > 0 });
+        },
+
+        /**
+         * The drawable is another size now -- its window was resized, or the
+         * context made current on another window: the default framebuffer
+         * takes the new size, its contents undefined as a driver leaves them,
+         * and the viewport and scissor box stay as the program set them.
+         *
+         * @param {number} width @param {number} height
+         */
+        resize(width, height){
+            if (!attached || (framebuffer.width === width && framebuffer.height === height))
+            {
+                return;
+            }
+            if (gpu)
+            {
+                gpu.attach(context, { width, height });
+                framebuffer = { ...framebuffer, width, height };
+                return;
+            }
+            framebuffer = createFramebuffer(width, height,
+                { depth: framebuffer.depth !== null });
         },
 
         /** @param {ReturnType<typeof createShareGroup>} group */

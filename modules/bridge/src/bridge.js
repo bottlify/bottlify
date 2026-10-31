@@ -172,10 +172,16 @@ export function createBridge({ steam, store, managers, version, platforms }){
         },
 
         // Nobody signed in is an answer, not a failure, and needs no logon to give.
-        account: async()=>{
+        // Fresh: the licences as Steam has them now, over a new logon -- one
+        // added since is among them.
+        account: async({ fresh })=>{
             if (!await store.get())
             {
                 return null;
+            }
+            if (fresh)
+            {
+                drop();
             }
             const now = await loggedOn();
             if (!now.session)
@@ -184,16 +190,25 @@ export function createBridge({ steam, store, managers, version, platforms }){
             }
             if (!library || Date.now() - library.at > LIBRARY_KEPT_MS)
             {
-                const games = await steam.library(now.connection, now.licenses);
+                // Every app the licences grant: which are games the page asks
+                // of what Steam tells anyone, which this session's product
+                // info would mostly leave out (core's ownedApps).
                 library = { at: Date.now(),
-                    apps: games.map((/** @type {any} */ game)=>game.appid)
-                        .sort((/** @type {number} */ a, /** @type {number} */ b)=>a - b) };
+                    apps: await steam.ownedApps(now.connection, now.licenses) };
             }
             return { steamId: String(now.steamId), accountName: now.session.accountName,
-                apps: library.apps };
+                apps: library.apps, licenses: now.licenses.length };
         },
 
         depotKey: async({ app, depot })=>steam.depotKey((await loggedOn()).connection, app, depot),
+
+        // The signed-in account's ownership ticket for an app, as Steam signs
+        // it; null signed out (no account owns anything) or for an app the
+        // account does not own. The session stays here; only the ticket goes.
+        appOwnershipTicket: async({ app })=>{
+            const now = await loggedOn();
+            return now.session ? steam.appOwnershipTicket(now.connection, app) : null;
+        },
 
         manifestCode: async({ app, depot, gid, branch })=>String(await steam.manifestRequestCode(
             (await loggedOn()).connection, app, depot, BigInt(gid), branch)),

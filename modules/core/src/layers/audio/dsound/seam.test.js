@@ -12,7 +12,8 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import { writeGuid } from '../../win32/ole32/guid.js';
 import {
     createDirectSound, createPublisher, describe,
-    DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSCAPS_FLAGS, DSBPOSITIONNOTIFY,
+    DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBUFFERDESC_64, DSBCAPS, DSCAPS, DSCAPS_FLAGS,
+    DSBPOSITIONNOTIFY, DSBPOSITIONNOTIFY_64,
     IID_IDirectSound, IID_IDirectSound8, IID_IDirectSoundBuffer,
     IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer, IID_IKsPropertySet,
     IID_IDirectSound3DListener,
@@ -137,8 +138,12 @@ function clock(){
     } };
 }
 
-/** Everything a test needs, wired the way the module wires it. */
-function fixture(){
+/**
+ * Everything a test needs, wired the way the module wires it.
+ *
+ * @param {{ pointerSize?: 4 | 8 }} [options]
+ */
+function fixture({ pointerSize = 4 } = {}){
     const memory = guestMemory();
     const bridge = fakeBridge();
     const time = clock();
@@ -161,6 +166,7 @@ function fixture(){
         publishInterface: (object, id)=>bridge.publishInterface(object, id),
         signal: event=>signalled.push(event),
         mtaUsage: mta,
+        pointerSize,
     });
     return { memory, bridge, time, dsound, signalled, mta };
 }
@@ -1828,4 +1834,90 @@ test('a new buffer holds silence, whatever the memory under it held', ()=>{
         assert.ok(held.every(byte=>byte === silence), `${bits}-bit silence is ${silence}`);
         assert.equal(f.bridge.call(buffer, 'Unlock', [f.memory.u32(p1), 4096, 0, 0]), DS_OK);
     }
+});
+
+test('a 64-bit process describes its buffers in 24 or 40 bytes and is handed whole pointers', ()=>{
+    // SDL2's DirectSound backend from a 64-bit program: sizeof(DSBUFFERDESC)
+    // is 40 there, and a check against the 32-bit sizes refused every buffer
+    // it asked for -- a device opened and no sound ever made.
+    const f = createRoot(fixture({ pointerSize: 8 }));
+    const out = 0x1800;
+    const descriptor = describeBuffer(f.memory, { bytes: 4096 });
+    for (const size of [DSBUFFERDESC.SIZE, DSBUFFERDESC.SIZE_DX8, DSBUFFERDESC_64.SIZE_DX8 + 8])
+    {
+        f.memory.setU32(descriptor + DSBUFFERDESC_64.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+            DSERR_INVALIDPARAM, `dwSize ${size} is a 32-bit layout or none`);
+    }
+    for (const size of [DSBUFFERDESC_64.SIZE, DSBUFFERDESC_64.SIZE_DX8])
+    {
+        f.memory.setU32(out, 0xdeadbeef);
+        f.memory.setU32(out + 4, 0xdeadbeef);
+        f.memory.setU32(descriptor + DSBUFFERDESC_64.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]), DS_OK,
+            `dwSize ${size}`);
+        assert.ok(f.bridge.recordAt(f.memory.u32(out)), 'the buffer\'s pointer');
+        assert.equal(f.memory.u32(out + 4), 0, 'its high half');
+    }
+    const buffer = f.memory.u32(out);
+    // Lock's two LPVOID* are eight bytes; its LPDWORD sizes stay four.
+    const [p1, n1, p2, n2] = [0x1900, 0x1910, 0x1920, 0x1930];
+    for (const at of [p1, p2])
+    {
+        f.memory.setU32(at, 0xdeadbeef);
+        f.memory.setU32(at + 4, 0xdeadbeef);
+    }
+    assert.equal(f.bridge.call(buffer, 'Lock', [4000, 200, p1, n1, p2, n2, 0]), DS_OK);
+    const base = f.dsound.buffers().at(-1).address;
+    assert.deepEqual([f.memory.u32(p1), f.memory.u32(p1 + 4), f.memory.u32(n1)],
+        [base + 4000, 0, 96]);
+    assert.deepEqual([f.memory.u32(p2), f.memory.u32(p2 + 4), f.memory.u32(n2)], [base, 0, 104]);
+});
+
+test('a 64-bit process\'s notification positions are sixteen bytes, the handle at eight', ()=>{
+    const f = createRoot(fixture({ pointerSize: 8 }));
+    const descriptor = describeBuffer(f.memory,
+        { bytes: 88200, flags: DSBCAPS_CTRLPOSITIONNOTIFY });
+    f.memory.setU32(descriptor + DSBUFFERDESC_64.dwSize, DSBUFFERDESC_64.SIZE_DX8);
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, 0x1800, 0]), DS_OK);
+    const array = 0x1d00;
+    f.memory.setU32(array + DSBPOSITIONNOTIFY_64.dwOffset, 44100);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY_64.hEventNotify, 0x77);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY_64.SIZE + DSBPOSITIONNOTIFY_64.dwOffset, 66000);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY_64.SIZE + DSBPOSITIONNOTIFY_64.hEventNotify, 0x88);
+    assert.equal(f.bridge.call(notifyOn(f, f.memory.u32(0x1800)), 'SetNotificationPositions',
+        [2, array]), DS_OK);
+    assert.deepEqual(f.dsound.buffers()[0].notifications,
+        [{ offset: 44100, event: 0x77 }, { offset: 66000, event: 0x88 }]);
+});
+
+test('a 64-bit process\'s device and class objects are written whole', ()=>{
+    const f = fixture({ pointerSize: 8 });
+    const dll = f.dsound.libraries['DSOUND.dll'];
+    const out = 0x1000;
+    f.memory.setU32(out + 4, 0xdeadbeef);
+    assert.equal(dll.DirectSoundCreate8.handler([0, out, 0]), DS_OK);
+    assert.equal(f.memory.u32(out + 4), 0);
+    f.memory.setU32(out + 4, 0xdeadbeef);
+    assert.equal(dll.DirectSoundCaptureCreate8.handler([0, out, 0]), DSERR_NODRIVER);
+    assert.deepEqual([f.memory.u32(out), f.memory.u32(out + 4)], [0, 0],
+        'a refusal clears the whole pointer');
+});
+
+test('the 3D setters name their float arguments, which a 64-bit caller passes in XMM', ()=>{
+    const f = createRoot();
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER, bytes: 0 });
+    const placed = createBuffer(f, { flags: 0x10, channels: 1 });
+    /** @param {number} pointer @param {string} id @param {string} name */
+    const floatsOf = (pointer, id, name)=>f.bridge.recordAt(pointer).object.interfaceFor(id)
+        .methods.find((/** @type {any} */ method)=>method.name === name).floats;
+    const xyz = { 1: 'f32', 2: 'f32', 3: 'f32' };
+    assert.deepEqual(floatsOf(primary, IID_IDirectSound3DListener, 'SetPosition'), xyz);
+    assert.deepEqual(floatsOf(primary, IID_IDirectSound3DListener, 'SetDistanceFactor'),
+        { 1: 'f32' });
+    assert.deepEqual(Object.keys(floatsOf(primary, IID_IDirectSound3DListener,
+        'SetOrientation')), ['1', '2', '3', '4', '5', '6']);
+    assert.deepEqual(floatsOf(placed, IID_IDirectSound3DBuffer, 'SetVelocity'), xyz);
+    assert.deepEqual(floatsOf(placed, IID_IDirectSound3DBuffer, 'SetMinDistance'), { 1: 'f32' });
+    assert.equal(floatsOf(placed, IID_IDirectSound3DBuffer, 'SetConeAngles'), undefined);
 });

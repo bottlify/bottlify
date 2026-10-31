@@ -615,6 +615,11 @@ export function drainTable(table, sampleRate, capture){
         {
             return;
         }
+        // mixBlock adds into the block, as the worklet's does after zeroing
+        // it: left as the last tick made it, every block carried all the
+        // earlier ones, and a capture heard a drifting offset clipped to full
+        // scale where the program wrote clean sound.
+        block.fill(0, 0, blockFrames * 2);
         mixBlock({ global, slots, seams, block, blockFrames, outputRate: sampleRate, arena });
         const at = readAt - started;
         if (capture && at >= capture.fromMs && at < capture.toMs)
@@ -1496,6 +1501,8 @@ export function createHarness(canvas, how = {}){
      *           pasted?: { text: string, after: number }[],
      *           logMatch?: string,
      *           network?: { module: string, url: string, room: string },
+     *           steamClientUrls?: Record<string, string>,
+     *           steamTickets?: Record<string, string>,
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
      *           clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[],
      *           moveTimes?: { x: number, y: number, atMs: number }[],
@@ -1680,8 +1687,17 @@ export function createHarness(canvas, how = {}){
                 .connectRelay({ url: request.network.url, room: request.network.room })
             : null;
         const logMatch = request.logMatch ? new RegExp(request.logMatch) : null;
+        // The Steam client's own files, as a launcher keeps them in its
+        // storage: fetched from the harness, which cached Valve's.
+        const clientFiles = request.steamClientUrls ? Object.fromEntries(await Promise.all(
+            Object.entries(request.steamClientUrls).map(async([name, url])=>
+                [name, new Uint8Array(await (await fetch(url)).arrayBuffer())]))) : null;
+        const ownershipTickets = Object.fromEntries(Object.entries(request.steamTickets ?? {})
+            .map(([app, ticket])=>[app, fromBase64(ticket)]));
+        const win32 = request.win32?.steam ? { ...request.win32, steam: { ...request.win32.steam,
+            ...clientFiles ? { clientFiles } : {}, ownershipTickets } } : request.win32;
         const app = await createApp({
-            win32: network || request.win32 ? { ...request.win32, ...network ? { network } : {} }
+            win32: network || win32 ? { ...win32, ...network ? { network } : {} }
                 : undefined,
             executable: request.exe ? fromBase64(request.exe)
                 : new Uint8Array(await (await fetch(request.exeUrl)).arrayBuffer()),

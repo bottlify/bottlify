@@ -11,12 +11,17 @@
  * writes a bundle, in a browser or on a host; the engine reads bundles with
  * the same constants, so the two cannot drift apart. The zstd decoder is the
  * engine's own, for a page reading a bundle's blocks itself: a browser
- * decompresses deflate and not zstd. Reading and writing files on a host is
- * `@bottlify/core/bundle/node`.
+ * decompresses deflate and not zstd. A bundle whose bytes arrive out of order
+ * is written in place (`bundle-in-place.js`). Reading and writing files on a
+ * host is `@bottlify/core/bundle/node`.
  */
 
-export { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, openBundle, withManifest }
+export {
+    MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, DEFAULT_BLOCK_SIZE, openBundle,
+    withManifest,
+}
     from './layers/filesystem/internal/bundle/format.js';
 export { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 export { blockCacheName, bundleResidency, cachedBundle } from './layers/filesystem/internal/bundle/cache.js';
 export { decompressZstd } from './zstd.js';
+export { finishBundle, placeFiles } from './bundle-in-place.js';

@@ -375,6 +375,35 @@ test('a frame is presented for its window, which holds the screen when it covers
         }
     });
 
+test('the default framebuffer follows its window\'s client size, the viewport the program\'s',
+    ()=>{
+        // SDL makes its context current on the window at the size it was
+        // created, then makes the window full-screen at the display's size and
+        // sets the viewport to it: the frame stayed the first size, and the
+        // scene sat in a corner of it.
+        const drawable = { key: 'window:7', window: 7, width: 8, height: 6 };
+        const { table, presented, box } = library({ describeDrawable: ()=>drawable });
+        startDrawing(table);
+        assert.equal(table.wglSwapBuffers.handler([0x900d]), 1);
+        drawable.width = 4;
+        drawable.height = 2;
+        assert.equal(table.wglSwapBuffers.handler([0x900d]), 1,
+            'the frame drawn before the resize is shown at its own size');
+        table.glClearColor.handler([floatBits(1), floatBits(0), floatBits(0), floatBits(1)]);
+        table.glClear.handler([GL.COLOR_BUFFER_BIT]);
+        assert.equal(table.wglSwapBuffers.handler([0x900d]), 1);
+        assert.deepEqual(presented.map(frame=>[frame.width, frame.height]),
+            [[8, 6], [8, 6], [4, 2]]);
+        const last = presented[2];
+        assert.deepEqual([...box.bytes.subarray(last.buffer + (4 * 2 - 1) * 4,
+            last.buffer + 4 * 2 * 4)], [0, 0, 255, 255], 'cleared to its last pixel');
+        const viewport = 0x2000;
+        table.glGetIntegerv.handler([GL.VIEWPORT, viewport]);
+        const view = new DataView(box.bytes.buffer, box.bytes.byteOffset);
+        assert.deepEqual([0, 4, 8, 12].map(at=>view.getInt32(viewport + at, true)), [0, 0, 8, 6],
+            'the viewport is as the first attachment set it, until the program sets one');
+    });
+
 // --- the typed variants and the memory paths ---
 
 /**

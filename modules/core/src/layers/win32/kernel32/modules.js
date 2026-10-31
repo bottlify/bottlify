@@ -106,6 +106,8 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @property {(code: number) => void} setLastError
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {() => string} imagePath  The path the running program was loaded from.
+ * @property {(name: string) => string | null} [libraryHome]  The folder a library this
+ *           build synthesises is installed in when it is not the system folder.
  * @property {(name: string, flags?: number) => number | Promise<number>} [load]
  *           Brings a library in if it is not here yet, answering with its base
  *           or zero. Answers synchronously whenever it can -- see LoadLibraryA.
@@ -152,16 +154,17 @@ export function createModuleFunctions(host){
      * certain it put it.
      *
      * A library read off the volume knows its own path, and a library a game
-     * ships does not live in a system directory. A module we synthesised has no
-     * file at all, and the system directory is the honest answer for something
-     * that exists only because Windows would have had it there — a program
-     * comparing that path against the system directory is right to find them
-     * equal.
+     * ships does not live in a system directory. A module we synthesised is
+     * where Windows would have had it -- the system directory, or the folder it
+     * is installed in, as the Steam client is in Steam's -- and its image stands
+     * there as a file (`withSystemLibraries`): a program comparing that path
+     * against the system directory is right to find them equal.
      *
      * @param {ModuleRecord} module
      */
     const fileNameOf = module=>module.path
-        ?? `C:${SEPARATOR}Windows${SEPARATOR}System32${SEPARATOR}${module.name}`;
+        ?? `${host.libraryHome?.(module.name)
+            ?? `C:${SEPARATOR}Windows${SEPARATOR}System32`}${SEPARATOR}${module.name}`;
 
     /**
      * What both LoadLibrary entry points do.

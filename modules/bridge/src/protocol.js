@@ -23,9 +23,14 @@
  *   QR code; sent again when the code changes) and `scanned`.
  * - `cancel { target }` -> `{}`: stops the sign-in asked as `target`.
  * - `signOut` -> `{}`.
- * - `account` -> `{ steamId, accountName, apps }`, or null when nobody is
- *   signed in: the games the account's licences grant, by app id.
+ * - `account { fresh? }` -> `{ steamId, accountName, apps, licenses }`, or null
+ *   when nobody is signed in: every app the account's licences grant (games,
+ *   DLC, tools), by id, and how many licences there are. `fresh` logs on again and reads them
+ *   anew rather than as they were read a while ago.
  * - `depotKey { app, depot }` -> Uint8Array, the depot's AES key.
+ * - `appOwnershipTicket { app }` -> Uint8Array, the signed-in account's app
+ *   ownership ticket for the app as Steam signs it (EMsg 857/858), or null
+ *   signed out or for an app the account does not own.
  * - `manifestCode { app, depot, gid, branch? }` -> string; `gid` a decimal string.
  * - `contentServers` -> `[{ host, vhost, type }]`, those the page may fetch from.
  *
@@ -36,7 +41,7 @@
 export const TO = 'bottlify-bridge';
 export const FROM = 'bottlify-bridge';
 
-/** @typedef {'uint' | 'id' | 'u64' | 'string?'} ArgKind */
+/** @typedef {'uint' | 'id' | 'u64' | 'string?' | 'bool?'} ArgKind */
 
 /** Each op's arguments and what they must be. @type {Record<string, Record<string, ArgKind>>} */
 export const OPS = Object.freeze({
@@ -44,8 +49,9 @@ export const OPS = Object.freeze({
     signIn: {},
     cancel: { target: 'id' },
     signOut: {},
-    account: {},
+    account: { fresh: 'bool?' },
     depotKey: { app: 'uint', depot: 'uint' },
+    appOwnershipTicket: { app: 'uint' },
     manifestCode: { app: 'uint', depot: 'uint', gid: 'u64', branch: 'string?' },
     contentServers: {},
 });
@@ -58,6 +64,7 @@ const VALID = {
     u64: value=>typeof value === 'string' && /^[0-9]{1,20}$/.test(value)
         && BigInt(value) < 2n ** 64n,
     'string?': value=>value === undefined || (typeof value === 'string' && value.length <= 256),
+    'bool?': value=>value === undefined || typeof value === 'boolean',
 };
 
 /**

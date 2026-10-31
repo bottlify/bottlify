@@ -78,6 +78,7 @@ import {
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createLibcefFunctions } from './libcef/functions.js';
+import { createSteamStart } from './steamclient/steam-start.js';
 import { STEAM_PATH, announceSteamClient, createSteamclientFunctions, steamClientDll }
     from './steamclient/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
@@ -431,9 +432,29 @@ export function createWin32Module(){
             const system = config?.system ?? null;
             // Across a link the run's namespace is asked there, and the
             // objects here are stand-ins for the run's (`system-objects.js`).
-            const namedObjects = system?.objects
+            const runObjects = system?.objects
                 ? createRemoteNamedObjects({ objects: system.objects, kernel })
                 : createNamedObjects({ table: system?.namedObjects });
+            // The objects a running Steam client offers by name (its
+            // SteamStart lock and section), made when a process first opens
+            // one, as the client made them before the game ran.
+            const steamStart = config?.steam ? createSteamStart({ kernel,
+                owns: app=>(config.steam?.apps ?? []).includes(app >>> 0) }) : null;
+            const namedObjects = steamStart ? {
+                ...runObjects,
+                /** @param {string | null} name @param {string} kind */
+                existing(name, kind){
+                    const found = runObjects.existing(name, kind);
+                    const offered = found === null && name !== null
+                        ? steamStart.provide(name, kind) : null;
+                    if (offered)
+                    {
+                        // The client's own hold, which keeps the name for the run.
+                        runObjects.remember(name, kind, offered, false, ()=>{});
+                    }
+                    return offered ?? found;
+                },
+            } : runObjects;
             /** @type {import('./display/functions.js').DisplayHost} */
             const displayHost = {
                 readMemory: (address, length)=>readMemory(address, length),
@@ -724,7 +745,28 @@ export function createWin32Module(){
             });
             // Absent unless a bundle is mounted, in which case a read of a block
             // that is not here yet becomes a wait rather than a fault.
-            const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
+            /**
+             * The folder a library of this build is installed in when it is not
+             * the system folder: the Steam client's, in Steam's, while one runs.
+             *
+             * @param {string} name
+             */
+            const libraryHome = name=>(config?.steam
+                && name.toLowerCase() === steamClientDll(pointerSize).toLowerCase()
+                ? STEAM_PATH : null);
+            // The libraries this build stands in for, by file name.
+            const systemLibraryNames = ()=>(/** @type {string[]} */ (
+                modules.systemLibraries?.() ?? Object.keys(libraries)))
+                .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name));
+            // Every file call's volume, with the engine's libraries standing in
+            // their folders as files of their images (A41).
+            const volume = withSystemLibraries(
+                createVolume(filesystem, config?.fetchBlocks ?? null),
+                ()=>systemLibraryNames(),
+                { homeOf: libraryHome,
+                    imageOf: name=>(libraryHome(name) !== null
+                        ? config?.steam?.clientFiles?.[name] : null)
+                        ?? modules.systemImage?.(name) ?? null });
             // A child whose parent handed it files for its output and error
             // writes there, at the position it shares with the parent's handle,
             // rather than to the console.
@@ -2066,9 +2108,6 @@ export function createWin32Module(){
             // file calls and setupapi's alike. Every layer's, not only this
             // one's: DDRAW.dll stands there as much as KERNEL32.dll does, and
             // VERSION already answers for both.
-            const systemLibraryNames = ()=>(/** @type {string[]} */ (
-                modules.systemLibraries?.() ?? Object.keys(libraries)))
-                .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name));
             libraries = {
                 'KERNEL32.dll': {
                     ...createConsoleFunctions({
@@ -2388,6 +2427,12 @@ export function createWin32Module(){
                         sharedViews: system?.sharedViews
                             ? { shared: system.sharedViews, process: processId } : undefined,
                         metrics: mappings,
+                        /** @param {number} ms @param {() => void} tick */
+                        every: (ms, tick)=>{
+                            const timer = kernel.createTimer({ name: 'section watch' });
+                            kernel.armTimer(timer, kernel.clock.virtualTime() + ms, ms, tick);
+                            return ()=>kernel.cancelTimer(timer);
+                        },
                         /** @param {number} bytes @param {{ alignment?: number }} [options] */
                         allocate: (bytes, options)=>allocator.allocate(bytes, options),
                         /** @param {number} address @param {number} bytes */
@@ -2596,6 +2641,7 @@ export function createWin32Module(){
                         byBase: base=>modules.byBase(base),
                         setLastError: setError,
                         imagePath: ()=>modules.imagePath(),
+                        libraryHome,
                         list: ()=>modules.list?.() ?? [],
                         // Reading a library off the volume belongs to whoever
                         // assembled the process, so it is passed straight through.
@@ -3313,7 +3359,7 @@ export function createWin32Module(){
                     readWideString,
                     setLastError: setError,
                     setLastErrorFor: setErrorOn,
-                    files: withSystemLibraries(volume, systemLibraryNames),
+                    files: volume,
                     /** @param {string} path */
                     fullPath: path=>filesystem.resolve(path).path,
                     /** @param {number} bytes */

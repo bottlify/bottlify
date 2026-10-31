@@ -28,10 +28,14 @@ function fakeSteam(){
             asked.push(`logOn ${session.accountName} ${session.refreshToken === TOKEN}`);
             return { steamId: 76561197960265729n, licenses: [{ package_id: 1 }] };
         },
-        library: async()=>[{ appid: 400 }, { appid: 220 }],
+        ownedApps: async()=>[220, 400],
         depotKey: async(/** @type {any} */ _c, /** @type {number} */ app, /** @type {number} */ depot)=>{
             asked.push(`key ${app} ${depot}`);
             return new Uint8Array(32);
+        },
+        appOwnershipTicket: async(/** @type {any} */ _c, /** @type {number} */ app)=>{
+            asked.push(`ticket ${app}`);
+            return app === 400 ? Uint8Array.of(4, 0, 0, 0) : null;
         },
         manifestRequestCode: async(/** @type {any} */ _c, /** @type {number} */ _app,
             /** @type {number} */ _depot, /** @type {bigint} */ gid)=>gid + 1n,
@@ -65,7 +69,7 @@ function bridgeOver(platforms = { steam: true }){
 }
 
 test('a sign-in streams its code, keeps the token and answers only the account name', async()=>{
-    const { kept, ask, events } = bridgeOver();
+    const { steam, kept, ask, events } = bridgeOver();
     const answer = await ask('signIn');
     assert.deepEqual(answer, { accountName: 'someone' });
     assert.deepEqual(events, [
@@ -75,7 +79,11 @@ test('a sign-in streams its code, keeps the token and answers only the account n
     assert.equal(kept.session.refreshToken, TOKEN);
     const account = await ask('account');
     assert.deepEqual(account,
-        { steamId: '76561197960265729', accountName: 'someone', apps: [220, 400] });
+        { steamId: '76561197960265729', accountName: 'someone', apps: [220, 400], licenses: 1 });
+    // Fresh logs on again rather than answering from the logon held.
+    await ask('account');
+    await ask('account', { fresh: true });
+    assert.equal(steam.asked.filter((/** @type {string} */ one)=>one.startsWith('logOn')).length, 2);
     // Nothing the page was given carries the token.
     assert.doesNotMatch(JSON.stringify([answer, events, account]), /secret-signature|eyJ/);
 });
@@ -111,6 +119,16 @@ test('a session another page kept is what the next op logs on with', async()=>{
     await ask('depotKey', { app: 1, depot: 2 });
     assert.deepEqual(steam.asked, ['anonymous', 'key 1 2', 'logOn elsewhere true', 'key 1 2',
         'anonymous', 'key 1 2']);
+});
+
+test('an ownership ticket is the signed-in account\'s, for an app it owns only', async()=>{
+    const { steam, ask } = bridgeOver();
+    assert.equal(await ask('appOwnershipTicket', { app: 400 }), null, 'signed out: none');
+    await ask('signIn');
+    assert.deepEqual(await ask('appOwnershipTicket', { app: 400 }), Uint8Array.of(4, 0, 0, 0));
+    assert.equal(await ask('appOwnershipTicket', { app: 480 }), null, 'not owned: none');
+    assert.deepEqual(steam.asked.filter(line=>line.startsWith('ticket')),
+        ['ticket 400', 'ticket 480']);
 });
 
 test('a sign-in is cancelled by its id', async()=>{

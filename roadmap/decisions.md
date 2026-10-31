@@ -653,8 +653,9 @@ launcher already has stays its fallback. *2026-10-30.*
 prerequisite installers among them.** Steam downloads the depots an app names from other apps
 (Steamworks Common Redistributables' Visual C++ and DirectX) and, on the first start, runs its
 install scripts' programs silently. The download (`tools/steam-install.mjs`) takes those depots
-too -- an anonymous logon opens them -- and `tools/redist.mjs` does what the programs would at
-install time instead: it unpacks each one with the engine's cabinet and installer-database
+too -- an anonymous logon opens them -- and `@bottlify/core/steam`'s `redist.js` (run over a
+directory by `tools/redist.mjs`, over the bottle a page writes by an install in the browser) does
+what the programs would at install time instead: it unpacks each one with the engine's cabinet and installer-database
 readers and applies the packages inside by their tables -- the files of each component whose
 condition holds into the bottle's system folders, its registry rows into the bottle's registry
 -- rather than running a Burn bootstrapper and Windows Installer in the guest. A program with
@@ -1180,6 +1181,16 @@ that the program writes; read, it is still nothing but the engine's. What a setu
 system folder is never in its way, and a program that loads the name still gets the engine's own
 library (the loader's `ours` rule). A setup that only opens one to look leaves an empty file there,
 which is no library the loader takes. *2026-10-15.*
+
+**A41 revisited again: a library standing in its folder reads as its image, and stands where it
+is installed.** A DRM wrapper around a 64-bit Steam game (SteamStub) loads the Steam client from
+the folder the registry names, asks GetModuleFileName where it is and opens that file to read it;
+the module said `system32\steamclient64.dll` and the open was refused, and the game stopped at
+"Application load error". A library this build implements now stands in the folder it is
+installed in -- the system folder, or Steam's for the Steam client while one runs -- and
+GetModuleFileName answers that folder; opened to be read, the file holds the library's image as
+it lies in the process's memory, its size what GetFileSize answers. Opened to be written it is
+still the setup's file, as above. *2026-10-31.*
 
 **DirectX's setup is the engine's: a title's `dsetup.dll` and `DXSETUP.exe` answer that DirectX is
 in place.** DirectX 9.0c is part of XP, and on XP SP3 its redistributable finds every file of it in

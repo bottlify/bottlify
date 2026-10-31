@@ -187,6 +187,7 @@ export function createAudioModule(){
                 signal: config?.signal,
                 divergence: config?.divergence,
                 mtaUsage: com?.mtaUsage,
+                pointerSize: config?.pointerSize === 8 ? 8 : 4,
                 /**
                  * Runs a guest routine and answers with what it returned. The
                  * bridge parks the caller while it does, which is what makes a

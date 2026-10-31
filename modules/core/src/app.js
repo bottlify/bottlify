@@ -35,6 +35,7 @@ import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
+import { installedHeaders } from './layers/loader/internal/synth.js';
 import { createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
 import { SHARED_USER_DATA, createSharedUserData } from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
@@ -4544,6 +4545,8 @@ async function buildApp(options){
             // cross-origin isolated) only this thread can ever read the
             // output, and the engine mixer is the only backend built for that.
             shared: options.audio?.shared ?? (typeof SharedArrayBuffer === 'function'),
+            // A 64-bit process's DirectSound structures and out pointers.
+            ...long ? { pointerSize: 8 } : {},
             // Whose call a sound provider is answering, read before it awaits
             // anything: a callback into the guest after an await has to name
             // the thread whose call it continues.
@@ -5207,6 +5210,19 @@ async function buildApp(options){
                  * answers for it: what a setup finds in the system folder.
                  */
                 systemLibraries: ()=>Object.keys(allLibraries),
+                /**
+                 * A synthesised library's image, which its file holds where it
+                 * stands in its folder (`withSystemLibraries`): read out of
+                 * the guest's memory where it lies whole, rather than a copy
+                 * of every library kept for a file few programs read.
+                 *
+                 * @param {string} name
+                 */
+                systemImage: name=>{
+                    const module = byName.get(moduleKeyOf(name));
+                    return module && !module.file
+                        ? memory.readBytes(module.base, module.size) : null;
+                },
             },
             commandLine: options.commandLine,
             // Every child a program asks for, while the stack that asked is
@@ -5583,10 +5599,16 @@ async function buildApp(options){
         // A table with a DllMain is a module with an entry point, run when a
         // program first loads it -- which is how a library the program did not
         // import announces itself to the one that asked for it.
+        // The Steam client's own file, where the embedder fetched Valve's: the
+        // module carries its headers, as the file stands in Steam's folder
+        // (the win32 layer's volume).
+        const installed = options.win32?.steam?.clientFiles?.[name];
         const placed = loader.synthesise({
             name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined, long,
+            headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
         });
         systemModulesEnd = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+
 
         // An export's address is its trampoline inside the module, and that is
         // what both the import table and GetProcAddress hand out -- so a program

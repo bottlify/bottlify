@@ -312,13 +312,21 @@ export function createLoaderModule(){
                  * @param {import('./internal/synth.js').SynthExport[]} options.exports
                  * @param {string} [options.entryPoint]  The export that is its DllMain.
                  * @param {boolean} [options.long]  For an x86-64 process.
+                 * @param {Uint8Array} [options.headers]  The real library's own headers
+                 *        (`installedHeaders`), laid over the synthesised ones.
                  * @returns {{ base: number, size: number, entryPoint: number,
                  *   addressOf: (name: string) => number | null,
                  *   ordinalOf: (name: string) => number | null }}
                  */
-                synthesise({ name, base, exports, entryPoint, long }){
+                synthesise({ name, base, exports, entryPoint, long, headers }){
                     const module = synthesiseModule({ name, base, exports, entryPoint, long });
                     const codeSize = module.dataRva || module.size;
+                    // The real library's own headers, where its file is
+                    // installed (`installedHeaders`): within the headers' page.
+                    if (headers)
+                    {
+                        module.bytes.set(headers, 0);
+                    }
 
                     memory.register({
                         name,
