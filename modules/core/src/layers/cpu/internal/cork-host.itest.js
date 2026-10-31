@@ -5,8 +5,8 @@
  */
 
 /**
- * `engine: 'cork'` runs with nothing of the emulator loaded: the cork host's
- * own memory and the engine loaded by URL. Step 5.2 wires the interpreter
+ * The cork host runs with nothing of the emulator loaded: its own memory and
+ * the engine loaded by URL. Step 5.2 wires the interpreter
  * tier in, so an address the translator has no entry for runs on cork's own
  * decoder and evaluator; an instruction the evaluator has no model for is an
  * invalid-opcode fault, and a fault becomes the host's fault record.

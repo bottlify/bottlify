@@ -1988,7 +1988,7 @@ test('an iPhone translates without wasm tail calls; phones and Safari run on one
         { crossTailCalls: false, dispatch: true, callDepth: 64, gatherAfter: 0, worker: false });
     assert.equal(withoutFaultingTailCalls({ cork: { config: { crossTailCalls: true } } }, true)
         .cork.config.crossTailCalls, true, 'the caller\'s own setting wins');
-    const options = { engine: 'cork' };
+    const options = {};
     assert.equal(withoutFaultingTailCalls(options, false), options);
 
     const browser = { node: false, processors: 8, shareable: true };

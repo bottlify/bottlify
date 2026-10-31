@@ -45,7 +45,7 @@ test('a 64-bit program draws with Direct3D 9: a clear and two triangles, present
         gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler',
             descriptor });
         const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            commandLine: '"C:\\d3d9_64.exe"', engine: 'cork',
+            commandLine: '"C:\\d3d9_64.exe"',
             device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
                 canvas: gpu.canvas,
                 adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' } } });

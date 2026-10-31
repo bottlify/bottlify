@@ -27,7 +27,7 @@ const FIXTURE = new URL('../test/fixtures/win64.exe', import.meta.url);
 test('an x86-64 program finds its blocks, thread-local storage and answers at 64 bits',
     { timeout: 120000 }, async t=>{
         const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            commandLine: '"C:\\win64.exe" one two', engine: 'cork' });
+            commandLine: '"C:\\win64.exe" one two' });
         t.after(()=>app.dispose());
         /** @type {string[]} */
         const output = [];

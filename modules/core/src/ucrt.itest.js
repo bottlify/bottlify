@@ -72,7 +72,7 @@ test('a program of the universal runtime prints through its API sets, bound to u
                 0xff, 0x15, ...u32(iat('exit')),
             ],
         });
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         t.after(()=>app.dispose());
         let printed = '';
         app.on('output', (/** @type {{ text: string }} */ { text })=>{

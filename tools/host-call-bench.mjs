@@ -303,9 +303,7 @@ async function engineOf(root){
         pathToFileURL(join(root, 'modules', 'core', 'src', 'app.js')).href);
     /** @param {Uint8Array} executable @returns {Promise<{ ms: number, calls: number }>} */
     return async executable=>{
-        // Named rather than left to the default: `--root` and `--baseline` may be
-        // checkouts whose default is another engine.
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         const started = performance.now();
         const code = await app.run({ timeoutMs: 600000, maxTurns: 1e9 });
         const ms = performance.now() - started;

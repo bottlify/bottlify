@@ -570,7 +570,7 @@ test('code the host rewrites between two calls of it runs as written; a host wri
 test('newContext under cork positions eip and esp', async()=>{
     const { cpuModule } = await import('../module.js');
     const api = await cpuModule.create({
-        engine: 'cork', engineUrl: ENGINE_URL, memorySize: MEMORY,
+        engineUrl: ENGINE_URL, memorySize: MEMORY,
     }, /** @type {any} */ ({ requireApi: ()=>({}), provide: ()=>{} }));
     try
     {

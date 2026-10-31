@@ -20,7 +20,7 @@ const FIXTURE = new URL('../test/fixtures/crt64.exe', import.meta.url);
 test('an x86-64 program starts on msvcrt and reads 64-bit structures', { timeout: 120000 },
     async t=>{
         const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            commandLine: '"C:\\crt64.exe" one two', engine: 'cork' });
+            commandLine: '"C:\\crt64.exe" one two' });
         t.after(()=>app.dispose());
         /** @type {string[]} */
         const output = [];

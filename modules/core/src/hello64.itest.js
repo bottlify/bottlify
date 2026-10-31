@@ -21,8 +21,7 @@ import { createApp } from './app.js';
 const FIXTURE = new URL('../test/fixtures/hello64.exe', import.meta.url);
 
 test('an x86-64 console program prints its line and exits with 0', { timeout: 120000 }, async t=>{
-    const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-        engine: 'cork' });
+    const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)) });
     t.after(()=>app.dispose());
     /** @type {string[]} */
     const output = [];
@@ -35,7 +34,7 @@ test('an x86-64 console program prints its line and exits with 0', { timeout: 12
 test('fed every slice, as a program that presents frames is, a 64-bit process\'s regions are'
     + ' formed by the runtime the 32-bit code runs on', { timeout: 120000 }, async t=>{
     const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-        engine: 'cork', cork: { config: { feed: 'slice' } } });
+        cork: { config: { feed: 'slice' } } });
     t.after(()=>app.dispose());
     /** @type {string[]} */
     const output = [];

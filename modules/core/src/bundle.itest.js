@@ -473,7 +473,6 @@ test('a process started from a bundle mounts the run\'s bundle rather than openi
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             bundle: { prefix: '', fetch: readCounting },
         });
         t.after(()=>app.dispose());

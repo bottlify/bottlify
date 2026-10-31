@@ -97,7 +97,6 @@ test('a word one process writes into a shared section the other reads, and back'
             executable: parent(),
             imagePath: 'C:\\App\\parent.exe',
             files: [{ path: CHILD, bytes: child() }],
-            engine: 'cork',
         });
         t.after(()=>app.dispose());
         /** @type {number[]} */

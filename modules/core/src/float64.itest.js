@@ -21,7 +21,7 @@ const FIXTURE = new URL('../test/fixtures/float64.exe', import.meta.url);
 test('a 64-bit program passes and is answered floats and doubles in XMM registers',
     { timeout: 120000 }, async t=>{
         const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            commandLine: '"C:\\float64.exe"', engine: 'cork' });
+            commandLine: '"C:\\float64.exe"' });
         t.after(()=>app.dispose());
         /** @type {string[]} */
         const output = [];
