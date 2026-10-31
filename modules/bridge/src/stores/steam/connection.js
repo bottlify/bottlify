@@ -269,30 +269,34 @@ export function connectCm({ endpoint, socket, timeout = 30000 }){
             return new Promise((resolve, reject)=>{
                 /** @type {Received[]} */
                 const answers = [];
-                const timer = setTimeout(()=>{
+                // The wait is for the next part, not the whole: a large answer
+                // comes in parts, each one a sign the server is still at it.
+                const wait = ()=>setTimeout(()=>{
                     jobs.delete(job);
                     reject(new Error(`steam: no answer to message ${emsg} in ${timeout} ms`));
                 }, timeout);
-                jobs.set(job, {
-                    take: message=>{
-                        answers.push(message);
-                        const last = isLast(message);
-                        if (last)
-                        {
-                            resolve(answers);
-                        }
-                        return last;
-                    },
-                    reject,
-                    timer,
-                });
+                const pending = { take: (/** @type {Received} */ message)=>{
+                    answers.push(message);
+                    const last = isLast(message);
+                    clearTimeout(pending.timer);
+                    if (last)
+                    {
+                        resolve(answers);
+                    }
+                    else
+                    {
+                        pending.timer = wait();
+                    }
+                    return last;
+                }, reject, timer: wait() };
+                jobs.set(job, pending);
                 try
                 {
                     connection.send(emsg, schema, body, { ...header, jobid_source: job });
                 }
                 catch (e){
                     jobs.delete(job);
-                    clearTimeout(timer);
+                    clearTimeout(pending.timer);
                     reject(e);
                 }
             });
