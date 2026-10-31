@@ -2591,6 +2591,13 @@ function readImageNow(filesystem, path){
 }
 
 /**
+ * The most a host-side whole-file read asks of the volume at once: a quarter of
+ * the heap's pool for fetched blocks, so one piece's blocks and the read-ahead
+ * beside them are all still held when the read looks again.
+ */
+export const WHOLE_READ_BYTES = HEAP_POOLS.blockCache / 4;
+
+/**
  * Reads a whole file off the volume, waiting for whatever is not here yet.
  *
  * A read of a block that has not been fetched reports which blocks it needs
@@ -2598,12 +2605,19 @@ function readImageNow(filesystem, path){
  * a host-side reader has to do what the guest's would: fetch, and look again.
  * This runs before the first guest instruction, so it may simply wait.
  *
+ * A piece at a time (`WHOLE_READ_BYTES`), not the whole file in one read: where
+ * the fetched blocks are held in the heap (no store, or one that refused them),
+ * the cache keeps a bounded pool, and a file larger than it -- a program image
+ * of a hundred megabytes -- was fetched, let go down to the pool and missed
+ * again, for ever.
+ *
  * @param {any} filesystem
  * @param {any} blocks
  * @param {string} path
+ * @param {number} [piece]  the most one read asks for
  * @returns {Promise<Uint8Array | null>}
  */
-async function readWholeFile(filesystem, blocks, path){
+export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ_BYTES){
     let handle;
     try
     {
@@ -2623,7 +2637,7 @@ async function readWholeFile(filesystem, blocks, path){
             let chunk;
             try
             {
-                chunk = filesystem.read(handle, size - at);
+                chunk = filesystem.read(handle, Math.min(size - at, piece));
             }
             catch (e){
                 const miss = /** @type {any} */ (e);
@@ -4571,46 +4585,10 @@ async function buildApp(options){
             // loader knows the file's name and not where the volume keeps it,
             // and the layer that answers for the volume is below audio, so
             // the reader is handed down as a thunk the same way the mixer is
-            // handed to win32.
-            readFile: async(/** @type {string} */ path)=>{
-                /** @type {any} */
-                let handle;
-                try
-                {
-                    handle = core.api('filesystem').open(path, { create: false });
-                }
-                catch {
-                    return null;
-                }
-                if (!handle)
-                {
-                    return null;
-                }
-                const filesystem = core.api('filesystem');
-                try
-                {
-                    try
-                    {
-                        return filesystem.read(handle, filesystem.size(handle));
-                    }
-                    catch (e){
-                        // A block of the bundle not fetched yet: fetched, then
-                        // read once more, as the volume's own reader does.
-                        const miss = /** @type {any} */ (e);
-                        if (miss?.code !== 'BLOCK_MISS' || !fetchBundleBlocks)
-                        {
-                            throw miss;
-                        }
-                        await fetchBundleBlocks(miss.blocks);
-                        filesystem.seek(handle, 0);
-                        return filesystem.read(handle, filesystem.size(handle));
-                    }
-                }
-                finally
-                {
-                    core.api('filesystem').close(handle);
-                }
-            },
+            // handed to win32. It waits for the bundle's blocks as a program's
+            // image does.
+            readFile: (/** @type {string} */ path)=>readWholeFile(core.api('filesystem'),
+                fetchBundleBlocks ? { fetch: fetchBundleBlocks } : null, path),
             // Whether anything is reading the other end of the ring. Told from
             // outside because only the assembling caller knows whether it
             // opened a device, and it decides whether a program's play cursor
