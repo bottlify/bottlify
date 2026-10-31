@@ -257,8 +257,9 @@ const hashText = (hash, text)=>{
  *     chains against, each root as DER bytes or base64; absent, it holds
  *     Microsoft's "Microsoft Root Authority" alone, and an empty list trusts
  *     nothing. `handleWords: false` leaves out the table of handle words that
- *     WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent answer from in
- *     the guest, so every such call is the host's: the second path of their gates.
+ *     WaitForSingleObject, ReleaseMutex, ReleaseSemaphore, SetEvent and ResetEvent
+ *     answer from in the guest, so every such call is the host's: the second path
+ *     of their gates.
  *     `steam` is a signed-in Steam account (its Steam ID, name and the app ids
  *     its licences grant, as the embedder established with the person's own
  *     sign-in): the run then has a Steam client running, which a game's
@@ -8249,8 +8250,9 @@ async function buildApp(options){
              */
             checkDraws: on=>core.api('graphics').checkDraws?.(on === true) ?? false,
             /**
-             * Whether the guest answers waits on events and mutexes, SetEvent,
-             * ResetEvent and ReleaseMutex by itself (`win32.handleWords`),
+             * Whether the guest answers waits on events, mutexes and semaphores,
+             * SetEvent, ResetEvent, ReleaseMutex and ReleaseSemaphore by itself
+             * (`win32.handleWords`),
              * switched as the program runs: off, every one crosses into the
              * host. Answers whether the guest answers them.
              *
