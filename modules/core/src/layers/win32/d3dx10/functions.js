@@ -235,8 +235,8 @@ export function createD3dx10Functions(host, version){
                 continue;
             }
             const last = out[out.length - 1];
-            out.push({ width: Math.max(1, last.width >> 1), height: Math.max(1, last.height >> 1),
-                data: halve(last.data, last.width, last.height) });
+            const half = halve(last.data, last.width, last.height);
+            out.push({ width: half.width, height: half.height, data: half.bgra });
         }
         return out;
     };

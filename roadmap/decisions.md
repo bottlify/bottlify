@@ -723,6 +723,16 @@ leaf of 5, so no brand and no long mode): a program named the machine by its sig
 and RDRAND still execute; they are not announced, since no processor of the class had them. When
 the engine executes SSSE3 and SSE4, the class moves with it. *2026-10-31.*
 
+**A74. A Direct3D 10 dynamic buffer's bytes are undefined after a WRITE_DISCARD map.** The
+documentation says so, and a driver hands out renamed memory that holds whatever it held. The
+guest's map (`seam/d3d10-inguest.js`, `BufferMap`) may move the buffer onto another of its
+storages in guest memory, which holds what it held the last time the buffer was on it. The
+pages the program writes travel whole from that storage, and the rest of the GPU copy is what it
+was, as a DISCARD's rename carries it. A program that writes part of a buffer after a DISCARD and draws
+from the rest reads what Windows would give it: something, not what it wrote before. A buffer is
+given another storage only where the engine watches the program's writes, so an unmap sends the
+pages written and not the storage. *2026-10-31.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

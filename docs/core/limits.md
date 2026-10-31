@@ -156,8 +156,11 @@ differently raises a `divergence` event naming the API.
   windowed Direct3D device's back buffer is placed at the screen's corner rather than in its
   window, and the windows of a process that has presented nothing show what is under them.
 - No Direct3D 11 or 12.
-- Direct3D 10 and Vulkan draw on the engine thread; Direct3D 7, 8, 9 and OpenGL in the graphics
-  worker.
+- Vulkan draws on the engine thread; Direct3D 7, 8, 9, 10 and OpenGL in the graphics worker.
+- Direct3D 10's command ring is i386 code: a 64-bit process traps every device call.
+- `D3DX10CompileFromMemory` has no shader model 4 compiler: it answers `E_FAIL` with an error
+  blob saying so. A program that ships its shaders compiled asks only for what its cache lacks.
+  `D3DX10SaveTextureToFile` answers `E_NOTIMPL`.
 - OpenGL keeps a texture's data only where it draws, in the graphics worker, and lets a level's
   texels go once the device holds them (a compressed level keeps its blocks). `glGetTexImage`
   reads black, as `glReadPixels` on a device does, and says so as a divergence.

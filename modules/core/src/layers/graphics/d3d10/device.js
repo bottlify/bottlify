@@ -50,6 +50,7 @@ import {
     multisampleQualityLevels as webgpuMultisampleQualityLevels, textureStorage,
 } from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
+import { D3D10_COMMANDS } from './commands.js';
 import { createRenderer } from './render.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
@@ -130,6 +131,8 @@ const PREDICATE_QUERIES = new Set([
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
  *     Told of every frame a swap chain's present queues; what it answers is
  *     what the present waits on before it answers the program.
+ * @property {import('./render.js').GuestStorage} [guest]  Guest memory for the bytes of
+ *     the resources a program maps, which a map then hands out as they are.
  */
 
 /**
@@ -445,6 +448,7 @@ export function createDevice(options = {}){
         divergence: options.divergence,
         compressedTextures: textureOptions.compressed,
         depthClipControl: options.depthClipControl ?? false,
+        guest: options.guest,
     });
     const statistics = createDrawStatistics();
     /** @type {import('./resources.js').ResourceStorage} */
@@ -454,6 +458,10 @@ export function createDevice(options = {}){
             renderer.unmap(resource, subresource, discard, noOverwrite),
         pending: resource=>renderer.pendingReadback(resource),
         readBack: resource=>renderer.readBack(resource),
+        guest: resource=>renderer.guestOf(resource),
+        addStorage: resource=>renderer.addStorage(resource),
+        unmapStorage: (resource, base, discard, noOverwrite)=>
+            renderer.unmapStorage(resource, base, discard, noOverwrite),
     };
 
     /**
@@ -557,7 +565,9 @@ export function createDevice(options = {}){
             releaseDevice,
             device: deviceHandle,
             storage,
+            onLastRef: ()=>renderer.resourceReleased(made),
         });
+        const made = out.resource;
         renderer.resourceCreated(out.resource, data);
         return S_OK;
     };
@@ -856,7 +866,9 @@ export function createDevice(options = {}){
                 releaseDevice,
                 device: deviceHandle,
                 storage,
+                onLastRef: ()=>renderer.resourceReleased(made),
             });
+            const made = out.resource;
             renderer.resourceCreated(out.resource, data);
             return S_OK;
         },
@@ -1906,6 +1918,19 @@ export function createDevice(options = {}){
          */
         diverge(detail){
             diverge(detail);
+        },
+
+        /**
+         * A run of the calls the program's routines wrote into the device's
+         * command ring (`seam/d3d10-inguest.js`), made in order: one call
+         * here, which a recording sends as one and its twin makes the same.
+         *
+         * @param {Uint8Array} records  whole records (`d3d8/commands.js`)
+         * @param {readonly any[]} objects  what their object arguments name, in order
+         * @returns {number} how many calls were made
+         */
+        commands(records, objects){
+            return D3D10_COMMANDS.runCommands(this, records, objects, ()=>{});
         },
 
         /** @returns {Promise<void>} settled when every presented frame has been submitted */

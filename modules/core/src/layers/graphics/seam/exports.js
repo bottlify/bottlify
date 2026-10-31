@@ -350,9 +350,14 @@ export function createGraphicsLibraries(
     }));
     const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
         publisher, memory, allocate, free, screen, resolution, gdi,
+        // The device's command ring, with guest code: none in a 64-bit
+        // process, whose calls all trap.
+        ringAllocate: guestAllocate,
+        allocateCode: guestAllocateCode, traps: new Set(guestTraps), ringBytes,
         identity: ()=>graphics.adapter?.() ?? null,
         videoMemory: ()=>graphics.videoMemory?.() ?? null,
-        deviceOptions: ()=>graphics.create('d3d10'),
+        root: (/** @type {any} */ factoryOptions)=>graphics.create('d3d10', { factoryOptions }),
+        divergence,
         // A back buffer asked for at zero takes the window's client area; the
         // display stands in only for a window this layer cannot measure.
         factoryOptions: { windowClientSize: window=>windowClientSize?.(window) ?? screen() },

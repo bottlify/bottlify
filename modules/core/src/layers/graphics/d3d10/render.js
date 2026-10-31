@@ -46,6 +46,7 @@ import {
     BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, STAGE, linkProgram, translateShader,
 } from './wgsl.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
+import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
 import { RESOURCE_DIMENSION } from './sm4.js';
 
 /**
@@ -59,6 +60,23 @@ import { RESOURCE_DIMENSION } from './sm4.js';
  *                                          without it they are decoded on the processor.
  * @property {boolean} [depthClipControl]  Whether the GPU device was made with
  *     depth-clip-control, which leaving depth unclipped needs.
+ * @property {GuestStorage} [guest]  Where a resource the program maps keeps the bytes a
+ *     map hands out: guest memory, so a map is an address and no copy.
+ */
+
+/**
+ * Guest memory for the bytes of the resources a program maps, and how they
+ * are read and written: the program's own memory, or the copy of it a
+ * played device keeps of what it was sent (`remote/replay.js`).
+ *
+ * @typedef {Object} GuestStorage
+ * @property {(bytes: number) => number} allocate  an address, 0 when there is no room
+ * @property {(address: number) => void} [free]
+ * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, length: number) => ({ take: (address: number,
+ *     length: number) => number[] } | null)} [watchWrites]
+ *     the pages of a range written since the last look, where the engine says
  */
 
 /** @type {Readonly<Record<number, string>>} */
@@ -539,6 +557,103 @@ export function createRenderer(services){
 
     let nextBacking = 1;
 
+    /**
+     * The guest memory a resource the program may map keeps the bytes a map
+     * hands out in -- a dynamic or staging resource with CPU access -- and the
+     * watch over the program's writes there; null for any other, or where
+     * there is no guest memory to have.
+     *
+     * A dynamic buffer may be given more storages (`addStorage`), which the
+     * guest's map moves it between for a DISCARD while the ring holds the
+     * unmap of the one before (`seam/d3d10-inguest.js`): `base` and `tracked`
+     * are the storage it is on.
+     *
+     * @param {any} desc @param {number} length
+     * @returns {{ base: number, length: number, tracked: any,
+     *     storages: { base: number, tracked: any }[] } | null}
+     */
+    const guestStorageOf = (desc, length)=>{
+        if (!services.guest || (desc.CPUAccessFlags ?? 0) === 0 || length === 0
+            || (desc.Usage !== D3D10_USAGE.DYNAMIC && desc.Usage !== D3D10_USAGE.STAGING))
+        {
+            return null;
+        }
+        const storage = storageOf(length);
+        if (!storage)
+        {
+            return null;
+        }
+        services.guest.writeMemory(storage.base, new Uint8Array(length));
+        return { ...storage, length, storages: [storage] };
+    };
+
+    /**
+     * A span of guest memory for a resource's bytes, and the watch over the
+     * program's writes there.
+     *
+     * @param {number} length
+     * @returns {{ base: number, tracked: any } | null}
+     */
+    const storageOf = length=>{
+        const guest = /** @type {GuestStorage} */ (services.guest);
+        const base = guest.allocate(length);
+        if (!base)
+        {
+            return null;
+        }
+        const watch = guest.watchWrites?.(base, length) ?? null;
+        return { base, tracked: watch ? { watch, dirty: pageMarksOf(base, length) } : null };
+    };
+
+    /**
+     * What a map of a guest-backed subresource hands out: its address, after
+     * the host's newer bytes, if any, are written there.
+     *
+     * @param {any} backing @param {number} at  the subresource's offset in the resource
+     */
+    const guestMapped = (backing, at)=>{
+        const guest = /** @type {GuestStorage} */ (services.guest);
+        if (backing.hostNewer)
+        {
+            backing.hostNewer = false;
+            guest.writeMemory(backing.guest.base, backing.bytes);
+            // What was just written is the host's, not the program's.
+            if (backing.guest.tracked)
+            {
+                writtenSpans(backing.guest.tracked, backing.guest.base, backing.guest.length, 0,
+                    backing.guest.length);
+            }
+        }
+        return backing.guest.base + at;
+    };
+
+    /**
+     * The bytes the program wrote into a guest-backed subresource taken into
+     * the host's: the pages written since the last look where the engine
+     * watches, all of the subresource otherwise.
+     *
+     * @param {any} backing
+     * @param {number} at @param {number} length  the subresource, in the resource
+     * @returns {{ start: number, end: number } | null}  what changed, in the resource
+     */
+    const guestWritten = (backing, at, length)=>{
+        const guest = /** @type {GuestStorage} */ (services.guest);
+        const { base, tracked } = backing.guest;
+        const spans = tracked
+            ? writtenSpans(tracked, base, backing.guest.length, at, at + length)
+            : [at, at + length];
+        if (spans.length === 0)
+        {
+            return null;
+        }
+        for (let index = 0; index < spans.length; index += 2)
+        {
+            const span = spans[index + 1] - spans[index];
+            backing.bytes.set(guest.readMemory(base + spans[index], span), spans[index]);
+        }
+        return { start: spans[0], end: spans[spans.length - 1] };
+    };
+
     /** @param {any} resource */
     const backingOf = resource=>{
         let backing = backings.get(resource);
@@ -552,6 +667,10 @@ export function createRenderer(services){
         backing = {
             id: nextBacking++, layout, bytes, gpu: null, texture: null, surface: null,
             sampleCount: desc.SampleDesc ? desc.SampleDesc.Count : 1,
+            guest: guestStorageOf(desc, bytes.length),
+            // Whether the host bytes hold what the guest's do not: written here
+            // since the guest's were, so a map writes them there first.
+            hostNewer: false,
         };
         if (!backend)
         {
@@ -724,17 +843,34 @@ export function createRenderer(services){
      * program wrote -- the rest of a level the GPU drew into is newer on the
      * GPU than on the host, and must not be overwritten with it.
      *
+     * A buffer sends the range given, or the box's, or all of it.
+     *
      * @param {any} resource
      * @param {number} subresource
      * @param {number} [flags]  A LockFlags value for a buffer.
      * @param {Box | null} [box]
+     * @param {{ start: number, end: number } | null} [range]  a buffer's bytes that changed
+     * @param {boolean} [fromGuest]  the bytes were just taken from the guest's: the two agree
      */
-    const upload = (resource, subresource, flags = LockFlags.NONE, box = null)=>{
+    const upload = (resource, subresource, flags = LockFlags.NONE, box = null,
+        range = /** @type {{ start: number, end: number } | null} */ (null), fromGuest = false)=>
+    {
         const backing = backingOf(resource);
+        if (backing.guest && !fromGuest)
+        {
+            backing.hostNewer = true;
+        }
         if (backing.gpu)
         {
-            const lock = backing.gpu.lock(0, backing.bytes.length, flags);
-            lock.data.set(backing.bytes);
+            const start = range ? range.start : box ? Math.max(0, box.left) : 0;
+            const end = range ? range.end
+                : box ? Math.min(backing.bytes.length, box.right) : backing.bytes.length;
+            if (end <= start)
+            {
+                return;
+            }
+            const lock = backing.gpu.lock(start, end - start, flags);
+            lock.data.set(backing.bytes.subarray(start, end));
             backing.gpu.unlock(lock);
             return;
         }
@@ -1766,6 +1902,10 @@ export function createRenderer(services){
                     diverge('a read back that did not arrive leaves the staging resource as it'
                         + ' was');
                 }
+                if (to.guest)
+                {
+                    to.hostNewer = true;
+                }
                 if (to.readback === waiting)
                 {
                     to.readback = null;
@@ -1982,6 +2122,36 @@ export function createRenderer(services){
 
     return {
         /**
+         * The program's last reference to a resource is gone: its guest
+         * memory goes back. A view still holding it keeps what the GPU has;
+         * one that hands it out again (GetResource) maps it into new memory.
+         *
+         * @param {any} resource
+         */
+        resourceReleased(resource){
+            const backing = backings.get(resource);
+            if (backing?.guest)
+            {
+                for (const storage of backing.guest.storages)
+                {
+                    services.guest?.free?.(storage.base);
+                }
+                backing.guest = null;
+                backing.guestReleased = true;
+            }
+        },
+
+        /**
+         * Where a resource keeps the bytes a map hands out in guest memory.
+         *
+         * @param {any} resource
+         * @returns {{ base: number, length: number } | null}
+         */
+        guestOf(resource){
+            return backings.get(resource)?.guest ?? null;
+        },
+
+        /**
          * @param {any} resource
          * @param {SubresourceData[] | null} initialData
          */
@@ -2025,7 +2195,15 @@ export function createRenderer(services){
          */
         map(resource, subresource){
             const held = subresourceBytes(resource, subresource);
-            return { data: held.bytes, rowPitch: held.rowPitch, depthPitch: held.depthPitch };
+            const backing = backingOf(resource);
+            if (backing.guestReleased && !backing.guest)
+            {
+                backing.guest = guestStorageOf(resource.desc, backing.bytes.length);
+                backing.hostNewer = backing.guest !== null;
+            }
+            return { data: held.bytes, rowPitch: held.rowPitch, depthPitch: held.depthPitch,
+                ...(backing.guest ? { address: guestMapped(backing, held.bytes.byteOffset),
+                    bytes: held.bytes.length } : {}) };
         },
 
         /**
@@ -2035,8 +2213,65 @@ export function createRenderer(services){
          * @param {boolean} noOverwrite  The program promises it touched nothing in flight.
          */
         unmap(resource, subresource, discard, noOverwrite){
-            upload(resource, subresource,
-                discard ? LockFlags.DISCARD : noOverwrite ? LockFlags.NOOVERWRITE : LockFlags.NONE);
+            const flags = discard ? LockFlags.DISCARD
+                : noOverwrite ? LockFlags.NOOVERWRITE : LockFlags.NONE;
+            const backing = backingOf(resource);
+            if (!backing.guest)
+            {
+                upload(resource, subresource, flags);
+                return;
+            }
+            const held = subresourceBytes(resource, subresource);
+            const changed = guestWritten(backing, held.bytes.byteOffset, held.bytes.length);
+            if (changed)
+            {
+                upload(resource, subresource, flags, null,
+                    resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER ? changed : null, true);
+            }
+        },
+
+        /**
+         * Another storage for a guest-backed buffer, which the guest's map
+         * may move it onto for a DISCARD (`seam/d3d10-inguest.js`).
+         *
+         * @param {any} resource
+         * @returns {number} its address, or 0 for none
+         */
+        addStorage(resource){
+            const backing = backingOf(resource);
+            // Only with a watch: an unmap from a storage the buffer moved onto
+            // sends the pages written there, and the GPU keeps the rest as a
+            // DISCARD's rename carries it. Without one it would send all of a
+            // storage that holds only what was written since the move.
+            const storage = backing.guest?.tracked ? storageOf(backing.guest.length) : null;
+            if (!storage)
+            {
+                return 0;
+            }
+            backing.guest.storages.push(storage);
+            return storage.base;
+        },
+
+        /**
+         * An unmap the guest made of a buffer on one of its storages: the
+         * buffer is on that storage from here on, and what the program wrote
+         * there goes to the GPU as an unmap's would.
+         *
+         * @param {any} resource
+         * @param {number} base  the storage
+         * @param {boolean} discard @param {boolean} noOverwrite
+         */
+        unmapStorage(resource, base, discard, noOverwrite){
+            const backing = backingOf(resource);
+            const storage = backing.guest?.storages.find(
+                (/** @type {{ base: number }} */ one)=>one.base === base);
+            if (!storage)
+            {
+                return;
+            }
+            backing.guest.base = storage.base;
+            backing.guest.tracked = storage.tracked;
+            this.unmap(resource, 0, discard, noOverwrite);
         },
 
         /**

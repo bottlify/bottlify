@@ -122,7 +122,10 @@ const first = (kind, length)=>{
  * @property {'empty' | 'any'} [nullable]  its pointer may be null: with a count of zero
  *     alone, or whatever the count
  * @property {boolean} [draws]
- * @property {(device: any, call: CommandArgs) => number} make
+ * @property {(arg: (index: number) => number) => number} [copiedObjects]
+ *     how many of the copy's first words name objects of the device's, given its
+ *     arguments: an array of interfaces a call binds, resolved after `objects`
+ * @property {(device: any, call: CommandArgs) => number | void} make
  */
 
 /**
@@ -194,6 +197,11 @@ export function commandSet(slots, table){
             for (const index of entry.objects ?? [])
             {
                 objects.push(objectAt(all[at + ARGS + index]) ?? null);
+            }
+            const copied = entry.copiedObjects?.(index=>all[at + ARGS + index]) ?? 0;
+            for (let index = 0; index < copied; index++)
+            {
+                objects.push(objectAt(all[at + ARGS + entry.args + index]) ?? null);
             }
             at += length;
         }
@@ -309,7 +317,7 @@ export function commandSet(slots, table){
             }
             if ((hr ?? 0) !== 0)
             {
-                refused(/** @type {string} */ (names.get(entry)), hr >>> 0);
+                refused(/** @type {string} */ (names.get(entry)), /** @type {number} */ (hr) >>> 0);
             }
             at += length;
         }

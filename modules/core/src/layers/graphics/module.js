@@ -9,6 +9,7 @@ import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { ringTrace } from './d3d8/commands.js';
 import { createDirect3D9 } from './d3d9/device.js';
+import { createDirect3D10 } from './d3d10/root.js';
 import { profileBehaviour, profileCaps } from './seam/adapter.js';
 import { connectGraphicsWorker } from './remote/connect.js';
 import { createGraphicsLibraries } from './seam/exports.js';
@@ -476,6 +477,14 @@ export function createGraphicsModule(){
             const direct3d = (name, factory, services)=>(remote
                 ? remote.root(name, factory, services)
                 : factory(services));
+            /**
+             * Direct3D 10's root, drawn here or in the graphics worker.
+             *
+             * @param {import('./d3d10/device.js').DeviceOptions} options
+             */
+            const direct3d10 = options=>(remote
+                ? remote.root('d3d10', createDirect3D10, options)
+                : createDirect3D10(options));
 
             /**
              * The draw check's live switch (`checkDraws` below): how many times
@@ -760,15 +769,18 @@ export function createGraphicsModule(){
                         : undefined,
                     ...options,
                 }),
-                // Direct3D 10's seam makes the device itself from what a program
-                // passes; this hands it the GPU, reached only when one is made.
-                /** @returns {import('./d3d10/device.js').DeviceOptions} */
-                d3d10: (/** @type {any} */ caps)=>({
-                    backend: device ? api.backend() : undefined,
-                    createSampler: device
+                // Direct3D 10's entry points (`d3d10/root.js`), with the GPU
+                // they draw through: here, or in the graphics worker, where the
+                // root the program gets is a recorded one (`remote/d3d10.js`).
+                // `caps.factoryOptions`: the seam's window and display answers.
+                /** @returns {any} */
+                d3d10: (/** @type {any} */ caps)=>direct3d10({
+                    factoryOptions: caps?.factoryOptions,
+                    backend: device && !remote ? api.backend() : undefined,
+                    createSampler: device && !remote
                         ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                         : undefined,
-                    createTexture: device
+                    createTexture: device && !remote
                         ? (/** @type {any} */ descriptor)=>device.device.createTexture(descriptor)
                         : undefined,
                     divergence: config?.divergence,
@@ -781,6 +793,16 @@ export function createGraphicsModule(){
                     // unclipped, which is what DepthClipEnable = FALSE asks.
                     depthClipControl: device?.device?.features?.has('depth-clip-control') === true,
                     frameQueued,
+                    // What a program maps lives in its own memory, so a map
+                    // hands out an address and an unmap reads what it wrote
+                    // (the pages written, where the engine watches them).
+                    guest: config?.allocate ? {
+                        allocate: config.allocate,
+                        free: config.free,
+                        readMemory: services.readMemory,
+                        writeMemory: services.writeMemory,
+                        watchWrites: services.watchWrites,
+                    } : undefined,
                 }),
                 /** @returns {any} */
                 vulkan: (/** @type {any} */ options)=>createVulkan({

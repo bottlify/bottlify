@@ -60,6 +60,8 @@ const VIEW_SHAPE = Object.freeze({
  * @property {Uint8Array} data
  * @property {number} rowPitch
  * @property {number} depthPitch
+ * @property {number} [address]  where the bytes are in guest memory, when they are there
+ * @property {number} [bytes]  and how many
  */
 
 /**
@@ -73,6 +75,11 @@ const VIEW_SHAPE = Object.freeze({
  * @property {(resource: any) => Promise<void> | null} [readBack]
  *     The GPU's copy of the first subresource brought into the host bytes,
  *     settled when it has arrived; null when the host bytes are current.
+ * @property {(resource: any) => { base: number, length: number } | null} [guest]
+ *     Where a resource the program maps keeps its bytes in guest memory, if it does.
+ * @property {(resource: any) => number} [addStorage]
+ * @property {(resource: any, base: number, discard: boolean, noOverwrite: boolean) => void}
+ *     [unmapStorage]
  */
 
 /**
@@ -151,10 +158,26 @@ export function createResource(options){
         desc: options.desc,
 
         /**
+         * Where the bytes a map hands out are in guest memory, and how many,
+         * when they are there: what a recording sends of them (`remote/replay.js`).
+         */
+        get base(){
+            return options.storage.guest?.(this)?.base;
+        },
+        get length(){
+            return options.storage.guest?.(this)?.length;
+        },
+
+        /**
          * @param {number} subresource
          * @param {number} mapType
          * @param {number} flags
-         * @param {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number }} out
+         * A subresource whose bytes live in guest memory hands out its address
+         * (`pData`) and how many bytes it has; one whose bytes are the host's
+         * hands those out (`data`).
+         *
+         * @param {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number,
+         *     pData?: number, bytes?: number }} out
          * @returns {number}
          */
         Map(subresource, mapType, flags, out){
@@ -163,15 +186,28 @@ export function createResource(options){
             {
                 return E_INVALIDARG;
             }
-            if ((flags & D3D10_MAP_FLAG_DO_NOT_WAIT) !== 0 && this.pendingReadback())
+            const pending = this.pendingReadback();
+            if (pending && (flags & D3D10_MAP_FLAG_DO_NOT_WAIT) !== 0)
             {
                 return DXGI_ERROR_WAS_STILL_DRAWING;
+            }
+            if (pending)
+            {
+                // What the GPU is copying into it comes first. The seam waits
+                // before it maps; a device played elsewhere is mapped as asked.
+                return /** @type {any} */ (pending.then(()=>this.Map(subresource, mapType, flags,
+                    out)));
             }
             const held = options.storage.map(this, subresource);
             mapped.set(subresource, mapType);
             out.data = held.data;
             out.rowPitch = held.rowPitch;
             out.depthPitch = held.depthPitch;
+            if (held.address !== undefined)
+            {
+                out.pData = held.address;
+                out.bytes = held.bytes;
+            }
             return S_OK;
         },
 
@@ -183,6 +219,30 @@ export function createResource(options){
          */
         pendingReadback(){
             return options.storage.pending?.(this) ?? null;
+        },
+
+        /**
+         * Another storage in guest memory for a buffer whose bytes live there,
+         * which the guest's map moves the buffer onto for a DISCARD while the
+         * device's command ring still holds the unmap of the one before
+         * (`seam/d3d10-inguest.js`). Not Direct3D's: the seam's.
+         *
+         * @returns {number} its address, or 0 for none
+         */
+        AddStorage(){
+            return isBuffer ? options.storage.addStorage?.(this) ?? 0 : 0;
+        },
+
+        /**
+         * An unmap the guest made, from the device's command ring: the buffer
+         * is on that storage from here on. Not Direct3D's: the seam's.
+         *
+         * @param {number} base  the storage
+         * @param {number} mapType  what the guest mapped it as
+         */
+        UnmapStorage(base, mapType){
+            options.storage.unmapStorage?.(this, base, mapType === D3D10_MAP.WRITE_DISCARD,
+                mapType === D3D10_MAP.WRITE_NO_OVERWRITE);
         },
 
         /** @param {number} subresource */

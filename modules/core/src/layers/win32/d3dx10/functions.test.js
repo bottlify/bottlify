@@ -89,13 +89,15 @@ test('D3DX10CreateTextureFromMemory makes a 2D texture with the full chain throu
     // Width, Height, MipLevels, ArraySize, Format, SampleDesc, Usage, BindFlags, CPU, Misc.
     assert.deepEqual(calls[0].desc, [4, 2, 3, 1, 87, 1, 0, 0, 0x8, 0, 0]);
     assert.deepEqual(calls[0].data.map(([, pitch])=>pitch), [16, 8, 4]);
+    // Each level's texels after the one before's: 4x2, then the halved 2x1 and 1x1.
+    assert.deepEqual(calls[0].data.map(([at])=>at - calls[0].data[0][0]), [0, 32, 40]);
 });
 
 test('D3DX10CompileFromMemory refuses with an error blob and the HRESULT written', ()=>{
     const { host, view, memory } = machine();
     /** @type {any[]} */
     const published = [];
-    const fns = createD3dx10Functions({ ...host, vtables: { publish: (object)=>{
+    const fns = createD3dx10Functions({ ...host, vtables: { publish: object=>{
         published.push(object);
         return 0x5000;
     } } }, 34);

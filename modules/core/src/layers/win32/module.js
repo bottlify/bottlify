@@ -3598,6 +3598,7 @@ export function createWin32Module(){
                 // functions, here for their stack width as much as their answers,
                 // since d3dx9 exports them undecorated though they are stdcall.
                 ...(()=>{
+                    /** @type {import('./d3dx9/functions.js').D3dxHost} */
                     const d3dxHost = { readMemory, writeMemory,
                         // A word read and written in place: an effect's commit reads
                         // a version word for every constant of its pass.

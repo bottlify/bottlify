@@ -48,12 +48,55 @@ import {
 } from '../webgpu/internal/reference.js';
 
 /**
+ * Guest memory as the engine gives it: a bump heap, and a write watch at
+ * page grain that a test marks by hand, as a store into a watched page does.
+ */
+function guestMemory(){
+    const memory = new Uint8Array(1 << 20);
+    let next = 0x10000;
+    /** @type {Set<number>} */
+    const written = new Set();
+    return {
+        memory,
+        /** @param {number} address @param {Uint8Array} bytes  the program's store */
+        store(address, bytes){
+            memory.set(bytes, address);
+            for (let page = address >>> 12; page <= (address + bytes.length - 1) >>> 12; page++)
+            {
+                written.add(page);
+            }
+        },
+        storage: {
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += (bytes + 0xfff) & ~0xfff;
+                return at;
+            },
+            free: ()=>{},
+            readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+                memory.slice(address, address + length),
+            writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+                memory.set(bytes, address),
+            watchWrites: ()=>({
+                take: (/** @type {number} */ address, /** @type {number} */ length)=>{
+                    const pages = [...written].filter(page=>page >= address >>> 12
+                        && page <= (address + length - 1) >>> 12);
+                    pages.forEach(page=>written.delete(page));
+                    return pages;
+                },
+            }),
+        },
+    };
+}
+
+/**
  * A device with a backend over the recording GPU, and a swap chain to present.
  *
  * @param {{ width?: number, height?: number, compressedTextures?: boolean,
  *           depthClipControl?: boolean, sampleCount?: number, format?: number,
  *           fake?: Parameters<typeof createFakeDevice>[0],
- *           frameQueued?: import('../webgpu/internal/latency.js').FrameQueued }} [options]
+ *           frameQueued?: import('../webgpu/internal/latency.js').FrameQueued,
+ *           guest?: import('./render.js').GuestStorage }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice(options.fake);
@@ -86,6 +129,7 @@ function harness(options = {}){
             compressedTextures: options.compressedTextures,
             depthClipControl: options.depthClipControl,
             frameQueued: options.frameQueued,
+            guest: options.guest,
         }), S_OK);
     const device = deviceOut.device;
     const swapChain = chainOut.swapChain;
@@ -541,6 +585,59 @@ test('a discard map between two draws renames the buffer, so each draw keeps its
         assert.equal(backing.renames, 2, 'one rename per discard');
         assert.equal(h.gpu.count('draw'), 2);
     });
+
+test('a buffer whose bytes live in guest memory maps to its address, and an unmap sends the'
+    + ' pages the program wrote and no others', async()=>{
+    const guest = guestMemory();
+    const h = harness({ guest: guest.storage });
+    const { device } = h;
+    /** @type {{ resource?: any }} */
+    const made = {};
+    assert.equal(device.CreateBuffer({
+        ByteWidth: 0x10000,
+        Usage: D3D10_USAGE.DYNAMIC,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER,
+        CPUAccessFlags: D3D10_CPU_ACCESS.WRITE,
+        MiscFlags: 0,
+    }, null, made), S_OK);
+    const buffer = made.resource;
+    const gpu = h.backend.diagnostics().buffers.find((/** @type {any} */ entry)=>
+        entry.label === 'd3d10:buffer#65536');
+    assert.ok(gpu);
+    /** @type {{ pData?: number, bytes?: number }} */
+    const mapped = {};
+    assert.equal(buffer.Map(0, D3D10_MAP.WRITE_NO_OVERWRITE, 0, mapped), S_OK);
+    assert.equal(typeof mapped.pData, 'number');
+    assert.equal(mapped.bytes, 0x10000);
+    const before = h.gpu.of('writeBuffer').length;
+    guest.store(/** @type {number} */ (mapped.pData) + 0x3010, Uint8Array.of(1, 2, 3, 4));
+    buffer.Unmap(0);
+    await h.present();
+    const writes = h.gpu.of('writeBuffer').slice(before);
+    assert.deepEqual(writes.map((/** @type {any} */ call)=>[call.bufferOffset, call.size]),
+        [[0x3000, 0x1000]], 'the page written, at its offset');
+    assert.deepEqual([...writes[0].bytes.subarray(0x10, 0x14)], [1, 2, 3, 4]);
+
+    // A map of bytes the device wrote on its side -- a copy into a staging
+    // buffer -- hands out what it wrote.
+    /** @type {{ resource?: any }} */
+    const source = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 },
+    { pSysMem: Uint8Array.from({ length: 16 }, (_, i)=>i + 1), SysMemPitch: 0,
+        SysMemSlicePitch: 0 }, source), S_OK);
+    /** @type {{ resource?: any }} */
+    const staging = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.STAGING,
+        BindFlags: 0, CPUAccessFlags: D3D10_CPU_ACCESS.READ, MiscFlags: 0 }, null, staging),
+    S_OK);
+    device.CopyResource(staging.resource, source.resource);
+    assert.equal(staging.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.deepEqual([...guest.memory.subarray(/** @type {number} */ (mapped.pData),
+        /** @type {number} */ (mapped.pData) + 16)], Array.from({ length: 16 }, (_, i)=>i + 1));
+    staging.resource.Unmap(0);
+    assert.deepEqual(h.divergences, []);
+});
 
 // --- textures ---
 

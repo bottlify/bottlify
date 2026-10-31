@@ -228,15 +228,19 @@ export function attachCom(target, options){
         },
     };
 
+    // Configurable: a recording's proxy of the object answers its own wrapper
+    // for each method (`remote/replay.js`), which a frozen property forbids.
+    /** @param {Function} value */
+    const method = value=>({ value, enumerable: true, writable: true, configurable: true });
     return Object.defineProperties(/** @type {any} */ (target), {
-        SetPrivateData: { value: privateData.SetPrivateData, enumerable: true },
-        SetPrivateDataInterface: { value: privateData.SetPrivateDataInterface, enumerable: true },
-        GetPrivateData: { value: privateData.GetPrivateData, enumerable: true },
-        supports: { value: methods.supports, enumerable: true },
-        addRef: { value: methods.addRef, enumerable: true },
-        release: { value: methods.release, enumerable: true },
-        QueryInterface: { value: methods.QueryInterface, enumerable: true },
-        GetParent: { value: methods.GetParent, enumerable: true },
-        refCount: { get: ()=>count, enumerable: true },
+        SetPrivateData: method(privateData.SetPrivateData),
+        SetPrivateDataInterface: method(privateData.SetPrivateDataInterface),
+        GetPrivateData: method(privateData.GetPrivateData),
+        supports: method(methods.supports),
+        addRef: method(methods.addRef),
+        release: method(methods.release),
+        QueryInterface: method(methods.QueryInterface),
+        GetParent: method(methods.GetParent),
+        refCount: { get: ()=>count, enumerable: true, configurable: true },
     });
 }

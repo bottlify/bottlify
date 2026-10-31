@@ -296,7 +296,7 @@ test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock an
             compressedTextures: true,
             guestNow: ()=>1234,
         }, hostWith(fakeMemory()));
-        const options = api.create('d3d10');
+        const { options } = api.create('d3d10');
         const granted = features.length > 0;
         assert.equal(options.compressedTextures, granted, 'block compression');
         assert.equal(options.depthClipControl, granted, 'depth clip control');
@@ -304,7 +304,7 @@ test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock an
         await graphicsModule.dispose();
     }
     const api = await graphicsModule.create({}, hostWith(fakeMemory()));
-    const headless = api.create('d3d10');
+    const headless = api.create('d3d10').options;
     assert.equal(headless.compressedTextures, false);
     assert.equal(headless.depthClipControl, false);
     await graphicsModule.dispose();
