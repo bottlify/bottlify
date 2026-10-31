@@ -94,7 +94,7 @@ const program = buildExe({
 
 /** @param {number[]} apps */
 async function run(apps){
-    const app = await createApp({ executable: program, engine: 'cork',
+    const app = await createApp({ executable: program,
         win32: { steam: { steamId: '76561197960287930', accountName: 'test', apps,
             appId: APP } } });
     try

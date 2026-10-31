@@ -418,9 +418,9 @@ test('cpuid and rdtsc answer without a crossing', ()=>{
     assert.equal(clocked.state.reg[0], 0x9abcdef0, 'the counter\'s low word in eax');
     assert.equal(clocked.state.reg[2], 0x12345678, 'and its high word in edx');
     const leaf = run([0xb8, 1, 0, 0, 0, 0x0f, 0xa2]);
-    assert.equal(leaf.state.reg[0], 0x00000673);
-    assert.equal(leaf.state.reg[1], 0xc0800001);
-    assert.equal(leaf.state.reg[2], 0x0780a979);
+    assert.equal(leaf.state.reg[0], 0x00000f65);
+    assert.equal(leaf.state.reg[1], 0x00002001);
+    assert.equal(leaf.state.reg[2], 0x0788a979);
     assert.equal(leaf.state.reg[3], 0x00010800);
 });
 
@@ -429,15 +429,15 @@ test('cpuid describes the processors of the state\'s layout, as translated code 
         state.layout = { processors: 4, processor: 2 };
     });
     assert.equal(pinned.state.reg[3], 0x02040800, 'four processors, APIC id 2');
-    assert.equal(pinned.state.reg[2], 0x1780a979, 'HTT set');
+    assert.equal(pinned.state.reg[2], 0x1788a979, 'HTT set');
     const cores = run([0xb8, 4, 0, 0, 0, 0xb9, 1, 0, 0, 0, 0x0f, 0xa2], state=>{
         state.layout = { processors: 4, processor: 2 };
     });
-    assert.equal(cores.state.reg[0], 0x0c000122, 'three more cores in the package');
+    assert.equal(cores.state.reg[0], 0x0c000143, 'three more cores in the package');
 });
 
 test('cpuid reads a subleaf from ecx; rdrand fills a register and sets CF alone', ()=>{
-    const sub = run([0xb8, 4, 0, 0, 0, 0xb9, 2, 0, 0, 0, 0x0f, 0xa2]); // leaf 4, subleaf 2
+    const sub = run([0xb8, 4, 0, 0, 0, 0xb9, 1, 0, 0, 0, 0x0f, 0xa2]); // leaf 4, subleaf 1
     assert.equal(sub.state.reg[0], 0x143);
     assert.equal(sub.state.reg[1], 0xfff);
     const values = new Set();

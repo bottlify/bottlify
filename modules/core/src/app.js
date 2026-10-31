@@ -14,7 +14,7 @@ import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './
 import { HEAP_POOLS, NOT_MEASURED, withZones } from './memory-zones.js';
 import { keepOriginStorageWithin } from './storage-budget.js';
 import {
-    DEFAULT_ENGINE, DEFAULT_INITIAL_STACK, DEFAULT_MEMORY_SIZE,
+    DEFAULT_INITIAL_STACK, DEFAULT_MEMORY_SIZE,
     DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY, MAX_EXECUTORS, processorsFor,
 } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
@@ -115,16 +115,9 @@ const hashText = (hash, text)=>{
  * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
  *     `store` here is a request -- `'local'` (the default) for the origin's private file
  *     system, a store of your own when the app runs in this thread, `null` for none.
- * @property {boolean} [cork.pool]  The run's pool of translation workers, lent to its
- *     processes as their translation needs: on by default wherever a machine's
- *     translator would open a worker of its own, unless `cork.config.translators` is set.
- * @property {number} [cork.poolPerProcess]  Workers of the pool at most for one process:
- *     `navigator.hardwareConcurrency` by default.
- * @property {number} [cork.poolWindowMs]  How often the pool's driver reads its workers.
- *     Default 500.
- * @property {Partial<import('./host/pool/driver.js').DriverSettings>} [cork.poolDriver]  The
- *     driver's thresholds (`joinAt`, `leaveBelow`, `leaveAfterMs`, `idleBelow`, `trialWindows`,
- *     `trialLimit`, `restMs`, `yieldShare`).
+ * @property {number} [cork.poolPerProcess]  Workers of the run's translation pool at most
+ *     for one process: the host's processors less the program's cores and two, at least one
+ *     (`translatorsBeside`). A test of the pool's lending sets it.
  * @property {Object} [media]             Video decoding, when this build has it.
  * @property {ArrayBuffer} [media.wasmBytes]
  *           The decoder binary. Absent, the media layer comes up and reports
@@ -134,7 +127,6 @@ const hashText = (hash, text)=>{
  *           it attaches to the same compiled module and linear memory rather
  *           than instantiate the binary again. Set by `createApp` on a rebuilt
  *           machine and not something a caller supplies.
- * @property {number} [stackSize]
  * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  *           Defaults to everything above the libraries up to the end of RAM.
@@ -271,19 +263,9 @@ const hashText = (hash, text)=>{
  *           write it somewhere. Each of the run's processes calls it, and a
  *           record names the process's image (`image`) and the calling
  *           thread (`thread`).
- * @property {'cork'} [engine]
- *     Which execution engine runs the program: `cork`, the only one.
- * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler.
- *     `false` turns it off, for a caller measuring the emulator's own compiler
- *     rather than the guest's code.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
- * @property {number} [soloQuantum]  Guest instructions per turn of a thread no other is
- *           ready beside, in a process with one executor, while no timed wait or timer is
- *           due within 16 ms. Default ten quanta.
- * @property {{ cores?: number, eager?: boolean, placement?: 'auto' | 'spread' | 'concentrate',
- *           placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions>,
- *           playPinned?: boolean, freeHost?: boolean,
+ * @property {{ cores?: number, eager?: boolean, placement?: 'spread' | 'concentrate',
  *           gcNudge?: boolean | { everyMs?: number, bytes?: number } }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
@@ -291,43 +273,26 @@ const hashText = (hash, text)=>{
  *           the process's own thread; 1 to 32. Unset, in a browser whose page can share
  *           memory one fewer than the host's processors, at most eight
  *           (`automaticCores`); elsewhere, and in node unless `BOTTLIFY_CORES` names
- *           them, one. Under cork, on a page that can share memory; elsewhere the
- *           program runs on one and is told of one.
+ *           them, one. On a page that cannot share memory the program runs on one and
+ *           is told of one.
  *           Named, they all open before the program starts; automatic, each opens
  *           when a thread wants it, some tens of milliseconds before it runs one, so
  *           a program of one thread pays for none. `eager` says which outright.
- *           `placement`: where a process of several cores runs its ready threads --
- *           `spread` (the default beside `freeHost`) each on a core of its own,
- *           `concentrate` all taking turns on the process's own core, `auto` (the
- *           default with `freeHost` false) each moved onto the process's own core or
- *           off it, one at a time, where what it did says it gains.
- *           `placementTiming`: the moves' windows and thresholds, for a test.
- *           `playPinned`: false keeps every processor on its own core; by default a
- *           thread the program pinned to one processor and that calls into the host
- *           often has its processor played by the process's own core, where those
- *           calls are answered. `freeHost` (on unless false) keeps the process's own
- *           core for the host's answers while a thread is pinned to its processor (a
- *           game's main thread, pinned to the first), the processor played by another
- *           core; with it the threads spread unless `placement` is named, and no
- *           processor is traded on its gains, so `playPinned` applies only with it off.
+ *           The process's own core is kept for the host's answers while a thread is
+ *           pinned to its processor (a game's main thread, pinned to the first): that
+ *           processor is played by another core.
+ *           `placement`, a debugging switch: `spread` (the default) runs each ready
+ *           thread on a core of its own, `concentrate` all of them taking turns on
+ *           the process's own core.
  *           `gcNudge`: each thread that holds the guest's memory makes and drops an
- *           untouched buffer (64 MB every 50 ms unless named) so that JavaScriptCore
- *           collects its young garbage before it piles up; on by default where
- *           JavaScriptCore runs and nowhere else, `false` for none.
- * @property {number} [executors]  `cpu.cores` by its older name: executors of the
- *           program's process under cork, past the process's own thread each a worker
- *           running one of its threads at once with the others, the locked
- *           instructions atomic. Default 1.
- * @property {boolean} [preemption]  End a slice early when a thread of higher
- *           priority comes due, as Windows preempts (the kernel's option; off).
+ *           untouched buffer (every 20 ms, 64 MB or a quarter of the guest's memory
+ *           past 256 MB, unless named) so that JavaScriptCore collects its young
+ *           garbage before it piles up; on by default where JavaScriptCore runs and
+ *           nowhere else, `false` for none.
  * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
  *           which is where a program that fails on its own computed state fails.
- * @property {number} [pendingYieldMs]  How often, in milliseconds, the run
- *     loop gives its thread away to hear an outstanding host answer while
- *     other threads still run. Default 1; lower hears answers sooner at more
- *     trips round the event loop.
  * @property {RunPacing} [pacing]
  *     How the run loop gives the thread away, and how it waits when the guest
  *     has nothing to run. The default is a page's: it cannot block, so it
@@ -995,8 +960,8 @@ export function createMissingImports({ register, events, journal, classify, faul
  * microtasks after each, and a loop that posts its next yield from those
  * microtasks stays inside the pass: a thousand turns go by before a timer
  * fires, a file read or a fetch answers, another port -- a worker's --
- * delivers a message, or a module the emulator compiled for a hot page is
- * installed, so the emulator interprets. Measured: a loop of half-millisecond
+ * delivers a message, or a module the translator compiled for hot code is
+ * installed, so the engine interprets. Measured: a loop of half-millisecond
  * turns yielding through a port saw a 3 ms interval fire three times in two
  * seconds, and through an immediate six hundred and sixty times. An immediate
  * set from inside an immediate runs on the next pass, and every pass looks at
@@ -1189,23 +1154,19 @@ export const PENDING_YIELD_MS = 1;
  * @param {() => number} deps.now             Wall milliseconds.
  * @param {number} deps.intervalMs
  * @param {() => boolean} [deps.signalled]    Whether a message is known to be waiting.
- * @param {number} [deps.pendingMs]  How long after the last trip an outstanding host
- *     answer or range is looked for again while other threads still run.
  * @param {Record<string, number>} [deps.counts]  Counted into: each turn, by why it went to
  *     the event loop (`suspended`, `fetching`, `spun`, `signalled`, `interval`) or `kept`.
  * @returns {RunPacing['yield']}
  */
-export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false,
-    pendingMs = PENDING_YIELD_MS, counts })
-{
+export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, counts }){
     let rested = now();
     return pending=>{
         // An answer outstanding is looked for at once only when the turn ran
-        // nothing; while other threads run it waits out pendingMs, since a
+        // nothing; while other threads run it waits out PENDING_YIELD_MS, since a
         // trip a turn behind a loader running beside a thread parked on
         // Present was the largest host phase of a run (2.46 M trips in 1500 s).
         const since = now() - rested;
-        const look = pending.spun > 0 || since >= pendingMs;
+        const look = pending.spun > 0 || since >= PENDING_YIELD_MS;
         // Why the turn went to the event loop, the first reason that held -- what a report
         // reads when the trips are many.
         const why = pending.suspended > 0 && look ? 'suspended'
@@ -1238,13 +1199,12 @@ export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false,
  * @param {number} [deps.yieldMs]
  * @param {() => number} [deps.now]
  * @param {() => boolean} [deps.signalled]
- * @param {number} [deps.pendingMs]
  * @param {Int32Array | null} [deps.napWord]  The shared word a wait to a deadline sleeps
  *     on; null spins macrotasks to it. Left out, one where a browser has it.
  * @returns {RunPacing}
  */
 export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs = PAGE_YIELD_MS,
-    now = ()=>performance.now(), signalled, pendingMs, napWord })
+    now = ()=>performance.now(), signalled, napWord })
 {
     /** Turns kept on the thread and trips to the event loop, by why. @type {Record<string, number>} */
     const counts = {};
@@ -1263,7 +1223,7 @@ export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs =
     return {
         counts: ()=>({ ...counts }),
         now,
-        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, pendingMs, counts }),
+        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, counts }),
         wait({ timer, sleep, deadlineMs, wakes }){
             if (!timer)
             {
@@ -1714,10 +1674,9 @@ export function corkArtifacts(asked, here = import.meta.url){
 /**
  * The run's pool of translation workers, where every
  * machine's translator would otherwise open a worker of its own: on cork, with
- * shared memory and ports to lend through, and unless the caller turned it off
- * (`cork.pool: false`) or set the translators a machine opens itself
- * (`cork.config.translators`). A process in a worker of its own is lent its
- * workers by the run's system, and makes no pool.
+ * shared memory and ports to lend through, and unless the caller set the
+ * translators a machine opens itself (`cork.config.translators`). A process in a
+ * worker of its own is lent its workers by the run's system, and makes no pool.
  *
  * @param {AppOptions} options
  * @returns {Promise<ReturnType<typeof createTranslatorPool> | null>}
@@ -1725,13 +1684,13 @@ export function corkArtifacts(asked, here = import.meta.url){
 async function openTranslationPool(options){
     const cork = options.cork ?? {};
     const config = /** @type {any} */ (cork.config ?? {});
-    if ((options.engine ?? DEFAULT_ENGINE) !== 'cork' || options.system || cork.pool === false
-        || typeof SharedArrayBuffer !== 'function' || typeof MessageChannel !== 'function')
+    if (options.system || typeof SharedArrayBuffer !== 'function'
+        || typeof MessageChannel !== 'function')
     {
         return null;
     }
-    const wanted = cork.pool === true || (config.translators === undefined
-        && (config.worker ?? (config.feed !== 'slice' && typeof globalThis.Worker === 'function')));
+    const wanted = config.translators === undefined
+        && (config.worker ?? (config.feed !== 'slice' && typeof globalThis.Worker === 'function'));
     if (!wanted)
     {
         return null;
@@ -1750,11 +1709,9 @@ async function openTranslationPool(options){
     return createTranslatorPool({
         open: ()=>openProcessWorker(url),
         perProcess: cork.poolPerProcess ?? translatorsBeside(processorsFor({
-            engine: options.engine ?? DEFAULT_ENGINE, executors: options.executors,
+            executors: options.cpu?.cores,
             sharedMemory: options.cork?.config?.sharedMemory,
         }), globalThis.navigator?.hardwareConcurrency ?? 4),
-        ...(cork.poolWindowMs === undefined ? {} : { windowMs: cork.poolWindowMs }),
-        driver: cork.poolDriver ?? {},
     });
 }
 
@@ -1774,40 +1731,36 @@ export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - c
 /**
  * The machine's processor as the caller sets it up (`cpu`): `cores`, the
  * processors the program is told it has, is the executors that run its threads
- * at once -- `executors` by its older name, which it sets. Refused before
- * anything is built when it is not a whole number from 1 to 32, or when
- * `executors` says otherwise. Cores the caller named open before the program
- * starts (`cpu.eager`, unless it says otherwise): opened as a thread first wants
- * one, each came some tens of milliseconds late, a stall in the middle of a
- * game. Automatic cores stay lazy, so a program of one thread pays for none.
+ * at once. Refused before anything is built when it is not a whole number from
+ * 1 to 32, and when the caller names `executors`, its older name: taken as
+ * nothing, it would have left the run on cores the caller did not ask for.
+ * Cores the caller named open before the program starts (`cpu.eager`, unless it
+ * says otherwise): opened as a thread first wants one, each came some tens of
+ * milliseconds late, a stall in the middle of a game. Automatic cores stay
+ * lazy, so a program of one thread pays for none.
  *
- * @template {{ cpu?: { cores?: number, eager?: boolean }, executors?: number, mode?: string,
- *     engine?: string, cork?: any }} T
+ * @template {{ cpu?: { cores?: number, eager?: boolean }, mode?: string, cork?: any }} T
  * @param {T} options
  * @param {CoresHost} [host]  where the run is made (`coresHost`)
- * @returns {T & { executors?: number, cpu?: { cores?: number, eager?: boolean } }}
+ * @returns {T & { cpu?: { cores?: number, eager?: boolean } }}
  */
 export function withCpuSetup(options, host = coresHost()){
-    const named = options.cpu?.cores !== undefined || options.executors !== undefined;
-    const cores = options.cpu?.cores
-        ?? (options.executors === undefined ? automaticCores(options, host) : undefined);
+    if (/** @type {any} */ (options).executors !== undefined)
+    {
+        throw new Error('cpu: `executors` is `cpu.cores` now -- set that');
+    }
+    const named = options.cpu?.cores !== undefined;
+    const cores = options.cpu?.cores ?? automaticCores(options, host);
     if (cores === undefined)
     {
-        return named ? { ...options, cpu: { ...options.cpu, eager: options.cpu?.eager ?? true } }
-            : options;
+        return options;
     }
     if (!Number.isInteger(cores) || cores < 1 || cores > MAX_EXECUTORS)
     {
         throw new Error(`cpu: ${JSON.stringify(cores)} cores -- a whole number from 1 to`
             + ` ${MAX_EXECUTORS}, as many as an affinity mask has bits`);
     }
-    if (options.executors !== undefined && options.executors !== cores)
-    {
-        throw new Error(`cpu: ${cores} cores and ${options.executors} executors -- they are one`
-            + ' number; set cores alone');
-    }
-    return { ...options, executors: cores,
-        cpu: { ...options.cpu, eager: options.cpu?.eager ?? named } };
+    return { ...options, cpu: { ...options.cpu, cores, eager: options.cpu?.eager ?? named } };
 }
 
 /**
@@ -1865,15 +1818,9 @@ const IOS_CALL_DEPTH = 64;
  * call into another faults, in the interpreter tier every wasm function starts
  * in: cork's regions placed by module (`dispatch`), a
  * transfer within a module a direct tail call and one out of it entered by the
- * runtime's loop (`crossTailCalls`); the emulator's chaining, every link of it
- * into another module, off. With them fewer calls wait as wasm calls
- * (`IOS_CALL_DEPTH`). The hottest regions are not gathered into a module of
- * their own (`gatherAfter`): each gathering builds them again, and WebKit keeps
- * what it compiled -- the Doom 3 demo's load in WebKit 27.2 (Playwright,
- * Windows, the game test page with the fake GPU, 180-240 s, one run each) held
- * 3090 MB of the web process at its end gathering and 1110 MB not, past the
- * 1720 MB an iPhone 13 Pro Max's tab is ended at. The caller's own settings
- * win. Decided on the page and carried to every worker in the options.
+ * runtime's loop (`crossTailCalls`). With them fewer calls wait as wasm calls
+ * (`IOS_CALL_DEPTH`). The caller's own settings win. Decided on the page and
+ * carried to every worker in the options.
  *
  * @template {Record<string, any>} T
  * @param {T} options
@@ -1884,7 +1831,7 @@ export function withoutFaultingTailCalls(options, fault = tailCallsFault()){
     return fault ? { ...options,
         cork: { ...options.cork,
             config: { crossTailCalls: false, dispatch: true, callDepth: IOS_CALL_DEPTH,
-                gatherAfter: 0, ...options.cork?.config } } } : options;
+                ...options.cork?.config } } } : options;
 }
 
 /**
@@ -1922,11 +1869,11 @@ export const AUTOMATIC_CORES = 8;
  * `AUTOMATIC_CORES`; the program is told of them from its first instruction and
  * sizes its threads to them, and their executors open as its threads want them.
  * One where its memory cannot be shared (a page that is not cross-origin
- * isolated, `compatible`) or under the emulator. In node, `BOTTLIFY_CORES`, so
+ * isolated, `compatible`). In node, `BOTTLIFY_CORES`, so
  * every suite can be run with its programs on several executors, and otherwise
  * one: a suite runs the same on every machine.
  *
- * @param {{ mode?: string, engine?: string, cork?: any }} options
+ * @param {{ mode?: string, cork?: any }} options
  * @param {CoresHost} host
  * @returns {number | undefined}  none: one
  */
@@ -2275,7 +2222,7 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory){
  *
  * Where they start is not a constant: it is wherever the system modules end,
  * because a fixed address chosen in advance is a guess about how much memory
- * the emulator was given, and a wrong guess maps a library outside guest RAM.
+ * the machine was given, and a wrong guess maps a library outside guest RAM.
  */
 const LIBRARY_ALIGN = 0x10000;
 
@@ -3544,7 +3491,7 @@ export function areaOf(call, cache){
  * A kernel's view of guest memory: the scalar accessors a hook has always
  * had, plus `u8s`/`i32s`/`f32s`, a typed-array view over a span rather than
  * one call per element. `memory.window` already hands back a live subarray
- * of the emulator's own RAM, bounds-checked once for the whole span (the
+ * of guest RAM, bounds-checked once for the whole span (the
  * same primitive `audio` and `graphics` already read through) -- this only
  * adds the `Int32Array`/`Float32Array` reinterpretation on top of it, so
  * nothing new needed to be added to the memory layer itself.
@@ -4116,7 +4063,7 @@ async function buildApp(options){
         return performance?.memory?.usedJSHeapSize ?? 0;
     };
 
-    // Filled in once the emulator is up and a bundle, if any, is mounted. win32
+    // Filled in once the machine is up and a bundle, if any, is mounted. win32
     // is built before that and is handed the lookup rather than the answer.
     /** @type {{ source: any, fetch: (needed: any[]) => Promise<void>, stop: () => void,
      *          ahead: () => number,
@@ -4409,21 +4356,9 @@ async function buildApp(options){
             // gets a turn. Lowering it is how a sampled profile gets enough
             // points to say anything; raising it costs nothing but resolution.
             quantum: options.quantum,
-            // A thread alone takes longer turns: the turn's own cost is what
-            // a short one buys nothing for (the kernel's scheduler).
-            soloQuantum: options.soloQuantum,
-            // Spread over the executors, kept on the process's own, or chosen by
-            // what the program gets done each way (the kernel's `placement`).
+            // Spread over the executors, or for a debugging run kept on the
+            // process's own (the kernel's `placement`).
             placement: options.cpu?.placement,
-            placementTiming: options.cpu?.placementTiming,
-            // A host-bound thread pinned to one processor has it played by the
-            // process's own executor (the kernel's `playPinned`) unless false.
-            playPinned: options.cpu?.playPinned,
-            // The process's own executor kept for the host's answers while a
-            // thread is pinned to its processor (the kernel's `freeHost`).
-            freeHost: options.cpu?.freeHost,
-            // Off unless asked for: see the kernel's `preemption`.
-            preemption: options.preemption,
             // Every thread gets the stack the image was linked to expect, the
             // way Windows does -- not a fixed small one. A program that recurses
             // in a worker thread, or builds a large structure on its stack,
@@ -4444,7 +4379,7 @@ async function buildApp(options){
             remoteObjects: options.system?.objects ?? null,
         },
         cpu: {
-            sampling: options.sampling, memorySize,
+            memorySize,
             reused: options.reusedMemory ?? undefined,
             initialStack: mainStack.initialStack,
             // ponytail: open, where Windows never maps the first 64 KiB, until
@@ -4456,8 +4391,7 @@ async function buildApp(options){
             // Nothing runs there all the same: a call through a null pointer
             // faults, as on Windows, rather than sliding through the zeroes.
             noExecuteBelow: 0x10000,
-            engine: options.engine ?? DEFAULT_ENGINE,
-            executors: long ? 1 : options.executors ?? 1,
+            executors: long ? 1 : options.cpu?.cores ?? 1,
             bits: processBits,
             eagerExecutors: options.cpu?.eager === true,
             // The threads holding the guest's memory bring JavaScriptCore's
@@ -4510,8 +4444,8 @@ async function buildApp(options){
             volume: options.system?.volume,
         },
         media: {
-            // The decoder, handed down the same way the emulator's binary is:
-            // this layer is one module over one wasm blob, and which blob is
+            // The decoder, handed down rather than fetched: this layer is one
+            // module over one wasm blob, and which blob is
             // the assembling caller's decision rather than something to fetch
             // from inside a worker. Absent, the layer comes up and says so.
             wasmBytes: options.media?.wasmBytes,
@@ -4916,10 +4850,9 @@ async function buildApp(options){
                 ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
             compatibility: compatibilityOf(options.executable),
             // The speed the registry reports: the rate the engine's rdtsc
-            // advances at. The emulator's counter keeps the default.
-            processorMhz: (options.engine ?? DEFAULT_ENGINE) === 'cork' ? CORK_TSC_MHZ : undefined,
-            processorName: (options.engine ?? DEFAULT_ENGINE) === 'cork'
-                ? processorName(SETTINGS) : undefined,
+            // advances at.
+            processorMhz: CORK_TSC_MHZ,
+            processorName: processorName(SETTINGS),
             performanceFrequency: SETTINGS.qpc.frequency,
             // What every process of the run shares, as one Windows does: the
             // namespace a named mutex, event, semaphore, timer and file
@@ -5453,8 +5386,8 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    // Cork runs with nothing of the emulator loaded: its own host, its own
-    // memory, and the translator named by `engineUrl`.
+    // The machine: cork's own host and memory, and the translator named by
+    // `engineUrl`.
     await cpu.boot();
 
     // A processor exception goes to the handlers the program registered
@@ -5483,12 +5416,11 @@ async function buildApp(options){
         return true;
     });
 
-    // Mounted after the machine is up. A zstd block is decoded by this
-    // project's own decoder now, so the mount no longer needs the emulator.
-    // The bundle is the run's: the first process opens it -- its index, its
-    // block cache, the background fill -- and every process after it mounts
-    // the same one, rather than each reading the index again and filling a
-    // second cache from the network beside the first.
+    // Mounted after the machine is up. The bundle is the run's: the first
+    // process opens it -- its index, its block cache, the background fill --
+    // and every process after it mounts the same one, rather than each reading
+    // the index again and filling a second cache from the network beside the
+    // first.
     mountedBlocks = !options.system?.bundle;
     blocks = options.system?.bundle
         ?? await mountBundle({ options, events, translationStore });
@@ -5541,8 +5473,7 @@ async function buildApp(options){
     // layout question rather than something to honour silently.
     const stackRoom = initialStack - (mainStack.initialStack === undefined
         ? thunkBase + cpu.layout.thunkCapacity : STACK_POOL_START);
-    const stackSize = options.stackSize
-        ?? Math.min(stackReserveOf(mainImage.stackReserve), stackRoom);
+    const stackSize = Math.min(stackReserveOf(mainImage.stackReserve), stackRoom);
 
     memory.register({
         name: 'entry-vector', base: entryVector, size: 4,
@@ -5556,19 +5487,6 @@ async function buildApp(options){
         name: 'heap', base: HEAP_BASE, size: HEAP_SIZE,
         kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
     });
-    // Our own boot ROM, so that a report can name it. A fault leaves the
-    // processor standing in the stub behind its vector, and until this was here
-    // that address came back as unmapped -- which sent every reader of a crash
-    // looking for a guest bug at an address belonging to the engine. Cork has
-    // no ROM and so registers none.
-    if (cpu.layout.romSize > 0)
-    {
-        memory.register({
-            name: 'boot-rom', base: cpu.layout.romBase, size: cpu.layout.romSize,
-            kind: memory.RegionKind.LOW_MEM, access: memory.Access.READ_EXECUTE,
-        });
-    }
-
     // Every system module exists in guest memory before the program's first
     // instruction, not when something first asks for it. An address taken early
     // has to be the address that works later (§13.3), and a module conjured on
@@ -7460,7 +7378,6 @@ async function buildApp(options){
     const pacing = options.pacing ?? pagePacing({
         macrotask: breathe,
         hidden: options.pageHidden ?? pageIsHidden,
-        pendingMs: options.pendingYieldMs,
     });
 
     /**
@@ -7562,7 +7479,7 @@ async function buildApp(options){
         /**
          * Runs the program to completion, one scheduler turn at a time.
          *
-         * Turns rather than a free-running emulator: a turn is where a thread
+         * Turns rather than a free-running machine: a turn is where a thread
          * can be preempted, where a blocked one is put back on the road, and
          * where "nothing can run" becomes visible instead of looking like work.
          *
@@ -8084,19 +8001,15 @@ async function buildApp(options){
         off: (name, handler)=>events.off(name, handler),
 
         /**
-         * The emulator's account of where the guest ran, by the address of
-         * every compiled block and interpreted instruction, weighted by the
-         * instructions retired there. A sample taken where a turn stops lands
-         * on whatever stopped it; this is kept by the code as it runs, and is
-         * the only honest answer to "which of the program's own instructions
-         * is the time going to". Costs a call per block while it is kept, so
-         * it is started for a measurement and stopped after.
+         * An engine's own account of where the guest ran, by address, weighted
+         * by the instructions retired there, for an engine that keeps one.
+         * Cork keeps none here (`available` answers false): its block profile
+         * (`cork.blockProfile`) is a diagnostic run's.
          */
         guestProfile: {
             /**
-             * What a profiler build of the emulator counted since it started:
-             * its event counters by name and retired instructions by opcode.
-             * Null in a build without the profiler; a window is two readings.
+             * An engine's event counters by name and retired instructions by
+             * opcode since it started; null where it keeps none.
              */
             instructionStats: ()=>core.api('cpu').profile?.instructionStats() ?? null,
             available: ()=>Boolean(core.api('cpu').profile?.available()),
@@ -9010,8 +8923,8 @@ async function buildSystemHost(deps){
         processorName: processorName(SETTINGS),
         // The keys a process in a worker reads are these: they name as many
         // processors as its cpu layer will say it has.
-        processors: processorsFor({ engine: options.engine ?? DEFAULT_ENGINE,
-            executors: options.executors, sharedMemory: options.cork?.config?.sharedMemory }),
+        processors: processorsFor({
+            executors: options.cpu?.cores, sharedMemory: options.cork?.config?.sharedMemory }),
     });
     system.windows = createWindowDirectory();
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
@@ -9965,11 +9878,10 @@ export async function createApp(options){
     const processesAtOnce = (options.concurrency ?? 1) > 1;
     /**
      * Whether every process of the run stands in a worker of its own, its
-     * first one too: where processes run at once, on cork, this thread is the
+     * first one too: where processes run at once, this thread is the
      * system alone and runs no program (`buildSystemHost`).
      */
-    const rootAcross = processesAtOnce && !options.system
-        && (options.engine ?? DEFAULT_ENGINE) === 'cork';
+    const rootAcross = processesAtOnce && !options.system;
     /** @type {import('./layers/win32/ole32/remote.js').ClassTableHooks} */
     const serveHere = {
         launch: (request, process)=>{

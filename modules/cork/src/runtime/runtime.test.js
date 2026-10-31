@@ -29,8 +29,7 @@ function machine(config = {}, ramSize = 4 << 20, imports = {}){
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: ()=>0, rdtsc: ()=>0n, ...imports },
+        imports: { trap: ()=>0, rdtsc: ()=>0n, ...imports },
         // A page's rewrites all at one moment: what makes it volatile is how
         // many there were, never how long a busy machine took between them.
         now: ()=>0,
@@ -279,6 +278,12 @@ test('a callee that calls on is formed in, and its callee\'s return comes back i
     // (four a turn when F is a region of its own).
     const transfers = m.runtime.diagnostics().transfers ?? Infinity;
     assert.ok(transfers <= 2 * 50, `${transfers} transfers through the hash`);
+});
+
+test('a run that does not count its transfers answers none, not 0', ()=>{
+    const m = machine();
+    assert.equal('transfers' in m.runtime.diagnostics(), false);
+    assert.equal(machine({ countTransfers: true }).runtime.diagnostics().transfers, 0);
 });
 
 test('translate: false keeps the translator off for the interpreter alone', async()=>{
@@ -742,7 +747,7 @@ test('the runtime refuses a memory that has no room for its tables', ()=>{
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, 0) });
     assert.throws(()=>createCorkRuntime({
         memory, layout, config: {}, read: ()=>0,
-        imports: { trap: ()=>0, getEflags: ()=>0, x87Read: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0n },
     }), /before the tables/);
 });
 
@@ -1035,45 +1040,10 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(store.size(), 5);
     });
 
-test('a region formed beside another one is found by a run that would form it whole', async()=>{
-    const { memoryTranslationStore } = await import('./cache.js');
-    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
-    const store = memoryTranslationStore();
-    const LOOP = CODE + 5;
-    /** @param {number[]} order */
-    const run = async order=>{
-        const m = machine({ store, bundleId: 'test', regionStops: true });
-        m.write(CODE, COUNTDOWN);
-        m.setReg(4, 0x80000);
-        for (const at of order)
-        {
-            m.runtime.noteHot(at);
-            await m.runtime.translatePending();
-            await settle();
-        }
-        const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
-        assert.equal(exit.kind, 'halt');
-        assert.equal(m.reg(1), 0);
-        assert.equal(exit.retired, 1 + 2 * 1000 + 1);
-        return m.runtime.diagnostics();
-    };
-    // The loop first: the function's entry, formed after it, stops at the loop's head and
-    // leaves to its region.
-    const first = await run([LOOP, CODE]);
-    assert.equal(first.cacheMisses, 2);
-    assert.equal(first.regions, 2);
-    // The entry first: formed whole here, formed again as stored, and taken.
-    const second = await run([CODE, LOOP]);
-    assert.equal(second.cacheMisses, 0, 'both from the store');
-    assert.equal(second.cacheHits, 2);
-    assert.equal(second.hitsFormedAgain, 1, 'the entry formed as its record says');
-    assert.equal(store.size(), 4, 'nothing stored again');
-});
-
 test('a region the store answers for at once is formed once, as its record says', async()=>{
-    // The run above's two orders, with a store that answers before forming: at once
-    // (`getNow`, a directory store's records file), or for many names in one wait
-    // (`getManyNow`, a store across a link), whose waits are counted.
+    // A loop, then its function's entry, translated twice over a store that answers
+    // before forming: at once (`getNow`, a directory store's records file), or for many
+    // names in one wait (`getManyNow`, a store across a link), whose waits are counted.
     const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
     const LOOP = CODE + 5;
     for (const linked of [false, true])
@@ -1095,7 +1065,7 @@ test('a region the store answers for at once is formed once, as its record says'
         };
         /** @param {number[]} order */
         const run = async order=>{
-            const m = machine({ store, bundleId: 'test', regionStops: true });
+            const m = machine({ store, bundleId: 'test' });
             m.write(CODE, COUNTDOWN);
             m.setReg(4, 0x80000);
             for (const at of order)
@@ -1114,7 +1084,7 @@ test('a region the store answers for at once is formed once, as its record says'
         assert.equal(first.cacheMisses, 2);
         const stored = records.size;
         waits = 0;
-        const second = await run([CODE, LOOP]);
+        const second = await run([LOOP, CODE]);
         assert.deepEqual([second.cacheHits, second.cacheMisses], [2, 0], 'both from the store');
         assert.equal(second.hitsFormedAgain, 0,
             `nothing formed twice (${linked ? 'linked' : 'at once'})`);
@@ -3450,8 +3420,7 @@ async()=>{
         esi = (esi + 1) >>> 0;
         edx = (edx ^ esi) >>> 0;
     }
-    for (const config of [{ callReturn: false }, { callReturn: true },
-        { callReturn: true, emptySites: true }])
+    for (const config of [{ callReturn: false }, { callReturn: true }])
     {
         const m = machine({ leafCalls: false, ...config });
         m.write(CODE, program);

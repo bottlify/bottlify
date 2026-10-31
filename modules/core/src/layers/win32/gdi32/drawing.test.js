@@ -330,7 +330,7 @@ test('a memory context is bound to the bitmap selected into it, and rebound on a
 });
 
 test('a surface whose bytes the guest outgrew is taken again, not drawn into nowhere', ()=>{
-    // The emulator grows its memory in place, which detaches every view of it
+    // Guest memory can grow in place, which detaches every view of it
     // taken before the growth. A context holds one such view for as long as its
     // selected bitmap does, so after a growth every draw through it reads
     // zeroes and writes nowhere -- an installer that copied for ten minutes and
@@ -353,7 +353,7 @@ test('a surface whose bytes the guest outgrew is taken again, not drawn into now
     assert.equal(fns.BitBlt.handler([memoryDc, 0, 0, 2, 2, 0, 0, 0, SRCCOPY]), 1);
     assert.equal(surfaces.length, 1, 'bound while the bytes are there');
 
-    // The emulator's buffer is replaced: the bound view goes empty.
+    // The memory's buffer is replaced: the bound view goes empty.
     surfaces[0].bytes = new Uint8Array(0);
     assert.equal(fns.BitBlt.handler([memoryDc, 0, 0, 2, 2, 0, 0, 0, SRCCOPY]), 1);
     assert.equal(surfaces.length, 2, 'the next draw takes the view again');

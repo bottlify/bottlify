@@ -329,7 +329,6 @@ export function captureTrace(sources){
                 .map(name=>[name, peekBytes(sources, Number(trace.registers[name]))]),
         ].filter(([, lines])=>lines !== null));
         trace.instructions = cpu.instructionCount();
-        trace.protectedMode = cpu.inProtectedMode();
     }
     catch (e){
         trace.cpuUnavailable = String(e);

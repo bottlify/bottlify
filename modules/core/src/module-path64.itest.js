@@ -85,7 +85,7 @@ test('a library loaded by its installed path reports that path, and its file rea
                 return bytes;
             },
         });
-        const app = await createApp({ executable: program, engine: 'cork',
+        const app = await createApp({ executable: program,
             win32: { steam: { steamId: '76561197960287930', accountName: 'test', apps: [480] } } });
         t.after(()=>app.dispose());
         /** @type {string[]} */
@@ -142,7 +142,7 @@ test('with the client\'s own file installed, the file is that file and the modul
             return bytes;
         },
     });
-    const app = await createApp({ executable: program, engine: 'cork',
+    const app = await createApp({ executable: program,
         win32: { steam: { steamId: '76561197960287930', accountName: 'test', apps: [480],
             clientFiles: { 'steamclient64.dll': installed } } } });
     t.after(()=>app.dispose());

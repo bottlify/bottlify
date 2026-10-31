@@ -133,9 +133,21 @@ export function I(op, forms = '', flags = 'none', faults = 'none', cc){
     };
 }
 
+/**
+ * A group's slot whose meaning the ModRM byte's mod picks: one instruction
+ * with a memory operand, another with none.
+ */
+export class ByMod {
+    /** @param {Entry | null} memory @param {Entry | null} register */
+    constructor(memory, register){
+        this.memory = memory;
+        this.register = register;
+    }
+}
+
 /** A `/r` group: eight entries, null where the encoding is invalid. */
 export class Group {
-    /** @param {(Entry | null | typeof SYS)[]} entries */
+    /** @param {(Entry | ByMod | null | typeof SYS)[]} entries */
     constructor(entries){
         if (entries.length !== 8)
         {
@@ -145,7 +157,7 @@ export class Group {
     }
 }
 
-/** @param {(Entry | null | typeof SYS)[]} entries */
+/** @param {(Entry | ByMod | null | typeof SYS)[]} entries */
 export const G = entries=>new Group(entries);
 
 /** A `0F` entry whose meaning the mandatory prefix picks. */
@@ -230,11 +242,10 @@ for (let reg = 0; reg < 8; reg++)
 }
 ONE_BYTE[0x60] = I('pushad');
 ONE_BYTE[0x61] = I('popad');
-// bound's second operand is a memory pair (`Ma`) on paper, but the emulator's
-// decoder consumes the register form too -- it neither reads the pair nor
-// raises #BR -- and a lost thread running the entry vector's bytes reaches
-// exactly that form (`62 d0`). `Ev` decodes both; the model and the emitter
-// treat the whole instruction as the no-op the emulator makes of it.
+// bound's second operand is a memory pair (`Ma`) on paper, but a lost thread
+// running the entry vector's bytes reaches the register form (`62 d0`) too.
+// `Ev` decodes both; the model and the emitter treat the whole instruction as
+// a no-op, which neither reads the pair nor raises #BR.
 ONE_BYTE[0x62] = I('bound', 'Gv,Ev', 'none', 'trap');
 // arpl: legal at every privilege level, and in the corpus; it adjusts a
 // selector's requested privilege and says whether it did.
@@ -569,9 +580,13 @@ TWO_BYTE[0xa9] = I('pop', 'GS');
 TWO_BYTE[0xab] = I('bts', 'Ev,Gv', 'bt');
 TWO_BYTE[0xac] = I('shrd', 'Ev,Gv,Ib', 'shiftDouble');
 TWO_BYTE[0xad] = I('shrd', 'Ev,Gv,CL', 'shiftDouble');
+// The fences are the register forms of /5../7; the memory form of /7 is
+// clflush (CPUID's CLFSH), those of /5 and /6 xrstor and xsaveopt, which need
+// an XSAVE CPUID does not report.
 TWO_BYTE[0xae] = G([
     I('fxsave', 'M'), I('fxrstor', 'M'), I('ldmxcsr', 'Md'), I('stmxcsr', 'Md'),
-    SYS, I('lfence'), I('mfence'), I('sfence'),
+    SYS, new ByMod(null, I('lfence')), new ByMod(null, I('mfence')),
+    new ByMod(I('clflush', 'Mb'), I('sfence')),
 ]);
 TWO_BYTE[0xaf] = I('imul', 'Gv,Ev', 'mul');
 TWO_BYTE[0xb0] = I('cmpxchg', 'Eb,Gb', 'cmpxchg');
@@ -605,7 +620,7 @@ TWO_BYTE[0xc3] = I('movnti', 'Md,Gy');
 TWO_BYTE[0xc4] = S({ '': I('pinsrw', 'Pq,Ew,Ib'), 66: I('pinsrw', 'Vdq,Ew,Ib') });
 TWO_BYTE[0xc5] = S({ '': I('pextrw', 'Gy,Nq,Ib'), 66: I('pextrw', 'Gy,Udq,Ib') });
 TWO_BYTE[0xc6] = S({ '': I('shufps', 'Vps,Wps,Ib'), 66: I('shufpd', 'Vpd,Wpd,Ib') });
-// rdrand: CPUID leaf 1 advertises it (the emulator's answer), so it is decoded;
+// rdrand: CPUID leaf 1 advertises it (`cpuid.js`), so it is decoded;
 // a memory operand is #UD, and it leaves CF set and the other five clear.
 TWO_BYTE[0xc7] = G([
     null, I('cmpxchg8b', 'Mq', 'cmpxchg8b'), null, null, null, null,
@@ -785,7 +800,7 @@ run(X87[7].reg, 0xf0, I('fcomip', 'ST0,STi', 'compareFloat'));
  */
 export function formsInUse(){
     const forms = new Set();
-    /** @param {Entry | Group | Prefixed | typeof SYS | null} entry */
+    /** @param {Entry | Group | ByMod | Prefixed | typeof SYS | null} entry */
     const visit = entry=>{
         if (entry === null || entry === SYS)
         {
@@ -794,6 +809,11 @@ export function formsInUse(){
         if (entry instanceof Group)
         {
             entry.entries.forEach(visit);
+        }
+        else if (entry instanceof ByMod)
+        {
+            visit(entry.memory);
+            visit(entry.register);
         }
         else if (entry instanceof Prefixed)
         {

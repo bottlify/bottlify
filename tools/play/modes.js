@@ -11,25 +11,26 @@
  * person's machine and one an agent makes are the same configuration when
  * they carry the same name.
  *
- * A mode is what `createApp` is given beyond the bottle: `executors`, the
- * program's threads on that many executors at once, and
- * `cork`, the translator's settings (`EngineConfig`). `default` is the
- * configuration every program runs with when nobody chooses.
+ * A mode is what `createApp` is given beyond the bottle: `cores` (`cpu.cores`),
+ * the program's threads on that many executors at once, and `cork`, the
+ * translator's settings (`EngineConfig`). `default` is the configuration every
+ * program runs with when nobody chooses.
  */
 
 /**
  * @typedef {Object} Mode
  * @property {string} what            One line on what the mode is for.
- * @property {number} [executors]
+ * @property {number} [cores]
  * @property {Record<string, unknown>} [cork]
  */
 
 /** @type {Record<string, Mode>} */
 export const MODES = {
-    default: { what: 'one executor, the translator as shipped: what every program runs with' },
-    multi2: { what: 'two executors: threads ready together run at once', executors: 2 },
-    multi: { what: 'three executors', executors: 3 },
-    multi4: { what: 'four executors', executors: 4 },
+    default: { what: 'the cores the host allows, the translator as shipped: what every program'
+        + ' runs with' },
+    multi2: { what: 'two cores: threads ready together run at once', cores: 2 },
+    multi: { what: 'three cores', cores: 3 },
+    multi4: { what: 'four cores', cores: 4 },
     checked: { what: 'translated reads test their pages from the start, not from the first fault',
         cork: { checkReads: true } },
 };

@@ -363,7 +363,7 @@ export function createBridgeModule(){
                 wantsCall: config?.wantsCall,
                 // Where the time a host call takes is accounted. Nested inside the
                 // guest phase the driver opens, so what is left as the guest's own
-                // self time is the emulator executing and this is our code -- which
+                // self time is the guest's code executing and this is ours -- which
                 // is the only division that answers a question about speed.
                 profiler: /** @type {any} */ (host.requireApi('log')),
                 // The same journal, for the record of a slot hook's crossings

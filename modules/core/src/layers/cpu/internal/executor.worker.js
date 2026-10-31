@@ -108,7 +108,7 @@ function processStore(send){
  * an executor kept running from one kept waiting on the process. `ends` counts
  * why its slices ended. `answerWaits` counts the answers by how long each took,
  * up to each of `ANSWER_BOUNDS_US` and past the last: how long a look before a
- * sleep (`spinMs`) would have caught how many of them.
+ * sleep (`lookFor`) would have caught how many of them.
  */
 const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0, traps: 0,
     faults: 0, yieldMs: 0, feedMs: 0, asyncWaits: 0, inChainYieldMs: 0,
@@ -131,14 +131,9 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
     }
     const bellWords = new Int32Array(bell);
     const routines = unbroken === undefined ? null : unbrokenTable(unbroken);
-    // The pacing the config names (`EngineConfig`), these defaults otherwise.
     // How long a wait looks before it sleeps: longer while the host has a core
     // to spare, which the slices out say (`Bell.RUNNING`).
-    const look = lookFor(bellWords, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency,
-        config.cork?.spinMs);
-    const idleMs = config.cork?.executorIdleMs ?? IDLE_MS;
-    const yieldMs = config.cork?.executorYieldMs ?? YIELD_MS;
-    const holdMs = config.cork?.executorHoldMs ?? HOLD_MS;
+    const look = lookFor(bellWords, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency);
     const channel = channelOf(buffer, bellWords, look);
     const { words } = channel;
     waits = channel.counts;
@@ -177,11 +172,10 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         }
         return retired;
     };
-    /** A wait for the process's answer, in its own account and the channel's (`Word.WAITED`). */
+    /** A wait for the process's answer, in its own account. */
     const noteWaited = (/** @type {number} */ ms)=>{
         spent.answerWaitMs += ms;
         const us = Math.round(ms * 1000);
-        Atomics.add(words, Word.WAITED, us);
         let bucket = 0;
         while (bucket < ANSWER_BOUNDS_US.length && us > ANSWER_BOUNDS_US[bucket])
         {
@@ -252,7 +246,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         {
             // The process mostly asks again soon after a slice's end, and a
             // wake through the event loop costs more: a short wait in place first.
-            waitWhile(words, Word.STATE, state, idleMs, look(), Word.SLEEPING);
+            waitWhile(words, Word.STATE, state, IDLE_MS, look(), Word.SLEEPING);
             state = Atomics.load(words, 0);
         }
         while (state !== Turn.RUN && state !== Turn.CLOSE)
@@ -264,7 +258,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
             state = Atomics.load(words, 0);
             yieldedAt = performance.now();
         }
-        if (performance.now() - yieldedAt >= yieldMs)
+        if (performance.now() - yieldedAt >= YIELD_MS)
         {
             // Asked again and again without a pause: a turn of the event loop
             // all the same, now and then, or no translation would ever land.
@@ -302,7 +296,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
                 const end = host.halted() ? 'halted' : host.stopRequested() ? 'stopped'
                     : host.fault() !== null ? 'faulted'
                         : go === 0 ? 'released'
-                            : go === 2 && now - chained >= holdMs ? 'turned'
+                            : go === 2 && now - chained >= HOLD_MS ? 'turned'
                                 : now - chained >= CHAIN_MS ? 'chained' : null;
                 if (end !== null)
                 {
@@ -311,7 +305,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
                         ? runOut() : 0;
                     break;
                 }
-                if (now - yieldedAt >= yieldMs)
+                if (now - yieldedAt >= YIELD_MS)
                 {
                     await yieldTurn();
                     yieldedAt = performance.now();

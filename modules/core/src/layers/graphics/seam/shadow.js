@@ -62,10 +62,10 @@ const D3DUSAGE_RENDERTARGET = 0x1;
 
 /**
  * The block takes pages of its own. The routines that write it are guest
- * code the emulator compiles, and a write into a page that holds compiled
- * code makes the emulator discard everything compiled for that page -- so a
- * block laid right after the routines, out of the same heap, would have every
- * SetRenderState throw the routines away and run them interpreted after.
+ * code the translator compiles, and a write near translated code drops what
+ * the translator made of it -- so a block laid right after the routines, out
+ * of the same heap, would have every SetRenderState throw the routines away
+ * and run them interpreted after.
  */
 const PAGE = 4096;
 const PAGES = 2;

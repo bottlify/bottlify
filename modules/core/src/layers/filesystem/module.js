@@ -149,8 +149,7 @@ export function createFilesystemModule(){
                 // was mounted -- rather than giving the drive a blank disk.
                 writables: shared?.writables ?? new Map(),
                 directories: null,
-                files: createFileTable({ limit: config?.openFileLimit,
-                    sharing: shared?.sharing }),
+                files: createFileTable({ sharing: shared?.sharing }),
                 disposed: false,
                 unwatch: ()=>{},
             };

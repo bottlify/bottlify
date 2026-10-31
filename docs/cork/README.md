@@ -391,14 +391,18 @@ of one process) is in [`docs/architecture.md`](../architecture.md), section 5.
 
 ```sh
 npm test -w @bottlify/cork                  # unit tests and gates, a minute or two
-npm run fetch:corpus                        # once: the instruction corpus
 npm run test:integration -w @bottlify/cork  # the suites over the corpus
 node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
 ```
 
-- **Instruction corpus** (`npm run fetch:corpus`, its version pinned in
-  [`corpus-lock.json`](../../modules/cork/corpus-lock.json)): cases recorded on real processors. Each goes through the
-  decoder, both interpreters and translated code, and the result has to match the hardware.
+- **Instruction corpus** ([`src/x86-corpus.json.gz`](../../modules/cork/src/x86-corpus.json.gz), in the
+  repository): short random instruction sequences from templates written from the Intel SDM, run on
+  a real processor by [`tools/x86-corpus.mjs`](../../tools/x86-corpus.mjs), which makes it again
+  with clang, lld and llvm-mc on an x86-64 Linux host. Each case goes through the decoder, both
+  interpreters and translated code, and the result has to match the hardware; what is not compared,
+  and why, is in [`src/testing/x86-corpus.js`](../../modules/cork/src/testing/x86-corpus.js), and
+  the cases an engine still gets wrong are listed with their reasons in
+  [`src/testing/x86-known.js`](../../modules/cork/src/testing/x86-known.js).
 - **Sequence corpus** ([`src/testing/sequences-judge.js`](../../modules/cork/src/testing/sequences-judge.js)):
   generated chains of instructions run on the model and in translated code and are compared bit for
   bit.

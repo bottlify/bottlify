@@ -7,10 +7,9 @@
 /**
  * The page-fault fixture: the same program on translated code and on the
  * interpreter, over memory whose pages the test marks inaccessible, compared
- * at the fault. Everywhere else a case is judged against the emulator or a
- * hardware recording; the page-flag table is cork's own, so the translator's
- * peer here is the interpreter, which consults the same table through
- * `blockState`.
+ * at the fault. Everywhere else a case is judged against a hardware
+ * recording; the page-flag table is cork's own, so the translator's peer here
+ * is the interpreter, which consults the same table through `blockState`.
  *
  * The queue's item 6 asks for the cases the flat test memory cannot hold: a
  * `rep` that faults with its progress in ecx, esi and edi and restarts from

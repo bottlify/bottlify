@@ -157,8 +157,7 @@ async function corkLoop({ cross, split, shared = false, n = 200000 }){
         config: { worker: false, leafCalls: false, mergeAfter: 0, callReturn: false,
             dispatch: true, crossTailCalls: cross },
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: ()=>0, rdtsc: ()=>0n } });
+        imports: { trap: ()=>0, rdtsc: ()=>0n } });
     bytes().set([0xb9, n & 0xff, n >>> 8 & 0xff, n >>> 16 & 0xff, 0, 0xe8, 0x04, 0, 0, 0,
         0x49, 0x75, 0xf8, 0xf4, 0x42, 0xc3], layout.ramBase + CODE);
     view().setUint32(layout.regs + 4 * 4, 0x80000, true);

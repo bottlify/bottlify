@@ -9,8 +9,8 @@
  *
  * A host function that takes a function pointer -- a comparator, a window
  * procedure, an enumeration callback -- has to run guest code and use its
- * answer. It cannot simply call it: the handler runs inside the emulator's own
- * loop, and the emulator cannot be re-entered from within it.
+ * answer. It cannot simply call it: the handler runs inside the engine's own
+ * slice, and the engine cannot be re-entered from within it.
  *
  * So the call happens the way §12.3 describes, pointed the other way. The
  * calling thread is stopped where it stands, a frame for the callback is built

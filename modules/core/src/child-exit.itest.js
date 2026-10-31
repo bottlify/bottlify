@@ -69,7 +69,6 @@ for (const [how, child] of /** @type {const} */ ([['faults', faulting], ['exits'
             const app = await createApp({
                 executable: parent(),
                 imagePath: 'C:\\App\\parent.exe',
-                engine: 'cork',
                 // A loop that takes its next turn at once rather than after a
                 // timer, as a page's does once its waits are answered: it turns
                 // while the child's machine is taken down, which awaits.

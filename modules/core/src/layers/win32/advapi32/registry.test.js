@@ -609,7 +609,7 @@ test('the processor key names the processor the engine gives', ()=>{
         assert.equal(value.type, REG_SZ);
         return new TextDecoder('latin1').decode(value.data).replace(/\0$/, '');
     };
-    assert.equal(nameOf(createHive()), 'Bottlify x86');
+    assert.equal(nameOf(createHive()), 'Bottlify Virtual CPU @ 3.00GHz', 'CPUID\'s brand');
     const named = createHive({ processorName: 'Bottlify Cork x86 v1.2.3' });
     assert.equal(nameOf(named), 'Bottlify Cork x86 v1.2.3');
     // HARDWARE is the kernel's, written at every boot: a restored hive takes

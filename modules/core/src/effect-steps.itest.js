@@ -53,7 +53,7 @@ async function run(executable, seed, drive, executors = 1){
         driveGuestCalls: drive,
         // Every executor open from the first instruction: opened as threads
         // want them, a run this short is over before the second one is.
-        ...(executors > 1 ? { cpu: { cores: executors, eager: true } } : {}),
+        ...(executors > 1 ? { cpu: { cores: executors } } : {}),
         device: {
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' },

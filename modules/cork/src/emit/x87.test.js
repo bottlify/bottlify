@@ -22,11 +22,13 @@ const DATA = 0x2000;
  *
  * @param {number[]} bytes
  * @param {{ data?: number[], top?: number, empty?: number, st?: Record<number, number>,
- *     regs?: Record<string, number>, eflags?: number, tagged?: [number, number[]][] }} [start]
+ *     regs?: Record<string, number>, eflags?: number, tagged?: [number, number[]][],
+ *     features?: { defaultNaNNegative: boolean } }} [start]
  */
 function run(bytes, start = {}){
-    const { data = [], top = 0, empty = 0xff, st = {}, regs = {}, eflags = 2, tagged = [] } = start;
-    const m = createTestMachine();
+    const { data = [], top = 0, empty = 0xff, st = {}, regs = {}, eflags = 2, tagged = [],
+        features } = start;
+    const m = createTestMachine(features ? { features } : {});
     const view = new DataView(m.memory.buffer);
     view.setUint8(m.layout.x87Top, top);
     view.setUint8(m.layout.x87Empty, empty);
@@ -260,9 +262,7 @@ test('fcomi sets ZF PF CF as cmp would; fcom sets the condition bits', ()=>{
     assert.equal(com.m.reg('eax') >>> 11 & 7, 6, 'the top in the word');
 });
 
-test('a region entered with top 6 reads the emulator tagged form without the import', ()=>{
-    // The state block in cork's own layout holds f64; the tagged form is the
-    // emulator's. Both are read: here the own form, with two registers held.
+test('a region entered with top 6 reads the two registers it holds, each an f64', ()=>{
     const r = run([
         0xde, 0xc1,                          // faddp st1, st0
         0xdd, 0x1d, 0x00, 0x20, 0, 0,        // fstp qword [DATA]
@@ -651,6 +651,35 @@ test('a signalling NaN from memory raises IE and goes on quiet, a quiet one does
     r = run([0xd9, 0xe8, 0xd8, 0x1d, ...d], { data: qNaN32 });
     assert.equal(r.status() & 0x4501, 0x4501, 'unordered, and IE');
 });
+
+for (const defaultNaNNegative of [false, true])
+{
+    test('arithmetic on a register holding a signalling NaN raises IE, a quiet one does not'
+        + ` (the host's default NaN ${defaultNaNNegative ? 'negative' : 'positive'})`, ()=>{
+        const d = [DATA & 255, DATA >> 8, 0, 0];
+        /** @param {bigint} value */
+        const register = value=>[...new Uint8Array(BigUint64Array.of(value).buffer),
+            ...Array(8).fill(0)];
+        const features = { defaultNaNNegative };
+        /** ST(0) at physical 7 holds `value`; `bytes` run on it. @param {bigint} value @param {number[]} bytes */
+        const on = (value, bytes, data = [0, 0, 0x80, 0x3f])=>run(bytes,
+            { top: 7, empty: 0x7f, tagged: [[7, register(value)]], data, features });
+        // fadd st0, st0
+        let r = on(0x7ff0000000000001n, [0xd8, 0xc0]);
+        assert.equal(r.status() & 1, 1, 'fadd st0, st0 of a signalling NaN: IE');
+        assert.ok(Number.isNaN(r.st(0)));
+        // fmul dword [DATA], the operand 1.0
+        r = on(0xfff0000000000001n, [0xd8, 0x0d, ...d]);
+        assert.equal(r.status() & 1, 1, 'fmul m32 into a signalling NaN: IE');
+        // fiadd dword [DATA]
+        r = on(0x7ff0000000000001n, [0xda, 0x05, ...d], [1, 0, 0, 0]);
+        assert.equal(r.status() & 1, 1, 'fiadd into a signalling NaN: IE');
+        r = on(0x7ff8000000000001n, [0xd8, 0xc0]);
+        assert.equal(r.status() & 1, 0, 'fadd st0, st0 of a quiet NaN: no IE');
+        r = on(0x3ff0000000000000n, [0xd8, 0xc0]);
+        assert.equal(r.status() & 1, 0, 'fadd of 1.0: no IE');
+    });
+}
 
 test('arithmetic on two NaNs answers the x87\'s choice: quiet first, the larger significand',
     ()=>{

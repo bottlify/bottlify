@@ -10,11 +10,9 @@
  * the instruction met once -- cold code, a refused instruction, a volatile
  * page -- where translating a whole region would cost more than running it.
  *
- * The evaluator's integer set is here. The x87, MMX and SSE operations the
- * emitter has and `ir.js` lacks are the remaining work of this step; an
- * instruction with no model throws `Unsupported`, which the host answers with
- * `cpu: cork has no tier for …` and hands to the other executor, as a refused
- * instruction is handled under hybrid.
+ * An instruction the evaluator has no model for throws `Unsupported`, which
+ * the host takes as the engine's no-tier answer: the run stops there, the
+ * instruction named.
  */
 
 import { decode } from './decode/decoder.js';
@@ -905,7 +903,7 @@ class BlockState {
         // The quadwords a `fild` left exact, as the block keeps them for every
         // executor (`layout.x87Exact`); translated code takes the marks off
         // the registers it writes. A layout with no place for them keeps none.
-        const exactAt = this.layout.x87Format === 'f64' ? this.layout.x87Exact ?? -1 : -1;
+        const exactAt = this.layout.x87Exact ?? -1;
         this.x87Exact = exactAt >= 0 ? this.view.getUint8(exactAt) : 0;
         for (let i = 0; i < 8; i++)
         {
@@ -923,7 +921,7 @@ class BlockState {
         const { view, layout } = this;
         view.setUint32(layout.eip, this.eip >>> 0, true);
         view.setUint32(layout.eflags, this.eflags >>> 0, true);
-        const exactAt = layout.x87Format === 'f64' ? layout.x87Exact ?? -1 : -1;
+        const exactAt = layout.x87Exact ?? -1;
         if (exactAt >= 0)
         {
             view.setUint8(exactAt, this.x87Exact);

@@ -178,7 +178,7 @@ function program(){
  * @param {Uint8Array} executable @param {number} executors
  */
 async function run(executable, executors){
-    const app = await createApp({ executable, executors, cpu: { eager: true }, win32: WIN32 });
+    const app = await createApp({ executable, cpu: { cores: executors }, win32: WIN32 });
     try
     {
         const began = performance.now();

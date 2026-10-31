@@ -193,16 +193,15 @@ export function arenaEmitCache(buffer){
  */
 function contextKey(layout, features, options, leaveOut){
     return JSON.stringify([layout.id ?? layout, features.simd, features.tailCalls,
-        features.defaultNaNNegative === true, features.armHost === true, options.undoLog === true,
-        options.hash === true,
+        features.defaultNaNNegative === true, features.armHost === true, options.hash === true,
         options.trapPort ?? null, options.countTransfers === true, options.blockProfile === true,
         options.wide === true, options.narrow === true, options.structure !== false,
         options.precise === true, options.place === true, options.profileCalls === true,
         options.atomic === true, options.ordered === true,
-        options.resume === true, options.callReturn === true, options.emptySites === true,
+        options.resume === true, options.callReturn === true,
         options.linkedCalls !== false, options.looseStacks === true,
         options.checkReads === true, options.expansion != null, options.crossTailCalls !== false,
-        options.callDepth ?? null, options.flagsAcrossCalls !== false, [...leaveOut].sort()]);
+        options.callDepth ?? null, [...leaveOut].sort()]);
 }
 
 /** @type {Map<string, number>} */
@@ -301,13 +300,13 @@ function sameShape(kept, shape){
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
  *     armHost?: boolean }} features
- * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
+ * @param {{ hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
  *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
  *     atomic?: boolean, ordered?: boolean,
- *     callReturn?: boolean, emptySites?: boolean, linkedCalls?: boolean, crossTailCalls?: boolean,
- *     callDepth?: number, flagsAcrossCalls?: boolean, looseStacks?: boolean, checkReads?: boolean,
+ *     callReturn?: boolean, linkedCalls?: boolean, crossTailCalls?: boolean,
+ *     callDepth?: number, looseStacks?: boolean, checkReads?: boolean,
  *     memory?: { shared?: boolean, maxPages?: number },
  *     expansion?: import('../emit/region.js').ExpansionNote | null }}
  *     [options]
@@ -328,7 +327,6 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         : new Set(options.leaveOut ?? []);
     const m = new ModuleBuilder();
     const context = prepareModule(m, layout, features, options.memory ?? {}, {
-        undoLog: options.undoLog === true,
         hash: options.hash === true,
         countTransfers: options.countTransfers === true,
         blockProfile: options.blockProfile === true,
@@ -342,13 +340,11 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         profileCalls: options.profileCalls === true,
         resume: options.resume === true,
         callReturn: options.callReturn === true,
-        emptySites: options.emptySites === true,
         linkedCalls: options.linkedCalls !== false,
         looseStacks: options.looseStacks === true,
         checkReads: options.checkReads === true,
         crossTailCalls: options.crossTailCalls !== false,
         ...(options.callDepth === undefined ? {} : { callDepth: options.callDepth }),
-        flagsAcrossCalls: options.flagsAcrossCalls !== false,
         leaveOut,
         expansion: options.expansion ?? null,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
@@ -444,14 +440,13 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  * into one module: the relink that gathers the regions of many small batch
  * modules into a few big ones. A region whose bytes no longer hash as they did
  * is answered as a failure (`changed`) and keeps the function it has. A job's
- * `targets` are the callees its indirect calls were predicted to (`callTargets`),
- * its `stops` the blocks its forming left to other regions (`entered`).
+ * `targets` are the callees its indirect calls were predicted to (`callTargets`).
  *
  * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean,
  *         copies?: boolean, precision?: import('../emit/region.js').X87Precision,
- *         floats?: boolean, targets?: [number, number[]][], stops?: number[] }[],
+ *         floats?: boolean, targets?: [number, number[]][] }[],
  *     pages: [number, Uint8Array][], formable?: number[],
- *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean,
+ *     form: { maxBlocks: number, leafCalls?: boolean,
  *         helpers?: boolean } }} relink   `pages` copies of every page forming read,
  *     `formable` the ones a region may span (all of `pages` when absent)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
@@ -488,9 +483,7 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
     const translatable = address=>formablePages.has(address >>> 12);
     const shared = formShared();
     const formed = jobs.map(job=>{
-        const stopped = new Set(job.stops ?? []);
         const region = formRegion(read, job.entry, { ...form, translatable, shared,
-            entered: address=>stopped.has(address),
             ...(job.targets === undefined ? {} : { callTargets: new Map(job.targets) }) });
         return region.hash === job.hash
             ? { region, entryTop: job.entryTop, checked: job.checked === true,
@@ -515,7 +508,7 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
  *     armHost?: boolean }} features
- * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number,
+ * @param {{ hash?: boolean, trapPort?: number,
  *     leaveOut?: Set<string> | string[] }} [options]
  * @returns {BuiltRegion}
  */

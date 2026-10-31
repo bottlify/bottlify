@@ -280,7 +280,6 @@ async function observed(parent, concurrency, through, t, childImage = child){
     const app = await createApp({
         executable: through ? launcher() : parent,
         imagePath: through ? 'C:\\App\\launcher.exe' : 'C:\\App\\parent.exe',
-        engine: 'cork',
         concurrency,
         storage: { load: async()=>({ files: [
             { path: 'C:\\App\\child.exe', bytes: childImage },

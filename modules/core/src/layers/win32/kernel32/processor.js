@@ -32,7 +32,7 @@ const EDX = Object.freeze({
 });
 
 /** And its ECX bits. */
-const ECX = Object.freeze({ SSE3: 1 << 0, POPCNT: 1 << 23, RDRAND: 1 << 30 });
+const ECX = Object.freeze({ SSE3: 1 << 0, CX16: 1 << 13, POPCNT: 1 << 23, RDRAND: 1 << 30 });
 
 /**
  * What the emulated processor answers to CPUID, leaf 0, leaf 1 and leaf 4, as
@@ -41,19 +41,19 @@ const ECX = Object.freeze({ SSE3: 1 << 0, POPCNT: 1 << 23, RDRAND: 1 << 30 });
  */
 export const CPUID = Object.freeze({
     vendor: 'GenuineIntel',
-    signature: 0x00000673,
-    edx: 0x0780a979,
-    ecx: 0xc0800001,
+    signature: 0x00000f65,
+    edx: 0x0788a979,
+    ecx: 0x00002001,
     /**
-     * Leaf 4's subleaves, EAX, EBX and ECX, one per cache: level 1 data and
-     * instruction, then a unified level 2. More processors change only
-     * EAX[31:26], the cores in the package less one, which nothing here
-     * reads: no two processors share a cache.
+     * Leaf 4's subleaves, EAX, EBX and ECX, one per cache: a level 1 data
+     * cache of 16 KiB, then a unified level 2 of 2 MiB (the class's level 1
+     * instructions are a trace cache, which leaf 4 does not list). More
+     * processors change only EAX[31:26], the cores in the package less one,
+     * which nothing here reads: no two processors share a cache.
      */
     caches: Object.freeze([
-        Object.freeze({ eax: 0x00000121, ebx: 0x01c0003f, ecx: 0x0000003f }),
-        Object.freeze({ eax: 0x00000122, ebx: 0x01c0003f, ecx: 0x0000003f }),
-        Object.freeze({ eax: 0x00000143, ebx: 0x05c0003f, ecx: 0x00000fff }),
+        Object.freeze({ eax: 0x00000121, ebx: 0x01c0003f, ecx: 0x0000001f }),
+        Object.freeze({ eax: 0x00000143, ebx: 0x01c0003f, ecx: 0x00000fff }),
     ]),
 });
 
@@ -64,11 +64,12 @@ export const PROCESSOR = Object.freeze({
     model: CPUID.signature >>> 4 & 0xf,
     stepping: CPUID.signature & 0xf,
     /**
-     * The rate the time-stamp counter advances at, which is what Windows
-     * measures at boot and writes as the processor's speed: one tick per host
-     * nanosecond, the emulated counter's rate and the base frequency the
-     * emulated CPUID reports. A program turns rdtsc deltas into seconds with
-     * it, and any other figure puts its clocks out by that ratio.
+     * The speed Windows measures at boot and writes for the processor where
+     * no engine gives its own. A run's is the rate cork's host counts rdtsc
+     * at, which CPUID's leaves 0x15 and 0x16 and its brand state and
+     * `createApp` passes in as `processorMhz`: a program turns rdtsc deltas
+     * into seconds with it, and any other figure puts its clocks out by that
+     * ratio.
      */
     mhz: 1000,
 });
@@ -77,8 +78,8 @@ export const PROCESSOR = Object.freeze({
 export const PROCESSOR_IDENTIFIER =
     `x86 Family ${PROCESSOR.family} Model ${PROCESSOR.model} Stepping ${PROCESSOR.stepping}`;
 
-/** What the processor is called where no engine names it. */
-export const PROCESSOR_NAME = 'Bottlify x86';
+/** What the processor is called where no engine names it: CPUID's brand string. */
+export const PROCESSOR_NAME = 'Bottlify Virtual CPU @ 3.00GHz';
 
 /** SYSTEM_INFO's wProcessorLevel and wProcessorRevision: the family, then model and stepping. */
 export const PROCESSOR_LEVEL = PROCESSOR.family;
@@ -267,6 +268,6 @@ export const PROCESSOR_FEATURES = new Map([
     [10, hasEdx(EDX.SSE2)],      // PF_XMMI64_INSTRUCTIONS_AVAILABLE
     [12, false],                 // PF_NX_ENABLED
     [13, hasEcx(ECX.SSE3)],      // PF_SSE3_INSTRUCTIONS_AVAILABLE
-    [14, false],                 // PF_COMPARE_EXCHANGE128
+    [14, hasEcx(ECX.CX16)],      // PF_COMPARE_EXCHANGE128
     [28, hasEcx(ECX.RDRAND)],    // PF_RDRAND_INSTRUCTION_AVAILABLE
 ]);

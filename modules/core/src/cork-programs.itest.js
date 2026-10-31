@@ -156,7 +156,6 @@ test('hello ends translated as it ends on the model',
         const cork = await run(exe);
         assert.equal(cork.code, reference.code);
         assert.equal(cork.output, reference.output);
-        assert.equal(cork.diagnostics.metrics?.engine, 'cork');
     });
 
 for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])
@@ -533,7 +532,7 @@ test('with no sink of the caller\'s own, a traced area\'s calls reach the journa
             0x6a, 0x00, 0xff, 0x15, ...u32(iat('GetSystemMetrics')), 0x4e, 0x75, 0xef,
             0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
     });
-    const app = await createApp({ executable: exe, engine: 'cork' });
+    const app = await createApp({ executable: exe });
     try
     {
         app.log.setLevel('call.cpu', 'trace');
@@ -570,7 +569,6 @@ test('a call area switched on mid-run is traced from the next call on',
         let calls = 0;
         app = await createApp({
             executable: exe,
-            engine: 'cork',
             onCall: (/** @type {any} */ call)=>{
                 if (call.name === 'KERNEL32.dll!GetCurrentProcessId' && ++calls === 1)
                 {

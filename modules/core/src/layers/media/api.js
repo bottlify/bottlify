@@ -30,8 +30,8 @@
  * }
  * ```
  *
- * The binary is injected rather than fetched, for the same reason the emulator's
- * is: this layer must come up under a test runner and inside a worker without
+ * The binary is injected rather than fetched: this layer must come up under a
+ * test runner and inside a worker without
  * knowing which of the two it is in, and where the bytes come from is the
  * decision of whoever assembles the engine. A build given none still assembles;
  * it reports `available() === false` and refuses to open anything, which is the

@@ -709,6 +709,20 @@ three nowhere; it has the two activation-context calls, whose frame is laid out 
 pointers there, which this layer does not write. The app's diagnostics list what is left out
 (`leftOutAt64`); revisit the two when a 64-bit program is found that imports them. *2026-10-31.*
 
+**A73. The processor is a family 15 of our own name, with nothing virtual about it.** CPUID
+answers what the engine executes, as a processor of the one class that has exactly that set:
+Intel family 15, model 6, stepping 5 (the Pentium 4 and Pentium D of 65 nm), with x87, MMX, SSE,
+SSE2, SSE3, CMPXCHG16B, CLFLUSH, and in the extended leaves long mode, execute-disable and
+LAHF/SAHF in 64-bit mode; its caches are that class's (a 16 KiB level 1 data cache, a 2 MiB level
+2). The brand string is `Bottlify Virtual CPU @ 3.00GHz`, the rate the time-stamp counter counts,
+as a virtual machine that does not pass its host's processor through names its own. No
+hypervisor bit and no hypervisor leaves: copy protection of the programs' time refuses to run
+where it finds one. Before this the table was another engine's (family 6 model 7, a Pentium III
+signature claiming SSE2, SSE3, POPCNT and RDRAND, a VMware hypervisor, and a highest extended
+leaf of 5, so no brand and no long mode): a program named the machine by its signature. POPCNT
+and RDRAND still execute; they are not announced, since no processor of the class had them. When
+the engine executes SSSE3 and SSE4, the class moves with it. *2026-10-31.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
@@ -894,6 +908,10 @@ under `cork`, which has no emulator compiler; the launcher's per-bundle engine s
 owner's. The paired browser table (`--engine emulator` as the control) that would confirm the
 target ns per instruction is the owner's to run. *2026-09-22, cork 5.5.*
 
+*Removed 2026-10-31:* the emulator is gone (no submodule, no package exports, no `engine`
+option): cork is the only engine. The `jit.*` counters, the `jit` and `engine` metrics and the
+boot ROM went with it.
+
 **Direct3D 8's and 9's setters and draws are made in the guest and played by the host at its
 next entry; the program is told D3D_OK at the call.** Render, stage and sampler states, transforms,
 the material, textures, streams, indices, the declaration and format, shaders and their
@@ -1024,6 +1042,19 @@ nothing, a read whose address is smaller than the offset its load takes past the
 reads the tables past RAM at the same offset, where it read RAM's first 64 KiB: a field read
 through a null pointer in a block that also reads below that pointer finds the page flags there,
 not the zeroes a null page holds. *2026-10-28.*
+
+**A process's threads spread over its executors, and its own executor keeps itself for the host's
+answers; nothing is moved on reckoned gains.** Each thread runs on an executor of its own, the
+host-bound and called-back threads kept on the process's executor; while a thread is pinned to the
+processor that executor plays (a game's main thread, pinned to the first), another executor plays
+it. The scheduler used to move threads onto the process's executor and off it, and trade a pinned
+thread's processor with it, each time its reckoning of the threads' waits said the move gained: a
+Call of Duty 4 run on an M4 with the trade made and held had frames of 34 ms at the median and
+130 ms at the 95th percentile, and spread with no trade ran without freezes at about 45 frames a
+second in its heaviest scene (the owner's observation, not a controlled A/B). The free host has
+been the default since 2026-10-21; the placement on gains, the trade and `cpu.freeHost: false`,
+the one way into them, are gone. `cpu.placement: 'concentrate'`, every thread taking turns on the
+process's executor, stays as a debugging switch. *2026-10-31.*
 
 ## C. Process model and porting
 

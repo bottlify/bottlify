@@ -136,7 +136,7 @@ const fold = path=>path.toLowerCase();
  * The options `createApp` needs to run a distribution in a prefix of its own.
  *
  * Merged into the caller's own options rather than replacing them: everything
- * about how the engine is built -- the emulator, the device, the audio -- is
+ * about how the engine is built -- the CPU, the device, the audio -- is
  * the caller's business and none of it is this module's.
  *
  * @param {InstallMedia} media

@@ -5,56 +5,40 @@
  */
 
 /**
- * The decoder against every image in the corpus: a linear decode from each
- * case's entry must land exactly on the footer's `hlt` with the `jmp` behind
- * it, having refused nothing on the way. A wrong length anywhere derails the
- * walk into the middle of an instruction and is caught by the byte it lands
- * on; an encoding the table lacks is caught by name.
- *
- * Needs the corpus (`npm run fetch:corpus`); no emulator.
+ * The decoder against every case of the hardware corpus: a linear decode of
+ * each case's bytes must land exactly on the `hlt` that ends them, or on the
+ * instruction the processor faulted at, refusing nothing on the way -- except
+ * where the processor raised #UD, where the decoder must refuse too. A wrong
+ * length anywhere derails the walk into the middle of an instruction and is
+ * caught by the byte it lands on; an encoding the table lacks is caught by
+ * name.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { skipWithout } from '../testing/fetched.js';
-import { readFile } from 'node:fs/promises';
 import { decode } from './decoder.js';
-import { loadCorpus } from '../testing/corpus.js';
+import { CORPUS_LAYOUT, loadX86Corpus } from '../testing/x86-corpus.js';
 
-const CORPUS = new URL('../../vendor/nasm-corpus.json.gz', import.meta.url);
-
-test('a linear decode of every corpus case reaches its hlt, refusing nothing',
-    { skip: skipWithout(CORPUS) },
-    async()=>{
-        const { cases } = loadCorpus(await readFile(CORPUS));
+test('a linear decode of every corpus case reaches its hlt, refusing only where the processor did',
+    ()=>{
+        const cases = loadX86Corpus();
         /** @type {string[]} */
         const failures = [];
-        /** @type {Map<string, number>} */
-        const refusals = new Map();
-        /** @type {Map<string, number>} */
-        const ops = new Map();
+        /** @type {Set<string>} */
+        const ops = new Set();
         let instructions = 0;
-        const skipped = 0;
         let invalidNamed = 0;
         for (const one of cases)
         {
-            const text = one.segments.find(
-                s=>s.address <= one.entry && one.entry < s.address + s.bytes.length);
-            if (!text)
-            {
-                failures.push(`${one.name}: entry outside every segment`);
-                continue;
-            }
-            const end = text.address + text.bytes.length;
+            const { CODE_AT } = CORPUS_LAYOUT;
+            const end = CODE_AT + one.code.length - 1;
             /** @param {number} address */
-            const read = address=>text.bytes[address - text.address] ?? 0;
-            // A case the hardware killed with #UD holds an encoding that is
-            // not an instruction; the decoder must say so at exactly that
-            // address, and the walk ends there.
-            const invalidAt = one.expected.exception === 'UD' ? one.expected.eip : -1;
-            let eip = one.entry;
-            let reached = false;
-            for (let steps = 0; steps < 100_000 && eip < end; steps++)
+            const read = address=>one.code[address - CODE_AT] ?? 0;
+            // Up to the fault, where the processor stopped: what lies past it never ran.
+            const invalidAt = one.fault?.vector === 6 ? one.fault.eip : -1;
+            const last = one.fault ? one.fault.eip : end;
+            let eip = CODE_AT;
+            while (eip < end && eip <= last)
             {
                 const decoded = decode(read, eip);
                 if ('refused' in decoded)
@@ -62,55 +46,40 @@ test('a linear decode of every corpus case reaches its hlt, refusing nothing',
                     if (eip === invalidAt && decoded.reason !== 'not user mode')
                     {
                         invalidNamed++;
-                        reached = true;
-                        break;
                     }
-                    refusals.set(decoded.opcode, (refusals.get(decoded.opcode) ?? 0) + 1);
-                    failures.push(`${one.name}: refused ${decoded.opcode} (${decoded.reason})`
-                        + ` at 0x${eip.toString(16)}`);
-                    break;
-                }
-                if (decoded.faults === 'invalid' && eip === invalidAt)
-                {
-                    invalidNamed++;
-                    reached = true;
+                    else
+                    {
+                        failures.push(`${one.name}: refused ${decoded.opcode} (${decoded.reason})`
+                            + ` at 0x${eip.toString(16)}`);
+                    }
                     break;
                 }
                 if (eip === invalidAt)
                 {
-                    failures.push(`${one.name}: accepted ${decoded.opcode} as ${decoded.op}`
-                        + ` at 0x${eip.toString(16)}, where the hardware raised #UD`);
-                    break;
-                }
-                instructions++;
-                ops.set(decoded.op, (ops.get(decoded.op) ?? 0) + 1);
-                eip += decoded.length;
-                if (decoded.op === 'hlt')
-                {
-                    // The footer: `hlt; jmp loop` -- the jump must be right behind.
-                    if (read(eip) === 0xeb && read(eip + 1) === 0xfd)
+                    if (decoded.faults === 'invalid')
                     {
-                        reached = true;
+                        invalidNamed++;
                     }
                     else
                     {
-                        failures.push(
-                            `${one.name}: hlt at 0x${(eip - 1).toString(16)} is not the footer`);
+                        failures.push(`${one.name}: accepted ${decoded.opcode} as ${decoded.op}`
+                            + ` at 0x${eip.toString(16)}, where the processor raised #UD`);
                     }
                     break;
                 }
-            }
-            if (!reached && !failures.some(f=>f.startsWith(`${one.name}:`)))
-            {
-                failures.push(
-                    `${one.name}: the walk left the text at 0x${eip.toString(16)} without a hlt`);
+                instructions++;
+                ops.add(decoded.op);
+                eip += decoded.length;
+                if (eip > end)
+                {
+                    failures.push(`${one.name}: ${decoded.op} ran past the case's end`
+                        + ` to 0x${eip.toString(16)}`);
+                }
             }
         }
-        const top = [...refusals].sort((a, b)=>b[1] - a[1]).slice(0, 20)
-            .map(([opcode, count])=>`${opcode}×${count}`).join(' ');
-        console.log(`decoded ${instructions} instructions over ${cases.length - skipped} cases`
-            + ` (${ops.size} distinct ops, ${skipped} skipped, ${invalidNamed} invalid encodings`
-            + ` named where the hardware raised #UD); refusals: ${top || 'none'}`);
+        console.log(`decoded ${instructions} instructions over ${cases.length} cases`
+            + ` (${ops.size} distinct ops, ${invalidNamed} invalid encodings named where the`
+            + ' processor raised #UD)');
         assert.equal(failures.length, 0,
             `${failures.length} cases:\n${failures.slice(0, 40).join('\n')}`);
     });

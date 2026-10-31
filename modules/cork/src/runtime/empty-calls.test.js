@@ -7,10 +7,9 @@
 /**
  * A call through a method table to an incremental linker's thunk to an empty method -- the
  * bytes of one an engine's virtual calls spend an eighth of their thread's time in -- run
- * interpreted, translated with the call entering the thunk's region (`emptyCalls` off),
- * returned from in the transfer (`emptyCalls`), and returned from at the call
- * (`emptySites`): the registers, the flags, `esp` and the slot the call pushed into come
- * out the same, and the runs that should take the short ways do.
+ * interpreted, translated with the call entering the thunk's region (`emptyCalls` off), and
+ * returned from in the transfer (`emptyCalls`): the registers, the flags, `esp` and the slot
+ * the call pushed into come out the same, and the run that should take the short way does.
  */
 
 import { test } from 'node:test';
@@ -66,7 +65,6 @@ async function run(config){
             },
             translated: stop.translated,
             inTransfer: mechanisms.EMPTY_RETURN ?? 0,
-            atCall: mechanisms.EMPTY_SITE ?? 0,
         };
     }
     finally
@@ -83,14 +81,11 @@ test('a virtual call to a thunk to an empty method returns as the method would',
     assert.equal(expected.observed.registers[6], RETURN_ADDRESS, 'the slot held the address');
     const entered = await run({ emptyCalls: false });
     const inTransfer = await run({});
-    const atCall = await run({ emptySites: true });
-    for (const [name, got] of Object.entries({ entered, inTransfer, atCall }))
+    for (const [name, got] of Object.entries({ entered, inTransfer }))
     {
         assert.deepEqual(got.observed, expected.observed, name);
         assert.ok(got.translated > 0, `${name}: translated code ran`);
     }
-    assert.equal(entered.inTransfer + entered.atCall, 0, 'off, every call enters the region');
+    assert.equal(entered.inTransfer, 0, 'off, every call enters the region');
     assert.ok(inTransfer.inTransfer > TURNS / 2, 'the transfer returned from most calls');
-    assert.equal(inTransfer.atCall, 0);
-    assert.ok(atCall.atCall > TURNS / 2, 'the call site returned from most calls');
 });

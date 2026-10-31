@@ -189,7 +189,7 @@ test('a block compiled for the stack in another shape than the entry gets no ent
     assert.equal(view.getUint8(m.layout.x87Top), 6, 'two pushes from the entry');
     assert.equal(view.getUint8(m.layout.x87Empty), 0x3f);
     // A block the tracking does not reach with a known shape (past an
-    // instruction left to the emulator) keeps the machine's own top when
+    // instruction left to the interpreter) keeps the machine's own top when
     // entered: fbld [m]; jmp C; C: fld1; hlt, entered at C with top 5.
     const n = createTestMachine();
     const C = CODE + 8;
@@ -1028,13 +1028,16 @@ test('a call made as a wasm call has its rare ways out hinted unlikely', ()=>{
     assert.ok(hinted(true) >= hinted(false) + 2, `${hinted(true)} hints, ${hinted(false)} without`);
 });
 
-test('a 64-bit state block without a flag record or SIMD is refused, not run as 32-bit', ()=>{
+test('a state block without a flag record, or a 64-bit one without SIMD, is refused', ()=>{
     const host = { simd: true, tailCalls: true, defaultNaNNegative: false };
     const layout = ownLayout({ ramSize: 1 << 24, bits: 64 });
     assert.throws(()=>prepareModule(new ModuleBuilder(), { ...layout, flagRecord: -1 }, host, {}),
         /needs a flag record/);
+    const narrow = ownLayout({ ramSize: 1 << 24 });
+    assert.throws(()=>prepareModule(new ModuleBuilder(), { ...narrow, flagRecord: -1 }, host, {}),
+        /needs a flag record/);
     assert.throws(()=>prepareModule(new ModuleBuilder(), layout, { ...host, simd: false }, {}),
-        /needs a flag record and SIMD/);
+        /needs SIMD/);
     prepareModule(new ModuleBuilder(), layout, host, {});
 });
 

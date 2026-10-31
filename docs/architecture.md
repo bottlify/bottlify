@@ -142,7 +142,7 @@ flowchart TB
 | Engine thread | the page, [`core/src/host/create.js`](../modules/core/src/host/create.js) | always. With `?host=thread` the engine runs on the page's thread instead, over the same protocol | The program runs in long quanta. On the page's thread it would be interrupted by garbage collection and the interface's rendering, and a click would wait for the quantum to end. Synchronous OPFS access also exists only in a worker. A WebGPU device cannot move between threads, so the worker opens its own and gets the canvas as an `OffscreenCanvas` |
 | Log keeper | the page, [`core/src/host/remote.js`](../modules/core/src/host/remote.js) | always. Without `Worker`, a `MessageChannel` on the page takes its place | The engine writes its journal, counters and tables into shared memory and answers no questions. The keeper drains the ring before it laps, keeps the history and works out frames, the profile and the per-module breakdown. Logging then costs neither the page nor the engine anything |
 | Graphics thread | the engine thread, [`core/src/host/graphics-worker.js`](../modules/core/src/host/graphics-worker.js) (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
-| Translation threads | the run's pool, [`core/src/host/pool/pool.js`](../modules/core/src/host/pool/pool.js) (made in `app.js`) | when the engine is cork, the page can share memory and a translator would use a worker; elsewhere each process opens a translator of its own. Each process is lent one from its start to its exit, and the pool's driver adds more while its translation lags (section 5; `cork.pool` in [`core/configuration.md`](core/configuration.md#cpu)). The pool lends to the process's own thread; its other executors each open a translator of their own. Until the first answers `ready`, regions are translated on the process's own thread | Emits wasm for regions, builds a module and compiles it. The process's thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives. A translation thread works for one process at a time, over a port of its own; one that works for none sleeps and holds nothing of any process |
+| Translation threads | the run's pool, [`core/src/host/pool/pool.js`](../modules/core/src/host/pool/pool.js) (made in `app.js`) | when the engine is cork, the page can share memory and a translator would use a worker; elsewhere each process opens a translator of its own. Each process is lent one from its start to its exit, and the pool's driver adds more while its translation lags (section 5). The pool lends to the process's own thread; its other executors each open a translator of their own. Until the first answers `ready`, regions are translated on the process's own thread | Emits wasm for regions, builds a module and compiles it. The process's thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives. A translation thread works for one process at a time, over a port of its own; one that works for none sleeps and holds nothing of any process |
 | Executors | the thread a process runs on, [`core/src/layers/cpu/internal/executor.js`](../modules/core/src/layers/cpu/internal/executor.js) | under cork, on a page that can share memory, when the process has more than one core ([`cpu.cores`](core/configuration.md#cpu)): one for each core past the first, opened when a thread of the program wants one | Runs the program's threads at once with the process's own thread, over the process's memory itself. A call into Win32 or the kernel, and a fault, waits while the process's thread answers it over the executor's registers. Each opens a translator of its own and takes translations from the run's store through the process |
 | Store writer | the engine thread, [`core/src/layers/cpu/internal/translation-store.js`](../modules/core/src/layers/cpu/internal/translation-store.js) | where the run's translation store is a directory on OPFS | Writes the store's records through a handle of its own: a write through the synchronous handle waits for the disk, which on the engine thread held a frame |
 | AudioWorklet | the page, `ui/src/engine/session.js` | if sound is on | The Web Audio real-time thread. On a cross-origin isolated page it reads the voices from shared memory on its own clock, so sound does not break up even while the engine is busy; elsewhere the engine posts it the mix down a channel of their own and it says back what it played |
@@ -356,9 +356,9 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
 - **Regions do not repeat each other.** A candidate at a block of a region formed and not yet
   published (earlier in its batch, with a translator, or its module compiling) is not formed
   again beside it (for a region with x87 in it, at the top that region was formed for): it has an
-  entry there once that region is published. A region may also stop at a block another region has
-  an entry for and leave to it there (`regionStops`), so a function's code is translated once; that
-  is off by default, because the hot code it cuts crosses between regions (`SETTINGS.md`). A small leaf callee
+  entry there once that region is published. A region runs on through a block another region has
+  an entry for: stopping there translated a function's code once, but the hot code it cut crossed
+  between regions. A small leaf callee
   is formed into each caller, for the call it saves.
 - **The store.** A translation is keyed by the cache version, the browser's features, the memory
   layout, the bundle id, the entry address, the x87 stack top (any top for a region with no x87 in
@@ -377,8 +377,8 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
 ### Execution in Bottlify
 
 - **Counting instructions.** Each block subtracts its instruction count from a budget on the way
-  out, and the budget is checked on backward jumps. Translated code is given its budget 10,000 at a
-  time, so a thread can be preempted promptly. How long a turn is (the 100,000-instruction quantum,
+  out, and the budget is checked on backward jumps. Translated code is given the turn's whole
+  budget; another executor's call ends it early at a back edge. How long a turn is (the 100,000-instruction quantum,
   a quarter of a millisecond among ready threads, about 750,000 for fast translated code, and a
   solo turn of ten quanta) is in [`core/configuration.md`](core/configuration.md#kernel). While
   other executors run threads, a solo turn comes only where their calls interrupt the process's
@@ -427,37 +427,14 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     with them, as a render thread its main thread waits on each frame, and stays on its own
     executor. A thread of either kind waiting for the process's executor takes it from one that
     computes, which goes to another executor in its place.
-  - **Spread, concentrated or moved on gains.** All of the above is one way of placing threads,
-    spread. Concentrated keeps every thread on the process's own executor where its mask allows,
-    taking turns there as on one processor (`cpu.placement`). With `cpu.freeHost` off and no way
-    named (`auto`), no way is tried on the running program: every quarter second the scheduler reckons, from what
-    each thread did (its own work at the process's executor's speed, its waits for that executor's
-    answers on another, its waits for a turn, its calls into the host), what moving it would gain:
-    in, where the process's executor has room for its work and it would stop waiting for answers;
-    out, where it waited for a turn here that another executor could give it. The gains build up,
-    leaking with a half-life of two seconds, and a move is made once its sum reaches 300 ms, one
-    thread at a time. A move is never checked against the frame rate after it: a wrong one shows
-    in the same reckoning, the threads' waits building the gain of the move back, and the move back
-    from one just made needs twice the sum, lowered again with a half-life of 30 seconds, so two
-    moves whose gains answer each other come at ever longer gaps. A game whose threads hand work to each other
-    every frame comes to take turns here thread by thread; a compressor's workers stay spread.
-  - **A free host** (`cpu.freeHost`, on unless `false`). The process's own executor keeps itself
-    for the answers: while a thread is pinned to its processor (a game's main thread, pinned to the
-    first), another executor plays that processor and the process's own plays one no thread is
-    pinned to. The threads spread unless the run names a way, and no processor is traded on its
-    gains. A game's main thread computed four tenths of the process's executor while its render
-    thread, on another, waited half of its time for that executor's answers.
-  - **A pinned thread** (`cpu.playPinned`, with `cpu.freeHost` off). A thread pinned to one processor whose calls into the
-    host take the process's executor the most time may have that processor played by the
-    process's own executor, where its calls are answered, the executor that played it taking the
-    process's. For example, a game's render thread, its Present and Lock a few hundred
-    microseconds each, is pinned to the last processor while its main thread is pinned to the
-    first. The time is that of the calls themselves, wherever the thread runs, halved every
-    second; a trade is weighed once it is 2% of the executor's time and twice what the calls of
-    the thread pinned to the process's own processor take. A count of calls does not say it: a
-    main thread's are many and cheap. The trade is reckoned as any move is: the waits the pinned thread's calls no longer make against
-    those the thread pinned to the process's processor will make, where the process's executor has
-    the room, and given back the same way.
+  - **Spread.** All of the above is how threads are placed. For a debugging run, concentrated
+    (`cpu.placement: 'concentrate'`) keeps every thread on the process's own executor where its
+    mask allows, taking turns there as on one processor.
+  - **A free host.** The process's own executor keeps itself for the answers: while a thread is
+    pinned to its processor (a game's main thread, pinned to the first), another executor plays
+    that processor and the process's own plays one no thread is pinned to. A game's main thread
+    computed four tenths of the process's executor while its render thread, on another, waited
+    half of its time for that executor's answers.
     GetCurrentProcessorNumber answers the processor played, so no thread is told of one its mask
     does not name.
   - **Answering calls.** The process's own thread runs its threads too, and answers the calls the
@@ -472,7 +449,7 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     process wants none back (suspended, ended by another), an executor keeps its thread slice after
     slice: its event loop turns in between, and the process hears of the thread at most every
     250 ms. While ready threads wait for an executor, it keeps its thread for a turn
-    (`executorHoldMs`) and gives it up at the first slice's end past that, as a processor keeps a
+    (1 ms) and gives it up at the first slice's end past that, as a processor keeps a
     thread to its quantum's end. The process's thread with nothing of its own to run waits for the
     others until its soonest deadline, 4 ms at most. An executor keeping a thread the process's
     executor may run lets it go at its slice's end and the thread comes to the process's executor,
@@ -744,10 +721,10 @@ flowchart TB
   wrote before, the vertices the program wrote before the call included, is then there too.
 - **Dynamic buffers.** A program may write a dynamic buffer through the pointer a lock gave it,
   after the `Unlock`, and draw from it with no lock between, so a draw sends what changed in the
-  range it reads since the buffer was last sent. Under the emulator every byte of the range is
-  compared; under cork only the part of it on pages written since the last comparison. A store
-  into a watched page marks it by the same page-flag test that finds translated code: the first
-  store after the page is armed makes one compare-and-swap. The host's writes and a worker's
+  range it reads since the buffer was last sent. Only the part of the range on pages written
+  since the last comparison is compared. A store into a watched page marks it by the same
+  page-flag test that finds translated code: the first store after the page is armed makes one
+  compare-and-swap. The host's writes and a worker's
   writes in place mark it too. The cpu layer's write watch (`cpu/internal/write-clock.js`) gives
   each buffer its own view of the marks, since one look arms a page again for everyone, and takes
   a page armed while another executor was running guest code as written until that run has ended:

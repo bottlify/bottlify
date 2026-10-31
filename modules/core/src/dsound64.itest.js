@@ -120,7 +120,7 @@ const program = buildExe({
 
 test('a 64-bit program opens a DirectSound buffer, fills it through Lock and plays it',
     { timeout: 60000 }, async t=>{
-        const app = await createApp({ executable: program, engine: 'cork' });
+        const app = await createApp({ executable: program });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 50000 }), 0, 'the step that failed');
         const audio = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'audio')

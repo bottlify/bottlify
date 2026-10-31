@@ -5,7 +5,7 @@
  */
 
 /**
- * The runtime: what the core's cpu layer composes into its hybrid host.
+ * The runtime: what the core's cpu layer composes into its host.
  *
  * Candidates arrive from the layer's sampler (`noteHot`); `translatePending`
  * forms a region at each, emits them into one wasm module of up to
@@ -173,7 +173,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     readBytes, imports, features, now: nowMs = ()=>performance.now() })
 {
     const settings = {
-        maxRegionBlocks: 128, maxRegionBytes: 8192, batchRegions: 32,
+        maxRegionBlocks: 128, batchRegions: 32,
         maxQueued: 8192, maxBatchRegions: 256,
         // Writes that drop a page's regions, inside `volatileWindowMs` of each
         // other, before the page is left to the other executor -- for
@@ -194,7 +194,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // Test-only: a run with the translator off, so the whole program is
         // the interpreter tier's and the corpus can judge it alone.
         translate: true,
-        undoLog: false,
         countTransfers: false,
         // Diagnostic: every block counts its executions in the block profile past
         // the tables -- only in a memory the host sized for it (cork's own layout)
@@ -206,12 +205,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // Diagnostic: every store key put and every one missed, as
         // `entry:hash:top`, in the diagnostics -- what tells two runs' keys apart.
         traceStore: false,
-        // A region stops at a block another region has an entry for, or one formed
-        // and on its way to being published, and leaves to it there (`entered` in
-        // `formRegion`): a function's code translated once, a third less stored in
-        // Far Cry -- and the hot code it cuts crossing between regions, 74% more
-        // transfers in xz. Off until the cut is kept out of hot code.
-        regionStops: false,
         // Diagnostic: the regions still published whose bytes no longer form
         // as they did -- translated code a write left standing -- in the
         // diagnostics (`staleRegions`), formed again when they are asked for.
@@ -233,31 +226,12 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // The wasm bytes of the modules some running region's function is in,
         // past which those gone longest without running are let go (0: no
         // ceiling): their regions leave the table and the entry hash, stay in
-        // the store, and are brought back from it as any miss is. One brought
-        // back is kept this many translated instructions whatever its mark,
-        // twice as many each time again.
+        // the store, and are brought back from it as any miss is
+        // (`EVICT_HOLD`).
         cacheBytes: 256 << 20,
-        evictHold: 1 << 28,
-        // Without tail calls into another module (`crossTailCalls`), the
-        // crossings out of placed modules since the last gathering past which
-        // the hottest regions, wherever they are, are built into one module
-        // (0: never): where two full modules keep crossing, a merge cannot.
-        // At most this many go into that module.
-        gatherAfter: 1 << 18,
-        gatherRegions: 2048,
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
-        // A direct call to a compiler's runtime helper recognised by its bytes
-        // (MSVC's _ftol2) formed as the instructions it amounts to (false:
-        // every such call runs the helper's own code; helpers.js).
-        runtimeHelpers: true,
-        // A direct call to an import thunk -- `jmp [slot]` alone, as a linker
-        // makes one for each function a module imports -- formed as the call
-        // through the slot it amounts to, the thunk's jump counted with it
-        // (false: the thunk formed in as a callee, its jump and the callee's
-        // return each a transfer through the entry hash; region.js).
-        importThunks: true,
         // Indirect calls sampled while the translator runs, and a region whose
         // indirect call keeps going to a few small leaf callees formed again
         // with them in it: the call compares its target with each and jumps
@@ -288,24 +262,12 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // to it returns from the transfer without entering its region
         // (`finishModule` in emit/region.js; false: entered as any other).
         emptyCalls: true,
-        // With it, a call out of a region reads its target's slot first and
-        // returns from such a function in place, without calling the transfer
-        // (`callAndReturn` in emit/integer.js).
-        emptySites: false,
         // A direct call out of a region reads its target's first slot in the
         // entry hash and, where the entry there is the one the transfer would
         // take at its first look, calls its function itself: the transfer's
         // hashing, probe and checks not run (`linkedCall` in emit/integer.js;
         // false: every call through the transfer).
         linkedCalls: true,
-        // The flag record carried into a guest call made as a wasm call and back
-        // with its `ret`, as the processor does. False: the caller goes on with
-        // its own record and the callee starts from the one the state block
-        // holds -- what no compiler's code reads, a call clobbering the flags by
-        // every calling convention; hand-written code that hands a result over in
-        // a flag across a call or a return reads stale flags (`flagsAcrossCalls`
-        // in emit/region.js). The flags word, which holds DF, is carried either way.
-        flagsAcrossCalls: true,
         // Each x87 region compiled for the precision control it runs under --
         // the wide ones (double, extended) or single -- a block testing
         // precision control once rather than every operation rounding by it;
@@ -337,8 +299,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // Everything the translator relaxes for speed kept exact instead: the x87
         // exception flags and their tests, signalling NaNs, underflow and C1, and
         // the flags an instruction leaves undefined -- off, what the cheapest code
-        // leaves there; on, what the emulator leaves. Off, as games run: the tests and
-        // the hardware corpus turn it on.
+        // leaves there; on, what the instruction model leaves. Off, as games run: the
+        // tests and the hardware corpus turn it on.
         precise: false,
         // Whether an instruction that only reads tests its pages as a store
         // does, so a page the program cannot read -- a reservation not
@@ -373,14 +335,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // queued behind its batch. 0 with a worker: none opened here, a host's
         // pool lends them (`attachTranslator`).
         translators: 1,
-        // Bytes of the translation cache arena, the functions emitted here and
-        // by every translator, which each takes again rather than emitting
-        // (0: each keeps a cache of its own). Shared memory is committed as
-        // it fills.
-        arenaBytes: 48 << 20,
-        // The arena itself, made by the host for every executor of a process
-        // (`createArena`), so what one executor's translators emitted the
-        // others take; absent, the runtime makes its own of `arenaBytes`.
+        // The translation cache arena, made by the host for every executor of a
+        // process (`createArena`), so what one executor's translators emitted the
+        // others take; absent, the runtime makes its own.
         arena: /** @type {SharedArrayBuffer | undefined} */ (undefined),
         // Diagnostic: the host clock read around the translator's phases -- the
         // milliseconds of forming, lookups, emitting, encoding, storing,
@@ -388,14 +345,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // shipped build runs, the clock is read only where the translator needs
         // it (a batch that never comes back is freed after a time).
         timings: false,
-        // While the translation worker loads: the largest batch emitted on the
-        // engine thread, and the share of the time since the worker was made
-        // that emitting there may take -- where the work there is bounded
-        // (`holdMs`), none: a batch waits for the worker.
-        loadingBatch: 16,
-        loadingShare: 0.25,
         // The engine thread's time the translator's work may take at a
-        // stretch, and the share of its time over a while, where a worker is
+        // stretch (and `HOLD_SHARE` of its time over a while), where a worker is
         // wanted: a batch goes on forming in the calls after, the store's
         // hits are compiled off the thread, their compiles started and they
         // and a worker's answers published a share's worth a call, and a call
@@ -407,43 +358,20 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // the guest did not run, its sound late -- where the translation is
         // the one to wait.
         holdMs: 4,
-        holdShare: 0.5,
-        // The bounded records the runtime keeps of where translated code left and
-        // what missed: targets of untranslated exits, misses per (address, top)
-        // before a candidate, and indirect call sites tried with predicted callees.
-        exitTargets: 4096,
-        missesKept: 4096,
-        callSitesKept: 16384,
-        // Merging modules a hot transfer crosses (`mergeAfter`): translated
-        // instructions between two readings of the crossings, the fewest between
-        // two merges, a region's share of that, and merges one region may take part in.
-        mergeSample: 1 << 20,
-        mergeEvery: 1 << 23,
-        mergePerRegion: 1 << 19,
-        mergesARegion: 2,
         // Indirect-call prediction (`callTargets`): samples of a call before its
-        // callees are looked at, the share of them a callee formed in must take
-        // (one in this many), callees a call compares with, how often a region is
-        // formed again for its calls, and the window a call's samples are counted in.
+        // callees are looked at, and the window a call's samples are counted in
+        // (`PREDICT_AFTER`, `CALL_WINDOW`).
         predictAfter: 48,
-        predictShare: 8,
-        predictCallees: 4,
-        reforms: 3,
         // At a few hundred readings a second, 64 was a fifth of a second: a
         // site taking one call in a hundred gathered ten samples in it and
         // never came due.
         callWindow: 1024,
-        // The entry hash's load past which a block start is kept in the host's
-        // map alone (its slots are the layout's, `hashSlots`).
-        hashLoad: 0.75,
-        // A callee formed into its caller (`leafCalls`): its blocks and bytes at
-        // most; and the most entries of a switch's jump table followed when forming.
-        leafBlocks: 16,
+        // The bytes a callee formed into its caller (`leafCalls`) may have at
+        // most; its blocks are `formRegion`'s own bound.
         leafBytes: 512,
         // Levels of callees formed in that may keep direct calls of their own,
         // their small callees formed in as well (`formRegion`).
         formDepth: 1,
-        switchEntries: 1024,
         // HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671:
         // false keeps every tail call inside its own instance, a transfer to a
         // region of another module leaving for this loop, which enters it. iOS
@@ -547,8 +475,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      */
     let readsChecked = settings.checkReads === true;
     /** Whether regions are made loose (`looseStacks`): until code is translated on a stack. */
-    let loose = settings.looseStacks !== false && settings.precise !== true
-        && settings.undoLog !== true;
+    let loose = settings.looseStacks !== false && settings.precise !== true;
     /** The pages of the threads' stacks the host named (`noteStack`). @type {Set<number>} */
     const stackPages = new Set();
     /**
@@ -558,30 +485,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      */
     const watchable = page=>!(loose
         && (stackPages.has(page) || codeShared?.onStack(page) === true));
-    /**
-     * Whether a block at an address is another region's (`entered` in
-     * `formRegion`): one with an entry at the top the region's own is formed for,
-     * or one indifferent to the x87 stack -- not the region `replaces`, which a
-     * region formed again in its place stands in for.
-     *
-     * @param {number} top @param {RegionRecord | null} replaces
-     * @returns {(address: number) => boolean}
-     */
-    const enteredFor = (top, replaces)=>address=>{
-        const entry = entries.entryOf(address, top);
-        return entry >= 0 && (replaces === null || recordOf.get(entry) !== replaces);
-    };
-    /** Where a running region's forming stopped, to form it again the same. @param {RegionRecord} record */
-    const stoppedAt = record=>{
-        const stops = new Set(record.stops ?? []);
-        return (/** @type {number} */ address)=>stops.has(address);
-    };
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
-    const formOptions = { maxBlocks: settings.maxRegionBlocks,
-        maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
-        helpers: settings.runtimeHelpers !== false, leafBlocks: settings.leafBlocks,
-        leafBytes: settings.leafBytes, switchEntries: settings.switchEntries,
-        formDepth: settings.formDepth, importThunks: settings.importThunks !== false,
+    const formOptions = { maxBlocks: settings.maxRegionBlocks, leafCalls: settings.leafCalls,
+        leafBytes: settings.leafBytes, formDepth: settings.formDepth,
         // Long mode's code formed as long mode's, the shared emitter's own cuts in it.
         ...layout.bits === 64 ? { mode: MODE_64 } : {} };
     /** The same on this thread, with the host's copy of a span at once where it has one; a
@@ -640,9 +546,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const table = found.tailCalls
         ? new WebAssembly.Table({ element: 'anyfunc', initial: 256 })
         : null;
-    // Under cork's own layout a miss of the hash may run the interpreter tier
-    // in wasm through the table (`interpretWith`); its slot is no region's.
-    const resumable = table !== null && (layout.flagRecord ?? -1) >= 0;
+    // A miss of the hash may run the interpreter tier in wasm through the
+    // table (`interpretWith`); its slot is no region's.
+    const resumable = table !== null;
     if (resumable)
     {
         table.set(TIER_SLOT, noTierEntry());
@@ -693,15 +599,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const instanceKeys = new WeakMap();
     /** A module compiled off the thread, by its bytes. @type {WeakMap<WebAssembly.Module, number>} */
     const compiledBytes = new WeakMap();
+    // Past three quarters of the entry hash's slots live, a block start is kept
+    // in the host's map alone (`createEntries`' own share).
     const entries = createEntries(
-        table
-            ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16,
-                load: settings.hashLoad }
+        table ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 }
             : {});
-    if (table)
-    {
-        imports.handoffHash?.(layout.tables + Tables.HASH - layout.ramBase);
-    }
     /** The queue, miss and barren key: one address at one x87 top. Every
      * "has an entry" question is for a top, so a region compiled for another
      * top is no answer. @param {number} eip @param {number} top */
@@ -867,7 +769,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const exitTargets = new Map();
     /** When the runtime was made, for the exits' times. */
     const bornAt = performance.now();
-    const EXIT_TARGETS_CAP = settings.exitTargets;
+    const EXIT_TARGETS_CAP = 4096;
     /**
      * How often the machine stood at an address that has a region for another
      * top (or a block with no entry of its own), per key(eip, top): the heat a
@@ -884,7 +786,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     // straight-line loader never became a candidate. The oldest is evicted
     // instead, and the counts halve every cap insertions so an address hit
     // once does not hold a slot against one hit often.
-    const MISSES_CAP = settings.missesKept;
+    const MISSES_CAP = 4096;
     let missesInserted = 0;
     const decayMisses = ()=>{
         for (const [key, count] of misses)
@@ -938,8 +840,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * @property {number} [merged]  the merges that built it again (`MERGES_A_REGION`)
      * @property {number} [floatMisses]  its float results that were not the processor's
      * @property {number} [shapeMisses]  its entries' tests that failed
-     * @property {number[]} [stops]  the blocks its forming left to other regions (`entered`),
-     *     where forming it again from a copy of its pages stops too
      * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
      * @property {Map<number, number[]>} [unformed]  by indirect call, the callees forming it
      *     again did not take in (the region full): not asked of it again
@@ -1040,7 +940,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         return one;
     };
-    const CALL_SITES_CAP = settings.callSitesKept;
+    // Indirect call sites tried with predicted callees, kept for the diagnostics.
+    const CALL_SITES_CAP = 16384;
     /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
     const generation = new Map();
     /**
@@ -1126,10 +1027,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
         relinks: 0, relinked: 0, merges: 0, merged: 0, reforms: 0, copied: 0,
-        // The hottest regions built into one module (`gatherAfter`), and how
-        // many; at the last weighing, the regions with any heat and the share
-        // of it those built took.
-        gathers: 0, gathered: 0, gatherWarm: 0, gatherShare: 0,
         // Modules let go past `cacheBytes`, their regions, and the regions of
         // them published again; the crossings counted by modules no longer placed.
         evictions: 0, evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
@@ -1298,7 +1195,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             {
                 watched[p] &= ~WATCH_REGIONS;
                 pageExtents.delete(p);
-                imports.handoffPage?.(p, false);
                 continue;
             }
             // The page's range from the extents of the regions still on it.
@@ -1839,9 +1735,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const translators = [];
     /** Whether the translators are a pool's to lend, none opened here, until the first is. */
     let awaitingLend = workerUrl !== null && settings.translators === 0;
-    /** When the first translator was made, and the time spent emitting here since. */
-    let loadingSince = performance.now();
-    let inlineWhileLoading = 0;
     let workerClosed = false;
     /** One that can take a batch now. */
     const freeTranslator = ()=>translators.find(one=>one.ready && !one.leaving
@@ -2002,13 +1895,15 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * emits here, and has no frames to keep.
      */
     const holding = ()=>settings.holdMs > 0 && workerUrl !== null;
+    /** The share of the engine thread's time over a while the translator's work may take. */
+    const HOLD_SHARE = 0.5;
     /** The engine thread's time forming may take now (`holdMs`), refilled at
-     * `holdShare` of the time that passes, and when it was last brought up to date. */
+     * `HOLD_SHARE` of the time that passes, and when it was last brought up to date. */
     let credit = settings.holdMs;
     let creditAt = performance.now();
     const creditNow = ()=>{
         const now = performance.now();
-        credit = Math.min(settings.holdMs, credit + (now - creditAt) * settings.holdShare);
+        credit = Math.min(settings.holdMs, credit + (now - creditAt) * HOLD_SHARE);
         creditAt = now;
         return credit;
     };
@@ -2042,44 +1937,41 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             {
                 sendNext();
             }
-        }, Math.max(1, (settings.holdMs / 2 - creditNow()) / settings.holdShare));
+        }, Math.max(1, (settings.holdMs / 2 - creditNow()) / HOLD_SHARE));
     };
     /** The process's translation cache arena, shared with every translator it has; none
-     * without a translator or where memory cannot be shared. */
-    const arena = settings.arena ?? (workerUrl !== null && settings.arenaBytes > 0
-        && typeof SharedArrayBuffer === 'function' ? createArena(settings.arenaBytes) : null);
+     * without a translator or where memory cannot be shared. Its size is `createArena`'s:
+     * an arena of 8 MiB rather than 48 bought no memory back (roadmap/negative-results.md). */
+    const arena = settings.arena ?? (workerUrl !== null && typeof SharedArrayBuffer === 'function'
+        ? createArena() : null);
     /** What emitting inline keeps for a relink to take again: the arena the translators
      * share, or a cache of this thread's own. */
     const emitCache = arena !== null ? arenaEmitCache(arena) : createEmitCache();
 
-    // The block profile is past cork's own tables, in a memory sized for it;
-    // the hybrid layout's tables are carved from the emulator's RAM.
     /** The last `hotForms` answer and when it was taken. @type {{ at: number, forms: any } | null} */
     let formsTaken = null;
-    const profiling = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.blockProfile === true
-        && (layout.codePages ?? -1) < 0;
+    const profiling = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.blockProfile === true;
     let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
         && settings.blockProfileFrom > 0
         ? performance.now() + settings.blockProfileFrom * 1000 : null;
     // The store is opened (a directory store reads its index) while the host
     // is still starting, so it can answer the first batch's lookups at once.
-    if (leaveOut.size === 0 && !settings.undoLog && !profiling)
+    if (leaveOut.size === 0 && !profiling)
     {
         settings.store?.prepare?.()?.catch(()=>{});
     }
+    /** Whether translated code counts its transfers through the hash (`countTransfers`). */
+    const transfersCounted = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+        && settings.countTransfers === true;
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
-        undoLog: settings.undoLog,
-        countTransfers: import.meta.BOTTLIFY_DIAGNOSTICS !== false
-            && settings.countTransfers === true,
+        countTransfers: transfersCounted,
         blockProfile: profiling,
         hash: table !== null,
         place: table !== null && settings.dispatch === true,
         profileCalls: table !== null && settings.callTargets === true,
-        callReturn: table !== null && settings.callReturn === true && !settings.undoLog,
-        emptySites: settings.emptySites === true && settings.emptyCalls !== false,
+        callReturn: table !== null && settings.callReturn === true,
         linkedCalls: settings.linkedCalls !== false,
-        flagsAcrossCalls: settings.flagsAcrossCalls !== false,
         crossTailCalls: settings.crossTailCalls !== false,
         ...(settings.callDepth === CallStack.LIMIT ? {} : { callDepth: settings.callDepth }),
         resume: resumable,
@@ -2154,7 +2046,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
             jobs.push({ region: formRegion(read, record.entry, { ...formHere, translatable,
-                ...called, entered: stoppedAt(record) }), entryTop: record.entryTop,
+                ...called }), entryTop: record.entryTop,
             checked: record.checked === true,
             copies: record.copies === true, ...precisionJob(record) });
         }
@@ -2280,6 +2172,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     /** Regions let go past `cacheBytes`, by key(entry, top): how many times, so
      * one brought back is kept the longer the more often it went. @type {Map<number, number>} */
     const evictedKeys = new Map();
+    /** Translated instructions a module brought back is kept whatever its mark, twice as
+     * many each time again. */
+    const EVICT_HOLD = 1 << 28;
 
     /**
      * A record into the module its function is in; a module not held yet is
@@ -2402,7 +2297,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 : new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (module));
             const instance = new WebAssembly.Instance(compiled, {
                 env: {
-                    memory, getEflags: imports.getEflags, trap: imports.trap,
+                    memory, trap: imports.trap,
                     rdtsc: imports.rdtsc ?? (()=>0n),
                     ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                     ...baseGlobals,
@@ -2604,7 +2499,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             checked: one.checked === true,
             copies: one.copies === true, closed, blocks: built.labels.length,
             anyTop: one.anyTop ?? !usesX87(region),
-            ...(region.stops === undefined ? {} : { stops: region.stops }),
             ...(one.targets === undefined ? {} : { targets: one.targets }),
         };
         if (keepsSources)
@@ -2722,13 +2616,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         for (const page of region.pages)
         {
-            if (!byPage.get(page)?.size)
-            {
-                imports.handoffPage?.(page, true);
-            }
-        }
-        for (const page of region.pages)
-        {
             let set = byPage.get(page);
             if (!set)
             {
@@ -2775,7 +2662,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             counts.broughtBack++;
             record.heat = (record.heat ?? 0) + 1;
             record.held.keepUntil = Math.max(record.held.keepUntil,
-                corkRetired + settings.evictHold * 2 ** Math.min(bounced - 1, 6));
+                corkRetired + EVICT_HOLD * 2 ** Math.min(bounced - 1, 6));
         }
         counts.publishMs += clock() - publishAt;
         return 1;
@@ -2807,9 +2694,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         + (settings.precise === true ? 'P' : '') + (settings.countTransfers ? 'T' : '')
         + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
         + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
-        + (settings.emptySites === true && settings.emptyCalls !== false ? 'E' : '')
         + (settings.linkedCalls !== false ? 'L' : '')
-        + (settings.callReturn === true && settings.flagsAcrossCalls === false ? 'F' : '')
         + (settings.crossTailCalls === false ? 'X' : '')
         + (settings.callReturn === true && settings.callDepth !== CallStack.LIMIT
             ? `d${settings.callDepth}` : '')
@@ -2838,14 +2723,13 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     };
     /**
      * What forming made of a region and what it is compiled as, for its record.
-     * @param {{ region: { entry: number, hash: string, stops?: number[] },
+     * @param {{ region: { entry: number, hash: string },
      *     targets?: [number, number[]][],
      *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean,
      *     copies?: boolean }} one
      * @returns {import('./cache.js').RegionShape}
      */
     const shapeOf = one=>({ hash: one.region.hash,
-        ...(one.region.stops === undefined ? {} : { stops: one.region.stops }),
         ...((precisionAt.get(one.region.entry)?.misses ?? 0) > 0 ? { moved: true } : {}),
         ...(one.targets === undefined ? {} : { targets: one.targets }),
         ...(one.wide === true ? { wide: true } : {}),
@@ -2889,9 +2773,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         if (region.hash !== shape.hash)
         {
-            const stops = new Set(shape.stops ?? []);
             region = formRegion(read, region.entry, { ...formHere, translatable,
-                entered: address=>stops.has(address),
                 ...(shape.targets === undefined ? {} : { callTargets: new Map(shape.targets) }) });
             if (region.hash !== shape.hash)
             {
@@ -2960,11 +2842,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         kept: 'blocks' });
     /**
      * The store this runtime keeps its translations in: none for a diagnostic run
-     * with classes left out, or with an undo log the stored modules were built
-     * without.
+     * with classes left out or a block profile.
      * @returns {any}
      */
-    const storeHere = ()=>(leaveOut.size > 0 || settings.undoLog || profiling
+    const storeHere = ()=>(leaveOut.size > 0 || profiling
         ? null : (settings.store ?? null));
     /** `storedBlocks` as a record holds it: a block, an entry and their tops each.
      * @param {Map<number, number>} blocks */
@@ -3242,7 +3123,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         counts.relinked++;
         if (store !== null)
         {
-            const one = { region: { entry: record.entry, hash: record.hash, stops: record.stops },
+            const one = { region: { entry: record.entry, hash: record.hash },
                 entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
                 floats: record.floats, checked: record.checked, copies: record.copies,
                 loose: record.loose, wrapped: record.wrapped, targets: record.targets,
@@ -3295,7 +3176,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const relinkStep = store=>{
         if (relinkQueue === null)
         {
-            if (mergeStep(store) || gatherStep(store))
+            if (mergeStep(store))
             {
                 return true;
             }
@@ -3304,7 +3185,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 return false;
             }
             // Only what still lives in a batch's own small module: a region
-            // relinked once stays in its big one, unless a gathering takes it.
+            // relinked once stays in its big one.
             // The hottest first, so they share the big modules, and those no
             // entry or crossing reached lately in small ones of their own.
             foldHeat();
@@ -3339,7 +3220,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     /**
      * Each running region's heat: what it had, halved, and the host's entries
      * into it and the crossings read into it since (`readModules`). Read only
-     * when a relink or a gathering is weighed: the entries count themselves.
+     * when a relink is weighed: the entries count themselves.
      * One entered once and not since is under one at the next reading: cold.
      */
     const foldHeat = ()=>{
@@ -3358,28 +3239,26 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     };
 
     /** Translated instructions between two readings of the modules' crossings. */
-    const MERGE_SAMPLE = settings.mergeSample;
+    const MERGE_SAMPLE = 1 << 20;
     let sampledAt = 0;
     // At most one merge in this many: its module is instantiated on the
     // engine thread, 23 ms for a whole chunk of `relinkRegions`.
-    const MERGE_EVERY = settings.mergeEvery;
+    const MERGE_EVERY = 1 << 23;
     // And past that, this many for each region the last one built: a merge
     // builds both modules whole again, and with the worker no longer the one
     // that paced them, a module of hundreds gathering a few new regions at a
     // time would have the engine thread instantiate it over and over.
-    const MERGE_PER_REGION = settings.mergePerRegion;
+    const MERGE_PER_REGION = 1 << 19;
     let mergedAt = -MERGE_EVERY;
     let mergeWait = MERGE_EVERY;
     // The merges a region is built again by at most. A merge builds both
     // modules whole, and a module that merged once is crossed into by the
     // next new one: without a bound, every module of new code calling into a
     // hot one could have it built again, for as long as new code arrives.
-    const MERGES_A_REGION = settings.mergesARegion;
+    const MERGES_A_REGION = 2;
     /** Readings of the modules' crossings, and the one the merges last weighed. */
     let modulesRead = 0;
     let mergeRead = 0;
-    /** Crossings read since the last gathering. */
-    let crossedSince = 0;
     /**
      * Reads each placed module's count of transfers out of it, every so many
      * translated instructions, not every call: a loading phase has hundreds
@@ -3403,7 +3282,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             {
                 continue;
             }
-            crossedSince += crossed;
             const from = heldModules.get(placed.instance);
             if (from !== undefined)
             {
@@ -3427,63 +3305,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
     };
 
-    // Without tail calls into another instance every crossing leaves for the
-    // host's loop, and a merge cannot help two full modules: past
-    // `gatherAfter` crossings the hottest regions, wherever they are, are
-    // built into one module -- those that took all but a hundredth of the
-    // heat, `gatherRegions` at most. Paced as merges are, the wait doubling
-    // while the hottest stay the same ones: a working set larger than the
-    // module crosses on, and building it again buys nothing.
-    const GATHER_AFTER = settings.crossTailCalls === false ? settings.gatherAfter : 0;
-    let gatheredAt = -MERGE_EVERY;
-    let gatherWait = MERGE_EVERY;
-    /** @type {Set<RegionRecord>} */
-    let lastGathered = new Set();
-    /**
-     * @param {any} store
-     * @returns {boolean} whether a gathering was taken this call
-     */
-    const gatherStep = store=>{
-        if (!(GATHER_AFTER > 0) || !translatorReady() || crossedSince < GATHER_AFTER
-            || corkRetired - gatheredAt < gatherWait)
-        {
-            return false;
-        }
-        crossedSince = 0;
-        gatheredAt = corkRetired;
-        foldHeat();
-        const warm = [...regions].filter(record=>(record.heat ?? 0) >= 1)
-            .sort((a, b)=>(b.heat ?? 0) - (a.heat ?? 0));
-        const total = warm.reduce((sum, record)=>sum + (record.heat ?? 0), 0);
-        /** @type {RegionRecord[]} */
-        const hot = [];
-        let covered = 0;
-        for (const record of warm)
-        {
-            if (hot.length >= settings.gatherRegions || covered >= total * 0.99)
-            {
-                break;
-            }
-            hot.push(record);
-            covered += record.heat ?? 0;
-        }
-        counts.gatherWarm = warm.length;
-        counts.gatherShare = total > 0 ? covered / total : 0;
-        const modules = new Set(hot.map(record=>record.module));
-        // The hottest in one module already: what crosses is between them and
-        // the rest, which a gathering of these would not change.
-        if (hot.length < 2 || (modules.size === 1 && !modules.has(undefined)))
-        {
-            return false;
-        }
-        const again = hot.filter(record=>lastGathered.has(record)).length * 2 >= hot.length;
-        gatherWait = again ? Math.min(gatherWait * 2, MERGE_EVERY * 1024)
-            : Math.max(MERGE_EVERY, hot.length * MERGE_PER_REGION);
-        lastGathered = new Set(hot);
-        counts.gathers++;
-        counts.gathered += hot.length;
-        return relinkChunk(hot, store);
-    };
     /**
      * What a merge of `from` into `into` would build: both whole when they fit
      * in `relinkRegions`, else the region `from` crossed into last, alone, into
@@ -3595,9 +3416,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const PREDICT_AFTER = settings.predictAfter;
     // A callee formed in takes an eighth of the call's samples, and a call
     // compares its target with four at most.
-    const PREDICT_SHARE = settings.predictShare;
-    const PREDICT_CALLEES = settings.predictCallees;
-    const REFORMS = settings.reforms;
+    const PREDICT_SHARE = 8;
+    const PREDICT_CALLEES = 4;
+    // Times a region is formed again for its indirect calls.
+    const REFORMS = 3;
     // Readings a call's samples are kept for unless it is due by then: a
     // region formed again is built, compiled and run on the baseline tier
     // again, which only a call hot now pays back, not one that gathers its
@@ -3823,9 +3645,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 continue;
             }
             const region = formRegion(read, record.entry,
-                { ...formHere, translatable, callTargets: targets,
-                    ...(settings.regionStops !== true ? {}
-                        : { entered: enteredFor(record.entryTop, record) }) });
+                { ...formHere, translatable, callTargets: targets });
             const starts = new Set(region.blocks.map(block=>block.start));
             // Formed without the profile at a quiet call, the region is worth
             // publishing whether or not a callee was formed in.
@@ -3905,8 +3725,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
             const region = formRegion(read, record.entry, { ...formHere, translatable,
-                ...called, ...(settings.regionStops !== true ? {}
-                    : { entered: enteredFor(record.entryTop, record) }) });
+                ...called });
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
@@ -3944,8 +3763,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
                 hash: record.hash, checked: record.checked === true, copies: record.copies === true,
                 ...precisionJob(record),
-                ...(record.targets === undefined ? {} : { targets: record.targets }),
-                ...(record.stops === undefined ? {} : { stops: record.stops }) })),
+                ...(record.targets === undefined ? {} : { targets: record.targets }) })),
             pages: [...copies],
             formable: chunk.flatMap(record=>[...record.formable ?? record.pages]),
             form: formOptions,
@@ -4070,10 +3888,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         /** @type {Translator} */
         const translator = { adapter, ready: false, pending: null, leaving: false };
-        if (translators.length === 0 && !awaitingLend)
-        {
-            loadingSince = performance.now();
-        }
         awaitingLend = false;
         translators.push(translator);
         adapter.onMessage(data=>{
@@ -4677,8 +4491,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                     jobs: unbuilt.map(one=>({ entry: one.region.entry, entryTop: one.entryTop,
                         hash: one.region.hash, checked: one.checked, copies: one.copies === true,
                         ...precisionJob(one),
-                        ...(one.targets === undefined ? {} : { targets: one.targets }),
-                        ...(one.region.stops === undefined ? {} : { stops: one.region.stops }) })),
+                        ...(one.targets === undefined ? {} : { targets: one.targets }) })),
                     pages: [...copies],
                     formable: unbuilt.flatMap(one=>[...one.region.formable ?? one.region.pages]),
                     form: formOptions,
@@ -4823,7 +4636,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // until its own batch comes back. A title's queue is never empty --
         // the cold starts met twice stay -- so the test is the heat, not the
         // length.
-        const keeps = leaveOut.size > 0 || settings.undoLog || profiling
+        const keeps = leaveOut.size > 0 || profiling
             ? null : (settings.store ?? null);
         // The steps that take over running regions go out alone: only with no
         // batch out, and nothing goes beside them until they are back.
@@ -4856,16 +4669,14 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // batch, a quarter of what waits up to `maxBatchRegions`, so the
         // round trip through the worker and the store is paid per hundreds
         // of regions rather than per thirty-two.
-        // While the worker loads, a batch emitted here is kept small. Where the
-        // work here is bounded (`holding`), nothing is emitted here while a
-        // translator loads -- the batch waits for it, a region of a shader
-        // compiler's emitted alone held the thread for twenty-five
+        // Where the work here is bounded (`holding`), nothing is emitted here
+        // while a translator loads -- the batch waits for it, a region of a
+        // shader compiler's emitted alone held the thread for twenty-five
         // milliseconds -- and with none to come a batch emitted here is one
         // region, emitted in the call that finishes it.
         const inline = !translatorReady();
         const loading = translatorLoading();
-        const ceiling = inline && holding() && !loading ? 1
-            : inline && loading && !holding() ? settings.loadingBatch : settings.maxBatchRegions;
+        const ceiling = inline && holding() && !loading ? 1 : settings.maxBatchRegions;
         const wanted = Math.min(ceiling,
             Math.max(settings.batchRegions, queue.size >> 2));
         forming = { batch: hottest(wanted), next: 0, formed: [], covered: new Set(), ceiling,
@@ -4932,7 +4743,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             }
             inFlight.set(key, takenAt);
             const entryTop = key % 16;
-            const publishedAt = enteredFor(entryTop, null);
             // A candidate that has an entry by now -- a block of a region
             // published while it waited, the return address of a call the
             // interpreter met before its caller's region came back -- would
@@ -4943,20 +4753,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 inFlight.delete(key);
                 continue;
             }
-            // Another region's blocks are its own once published, as are those of a
-            // region formed before this one in the batch, or on its way to being
-            // published: their entries are there by the time this region runs. One
-            // the store holds is formed as its record says (`recordBefore`).
+            // One the store holds is formed as its record says (`recordBefore`).
             const record = recordBefore(step, store, eip, entryTop);
-            const recordStops = record === null ? null : new Set(record.shape.stops ?? []);
             const region = formRegion(read, eip, { ...formHere, translatable, shared,
-                ...(recordStops !== null ? { entered: (/** @type {number} */ address)=>
-                    recordStops.has(address),
                 ...(record?.shape.targets === undefined ? {}
-                    : { callTargets: new Map(record.shape.targets) }) }
-                    : settings.regionStops !== true ? {} : { entered: address=>
-                        coveredIn(covered, address, entryTop)
-                        || coveredIn(coveredOut, address, entryTop) || publishedAt(address) }) });
+                    : { callTargets: new Map(record.shape.targets) }) });
             // What the region calls directly lands in the same batch, so
             // the call and the return transfer without a miss -- each
             // callee at the top the call site has, which the tracker
@@ -5181,7 +4982,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         run(entry, budget){
             const one = entries.at(entry);
             const { fn, label } = one;
-            // The heat a relink and a gathering weigh by, and the mark of the
+            // The heat a relink weighs by, and the mark of the
             // module the eviction weighs by.
             one.heat++;
             if (one.owner !== null)
@@ -5255,8 +5056,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 pages.clearStale();
                 storedInto(address, size);
                 codeShared?.publish(address, size);
-                // The other executor's compiled page, if that is what was hit.
-                imports.dirtyCode?.(address, size);
             }
             exit.retired = retired;
             exit.kind = kind;
@@ -5479,31 +5278,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         /** @type {() => Promise<number>} */
         async translatePending(){
             liftVolatile();
-            // Bounded (`holding`), nothing is emitted here while a translator
-            // loads: the share below is for emitting.
-            if (!translatorLoading() || translatorReady() || holding())
-            {
-                return translateNow();
-            }
-            // The worker is loading: what is asked for now is emitted here, in
-            // small batches and for a quarter of the time the load has taken at
-            // most, and the rest waits for it. A loading phase's thousands of
-            // starts, each run a few times, cost more emitted on this thread
-            // than interpreted until the worker takes them.
-            if (inlineWhileLoading > settings.loadingShare * (performance.now() - loadingSince))
-            {
-                owed++;
-                return 0;
-            }
-            const startedAt = performance.now();
-            try
-            {
-                return translateNow();
-            }
-            finally
-            {
-                inlineWhileLoading += performance.now() - startedAt;
-            }
+            return translateNow();
         },
         invalidatePage,
         /**
@@ -5658,8 +5433,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                         transferTargets: transferTargets(view(), layout) }
                     : {}),
                 regions: regions.size,
-                // Counted only by a run that asked (`countTransfers`), else 0.
-                transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true),
+                // Counted only by a run that asked (`countTransfers`); absent otherwise,
+                // where a 0 would read as none made.
+                ...(transfersCounted
+                    ? { transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true) }
+                    : {}),
                 relinks: counts.relinks,
                 relinked: counts.relinked,
                 merges: counts.merges,
@@ -5673,10 +5451,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // And all of them since the start, those of modules gone included.
                 crossingsAll: counts.crossingsGone
                     + [...placedLive].reduce((sum, placed)=>sum + placed.crossings.value, 0),
-                gathers: counts.gathers,
-                gathered: counts.gathered,
-                gatherWarm: counts.gatherWarm,
-                gatherShare: counts.gatherShare,
                 // The wasm bytes of the modules some running region's function is
                 // in, and how many: what the translated code holds now, against
                 // `moduleBytes`, all made in the run. Past `cacheBytes` the modules
@@ -5769,7 +5543,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // longer form as they did: translated code a write did not drop.
                 ...(settings.checkStale ? { staleRegions: [...regions]
                     .filter(record=>formRegion(read, record.entry, { ...formHere, translatable,
-                        entered: stoppedAt(record), ...(record.targets === undefined
+                        ...(record.targets === undefined
                             ? {} : { callTargets: new Map(record.targets) }) }).hash
                         !== record.hash)
                     .map(record=>`0x${record.entry.toString(16)}`) } : {}),
@@ -5814,7 +5588,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // misbehaves only without `precise` is looked for here first.
                 relaxedFlagReads: { ...relaxedFlagReads },
                 forcedSteps,
-                handoffMisses: 0,
                 worker: translatorReady() ? 'ready' : translatorLoading() ? 'loading' : 'none',
                 translators: translators.length,
                 translatorsReady: translators.filter(one=>one.ready).length,

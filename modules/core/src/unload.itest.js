@@ -279,7 +279,6 @@ test('an exception out of DllMain is taken by the loader, not by the program tha
             executable,
             imagePath: 'C:\\App\\Detach.exe',
             files: [{ path: 'C:\\App\\probe.dll', bytes: probe }],
-            engine: 'cork',
         });
         t.after(()=>app.dispose());
 

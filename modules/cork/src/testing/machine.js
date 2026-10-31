@@ -31,7 +31,7 @@ import { eflagsOf, setEflags } from '../emit/flags.js';
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
 /**
- * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number,
+ * @param {{ ramSize?: number, trapPort?: number,
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
  *     leaveOut?: string[], precise?: boolean, structure?: boolean,
  *     resume?: boolean, looseStacks?: boolean, executor?: number, hashSlots?: number,
@@ -54,22 +54,19 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     that host's translator makes them -- an arm64 one's default NaN is positive
  */
 export function createTestMachine(given = {}){
-    const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [],
+    const { ramSize = 1 << 20, trapPort, trap, rdtsc, leaveOut = [],
         precise = true, resume = false, looseStacks = false, executor = 0, shared = false } = given;
     const forced = globalThis.process?.env?.CORK_STRUCTURE;
     const structure = given.structure
         ?? (forced === '1' ? true : forced === '0' ? false : undefined);
-    // With `codePages`, the undo ring's area doubles as another executor's
-    // byte-per-page code table, for the tests of a store into its pages.
     // A small entry hash: a test's program has few block starts, and a machine
     // per test zeroing the engine's default would be most of the suite's time.
     const first = ownLayout({ ramSize, hashSlots: given.hashSlots ?? 1 << 16,
         processors: given.processors ?? 1 });
     const firstPages = pagesFor(first, tablesSize(first));
-    const own = executor === 0 ? first
+    const layout = executor === 0 ? first
         : executorLayout(first, firstPages * PAGE + (executor - 1) * executorBytes(first),
             executor);
-    const layout = codePages ? { ...own, codePages: own.tables + Tables.UNDO_RING } : own;
     // What regions are translated for, and the two globals that place them here.
     const emitLayout = shared ? sharedLayout(first) : layout;
     const bases = shared ? Object.fromEntries(Object.entries(basesOf(layout)).map(([name, value])=>

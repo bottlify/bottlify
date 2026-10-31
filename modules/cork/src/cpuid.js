@@ -5,20 +5,50 @@
  */
 
 /**
+ * The brand string leaves 0x80000002 to 0x80000004 spell, sixteen bytes each,
+ * the rest NUL: no product's name, as a virtual machine that does not pass its
+ * host's processor through names its own, at the rate the time-stamp counter
+ * counts (`CORK_TSC_MHZ` in the core's cork host).
+ */
+export const BRAND = 'Bottlify Virtual CPU @ 3.00GHz';
+
+/**
+ * Leaves 0x80000002..4 as words: the brand's bytes little-endian, four to a register.
+ *
+ * @returns {CpuidAnswer[]}
+ */
+function brandLeaves(){
+    const bytes = new Uint8Array(48);
+    bytes.set(new TextEncoder().encode(BRAND));
+    const word = (/** @type {number} */ at)=>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
+        | bytes[at + 3] << 24) >>> 0;
+    return [0, 16, 32].map(at=>Object.freeze({ eax: word(at), ebx: word(at + 4),
+        ecx: word(at + 8), edx: word(at + 12) }));
+}
+const [BRAND_0, BRAND_1, BRAND_2] = brandLeaves();
+
+/**
  * The four words `cpuid` answers, one entry per leaf that answers anything
- * but zero. The figures are the pinned emulator's own, read from it once, so
- * cork and the emulator agree bit for bit without a crossing: leaf 0 the vendor
- * and the highest standard leaf, 1 the family, model, stepping and features,
- * 2 the cache descriptors, 4 the cache parameters (by subleaf), 5 the monitor
- * line sizes, 7 the extended features (subleaf 0), 0x40000000 the hypervisor's
- * name, 0x80000000 the highest extended leaf -- except the clock leaves, 0x15
- * (a 1 GHz crystal times 3/1) and 0x16 (base and maximum), which state the
- * 3000 MHz cork's host counts rdtsc at (`CORK_TSC_MHZ`; the emulator's counter
- * and its leaves run at 1000). A leaf with no entry, or a subleaf a leaf does
- * not list, answers four zeros.
- * The hypervisor bit in leaf 1 and the VMware name at 0x40000000 are the
- * emulator's too: a real processor of this signature has neither, but the two
- * engines must answer alike, and the emulator's answer is compiled into it.
+ * but zero: the processor every program run here is told it runs on.
+ *
+ * It is a processor of the class whose instructions the engine executes, so
+ * a program that picks its code by what CPUID says picks code that runs: an
+ * Intel family 15 (Pentium 4 and Pentium D, 90 and 65 nm), the one line with
+ * SSE3 and x86-64 and neither SSSE3 nor SSE4. Leaf 0 the vendor and the
+ * highest standard leaf; 1 the signature (family 15, model 6, stepping 5), a
+ * 64-byte CLFLUSH line, and the features: x87, TSC, CX8, SYSENTER, CMOV, MMX,
+ * FXSR, SSE, SSE2, CLFLUSH, SSE3 and CMPXCHG16B (the 64-bit process's); 2 the
+ * descriptors of that class's caches (a 12K-uop trace cache, a 16 KiB 8-way
+ * data cache, a 2 MiB 8-way level 2); 4 the same caches by subleaf; 0x15 (a
+ * 1 GHz crystal times 3/1) and 0x16 (base and maximum), which state the 3000
+ * MHz cork's host counts rdtsc at (`CORK_TSC_MHZ`) for a program that reads
+ * its clock from them. The extended leaves: 0x80000001 LAHF/SAHF in 64-bit
+ * mode, execute-disable and long mode; the brand (`BRAND`); 0x80000006 the
+ * level 2 cache again; 0x80000008 36 physical and 48 linear address bits.
+ *
+ * Nothing says it is virtual: no hypervisor bit, no hypervisor leaves. Copy
+ * protection of the programs' time refuses to run under a hypervisor it finds.
+ * A leaf with no entry, or a subleaf a leaf does not list, answers four zeros.
  *
  * @typedef {Object} CpuidAnswer
  * @property {number} eax
@@ -33,19 +63,21 @@
  */
 export const CPUID_LEAVES = Object.freeze({
     0x00000000: { eax: 0x16, ebx: 0x756e6547, ecx: 0x6c65746e, edx: 0x49656e69 },
-    0x00000001: { eax: 0x00000673, ebx: 0x00010800, ecx: 0xc0800001, edx: 0x0780a979 },
-    0x00000002: { eax: 0x665b5001, ebx: 0, ecx: 0, edx: 0x007a7000 },
+    0x00000001: { eax: 0x00000f65, ebx: 0x00010800, ecx: 0x00002001, edx: 0x0788a979 },
+    0x00000002: { eax: 0x605b5001, ebx: 0, ecx: 0, edx: 0x007d7040 },
     0x00000004: Object.freeze({
-        0: { eax: 0x00000121, ebx: 0x01c0003f, ecx: 0x0000003f, edx: 0x00000001 },
-        1: { eax: 0x00000122, ebx: 0x01c0003f, ecx: 0x0000003f, edx: 0x00000001 },
-        2: { eax: 0x00000143, ebx: 0x05c0003f, ecx: 0x00000fff, edx: 0x00000001 },
+        0: { eax: 0x00000121, ebx: 0x01c0003f, ecx: 0x0000001f, edx: 0x00000001 },
+        1: { eax: 0x00000143, ebx: 0x01c0003f, ecx: 0x00000fff, edx: 0x00000001 },
     }),
-    0x00000005: { eax: 0x00000040, ebx: 0x00000040, ecx: 0x00000003, edx: 0x00142120 },
-    0x00000007: Object.freeze({ 0: { eax: 0, ebx: 0x00000200, ecx: 0, edx: 0 } }),
     0x00000015: { eax: 0x00000001, ebx: 0x00000003, ecx: 0x3b9aca00, edx: 0 },
     0x00000016: { eax: 0x00000bb8, ebx: 0x00000bb8, ecx: 0x0000000a, edx: 0 },
-    0x40000000: { eax: 0, ebx: 0x61774d56, ecx: 0x4d566572, edx: 0x65726177 },
-    0x80000000: { eax: 0x00000005, ebx: 0, ecx: 0, edx: 0 },
+    0x80000000: { eax: 0x80000008, ebx: 0, ecx: 0, edx: 0 },
+    0x80000001: { eax: 0, ebx: 0, ecx: 0x00000001, edx: 0x20100000 },
+    0x80000002: BRAND_0,
+    0x80000003: BRAND_1,
+    0x80000004: BRAND_2,
+    0x80000006: { eax: 0, ebx: 0, ecx: 0x08006040, edx: 0 },
+    0x80000008: { eax: 0x00003024, ebx: 0, ecx: 0, edx: 0 },
 });
 
 const ZEROS = Object.freeze({ eax: 0, ebx: 0, ecx: 0, edx: 0 });

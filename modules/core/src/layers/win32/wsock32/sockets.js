@@ -10,7 +10,7 @@
  * Nothing here knows about guest memory, argument lists or return codes. It
  * deals in sockets, addresses and bytes, and it answers in outcomes -- a count,
  * or an error number -- which is what lets the surface above be a translation
- * and nothing more, and what lets all of this be tested without an emulator.
+ * and nothing more, and what lets all of this be tested without an engine.
  *
  * Four properties are load-bearing and each one is a defect that has happened:
  *

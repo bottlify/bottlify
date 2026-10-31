@@ -8,7 +8,7 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRemoteApp } from './remote.js';
 import {
-    postAsItIs, serveEngine, watchFrom, workerPacing, WORKER_YIELD_MS,
+    postAsItIs, serveEngine, watchFrom, WORKER_YIELD_MS,
 } from './serve.js';
 import { serveKeeper } from './keeper.js';
 import { PAGE_YIELD_MS } from '../app.js';
@@ -951,101 +951,6 @@ test('a watch spec names libraries whole or by ordinal', ()=>{
     assert.equal(watch('c.dll', '_Name@12', 9), null);
 });
 
-test('a worker runs turns back to back and yields for something pending or on its clock', async()=>{
-    let now = 0;
-    let signalled = false;
-    let yields = 0;
-    const pacing = workerPacing({
-        macrotask: async()=>{
-            yields++;
-        },
-        poke: ()=>new Promise(()=>{}),
-        signalled: ()=>signalled,
-        now: ()=>now,
-    });
-    const nothing = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
-    assert.equal(pacing.yield(nothing), null);
-    assert.equal(pacing.yield(nothing), null);
-    now += 1;
-    await pacing.yield({ ...nothing, suspended: 1 });
-    now += 1;
-    await pacing.yield({ ...nothing, fetching: 1 });
-    await pacing.yield({ ...nothing, spun: 1 });
-    assert.equal(yields, 3, 'a call suspended and a range in flight each yield once a '
-        + 'millisecond is up, a turn that retired nothing at once');
-    assert.equal(pacing.yield({ ...nothing, idlers: 1 }), null,
-        "a caller on the guest's own queue looks again without the host");
-    signalled = true;
-    await pacing.yield(nothing);
-    assert.equal(yields, 4, 'the page posted something');
-    signalled = false;
-    assert.equal(pacing.yield(nothing), null);
-    now += WORKER_YIELD_MS - 1;
-    assert.equal(pacing.yield(nothing), null, 'the interval is not up');
-    now += 1;
-    await pacing.yield(nothing);
-    assert.equal(yields, 5, 'the interval is up');
-    assert.equal(pacing.yield(nothing), null, 'and the clock was reset');
-});
-
-test('an idle worker sleeps to the deadline, or until the page or the host speaks', async t=>{
-    // On the timers' own clock, moved by hand: what ends each wait is read off
-    // what had happened when it ended, not off how long a busy machine took.
-    t.mock.timers.enable({ apis: ['setTimeout'] });
-    /** @type {(() => void) | null} */
-    let wake = null;
-    const pacing = workerPacing({
-        macrotask: async()=>{},
-        poke: ()=>new Promise(resolve=>{
-            wake = resolve;
-        }),
-        signalled: ()=>false,
-        now: ()=>0,
-    });
-    /** @param {Promise<void>} wait */
-    const watched = wait=>{
-        const one = { ended: false };
-        wait.then(()=>{
-            one.ended = true;
-        });
-        return one;
-    };
-    const settle = ()=>new Promise(resolve=>setImmediate(resolve));
-
-    let waiting = watched(pacing.wait({ timer: true, sleep: true, deadlineMs: 20, wakes: [] }));
-    t.mock.timers.tick(19);
-    await settle();
-    assert.equal(waiting.ended, false, 'asleep until the deadline');
-    t.mock.timers.tick(1);
-    await settle();
-    assert.equal(waiting.ended, true, 'nothing else spoke: the deadline is the wake');
-
-    waiting = watched(pacing.wait({ timer: true, sleep: true, deadlineMs: 5000, wakes: [] }));
-    await settle();
-    assert.equal(waiting.ended, false, 'asleep while nothing speaks');
-    /** @type {() => void} */ (/** @type {unknown} */ (wake))();
-    await settle();
-    assert.equal(waiting.ended, true, 'a message from the page ends the wait');
-
-    /** @type {(value?: void) => void} */
-    let answer = ()=>{};
-    waiting = watched(pacing.wait({ timer: true, sleep: true, deadlineMs: null,
-        wakes: [new Promise(resolve=>{
-            answer = resolve;
-        })] }));
-    t.mock.timers.tick(60_000);
-    await settle();
-    assert.equal(waiting.ended, false, 'no deadline: no timer ends it');
-    answer();
-    await settle();
-    assert.equal(waiting.ended, true, 'a host answer ends a wait with no deadline');
-
-    waiting = watched(pacing.wait({ timer: false, sleep: false, deadlineMs: 5000, wakes: [] }));
-    await settle();
-    assert.equal(waiting.ended, true,
-        'a thread still getting work done is not put to sleep, whatever the deadline');
-});
-
 test('the page counts what it posts, and the worker sees it between two turns', async()=>{
     const nothing = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
     let clock = 0;
@@ -1067,7 +972,8 @@ test('the page counts what it posts, and the worker sees it between two turns', 
     assert.ok(looks.built().pacing.yield(nothing), 'and yields on its own');
     await looks.remote.dispose();
 
-    const { remote, built } = await connect({ pacing: 'event' }, { threaded: true });
+    clock = 0;
+    const { remote, built } = await connect({}, { threaded: true, now });
     const pacing = built().pacing;
     assert.equal(typeof pacing.yield, 'function');
     assert.equal(pacing.yield(nothing), null, 'nothing posted since start');

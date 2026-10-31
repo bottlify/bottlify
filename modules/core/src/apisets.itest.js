@@ -69,7 +69,7 @@ test('a program importing the core sets is bound to kernel32 and advapi32',
                 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         t.after(()=>app.dispose());
         const code = await app.run({ timeoutMs: 30000 });
         assert.equal(code, 6, 'RegCloseKey(NULL) answered, the set kernel32 by handle');

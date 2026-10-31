@@ -331,7 +331,7 @@ function handoff(frames, jobs, poll){
 test('jobs handed to workers on three executors through semaphores are each done once, blocking'
     + ' and polling, with the guest\'s answers and with every call in the host',
 { timeout: 600_000 }, async()=>{
-    const cpu = { cores: 3, eager: true };
+    const cpu = { cores: 3 };
     for (const poll of [false, true])
     {
         const executable = handoff(150, 12, poll);
@@ -409,9 +409,9 @@ test('threads queued on a semaphore are woken one a release in the order they qu
         .reduce((sum, value)=>(Math.imul(sum, 31) + value) >>> 0, 0);
     for (const cores of [1, 3])
     {
-        const inGuest = await run(executable, SEMAPHORE_CALLS, { cpu: { cores, eager: true } });
+        const inGuest = await run(executable, SEMAPHORE_CALLS, { cpu: { cores } });
         const inHost = await run(executable, SEMAPHORE_CALLS,
-            { cpu: { cores, eager: true }, win32: { handleWords: false } });
+            { cpu: { cores }, win32: { handleWords: false } });
         assert.equal(inHost.code, expected, `${cores} executor(s), every call in the host`);
         assert.equal(inGuest.code, expected, `${cores} executor(s), with the guest's answers`);
     }

@@ -3,7 +3,7 @@
   "version": "1.1.0",
   "type": "module",
   "license": "MPL-2.0",
-  "description": "Cork: a user-mode x86-32 to WebAssembly translator, an execution engine @bottlify/core's cpu layer loads by URL when a launch selects it",
+  "description": "Cork: a user-mode x86 to WebAssembly translator, the execution engine @bottlify/core's cpu layer loads by URL",
   "homepage": "https://github.com/bottlify/bottlify/tree/main/modules/cork#readme",
   "repository": {
     "type": "git",
@@ -45,7 +45,6 @@
     "test": "node --test --test-timeout=1200000 \"src/**/*.test.js\"",
     "test:integration": "node --test --test-timeout=1800000 \"src/**/*.itest.js\"",
     "typecheck": "tsc -p jsconfig.json",
-    "fetch:corpus": "node scripts/fetch-corpus.mjs",
     "prepack": "node -e \"require('node:fs').copyFileSync('../../LICENSE', 'LICENSE')\""
   },
   "publishConfig": {

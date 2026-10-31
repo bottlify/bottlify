@@ -97,9 +97,6 @@ function native(variant, workload, iterations){
 async function engine(executable, workload, iterations){
     const app = await createApp({
         executable,
-        // Named rather than left to the default: `--root` may be a checkout
-        // whose default is another engine.
-        engine: 'cork',
         exitNotice: false,
         commandLine: `bench.exe ${workload}${iterations ? ` ${iterations}` : ''}`,
         cork: { config: corkConfig },

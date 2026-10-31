@@ -57,7 +57,7 @@ test('a 64-bit RtlUnwind lands at its target with the value and does not return'
                     ...landing];
             },
         });
-        const app = await createApp({ executable: program, engine: 'cork' });
+        const app = await createApp({ executable: program });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 50000 }), 0x55);
     });

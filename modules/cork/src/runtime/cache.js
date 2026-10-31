@@ -13,9 +13,8 @@
  *
  * A region is kept under its entry, the x87 top it is entered at and the
  * run's modes -- what a run knows before it forms it. What forming made of
- * it is in its record (`RegionShape`): where it stopped at other regions'
- * blocks and which callees it formed in depend on what the run had
- * translated by then, and a run that formed it otherwise forms it again as
+ * it is in its record (`RegionShape`): which callees it formed in depend
+ * on what the run had sampled by then, and a run that formed it otherwise forms it again as
  * the record says before it compares the bytes.
  *
  * A record is the module's bytes behind a small header of what the
@@ -28,7 +27,7 @@
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 138;
+export const CACHE_VERSION = 140;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 
@@ -95,13 +94,12 @@ export function moduleKey({ version, features, variant = '', layoutId, bundleId 
 
 /**
  * What forming made of a stored region, and what it was compiled as: its
- * bytes' hash, the blocks it left to other regions (`stops`), by indirect
- * call the callees formed in (`targets`), its x87 precision and float
+ * bytes' hash, by indirect call the callees formed in (`targets`), its x87 precision and float
  * arithmetic, whether that precision is one its run moved the entry to
  * (`moved`), whether its entries test the x87 stack's shape (`checked`
  * not), and whether its loops' blocks have entries of their own (`copies`).
  *
- * @typedef {{ hash: string, stops?: number[], targets?: [number, number[]][],
+ * @typedef {{ hash: string, targets?: [number, number[]][],
  *     wide?: boolean, narrow?: boolean, floats?: boolean, moved?: boolean,
  *     checked?: boolean, copies?: boolean }} RegionShape
  */

@@ -722,16 +722,19 @@ static double roundBy(double v, u32 control)
     return __builtin_copysign(r, v);
 }
 
-/* The ten-byte extended value as a double; a NaN loses its payload and a zero
- * its sign, as the model's conversion does. */
+/* The ten-byte extended value as a double, as the model's conversion has it: a
+ * NaN keeps its payload's top 52 bits (by its lowest bit when they are all clear),
+ * a zero its sign. */
 static double f80ToF64(u64 low, u32 high)
 {
     if ((high & 0x7fff) == 0x7fff)
     {
-        u64 special = (low & ~SIGN64) == 0 ? 0x7ff0000000000000ull : HOST_NAN_BITS;
+        u64 fraction = (low >> 11) & 0x000fffffffffffffull;
+        u64 special = (low & ~SIGN64) == 0 ? 0x7ff0000000000000ull
+            : 0x7ff0000000000000ull | (fraction ? fraction : 1);
         return fromBits(special | (u64)(high & 0x8000) << 48);
     }
-    if (low == 0) return 0;
+    if (low == 0) return fromBits((u64)(high & 0x8000) << 48);
     double v = (double)low;
     i32 e = (i32)(high & 0x7fff) - 16446;
     for (u32 pass = 0; pass < 2; pass++)
@@ -810,8 +813,10 @@ static inline u32 guard(u32 top, u32 empty, u32 *status, u32 sources, u32 pushes
     if (pushes)
     {
         u32 held = ((empty >> ((top - 1) & 7)) & 1) == 0;
+        /* An underflow of the source comes first: C1 says nothing of the push then. */
+        u32 under = (empty & read) != 0;
         t1 |= held;
-        if (held) *status |= S_C1;
+        if (held && !under) *status |= S_C1;
         else if (precise) *status &= ~S_C1;
     }
     if (t1) *status |= S_IE | S_SF;
@@ -853,7 +858,8 @@ static inline double arith(u32 kind, double a0, double c0, u32 t1, u32 control, 
     if (t1) return fromBits(INDEFINITE_BITS);
     if (!precise) return r;
     if (kind >= 6 && c == 0 && a != 0 && __builtin_fabs(a) < __builtin_inf()) *status |= S_ZE;
-    if (isNaN(r) && !isNaN(a0) && !isNaN(c0)) *status |= S_IE;
+    /* A NaN made of operands that were not, or a register that held a signalling one. */
+    if (isNaN(r) && ((!isNaN(a0) && !isNaN(c0)) || signalling(a0) || signalling(c0))) *status |= S_IE;
     return r;
 }
 
@@ -1140,9 +1146,7 @@ static u32 x87(const u8 *p)
                 X_READ(ea, 10);
                 u32 high = *(u16 *)(ram + ea + 8);
                 u64 low = *(u64 *)(ram + ea);
-                /* A signalling NaN: the quiet bit (62) clear, another fraction bit set. */
-                if (precise && (high & 0x7fff) == 0x7fff && (low & 0x4000000000000000ull) == 0
-                    && (low & 0x3fffffffffffffffull) != 0) status |= S_IE;
+                /* No IE for a signalling NaN in this format (the SDM's FLD). */
                 v = f80ToF64(low, high);
             }
             t1 = GUARD(0, 1);
@@ -1167,8 +1171,14 @@ static u32 x87(const u8 *p)
         }
         case 012: case 013: case 052: case 053: case 037:
         {
-            /* fst, fstp m32fp, m64fp; fstp m80fp */
+            /* fst, fstp m32fp, m64fp; fstp m80fp: a signalling NaN stored to a single
+             * or a double raises IE and goes out quiet, the extended takes it as it is. */
             double v = OR_INDEFINITE(ST(0), GUARD(1, 0));
+            if ((e == 1 || e == 5) && signalling(v))
+            {
+                if (precise) status |= S_IE;
+                v = fromBits(bitsOf(v) | 0x0008000000000000ull);
+            }
             if (e == 1)
             {
                 if (precise && __builtin_fabs(v) < 0x1p-126 && v != 0) status |= S_UE;
@@ -1312,16 +1322,19 @@ static u32 x87(const u8 *p)
         xnone = modrm != 0xe4 && modrm != 0xe5 && (modrm < 0xe8 || modrm > 0xee);
         switch (modrm)
         {
+        /* fchs and fabs clear C1, as fxch, fincstp and fdecstp do. */
         case 0xe0:
         {
             double v = -ST(0);
             SET_ST(0, OR_INDEFINITE(v, GUARD(1, 0)));
+            status &= ~S_C1;
             break;
         }
         case 0xe1:
         {
             double v = __builtin_fabs(ST(0));
             SET_ST(0, OR_INDEFINITE(v, GUARD(1, 0)));
+            status &= ~S_C1;
             break;
         }
         case 0xe4:
@@ -1366,14 +1379,16 @@ static u32 x87(const u8 *p)
                 if (precise && ST(0) == 0 && __builtin_fabs(ST(1)) < __builtin_inf() && ST(1) != 0
                     && !t1) status |= S_ZE;
                 if (precise && ST(0) < 0) status |= S_IE;
-                /* A negative argument's logarithm is the indefinite, not the host's NaN. */
-                double log = ST(0) < 0 ? fromBits(INDEFINITE_BITS) : quietNaN(hostLog2(ST(0)));
+                /* A negative argument's logarithm is the indefinite, not the host's NaN,
+                 * and a NaN's is itself: the host's logarithm keeps no NaN's bits. */
+                double log = isNaN(ST(0)) ? ST(0)
+                    : ST(0) < 0 ? fromBits(INDEFINITE_BITS) : quietNaN(hostLog2(ST(0)));
                 r = twoNaN(ST(1) * log, ST(1), log);
             }
             else
             {
                 if (precise && ST(0) < -1) status |= S_IE;
-                double log = ST(0) < -1 ? fromBits(INDEFINITE_BITS)
+                double log = isNaN(ST(0)) ? ST(0) : ST(0) < -1 ? fromBits(INDEFINITE_BITS)
                     : quietNaN(hostLog1p(ST(0))) / fromBits(0x3fe62e42fefa39efull);
                 r = twoNaN(ST(1) * log, ST(1), log);
             }
@@ -1458,6 +1473,16 @@ static u32 x87(const u8 *p)
             double a = ST(0), c = ST(1);
             if (isNaN(a) || isNaN(c) || __builtin_fabs(a) == __builtin_inf() || c == 0 || t1)
             {
+                /* No reduction: C1 and C2 cleared, C0 and C3 as they were. A NaN operand
+                 * goes on quiet (of two, the x87's choice), raising IE only if it
+                 * signals; anything else is the indefinite and IE. */
+                status &= ~(S_C1 | S_C2);
+                if (!t1 && (isNaN(a) || isNaN(c)))
+                {
+                    if (precise && (signalling(a) || signalling(c))) status |= S_IE;
+                    SET_ST(0, twoNaN(quietNaN(isNaN(a) ? a : c), a, c));
+                    break;
+                }
                 if (precise) status |= S_IE;
                 SET_ST(0, fromBits(INDEFINITE_BITS));
                 break;
@@ -1469,9 +1494,11 @@ static u32 x87(const u8 *p)
         }
         case 0xf6:
             top = (top - 1) & 7;
+            status &= ~S_C1;
             break;
         case 0xf7:
             top = (top + 1) & 7;
+            status &= ~S_C1;
             break;
         case 0xfa:
         {
@@ -1627,6 +1654,7 @@ fxch:
     double v = REG(top);
     REG(top) = ST(i);
     ST(i) = v;
+    status &= ~S_C1;
     /* An exact integer's mark and shadow go with its value. */
     u32 a = top, c = PHYS(i);
     if (((exactMarks >> a | exactMarks >> c) & 1) != 0)
@@ -2166,8 +2194,9 @@ static u32 sse(const u8 *p)
     if (lock) return X_LEAVE;
     if (key == 0 && p[len] == 0x77)
     {
-        /* emms: every register empty, the top as it was */
+        /* emms: every register empty, the top at zero */
         *x87EmptyAt = 0xff;
+        *x87TopAt = 0;
         xWrite = NONE;
         xLen = len + 1;
         return X_DONE;
@@ -2764,6 +2793,25 @@ done:
     return code;
 }
 
+/* Whether a `lock` may stand before the opcode at p (the opcode's next byte):
+ * the SDM's LOCK, the forms that read and write memory as one -- whose
+ * register forms MODRM leaves. Any other is #UD, the JavaScript tier's to
+ * raise. */
+static inline u32 lockable(u32 op, const u8 *p)
+{
+    if (op == 0x0f)
+    {
+        u32 op2 = p[0], slot = (p[1] >> 3) & 7;
+        return op2 == 0xab || op2 == 0xb3 || op2 == 0xbb || (op2 == 0xba && slot >= 5)
+            || op2 == 0xb0 || op2 == 0xb1 || op2 == 0xc0 || op2 == 0xc1 || (op2 == 0xc7 && slot == 1);
+    }
+    u32 slot = (p[0] >> 3) & 7;
+    if (op < 0x40) return (op & 7) < 2 && (op >> 3) != 7;
+    return ((op == 0x80 || op == 0x81 || op == 0x83) && slot != 7) || op == 0x86 || op == 0x87
+        || ((op == 0xf6 || op == 0xf7) && (slot == 2 || slot == 3))
+        || ((op == 0xfe || op == 0xff) && slot < 2);
+}
+
 #ifdef LONG
 /* The high quadword of a 64 by 64 bit product, the low one in *low: the halves
  * multiplied apart, as no wider type holds it without a library call. */
@@ -2833,23 +2881,6 @@ static u32 divideSigned128(u64 high, u64 low, u64 d, u64 *quotient, u64 *remaind
     *quotient = q;
     *remainder = negative ? 0 - rest : rest;
     return 1;
-}
-
-/* Whether a `lock` may stand before the opcode at p: the forms that read and
- * write memory as one, whose register forms MODRM leaves. The decoder takes a
- * lock on more -- every form with a memory operand -- which the model runs as
- * if it were not there; those are the JavaScript tier's. */
-static inline u32 lockable(u32 op, const u8 *p)
-{
-    if (op == 0x0f)
-    {
-        u32 op2 = p[0];
-        return op2 == 0xab || op2 == 0xb3 || op2 == 0xbb || op2 == 0xba || op2 == 0xb0 || op2 == 0xb1
-            || op2 == 0xc0 || op2 == 0xc1 || op2 == 0xc7;
-    }
-    if (op < 0x40) return (op & 7) < 2;
-    return op == 0x80 || op == 0x81 || op == 0x83 || op == 0x86 || op == 0x87 || op == 0xf6
-        || op == 0xf7 || op == 0xfe || op == 0xff;
 }
 
 /* The integer interpreter in long mode, as runInteger below is in 32-bit code. */
@@ -4127,7 +4158,7 @@ static u32 runInteger(u32 budget)
             if (len > 4) LEAVE(W_UNSUPPORTED);
         }
         if (op == 0x65 || op == 0x67) LEAVE(W_UNSUPPORTED);
-        if (lock && atomic) LEAVE(W_UNSUPPORTED);
+        if (lock && (atomic || !lockable(op, p + len))) LEAVE(W_UNSUPPORTED);
         u32 si = SIZE_INDEX(opsize);
 
         /* The modrm operand: a register (isReg, ea its number) or memory at ea. */

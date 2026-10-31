@@ -490,7 +490,7 @@ test('emms after an MMX instruction leaves the top at the zero it set', { skip }
     };
     const PXOR = [0x0f, 0xef, 0xc9];        // pxor mm1, mm1
     const EMMS = [0x0f, 0x77];
-    assert.deepEqual(stack([...PXOR, ...EMMS]), [0, 0xff], 'the hold goes, the top stays');
+    assert.deepEqual(stack([...PXOR, ...EMMS]), [0, 0xff], 'the hold goes, the top is zero');
     assert.deepEqual(stack([...EMMS, ...PXOR]), [0, 0], 'an MMX instruction after it holds');
     assert.deepEqual(stack([...PXOR, ...EMMS, ...PXOR]), [0, 0]);
 });
@@ -520,12 +520,14 @@ test('an emms in a region holding the x87 registers empties its own mask', { ski
     const FLD = [0xdd, 0x05, DATA & 255, DATA >> 8 & 255, 0, 0];  // fld qword [DATA]
     const FLD1 = [0xd9, 0xe8];
     const EMMS = [0x0f, 0x77];
+    // The top goes to zero with it, as the SDM's table of the MMX
+    // instructions' effects on the x87 state has it, and the processor does.
     assert.deepEqual(stack([...FLD, ...EMMS]),
-        { top: 7, empty: 0xff, status: 0 }, 'the register the load held is free again');
-    // And the mask is the one the instructions after the emms read: the push
-    // is onto a free register, so it raises no stack fault.
+        { top: 0, empty: 0xff, status: 0 }, 'the register the load held is free again');
+    // And the mask and the top are the ones the instructions after the emms
+    // read: the push is onto a free register, so it raises no stack fault.
     assert.deepEqual(stack([...FLD1, ...FLD1, ...EMMS, ...FLD1]),
-        { top: 5, empty: 0xdf, status: 0 });
+        { top: 7, empty: 0x7f, status: 0 });
 });
 
 test('x87 and MMX translate in one region: an x87 write is the mm mantissa', { skip }, ()=>{
@@ -534,10 +536,9 @@ test('x87 and MMX translate in one region: an x87 write is the mm mantissa', { s
     // so an x87 push leaves the mm view the double's bits and an MMX store of
     // that register reads them. Without the representation the region is cut at
     // the fld1, which retires nothing, and runProgram answers -2 (stuck) -- so
-    // this proves both the crossover and that it is one region. Cork's own f64
-    // layout holds the value as the mantissa's bits, so the crossing is the
-    // identity here; the emulator's tagged form, which the sequence corpus
-    // judges, decodes the MMX form to the indefinite instead.
+    // this proves both the crossover and that it is one region. The state
+    // block holds the value as the mantissa's bits, so the crossing is the
+    // identity.
     const m = createTestMachine();
     const view = new DataView(m.memory.buffer);
     m.write(DATA, new Array(8).fill(0));

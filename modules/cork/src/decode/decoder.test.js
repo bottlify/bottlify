@@ -334,7 +334,7 @@ test('x87: register forms by the modrm byte, memory forms by /r', ()=>{
     assert.equal(at([0xd9, 0xc8]).operands[1].reg, 0, 'fxch st0');
 });
 
-test('bound decodes its register form too, as the emulator consumes it', ()=>{
+test('bound decodes its register form too, which a lost thread reaches', ()=>{
     const memory = at([0x62, 0x10]);          // bound edx, [eax]
     assert.equal(memory.op, 'bound');
     assert.equal(memory.operands[1].kind, 'mem');

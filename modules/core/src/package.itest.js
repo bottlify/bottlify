@@ -206,7 +206,7 @@ const RUN = `
 import { readFile } from 'node:fs/promises';
 const [module, exe] = process.argv.slice(2);
 const { createApp } = await import(module);
-const app = await createApp({ executable: new Uint8Array(await readFile(exe)), engine: 'cork',
+const app = await createApp({ executable: new Uint8Array(await readFile(exe)),
     cork: { config: { feed: 'slice' } } });
 const output = [];
 app.attachLog((_, text)=>output.push(text));

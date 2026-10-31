@@ -41,7 +41,7 @@ const ARENA = { base: 0x1000, size: 0x4000 };
 const RESERVING_ARENA = { base: GRANULARITY, size: 4 * GRANULARITY };
 
 /**
- * Guest memory, as the emulator's own is: zero until something writes.
+ * Guest memory, as the engine's own is: zero until something writes.
  *
  * The fixture holds that premise rather than contradicting it, because it is
  * what the allocator's zeroing rests on -- a pre-dirtied arena would describe a

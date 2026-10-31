@@ -127,7 +127,6 @@ test('diagnostics describe the run afterwards', { timeout: 15000 }, async t=>{
 
     const byName = Object.fromEntries(app.diagnostics().map((/** @type {any} */ d)=>[d.name, d]));
 
-    assert.equal(byName.cpu.metrics.protectedMode, true, 'the ROM switched the CPU over');
     assert.ok(byName.cpu.metrics.instructions > 0);
     // Every function of every library gets a stub, whether the program calls it
     // or not: the modules exist in guest memory before the first instruction, so

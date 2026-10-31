@@ -348,8 +348,7 @@ test('a batch formed whole while the only translator is replaced waits for the o
     });
 
 test('nothing is emitted here while the translator loads: the batch waits for it', async()=>{
-    const config = { worker: true, translators: 0, batchRegions: 4, maxBatchRegions: 4,
-        loadingShare: 1 };
+    const config = { worker: true, translators: 0, batchRegions: 4, maxBatchRegions: 4 };
     const starts = [0x2000, 0x3000, 0x4000];
     /** @param {ReturnType<typeof machine>} m */
     const translated = m=>starts.filter(at=>m.runtime.entryOf(at) >= 0).length;

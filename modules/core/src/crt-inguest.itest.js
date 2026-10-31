@@ -675,7 +675,7 @@ async function exitCodeOf(executable){
 
 test('a host write into the runtime\'s variables keeps none of its code from translation',
     { timeout: 120000 }, async()=>{
-        const app = await createApp({ executable: buildNeighbourExe(), engine: 'cork' });
+        const app = await createApp({ executable: buildNeighbourExe() });
         try
         {
             assert.equal(await app.run({ timeoutMs: 60000 }), 0);

@@ -431,7 +431,7 @@ test('diagnostics answers for the live instance', async()=>{
 
 test('parking a thread keeps where its stub leaves the stack, for the resume', async()=>{
     // Whether the stub's `ret` runs before or after the thread is switched
-    // away is the emulator's business; the resume must not depend on it.
+    // away is the engine's business; the resume must not depend on it.
     const { kernel, memory } = await makeKernel(0x2ffed0);
     const thread = kernel.createThread({ entry: 0x00402000, name: 'main' });
     memory.words.set(0x2ffed0, 0x007e8166);

@@ -486,9 +486,7 @@ async function engineOf(root){
         pathToFileURL(join(root, 'modules', 'core', 'src', 'app.js')).href);
     /** @param {Uint8Array} executable */
     return async executable=>{
-        // Named rather than left to the default: `--root` may be a checkout
-        // whose default is another engine.
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         /** @type {string[]} */
         const output = [];
         app.on('output', (/** @type {any} */ payload)=>output.push(payload.text));

@@ -27,7 +27,6 @@
  *             writable: WritableStore,
  *         },
  *     },
- *     openFileLimit: 4096,
  * }
  * ```
  *

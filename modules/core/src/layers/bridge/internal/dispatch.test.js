@@ -14,7 +14,7 @@ import { createTable, readTable } from '../../log/internal/table.js';
 
 /**
  * A CPU and an address space stood in for, so these tests are about marshalling
- * and about where a result goes -- not about an emulator.
+ * and about where a result goes -- not about an engine.
  *
  * @param {Object} [options]
  * @param {number} [options.esp]
@@ -1524,7 +1524,7 @@ test('a register file lent by the cpu carries ESP and EAX, and one that reads em
     assert.deepEqual(byName, [], 'neither register asked for by name');
     assert.equal(lent, 1);
 
-    // What an emulator growing its memory does to the view it lent.
+    // What a memory that grows does to the view lent over it.
     const moved = new Int32Array(8);
     moved[4] = 0x3000;
     /** @type {any} */ (file.buffer).transfer();

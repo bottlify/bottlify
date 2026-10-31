@@ -270,9 +270,9 @@ export function createRegionMap(){
          * Whether anything at this address could ever be executed.
          *
          * Asked by whoever writes on the host's behalf: a write into memory the
-         * guest can execute may be changing code the emulator has compiled, and
-         * has to say so. A write anywhere else cannot be, and paying the
-         * emulator's invalidation for it is pure loss.
+         * guest can execute may be changing code the translator has compiled,
+         * and has to say so. A write anywhere else cannot be, and paying the
+         * translator's invalidation for it is pure loss.
          *
          * @param {number} address
          * @returns {boolean} true when nothing is known, which is the safe answer.

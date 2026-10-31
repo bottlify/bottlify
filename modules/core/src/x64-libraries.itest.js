@@ -82,7 +82,7 @@ function library(bits){
  */
 async function run(executable, files){
     const app = await createApp({
-        executable, imagePath: 'C:\\App\\program.exe', engine: 'cork',
+        executable, imagePath: 'C:\\App\\program.exe',
         storage: { load: async()=>({ files: Object.entries(files).map(([name, bytes])=>(
             { path: `C:\\App\\${name}`, bytes })) }) },
     });

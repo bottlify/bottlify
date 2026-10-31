@@ -285,7 +285,6 @@ const app = await createApp({
     storage: prefix.storage,
     ...prefix.files?.length > 0 ? { files: prefix.files } : {},
     ...'bundle' in prefix ? { bundle: prefix.bundle } : {},
-    engine: 'cork',
     // `--windows NAME`: the Windows the machine is, over the one a bundle's
     // manifest names -- a program that refuses an old one says so first.
     ...argv.includes('--windows') || prefix.windows
@@ -299,7 +298,7 @@ const app = await createApp({
     // `--executors N`: the program's threads on N executors at once, as the
     // player's multi modes run them.
     ...argv.includes('--executors')
-        ? { executors: Number(argv[argv.indexOf('--executors') + 1]) } : {},
+        ? { cpu: { cores: Number(argv[argv.indexOf('--executors') + 1]) } } : {},
     // `--unshared`: guest memory not a SharedArrayBuffer, as on a page that is
     // not cross-origin isolated.
     // `--cork JSON`: cork's settings (`EngineConfig`), beside `--unshared`.

@@ -78,7 +78,7 @@ function buildProgram(){
 test('the performance counter answers every thread later each time, on two executors at once',
     { timeout: 120_000 }, async()=>{
         const app = await createApp({ executable: buildProgram(),
-            cpu: { cores: 2, eager: true } });
+            cpu: { cores: 2 } });
         try
         {
             const errors = await app.run({ timeoutMs: 90_000 });

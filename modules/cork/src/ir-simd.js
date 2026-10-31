@@ -647,7 +647,10 @@ export function evaluateSimd(instruction, state, address){
     switch (op)
     {
         case 'emms':
+            // Every register empty and the top at zero (the SDM's table of the
+            // MMX instructions' effects on the x87 state).
             state.empty = 0xff;
+            state.top = 0;
             return true;
         case 'movaps': case 'movups': case 'movapd': case 'movupd': case 'movdqa': case 'movdqu':
         case 'lddqu': case 'movntps': case 'movntpd': case 'movntdq':

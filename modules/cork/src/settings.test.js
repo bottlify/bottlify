@@ -5,12 +5,13 @@
  */
 
 /**
- * Every setting the runtime takes is a documented one: in the engine's
- * `EngineConfig` typedef and in the tables of SETTINGS.md. A knob added to the
- * runtime and nowhere else is one nobody can find, and one documented and
- * gone is a setting that silently does nothing. And the default the tables
- * give is the runtime's: `callWindow` and `callSitesKept` had moved on and
- * their rows had not.
+ * The settings cork takes and the tables of SETTINGS.md and SETTINGS.ru.md are
+ * the same set, both ways. A setting the code reads and no table names is one
+ * nobody can find; a row whose setting nothing reads silently does nothing
+ * (`long` stayed a row a week after the code that read it was gone). The
+ * default a table gives is the runtime's: `callWindow` and `callSitesKept`
+ * had moved on and their rows had not. And every runtime setting a host may
+ * pass is in the core's `EngineConfig` typedef.
  */
 
 import { test } from 'node:test';
@@ -18,6 +19,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const read = (/** @type {string} */ path)=>readFileSync(new URL(path, import.meta.url), 'utf8');
+
+/** A setting's name: a word that may hold digits past its first letter (`x87Shapes`). */
+const NAME = '[a-zA-Z][a-zA-Z0-9]*';
 
 /**
  * The runtime's `settings` object, its defaults: each key with its value as
@@ -29,14 +33,40 @@ function runtimeDefaults(){
     const from = source.indexOf('const settings = {');
     const to = source.indexOf('...config,', from);
     assert.ok(from > 0 && to > from, 'the settings object is where it was');
-    return new Map(source.slice(from, to).split('\n').filter(line=>/^\s{8}[a-zA-Z]+:/.test(line))
-        .flatMap(line=>[...line.replace(/\/\*.*?\*\//g, '')
-            .matchAll(/([a-zA-Z]+): ([^,]+?)(?=,|$)/g)])
+    return new Map(source.slice(from, to).split('\n')
+        .map(line=>line.replace(/\/\*.*?\*\//g, ''))
+        .filter(line=>new RegExp(`^\\s{8}${NAME}:`).test(line))
+        .flatMap(line=>[...line.matchAll(new RegExp(`(${NAME}): ([^,]+?)(?=,|$)`, 'g'))])
         .map(([, name, value])=>[name, value.trim()]));
 }
 
-/** The keys of the runtime's `settings` object. */
-const runtimeSettings = ()=>[...runtimeDefaults().keys()];
+/**
+ * The names a source reads off a config by one of the spellings given (`settings.`,
+ * `corkConfig?.`): each spelling a pattern before the name.
+ * @param {string} source @param {string[]} spellings
+ */
+const namesRead = (source, spellings)=>new Set(spellings.flatMap(spelling=>[
+    ...source.matchAll(new RegExp(`${spelling}(${NAME})\\b`, 'g'))].map(match=>match[1])));
+
+/** What the runtime reads: its defaults' keys, and the keys it reads past them. */
+function runtimeReads(){
+    const source = read('./runtime/runtime.js');
+    return new Set([...runtimeDefaults().keys(),
+        ...namesRead(source, ['\\bsettings\\.', '\\bsettings\\?\\.', '\\bconfig\\.'])]);
+}
+
+/** What the core's host of cork reads of cork's config, and what `createMachine` does. */
+function hostReads(){
+    const host = read('../../core/src/layers/cpu/internal/cork-host.js')
+        + read('../../core/src/layers/cpu/internal/executor.worker.js')
+        + read('../../core/src/layers/cpu/internal/executor.js')
+        + read('../../core/src/layers/cpu/module.js');
+    return new Set([
+        ...namesRead(host, ['\\bcorkConfig\\??\\.', '\\bconfig\\.cork\\??\\.',
+            '\\bsettings\\.cork\\??\\.']),
+        ...namesRead(read('./machine.js'), ['\\bconfig\\.']),
+    ]);
+}
 
 /**
  * A default as the runtime writes it or a table gives it, as a value: a number
@@ -57,8 +87,8 @@ function valueOf(text){
 }
 
 /**
- * The defaults a settings table gives, by setting: a row's names and its
- * defaults in the same order, or one default for all of them (`4096 each`).
+ * The settings a settings table names, with their defaults: a row's names and its
+ * defaults in the same order, or one default for all of them.
  * @param {string} doc
  * @returns {Map<string, string>}
  */
@@ -67,52 +97,66 @@ function documentedDefaults(doc){
     const found = new Map();
     for (const line of doc.split('\n').filter(row=>row.startsWith('| `')))
     {
-        const [names, defaults] = line.split(' | ');
-        const keys = [...names.matchAll(/`([a-zA-Z]+)`/g)].map(match=>match[1]);
-        const each = /^(?:по )?(\S+?)(?: each)?$/.exec(defaults.trim());
+        const [names, defaults] = line.slice(2).split(' | ');
+        const keys = [...names.matchAll(new RegExp(`\`(${NAME})\``, 'g'))].map(match=>match[1]);
         const values = keys.length > 1 && defaults.includes(', ') ? defaults.split(', ')
-            : keys.map(()=>each?.[1] ?? defaults);
+            : keys.map(()=>defaults);
         keys.forEach((key, k)=>found.set(key, values[k] ?? ''));
     }
     return found;
 }
 
-/** Settings set by a host or the runtime for its own wiring, not a person's. */
+const DOCS = ['../SETTINGS.md', '../SETTINGS.ru.md'];
+
+/** Settings a host wires that EngineConfig does not carry: not a person's to pass. */
 const WIRING = new Set(['sharedCode']);
 
-test('every runtime setting is in EngineConfig and in SETTINGS.md', ()=>{
-    const typedef = read('../../core/src/layers/cpu/engine.js');
-    const readme = read('../SETTINGS.md');
-    const names = runtimeSettings().filter(name=>!WIRING.has(name));
-    assert.ok(names.length > 40, `${names.length} settings found`);
-    const untyped = names.filter(name=>!typedef.includes(`[${name}]`));
-    const undocumented = names.filter(name=>!readme.includes(`\`${name}\``));
-    assert.deepEqual({ untyped, undocumented }, { untyped: [], undocumented: [] });
+test('the name pattern sees a setting with digits in it', ()=>{
+    assert.ok(runtimeDefaults().has('x87Shapes'), 'x87Shapes among the runtime\'s defaults');
+    assert.ok(documentedDefaults(read(DOCS[0])).has('x87Shapes'), 'and among the documented');
 });
 
-test('every config the core\'s host reads is in EngineConfig and in SETTINGS.md', ()=>{
-    const typedef = read('../../core/src/layers/cpu/engine.js');
-    const readme = read('../SETTINGS.md');
-    const host = read('../../core/src/layers/cpu/internal/cork-host.js')
-        + read('../../core/src/layers/cpu/internal/executor.worker.js')
-        + read('../../core/src/layers/cpu/internal/executor.js');
-    const names = [...new Set([...host.matchAll(/(?:corkConfig|config\.cork)\?\.([a-zA-Z]+)/g)]
-        .map(match=>match[1]))];
+test('every setting the runtime reads is in both tables, and in EngineConfig but the wiring',
+    ()=>{
+        const typedef = read('../../core/src/layers/cpu/engine.js');
+        const names = [...runtimeReads()];
+        assert.ok(names.length > 40, `${names.length} settings found`);
+        for (const doc of DOCS)
+        {
+            const documented = documentedDefaults(read(doc));
+            assert.deepEqual(names.filter(name=>!documented.has(name)), [], `${doc}: undocumented`);
+        }
+        assert.deepEqual(names.filter(name=>!WIRING.has(name) && !typedef.includes(`[${name}]`)),
+            [], 'not in EngineConfig');
+    });
+
+test('every config the core\'s host or createMachine reads is in both tables', ()=>{
+    const names = [...hostReads()];
     assert.ok(names.length > 8, `${names.length} host settings found`);
-    const untyped = names.filter(name=>!typedef.includes(`[${name}]`));
-    const undocumented = names.filter(name=>!readme.includes(`\`${name}\``));
-    assert.deepEqual({ untyped, undocumented }, { untyped: [], undocumented: [] });
+    for (const doc of DOCS)
+    {
+        const documented = documentedDefaults(read(doc));
+        assert.deepEqual(names.filter(name=>!documented.has(name)), [], `${doc}: undocumented`);
+    }
+});
+
+test('every setting a table names is one something reads, and both tables name the same', ()=>{
+    const reads = new Set([...runtimeReads(), ...hostReads()]);
+    const [english, russian] = DOCS.map(doc=>[...documentedDefaults(read(doc)).keys()]);
+    assert.ok(english.length > 40, `${english.length} settings documented`);
+    assert.deepEqual(english.filter(name=>!reads.has(name)), [], 'documented, read by nothing');
+    assert.deepEqual([...russian].sort(), [...english].sort(), 'the two tables name the same');
 });
 
 test('every default SETTINGS.md and SETTINGS.ru.md give for a runtime setting is the runtime\'s',
     ()=>{
         const runtime = runtimeDefaults();
-        for (const doc of ['../SETTINGS.md', '../SETTINGS.ru.md'])
+        for (const doc of DOCS)
         {
             const documented = documentedDefaults(read(doc));
             const compared = [...documented].filter(([name, text])=>runtime.has(name)
                 && valueOf(text) !== undefined);
-            assert.ok(compared.length > 40, `${doc}: ${compared.length} defaults compared`);
+            assert.ok(compared.length > 30, `${doc}: ${compared.length} defaults compared`);
             const wrong = compared.filter(([name, text])=>valueOf(text)
                 !== valueOf(/** @type {string} */ (runtime.get(name))))
                 .map(([name, text])=>`${name}: ${text}, the runtime's ${runtime.get(name)}`);

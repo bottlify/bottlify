@@ -8,7 +8,7 @@
  * Starting another program: CreateProcess, its older spelling WinExec, and the
  * pair a launcher uses to patch a child before letting it run.
  *
- * There is one address space and one emulator here, so nothing below starts a
+ * There is one address space and one machine here, so nothing below starts a
  * second machine. A call records what was asked for -- the image, the command
  * line, the bytes to write into the child -- and the caller that assembled the
  * process replaces this one with the child once the parent has nothing left to

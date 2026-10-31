@@ -47,7 +47,7 @@ test('a default build contains every layer, in dependency order', async()=>{
     }
 });
 
-test('building the graph costs nothing: the emulator is not started', async()=>{
+test('building the graph costs nothing: the engine is not started', async()=>{
     const core = await assembleModules({});
     const cpu = core.api('cpu');
 

@@ -32,7 +32,7 @@ test('three executors without SharedArrayBuffer run the program on one and say w
         delete globalThis.SharedArrayBuffer;
         try
         {
-            const app = await createApp({ executable, executors: 3 });
+            const app = await createApp({ executable, cpu: { cores: 3 } });
             try
             {
                 assert.equal(await app.run({ timeoutMs: 30_000 }), 7);

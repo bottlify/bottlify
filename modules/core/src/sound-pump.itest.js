@@ -51,7 +51,7 @@ test('a program that turns the loop over and over is pumped for sound a few time
         return paced.yield(pending);
     } };
     const app = await createApp({ executable: program, imagePath: 'C:\\spin.exe',
-        engine: 'cork', pacing });
+        pacing });
     t.after(()=>app.dispose());
     // It never ends: the run is cut at its time, as a runaway.
     await assert.rejects(app.run({ timeoutMs: 1500 }), /did not finish/);

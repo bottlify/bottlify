@@ -51,7 +51,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
     [--pointer x,y[,down]] [--click x,y[,after]] [--key Code[,after[,frames]]] [--turn dx,dy,after,frames] [--screen WxH]
     [--run-seconds N] [--command-line STRING] [--args STRING] [--windows NAME] [--gpu PROFILE] [--file HOST=GUEST] [--save-files]
     [--profile-calls] [--no-video] [--no-fog] [--no-mips] [--trace]
-    [--worker [--pacing page|event]] [--coi]
+    [--worker] [--coi]
     [--user-data-dir DIR] [--port N] [--store local] [--quota MB] [--prefetch] [--export-translations FILE]
 ```
 
@@ -92,7 +92,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--roots FILE` | none | A PEM bundle (`/etc/ssl/certs/ca-certificates.crt`) added to the machine's trusted roots: the ROOT store a program doing its own TLS has crypt32 judge a server's chain against |
 | `--win32-config JSON` | none | createApp's `win32` for the run, e.g. `{"handleWords":false}`: events, mutexes, semaphores and their waits answered by the host instead of the guest's handle words, a run that differs from an ordinary one by that path alone |
 | `--steam FILE` | none | a signed-in Steam account, as `node tools/steam-account.mjs --session <session> --out FILE` writes it (its Steam ID, name and owned app ids): the run has the engine's Steam client running for it, the app being the manifest's `steam.appId` -- what a game that needs Steam running (SteamAPI_Init) starts with |
-| `--cpu-config JSON` | none | createApp's `cpu` for the run, e.g. `{"playPinned":false}`: threads placed one fixed way instead of by the scheduler's trials, so two arms of an A/B are placed alike |
+| `--cpu-config JSON` | none | createApp's `cpu` for the run, e.g. `{"gcNudge":false}` |
 | `--cork-config JSON` | `{"timings":true}` | the translator's own settings for the run, e.g. `{"countTransfers":true}` or `{"relinkAfter":0}`; the harness turns the translator's `timings` on (its milliseconds and `stalls`), which a shipped build leaves off, and `{"timings":false}` runs as it does; `{"traceStore":true}` writes every store key put and missed to `game-<stamp>-store.json` beside the report, for comparing a cold run's keys with a warm run's; `{"blockProfile":true}` counts every translated block's executions (with `"blockProfileFrom":S` only from S seconds on, so a profile holds the game and not its load) (no store is kept that run), prints the twenty hottest as `hottest blocks` and how calls, returns, transfers and `rdtsc`s went as `mechanisms` (cork's `Mechanism`) and what the hot code is made of as `forms` (each instruction form's executions and wasm bytes), and writes all of them to `game-<stamp>-blocks.json`, which `node tools/cork-mix.mjs <that file> [--top N]` turns into the dynamic instruction mix (a DLL's blocks too, placed with `--image name.dll@base`) by operation and operand form with the wasm operations cork emits for each form, ranked by weighted cost, and `node tools/cork-asm.mjs --image name.dll@base --entry A,B --blocks <that file>` into the machine instructions an executed guest instruction costs: the regions emitted again, compiled by a node's V8 (`--runner` another node, e.g. an arm64 one under qemu), each block's code found by a mark and weighed by its executions |
 | `--js-flags FLAGS` | none | V8 flags for the browser (`--no-liftoff`), for a question about the wasm tiers |
 | `--no-video` | video on | assemble the engine without a decoder, so a run is not measured through a cinematic |
@@ -121,7 +121,6 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--fake-gpu` | off | a GPU that takes every call and draws nothing, the devices played in a graphics worker over it: a run that measures the engine alone. A software adapter (SwiftShader, where the machine has no GPU) takes the same cores as the engine and holds it waiting for frames, which is not what a person's GPU does; nothing is drawn, so nothing about the picture can be asked of such a run |
 | `--fake-pipeline-ms N` | 0 | with `--fake-gpu`: each pipeline takes N ms to build, as a GPU compiling its shaders does, so frames wait in the graphics worker behind their pipelines while the next ones are recorded |
 | `--graphics-capture FILE` | off | everything the graphics worker is sent, from its start, written to FILE (gzip) when the run ends. The frames to measure are marked while it runs with `captureFrames(n)` (below), and the capture ends n presents after the mark. The guest memory the calls carry (vertices, indices, texels: pieces of 4 KB and more) is kept as zeros and everything else whole, so a run of minutes is tens of megabytes. `tools/graphics-replay.mjs` plays it again in node (below) |
-| `--pacing page\|event` | `page` | with `--worker`: how the loop waits: a look every few milliseconds, or sleep until something happens |
 | `--coi` | off | serve with the cross-origin isolation headers, so the page comes up `crossOriginIsolated` and `SharedArrayBuffer` exists, which the shared-table audio backend and its worklet need |
 | `--user-data-dir DIR` | a fresh temp dir, removed on shutdown | a browser profile of your own, kept rather than thrown away when the run ends. Needed for `--store local` to warm anything: OPFS lives in the profile, so a later run only reads it back if it is the same profile. A browser an earlier run left on the same profile (its node process killed outright) is closed before the launch |
 | `--port N` | random | fixes the static server's port, so `http://127.0.0.1:<port>`, the origin OPFS is scoped to, is the same every run. Pair with `--user-data-dir` for a warm store to survive between separate invocations of this tool; without a fixed port each run is a different origin no matter which profile it opens |
@@ -427,7 +426,7 @@ Reading it:
   many of them found it asleep and had to wake it, the turns it ended and how
   many woke e0 asleep on the bell, and how many of its waits for an answer
   slept. `answers by wait`: those waits counted by how long the answer took; a
-  look before the sleep (`cork.config.spinMs`; by default 1 ms while the host has
+  look before the sleep (`lookFor` in the cpu layer: 1 ms while the host has
   a core free, 0.05 ms when it has none) catches the counts up to its length, and
   every sleep it misses costs a wake on both sides.
 

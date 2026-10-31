@@ -104,7 +104,7 @@ test('the record is eighty bytes, and the parameters are where a handler reads t
 });
 
 test('the guest context is the layout a handler was compiled against', ()=>{
-    // Not the shape the emulator keeps. Every one of these is a translation,
+    // Not the shape the engine keeps. Every one of these is a translation,
     // and a wrong offset hands a handler a plausible number from the next
     // field along.
     assert.equal(CONTEXT.SIZE, 0x2cc);

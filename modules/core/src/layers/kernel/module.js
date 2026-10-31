@@ -193,20 +193,13 @@ export function createKernelModule(){
                 /** @param {any} thread @param {string | null} reason @param {number} value */
                 onResume: (thread, reason, value)=>log.debug('kernel',
                     '{0} resumed from {1} with {2:x}', thread.name, reason ?? 'a park', value),
-                // Below a page the emulator cannot honour a smaller quantum anyway,
-                // so asking for one would only be a lie in the configuration.
+                // A turn's length in instructions where the run names none.
                 quantum: config?.quantum ?? 100_000,
                 // A quantum asked for is kept to the instruction: a test's, a profile's.
                 turnMs: config?.quantum === undefined ? TURN_MS : undefined,
-                soloQuantum: config?.soloQuantum,
-                // Where a process of several executors runs its ready threads: the
-                // way the caller names, else spread beside a free host (`freeHost`),
-                // or each thread moved on its gains without one (`placement.js`).
-                placement: ['spread', 'concentrate', 'auto'].includes(config?.placement)
-                    ? config.placement : null,
-                placementTiming: config?.placementTiming,
-                playPinned: config?.playPinned,
-                freeHost: config?.freeHost,
+                // Where a process of several executors runs its ready threads:
+                // spread, unless a debugging run concentrates them.
+                placement: config?.placement === 'concentrate' ? 'concentrate' : null,
                 // The guest's Sleep reads it (`mirrorReady`).
                 readyChanged: (/** @type {number} */ count)=>{
                     if (state.readyWord !== 0)
@@ -221,18 +214,6 @@ export function createKernelModule(){
             if (typeof log.metrics?.onFrame === 'function')
             {
                 log.metrics.onFrame(()=>state.scheduler.publish());
-            }
-            // With `preemption` on, a slice ends between chunks of translated
-            // code once a thread of higher priority comes due, as Windows
-            // preempts for one (`preemptionDue`). Off by default: measured on
-            // the Warcraft III demo it ended ~8 000 slices early for Miles'
-            // TIME_CRITICAL mixer and changed nothing heard in a browser, where
-            // the mixer's lateness is collection pauses outside any slice; and
-            // the chunked budget it needs has not been measured for speed.
-            if (config?.preemption === true)
-            {
-                cpu.setYieldCheck?.(()=>!state.disposed
-                    && state.scheduler.preemptionDue(state.refreshClock));
             }
             // The words the guest reads its events by, once kernel32 places
             // the table (`mirrorEvents`); until then nothing is written.
@@ -537,11 +518,9 @@ export function createKernelModule(){
                         state.scheduler.atomicCode(address, length);
                     }
                 },
-                /** Whether a thread of higher priority is due the processor now (see the scheduler). */
-                preemptionDue: ()=>live() && state.scheduler.preemptionDue(state.refreshClock),
                 /**
                  * How the guest's clock is brought up to the host's between turns,
-                 * so a wait can come due inside a slice (see `preemptionDue`).
+                 * so a wait can come due inside a slice of many crossings.
                  *
                  * @param {() => void} refresh
                  */

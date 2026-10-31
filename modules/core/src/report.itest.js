@@ -28,7 +28,7 @@ test('a report carries every layer, the profile and the code the guest spent its
             codeSize: 0x20,
             code: ({ iat })=>[...loop, 0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
         });
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         t.after(()=>app.dispose());
         assert.equal(await app.run(), 0);
 
@@ -68,7 +68,7 @@ test('a report lists what was said as a divergence, which nothing else keeps',
                 0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         t.after(()=>app.dispose());
         assert.equal(await app.run(), 0);
 
@@ -96,7 +96,7 @@ test('a polling loop is written twice and counted, so the journal still holds wh
                 0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         t.after(()=>app.dispose());
         app.log.setLevel('call.cpu', 'trace');
         assert.equal(await app.run(), 0);

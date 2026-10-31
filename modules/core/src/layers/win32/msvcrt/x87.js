@@ -7,8 +7,8 @@
 /**
  * The x87's own operations, for `@guestCode` sources: what an instruction no
  * JavaScript operator or `Math` function is computes, as the engines compute
- * it. Both keep an x87 register as a double (cork's translated code and the
- * emulator alike), so each is the double the instruction leaves there:
+ * it. The engine keeps an x87 register as a double (translated code and the
+ * interpreter alike), so each is the double the instruction leaves there:
  * `fldl2e` is `Math.LOG2E`, `f2xm1` the host's `expm1` of the argument's
  * natural measure, `fyl2x` a product with the host's `log2`. The compiler
  * (`scripts/guest-code/compile.mjs`) emits the one instruction for each, and

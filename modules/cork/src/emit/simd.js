@@ -14,8 +14,9 @@
  * wasm's min); a float-to-integer conversion answers the "integer
  * indefinite" 0x80000000 for a NaN or a value out of range (a saturating
  * conversion and a fix-up); `rsqrtps` and `rcpps` are computed exactly, as
- * the emulator does, so results stay bit-identical to what the library's
- * programs already run against. MXCSR is read by the conversions that round
+ * the interpreter computes them (`ir-simd.js`), within the processor's own
+ * estimate's error, and the two tiers agree bit for bit. MXCSR is read by the
+ * conversions that round
  * alone: the arithmetic rounds to nearest, keeps denormals (no FTZ, no DAZ)
  * and raises no flag, as the host's f32 and f64 lanes do. MMX operations run
  * in the low lane of a `v128` and come back as an `i64`; an MMX instruction
@@ -479,18 +480,25 @@ function emitForm(e, instruction, flagsLive){
             // exit writes that mask back over anything written straight into
             // the state block, and into the state block otherwise. The
             // run's hold is released too, or the exit would hold every
-            // register right after. The top is left alone: an MMX instruction
-            // of this run put it at zero and leaving the MMX state does not
-            // put it back, and a run with none leaves the machine's own.
+            // register right after. The top goes to zero, as the SDM's table
+            // of the MMX instructions' effects on the x87 state has it.
             if (e.x87.active)
             {
                 x87Forget(e);
                 b.i32const(0xff).localSet(Local.x87Empty);
+                b.i32const(0).localSet(Local.x87Top);
+                // The x87 after it is compiled for that top (the tracker's, `step`).
+                if (e.x87.current !== null)
+                {
+                    e.x87.current = { top: 0, slot: [...e.x87.current.slot] };
+                }
             }
             else
             {
                 atState(e.context, b).i32const(0xff).store('i32_8',
                     { offset: e.layout.x87Empty });
+                atState(e.context, b).i32const(0).store('i32_8',
+                    { offset: e.layout.x87Top });
             }
             b.localGet(e.mmxTouchedLocal()).i32const(~MMX_HELD).op(I32.and)
                 .localSet(e.mmxTouchedLocal());

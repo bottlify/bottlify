@@ -9,7 +9,7 @@
  *
  * Two constraints shape all of it.
  *
- * A guest read is synchronous: when a program calls `ReadFile` the emulator is
+ * A guest read is synchronous: when a program calls `ReadFile` the engine is
  * mid-instruction and wants bytes now, so `read` cannot return a promise. It
  * therefore serves only blocks that are already here, and reports the ones that
  * are not by throwing a miss that names them. The caller above fetches those and
@@ -18,7 +18,7 @@
  * read of every cached block, is a different engine.
  *
  * Decompression is injected. In the engine the deflate path is the platform's
- * own and the zstd path is the decoder already inside the emulator; neither is
+ * own and the zstd path is the project's own decoder (`zstd.js`); neither is
  * this layer's business, and importing a compressor here would add the one thing
  * this package does not have.
  */

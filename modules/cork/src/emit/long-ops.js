@@ -22,6 +22,7 @@ const LONG_OPS = new Set([
     'shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'imul', 'mul', 'div', 'idiv',
     'xchg', 'popcnt', 'cwde', 'cdq', 'leave', 'bsf', 'bsr', 'bswap', 'prefetch', 'prefetchw',
     'prefetchnta', 'prefetcht0', 'prefetcht1', 'prefetcht2', 'lfence', 'mfence', 'sfence', 'pause',
+    'clflush',
     'emms', 'ldmxcsr', 'stmxcsr', 'bt', 'bts', 'btr', 'btc',
     'clc', 'stc', 'cmc', 'cld', 'std', 'lahf', 'sahf', 'pushf', 'popf', 'xadd', 'cmpxchg',
     'cmpxchg8b', 'cmpxchg16b', 'movnti', 'shld', 'shrd', 'loop', 'loope', 'loopne', 'jecxz',

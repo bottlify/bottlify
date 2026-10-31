@@ -74,9 +74,6 @@ jobs:
       - run: npm run typecheck -w @bottlify/cork
       - run: npx eslint modules/cork --max-warnings 0
       - run: npm run test -w @bottlify/cork
-      # The translator's corpus suites judge it against the hardware recording;
-      # with CI set they fail rather than skip without it.
-      - run: npm run fetch:corpus
       - run: npm run test:integration -w @bottlify/cork
 
   core:

@@ -32,7 +32,7 @@ test('a program draws with GLSL into a framebuffer object and samples it in the 
         gpuDevice.features = new Set();
         gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler',
             descriptor });
-        const app = await createApp({ executable: glslProgram(), engine: 'cork',
+        const app = await createApp({ executable: glslProgram(),
             device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
                 canvas: gpu.canvas,
                 adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' } } });

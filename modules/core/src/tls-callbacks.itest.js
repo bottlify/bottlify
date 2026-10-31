@@ -173,7 +173,7 @@ async function run(executable, libraries, cores){
     const app = await createApp({
         executable,
         imagePath: 'C:\\App\\tls.exe',
-        cpu: { cores, eager: true },
+        cpu: { cores },
         files: Object.entries({ 'log.dll': logLibrary(), ...libraries })
             .map(([name, bytes])=>({ path: `C:\\App\\${name}`, bytes })),
     });

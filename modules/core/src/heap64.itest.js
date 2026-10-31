@@ -57,7 +57,7 @@ test('a 64-bit process\'s heap blocks start on 16 bytes, HeapAlloc\'s and malloc
                 return bytes;
             },
         });
-        const app = await createApp({ executable: program, engine: 'cork' });
+        const app = await createApp({ executable: program });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 50000 }), 0, 'no block had a low bit set');
     });

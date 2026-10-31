@@ -98,8 +98,6 @@ import { translatesLong } from './emit/long-ops.js';
  *                                       them -- a callee, a jump's target, a table
  *                                       (`sourcesOf`)
  * @property {Map<string, number>} refused   opcode → times a refusal cut a block
- * @property {number[]} [stops]          the blocks forming went to and left to another region
- *                                       (`entered`): a worker forming it again stops there too
  */
 
 /** Exits that end a block and are not followed into another block of this region. */
@@ -590,8 +588,8 @@ export function formShared(){
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[],
- *     importThunks?: boolean, bytesOf?: (start: number, end: number) => Uint8Array,
- *     entered?: (eip: number) => boolean, mode?: { bits: 32 | 64 },
+ *     bytesOf?: (start: number, end: number) => Uint8Array,
+ *     mode?: { bits: 32 | 64 },
  *     translates?: (instruction: import('./decode/decoder.js').Instruction) => boolean,
  *     baseOf?: (reg: number) => number | null }} [options]
  *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`), of
@@ -600,9 +598,8 @@ export function formShared(){
  *     (1: a callee's callees leave; 0: only leaves are formed in); switchEntries: the most
  *     entries a switch's jump table is followed through; helpers: a
  *     call to a compiler's runtime helper is formed as what it amounts to (helpers.js), those
- *     of RUNTIME_HELPERS or of the list given; importThunks: a direct call to an import
- *     thunk is formed as the call through its slot (`thunkCall`; never in long mode);
- *     callTargets:
+ *     of RUNTIME_HELPERS or of the list given, and a direct call to an import thunk as the
+ *     call through its slot (`thunkCall`), neither in long mode; callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
  *     as a direct call's small callee is -- the call compares its target with each; a call
  *     named with none is `quiet`, its calls no longer sampled;
@@ -618,11 +615,6 @@ export function formShared(){
  *     same `translatable` (`formShared`);
  *     bytesOf: `[start, end)` of what `read` answers, copied at once -- the region's
  *     `sources` are read so where given, a byte at a time through `read` otherwise;
- *     entered: whether another region has an entry at an address -- a block of the entry's
- *     own function there is not formed again here: a jump or a fall-through to it leaves to
- *     that region, so a function's code is translated once however many of its blocks start
- *     regions. Not the blocks this region's calls return to (in the region a call is a wasm
- *     call and its return comes back into it), nor a callee formed in;
  *     mode: the decoder's (`MODE_64` for long-mode code: no address past the 4 GiB
  *     window is translatable, and no runtime helper is formed); translates: whether the
  *     emitter has a case for an instruction -- one it has none for ends its block,
@@ -638,14 +630,13 @@ export function formRegion(read, entry,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
         formDepth = 1, predictedRoom = PREDICTED_ROOM,
         ownRoom = { blocks: maxBlocks, bytes: maxBytes },
-        switchEntries = SWITCH_ENTRIES, bytesOf, entered, mode, translates, baseOf,
-        importThunks = true } = {})
+        switchEntries = SWITCH_ENTRIES, bytesOf, mode, translates, baseOf } = {})
 {
     const wide = mode?.bits === 64;
+    const importThunks = !wide;
     if (wide)
     {
         helpers = false;
-        importThunks = false;
         translates ??= translatesLong;
     }
     // Every page forming reads decides what it forms -- an import slot a call is predicted
@@ -733,18 +724,6 @@ export function formRegion(read, entry,
     const predictedStarts = new Set();
     /** Whether the block being decoded was reached through such a callee. */
     let inPredicted = false;
-    /** The blocks this region's calls return to, which it keeps whoever has them. @type {Set<number>} */
-    const returns = new Set();
-    /** The blocks left to another region (`entered`). @type {Set<number>} */
-    const stops = new Set();
-    /**
-     * Whether a block of the entry's own function is left to the region that has it.
-     * A callee formed in keeps its blocks: a small leaf is formed into its callers for
-     * the call it saves.
-     * @param {number} at @param {number} depth
-     */
-    const elsewhere = (at, depth)=>depth === 0 && at !== entry && !returns.has(at)
-        && entered?.(at) === true;
     /** @param {number} at @param {number} depth */
     const follow = (at, depth)=>{
         if (inPredicted)
@@ -872,12 +851,6 @@ export function formRegion(read, entry,
         {
             overlapping = true;
         }
-        if (elsewhere(start, depth))
-        {
-            // Another region has it: whoever jumps here leaves to that one.
-            stops.add(start);
-            continue;
-        }
         inPredicted = predictedStarts.has(start);
         // The entry's own function is decoded first (`pendingAt`): it may take its room
         // past the caps, and the callees after it stop at them.
@@ -897,10 +870,9 @@ export function formRegion(read, entry,
         let eip = start;
         for (;;)
         {
-            if (eip !== start && (blocks.has(eip) || containing(eip) || elsewhere(eip, depth)))
+            if (eip !== start && (blocks.has(eip) || containing(eip)))
             {
-                // Ran into a block already decoded, here or by another region:
-                // fall through to it.
+                // Ran into a block already decoded: fall through to it.
                 block.exit = { kind: 'fallthrough', targets: [eip], next: eip, backEdge: false };
                 follow(eip, depth);
                 break;
@@ -1021,7 +993,6 @@ export function formRegion(read, entry,
                 // between functions with int3, and following each to the next
                 // byte made a block of every byte of the padding, until the
                 // region had none left for the callees it forms in.
-                returns.add(exit.next);
                 follow(exit.next, depth);
                 const listed = exit.kind !== 'indirect' ? undefined : callTargets?.get(decoded.eip);
                 // Named with no callees, the call's samples showed none worth forming
@@ -1124,7 +1095,6 @@ export function formRegion(read, entry,
         hash: hashRegion(read, { blocks: ordered, tables }),
         sources: copiesOf(source, spans, bytesOf),
         refused,
-        ...(stops.size > 0 ? { stops: [...stops].sort((a, b)=>a - b) } : {}),
     };
 }
 

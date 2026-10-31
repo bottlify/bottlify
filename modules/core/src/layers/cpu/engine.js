@@ -47,29 +47,23 @@ export function engineContractProblem(engineModule, url){
 /**
  * Where each register lives in the memory a runtime executes over, as byte
  * offsets. Translated code addresses registers by these constants, so the
- * layout is part of every translation's identity (`id`).
- *
- * In hybrid mode the offsets are the emulator's own register file inside its
- * exported memory, read off its typed views at boot; the state block *is* the
- * emulator's, and a switch between the two executors copies nothing. In an
- * engine-alone mode the layout is the engine's own.
+ * layout is part of every translation's identity (`id`). The engine makes it
+ * (cork's `ownLayout`), for the memory it allocates.
  *
  * @typedef {Object} StateLayout
- * @property {32 | 64} bits        The register width; 32 in every mode built so far.
+ * @property {32 | 64} bits        The register width.
  * @property {number} ramBase      Wasm address of guest address 0.
  * @property {number} ramSize
  * @property {number} [hashShift]  The entry hash's slot is `(eip * 0x9e3779b1) >>> hashShift`
- *     (16 when absent, the emulator's handoff lookup).
+ *     (16, a hash of 2^16 slots, when absent).
  * @property {number} regs         8 × i32 (eax ecx edx ebx esp ebp esi edi); 16 × i64 at 64.
  * @property {number} eip
  * @property {number} previousIp
- * @property {number} eflags       The eager word (hybrid: the emulator's `flags`).
+ * @property {number} eflags       The eager word.
  * @property {number} [flagRecord] Cork's own: five i32 (kind, result, op1, op2, carry in) of
  *     the arithmetic record a region leaves instead of folding it into `eflags`; the word
- *     is whole only once `eflagsOf` has folded it. Absent (hybrid): the word is folded at exit.
- * @property {number} flagsChanged Hybrid only, written 0 at every exit; -1 when absent.
- * @property {number} x87          8 × 16 bytes.
- * @property {'f64' | 'tagged80'} x87Format  The engine's own f64, or the emulator's tagged form.
+ *     is whole only once `eflagsOf` has folded it. Absent: the word is folded at exit.
+ * @property {number} x87          8 × 16 bytes: each register's value as an f64.
  * @property {number} x87Top       u8.
  * @property {number} x87Empty     u8 bitmask, bit i set = register i empty.
  * @property {number} x87Control   u16.
@@ -77,12 +71,12 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [x87Exact]   Cork's own, u8: the physical registers a quadword `fild`
  *     loaded and nothing has written since, each register's quadword in the eight bytes past
  *     its double (`x87 + 16 i + 8`), kept for a quadword `fistp` whichever executor runs it;
- *     absent (hybrid), no executor keeps one past its own run.
+ *     absent, no executor keeps one past its own run.
  * @property {number} xmm          8 × 16 bytes.
  * @property {number} mxcsr
  * @property {number} fsBase       The thread block's linear address (32-bit Windows).
  * @property {number} gsBase       The same for 64-bit Windows; -1 when absent.
- * @property {number} counter      u32 retired-instruction word (hybrid: the emulator's).
+ * @property {number} counter      u32 retired-instruction word.
  * @property {number} [callProfile] Cork's own: where translated code notes its indirect calls
  *     while the runtime asks -- a flag, a count, and sixteen pairs of the call's address and
  *     its target, the last calls (`callTargets`); absent, no profile.
@@ -94,9 +88,6 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [pageFlags]  Cork's own: where the page flags lie when not in `tables` --
  *     another executor of a process reads and writes the first's (`executorLayout`).
  * @property {number} [codeRanges] Cork's own: the same for the pages' code granules.
- * @property {number} codePages    Wasm address of the other executor's byte-per-page
- *                                 "has compiled code" table (hybrid), or -1: a store into
- *                                 such a page leaves `stale` so its cache can be dirtied.
  * @property {number} [processors] Cork's own: how many processors `cpuid` says the machine has
  *     -- the process's executors -- where more than one; absent, one.
  * @property {number} [processor]  Cork's own: which of them this layout's executor is, the
@@ -113,7 +104,7 @@ export function engineContractProblem(engineModule, url){
  * What the layer hands an engine factory.
  *
  * @typedef {Object} EngineEnv
- * @property {WebAssembly.Memory} memory  The layer's memory (the emulator's in hybrid).
+ * @property {WebAssembly.Memory} memory  The layer's memory.
  * @property {StateLayout} layout
  * @property {StateLayout} [sharedLayout]  Cork's own: the process's shared layout
  *     (`sharedLayout`), translations are made for where it has several executors -- the same
@@ -143,21 +134,7 @@ export function engineContractProblem(engineModule, url){
  *     The trap port write. Answers 1 when the handler moved EIP, so the region goes on
  *     where it points through the entry hash, and 2 (`TRAP_END_TURN`) when the turn is to
  *     end there and the region leaves for the host.
- * @property {() => number} getEflags   The eager flags word, for a region that reads
- *     flags before writing them.
- * @property {(index: number) => number} x87Read  A physical x87 register the state
- *     block holds in a form the engine cannot read inline, as an f64.
- * @property {() => bigint} rdtsc      The time-stamp counter `rdtsc` reads: the
- *     emulator's own under hybrid, the engine's clock under cork.
- * @property {(page: number, on: boolean) => void} [handoffPage]
- *     Hybrid: flags a page the engine holds code for, so the other executor's slice
- *     returns when the guest arrives there (`handoffPage` on the emulator's host).
- * @property {(address: number, length: number) => void} [dirtyCode]
- *     Hybrid: a store translated code made into a page the other executor compiled;
- *     the host dirties that cache.
- * @property {(physical: number) => void} [handoffHash]
- *     Hybrid: where the engine's entry hash lies in guest memory, so the other executor
- *     returns only at an address the hash holds rather than anywhere in a flagged page.
+ * @property {() => bigint} rdtsc      The time-stamp counter `rdtsc` reads: the host's clock.
  */
 
 /**
@@ -170,7 +147,6 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [hashSlots]  The entry hash's slots, a power of two: a block start
  *     past three quarters of them is reached from translated code only through the host.
  *     Default 2^20 (`Tables.HASH_SLOTS`).
- * @property {number} [maxRegionBytes]   Default 8192.
  * @property {boolean} [precise]         Nothing relaxed for speed: the x87 exception flags,
  *     signalling NaNs, underflow and C1 kept as the processor keeps them, and the flags an
  *     instruction leaves undefined left as the instruction model leaves them rather than as the
@@ -213,9 +189,8 @@ export function engineContractProblem(engineModule, url){
  *     to the other executor (a region exits before one), so a defect can be localised by
  *     class from a run; a run with any class left out keeps no translation store. Default none.
  * @property {number} [trapPort]         The I/O port that is the host's call channel: a
- *     write of eax to it by translated code leaves with a `trap` exit past the instruction,
- *     and the hybrid host runs the handler the port write would have reached. Without it,
- *     the instruction is the other executor's.
+ *     write of eax to it by translated code calls the host's `trap` import, which runs
+ *     the handler. Without it, the instruction is left to the interpreter.
  * @property {'frame' | 'slice'} [feed]  When the sampler's hot buckets become candidates:
  *     once a frame (the default, paced by presentation) or after every slice, for a run
  *     that has no frames -- a test in a process without a presenter.
@@ -258,15 +233,11 @@ export function engineContractProblem(engineModule, url){
  *     process's cork hosts, between them, before the wasm tier takes over: their instructions,
  *     a jump target new to a host counting as 128. Default 8192; 0 runs the wasm tier from the
  *     first instruction.
- * @property {number} [newTargetWork]  What a jump target new to a host counts as against
- *     `wasmInterpreterAfter`. Default 128.
  * @property {number} [volatileAfter]  Writes that drop one page's code, within
  *     `volatileWindowMs` of each other, before the page is left to the interpreter. Default 8.
  * @property {number} [volatileWindowMs]  The window those writes are counted in. Default 100.
  * @property {number} [volatileHoldMs]  How long a page is left to the interpreter before it is
  *     translated again, twice as long each time it is left again. Default 2000.
- * @property {boolean} [undoLog]  A differential build: every store's old bytes recorded, so a
- *     slice can be replayed. Default false.
  * @property {boolean} [countTransfers]  A diagnostic: transfers between regions through the hash
  *     counted. Default false.
  * @property {boolean} [checkStale]  A diagnostic: regions whose bytes no longer form as they
@@ -278,52 +249,24 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [relinkRegions]  Regions in each gathered module. Default 512.
  * @property {number} [mergeAfter]  Transfers between two modules' regions before the two are
  *     gathered into one on the translation worker (0: never). Default 2^16.
- * @property {number} [mergeSample]  Translated instructions between two readings of the
- *     modules' crossings. Default 2^20.
- * @property {number} [mergeEvery]  The fewest translated instructions between two merges.
- *     Default 2^23.
- * @property {number} [mergePerRegion]  Of those, per region a merge builds again. Default 2^19.
- * @property {number} [mergesARegion]  Merges one region may take part in. Default 2.
  * @property {number} [relinkCold]  Regions in each module a relink builds of those no entry
  *     or crossing reached lately: a module is held or let go whole. Default 128.
- * @property {number} [gatherAfter]  With `crossTailCalls` false and `dispatch`, crossings out
- *     of placed modules past which the hottest regions are built into one module (0: never).
- *     Default 2^18.
- * @property {number} [gatherRegions]  The most regions such a module takes. Default 2048.
  * @property {boolean} [dispatch]  Each module placed in a range of the table, a transfer inside
  *     it a direct tail call. Default false.
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
- * @property {boolean} [regionStops]  A region stops at a block another region has an entry for
- *     and leaves to it there; off by default (it cuts hot code: `SETTINGS.md`).
- * @property {number} [leafBlocks]  Its blocks at most. Default 16.
  * @property {number} [leafBytes]  Its bytes at most. Default 512.
  * @property {number} [formDepth]  How many levels of callees formed in may keep direct calls
  *     of their own, those callees formed in as well when small; 0 forms leaves alone. Default 1.
- * @property {number} [switchEntries]  Entries of a switch's jump table followed when forming.
- *     Default 1024.
- * @property {boolean} [runtimeHelpers]  A call to a compiler's runtime helper (MSVC's `_ftol2`)
- *     formed as what it amounts to. Default true.
- * @property {boolean} [importThunks]  A direct call to an import thunk (`jmp [slot]` alone)
- *     formed as the call through its slot. Default true.
  * @property {boolean} [callTargets]  Indirect calls sampled and their few small callees formed
  *     in. Default true.
  * @property {number} [predictAfter]  Samples of one call before its callees are looked at.
  *     Default 48.
- * @property {number} [predictShare]  A callee formed in takes one in this many of the call's
- *     samples. Default 8.
- * @property {number} [predictCallees]  Callees one call compares its target with. Default 4.
- * @property {number} [reforms]  Times a region is formed again for its calls. Default 3.
- * @property {number} [callWindow]  The window a call's samples are counted in. Default 64.
+ * @property {number} [callWindow]  The window a call's samples are counted in. Default 1024.
  * @property {boolean} [callReturn]  A call out of a region a wasm call, the region going on after
  *     the `ret`. Default true.
  * @property {boolean} [emptyCalls]  A call to a function that does nothing -- a `ret` or
  *     `ret imm16`, after at most three direct jumps -- returns without entering a region.
  *     Default true.
- * @property {boolean} [emptySites]  With `emptyCalls`, a call out of a region reads its target's
- *     slot first and returns from such a function in place, without calling the transfer.
- *     Default false.
- * @property {boolean} [flagsAcrossCalls]  With `callReturn`, the flag record carried into a
- *     guest call made as a wasm call and back with its `ret`. Default true.
  * @property {boolean} [linkedCalls]  A direct call out of a region reads its target's first slot
  *     and, where the entry there is the one the transfer would take at its first look, calls
  *     its function itself, without the transfer's hashing and probe. Default true.
@@ -344,12 +287,8 @@ export function engineContractProblem(engineModule, url){
  * @property {boolean} [structure]  A region's loops as wasm loops. Default true.
  * @property {boolean} [looseStacks]  A store through esp alone tests no page while no
  *     translated code lies on a stack. Default true.
- * @property {number} [hashLoad]  The share of the entry hash's slots live past which a block
- *     start stays in the host's map alone. Default 0.75.
  * @property {number} [translators]  Translation workers the runtime opens itself (0: a host's
  *     pool lends them). Default 1.
- * @property {number} [arenaBytes]  Bytes of the shared translation arena (0: none). Default
- *     48 MiB.
  * @property {SharedArrayBuffer} [arena]  The arena itself, made by the host for every executor of
  *     a process (cork's `createArena`): what one executor's translators emitted, the others take.
  * @property {number} [cacheBytes]  Wasm bytes of the modules running regions are in, past
@@ -357,39 +296,16 @@ export function engineContractProblem(engineModule, url){
  *     when asked for (0: no ceiling). Default 256 MiB; the cpu layer gives each executor's
  *     runtime its part of what the translation zone (`TRANSLATION_ZONE_BYTES`) leaves after
  *     the engine's tables (`cacheShare`). Its diagnostics say what it holds (`heldBytes`).
- * @property {number} [evictHold]  Translated instructions a module brought back after an
- *     eviction is kept whatever its mark, twice as many each time again. Default 2^28.
- * @property {number} [loadingBatch]  While the translation worker loads, the largest batch
- *     emitted on the engine thread -- none where `holdMs` bounds the work there: a batch waits
- *     for the worker. Default 16.
- * @property {number} [loadingShare]  And the share of the time since the worker was made
- *     emitting there may take. Default 0.25.
  * @property {number} [holdMs]  Where a translation worker is wanted, the engine thread's
  *     time the translator's work may take at a stretch: a batch is formed over several calls,
  *     the store's hits compiled off the thread, their compiles started and they and a worker's
  *     answers published a few at a call (0: a batch formed and published whole in one call).
  *     Default 4.
- * @property {number} [holdShare]  And the share of the engine thread's time that work may
- *     take over a while. Default 0.5.
- * @property {number} [exitTargets]  Targets of untranslated exits kept. Default 4096.
- * @property {number} [missesKept]  (Address, top) miss counts kept. Default 4096.
- * @property {number} [callSitesKept]  Indirect call sites tried with predicted callees kept.
- *     Default 4096.
- * @property {number} [yieldChunk]  Instructions translated code runs at a time while a slice may
- *     end early. Default 10000.
- * @property {number} [interpretChunk]  Instructions the interpreter runs at a time. Default 8192.
+ * @property {number} [yieldChunk]  `createMachine` alone (cork's machine for its tests): the
+ *     instructions translated code runs at a time. Default 2^24.
+ * @property {number} [interpretChunk]  `createMachine` alone: the instructions its interpreter
+ *     runs at a time. Default 2^16.
  * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
- * @property {number} [tscDriftMs]  How far `rdtsc` runs ahead of the guest's clock. Default 16.
- * @property {number} [spinMs]  With several executors, how long a side of their channel, and the
- *     process on their bell, looks at it before it sleeps. Default 1 while the slices out, the
- *     process's own executor and the graphics worker leave one of the host's processors free,
- *     0.05 otherwise.
- * @property {number} [executorIdleMs]  How long an executor waits in place for its next slice
- *     before its event loop does. Default 2.
- * @property {number} [executorYieldMs]  The longest an executor goes without a turn of its
- *     event loop. Default 4.
- * @property {number} [executorHoldMs]  How long an executor keeps a thread past its slice while
- *     other ready threads wait for one: its turn. Default 1.
  */
 
 /**
@@ -628,7 +544,6 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [crossingsAll]  Crossings out of placed modules since the start,
  *     modules gone included (`crossings` counts the running ones only).
  * @property {number} [gathers]  Gatherings of the hottest regions into one module.
- * @property {number} handoffMisses    Hybrid: slices the emulator ran through translated code.
  */
 
 /**
@@ -687,8 +602,7 @@ export function engineContractProblem(engineModule, url){
  *     share leaves out; false when the runtime has no function table to reach it through.
  * @property {(what: string, since: number, floorMs?: number) => void} [noteStall]
  *     A hold of the engine thread since that `performance.now`, kept when over the floor.
- * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
- *     (the pages the emulator's handoff bit is set for).
+ * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page.
  * @property {(address: number, length: number) => number[]} [takeWrites]  The range's pages
  *     written since they were armed (or never armed, or on a stack whose stores go untested),
  *     each armed from now: a store finds an armed page by the flag its page check reads

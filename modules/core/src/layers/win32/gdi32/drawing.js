@@ -733,7 +733,7 @@ export function createDrawingFunctions(
         {
             host.windowContextCurrent?.(handle >>> 0);
         }
-        // The emulator grows its memory in place, which detaches every view of
+        // Guest memory can grow in place, which detaches every view of
         // it taken before the growth; a view on a detached buffer is empty. A
         // bound surface is one such view, held for the bitmap's life, so after
         // a growth it would read zeroes and swallow every write. Its bytes

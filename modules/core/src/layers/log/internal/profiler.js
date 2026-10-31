@@ -88,48 +88,7 @@ export const NOTES_PER_FRAME = 8;
  */
 export const FRAME_DELTAS = /* @__PURE__ */ Object.freeze([
     { column: 'retired', layer: 'cpu', counter: 'instructions' },
-    { column: 'entries', layer: 'cpu', counter: 'jit.entries' },
-    { column: 'interpretedSteps', layer: 'cpu', counter: 'jit.interpretedSteps' },
-    // Beside it, the steps that did run compiled: a frame interpreting twice
-    // as much is a different story depending on whether it retired twice as
-    // much, and the interpreted count alone cannot tell the two apart.
-    { column: 'compiledSteps', layer: 'cpu', counter: 'jit.compiledSteps' },
-    // Steps and entries together: their ratio is how long a stretch of
-    // interpreted code ran before the compiler took over again, and a frame
-    // full of short stretches is a different defect from one long one.
-    { column: 'interpretedDispatches', layer: 'cpu', counter: 'jit.interpretedDispatches' },
-    // Why the interpreter ran, per frame rather than per run. The four reasons
-    // charge one dispatch each and so sum to the dispatches above, and the
-    // steps beside each separate a reason taken often for two instructions
-    // from one taken rarely for thousands. Sampling these on a timer beside
-    // the frame index was the only way to see them, and a sample is not a
-    // frame: a frame that stalls has to say its own reason.
-    { column: 'interpNoCode', layer: 'cpu', counter: 'jit.interpNoCode' },
-    { column: 'interpNoEntry', layer: 'cpu', counter: 'jit.interpNoEntry' },
-    { column: 'interpNearPageEnd', layer: 'cpu', counter: 'jit.interpNearPageEnd' },
-    { column: 'interpDifferentState', layer: 'cpu', counter: 'jit.interpDifferentState' },
-    { column: 'interpNoCodeSteps', layer: 'cpu', counter: 'jit.interpNoCodeSteps' },
-    { column: 'interpNoEntrySteps', layer: 'cpu', counter: 'jit.interpNoEntrySteps' },
-    { column: 'interpNearPageEndSteps', layer: 'cpu', counter: 'jit.interpNearPageEndSteps' },
-    { column: 'interpDifferentStateSteps', layer: 'cpu',
-        counter: 'jit.interpDifferentStateSteps' },
-    // What a compile would have saved: a page on its way to a module against
-    // one that had the heat and never got one. And the look that needed no
-    // dispatch at all, the page walk having turned up the entry it missed.
-    { column: 'interpBelowThreshold', layer: 'cpu', counter: 'jit.interpBelowThreshold' },
-    { column: 'interpCompileDeferred', layer: 'cpu', counter: 'jit.interpCompileDeferred' },
-    { column: 'interpEntryAfterPageWalk', layer: 'cpu', counter: 'jit.interpEntryAfterPageWalk' },
-    { column: 'f80Conversions', layer: 'cpu', counter: 'jit.f80Conversions' },
-    { column: 'x87TagLost', layer: 'cpu', counter: 'jit.x87TagLost' },
-    { column: 'slowWrites', layer: 'cpu', counter: 'jit.slowWrites' },
-    { column: 'codePageWritesKept', layer: 'cpu', counter: 'jit.codePageWritesKept' },
-    // What a write into a page holding code cost: the module thrown away, and
-    // the hotness of a page that had not compiled yet. A frame that fell back
-    // to the interpreter for code it had already compiled is this, and a frame
-    // reading zero here fell back for some other reason.
-    { column: 'modulesLostToWrites', layer: 'cpu', counter: 'jit.modulesLostToWrites' },
-    { column: 'hotnessLostToWrites', layer: 'cpu', counter: 'jit.hotnessLostToWrites' },
-    { column: 'hostWrittenBytes', layer: 'cpu', counter: 'jit.hostWrittenBytes' },
+    { column: 'hostWrittenBytes', layer: 'cpu', counter: 'hostWrittenBytes' },
     { column: 'trapCrossings', layer: 'cpu', counter: 'trapCrossings' },
 ]);
 
@@ -194,12 +153,12 @@ export const PHASE_ROWS = 512;
  * @property {{ ms: number, instructions: number }} longestGuest
  *     The longest guest slice in the frame, and how much it retired.
  * @property {number} waits      Turns the machine spent waiting for a fetch.
- * @property {number} compiles   Modules the emulator compiled during the frame.
+ * @property {number} compiles   Modules the translator instantiated during the frame.
  * @property {number} idleMs
  *     Of the frame, how long the machine had nothing of the program's to run
  *     and was parked on us -- a host call that had not answered, a fetch, an
  *     empty message queue. A frame long for this reason is not a frame the
- *     program or the emulator was slow in, and nothing else told them apart.
+ *     program or the engine was slow in, and nothing else told them apart.
  * @property {Record<string, number>} notes
  *     Whatever else the frame's owner counted into it -- instructions
  *     retired, instructions interpreted -- summed by name.
@@ -513,7 +472,7 @@ export function createProfiler(options){
 
         /**
          * Something the frame paid for that is not a phase of its own: a
-         * module the emulator compiled inside a guest slice.
+         * module the translator instantiated inside a guest slice.
          *
          * @param {number} [count]
          */

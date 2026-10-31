@@ -9,7 +9,7 @@
  *
  * Pure functions over a byte array — nothing here touches guest memory. Mapping
  * an image is a separate step (image.js) so the parsing can be tested against a
- * real executable without an emulator.
+ * real executable without an engine.
  */
 
 const DOS_MAGIC = 0x5a4d; // "MZ"

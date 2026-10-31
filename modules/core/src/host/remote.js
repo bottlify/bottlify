@@ -112,7 +112,7 @@ function openKeeper(given){
  *     the same worker and no canvas at all.
  * @property {any[]} [transfer]
  *     Buffers in `options` to hand over rather than copy: the image, the
- *     emulator's binary, the decoder's.
+ *     decoder's binary.
  * @property {any} [keeper]
  *     The log keeper's port, when a test supplies one. Absent, a worker is
  *     created the way the engine's is.
@@ -492,9 +492,10 @@ export async function createRemoteApp(wiring){
         presented: ()=>request('presented'),
 
         /**
-         * The emulator's account of where the guest ran, by address, weighted by
-         * the instructions retired there. The same surface the local controller
-         * offers, because the run worth profiling is the one a page drives.
+         * An engine's account of where the guest ran, by address, weighted by
+         * the instructions retired there, where it keeps one. The same surface
+         * the local controller offers, because the run worth profiling is the
+         * one a page drives.
          *
          * Costs a call per compiled block while it is kept, so it is started for
          * a measurement and stopped after.

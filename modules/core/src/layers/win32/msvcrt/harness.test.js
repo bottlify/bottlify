@@ -34,7 +34,7 @@ export function fakeMemory(base = 0x10000, size = 1 << 20){
 
         /**
          * Bytes the handlers asked memory for, reads only. The real layer
-         * counts what its scan hands the emulator; counting what the fake is
+         * counts what its scan reads; counting what the fake is
          * asked is the same measurement from this side of the seam.
          */
         asked: 0,

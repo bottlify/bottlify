@@ -28,7 +28,6 @@ test('a 64-bit program starts a 32-bit child under WOW64 and a 64-bit one beside
         const app = await createApp({
             executable: new Uint8Array(parent),
             imagePath: 'C:\\App\\wow64.exe',
-            engine: 'cork',
             storage: { load: async()=>({ files: [
                 { path: 'C:\\App\\wow64_child.exe', bytes: new Uint8Array(child) },
                 { path: 'C:\\App\\hello64.exe', bytes: new Uint8Array(hello) },
@@ -50,8 +49,7 @@ test('a 64-bit program starts a 32-bit child under WOW64 and a 64-bit one beside
     });
 
 test('a 32-bit program alone is on a 32-bit machine: no WOW64', { timeout: 60000 }, async t=>{
-    const app = await createApp({ executable: new Uint8Array(await fixture('wow64_child')),
-        engine: 'cork' });
+    const app = await createApp({ executable: new Uint8Array(await fixture('wow64_child')) });
     t.after(()=>app.dispose());
     /** @type {string[]} */
     const output = [];

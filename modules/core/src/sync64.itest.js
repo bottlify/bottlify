@@ -133,7 +133,7 @@ test('a 64-bit program initialises once and sleeps on condition variables, SRW a
                 ];
             },
         });
-        const app = await createApp({ executable: program, engine: 'cork' });
+        const app = await createApp({ executable: program });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 50000 }), 0, 'every check held');
     });

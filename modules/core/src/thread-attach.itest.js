@@ -241,7 +241,7 @@ async function run(executable, cores){
     const app = await createApp({
         executable,
         imagePath: 'C:\\App\\attach.exe',
-        cpu: { cores, eager: true },
+        cpu: { cores },
         bundle: {
             prefix: 'App',
             fetch: async(/** @type {number} */ offset, /** @type {number} */ length)=>{

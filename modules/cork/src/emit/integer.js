@@ -247,13 +247,6 @@ function countApart(e){
  * leaves as any call does: every call waiting below it comes back through the
  * entry hash, and the host's stack holds no more than that many calls' frames.
  *
- * With `emptySites`, outside x87 code, the target's first slot in the entry hash
- * is read first: a function that does nothing there (`emptyCode`, the slot's
- * byte 11) is returned from in place -- the address just pushed popped, with
- * the bytes its `ret` pops, and its instructions charged -- with nothing
- * written back and no transfer called. A target held further along the probe
- * goes through the transfer, which returns from it as well (`finishModule`).
- *
  * Every call reads the first slot of the entry hash its target's address takes
  * -- a direct call's known here (`slotOf`), an indirect one's hashed as the
  * transfer hashes it: where that slot holds the target for the machine's top
@@ -293,25 +286,6 @@ function callAndReturn(e, next, target, mechanism){
         e.exitDynamic(Exit.STALE);
         e.close();
     }
-    const site = e.context.emptySites === true && !e.x87.active;
-    if (site)
-    {
-        const hash = layout.tables + Tables.HASH;
-        b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul)
-            .i32const(layout.hashShift ?? 16).op(I32.shrU).i32const(Tables.HASH_SLOT).op(I32.mul);
-        intoTables(context, b).localTee(Local.t1).load('i32_8u', { offset: hash + 11 });
-        b.i32const(0);
-        b.localGet(Local.t1).load('i32', { offset: hash }).localGet(Local.eip).op(I32.eq);
-        b.select().localTee(Local.t1);
-        e.openIf('empty');
-        e.countMechanism(Mechanism.EMPTY_SITE);
-        // The low six bits are the dwords popped plus one, the top two the jumps before the `ret`.
-        b.localGet(registerLocal(e, 4)).localGet(Local.t1).i32const(63).op(I32.and).i32const(2)
-            .op(I32.shl).op(I32.add).localSet(registerLocal(e, 4));
-        b.localGet(Local.budget).localGet(Local.t1).i32const(6).op(I32.shrU).i32const(1)
-            .op(I32.add).op(I32.sub).localSet(Local.budget);
-        b.else();
-    }
     // Two branches to one way out, not one condition: V8 makes a flag of each
     // comparison it ors.
     e.open('callable', EMPTY);
@@ -343,7 +317,7 @@ function callAndReturn(e, next, target, mechanism){
     // left out (`fillDeferred`).
     /** @type {import('./region.js').CallSite | undefined} */
     const call = e.b.written === null ? undefined
-        : { block: e.blockIndex, written: new Set(e.b.written), empty: site };
+        : { block: e.blockIndex, written: new Set(e.b.written) };
     if (call !== undefined)
     {
         e.callSites.set(e.blockIndex, call);
@@ -382,20 +356,15 @@ function callAndReturn(e, next, target, mechanism){
     e.close();
     atState(context, b).load('i32', { offset: layout.regs + CallStack.BUDGET })
         .localSet(Local.budget);
-    e.loadState(false, true, call);
+    e.loadState(false, call);
     if (call?.after !== undefined)
     {
-        // What follows the return, the way the call does nothing too, reads
-        // what the return reloads (`planPaths`).
+        // What follows the return reads what the return reloads (`planPaths`).
         e.openSegment(e.blockIndex, call);
     }
     if (e.x87.active)
     {
         x87AfterCall(e, next, top);
-    }
-    if (site)
-    {
-        e.close();
     }
     b.i32const(next).localSet(Local.eip);
     e.returned = true;
@@ -699,11 +668,11 @@ export function emitInstruction(e, instruction, flagsLive){
     {
         case 'nop': case 'fwait': case 'fnop': case 'prefetch': case 'prefetchw':
         case 'prefetchnta': case 'prefetcht0': case 'prefetcht1': case 'prefetcht2':
-        case 'lfence': case 'mfence': case 'sfence': case 'pause':
+        case 'lfence': case 'mfence': case 'sfence': case 'pause': case 'clflush':
             return true;
-        // The emulator's decoder consumes BOUND and neither checks the bounds
-        // nor raises #BR, so translated code does the same. A guest that runs
-        // data (a return into the entry vector) reaches it and must go on.
+        // BOUND neither checks the bounds nor raises #BR, here as in the
+        // interpreter (`ir.js`): a guest that runs data (a return into the
+        // entry vector) reaches it and must go on.
         case 'bound':
             return true;
         case 'hlt':
@@ -737,7 +706,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 // the interpreter answers, with the executor's own layout.
                 return false;
             }
-            // The leaves the pinned emulator answers, as constants -- with the
+            // The leaves `cpuid.js` lists, as constants -- with the
             // processors of the executor the code is translated for, whose
             // layout it is -- and a leaf with no entry answers four zeros. The
             // leaf in eax and the subleaf in ecx are saved before the four
@@ -796,8 +765,7 @@ export function emitInstruction(e, instruction, flagsLive){
         }
         case 'rdtsc':
             // The time-stamp counter, read through the host's import (the
-            // emulator's own under hybrid, cork's clock under cork): the low
-            // word to eax, the high word to edx.
+            // host's clock): the low word to eax, the high word to edx.
             e.countMechanism(Mechanism.RDTSC);
             b.call(e.context.rdtsc).localSet(Local.t64);
             b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
@@ -1632,11 +1600,10 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'daa': case 'das': case 'aaa': case 'aas': case 'aam': case 'aad':
             return decimal(e, instruction);
         case 'int3': case 'int': case 'into':
-            // Left to the other executor, before the instruction: a trap
-            // taken past it would be skipped by a host that re-executes the
-            // instruction to raise it, and the software interrupt goes
-            // through the emulator's own vector table. A trap exit of this
-            // engine's own returns with the engine that delivers it.
+            // Left to the interpreter, before the instruction: a trap taken
+            // past it would be skipped by a host that re-executes the
+            // instruction to raise it, and the interpreter raises the
+            // software interrupt as the fault the host delivers.
             e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
             e.dead = true;
             return true;
@@ -4926,12 +4893,11 @@ function stringInstruction(e, instruction){
         {
             // Element by element.
         }
-        else if ((op === 'movs' || op === 'stos') && e.context.undo === undefined
-            && e.layout.codePages < 0 && !fsSource)
+        else if ((op === 'movs' || op === 'stos') && e.context.undo === undefined && !fsSource)
         {
             bulkString(e, instruction);
         }
-        if (!long && compare && e.layout.codePages < 0 && !fsSource)
+        if (!long && compare && !fsSource)
         {
             bulkScan(e, instruction);
         }

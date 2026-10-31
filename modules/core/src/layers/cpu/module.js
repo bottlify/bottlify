@@ -10,13 +10,10 @@ import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
 import { engineContractProblem } from './engine.js';
-import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
-import { THREAD_DESCRIPTOR } from './internal/boot-rom.js';
 import { describeFault, hostFault } from './internal/faults.js';
 import {
-    captureContext, clearGeneralRegisters, freshThreadFpu, restoreContext, setContextEflags,
-    setContextLong, setThreadBase,
+    clearGeneralRegisters, freshThreadFpu, setContextEflags, setContextLong, setThreadBase,
 } from './internal/context.js';
 import { createSampleTable, creditSample, takeDue, topSamples } from './internal/samples.js';
 import { fileNameOf } from './internal/translation-store.js';
@@ -24,9 +21,9 @@ import { fileNameOf } from './internal/translation-store.js';
 /**
  * Guest RAM when nobody says otherwise. A gigabyte, because a program of this
  * era that loads a level allocates several hundred megabytes and a machine
- * with less turns that into an out-of-memory failure it reports as its own;
- * a power of two, because the emulator requires it. Reserved rather than
- * committed: the host pays only for what the guest touches.
+ * with less turns that into an out-of-memory failure it reports as its own.
+ * Reserved rather than committed: the host pays only for what the guest
+ * touches.
  */
 export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
 
@@ -38,15 +35,6 @@ export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
  * modules go to stay under that.
  */
 export const TRANSLATION_ZONE_BYTES = 256 * 1024 * 1024;
-
-/**
- * The execution engines a launch may select (`engine.js` for the contract):
- * `cork`, the translator, alone.
- */
-export const ENGINES = Object.freeze(['cork']);
-
-/** The engine a launch that names none runs: the translator. */
-export const DEFAULT_ENGINE = 'cork';
 
 /** The most executors a process has: an x86 affinity mask has 32 bits, a processor each. */
 export const MAX_EXECUTORS = 32;
@@ -65,12 +53,12 @@ export const memoryShareable = sharedMemory=>sharedMemory !== false
 
 /**
  * The processors a process is told the machine has, under `config`: one for
- * each executor under cork, which alone runs more than one, and one where the
- * host cannot share the program's memory with another (`executorsRefused`).
+ * each executor, and one where the host cannot share the program's memory with
+ * another (`executorsRefused`).
  * The cpu layer answers this (`processors`), and whoever describes the machine
  * before a process exists -- the run's registry -- asks it here.
  *
- * @param {{ engine?: string, executors?: number, sharedMemory?: boolean } | undefined} config
+ * @param {{ executors?: number, sharedMemory?: boolean } | undefined} config
  * @returns {number}
  */
 export function processorsFor(config){
@@ -94,6 +82,15 @@ export const DEFAULT_THUNK_CAPACITY = 16384 * 16;
  * byte, the count.
  */
 export const EXECUTORS_OPENED_KEY = 'cpu/executors-opened';
+
+/**
+ * The guest instructions slices that ran their whole budget must have retired
+ * ending in one 64-byte bucket before its address is handed to the translator
+ * as a start (`creditSample`, `takeDue`). Not cork's `hotThreshold`, which
+ * counts the interpreter's visits to a jump target: this counts instructions,
+ * so one slice of a quantum is already past it.
+ */
+const HOT_SAMPLE_INSTRUCTIONS = 2000;
 
 /**
  * cpu — the guest CPU and the channel the guest calls us through.
@@ -168,32 +165,13 @@ const REGISTER_INDEX = Object.freeze({
 
 /**
  * What this layer publishes as numbers, once a frame: the counters the
- * diagnostics table carries at the top level, and the emulator's own
- * counters under `jit.`. Read from the emulator's exports when sampled --
- * nobody keeps them as they change, and reading thirty exports once a frame
- * is nothing -- rather than on every request for them.
+ * diagnostics table carries at the top level.
  */
-const JIT_FIELDS = [
-    'disabled', 'maxPages', 'loopSafety', 'cache', 'tableFree', 'compiledSteps',
-    'interpretedSteps', 'entries', 'interpretedDispatches', 'f80Conversions', 'codePageWrites',
-    'modulesLostToWrites', 'hotnessLostToWrites', 'chaining', 'chained', 'chainMissed',
-    'chainRefused', 'flagsDead', 'slowWrites', 'codePageWritesKept', 'x87TagLost',
-    // Why the interpreter ran, per frame: the four reasons partition the
-    // dispatches, and the steps beside them say which reason the frame actually
-    // lost its time to -- a reason taken often for two instructions each and a
-    // reason taken rarely for thousands read the same until these are separate.
-    'interpNoCode', 'interpNoEntry', 'interpNearPageEnd', 'interpDifferentState',
-    'interpNoCodeSteps', 'interpNoEntrySteps', 'interpNearPageEndSteps',
-    'interpDifferentStateSteps', 'interpEntryAfterPageWalk',
-    'interpBelowThreshold', 'interpCompileDeferred',
-    'finalised', 'discarded', 'hostWrites', 'hostWrittenBytes',
-];
-/** Where this layer's own counters sit, before the emulator's. */
-const JIT_AT = 7;
 export const CPU_COUNTERS = [
-    'running', 'instructions', 'protectedMode', 'traps', 'trapCapacity', 'eip',
-    'trapCrossings',
-    ...JIT_FIELDS.map(field=>`jit.${field}`),
+    'running', 'instructions', 'traps', 'trapCapacity', 'eip', 'trapCrossings',
+    // What the host wrote into guest memory, all told: which of our own calls
+    // wrote most is the memory layer's (`frameWriter`).
+    'hostWrittenBytes',
     // Where the interpreter ran, rather than only how much of it there was.
     // `interpretedSteps` is a count with no address attached, and a frame that
     // lost twenty milliseconds to the interpreter cannot be acted on until the
@@ -203,7 +181,7 @@ export const CPU_COUNTERS = [
     // table, the way it already does for the scheduler's heaviest slice.
     'frameInterpreted', 'frameInterpretedAt',
 ];
-const FRAME_INTERPRETED = JIT_AT + JIT_FIELDS.length;
+const FRAME_INTERPRETED = CPU_COUNTERS.indexOf('frameInterpreted');
 // The translator's own figures, when one is attached: regions live, regions
 // discarded by a write, and the share of retired instructions it ran.
 const CORK_AT = FRAME_INTERPRETED + 2;
@@ -224,10 +202,10 @@ export function createCpuModule(){
      * The module contract puts both on the module rather than on the api, so
      * something outside a `create()` call has to be able to see in. That is
      * the only reason this exists, and it holds a reference rather than the
-     * state itself -- the emulator, the stub table and the fault record
+     * state itself -- the machine, the stub table and the fault record
      * belong to the closure `create()` returns, so a second instance in one
      * realm cannot take the first one's machine, and its own `boot()` does
-     * not see the first one's emulator when it asks whether it has already
+     * not see the first one's machine when it asks whether it has already
      * booted.
      *
      * @type {any}
@@ -247,16 +225,6 @@ export function createCpuModule(){
         async create(config, moduleHost){
             const log = moduleHost?.requireApi('log');
 
-            // Refused here rather than at boot: a configuration naming an engine
-            // that does not exist is a configuration error, and the assembler
-            // reports those before any module has a machine to lose.
-            /** @type {string} */
-            const engine = config?.engine ?? DEFAULT_ENGINE;
-            if (!ENGINES.includes(engine))
-            {
-                throw new Error(`cpu: unknown engine "${engine}" (${ENGINES.join(', ')})`);
-            }
-
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -264,21 +232,21 @@ export function createCpuModule(){
              * module-level bindings, because `create()` may run more than once in
              * one realm -- a process replacement does, and the plan for more than
              * one machine in a worker needs two at once -- so each run keeps its
-             * own emulator, stub table and fault record. `host`/`thunks` double
+             * own machine, stub table and fault record. `host`/`thunks` double
              * as the "has this instance booted" flag: `boot()`'s "already
-             * booted" refusal and every method that needs a running emulator
+             * booted" refusal and every method that needs a running machine
              * read them, and only them, never a different instance's.
              *
              * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
              *          worstInterpreted: number, worstInterpretedAt: number,
              *          interpretedBefore: number, lastFault: any, disposed: boolean,
-             *          samples: ReturnType<typeof createSampleTable>, engine: string,
+             *          samples: ReturnType<typeof createSampleTable>,
              *          cork: import('./engine.js').Runtime | null,
              *          corkFrame: { instructions: number, retired: number, translateMs: number,
              *              leaves: number },
              *          faultHandler: ((fault: any) => boolean) | null,
              *          guestClock: (() => number) | null,
-             *          yieldCheck: (() => boolean) | null, stacks: [number, number][],
+             *          stacks: [number, number][],
              *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
              *          openExecutor: ((index: number) => Promise<any>) | null,
              *          opening: Map<number, Promise<void>>, unopened: Set<number>,
@@ -298,7 +266,7 @@ export function createCpuModule(){
                 // The translations' store the run gave, for its figures.
                 store: null,
                 worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
-                lastFault: null, disposed: false, samples: createSampleTable(), engine,
+                lastFault: null, disposed: false, samples: createSampleTable(),
                 cork: null,
                 remotes: [],
                 // How an executor past the process's own is opened, those being
@@ -330,7 +298,6 @@ export function createCpuModule(){
                 faultHandler: null,
                 // The guest's clock once the kernel gives it (`useGuestClock`).
                 guestClock: null,
-                yieldCheck: null,
                 // The translator's figures at the last frame, for the frame's own columns.
                 corkFrame: { instructions: 0, retired: 0, translateMs: 0, leaves: 0 },
                 // The threads' stacks the kernel named, for a host made after it did.
@@ -365,14 +332,6 @@ export function createCpuModule(){
                 cork.translatePending().catch(()=>{});
             };
 
-            // Always on, because the whole point is never having to reproduce a
-            // heavy frame under a second run just to find out where it went --
-            // the cost this pays every slice is a register read and a table
-            // update, measured to leave the guest phase's ms/frame unchanged. A
-            // caller measuring the emulator itself (a JIT budget comparison) can
-            // still turn it off.
-            const samplingEnabled = config?.sampling !== false;
-
             if (typeof log?.metrics?.counters === 'function')
             {
                 const counters = log.metrics.counters('cpu', CPU_COUNTERS);
@@ -383,11 +342,11 @@ export function createCpuModule(){
                     }
                     counters[0] = state.running ? 1 : 0;
                     counters[1] = retiredEverywhere(state);
-                    counters[2] = state.host.inProtectedMode() ? 1 : 0;
-                    counters[3] = state.thunks ? state.thunks.size : 0;
-                    counters[4] = state.thunks ? state.thunks.capacity : 0;
-                    counters[5] = state.host.eip();
-                    counters[6] = state.host.trapCrossings();
+                    counters[2] = state.thunks ? state.thunks.size : 0;
+                    counters[3] = state.thunks ? state.thunks.capacity : 0;
+                    counters[4] = state.host.eip();
+                    counters[5] = state.host.trapCrossings();
+                    counters[6] = state.host.hostWrittenBytes();
                     feedTranslator();
                     if (state.cork)
                     {
@@ -409,29 +368,6 @@ export function createCpuModule(){
                             leaves,
                         };
                     }
-                    const jit = state.host.jitState();
-                    // An emulator that refused to answer reports `-1` rather than a
-                    // record, and reading fields off a number leaves every counter
-                    // NaN -- which a frame's own figures are then subtracted from.
-                    if (jit && typeof jit === 'object')
-                    {
-                        for (let field = 0; field < JIT_FIELDS.length; field++)
-                        {
-                            const value = jit[JIT_FIELDS[field]];
-                            counters[JIT_AT + field] = typeof value === 'number'
-                                ? value : Number(value);
-                        }
-                    }
-                    else
-                    {
-                        // No emulator compiler on this engine (`cork`): the columns
-                        // are kept and say `-1`, not the zero a never-read counter
-                        // would look like a dead compiler by.
-                        for (let field = 0; field < JIT_FIELDS.length; field++)
-                        {
-                            counters[JIT_AT + field] = -1;
-                        }
-                    }
                     counters[FRAME_INTERPRETED] = state.worstInterpreted;
                     counters[FRAME_INTERPRETED + 1] = state.worstInterpretedAt;
                     state.worstInterpreted = 0;
@@ -445,8 +381,7 @@ export function createCpuModule(){
                 // modules are placed a megabyte apart and a game's own libraries
                 // are megabytes each, and the memory itself, since a title loads
                 // its textures, models and sound into the heap and asks for
-                // hundreds of megabytes of it. Must stay a power of two -- the
-                // emulator requires it.
+                // hundreds of megabytes of it.
                 memorySize: config?.memorySize ?? DEFAULT_MEMORY_SIZE,
                 // A gone process's memory, taken in place of a new one where it
                 // fits (`CorkHostConfig.reused`).
@@ -455,11 +390,10 @@ export function createCpuModule(){
                 engineUrl: config?.engineUrl ?? null,
                 /** @type {import('./engine.js').EngineConfig} */
                 cork: config?.cork ?? {},
-                // Addresses below this are no-access under cork alone; zero
-                // closes none, and the emulator reads them whatever it says.
+                // Addresses below this are no-access; zero closes none.
                 closedBelow: config?.closedBelow ?? 0,
-                // And below this nothing runs under cork alone, whatever reads
-                // and writes the range answers.
+                // And below this nothing runs, whatever reads and writes the
+                // range answers.
                 noExecuteBelow: config?.noExecuteBelow ?? 0,
                 trapPort: config?.trapPort ?? 0xb077,
                 entryVector: config?.entryVector ?? 0x7000,
@@ -596,23 +530,12 @@ export function createCpuModule(){
             };
 
             /**
-             * @param {any} [into]  the thread's last record, written over where
-             *     the engine can (cork): a record is its thread's alone
+             * @param {any} [into]  the thread's last record, written over: a record
+             *     is its thread's alone
              */
-            const captureCurrentContext = into=>{
-                const host = started();
-                return typeof host.captureContext === 'function'
-                    ? host.captureContext(into)
-                    : captureContext(host.cpu());
-            };
+            const captureCurrentContext = into=>started().captureContext(into);
 
-            const emulatorFpu = createFpu({
-                get wasm_memory(){ return started().cpu().wasm_memory; },
-            });
-            const activeFpu = ()=>{
-                const host = started();
-                return typeof host.fpu === 'function' ? host.fpu() : emulatorFpu;
-            };
+            const activeFpu = ()=>started().fpu();
             const fpu = {
                 /** @param {number} value */
                 setResult: value=>activeFpu().setResult(value),
@@ -642,14 +565,6 @@ export function createCpuModule(){
                     // Cork allocates its state block and tables beside the guest's
                     // full RAM, so nothing is carved out of it.
                     memorySize: settings.memorySize,
-                    // Where our own boot ROM sits. Worth registering as a region
-                    // by whoever lays out memory: a fault leaves the processor
-                    // standing in the stub behind its vector, and a report that
-                    // cannot name that address calls the engine's own code
-                    // unmapped -- which is the one place a reader should not be
-                    // sent to look for a guest's bug. Cork has no ROM.
-                    romBase: -1,
-                    romSize: 0,
                 },
 
                 /**
@@ -707,8 +622,7 @@ export function createCpuModule(){
                             awaited: ()=>state.awaited?.() === true,
                             ...(typeof engineModule.createArena === 'function'
                                 && typeof SharedArrayBuffer === 'function'
-                                && settings.cork?.arenaBytes !== 0
-                                ? { arena: engineModule.createArena(settings.cork?.arenaBytes) }
+                                ? { arena: engineModule.createArena() }
                                 : {}) } : settings.cork,
                         closedBelow: settings.closedBelow,
                         noExecuteBelow: settings.noExecuteBelow,
@@ -744,7 +658,7 @@ export function createCpuModule(){
                         {
                             cork.translators = 1;
                         }
-                        const bell = createBell(settings.cork?.spinMs);
+                        const bell = createBell();
                         state.bell = bell;
                         const host = state.host;
                         state.openExecutor = index=>createRemoteExecutor({ host, index,
@@ -799,7 +713,6 @@ export function createCpuModule(){
                     {
                         state.host.useGuestClock(state.guestClock);
                     }
-                    state.host.setYieldCheck(state.yieldCheck);
                     state.thunks = createThunkTable({
                         base: settings.thunkBase,
                         port: settings.trapPort,
@@ -853,11 +766,11 @@ export function createCpuModule(){
                  * by the same poll that finds a processor exception.
                  *
                  * Only the record: this is called from inside a trap, where the
-                 * emulator is still standing on the stub and will run its `ret`
+                 * machine is still standing on the stub and will run its `ret`
                  * regardless. The caller sends that return into the park loop,
-                 * whose `hlt` is what actually ends the slice -- the same halt
-                 * the ROM's fault stubs end on. A no-op once this instance is
-                 * disposed: there is no slice left for the record to explain.
+                 * whose `hlt` is what actually ends the slice. A no-op once this
+                 * instance is disposed: there is no slice left for the record to
+                 * explain.
                  *
                  * @param {Omit<Parameters<typeof hostFault>[0], 'vector' | 'errorCode'>} fault
                  */
@@ -970,18 +883,6 @@ export function createCpuModule(){
                     }
                 },
 
-                /**
-                 * What a slice asks between regions of translated code, to end
-                 * early when it answers true; an engine with no such boundary
-                 * runs its slices whole.
-                 *
-                 * @param {(() => boolean) | null} check
-                 */
-                setYieldCheck(check){
-                    state.yieldCheck = check;
-                    state.host?.setYieldCheck?.(check);
-                },
-
                 /** @param {number} address @param {number} length */
                 readPhysical: (address, length)=>started().readPhysical(address, length),
                 /** @param {number} address @param {Uint8Array} bytes */
@@ -1009,8 +910,8 @@ export function createCpuModule(){
                  * EAX..EDI as a view in the encoding's order, for a caller
                  * that reads and writes them on every crossing; null when the
                  * engine keeps them nowhere a view can reach. A view that
-                 * reads empty is stale -- the emulator grew its memory -- and
-                 * is asked for again.
+                 * reads empty is stale -- the memory grew -- and is asked for
+                 * again.
                  *
                  * @returns {Int32Array | null}
                  */
@@ -1155,10 +1056,9 @@ export function createCpuModule(){
                 /**
                  * The processors the program is told the machine has: one for
                  * each of its executors, the process's own among them -- known
-                 * from the start, before the others are made. Only cork runs
-                 * more than one.
+                 * from the start, before the others are made.
                  */
-                processors: ()=>processorsFor({ engine, executors: settings.executors }),
+                processors: ()=>processorsFor({ executors: settings.executors }),
                 /** The word their turns ring: one wait for all of them. */
                 executorBell: ()=>state.bell,
                 /**
@@ -1268,47 +1168,34 @@ export function createCpuModule(){
                         instructions = machine.runSlice(maxInstructions) >>> 0;
                     }
                     catch (e){
-                        // An exception the processor could not deliver. The
-                        // emulator has no double fault: a page fault while
-                        // pushing the frame for a page fault raises another, and
-                        // it recurses until the host's stack is gone -- which
-                        // surfaces as a range error naming nothing. What is known
-                        // afterwards is still in the machine: EIP was put back on
-                        // the instruction that faulted first and never moved, and
-                        // CR2 holds the last address that would not translate.
+                        // A range error the slice could not get past: the host's
+                        // stack spent -- translated code's calls nest on it
+                        // (`callDepth`) -- or memory refused. Nothing the program
+                        // did faulted, so it is not offered a handler: the run
+                        // stops as on a double fault, at the eip the machine holds.
                         if (!(e instanceof RangeError))
                         {
                             throw e;
                         }
                         const eip = machine.eip();
-                        const cr2 = machine.controlRegister(2);
-                        const cr3 = machine.controlRegister(3);
-                        const paging = (machine.controlRegister(0) & 0x80000000) !== 0;
                         state.lastFault ??= hostFault({
                             vector: 8,
                             name: 'double fault',
                             errorCode: 0,
                             eip,
-                            detail: `double fault at 0x${eip.toString(16).padStart(8, '0')}:`
-                                + ` a page fault at 0x${cr2.toString(16).padStart(8, '0')}`
-                                + ' while delivering a fault'
-                                + (paging
-                                    ? `; paging is on with cr3 0x${cr3.toString(16)}`
-                                    : '')
-                                // Any range error reads so, and a host's own --
-                                // its stack spent on something else -- is told
-                                // apart by where it was thrown.
+                            detail: `double fault at 0x${eip.toString(16).padStart(8, '0')}`
+                                // Where it was thrown tells the stack spent on the
+                                // guest's calls from one spent on something else.
                                 // JavaScriptCore's stack carries no message, so
                                 // the error's own name and message go first:
                                 // a spent stack and memory refused read apart.
-                                + `; the host said: ${e.name}: ${e.message} at `
+                                + `: the host said: ${e.name}: ${e.message} at `
                                 + String(/** @type {any} */ (e).stack ?? '')
                                     .split('\n').filter(line=>!line.startsWith(e.name))
                                     .slice(0, 8).join(' '),
                         });
                         // Nothing more may run: the next slice would only walk
-                        // into the same fault. A halt is what the stub behind a
-                        // vector would have ended on, had one been reached.
+                        // into the same error.
                         machine.halt();
                     }
                     // Folds the machine's word into the count before it can wrap.
@@ -1332,12 +1219,16 @@ export function createCpuModule(){
                     // stopped where the guest asked to -- a wait it parked in, a
                     // halt -- and crediting that place with everything the slice
                     // retired charged a frame's hot loop to the call ending it.
-                    if (samplingEnabled && instructions >= maxInstructions)
+                    // Always on, because the whole point is never having to
+                    // reproduce a heavy frame under a second run just to find out
+                    // where it went: a register read and a table update a slice,
+                    // measured to leave the guest phase's ms/frame unchanged.
+                    if (instructions >= maxInstructions)
                     {
                         creditSample(state.samples, machine.eip(), instructions,
-                            settings.cork.hotThreshold ?? 2000);
+                            HOT_SAMPLE_INSTRUCTIONS);
                     }
-                    if (samplingEnabled && instructions > 0 && settings.cork.feed === 'slice')
+                    if (instructions > 0 && settings.cork.feed === 'slice')
                     {
                         feedTranslator();
                     }
@@ -1345,11 +1236,10 @@ export function createCpuModule(){
                 },
 
                 /**
-                 * The guest's clock, for the time-stamp counter: under cork `rdtsc`
-                 * then counts nanoseconds of the time QueryPerformanceCounter reads.
-                 * The emulator's counter is its own and is not moved by this. Each
-                 * move is published for the process's other executors, whose
-                 * counter is the same one.
+                 * The guest's clock, for the time-stamp counter: `rdtsc` then
+                 * counts the time QueryPerformanceCounter reads. Each move is
+                 * published for the process's other executors, whose counter is
+                 * the same one.
                  *
                  * @param {() => number} readMs  milliseconds of guest time
                  * @param {(listener: () => void) => void} [whenMoved]  tells the
@@ -1450,21 +1340,7 @@ export function createCpuModule(){
                  */
                 restoreContext(context, threadBase){
                     setThreadBase(context, threadBase);
-                    const host = started();
-                    if (typeof host.restoreContext === 'function')
-                    {
-                        host.restoreContext(context);
-                        return;
-                    }
-                    restoreContext(host.cpu(), context);
-                    // The emulator loads a segment's base from its descriptor, so
-                    // FS's follows the thread too: a program reloading FS finds its
-                    // own TEB. Bytes 2..7 of the descriptor: the base's low three
-                    // bytes, the access and flags as the ROM wrote them, the high.
-                    host.writePhysical(THREAD_DESCRIPTOR + 2, new Uint8Array([
-                        threadBase & 0xff, threadBase >>> 8 & 0xff, threadBase >>> 16 & 0xff,
-                        0x92, 0xcf, threadBase >>> 24 & 0xff,
-                    ]));
+                    started().restoreContext(context);
                 },
 
                 /**
@@ -1506,8 +1382,8 @@ export function createCpuModule(){
                  * Watches the range for writes, the program's on any executor and
                  * the host's (`write-clock.js`): the caller reads the bytes after
                  * this, and the watch's `take` answers the pages that may differ
-                 * since. Null where the engine cannot say which (the emulator),
-                 * and every byte is to be looked at.
+                 * since. Null where the engine cannot say which, and every byte
+                 * is to be looked at.
                  *
                  * @param {number} address @param {number} length
                  * @returns {import('./internal/write-clock.js').WriteWatch | null}
@@ -1567,9 +1443,9 @@ export function createCpuModule(){
                 interpretedSteps: ()=>started().interpretedSteps(),
                 hostWrittenBytes: ()=>started().hostWrittenBytes(),
                 /**
-                 * The emulator's account of where the guest ran, by address and
-                 * weighted by instructions. Kept only between start and stop, and
-                 * only by a build that carries it.
+                 * An engine's own account of where the guest ran, by address and
+                 * weighted by instructions, kept between start and stop by an
+                 * engine that keeps one (`app.guestProfile`).
                  */
                 profile: {
                     /** The profiler build's counts, null without one. */
@@ -1585,15 +1461,14 @@ export function createCpuModule(){
                     stop: ()=>started().profile.stop(),
                     read: ()=>started().profile.read(),
                 },
-                inProtectedMode: ()=>started().inProtectedMode(),
                 eip: ()=>started().eip(),
                 forwardSave: FORWARD_SAVE,
 
                 /**
                  * The floating-point stack, for whoever answers a call that returns
                  * a double. Handed out before the guest starts and reached through
-                 * a getter, so that an assembling caller can wire it at build time
-                 * and the emulator's memory can still be grown and replaced later.
+                 * a getter, so that an assembling caller can wire it at build time,
+                 * before the machine it reaches is made.
                  */
                 fpu,
             };
@@ -1606,7 +1481,7 @@ export function createCpuModule(){
             {
                 return {
                     name: 'cpu', version: '0.1.0', status: 'created',
-                    metrics: instance ? { engine: instance.engine } : {},
+                    metrics: {},
                 };
             }
             // The translator's own report, with what its host adds -- the
@@ -1620,9 +1495,6 @@ export function createCpuModule(){
                 version: '0.1.0',
                 status: 'ready',
                 metrics: {
-                    // Which execution engine this launch selected, so a report
-                    // says what the figures below were measured on.
-                    engine: instance.engine,
                     // Whether guest memory is a SharedArrayBuffer another worker
                     // can read and write in place.
                     sharedMemory: typeof SharedArrayBuffer === 'function'
@@ -1643,7 +1515,6 @@ export function createCpuModule(){
                     gcNudgesRefused: instance.nudge?.refused() ?? null,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),
-                    protectedMode: instance.host.inProtectedMode(),
                     traps: instance.thunks ? instance.thunks.size : 0,
                     trapCapacity: instance.thunks ? instance.thunks.capacity : 0,
                     // How many traps the host has answered since boot, so a
@@ -1658,20 +1529,6 @@ export function createCpuModule(){
                     // it retired, so a run that makes no progress says where it sits.
                     recent: instance.host.recentSlices ? instance.host.recentSlices() : null,
                     recentStarts: instance.host.recentStarts ? instance.host.recentStarts() : null,
-                    // Whether the emulator is compiling guest code at all, and
-                    // how much of it runs compiled rather than interpreted.
-                    //
-                    // Every test this project has passes on a dead compiler: they
-                    // assert what the guest computed, and an interpreter computes
-                    // the same answers several times slower. So the one thing that
-                    // separates a machine running at its speed from one running at
-                    // a seventh of it is invisible to all of them.
-                    //
-                    // Not the emulator's own cache size: that counter is compiled
-                    // out of a release build and answers zero always, which reads
-                    // as a dead compiler on a healthy machine. Counted where the
-                    // instructions are actually retired instead.
-                    jit: instance.host.jitState(),
                     // Where the guest is right now. A thread that spins in guest
                     // code makes no host call, so nothing else in this report can
                     // say what it is doing; sampled repeatedly from outside, this

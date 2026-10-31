@@ -96,7 +96,7 @@ for (const cores of [1, 2])
 {
     test(`a thread made by CreateThread has its own copy of the image's thread-local block, on ${
         cores} executor${cores > 1 ? 's' : ''}`, async()=>{
-        const app = await createApp({ executable: program(), cpu: { cores, eager: true } });
+        const app = await createApp({ executable: program(), cpu: { cores } });
         try
         {
             const code = (await app.run({ timeoutMs: 30_000 })) >>> 0;
@@ -191,7 +191,7 @@ for (const cores of [1, 2])
     test(`the program's block is at index 0 of the array behind fs:[0x2c], apart from TlsAlloc's`
         + ` slots, on ${cores} executor${cores > 1 ? 's' : ''}`, async()=>{
         const app = await createApp({ executable: indexZeroProgram(),
-            cpu: { cores, eager: true } });
+            cpu: { cores } });
         try
         {
             const code = (await app.run({ timeoutMs: 30_000 })) >>> 0;

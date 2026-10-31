@@ -107,7 +107,6 @@ test('a child in a worker of its own leaves its parent its file, its registry va
         const app = await createApp({
             executable: new Uint8Array(parent),
             imagePath: 'C:\\App\\spawn.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
@@ -175,7 +174,6 @@ test('a child in a worker of its own reads what the run\'s bundle has not fetche
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             bundle: { prefix: '', store: null, fetch: async(offset, length)=>{
                 asked.push([offset, length]);
@@ -229,7 +227,6 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
         const app = await createApp({
             executable: waitingParent(),
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             cork: /** @type {any} */ ({ config: { sharedMemory: true } }),
             device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
@@ -299,7 +296,6 @@ test('a child in a worker of its own is sent the page\'s input while it stands',
         const app = await createApp({
             executable: waitingParent(),
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
         });
@@ -330,7 +326,6 @@ test('a child in a worker of its own mixes on the run\'s table in a span its par
     const app = await createApp({
         executable: waitingParent(),
         imagePath: 'C:\\parent.exe',
-        engine: 'cork',
         concurrency: 2,
         storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
     });
@@ -364,7 +359,6 @@ for (const where of ['in its own place', 'in a worker of its own'])
             const app = await createApp({
                 executable: across ? waitingParent() : paintsThenWaits(),
                 imagePath: 'C:\\parent.exe',
-                engine: 'cork',
                 ...across ? { concurrency: 2 } : {},
                 device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
                     canvas: gpu.canvas },
@@ -393,7 +387,6 @@ test('a child in a worker of its own is among the processes standing, with its o
         const app = await createApp({
             executable: waitingParent(),
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\a.exe', bytes: paintsThenWaits() }],
@@ -432,7 +425,6 @@ test('where processes run at once, the run\'s own program runs in a worker of it
     const app = await createApp({
         executable: new Uint8Array(exe),
         imagePath: 'C:\\hello.exe',
-        engine: 'cork',
         concurrency: 2,
         storage: { load: async()=>({ files: [{ path: 'C:\\note.txt',
             bytes: new TextEncoder().encode('kept') }] }) },
@@ -499,7 +491,6 @@ test('a program in a worker of its own is built from a library of the bundle no 
     const app = await createApp({
         executable: program,
         imagePath: 'C:\\z\\program.exe',
-        engine: 'cork',
         concurrency: 2,
         bundle: { prefix: '', store: null, fetch: async(offset, length)=>{
             const buffer = Buffer.alloc(length);
@@ -540,7 +531,6 @@ test('a launcher in a worker of its own that starts its game and exits leaves th
         const app = await createApp({
             executable: launcher,
             imagePath: 'C:\\launcher.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\game.exe', bytes: game }] }) },
         });
@@ -563,7 +553,6 @@ test('a program in a worker of its own that is stopped leaves the run its tables
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\spin.exe',
-            engine: 'cork',
             concurrency: 2,
         });
         t.after(()=>app.dispose());

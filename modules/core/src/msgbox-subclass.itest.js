@@ -99,7 +99,6 @@ test('a message box a hook subclassed ends on its button with that button\'s ans
         const app = await createApp({
             executable: buildProgram(),
             imagePath: 'C:\\App\\Box.exe',
-            engine: 'cork',
         });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 20000 }), IDOK);
