@@ -42,9 +42,16 @@ const QUERY_COUNT = 12;
 const QUERY_BUDGET = 16;
 const D3DQUERYTYPE_EVENT = 8;
 const D3DQUERYTYPE_OCCLUSION = 9;
-/** `QUERY.STATE`: asked for and not back; back. */
+/**
+ * `COUNT_STATE`: asked for and not back; back; the played side writes it and
+ * nothing has flushed its draws; the same, flushed. The state's low three bits.
+ */
 const COUNT_ASKED = 1;
 const COUNT_BACK = 2;
+const COUNT_WRITTEN = 3;
+const COUNT_FLUSHED = 4;
+const COUNT_STATE_MASK = 7;
+const D3DGETDATA_FLUSH = 1;
 const S_FALSE = 1;
 const D3DISSUE_BEGIN = 2;
 const FLAG_SLOW_PATH = 1;
@@ -136,7 +143,22 @@ export function QueryGetData({ u32, setU32, host }, self, data, size, flags){
     const type = u32(block + QUERY_TYPE);
     if (type === D3DQUERYTYPE_OCCLUSION)
     {
-        const state = u32(block + QUERY_STATE);
+        const state = u32(block + QUERY_STATE) & COUNT_STATE_MASK;
+        // A count the played side writes here: the poll that first asks
+        // for a flush is the host's, which sends the draws on; every other
+        // poll is answered here until the count lands.
+        if (state === COUNT_WRITTEN)
+        {
+            if ((flags & D3DGETDATA_FLUSH) !== 0)
+            {
+                return host();
+            }
+            return S_FALSE;
+        }
+        if (state === COUNT_FLUSHED)
+        {
+            return S_FALSE;
+        }
         if (state === COUNT_ASKED)
         {
             // Every so many polls one is the host's, which looks for the count.

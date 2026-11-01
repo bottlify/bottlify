@@ -76,6 +76,7 @@ import { createCapture } from './capture.js';
 import { createReceiver, sharedNow } from './channel.js';
 import { createBorrower } from './lending.js';
 import { playedDirect3D } from './direct3d.js';
+import { storeCount as storeCountIn } from '../seam/shadow.js';
 import { playedOpengl } from './opengl.js';
 import { playedDirect3D7 } from './d3d7.js';
 import { playedDirect3D10 } from './d3d10.js';
@@ -511,6 +512,18 @@ export function serveGraphics(scope, deps){
             }
             post({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
         };
+        /**
+         * An occlusion count straight into its query's block where guest memory is
+         * shared (`storeCount` in seam/shadow.js): nothing crosses to the engine's thread.
+         *
+         * @param {number} block @param {number} measurement @param {number} count
+         */
+        const words = memory
+            ? new Int32Array(memory.buffer, memory.byteOffset, memory.length >>> 2) : null;
+        const storeCount = words
+            ? (/** @type {number} */ block, /** @type {number} */ measurement,
+                /** @type {number} */ count)=>storeCountIn(words, block, measurement, count)
+            : undefined;
         /** @param {any} submitted */
         const frameQueued = submitted=>latency.queued(submitted);
         /** @type {ReturnType<typeof createReceiver> | null} */
@@ -574,6 +587,7 @@ export function serveGraphics(scope, deps){
                 readMemory: true,
                 borrow: memory && lending ? createBorrower({ ...lending, memory }) : undefined,
                 writeMemory: wrote,
+                storeCount,
                 divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
                     post({ type: 'divergence', api: name, detail }),
                 onDeviceLost: (/** @type {() => void} */ watcher)=>{

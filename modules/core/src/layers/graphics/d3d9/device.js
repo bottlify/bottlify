@@ -489,6 +489,11 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
+ * @property {boolean} [countsInGuest]  Whether the side that draws writes occlusion counts
+ *     into the guest's query blocks itself (`storeCount` there).
+ * @property {(block: number, measurement: number, count: number) => void} [storeCount]
+ *     Writes a count into a query's block in guest memory, for the measurement it
+ *     was made for only (`QUERY`, `COUNT_STATE`).
  * @property {() => void} [occlusionCounted]
  *     Told whenever an occlusion count has come back from the GPU: where the
  *     program is told counts across a thread, so they can go to it unasked.
@@ -531,7 +536,7 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        occlusionCounted,
+        occlusionCounted, countsInGuest, storeCount,
         drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
         watchWrites, keepConstantBlocks, verifyDynamic,
         ...caps
@@ -544,7 +549,7 @@ export function createDirect3D9(options = {}){
         free: giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        occlusionCounted,
+        occlusionCounted, countsInGuest, storeCount,
         drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
         watchWrites, keepConstantBlocks, verifyDynamic,
     };
@@ -961,6 +966,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             driverRules: services.driverRules,
             rectangleBump: services.rectangleBump,
             occlusionCounted: services.occlusionCounted,
+            storeCount: services.storeCount,
             verifyDynamic: services.verifyDynamic === true,
             compressedTextures: caps.compressedTextures,
             keepConstantBlocks: services.keepConstantBlocks,
@@ -4814,6 +4820,21 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             },
             addRef: ()=>queryCount.addRef(),
             release: ()=>queryCount.release(),
+            /** Whether the side that draws writes this query's counts into the guest. */
+            countsInGuest: occlusion && services.countsInGuest === true,
+            /**
+             * Where in the guest the counts of the measurement the next END
+             * closes go (`QUERY`), and that measurement's number: written by
+             * the side that draws once the GPU has them.
+             *
+             * @param {number} block @param {number} measurement
+             */
+            countInto(block, measurement){
+                if (counted)
+                {
+                    counted.guest = { block: block >>> 0, measurement: measurement >>> 0 };
+                }
+            },
             GetType: ()=>type,
             /** Four bytes: a BOOL, or a pixel count. */
             GetDataSize: ()=>4,

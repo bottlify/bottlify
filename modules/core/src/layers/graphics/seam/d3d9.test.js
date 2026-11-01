@@ -23,7 +23,7 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createCountCells, createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
 import {
-    BUFFER, DRAW, FLAG_STALE, POLLS_BETWEEN, SHADOW, SURFACE, transformSlot,
+    BUFFER, DRAW, FLAG_STALE, POLLS_BETWEEN, SHADOW, SURFACE, storeCount, transformSlot,
 } from './shadow.js';
 import * as guestCode from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
@@ -150,6 +150,8 @@ function machine(){
 
     return {
         memory,
+        /** The first four megabytes, as words: what a side sharing guest memory writes into. */
+        words: new Int32Array(low.buffer),
         services: { readMemory: readBytes, writeMemory: writeBytes },
         /** @param {any} object @param {string} id */
         publishInterface: (object, id)=>vtables.publish(object, id),
@@ -2618,4 +2620,120 @@ test('a declaration keeps its count in the guest, as a texture does', ()=>{
     const cell = h.box.memory.readU32(declaration + 8);
     assert.notEqual(cell, 0, 'the declaration\'s count has a word in the guest (none before)');
     assert.equal(h.box.memory.readU32(cell), h.object(declaration).refCount);
+});
+
+test('an occlusion count the side that draws writes into the guest answers as the host does,'
+    + ' with one crossing a wait and a late count landing on no later measurement', ()=>{
+    // A device recorded for a graphics worker that shares guest memory: the
+    // worker writes each count into the query's block (`storeCount`) as the
+    // GPU gives it, and the guest's GetData answers every poll -- the first
+    // flush of a wait goes to the host to send the draws on. An Unreal Engine
+    // 3 title waited on its counts 33 ms each, 7 of them for the answer to
+    // cross back to its thread.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const memory = h.box.memory;
+    const HANDED = -1;
+    const guest = /** @type {any} */ ({
+        u32: (/** @type {number} */ at)=>memory.readU32(at),
+        setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+            memory.writeU32(at, value >>> 0),
+        host: ()=>HANDED,
+    });
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
+    const query = memory.readU32(out);
+    const object = h.publisher.objectAt(query);
+    object.countsInGuest = true;
+    /** Where the next END's count goes, as the seam said: the block and the measurement. */
+    let into = /** @type {{ block: number, measurement: number } | null} */ (null);
+    object.countInto = (/** @type {number} */ block, /** @type {number} */ measurement)=>{
+        into = { block, measurement };
+    };
+    /** The measurement's count once it has come, null while it has not. */
+    let counted = /** @type {number | null} */ (null);
+    /** The measurement now waited on, and the one before it, whose count may come late. */
+    let current = /** @type {{ block: number, measurement: number } | null} */ (null);
+    let earlier = /** @type {{ block: number, measurement: number } | null} */ (null);
+    let measured = 0;
+    object.Issue = (/** @type {number} */ flags)=>{
+        // A BEGIN starts a measurement too: nothing is counted until its END.
+        earlier = current ?? earlier;
+        current = (flags & 2) === 0 ? into : null;
+        counted = null;
+        measured += (flags & 2) === 0 ? 1 : 0;
+        return D3D_OK;
+    };
+    object.GetData = (/** @type {{ value?: number } | null} */ held)=>{
+        if (counted === null)
+        {
+            return S_FALSE;
+        }
+        if (held)
+        {
+            held.value = counted;
+        }
+        return D3D_OK;
+    };
+    const data = 0x3300;
+    const next = (seed=>()=>(seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8)(17);
+    let crossings = 0;
+    let polledInGuest = 0;
+    let late = 0;
+    /** @param {(...args: any[]) => number} js @param {string} name @param {number[]} args */
+    const both = (js, name, args)=>{
+        memory.writeU32(data, 0xdeadbeef);
+        const answer = js(guest, query, ...args) >>> 0;
+        const written = memory.readU32(data);
+        memory.writeU32(data, 0xdeadbeef);
+        if (answer === HANDED >>> 0)
+        {
+            // Counted while a count the played side writes is waited on.
+            crossings += current && counted === null && name === 'GetData' ? 1 : 0;
+            h.box.trap(query, name, args);
+            return;
+        }
+        // The host's answer, asked of the object without the seam's moves.
+        const held = /** @type {{ value?: number }} */ ({});
+        const hostAnswer = name === 'GetData' ? object.GetData(held) : D3D_OK;
+        if (answer === S_FALSE)
+        {
+            polledInGuest++;
+        }
+        assert.equal(answer, hostAnswer >>> 0, `${name}(${args}) at measurement ${measured}`);
+        if (name === 'GetData' && answer === D3D_OK && args[0] !== 0)
+        {
+            assert.equal(written, held.value, 'the count the host has');
+        }
+    };
+    for (let round = 0; round < 3000; round++)
+    {
+        const roll = next() % 12;
+        if (roll === 0)
+        {
+            both(guestCode.QueryIssue, 'Issue', [[1, 2][next() % 2]]);
+        }
+        else if (roll === 1 && current && counted === null)
+        {
+            // The GPU has the count: the side that draws writes it in.
+            const count = next() % 1000;
+            assert.ok(storeCount(h.box.words, current.block, current.measurement, count));
+            counted = count;
+        }
+        else if (roll === 2 && earlier)
+        {
+            // An earlier measurement's count comes after the next was issued.
+            assert.equal(storeCount(h.box.words, earlier.block, earlier.measurement, 4321), false,
+                'a late count lands on nothing');
+            late++;
+        }
+        else
+        {
+            both(guestCode.QueryGetData, 'GetData', [next() % 5 === 0 ? 0 : data, 4, next() % 2]);
+        }
+    }
+    assert.ok(measured > 100 && late > 50, `${measured} measurements, ${late} late counts`);
+    assert.ok(crossings <= measured && polledInGuest > crossings * 5,
+        `${polledInGuest} polls answered in the guest, ${crossings} crossings while waiting`);
 });

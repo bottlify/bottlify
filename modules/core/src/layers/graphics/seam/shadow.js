@@ -229,9 +229,12 @@ export const QUERY = {
     /** Its D3DQUERYTYPE. */
     TYPE: 4,
     /**
-     * An occlusion query's count as the guest's GetData answers it, written
-     * by the host: 0 the host's to ask for, 1 asked for and not back (the
-     * guest answers S_FALSE), 2 back, in COUNT.
+     * An occlusion query's count as the guest's GetData answers it: in its
+     * low three bits (`COUNT_STATE`) 0 the host's to ask for, 1 asked for and
+     * not back (the guest answers S_FALSE), 2 back, in COUNT, 3 the played
+     * side writes it here and nothing has flushed its draws yet, 4 the same
+     * flushed; above them the measurement's number, so a count the played
+     * side writes late lands only on the measurement it was made for.
      */
     STATE: 8,
     COUNT: 12,
@@ -242,6 +245,34 @@ export const QUERY = {
     BUDGET: 16,
     SIZE: 20,
 };
+/** QUERY.STATE's states, its mask and where the measurement's number starts. */
+export const COUNT_STATE = Object.freeze({ HOST: 0, ASKED: 1, BACK: 2, WRITTEN: 3, FLUSHED: 4,
+    MASK: 7, SHIFT: 3 });
+
+/**
+ * An occlusion count into its query's block, as the side that draws writes it
+ * into shared guest memory: the count, then the state from "the played side
+ * writes it" (flushed or not) to "back" -- only while the block still waits on
+ * the measurement the count was made for, so one that comes late never lands
+ * on the next. The state moves by compare-exchange against the engine's
+ * thread, which numbers each measurement as it issues it.
+ *
+ * @param {Int32Array} words  Guest memory.
+ * @param {number} block @param {number} measurement @param {number} count
+ * @returns {boolean} whether it landed
+ */
+export function storeCount(words, block, measurement, count){
+    const state = (block + QUERY.STATE) >>> 2;
+    const stamp = (measurement << COUNT_STATE.SHIFT) | 0;
+    const now = Atomics.load(words, state);
+    if (now !== (stamp | COUNT_STATE.WRITTEN) && now !== (stamp | COUNT_STATE.FLUSHED))
+    {
+        return false;
+    }
+    Atomics.store(words, (block + QUERY.COUNT) >>> 2, count | 0);
+    return Atomics.compareExchange(words, state, now, stamp | COUNT_STATE.BACK) === now;
+}
+
 /**
  * The polls of an occlusion count asked for that the guest answers between
  * two the host does: the host's look is what brings a count in where the

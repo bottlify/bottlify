@@ -527,7 +527,10 @@ export function connectGraphicsWorker(options){
                 case 'd3d10':
                     return recordedDirect3D10(factory, services, sender);
                 default:
-                    return recordedDirect3D(factory, services, sender);
+                    // Where the worker shares the guest's memory it writes the
+                    // occlusion counts into the query blocks itself.
+                    return recordedDirect3D(factory,
+                        { ...services, countsInGuest: Boolean(lending) }, sender);
             }
         },
         answered: ()=>Promise.all(senders.map(sender=>sender.answered())).then(()=>{}),

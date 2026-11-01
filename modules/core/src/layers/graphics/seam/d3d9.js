@@ -80,7 +80,7 @@ import {
     STRETCH_GUARD, compiledAt, createShadow, getRenderStateCode, getTargetCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, moveCopyCode, settledAfter, stageStateMirror,
-    unlockCode, HOST_MIRRORS, POLLS_BETWEEN, QUERY, appendCommand, guestWords,
+    unlockCode, HOST_MIRRORS, POLLS_BETWEEN, QUERY, COUNT_STATE, appendCommand, guestWords,
     createLevelLocks, levelIndex, lockLevelCode, unlockLevelCode,
 } from './shadow.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
@@ -145,6 +145,8 @@ const S_FALSE = 1;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
 /** D3DQUERYTYPE_OCCLUSION. */
 const D3DQUERYTYPE_OCCLUSION = 9;
+/** D3DISSUE_BEGIN. */
+const D3DISSUE_BEGIN = 2;
 const D3DERR_NOTAVAILABLE = 0x8876086a | 0;
 const D3DSCANLINEORDERING_PROGRESSIVE = 1;
 const D3DSCANLINEORDERING_INTERLACED = 2;
@@ -1340,10 +1342,34 @@ export function createDirect3D9Seam(
         const block = queryBlocks.get(query);
         if (block)
         {
+            // The measurement's number stays; only what the guest answers moves.
+            const measured = fields.readU32(block + QUERY.STATE) & ~COUNT_STATE.MASK;
             fields.writeU32(block + QUERY.COUNT, count >>> 0);
             fields.writeU32(block + QUERY.BUDGET, state === 1 ? POLLS_BETWEEN : 0);
-            fields.writeU32(block + QUERY.STATE, state);
+            fields.writeU32(block + QUERY.STATE, (measured | state) >>> 0);
         }
+    };
+
+    /**
+     * A new measurement whose count the played side writes into the query's
+     * block itself (`countInto`), numbered so that a count it writes late for
+     * an earlier one never lands on this. True when it is so.
+     *
+     * @param {any} query
+     */
+    const countWritten = query=>{
+        const block = queryBlocks.get(query);
+        if (!block || query.countsInGuest !== true || typeof query.countInto !== 'function')
+        {
+            return false;
+        }
+        const measurement = ((fields.readU32(block + QUERY.STATE) >>> COUNT_STATE.SHIFT) + 1)
+            & 0x1fffffff;
+        fields.writeU32(block + QUERY.BUDGET, 0);
+        fields.writeU32(block + QUERY.STATE,
+            ((measurement << COUNT_STATE.SHIFT) | COUNT_STATE.WRITTEN) >>> 0);
+        query.countInto(block, measurement);
+        return true;
     };
 
     const queryInterfaces = [describeResource(IID_IDirect3DQuery9, IDIRECT3DQUERY9_SLOTS, {
@@ -1354,8 +1380,13 @@ export function createDirect3D9Seam(
         GetDataSize: query=>query.GetDataSize(),
         /** @param {any} query @param {number[]} args */
         Issue: (query, [flags])=>{
-            // A new measurement: its count is the host's to ask for again.
-            countState(query, 0);
+            // A new measurement: its count is written into the guest by the
+            // side that draws, where it can be; the host's to ask for otherwise.
+            if (query.type !== D3DQUERYTYPE_OCCLUSION || (flags & D3DISSUE_BEGIN) !== 0
+                || !countWritten(query))
+            {
+                countState(query, 0);
+            }
             return query.Issue(flags >>> 0);
         },
         // A count is written in as many of its four bytes as the caller has
@@ -1373,7 +1404,25 @@ export function createDirect3D9Seam(
                 }
                 return hr;
             };
+            const block = queryBlocks.get(query);
+            const word = block ? fields.readU32(block + QUERY.STATE) : 0;
             const hr = query.GetData((data >>> 0) === 0 ? null : held, size >>> 0, flags >>> 0);
+            // A count the played side writes into the block, its draws sent on
+            // by this flush: the guest answers every poll until it lands. Moved
+            // only from the state read, so a count that landed meanwhile stays.
+            if (block && hr === S_FALSE && (word & COUNT_STATE.MASK) === COUNT_STATE.WRITTEN)
+            {
+                const flushed = ((word & ~COUNT_STATE.MASK) | COUNT_STATE.FLUSHED) >>> 0;
+                if (typeof memory.compareExchangeU32 === 'function')
+                {
+                    memory.compareExchangeU32(block + QUERY.STATE, word, flushed);
+                }
+                else
+                {
+                    fields.writeU32(block + QUERY.STATE, flushed);
+                }
+                return write(hr);
+            }
             // An occlusion count asked for, whose answer will be told as it
             // comes (`whenCounted`): the guest answers the polls till then.
             if (hr === S_FALSE && query.type === D3DQUERYTYPE_OCCLUSION && query.countsLater)
