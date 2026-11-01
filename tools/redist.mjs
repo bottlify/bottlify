@@ -13,38 +13,16 @@
  *       [--machine x86|amd64]
  */
 
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as redist from '../modules/core/src/steam/redist.js';
+import { directoryTree } from '../modules/core/src/steam/install-directory.js';
 
 export {
     DRIVE_PATH, INSTALL_DIRECTORY, REGISTRY_PATH, applyPackage, compareVersions,
     embeddedCabinets, imageMachine, parseInstallScript, registryValue,
     unpackRedistributable, writeRegistry,
 } from '../modules/core/src/steam/redist.js';
-
-/**
- * A directory as redist.js reaches an installed app.
- *
- * @param {string} directory
- * @returns {import('../modules/core/src/steam/redist.js').AppTree}
- */
-export function directoryTree(directory){
-    /** @param {string} path */
-    const onDisk = path=>join(directory, ...path.split('\\'));
-    return {
-        list: async()=>(await readdir(directory, { recursive: true, withFileTypes: true }))
-            .filter(entry=>entry.isFile())
-            .map(entry=>relative(directory, join(entry.parentPath, entry.name))
-                .split(sep).join('\\')),
-        read: async path=>new Uint8Array(await readFile(onDisk(path))),
-        write: async(path, bytes)=>{
-            await mkdir(dirname(onDisk(path)), { recursive: true });
-            await writeFile(onDisk(path), bytes);
-        },
-    };
-}
+export { directoryTree };
 
 /**
  * redist.js's installRedistributables over a directory.

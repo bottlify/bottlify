@@ -5,59 +5,25 @@
  */
 
 /**
- * steam-install.mjs's --keys on stdin: read and checked before Steam is asked
- * anything, a refusal one line that shows no key or code. And the install
- * itself, over depots made up here: what it leaves in a directory, packed, is
+ * An install into a directory (core's install-directory.js, which GameHub's
+ * steam-install tool runs), over depots made up here: what it leaves, packed, is
  * the bundle a browser's install of the same depots writes in place
  * (@bottlify/core/steam's installBundle) -- the gate between the two.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import {
     closeSync, fstatSync, fsyncSync, ftruncateSync, openSync, readSync, statSync, writeSync,
 } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { installToDirectory } from './steam-install.mjs';
+import { installToDirectory } from '../modules/core/src/steam/install-directory.js';
 import { openBundle, writeBundle } from './btl.mjs';
 import { installBundle } from '../modules/core/src/steam/install.js';
 import { contentServer, fakeDepot, noise } from '../modules/core/src/steam/depot.fixture.js';
 import { bootstrapper, gameSetup } from '../modules/core/src/steam/redist.fixture.js';
-
-const TOOL = fileURLToPath(new URL('./steam-install.mjs', import.meta.url));
-const KEY = '5a'.repeat(32);
-const CODE = '9876543210987654321';
-const ENTRY = { depot: 1, gid: '2', key: KEY, code: CODE };
-
-/** @param {string[]} args @param {string} input */
-const run = (args, input)=>spawnSync(process.execPath, [TOOL, ...args],
-    { input, encoding: 'utf8' });
-
-test('keys that are not a depot access list fail the run at once, naming no key or code', ()=>{
-    const inputs = [`[${JSON.stringify(ENTRY)}`, '[]',
-        JSON.stringify([{ ...ENTRY, key: KEY.slice(1) }]), JSON.stringify([ENTRY, ENTRY])];
-    for (const input of inputs)
-    {
-        const result = run(['--keys', '-', '--app', '70', '--out', 'unused'], input);
-        assert.equal(result.status, 1, result.stderr);
-        assert.match(result.stderr, /^failed: [^\n]*\n$/, 'one line');
-        assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${KEY.slice(1)}|${CODE}`));
-    }
-});
-
-test('a run takes a session or keys, not both and not neither', ()=>{
-    const both = ['--session', '-', '--keys', '-'];
-    for (const args of [[], both])
-    {
-        const result = run([...args, '--app', '70', '--out', 'x'], '');
-        assert.equal(result.status, 1);
-        assert.match(result.stderr, /^failed: usage: .*--session <file> \| --keys <file>/);
-    }
-});
 
 /** A program's first bytes: a PE image for x86-64. */
 function program64(){

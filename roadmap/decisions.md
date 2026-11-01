@@ -640,7 +640,7 @@ the program's block to index 1 and that executable found a null at index 0. *202
 
 **A66. A game platform's own servers are reached from the page only while the platform lets us,
 and its first request to stop is honoured for everyone at once.** The GameHub extension
-(`modules/gamehub`) carries a page's requests to a platform -- Steam's connection managers, which
+(`gamehub/` in the launcher, bottlify-ui) carries a page's requests to a platform -- Steam's connection managers, which
 admit only their own and localhost origins, and its content servers, which send no CORS headers
 -- by rewriting their headers with one ruleset a platform. Each ruleset is switched by the site's
 own configuration (`config.json`'s `bridge`, `"steam": false`), read by the extension on every
@@ -653,7 +653,7 @@ switched off is simply absent. *2026-10-30; restated 2026-10-31.*
 **A67. A Steam bottle is installed with its redistributables already applied, the app's own
 prerequisite installers among them.** Steam downloads the depots an app names from other apps
 (Steamworks Common Redistributables' Visual C++ and DirectX) and, on the first start, runs its
-install scripts' programs silently. The download (`tools/steam-install.mjs`) takes those depots
+install scripts' programs silently. The download (`bottlify-ui/gamehub/tools/steam-install.mjs`) takes those depots
 too -- an anonymous logon opens them -- and `@bottlify/core/steam`'s `redist.js` (run over a
 directory by `tools/redist.mjs`, over the bottle a page writes by an install in the browser) does
 what the programs would at install time instead: it unpacks each one with the engine's cabinet and installer-database

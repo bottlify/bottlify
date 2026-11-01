@@ -8,7 +8,7 @@
  * A Steam app's depots installed: their manifests, the files they leave -- a
  * path two depots ship is the later one's --, every chunk downloaded from the
  * content servers, and the redistributables applied (`redist.js`). The
- * engine's tools/steam-install.mjs installs into a directory this way, and a
+ * launcher's bottlify-ui/gamehub/tools/steam-install.mjs installs into a directory this way, and a
  * page into a bottle it writes in place (`installBundle`): one install, two
  * places it lands.
  */

@@ -57,13 +57,13 @@ function parse(argv){
         id,
         turns: turns === -1 ? 200000 : Number(argv[turns + 1]),
         map: argv.includes('--map'),
-        // A signed-in Steam account (`tools/steam-account.mjs` writes one): the
+        // A signed-in Steam account (`bottlify-ui/gamehub/tools/steam-account.mjs` writes one): the
         // engine's Steam client runs for the manifest's app, as game.mjs's
         // `--steam` has it, for a game that needs Steam running.
         steam: argv.includes('--steam')
             ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
         // A signed-in session (or `-`, stdin) the app's ownership ticket is
-        // asked for with (tools/steam-tickets.mjs), held for this run only.
+        // asked for with (bottlify-ui/gamehub/tools/steam-tickets.mjs), held for this run only.
         steamSession: argv.includes('--steam-session')
             ? argv[argv.indexOf('--steam-session') + 1] : null,
         // Which executable in the bundle to start. `--which launcher` takes the

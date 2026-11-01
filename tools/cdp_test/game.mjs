@@ -406,13 +406,13 @@ function parse(argv){
                     rootsFromArgv(argv)).map(root=>Buffer.from(root).toString('base64')) } : {},
             }
             : undefined,
-        // `--steam FILE`: the signed-in Steam account (tools/steam-account.mjs)
+        // `--steam FILE`: the signed-in Steam account (bottlify-ui/gamehub/tools/steam-account.mjs)
         // the engine's Steam client answers for; the app is the manifest's
         // `steam.appId`.
         steamAccount: argv.includes('--steam')
             ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
         // `--steam-session FILE` (or `-`, stdin): a signed-in session, which the
-        // app's ownership ticket is asked for with (tools/steam-tickets.mjs) --
+        // app's ownership ticket is asked for with (bottlify-ui/gamehub/tools/steam-tickets.mjs) --
         // what the launcher's bridge gets -- held in memory for this run only.
         steamSession: argv.includes('--steam-session')
             ? argv[argv.indexOf('--steam-session') + 1] : null,
@@ -1862,7 +1862,7 @@ export async function game(options){
             // The networking client, for a run that names a relay.
             { prefix: '/networking/', root: join(PACKAGE_DIR, '..', 'networking', 'src') },
             // The Steam client's own files, from this machine's cache of Valve's
-            // (tools/steam-client.mjs), for a run with a Steam account.
+            // (bottlify-ui/gamehub/tools/steam-client.mjs), for a run with a Steam account.
             ...steamClient ? [{ prefix: '/steam-client/', root: steamClient.folder }] : [],
         ],
         coi: options.coi,

@@ -8,7 +8,7 @@
  * Fails when a game store's protocol is spoken outside GameHub.
  *
  * Speaking to a store -- its connection managers, its sign-in, its keys and
- * codes -- is GameHub's (`modules/gamehub/src/stores/`), in the extension's own
+ * codes -- is GameHub's (the launcher's `gamehub/src/stores/`), in the extension's own
  * pages, and the page is given finished answers (roadmap/gamehub.md). Core
  * and the launcher keep only what reads a store's file formats, and GameHub's
  * content script, which runs in the page's tab, only says GameHub is there. A
@@ -99,14 +99,15 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
     const launcher = option('--launcher', resolve(ROOT, '..', 'bottlify-ui'));
     const coreFiles = sources(join(core, 'src'));
     const issues = storeProtocolIssues(coreFiles, core);
-    const content = join(ROOT, 'modules', 'gamehub', 'src', 'content.js');
-    issues.push(...storeProtocolIssues([content], ROOT).map(line=>`content script: ${line}`));
     let launcherSaid = 'not checked: no launcher at ' + launcher;
     if (existsSync(join(launcher, 'package.json')))
     {
         const launcherFiles = [...sources(join(launcher, 'src')),
             ...readdirSync(launcher).filter(name=>/\.m?js$/.test(name)).map(name=>join(launcher, name))];
         issues.push(...storeProtocolIssues(launcherFiles, launcher).map(line=>`launcher: ${line}`));
+        const content = join(launcher, 'gamehub', 'src', 'content.js');
+        issues.push(...storeProtocolIssues([content], launcher)
+            .map(line=>`content script: ${line}`));
         launcherSaid = `${launcherFiles.length} files`;
     }
     if (issues.length > 0)

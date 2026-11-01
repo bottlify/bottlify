@@ -45,7 +45,7 @@
  * in `.bottlify\registry.json`.
  *
  * The installed app is reached as an `AppTree`, so the one install runs over
- * a directory on a host (tools/redist.mjs, tools/steam-install.mjs) and over a
+ * a directory on a host (tools/redist.mjs, bottlify-ui/gamehub/tools/steam-install.mjs) and over a
  * bottle a page writes in the browser (`install.js`).
  */
 
@@ -930,7 +930,7 @@ export function imageMachine(bytes){
  * What Steam does on an installed app's first start: the install scripts of
  * the app (`extended.installscript` in its product info) and of the
  * redistributables' depots it took (each an `installscript.vdf`) run on the
- * machine its program is for -- how tools/steam-install.mjs and an install in
+ * machine its program is for -- how bottlify-ui/gamehub/tools/steam-install.mjs and an install in
  * the browser both finish.
  *
  * @param {AppTree} tree
