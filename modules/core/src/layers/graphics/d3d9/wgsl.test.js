@@ -193,6 +193,9 @@ test('the pixel-stage instructions become the statements they mean', ()=>{
     }
 });
 
+/** Sampler 0's level bias, as a translation reads it from the draw's registers. */
+const BIAS0 = 'c[_lodBias + 0].x';
+
 test('a sampler\'s level-of-detail bias joins every kind of read through it, and only its own',
     ()=>{
         // D3DSAMP_MIPMAPLODBIAS is added to the level a read takes: one
@@ -217,16 +220,24 @@ test('a sampler\'s level-of-detail bias joins every kind of read through it, and
         const biased = translateShader(reads, { sampling: [{ lodBias: -1 }] });
         assert.equal(biased.error, null);
         for (const line of [
-            'r0 = textureSampleBias(tex0, samp0, in.v0.xy, -1.0);',
-            'r1 = textureSampleBias(tex0, samp0, (in.v0.xy / in.v0.w), -1.0);',
-            'r2 = textureSampleBias(tex0, samp0, in.v0.xy, in.v0.w + -1.0);',
-            'r3 = textureSampleLevel(tex0, samp0, in.v0.xy, in.v0.w + -1.0);',
-            'r4 = textureSampleGrad(tex0, samp0, in.v0.xy, r1.xy * 0.5, r2.xy * 0.5);',
+            // The bias is the draw's to fill in, read from a register: one
+            // module for every value a program moves it through.
+            'r0 = textureSampleBias(tex0, samp0, in.v0.xy, c[_lodBias + 0].x);',
+            'r1 = textureSampleBias(tex0, samp0, (in.v0.xy / in.v0.w), c[_lodBias + 0].x);',
+            'r2 = textureSampleBias(tex0, samp0, in.v0.xy, in.v0.w + c[_lodBias + 0].x);',
+            'r3 = textureSampleLevel(tex0, samp0, in.v0.xy, in.v0.w + c[_lodBias + 0].x);',
+            'r4 = textureSampleGrad(tex0, samp0, in.v0.xy, r1.xy * exp2(c[_lodBias + 0].x),'
+                + ' r2.xy * exp2(c[_lodBias + 0].x));',
             'r5 = textureSample(tex1, samp1, in.v0.xy);',
+            `const _lodBias = ${biased.biasRegister};`,
         ])
         {
             assertLine(biased.wgsl, line);
         }
+        assert.equal(biased.biasRegister, plain.constants, 'past every register the shader reads');
+        assert.equal(biased.constants, plain.constants + 4);
+        assert.equal(translateShader(reads, { sampling: [{ lodBias: 1.5 }] }).wgsl, biased.wgsl,
+            'another bias, the same module');
         assert.equal(translateShader(reads, { sampling: [] }).wgsl, plain.wgsl,
             'no variant is the translation as it always was, to the byte');
 
@@ -236,12 +247,12 @@ test('a sampler\'s level-of-detail bias joins every kind of read through it, and
             op(OPCODE.TEXLDL, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
             op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(r, 0), END_TOKEN]),
         { sampling: [{ lodBias: 2 }] });
-        assertLine(vertex.wgsl, 'r0 = textureSampleLevel(tex0, samp0, v0.xy, v0.w + 2.0);');
+        assertLine(vertex.wgsl, `r0 = textureSampleLevel(tex0, samp0, v0.xy, v0.w + ${BIAS0});`);
         const legacy = translateShader(parseShader([PS_1_1,
             0x00000042, 0xb00f0000,                 // tex t0
             0x00000001, 0x800f0000, 0xb0e40000,     // mov r0, t0
             END_TOKEN]), { sampling: [{ lodBias: 0.5 }] });
-        assertLine(legacy.wgsl, 't0 = textureSampleBias(tex0, samp0, in.t0.xy, 0.5);');
+        assertLine(legacy.wgsl, `t0 = textureSampleBias(tex0, samp0, in.t0.xy, ${BIAS0});`);
     });
 
 test('a mirror-once axis is folded at every kind of read, a border axis selects its colour',
@@ -266,13 +277,15 @@ test('a mirror-once axis is folded at every kind of read, a border axis selects 
         const folded = translateShader(reads, { sampling: [both, both] });
         assert.equal(folded.error, null);
         for (const line of [
-            'r0 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy) * 2.0,'
-                + ' dpdy(in.v0.xy) * 2.0);',
+            `r0 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy) * exp2(${BIAS0}),`
+                + ` dpdy(in.v0.xy) * exp2(${BIAS0}));`,
             'r2 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy)'
-                + ' * exp2(in.v0.w + 1.0), dpdy(in.v0.xy) * exp2(in.v0.w + 1.0));',
-            'r3 = textureSampleLevel(tex0, samp0, abs(in.v0.xy), in.v0.w + 1.0);',
-            'r4 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), r1.xy * 2.0, r2.xy * 2.0);',
-            'r5 = textureSampleBias(tex1, samp1, in.v0.xyz, 1.0);',
+                + ` * exp2(in.v0.w + ${BIAS0}), dpdy(in.v0.xy)`
+                + ` * exp2(in.v0.w + ${BIAS0}));`,
+            'r3 = textureSampleLevel(tex0, samp0, abs(in.v0.xy), in.v0.w + c[_lodBias + 0].x);',
+            'r4 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), r1.xy * exp2(c[_lodBias + 0].x),'
+                + ' r2.xy * exp2(c[_lodBias + 0].x));',
+            'r5 = textureSampleBias(tex1, samp1, in.v0.xyz, c[_lodBias + 0].y);',
         ])
         {
             assertLine(folded.wgsl, line);

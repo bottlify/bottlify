@@ -1914,7 +1914,9 @@ test('a sampler\'s level-of-detail bias reaches the reads of a shader pair and o
         assert.equal(h.device.BeginScene(), D3D_OK);
         h.device.SetVertexShader(vs.shader);
         h.device.SetPixelShader(ps.shader);
-        for (const bias of [0, -0.5, 0])
+        // A program that moves the bias a little at every draw, as a texture
+        // streamed in fades its levels, makes one translation for them all.
+        for (const bias of [0, -0.5, -0.75, 0])
         {
             // D3DSAMP_MIPMAPLODBIAS.
             assert.equal(h.device.SetSamplerState(0, 8, floatToDword(bias)), D3D_OK);
@@ -1933,7 +1935,8 @@ test('a sampler\'s level-of-detail bias reaches the reads of a shader pair and o
         assert.equal(pixels.length, 4, 'a translation and a fixed stage each with the bias and'
             + ' without; the draw back at zero shares the first');
         assert.ok(pixels[0].includes('textureSample(tex0, samp0, in.t0.xy)'));
-        assert.ok(pixels[1].includes('textureSampleBias(tex0, samp0, in.t0.xy, -0.5)'));
+        assert.ok(pixels[1].includes('textureSampleBias(tex0, samp0, in.t0.xy, c[_lodBias + 0].x)'),
+            pixels[1]);
         assert.ok(!pixels[2].includes(' + -0.5'));
         assert.ok(pixels[3].includes('1.0e-12)) + -0.5,'), pixels[3]);
         h.device.SetTexture(0, null);
@@ -2173,3 +2176,33 @@ test('table fog through a shader that writes oFog runs over it, or over the dept
         assert.match(await rangeLine('legacy'), /= vec4f\(c\[\d+\]\.xyz, 2\.0\);$/);
         assert.match(await rangeLine('current'), /= c\[\d+\];$/);
     });
+
+test('a sampler\'s level-of-detail bias reaches the GPU in the draw\'s own registers', async()=>{
+    // The translation reads the bias from a register the draw fills, so the
+    // value has to travel with the draw: one that did not would sample every
+    // texture at its unbiased level, without a word.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetTexture(0, h.texture);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    // D3DSAMP_MIPMAPLODBIAS.
+    assert.equal(h.device.SetSamplerState(0, 8, floatToDword(-0.75)), D3D_OK);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    const pixel = modulesOf(h, 'ps:').find(code=>code.includes('_lodBias'));
+    assert.ok(pixel, 'the pixel translation reads its bias from a register');
+    const register = Number(/const _lodBias = (\d+);/.exec(pixel)?.[1]);
+    const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(1), 0).buffer);
+    assert.equal(floats[register * 4], -0.75, 'sampler 0\'s bias, where the module reads it');
+    h.device.SetTexture(0, null);
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    vs.shader.release();
+    ps.shader.release();
+});

@@ -205,7 +205,9 @@ const onesKey = ones=>{
  * @param {(import('../d3d9/wgsl.js').SamplerVariant | undefined)[]} variants
  */
 const variantsKey = variants=>Array.from(variants, variant=>(variant
-    ? `${variant.lodBias ?? 0}/${variant.mirrorOnce ?? 0}`
+    // Whether a sampler biases its level, not by how much: the draw fills the
+    // value in (`biasRegister`), and one module serves every value.
+    ? `${variant.lodBias ? 'b' : 0}/${variant.mirrorOnce ?? 0}`
         + `/${variant.border ? `${variant.border.mask}:${variant.border.colour}` : ''}`
     : '')).join(',');
 
@@ -3060,6 +3062,8 @@ const CLEAR_STRIDE = 20;
  *     the default -- keeps all of them. A frame dump says which draws could
  *     have painted a region; cutting the frame short is what says which one
  *     did, because the region is either there or not at each cut.
+ * @property {(block: number, measurement: number, count: number) => void} [storeCount]
+ *     writes a count into its query's block in guest memory, as soon as the GPU has it
  * @property {() => void} [occlusionCounted]  told whenever an occlusion count has come back
  * @property {((api: string, detail: string)=>void) | null} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
@@ -3402,6 +3406,12 @@ export function createRenderer(options){
     /** @param {any} count  An occlusion count every counter of which is back. */
     const settleOcclusion = count=>{
         count.value = count.total;
+        // Into the guest first: a program polling the count in its own code
+        // sees it there without the answer crossing back to its thread.
+        if (count.guest)
+        {
+            options.storeCount?.(count.guest.block, count.guest.measurement, count.total);
+        }
         count.resolve(count.total);
         options.occlusionCounted?.();
         if (count.endedAt !== null && count.replayedAt !== null)
@@ -6381,6 +6391,14 @@ export function createRenderer(options){
             pixelBlocks[0][pixel.alphaRegister * 4] =
                 ((model.renderStates.get(D3DRS.ALPHAREF) ?? 0) & 0xff) / 255;
         }
+        if (pixel.biasRegister !== undefined)
+        {
+            levelBiases(model, pixelBlocks[0], pixel.biasRegister, 0);
+        }
+        if (program.vertex && vertex.biasRegister !== undefined)
+        {
+            levelBiases(model, vertexBlocks[0], vertex.biasRegister, D3DVERTEXTEXTURESAMPLER0);
+        }
         return {
             version: undefined,
             contentVersion: 0,
@@ -6775,6 +6793,21 @@ export function createRenderer(options){
             key: `${stages}${ones}`, pixelKey: `${stages}${pixelPart}`,
             stageDimensions, projectedBy, ...filled,
         };
+    };
+
+    /**
+     * Each sampler's level-of-detail bias, into the registers a translation
+     * reads them from (`biasRegister`): four samplers a register.
+     *
+     * @param {RenderModel} model @param {Float32Array} floats @param {number} register
+     * @param {number} first  The stage the shader's s0 is: 0, or D3DVERTEXTEXTURESAMPLER0.
+     */
+    const levelBiases = (model, floats, register, first)=>{
+        for (let index = 0; index < 16; index++)
+        {
+            floats[register * 4 + index] = lodBiasOf(model.stageStates(first + index)
+                .get(D3DTSS.MIPMAPLODBIAS) ?? 0);
+        }
     };
 
     /**
@@ -9987,11 +10020,14 @@ export function createRenderer(options){
             ensureFrame().commands.push({ kind: 'occlusion', count: query.open, begin: true });
         },
 
-        /** @param {{ open: any, latest: any }} query */
+        /** @param {{ open: any, latest: any, guest?: any }} query */
         endOcclusion(query){
             const count = query.open ?? occlusionCount();
             query.open = null;
             query.latest = count;
+            // The measurement this END closes, where the device was told it goes.
+            count.guest = query.guest ?? null;
+            query.guest = null;
             const frame = ensureFrame();
             count.recording = frame;
             count.endedAt = clock();

@@ -300,6 +300,10 @@ export function varyingLocation(usage, index){
  * @property {number} [clipRegister]
  *     A vertex stage that clips: the first of the registers its user clip
  *     planes travel in, one a plane, past every other it reads.
+ * @property {number} [biasRegister]
+ *     A stage whose samplers bias their level of detail: the first of four
+ *     registers the biases travel in, sampler n in component n % 4 of register
+ *     n / 4 from it, past every other it reads.
  * @property {string | null} error
  */
 
@@ -310,7 +314,11 @@ export function varyingLocation(usage, index){
  *
  * @typedef {Object} SamplerVariant
  * @property {number} [lodBias]  D3DSAMP_MIPMAPLODBIAS, not zero: added to the
- *     level of detail of every read, implicit or explicit.
+ *     level of detail of every read, implicit or explicit. The translation reads
+ *     the value from a register the draw fills (`biasRegister`), so a program
+ *     that moves it a little every frame, as a streamed texture fades in, does
+ *     not make a module and a pipeline of every value.
+ * @property {string} [bias]  The translation's own: the register the bias is read from.
  * @property {number} [mirrorOnce]  The axes (1 u, 2 v, 4 w) addressed
  *     D3DTADDRESS_MIRRORONCE, whose GPU sampler clamps: a read folds the
  *     coordinate about zero first. Not of a cube map, whose faces are not
@@ -359,9 +367,9 @@ const foldedCoordinate = (at, components, mask)=>{
  * @returns {string}
  */
 const variantRead = (pair, at, components, read, variant, addressed)=>{
-    const lodBias = variant?.lodBias ?? 0;
-    const plus = lodBias ? ` + ${literal(lodBias)}` : '';
-    const scale = lodBias ? ` * ${literal(2 ** lodBias)}` : '';
+    const lodBias = variant?.bias ?? (variant?.lodBias ? literal(variant.lodBias) : '');
+    const plus = lodBias ? ` + ${lodBias}` : '';
+    const scale = lodBias ? ` * exp2(${lodBias})` : '';
     const mask = addressed ? (variant?.mirrorOnce ?? 0) & ((1 << components) - 1) : 0;
     const folded = mask === 0 ? at : foldedCoordinate(at, components, mask);
     switch (read.how)
@@ -382,7 +390,7 @@ const variantRead = (pair, at, components, read, variant, addressed)=>{
                     + ` dpdy(${at})${scale})`;
             }
             return lodBias
-                ? `textureSampleBias(${pair}, ${at}, ${literal(lodBias)})`
+                ? `textureSampleBias(${pair}, ${at}, ${lodBias})`
                 : `textureSample(${pair}, ${at})`;
     }
 };
@@ -970,7 +978,7 @@ export function translateShader(parsed, options = {}){
         }
         const components = dimension === '2d' ? 2 : 3;
         const coordinates = swizzled(at, components === 2 ? 'xy' : 'xyz');
-        const variant = options.sampling?.[stage];
+        const variant = biasedVariant(options.sampling?.[stage], stage);
         const addressed = dimension !== 'cube';
         return borderedRead(sampledWithOnes(variantRead(`tex${stage}, samp${stage}`, coordinates,
             components, { how: 'sample' }, variant, addressed), options.ones?.[stage]),
@@ -1008,6 +1016,24 @@ export function translateShader(parsed, options = {}){
     const rowOf = (stage, read)=>{
         pixelCoordinates.add(stage);
         return `dot(in.t${stage}.xyz, ${swizzled(read, 'xyz')})`;
+    };
+
+    /** Whether a read takes its level bias from the bias registers (`_lodBias`). */
+    let biased = false;
+    /**
+     * A sampler's variant with its level bias read from the register the draw
+     * fills, four samplers a register, rather than written into the module.
+     *
+     * @param {SamplerVariant | undefined} variant @param {number} index
+     * @returns {SamplerVariant | undefined}
+     */
+    const biasedVariant = (variant, index)=>{
+        if (!variant?.lodBias)
+        {
+            return variant;
+        }
+        biased = true;
+        return { ...variant, bias: `c[_lodBias + ${index >> 2}].${COMPONENT[index & 3]}` };
     };
 
     /**
@@ -1099,7 +1125,7 @@ export function translateShader(parsed, options = {}){
         const at = project
             ? `(${src(instruction, 0)}.${coordinates} / ${src(instruction, 0)}.w)`
             : `${src(instruction, 0)}.${coordinates}`;
-        const variant = options.sampling?.[entry.index];
+        const variant = biasedVariant(options.sampling?.[entry.index], entry.index);
         const addressed = entry.type !== 'texture_cube<f32>';
         /** @type {Parameters<typeof variantRead>[3]} */
         const read = how === 'level' ? { how: 'level', by: `${src(instruction, 0)}.w` }
@@ -2099,9 +2125,12 @@ export function translateShader(parsed, options = {}){
         }
         return constants === Infinity ? 224 : constants;
     })();
+    // The samplers' level biases follow every other register, four a register.
+    const biasRegister = biased ? reach : undefined;
+    const declared = biased ? reach + 4 : reach;
     const wgsl = [
         ...moduleHeader({
-            vertex, constants: reach, samplers, inputFields, outputFields,
+            vertex, constants: declared, samplers, inputFields, outputFields,
             clipDistances: vertex && options.clip?.distances === true,
         }),
         D3D_MATH,
@@ -2119,6 +2148,7 @@ export function translateShader(parsed, options = {}){
         ...(bumpRegister === undefined ? [] : [`const _bump = ${bumpRegister};`]),
         ...(alphaRegister === undefined ? [] : [`const _alphaRef = ${alphaRegister};`]),
         ...(clipRegister === undefined ? [] : [`const _clip = ${clipRegister};`]),
+        ...(biasRegister === undefined ? [] : [`const _lodBias = ${biasRegister};`]),
         vertex ? '@vertex' : '@fragment',
         `fn ${entry}(in: ${vertex ? 'VsIn' : 'PsIn'}) -> ${vertex ? 'VsOut' : 'PsOut'} {`,
         `    var out: ${vertex ? 'VsOut' : 'PsOut'};`,
@@ -2131,13 +2161,14 @@ export function translateShader(parsed, options = {}){
     ].join('\n');
 
     return {
-        wgsl, entry, inputs, outputs, reads, samplers, constants: reach,
+        wgsl, entry, inputs, outputs, reads, samplers, constants: declared,
         ...(viewportRegister === undefined ? {} : { viewportRegister }),
         ...(fogRegister === undefined ? {} : { fogRegister }),
         ...(pointRegister === undefined ? {} : { pointRegister }),
         ...(alphaRegister === undefined ? {} : { alphaRegister }),
         ...(bumpRegister === undefined ? {} : { bumpRegister }),
         ...(clipRegister === undefined ? {} : { clipRegister }),
+        ...(biasRegister === undefined ? {} : { biasRegister }),
         error,
     };
 }
