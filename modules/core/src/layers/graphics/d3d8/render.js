@@ -10198,7 +10198,11 @@ export function createRenderer(options){
                 colorWrite: ((flags & D3DCLEAR.TARGET) !== 0 ? 0xf : 0)
                     & (formatsOf(model).targetHasAlpha ? ~0 : ~COLORWRITEENABLE_ALPHA),
                 alphaTest: false,
+                // Its source too: table fog left on by the scene asked the
+                // shader for a curve the mode of nothing does not declare,
+                // and the frame went with it.
                 fogMode: D3DFOG.NONE,
+                fogSource: FOG_SOURCE.NONE,
                 // A clear is the colour it was given and nothing else: neither
                 // the scene's lighting nor its specular pass belongs to it.
                 specularEnable: false,

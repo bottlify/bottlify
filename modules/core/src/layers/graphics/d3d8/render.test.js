@@ -2727,6 +2727,21 @@ test('recorded: lighting off leaves the colour alone, and no normal still lights
     assert.equal(preTransformed.state.lighting, null);
 });
 
+test('recorded: a partial clear under the scene\'s table fog is not fogged', async()=>{
+    // Fog left on by the draws before it: the clear's quad took the table
+    // fog's source with no mode, its shader called a curve it never declared,
+    // and the GPU refused the whole frame.
+    const h = harness();
+    const { device, gpu } = h;
+    device.SetRenderState(D3DRS.FOGENABLE, 1);
+    device.SetRenderState(D3DRS.FOGTABLEMODE, D3DFOG.LINEAR);
+    assert.equal(device.Clear(1, [{ x1: 1, y1: 1, x2: 3, y2: 3 }],
+        D3DCLEAR.TARGET, argb(4, 5, 6), 1, 0), D3D_OK);
+    await h.present();
+    assert.doesNotMatch(gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code).join('\n'), /fogFactorOf/, 'a clear has no fog');
+});
+
 test('a state with no lighting in its shape is unlit, and still reads the specular state', ()=>{
     // The quad a partial clear draws is the colour it was given. Lighting it
     // would multiply the clear colour by a material nobody set for it.
